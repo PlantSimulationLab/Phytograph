@@ -643,6 +643,7 @@ function App() {
         <div className="flex-1" />
         <div className="relative" ref={importMenuRef}>
           <button
+            data-testid="import-menu-button"
             onClick={() => setShowImportMenu(!showImportMenu)}
             className="px-3 py-1.5 text-sm bg-neutral-700 text-neutral-200 rounded hover:bg-neutral-600 transition-colors flex items-center gap-1"
           >
@@ -651,8 +652,9 @@ function App() {
             <ChevronDown className="w-3 h-3" />
           </button>
           {showImportMenu && (
-            <div className="absolute top-full right-0 mt-1 bg-neutral-800 border border-neutral-700 rounded-lg shadow-lg py-1 min-w-[180px] z-50">
+            <div data-testid="import-menu" className="absolute top-full right-0 mt-1 bg-neutral-800 border border-neutral-700 rounded-lg shadow-lg py-1 min-w-[180px] z-50">
               <button
+                data-testid="import-menu-auto"
                 onClick={() => { pendingImportTypeRef.current = 'auto'; setShowImportMenu(false); open(); }}
                 className="w-full px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-700 flex items-center gap-2 text-left"
               >
@@ -661,6 +663,7 @@ function App() {
               </button>
               <div className="border-t border-neutral-700 my-1" />
               <button
+                data-testid="import-menu-pointcloud"
                 onClick={() => { pendingImportTypeRef.current = 'pointcloud'; setShowImportMenu(false); open(); }}
                 className="w-full px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-700 flex items-center gap-2 text-left"
               >
@@ -668,6 +671,7 @@ function App() {
                 Point Cloud
               </button>
               <button
+                data-testid="import-menu-mesh"
                 onClick={() => { pendingImportTypeRef.current = 'mesh'; setShowImportMenu(false); open(); }}
                 className="w-full px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-700 flex items-center gap-2 text-left"
               >
@@ -675,6 +679,7 @@ function App() {
                 Mesh
               </button>
               <button
+                data-testid="import-menu-skeleton"
                 onClick={() => { pendingImportTypeRef.current = 'skeleton'; setShowImportMenu(false); open(); }}
                 className="w-full px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-700 flex items-center gap-2 text-left"
               >
@@ -685,6 +690,7 @@ function App() {
           )}
         </div>
         <button
+          data-testid="close-all-clouds"
           onClick={handleClearAllClouds}
           className="px-3 py-1.5 text-sm text-neutral-400 hover:text-neutral-200 hover:bg-neutral-700 rounded transition-colors"
         >
@@ -780,8 +786,11 @@ function App() {
   );
 
   return (
-    <div {...getRootProps()} className="flex h-screen flex-col bg-slate-50 select-none">
-      <input {...getInputProps()} />
+    <div {...getRootProps()} data-testid="app-root" className="flex h-screen flex-col bg-slate-50 select-none">
+      {/* Wrap the dropzone input so we can attach data-testid without fighting react-dropzone's prop spread. */}
+      <span data-testid="app-dropzone-input-wrap">
+        <input {...getInputProps()} data-testid="app-dropzone-input" />
+      </span>
 
       <BackendStatusBanner />
 
@@ -800,6 +809,7 @@ function App() {
 
         {/* Navigation */}
         <button
+          data-testid="nav-home"
           onClick={() => setActiveNav('home')}
           className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
             activeNav === 'home'
@@ -812,6 +822,7 @@ function App() {
         </button>
 
         <button
+          data-testid="nav-viewer"
           onClick={() => setActiveNav('viewer')}
           className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
             activeNav === 'viewer'
@@ -826,6 +837,7 @@ function App() {
         <div className="flex-1" />
 
         <button
+          data-testid="nav-options"
           onClick={() => setActiveNav('options')}
           className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
             activeNav === 'options'

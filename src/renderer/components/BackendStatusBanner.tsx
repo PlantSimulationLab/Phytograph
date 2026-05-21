@@ -13,7 +13,11 @@ export function BackendStatusBanner() {
 
   if (status === 'failed') {
     return (
-      <div className="flex items-center gap-2 bg-red-900/80 px-4 py-2 text-sm text-red-100 border-b border-red-700/50">
+      <div
+        data-testid="backend-status-banner"
+        data-status="failed"
+        className="flex items-center gap-2 bg-red-900/80 px-4 py-2 text-sm text-red-100 border-b border-red-700/50"
+      >
         <AlertTriangle className="h-4 w-4 shrink-0" />
         <span>
           Backend failed to start{error ? `: ${error}` : '.'} Triangulation, plant generation, and
@@ -24,7 +28,11 @@ export function BackendStatusBanner() {
   }
 
   return (
-    <div className="flex items-center gap-2 bg-amber-900/70 px-4 py-2 text-sm text-amber-100 border-b border-amber-700/40">
+    <div
+      data-testid="backend-status-banner"
+      data-status="starting"
+      className="flex items-center gap-2 bg-amber-900/70 px-4 py-2 text-sm text-amber-100 border-b border-amber-700/40"
+    >
       <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
       <span>
         Starting backend… ({seconds}s)

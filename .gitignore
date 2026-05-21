@@ -9,4 +9,13 @@ backend-api/venv/
 .DS_Store
 *.log
 .vite/
-CLAUDE.md
+
+# Test artifacts
+backend-api/.coverage
+backend-api/htmlcov/
+backend-api/__pycache__/
+backend-api/tests/__pycache__/
+**/__pycache__/
+playwright-report/
+test-results/
+coverage/

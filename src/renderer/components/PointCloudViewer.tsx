@@ -6637,6 +6637,10 @@ export default function PointCloudViewer({
               return (
                 <div
                   key={cloud.id}
+                  data-testid="cloud-row"
+                  data-cloud-name={cloud.data.fileName || 'Unnamed'}
+                  data-point-count={effectivePointCount}
+                  data-selected={isSelected ? 'true' : 'false'}
                   onClick={(e) => onToggleSelection(cloud.id, e.shiftKey || e.ctrlKey || e.metaKey)}
                   className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
                     isSelected ? 'bg-blue-600/30 border border-blue-500/50' : 'hover:bg-neutral-700/50'
@@ -6644,8 +6648,8 @@ export default function PointCloudViewer({
                 >
                   <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: cloud.color }} />
                   <div className="flex-1 min-w-0">
-                    <div className="text-xs text-neutral-200 truncate">{cloud.data.fileName || 'Unnamed'}</div>
-                    <div className="text-[10px] text-neutral-500">
+                    <div className="text-xs text-neutral-200 truncate" data-testid="cloud-row-name">{cloud.data.fileName || 'Unnamed'}</div>
+                    <div className="text-[10px] text-neutral-500" data-testid="cloud-row-count">
                       {effectivePointCount.toLocaleString()} pts
                       {hasCloudEdits && <span className="ml-1 text-amber-400">*</span>}
                     </div>
@@ -6707,6 +6711,11 @@ export default function PointCloudViewer({
                 return (
                   <div
                     key={mesh.id}
+                    data-testid="mesh-row"
+                    data-mesh-name={displayName}
+                    data-triangle-count={mesh.data.triangleCount}
+                    data-is-plant={mesh.isPlant ? 'true' : 'false'}
+                    data-selected={isSelected ? 'true' : 'false'}
                     onClick={() => handleSelectMesh(mesh.id)}
                     className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
                       isSelected ? 'bg-green-600/30 border border-green-500/50' : 'hover:bg-neutral-700/50'
@@ -6718,10 +6727,10 @@ export default function PointCloudViewer({
                       <div className="w-3 h-3 rounded flex-shrink-0" style={{ backgroundColor: mesh.color }} />
                     )}
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs text-neutral-200 truncate">
+                      <div className="text-xs text-neutral-200 truncate" data-testid="mesh-row-name">
                         {displayName}
                       </div>
-                      <div className="text-[10px] text-neutral-500">
+                      <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
                         {mesh.data.triangleCount.toLocaleString()} triangles
                         {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
                         {mesh.isPlant && ' · Helios Plant'}
@@ -6794,6 +6803,11 @@ export default function PointCloudViewer({
                 return (
                   <div
                     key={skeleton.id}
+                    data-testid="skeleton-row"
+                    data-skeleton-name={sourceCloud?.data.fileName || 'Skeleton'}
+                    data-total-length={skeleton.data.totalLength}
+                    data-point-count={skeleton.data.pointCount}
+                    data-selected={isSelected ? 'true' : 'false'}
                     onClick={() => handleSelectSkeleton(skeleton.id)}
                     className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
                       isSelected ? 'bg-amber-600/30 border border-amber-500/50' : 'hover:bg-neutral-700/50'
@@ -6801,10 +6815,10 @@ export default function PointCloudViewer({
                   >
                     <div className="w-3 h-3 rounded flex-shrink-0" style={{ backgroundColor: skeleton.color }} />
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs text-neutral-200 truncate">
+                      <div className="text-xs text-neutral-200 truncate" data-testid="skeleton-row-name">
                         {sourceCloud?.data.fileName || 'Skeleton'}
                       </div>
-                      <div className="text-[10px] text-neutral-500">
+                      <div className="text-[10px] text-neutral-500" data-testid="skeleton-row-stats">
                         {skeleton.data.totalLength.toFixed(2)}m · {skeleton.data.pointCount} pts
                       </div>
                     </div>
@@ -6937,6 +6951,7 @@ export default function PointCloudViewer({
               <Triangle className="w-4 h-4 text-neutral-300" />
             </button>
             <button
+              data-testid="tool-plant-generate"
               onClick={() => setShowPlantPopup(true)}
               disabled={isGeneratingPlant}
               className={`p-2 rounded transition-colors ${isGeneratingPlant ? 'bg-neutral-600 cursor-wait' : 'hover:bg-neutral-600 bg-neutral-700'}`}
@@ -7190,6 +7205,7 @@ export default function PointCloudViewer({
                   </button>
                   {/* 7. Triangulate */}
                   <button
+                    data-testid="tool-triangulate"
                     onClick={() => {
                       if (showTriangulationPanel) {
                         setShowTriangulationPanel(false);
@@ -7205,6 +7221,7 @@ export default function PointCloudViewer({
                   </button>
                   {/* 8. Extract Skeleton (single cloud only) */}
                   <button
+                    data-testid="tool-skeleton"
                     onClick={() => {
                       if (showSkeletonPanel) {
                         setShowSkeletonPanel(false);
@@ -7221,6 +7238,7 @@ export default function PointCloudViewer({
                   </button>
                   {/* 9. Export */}
                   <button
+                    data-testid="tool-export-cloud"
                     onClick={() => {
                       if (showExportPanel) {
                         setShowExportPanel(false);
@@ -7328,6 +7346,7 @@ export default function PointCloudViewer({
                   )}
                   {/* 7. Export */}
                   <button
+                    data-testid="tool-export-mesh"
                     onClick={() => {
                       if (showExportPanel) {
                         setShowExportPanel(false);
@@ -7362,6 +7381,7 @@ export default function PointCloudViewer({
                     <Move className={`w-4 h-4 ${editMode === 'translate' ? 'text-white' : 'text-neutral-300'}`} />
                   </button>
                   <button
+                    data-testid="tool-export-skeleton"
                     onClick={() => {
                       if (showExportPanel) {
                         setShowExportPanel(false);
@@ -8092,7 +8112,7 @@ export default function PointCloudViewer({
 
       {/* Triangulation Panel */}
       {showTriangulationPanel && selectedIds.size === 1 && (
-        <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
+        <div data-testid="triangulation-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
           <div className="flex items-center justify-between mb-3">
             <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
               <Triangle className="w-3 h-3" />
@@ -8110,6 +8130,7 @@ export default function PointCloudViewer({
           <div className="mb-3">
             <label className="text-[10px] text-neutral-400 block mb-1">Method</label>
             <select
+              data-testid="triangulation-method"
               value={triangulationMethod}
               onChange={(e) => setTriangulationMethod(e.target.value as TriangulationMethod)}
               className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
@@ -8139,6 +8160,7 @@ export default function PointCloudViewer({
                 Octree Depth: {poissonDepth}
               </label>
               <input
+                data-testid="triangulation-poisson-depth"
                 type="range"
                 min="4"
                 max="12"
@@ -8190,6 +8212,7 @@ export default function PointCloudViewer({
           {/* Triangulate / Setup Button */}
           {(triangulationMethod === 'helios' || selectedIds.size > 1) ? (
             <button
+              data-testid="triangulation-setup-button"
               onClick={() => setShowHeliosPopup(true)}
               className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
             >
@@ -8198,6 +8221,7 @@ export default function PointCloudViewer({
             </button>
           ) : (
             <button
+              data-testid="triangulation-run-button"
               onClick={handleTriangulate}
               disabled={triangulationInProgress}
               className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
@@ -8224,7 +8248,7 @@ export default function PointCloudViewer({
 
       {/* Skeleton Extraction Panel */}
       {showSkeletonPanel && selectedIds.size === 1 && (
-        <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto">
+        <div data-testid="skeleton-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto">
           <div className="flex items-center justify-between mb-3">
             <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
               <GitBranch className="w-3 h-3" />
@@ -8273,6 +8297,7 @@ export default function PointCloudViewer({
               Search Radius: {skeletonSearchRadius < 0.001 ? 'Auto (based on density)' : `${skeletonSearchRadius.toFixed(3)}m`}
             </label>
             <input
+              data-testid="skeleton-search-radius"
               type="range"
               min="0"
               max="0.2"
@@ -8293,6 +8318,7 @@ export default function PointCloudViewer({
               Min Points/Block: {skeletonThresholdFilter}
             </label>
             <input
+              data-testid="skeleton-min-points"
               type="range"
               min="1"
               max="50"
@@ -8409,6 +8435,7 @@ export default function PointCloudViewer({
 
           {/* Extract Button */}
           <button
+            data-testid="skeleton-extract-button"
             onClick={handleExtractSkeleton}
             disabled={skeletonInProgress}
             className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
@@ -9280,7 +9307,7 @@ export default function PointCloudViewer({
 
       {/* Export Panel - context-sensitive based on selection */}
       {showExportPanel && (
-        <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto">
+        <div data-testid="export-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto">
           <div className="flex items-center justify-between mb-3">
             <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
               <Download className="w-3 h-3" />
@@ -9302,12 +9329,14 @@ export default function PointCloudViewer({
               </div>
               <div className="grid grid-cols-3 gap-1">
                 <button
+                  data-testid="export-cloud-las"
                   onClick={() => exportPointCloud('las')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                 >
                   LAS
                 </button>
                 <button
+                  data-testid="export-cloud-laz"
                   onClick={() => exportPointCloud('laz')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                   title="Compressed LAS (requires backend)"
@@ -9315,24 +9344,28 @@ export default function PointCloudViewer({
                   LAZ
                 </button>
                 <button
+                  data-testid="export-cloud-ply"
                   onClick={() => exportPointCloud('ply')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                 >
                   PLY
                 </button>
                 <button
+                  data-testid="export-cloud-xyz"
                   onClick={() => exportPointCloud('xyz')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                 >
                   XYZ
                 </button>
                 <button
+                  data-testid="export-cloud-csv"
                   onClick={() => exportPointCloud('csv')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                 >
                   CSV
                 </button>
                 <button
+                  data-testid="export-cloud-txt"
                   onClick={() => exportPointCloud('txt')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                   title="Space-delimited with header and scalar fields"
@@ -9340,6 +9373,7 @@ export default function PointCloudViewer({
                   TXT
                 </button>
                 <button
+                  data-testid="export-cloud-obj"
                   onClick={() => exportPointCloud('obj')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                 >
@@ -9360,18 +9394,21 @@ export default function PointCloudViewer({
               </div>
               <div className="grid grid-cols-3 gap-1">
                 <button
+                  data-testid="export-mesh-obj"
                   onClick={() => exportMesh(selectedMesh.id, 'obj')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                 >
                   OBJ
                 </button>
                 <button
+                  data-testid="export-mesh-ply"
                   onClick={() => exportMesh(selectedMesh.id, 'ply')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                 >
                   PLY
                 </button>
                 <button
+                  data-testid="export-mesh-stl"
                   onClick={() => exportMesh(selectedMesh.id, 'stl')}
                   className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
                 >

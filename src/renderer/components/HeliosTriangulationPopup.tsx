@@ -277,7 +277,7 @@ export function HeliosTriangulationPopup({ isOpen, onClose, onStartTriangulate, 
       />
 
       {/* Modal */}
-      <div className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-2xl mx-4 overflow-hidden">
+      <div data-testid="helios-triangulation-popup" className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-2xl mx-4 overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-700 bg-neutral-800/90">
           <div className="flex items-center gap-2">
@@ -434,6 +434,7 @@ export function HeliosTriangulationPopup({ isOpen, onClose, onStartTriangulate, 
                   Max Edge Length (Lmax)
                 </label>
                 <input
+                  data-testid="helios-input-lmax"
                   type="number"
                   value={lmaxStr}
                   onChange={(e) => setLmaxStr(e.target.value)}
@@ -449,6 +450,7 @@ export function HeliosTriangulationPopup({ isOpen, onClose, onStartTriangulate, 
                   Max Aspect Ratio
                 </label>
                 <input
+                  data-testid="helios-input-aspect"
                   type="number"
                   value={maxAspectRatioStr}
                   onChange={(e) => setMaxAspectRatioStr(e.target.value)}
@@ -553,6 +555,7 @@ export function HeliosTriangulationPopup({ isOpen, onClose, onStartTriangulate, 
             )}
           </div>
           <button
+            data-testid="helios-triangulate-button"
             onClick={handleTriangulate}
             disabled={selectedClouds.length === 0}
             className={`px-4 py-2 text-xs rounded font-medium flex items-center gap-2 ${

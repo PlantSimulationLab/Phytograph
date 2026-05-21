@@ -111,7 +111,7 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
       />
 
       {/* Modal */}
-      <div className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-md mx-4 overflow-hidden">
+      <div data-testid="plant-generation-popup" className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-md mx-4 overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-700 bg-neutral-800/90">
           <div className="flex items-center gap-2">
@@ -141,6 +141,7 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
               </div>
             ) : (
               <select
+                data-testid="plant-species-select"
                 value={plantType}
                 onChange={(e) => setPlantType(e.target.value)}
                 className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
@@ -165,6 +166,7 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
               Age (days)
             </label>
             <input
+              data-testid="plant-age-input"
               type="number"
               value={age}
               onChange={(e) => setAge(Math.max(0, parseFloat(e.target.value) || 0))}
@@ -268,6 +270,7 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
 
           {/* Submit Button */}
           <button
+            data-testid="plant-generate-button"
             type="submit"
             disabled={isGenerating || isLoadingModels}
             className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 hover:bg-green-500 disabled:bg-neutral-600 disabled:cursor-not-allowed rounded-lg text-white font-medium transition-colors"
