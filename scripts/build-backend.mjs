@@ -1,0 +1,149 @@
+// Builds the Python/FastAPI backend into a PyInstaller --onedir bundle and
+// drops it into ./resources/ so electron-builder picks it up as an extra
+// resource at packaging time.
+//
+// Usage:
+//   npm run build:backend                            # uses ./backend-api/venv
+//   BACKEND_DIR=/path/to/backend-api npm run build:backend
+//   PYTHON=/path/to/python npm run build:backend     # bypass venv discovery
+//
+// Python interpreter resolution (first match wins):
+//   1. $PYTHON env var (explicit override)
+//   2. $BACKEND_DIR/venv/bin/python (Unix) or $BACKEND_DIR/venv/Scripts/python.exe (Windows)
+//   3. `pyinstaller` on PATH (CI uses this — runner has no anaconda)
+//
+// Why prefer the venv: a bare `pyinstaller` shebang on a dev machine often
+// resolves to /opt/anaconda3/bin/pyinstaller, whose Python lacks the backend's
+// deps (fastapi, pyhelios, etc.) and produces a broken binary that crashes
+// with ModuleNotFoundError at startup. Invoking `python -m PyInstaller` via
+// the venv's python sidesteps PATH precedence AND any broken shebangs in
+// venv/bin/pyinstaller (which can happen if the venv was relocated).
+
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = resolve(__dirname, '..');
+const backendDir = resolve(process.env.BACKEND_DIR ?? join(root, 'backend-api'));
+const distPath = join(root, 'resources');
+const isWin = process.platform === 'win32';
+
+if (!existsSync(join(backendDir, 'backend_wrapper.py'))) {
+  console.error(`[build-backend] backend_wrapper.py not found in ${backendDir}`);
+  console.error('[build-backend] set BACKEND_DIR to the backend-api directory, or create the venv as documented in README.md.');
+  process.exit(1);
+}
+
+mkdirSync(distPath, { recursive: true });
+
+// Hidden imports + collect-all flags mirror the historical CI workflow.
+const hiddenImports = [
+  'uvicorn',
+  'uvicorn.logging',
+  'uvicorn.loops',
+  'uvicorn.loops.auto',
+  'uvicorn.protocols',
+  'uvicorn.protocols.http',
+  'uvicorn.protocols.http.auto',
+  'uvicorn.protocols.websockets',
+  'uvicorn.protocols.websockets.auto',
+  'uvicorn.lifespan',
+  'uvicorn.lifespan.on',
+  'fastapi',
+  'pandas',
+  'numpy',
+  'numpy.core._methods',
+  'numpy.lib.format',
+  'matplotlib',
+  'matplotlib.backends.backend_agg',
+  'scipy',
+  'scipy.optimize',
+  'scipy.spatial',
+  'scipy.sparse',
+  'scipy.sparse.csgraph',
+  'open3d',
+  'laspy',
+  'lazrs',
+  'openpyxl',
+  'pydantic',
+  'pydantic.deprecated.decorator',
+];
+
+// --collect-all bundles a package's binaries + data files + submodules.
+// pytexit reads __version__.txt at import time, so it must be collected as data.
+// pyhelios is the importable module name; the PyPI distribution is "pyhelios3d".
+// It ships native libs + textures + xml asset trees that must travel with the bundle.
+const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios'];
+
+// --onedir vs --onefile:
+//   --onefile produces a single self-extracting binary that unpacks ~300 MB
+//   to a temp dir on EVERY launch. Adds 5-8s of cold start.
+//   --onedir produces a directory tree (binary + _internal/) with no
+//   extraction step. Inside the .app bundle the user sees no difference.
+//   Faster, fewer disk writes per launch, easier to codesign per-file.
+const pyinstallerArgs = [
+  '-m', 'PyInstaller',
+  '--onedir',
+  '--noconfirm',
+  '--name', 'phytograph_backend',
+  '--distpath', distPath,
+  '--workpath', join(distPath, 'build'),
+  '--specpath', join(distPath, 'build'),
+  ...hiddenImports.flatMap((m) => ['--hidden-import', m]),
+  ...collectAll.flatMap((m) => ['--collect-all', m]),
+  'backend_wrapper.py',
+];
+
+function resolvePython() {
+  if (process.env.PYTHON) {
+    if (!existsSync(process.env.PYTHON)) {
+      console.error(`[build-backend] PYTHON=${process.env.PYTHON} does not exist`);
+      process.exit(1);
+    }
+    return { path: process.env.PYTHON, source: '$PYTHON' };
+  }
+
+  const venvPython = isWin
+    ? join(backendDir, 'venv', 'Scripts', 'python.exe')
+    : join(backendDir, 'venv', 'bin', 'python');
+  if (existsSync(venvPython)) {
+    return { path: venvPython, source: 'backend-api/venv' };
+  }
+
+  // CI fallback: rely on whatever python pyinstaller resolves to. CI installs
+  // pip deps into the active Python env; runners have no anaconda interference.
+  return null;
+}
+
+const python = resolvePython();
+
+console.log(`[build-backend] backend: ${backendDir}`);
+console.log(`[build-backend] output:  ${distPath}`);
+if (python) {
+  console.log(`[build-backend] python:  ${python.path} (from ${python.source})`);
+} else {
+  console.log(`[build-backend] python:  using bare \`pyinstaller\` from PATH (no venv found)`);
+  console.log(`[build-backend] NOTE: if this is a local dev machine with anaconda installed, the bare`);
+  console.log(`[build-backend]       pyinstaller will likely resolve to anaconda's, which lacks the backend's`);
+  console.log(`[build-backend]       deps and will produce a broken binary. Create backend-api/venv per README.`);
+}
+
+const cmd = python ? python.path : 'pyinstaller';
+const args = python ? pyinstallerArgs : pyinstallerArgs.slice(2); // drop `-m PyInstaller` when using the binary directly
+
+const proc = spawn(cmd, args, { cwd: backendDir, stdio: 'inherit' });
+proc.on('error', (err) => {
+  console.error(`[build-backend] failed to spawn ${cmd}:`, err.message);
+  process.exit(1);
+});
+proc.on('exit', (code) => {
+  if (code !== 0) {
+    console.error(`[build-backend] exited ${code}`);
+    process.exit(code ?? 1);
+  }
+  // Clean up PyInstaller's build artifacts; keep only the bundle directory.
+  rmSync(join(distPath, 'build'), { recursive: true, force: true });
+  console.log('[build-backend] done.');
+});

@@ -1,0 +1,17 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+pandas>=2.1.0
+numpy>=1.26.0
+scipy>=1.11.0
+openpyxl>=3.1.0
+pydantic>=2.5.0
+matplotlib>=3.7.0
+phytorch-lib
+prosail>=2.0.0
+# Pin llvmlite to version with x86_64 wheels (0.46+ dropped Intel Mac support)
+llvmlite<0.46
+pytexit>=0.3.4
+pyhelios3d
+open3d>=0.18.0
+laspy[lazrs]>=2.5.0

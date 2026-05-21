@@ -1,0 +1,12 @@
+node_modules/
+dist-main/
+dist-preload/
+dist-renderer/
+release/
+resources/phytograph_backend/
+resources/phytograph_backend.exe
+backend-api/venv/
+.DS_Store
+*.log
+.vite/
+CLAUDE.md
