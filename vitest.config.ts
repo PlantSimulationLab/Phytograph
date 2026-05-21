@@ -19,18 +19,23 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      include: ['src/renderer/**/*.{ts,tsx}'],
+      // Coverage scope: pure-logic modules only. React components live
+      // in src/renderer/components/ and src/renderer/App.tsx; they're
+      // covered by Playwright E2E (see CLAUDE.md Testing section).
+      include: [
+        'src/renderer/lib/**/*.ts',
+        'src/renderer/utils/**/*.ts',
+        'src/renderer/hooks/**/*.ts',
+      ],
       exclude: [
         '**/*.test.*',
-        'src/renderer/main.tsx',
         'src/renderer/types/**',
-        'src/renderer/assets/**',
       ],
       thresholds: {
-        lines: 0,
-        functions: 0,
-        branches: 0,
-        statements: 0,
+        lines: 80,
+        functions: 80,
+        branches: 80,
+        statements: 80,
       },
     },
   },

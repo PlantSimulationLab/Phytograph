@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   createTag,
   deleteTag,
+  exportData,
   getSettings,
   getTagById,
+  getTagColor,
   getTags,
+  importData,
+  initStore,
+  TAG_COLORS,
   updateSettings,
   updateTag,
 } from './store';
@@ -55,5 +60,62 @@ describe('store settings', () => {
     await updateSettings({ theme: 'dark' });
     const settings = await getSettings();
     expect(settings.theme).toBe('dark');
+  });
+});
+
+describe('store export/import', () => {
+  it('exportData round-trips through importData', async () => {
+    const tag = await createTag('field-a', 'green');
+    await updateSettings({ theme: 'dark' });
+    const json = await exportData();
+    const parsed = JSON.parse(json);
+    expect(parsed.tags).toHaveLength(1);
+    expect(parsed.tags[0].id).toBe(tag.id);
+    expect(parsed.settings.theme).toBe('dark');
+
+    // Wipe and re-import.
+    await deleteTag(tag.id);
+    await updateSettings({ theme: 'light' });
+    await importData(json);
+
+    const tags = await getTags();
+    const settings = await getSettings();
+    expect(tags).toHaveLength(1);
+    expect(tags[0].id).toBe(tag.id);
+    expect(settings.theme).toBe('dark');
+  });
+
+  it('importData ignores missing tags / settings fields', async () => {
+    await importData(JSON.stringify({ tags: [{ id: 't1', name: 'only', color: 'red', createdAt: '' }] }));
+    expect(await getTags()).toHaveLength(1);
+    // settings untouched
+    expect((await getSettings()).theme).toBe('light');
+  });
+
+  it('exportData with empty store returns defaults', async () => {
+    const json = await exportData();
+    const parsed = JSON.parse(json);
+    expect(parsed.tags).toEqual([]);
+    expect(parsed.settings).toEqual({ theme: 'light' });
+  });
+});
+
+describe('getTagColor', () => {
+  it('returns the matching color descriptor for a known name', () => {
+    const color = getTagColor('rose');
+    expect(color.name).toBe('rose');
+    expect(color.bg).toBe('bg-rose-100');
+  });
+
+  it('falls back to the first color (slate) when name is unknown', () => {
+    // Cast around the literal type so we can exercise the fallback path.
+    const color = getTagColor('not-a-real-color' as 'slate');
+    expect(color.name).toBe(TAG_COLORS[0].name);
+  });
+});
+
+describe('initStore', () => {
+  it('resolves to undefined (kept for Tauri API parity)', async () => {
+    await expect(initStore()).resolves.toBeUndefined();
   });
 });
