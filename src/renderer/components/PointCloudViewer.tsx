@@ -1,14 +1,30 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { Canvas, useThree, ThreeEvent } from '@react-three/fiber';
-import { OrbitControls, Grid, Html } from '@react-three/drei';
+import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import * as THREE from 'three';
-import { ZoomIn, ZoomOut, Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Shapes, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Palette, Filter, Globe, Search, Dna } from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Palette, Filter, Globe, Search, Dna, Radio, Pencil, FileUp } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, SkeletonResponse, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, HeliosTriangulationResponse, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession } from '../utils/backendApi';
 import { showToast } from './Toast';
+import {
+  ColormapName,
+  COLORMAP_NAMES,
+  COLORMAP_LABELS,
+  sampleColormap,
+  colormapToCssGradient,
+} from '../lib/colormaps';
 import { PlantGenerationPopup } from './PlantGenerationPopup';
 import { HeliosTriangulationPopup } from './HeliosTriangulationPopup';
 import { MorphPopup } from './MorphPopup';
+import { ScanParametersPopup } from './ScanParametersPopup';
+import { ScannerMarker } from './ScannerMarker';
+import { DebouncedNumberInput } from './DebouncedNumberInput';
+import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
+import { type ScanParameters } from '../lib/scanParameters';
+import { type Scan, hasData, hasParams, scanDisplayName } from '../lib/scan';
+import { parsePointCloudFromPath } from '../lib/pointCloudParsers';
+import { resolveAttachedScanFile } from '../lib/scanFileResolver';
+import { dirname } from '../lib/pathUtils';
 
 // Scalar field data with min/max for normalization
 export interface ScalarField {
@@ -33,7 +49,9 @@ export interface PointCloudData {
   fileName?: string;
 }
 
-// Point cloud entry with metadata
+// Point cloud entry with metadata. Internal alias matching the data-bearing
+// shape of `Scan` for legacy callsites — every PointCloudEntry seen inside
+// this file is derived from `scans.filter(hasData)`.
 export interface PointCloudEntry {
   id: string;
   data: PointCloudData;
@@ -112,6 +130,9 @@ export interface MeshEntry {
   regenerationKey?: number;  // Counter that increments on each regeneration to force React remount
   heliosXml?: string;  // Plant structure XML for Helios simulation export
   plantMaterials?: PlantMaterialDef[];  // Materials with textures for plant rendering
+  // Voxel-specific: per-axis grid subdivision count for the PyHelios LiDAR grid.
+  // Only set on shape-voxel meshes; renders as a wireframe overlay when any axis > 1.
+  gridSubdivisions?: { x: number; y: number; z: number };
 }
 
 // Skeleton data from extraction
@@ -135,7 +156,11 @@ export interface SkeletonEntry {
 }
 
 // Color mapping modes
-type ColorMode = 'x' | 'y' | 'height' | 'intensity' | 'rgb' | 'single' | 'scalar';
+// 'per-scan' = each scan colored by its own swatch (the same color shown
+// next to the scan in the side panel). Implemented internally as a 'single'
+// render with a different singleColor per cloud. Default for newly loaded
+// scans since it tells you at a glance which points came from which scanner.
+type ColorMode = 'x' | 'y' | 'height' | 'intensity' | 'rgb' | 'single' | 'per-scan' | 'scalar';
 
 // Shape types for shape creator
 type ShapeType = 'voxel' | 'cylinder' | 'sphere' | 'cone';
@@ -163,18 +188,54 @@ interface PointCloudProps {
   singleColor?: string;
   selectedScalarField?: string;  // Name of scalar field to color by when colorMode='scalar'
   filters?: CloudFilters;  // Active filters
+  colormap?: ColormapName;
+  rangeMin?: number;  // Overrides data-derived min for color mapping
+  rangeMax?: number;  // Overrides data-derived max for color mapping
 }
 
-// Viridis-like colormap for height visualization
-const heightToColor = (t: number): [number, number, number] => {
-  const r = Math.max(0, Math.min(1, 0.267004 + t * (0.329415 + t * (0.417642 + t * -0.601044))));
-  const g = Math.max(0, Math.min(1, 0.004874 + t * (0.873465 + t * (-0.348827 + t * 0.470363))));
-  const b = Math.max(0, Math.min(1, 0.329415 + t * (0.694719 + t * (-1.178884 + t * 0.154613))));
-  return [r, g, b];
-};
+// Format a numeric range tick so the colorbar labels stay readable across
+// many orders of magnitude.
+function formatColorbarTick(value: number): string {
+  if (!isFinite(value)) return '—';
+  const abs = Math.abs(value);
+  if (abs !== 0 && (abs >= 1e5 || abs < 1e-3)) return value.toExponential(2);
+  return value.toLocaleString(undefined, { maximumFractionDigits: 3 });
+}
+
+interface ColorbarProps {
+  colormap: ColormapName;
+  min: number;
+  max: number;
+  label?: string;
+}
+
+// Vertical colorbar overlay; min at the bottom, max at the top.
+function Colorbar({ colormap, min, max, label }: ColorbarProps) {
+  const mid = (min + max) / 2;
+  return (
+    <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg px-2 py-2 border border-neutral-700/50 pointer-events-none select-none">
+      {label && (
+        <div className="text-[10px] text-neutral-300 text-center mb-1 max-w-[80px] truncate" title={label}>
+          {label}
+        </div>
+      )}
+      <div className="flex items-stretch gap-2">
+        <div
+          className="w-4 rounded-sm border border-neutral-600"
+          style={{ height: 180, background: colormapToCssGradient(colormap, 32, 'to top') }}
+        />
+        <div className="flex flex-col justify-between text-[10px] text-neutral-300 leading-none" style={{ height: 180 }}>
+          <span>{formatColorbarTick(max)}</span>
+          <span className="text-neutral-400">{formatColorbarTick(mid)}</span>
+          <span>{formatColorbarTick(min)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // Point cloud mesh component
-function PointCloud({ data, pointSize = 2, colorMode = 'height', singleColor = '#a1a1aa', selectedScalarField, filters }: PointCloudProps) {
+function PointCloud({ data, pointSize = 2, colorMode = 'height', singleColor = '#a1a1aa', selectedScalarField, filters, colormap = 'viridis', rangeMin, rangeMax }: PointCloudProps) {
   const pointsRef = useRef<THREE.Points>(null);
 
   const geometry = useMemo(() => {
@@ -256,61 +317,65 @@ function PointCloud({ data, pointSize = 2, colorMode = 'height', singleColor = '
         colors[i * 3 + 2] = data.colors[origIdx * 3 + 2];
       }
     } else if (colorMode === 'intensity' && data.intensities && data.intensities.length >= data.pointCount) {
+      const lo = rangeMin ?? 0;
+      const hi = rangeMax ?? 1;
+      const span = (hi - lo) || 1;
       for (let i = 0; i < pointCount; i++) {
         const origIdx = getOriginalIndex(i);
-        const intensity = data.intensities[origIdx];
-        colors[i * 3] = intensity;
-        colors[i * 3 + 1] = intensity;
-        colors[i * 3 + 2] = intensity;
+        const t = (data.intensities[origIdx] - lo) / span;
+        const [r, g, b] = sampleColormap(colormap, t);
+        colors[i * 3] = r;
+        colors[i * 3 + 1] = g;
+        colors[i * 3 + 2] = b;
       }
     } else if (colorMode === 'scalar' && selectedScalarField && data.scalarFields?.[selectedScalarField]) {
-      // Color by scalar field using viridis colormap
       const field = data.scalarFields[selectedScalarField];
-      const range = (field.max - field.min) || 1;
+      const lo = rangeMin ?? field.min;
+      const hi = rangeMax ?? field.max;
+      const span = (hi - lo) || 1;
       for (let i = 0; i < pointCount; i++) {
         const origIdx = getOriginalIndex(i);
-        const t = Math.max(0, Math.min(1, (field.values[origIdx] - field.min) / range));
-        const [r, g, b] = heightToColor(t);
+        const t = (field.values[origIdx] - lo) / span;
+        const [r, g, b] = sampleColormap(colormap, t);
         colors[i * 3] = r;
         colors[i * 3 + 1] = g;
         colors[i * 3 + 2] = b;
       }
     } else if (colorMode === 'x') {
       const { min, max } = data.bounds;
-      const minX = isFinite(min.x) ? min.x : 0;
-      const maxX = isFinite(max.x) ? max.x : 1;
-      const rangeX = (maxX - minX) || 1;
+      const lo = rangeMin ?? (isFinite(min.x) ? min.x : 0);
+      const hi = rangeMax ?? (isFinite(max.x) ? max.x : 1);
+      const span = (hi - lo) || 1;
       for (let i = 0; i < pointCount; i++) {
         const x = positions[i * 3];
-        const t = Math.max(0, Math.min(1, (x - minX) / rangeX));
-        const [r, g, b] = heightToColor(t);
+        const t = (x - lo) / span;
+        const [r, g, b] = sampleColormap(colormap, t);
         colors[i * 3] = r;
         colors[i * 3 + 1] = g;
         colors[i * 3 + 2] = b;
       }
     } else if (colorMode === 'y') {
       const { min, max } = data.bounds;
-      const minY = isFinite(min.y) ? min.y : 0;
-      const maxY = isFinite(max.y) ? max.y : 1;
-      const rangeY = (maxY - minY) || 1;
+      const lo = rangeMin ?? (isFinite(min.y) ? min.y : 0);
+      const hi = rangeMax ?? (isFinite(max.y) ? max.y : 1);
+      const span = (hi - lo) || 1;
       for (let i = 0; i < pointCount; i++) {
         const y = positions[i * 3 + 1];
-        const t = Math.max(0, Math.min(1, (y - minY) / rangeY));
-        const [r, g, b] = heightToColor(t);
+        const t = (y - lo) / span;
+        const [r, g, b] = sampleColormap(colormap, t);
         colors[i * 3] = r;
         colors[i * 3 + 1] = g;
         colors[i * 3 + 2] = b;
       }
     } else if (colorMode === 'height') {
       const { min, max } = data.bounds;
-      // Validate bounds are finite numbers
-      const minZ = isFinite(min.z) ? min.z : 0;
-      const maxZ = isFinite(max.z) ? max.z : 1;
-      const heightRange = (maxZ - minZ) || 1;
+      const lo = rangeMin ?? (isFinite(min.z) ? min.z : 0);
+      const hi = rangeMax ?? (isFinite(max.z) ? max.z : 1);
+      const span = (hi - lo) || 1;
       for (let i = 0; i < pointCount; i++) {
         const z = positions[i * 3 + 2];
-        const t = Math.max(0, Math.min(1, (z - minZ) / heightRange)); // Clamp t to 0-1
-        const [r, g, b] = heightToColor(t);
+        const t = (z - lo) / span;
+        const [r, g, b] = sampleColormap(colormap, t);
         colors[i * 3] = r;
         colors[i * 3 + 1] = g;
         colors[i * 3 + 2] = b;
@@ -326,7 +391,7 @@ function PointCloud({ data, pointSize = 2, colorMode = 'height', singleColor = '
 
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     return geo;
-  }, [data, colorMode, singleColor, selectedScalarField, filters]);
+  }, [data, colorMode, singleColor, selectedScalarField, filters, colormap, rangeMin, rangeMax]);
 
   const material = useMemo(() => {
     return new THREE.PointsMaterial({
@@ -421,6 +486,43 @@ function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = fals
   }, [color, opacity, wireframe, hasVertexColors]);
 
   return <mesh ref={meshRef} geometry={geometry} material={material} />;
+}
+
+// Wireframe grid overlay for the unit-cube voxel mesh.
+// Draws all internal grid lines for an Nx*Ny*Nz subdivision in local space [-0.5, 0.5]^3
+// so the parent group's per-axis scale stretches the grid with the voxel.
+interface VoxelGridOverlayProps {
+  subdivisions: { x: number; y: number; z: number };
+  color?: string;
+}
+
+function VoxelGridOverlay({ subdivisions, color = '#94a3b8' }: VoxelGridOverlayProps) {
+  const geometry = useMemo(() => {
+    const nx = Math.max(1, Math.floor(subdivisions.x));
+    const ny = Math.max(1, Math.floor(subdivisions.y));
+    const nz = Math.max(1, Math.floor(subdivisions.z));
+    const xs = Array.from({ length: nx + 1 }, (_, i) => -0.5 + i / nx);
+    const ys = Array.from({ length: ny + 1 }, (_, i) => -0.5 + i / ny);
+    const zs = Array.from({ length: nz + 1 }, (_, i) => -0.5 + i / nz);
+    const verts: number[] = [];
+    // Lines along Z at each (x, y) grid intersection
+    for (const x of xs) for (const y of ys) verts.push(x, y, -0.5, x, y, 0.5);
+    // Lines along Y at each (x, z) grid intersection
+    for (const x of xs) for (const z of zs) verts.push(x, -0.5, z, x, 0.5, z);
+    // Lines along X at each (y, z) grid intersection
+    for (const y of ys) for (const z of zs) verts.push(-0.5, y, z, 0.5, y, z);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    return geo;
+  }, [subdivisions.x, subdivisions.y, subdivisions.z]);
+
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  return (
+    <lineSegments geometry={geometry}>
+      <lineBasicMaterial color={color} transparent opacity={0.85} depthTest={false} />
+    </lineSegments>
+  );
 }
 
 // Textured plant mesh component - renders plant with multiple materials and textures
@@ -544,7 +646,7 @@ function MaterialSubmesh({ vertices, normals, uvs, materialDef, opacity }: Mater
   return <mesh ref={meshRef} geometry={geometry} material={material} />;
 }
 
-function TexturedPlantMesh({ data, plantMaterials, opacity = 0.9 }: TexturedPlantMeshProps) {
+export function TexturedPlantMesh({ data, plantMaterials, opacity = 0.9 }: TexturedPlantMeshProps) {
   // Build submeshes for each material group
   const submeshes = useMemo(() => {
     // If no UVs or no materials with textures, render as single colored mesh
@@ -987,6 +1089,7 @@ function CameraController({ bounds, enabled = true }: { bounds: PointCloudData['
   return (
     <OrbitControls
       ref={controlsRef}
+      makeDefault
       enabled={enabled}
       enableDamping
       dampingFactor={0.05}
@@ -1002,9 +1105,18 @@ function CameraController({ bounds, enabled = true }: { bounds: PointCloudData['
   );
 }
 
-// Axes helper
-function AxesDisplay({ size }: { size: number }) {
-  return <axesHelper args={[size]} />;
+// Corner-pinned viewport gizmo: shows X/Y/Z orientation and snaps the
+// camera to look down an axis when its handle is clicked. Replaces the
+// world-origin axesHelper, which drifted in screen space as the user moved.
+function ViewportAxesGizmo() {
+  return (
+    <GizmoHelper alignment="bottom-left" margin={[80, 120]}>
+      <GizmoViewport
+        axisColors={['#ef4444', '#22c55e', '#3b82f6']}
+        labelColor="white"
+      />
+    </GizmoHelper>
+  );
 }
 
 // Scene background component
@@ -1386,8 +1498,6 @@ interface EraseBrushProps {
 
 function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, cloudTranslation, alreadyErasedIndices, onErase, onBrushPositionChange, onEraseStart, onEraseEnd, setIsErasing }: EraseBrushProps) {
   const { camera, gl, size, raycaster } = useThree();
-  const planeRef = useRef(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0));
-  const intersectionPoint = useRef(new THREE.Vector3());
 
   // Update brush position based on mouse movement
   useEffect(() => {
@@ -1530,17 +1640,20 @@ export interface ImportRefs {
 }
 
 interface PointCloudViewerProps {
-  clouds: PointCloudEntry[];
-  selectedIds: Set<string>;
+  scans: Scan[];
+  selectedScanIds: Set<string>;
   onToggleVisibility: (id: string) => void;
   onToggleSelection: (id: string, multiSelect: boolean) => void;
-  onRemoveCloud: (id: string) => void;
+  onRemoveScan: (id: string) => void;
   onSelectAll: () => void;
   onDeselectAll: () => void;
-  onUpdateCloud: (id: string, data: PointCloudData) => void;
+  onUpdateScanData: (id: string, data: PointCloudData) => void;
+  onUpdateScanParams: (id: string, params: ScanParameters | undefined) => void;
+  onUpdateScanLabel?: (id: string, label: string) => void;
   onSave: (data: PointCloudData, fileName: string) => void;
-  onAddCloud?: (cloud: PointCloudEntry) => void;
-  onStitchClouds?: (ids: string[]) => void;
+  onAddScan?: (scan: Scan) => void;
+  onAddScans?: (scans: Scan[]) => void;
+  onStitchScans?: (ids: string[]) => void;
   onUndoStitch?: () => boolean;
   canUndoStitch?: () => boolean;
   className?: string;
@@ -1548,26 +1661,66 @@ interface PointCloudViewerProps {
 }
 
 export default function PointCloudViewer({
-  clouds,
-  selectedIds,
+  scans,
+  selectedScanIds,
   onToggleVisibility,
   onToggleSelection,
-  onRemoveCloud,
+  onRemoveScan,
   onSelectAll,
   onDeselectAll,
-  onUpdateCloud,
-  onSave,
-  onAddCloud,
-  onStitchClouds,
+  onUpdateScanData,
+  onUpdateScanParams,
+  onUpdateScanLabel,
+  onSave: _onSave,
+  onAddScan,
+  onAddScans,
+  onStitchScans,
   onUndoStitch,
   canUndoStitch,
   className = '',
   importRefsCallback
 }: PointCloudViewerProps) {
+  // Legacy internal aliases. The bulk of this file was written against
+  // `clouds` / `selectedIds` / `onUpdateCloud` etc., and assumes every entry
+  // has a `data` payload. We adapt the unified Scan list at the boundary so
+  // existing callsites keep working while the right-pane UI and the marker
+  // rendering use the full scan (including params-only entries).
+  const clouds: PointCloudEntry[] = useMemo(
+    () => scans.filter(hasData).map(s => ({
+      id: s.id,
+      data: s.data,
+      visible: s.visible,
+      color: s.color,
+    })),
+    [scans],
+  );
+  // Selection set is shared between data-bearing and params-only scans — the
+  // existing tool-panel logic only ever asks "is this cloud id selected", and
+  // those ids never collide with params-only scan ids.
+  const selectedIds = selectedScanIds;
+  const onRemoveCloud = onRemoveScan;
+  const onUpdateCloud = onUpdateScanData;
+  const onAddCloud = useMemo(() => {
+    if (!onAddScan) return undefined;
+    return (cloud: PointCloudEntry) => {
+      onAddScan({
+        id: cloud.id,
+        label: cloud.data.fileName ?? 'Scan',
+        visible: cloud.visible,
+        color: cloud.color,
+        data: cloud.data,
+      });
+    };
+  }, [onAddScan]);
+  const onStitchClouds = onStitchScans;
   const [pointSize, setPointSize] = useState(1);
-  const [colorMode, setColorMode] = useState<ColorMode>('height');
+  const [colorMode, setColorMode] = useState<ColorMode>('per-scan');
   const [selectedScalarField, setSelectedScalarField] = useState<string | undefined>(undefined);
   const [colorDropdownCloudId, setColorDropdownCloudId] = useState<string | null>(null);
+  const [colormap, setColormap] = useState<ColormapName>('viridis');
+  // Custom min/max overrides keyed by `${colorMode}:${field?}`. Undefined entries
+  // mean "use the data-derived range."
+  const [colorRanges, setColorRanges] = useState<Record<string, { min?: number; max?: number }>>({});
   const [showFilterPanel, setShowFilterPanel] = useState(false);
   const [showResamplePanel, setShowResamplePanel] = useState(false);
   const [resampleFraction, setResampleFraction] = useState(0.5);
@@ -1646,7 +1799,7 @@ export default function PointCloudViewer({
   const [skeletonQuantizationLevels, setSkeletonQuantizationLevels] = useState(100); // More levels for better detail
   const [skeletonUseNonlinearQuant, setSkeletonUseNonlinearQuant] = useState(true);
   const [skeletonUseProportionFilter, setSkeletonUseProportionFilter] = useState(true);
-  const [skeletonProportionThreshold, setSkeletonProportionThreshold] = useState(0.1);
+  const [skeletonProportionThreshold] = useState(0.1);
 
   // Import functions for external use
   const importMesh = useCallback((mesh: Omit<MeshEntry, 'id'>) => {
@@ -1680,7 +1833,7 @@ export default function PointCloudViewer({
   const [alignmentResults, setAlignmentResults] = useState<AlignmentDistanceResponse | null>(null);
   const [isComputingAlignment, setIsComputingAlignment] = useState(false);
   // Live alignment mode - automatically computes alignment when mesh is moved
-  const [liveAlignmentEnabled, setLiveAlignmentEnabled] = useState(true); // Auto-enabled by default in mixed mode
+  const [liveAlignmentEnabled] = useState(true); // Auto-enabled by default in mixed mode
   const alignmentDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMeshPositionRef = useRef<string>(''); // Track mesh position for debounced updates
   // ICP (Iterative Closest Point) snap-to-fit state
@@ -1729,9 +1882,34 @@ export default function PointCloudViewer({
   const [skeletonPositions, setSkeletonPositions] = useState<Map<string, { x: number; y: number; z: number }>>(new Map());
   // Show resize panel when a mesh is selected
   const [showResizePanel, setShowResizePanel] = useState(false);
+  // Lock per-axis scale so edits apply uniformly to X/Y/Z
+  const [scaleLocked, setScaleLocked] = useState(false);
   const [showPlantGrowthPanel, setShowPlantGrowthPanel] = useState(false);
   const [showMorphPopup, setShowMorphPopup] = useState(false);
   const [isMorphing, setIsMorphing] = useState(false);
+
+  // Scan rows derived from the parent's unified Scan list. `scansWithParams`
+  // backs the scanner-marker rendering and the right-pane "Scans" panel for
+  // entries that carry scan parameters; `scansAll` is used for the panel
+  // listing (which shows every scan regardless of whether it has data).
+  const scansAll = scans;
+  const scansWithParams = useMemo(() => scans.filter(hasParams), [scans]);
+  const [selectedMarkerScanId, setSelectedMarkerScanId] = useState<string | null>(null);
+  const [scanPopupState, setScanPopupState] = useState<
+    | { kind: 'closed' }
+    | { kind: 'add' }
+    | { kind: 'edit'; id: string }
+    | { kind: 'add-params-to'; id: string }
+  >({ kind: 'closed' });
+  // Defaults handed to the popup when adding a new scan (label, origin).
+  // openAddScanPopup is declared lower, after combinedBounds is in scope.
+  const [scanDefaults, setScanDefaults] = useState<{ label?: string; params?: Partial<ScanParameters> }>({});
+  // Progress for a Helios XML bulk import in flight. The launching popup
+  // closes immediately so the user sees this modal instead of an idle popup.
+  const [bulkImportProgress, setBulkImportProgress] = useState<BulkImportProgressState | null>(null);
+  // Per-row expansion state for the scans panel. Held in-memory only; resets
+  // on app reload.
+  const [expandedScanIds, setExpandedScanIds] = useState<Set<string>>(new Set());
 
   // Edit mode and per-cloud edit states
   const [editMode, setEditMode] = useState<EditMode>('none');
@@ -1752,6 +1930,28 @@ export default function PointCloudViewer({
   const meshRotationsRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
   const meshScalesRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
   const skeletonPositionsRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
+
+  // Blender-style modal transform state: T (translate), S (scale) with X/Y/Z axis lock
+  // and Shift+X/Y/Z plane lock (Shift+X = constrain to YZ plane, etc.).
+  type TransformAxis = 'free' | 'x' | 'y' | 'z' | 'yz' | 'xz' | 'xy';
+  interface TransformModalState {
+    op: 'translate' | 'scale';
+    axis: TransformAxis;
+    startScreen: { x: number; y: number };
+    pivot: { x: number; y: number; z: number };
+    target: 'mesh' | 'skeleton' | 'cloud';
+    meshId?: string;
+    skeletonId?: string;
+    cloudIds?: string[];
+    originalMeshPos?: { x: number; y: number; z: number };
+    originalMeshScale?: { x: number; y: number; z: number };
+    originalSkeletonPos?: { x: number; y: number; z: number };
+    originalCloudTranslations?: Map<string, { x: number; y: number; z: number }>;
+    // Numeric input buffer (Blender-style). When parseable, overrides mouse-driven value.
+    numericBuffer: string;
+  }
+  const transformModalRef = useRef<TransformModalState | null>(null);
+  const [transformModal, setTransformModal] = useState<TransformModalState | null>(null);
 
   // Track previous cloud IDs to detect new additions
   const prevCloudIdsRef = useRef<Set<string>>(new Set());
@@ -2076,6 +2276,24 @@ export default function PointCloudViewer({
       setTimeout(() => { isUndoingRef.current = false; }, 0);
     }
   }, [history, historyIndex, applyState]);
+
+  // Expose viewer-scoped actions on window so the application menu (wired in
+  // src/main/menu.ts) can dispatch to them via App.tsx without prop-drilling.
+  // Matches the existing __resetPointCloudCamera / __snapToView pattern in
+  // CameraController above.
+  useEffect(() => {
+    (window as any).__handleUndo = handleUndo;
+    (window as any).__handleRedo = handleRedo;
+    (window as any).__openExportPanel = () => {
+      closeAllToolPanels('export');
+      setShowExportPanel(true);
+    };
+    return () => {
+      delete (window as any).__handleUndo;
+      delete (window as any).__handleRedo;
+      delete (window as any).__openExportPanel;
+    };
+  }, [handleUndo, handleRedo, closeAllToolPanels]);
 
   // Apply crop to the selected cloud
   const handleApplyCrop = useCallback(() => {
@@ -2637,6 +2855,30 @@ export default function PointCloudViewer({
     return { min, max, center, size };
   }, [clouds, meshes, skeletons, getEditState]);
 
+  // Open the add-scan popup with sensible defaults: next label and current
+  // scene center as origin. Shared by the toolbar Radio button (Create
+  // section) and the "+" inside the right-hand Scans panel.
+  const openAddScanPopup = useCallback(() => {
+    const center = combinedBounds.center;
+    setScanDefaults({
+      label: `Scan ${scansAll.length + 1}`,
+      params: { origin: { x: center.x, y: center.y, z: center.z } },
+    });
+    setScanPopupState({ kind: 'add' });
+  }, [combinedBounds, scansAll.length]);
+
+  // Open the params popup pre-filled to attach scan params to an existing
+  // data-only scan. The origin defaults to the scan's bounds center.
+  const openAddParamsPopupFor = useCallback((scan: Scan) => {
+    const origin = scan.data?.bounds.center
+      ? { x: scan.data.bounds.center.x, y: scan.data.bounds.center.y, z: scan.data.bounds.center.z }
+      : combinedBounds.center
+        ? { x: combinedBounds.center.x, y: combinedBounds.center.y, z: combinedBounds.center.z }
+        : undefined;
+    setScanDefaults({ label: scan.label, params: { origin } });
+    setScanPopupState({ kind: 'add-params-to', id: scan.id });
+  }, [combinedBounds]);
+
   // Stable static bounds for grid/axes - only updates when objects are added, not removed.
   // This prevents the grid and axes from jumping when objects are deleted.
   const prevStaticBoundsIdsRef = useRef<Set<string>>(new Set());
@@ -2787,10 +3029,7 @@ export default function PointCloudViewer({
       { id: 'deselect-all', name: 'Deselect All', keywords: ['clear', 'none'], action: () => onDeselectAll(), category: 'Selection', requires: null },
 
       // Create commands - always available
-      { id: 'create-voxel', name: 'Create Voxel', keywords: ['cube', 'box', 'shape'], action: () => handleCreateShape('voxel'), category: 'Create', requires: null },
-      { id: 'create-cylinder', name: 'Create Cylinder', keywords: ['tube', 'shape'], action: () => handleCreateShape('cylinder'), category: 'Create', requires: null },
-      { id: 'create-sphere', name: 'Create Sphere', keywords: ['ball', 'shape'], action: () => handleCreateShape('sphere'), category: 'Create', requires: null },
-      { id: 'create-cone', name: 'Create Cone', keywords: ['shape'], action: () => handleCreateShape('cone'), category: 'Create', requires: null },
+      { id: 'create-voxel', name: 'Create Voxel', keywords: ['cube', 'box', 'shape', 'grid'], action: () => handleCreateShape('voxel'), category: 'Create', requires: null },
       { id: 'create-plant', name: 'Generate Plant', keywords: ['helios', 'leaf', 'vegetation'], action: () => setShowPlantPopup(true), category: 'Create', requires: null },
 
       // Point cloud tools
@@ -2805,9 +3044,7 @@ export default function PointCloudViewer({
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => { if (selectedIds.size >= 2 && onStitchClouds) onStitchClouds(Array.from(selectedIds)); }, category: 'Point Cloud', requires: 'multiple-clouds' },
 
       // Mesh tools
-      { id: 'mesh-translate', name: 'Translate Mesh', keywords: ['move', 'position'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'translate' ? 'none' : 'translate'); }, category: 'Mesh', requires: 'mesh' },
-      { id: 'mesh-rotate', name: 'Rotate Mesh', keywords: ['turn', 'spin'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'rotate' ? 'none' : 'rotate'); }, category: 'Mesh', requires: 'mesh' },
-      { id: 'mesh-resize', name: 'Resize Mesh', keywords: ['scale', 'size'], action: () => setShowResizePanel(!showResizePanel), category: 'Mesh', requires: 'mesh' },
+      { id: 'mesh-transform', name: 'Transform Mesh', keywords: ['translate', 'move', 'position', 'rotate', 'turn', 'spin', 'resize', 'scale', 'size'], action: () => setShowResizePanel(!showResizePanel), category: 'Mesh', requires: 'mesh' },
       { id: 'mesh-sample', name: 'Sample to Point Cloud', keywords: ['convert', 'points'], action: () => setShowSamplingPopup(true), category: 'Mesh', requires: 'mesh' },
       { id: 'mesh-export', name: 'Export Mesh', keywords: ['save', 'obj', 'ply'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Mesh', requires: 'mesh' },
 
@@ -2962,8 +3199,6 @@ export default function PointCloudViewer({
         cy /= vertexCount;
         cz /= vertexCount;
 
-        // Current position offset
-        const currentPos = meshPositions.get(selectedMeshId) || { x: 0, y: 0, z: 0 };
         // New position should offset so that center ends up at origin
         const newPos = { x: -cx, y: -cy, z: -cz };
 
@@ -3017,8 +3252,6 @@ export default function PointCloudViewer({
             if (currentState) {
               // Cloud's current center (in original coordinates)
               const center = cloud.data.bounds.center;
-              // Current translation
-              const currentTrans = currentState.translation;
               // New translation: offset so center + translation = origin
               const newTrans = {
                 x: -center.x,
@@ -3180,6 +3413,7 @@ export default function PointCloudViewer({
       },
     };
   }, []);
+  void applyErasedPoints; // kept for upcoming permanent-erase feature
 
   // Get display data for a cloud (with edits applied)
   // showCropPreview: when true, apply crop filtering for preview (used in crop mode)
@@ -4333,10 +4567,6 @@ export default function PointCloudViewer({
       // Target cloud positions (stays fixed)
       const targetPoints: number[] = Array.from(targetDisplayData.positions);
 
-      // Get source cloud's current translation
-      const sourceState = getEditState(sourceCloud.id);
-      const currentTranslation = sourceState.translation;
-
       // Source cloud positions (already includes translation from getDisplayData)
       const sourcePoints: number[] = Array.from(sourceDisplayData.positions);
 
@@ -4816,6 +5046,462 @@ export default function PointCloudViewer({
     return skeletons.find(s => s.id === selectedSkeletonId) || null;
   }, [skeletons, selectedSkeletonId]);
 
+  // Blender-style modal transform shortcuts (T translate, S scale; X/Y/Z lock axis,
+  // Shift+X/Y/Z lock to the perpendicular plane). Enter/click commits, Esc/right-click
+  // cancels. Suppressed while an input is focused.
+  useEffect(() => {
+    const isInputFocused = (): boolean => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      if (el.isContentEditable) return true;
+      return false;
+    };
+
+    const lastMouse = { x: 0, y: 0, set: false };
+
+    const getCanvas = (): HTMLCanvasElement | null =>
+      (document.querySelector('canvas[data-engine]') as HTMLCanvasElement | null) ||
+      (document.querySelector('canvas') as HTMLCanvasElement | null);
+
+    const computePivot = (): { x: number; y: number; z: number } | null => {
+      if (selectedMesh) {
+        const pos = meshPositionsRef.current.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
+        const scl = meshScalesRef.current.get(selectedMesh.id) || { x: 1, y: 1, z: 1 };
+        const { vertices, vertexCount } = selectedMesh.data;
+        if (vertexCount === 0) return pos;
+        let cx = 0, cy = 0, cz = 0;
+        for (let i = 0; i < vertexCount; i++) {
+          cx += vertices[i * 3];
+          cy += vertices[i * 3 + 1];
+          cz += vertices[i * 3 + 2];
+        }
+        cx /= vertexCount; cy /= vertexCount; cz /= vertexCount;
+        return { x: cx * scl.x + pos.x, y: cy * scl.y + pos.y, z: cz * scl.z + pos.z };
+      }
+      if (selectedSkeleton) {
+        const pos = skeletonPositionsRef.current.get(selectedSkeleton.id) || { x: 0, y: 0, z: 0 };
+        const { points, pointCount } = selectedSkeleton.data;
+        if (pointCount === 0) return pos;
+        let cx = 0, cy = 0, cz = 0;
+        for (let i = 0; i < pointCount; i++) {
+          cx += points[i * 3];
+          cy += points[i * 3 + 1];
+          cz += points[i * 3 + 2];
+        }
+        cx /= pointCount; cy /= pointCount; cz /= pointCount;
+        return { x: cx + pos.x, y: cy + pos.y, z: cz + pos.z };
+      }
+      if (selectedIds.size > 0) {
+        let cx = 0, cy = 0, cz = 0, n = 0;
+        for (const id of selectedIds) {
+          const cloud = clouds.find(c => c.id === id);
+          if (!cloud) continue;
+          const state = editStates.get(id);
+          const tr = state?.translation ?? { x: 0, y: 0, z: 0 };
+          cx += cloud.data.bounds.center.x + tr.x;
+          cy += cloud.data.bounds.center.y + tr.y;
+          cz += cloud.data.bounds.center.z + tr.z;
+          n++;
+        }
+        if (n === 0) return null;
+        return { x: cx / n, y: cy / n, z: cz / n };
+      }
+      return null;
+    };
+
+    const closestPointOnLineFromRay = (ray: THREE.Ray, P: THREE.Vector3, dir: THREE.Vector3): number => {
+      // Returns parameter t such that P + t*dir is closest to the ray.
+      const w0 = new THREE.Vector3().subVectors(ray.origin, P);
+      const b = ray.direction.dot(dir);
+      const d = ray.direction.dot(w0);
+      const e = dir.dot(w0);
+      const denom = 1 - b * b;
+      if (Math.abs(denom) < 1e-6) return 0;
+      return (e - b * d) / denom;
+    };
+
+    const computeTranslateDelta = (
+      camera: THREE.Camera,
+      canvas: HTMLCanvasElement,
+      axis: TransformAxis,
+      pivot: { x: number; y: number; z: number },
+      startScreen: { x: number; y: number },
+      currentScreen: { x: number; y: number },
+    ): THREE.Vector3 => {
+      const rect = canvas.getBoundingClientRect();
+      const makeRay = (s: { x: number; y: number }) => {
+        const ndc = new THREE.Vector2(
+          ((s.x - rect.left) / rect.width) * 2 - 1,
+          -(((s.y - rect.top) / rect.height) * 2 - 1),
+        );
+        const rc = new THREE.Raycaster();
+        rc.setFromCamera(ndc, camera);
+        return rc.ray.clone();
+      };
+      const rayA = makeRay(startScreen);
+      const rayB = makeRay(currentScreen);
+      const pivotVec = new THREE.Vector3(pivot.x, pivot.y, pivot.z);
+
+      if (axis === 'free') {
+        const camDir = new THREE.Vector3();
+        camera.getWorldDirection(camDir);
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir.clone().negate(), pivotVec);
+        const pA = new THREE.Vector3();
+        const pB = new THREE.Vector3();
+        if (!rayA.intersectPlane(plane, pA)) return new THREE.Vector3();
+        if (!rayB.intersectPlane(plane, pB)) return new THREE.Vector3();
+        return pB.sub(pA);
+      }
+
+      if (axis === 'yz' || axis === 'xz' || axis === 'xy') {
+        const normal = new THREE.Vector3(
+          axis === 'yz' ? 1 : 0,
+          axis === 'xz' ? 1 : 0,
+          axis === 'xy' ? 1 : 0,
+        );
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, pivotVec);
+        const pA = new THREE.Vector3();
+        const pB = new THREE.Vector3();
+        if (!rayA.intersectPlane(plane, pA)) return new THREE.Vector3();
+        if (!rayB.intersectPlane(plane, pB)) return new THREE.Vector3();
+        return pB.sub(pA);
+      }
+
+      const axisDir = new THREE.Vector3(
+        axis === 'x' ? 1 : 0,
+        axis === 'y' ? 1 : 0,
+        axis === 'z' ? 1 : 0,
+      );
+      const tA = closestPointOnLineFromRay(rayA, pivotVec, axisDir);
+      const tB = closestPointOnLineFromRay(rayB, pivotVec, axisDir);
+      return axisDir.clone().multiplyScalar(tB - tA);
+    };
+
+    const computeScaleFactor = (
+      camera: THREE.Camera,
+      canvas: HTMLCanvasElement,
+      axis: TransformAxis,
+      pivot: { x: number; y: number; z: number },
+      startScreen: { x: number; y: number },
+      currentScreen: { x: number; y: number },
+    ): { x: number; y: number; z: number } => {
+      const rect = canvas.getBoundingClientRect();
+      const proj = new THREE.Vector3(pivot.x, pivot.y, pivot.z).project(camera);
+      const pivotPx = {
+        x: rect.left + ((proj.x + 1) / 2) * rect.width,
+        y: rect.top + ((-proj.y + 1) / 2) * rect.height,
+      };
+      const dStart = Math.hypot(startScreen.x - pivotPx.x, startScreen.y - pivotPx.y);
+      const dCur = Math.hypot(currentScreen.x - pivotPx.x, currentScreen.y - pivotPx.y);
+      const factor = dStart > 1 ? dCur / dStart : 1;
+      const fx = (axis === 'free' || axis === 'x' || axis === 'xy' || axis === 'xz') ? factor : 1;
+      const fy = (axis === 'free' || axis === 'y' || axis === 'xy' || axis === 'yz') ? factor : 1;
+      const fz = (axis === 'free' || axis === 'z' || axis === 'xz' || axis === 'yz') ? factor : 1;
+      return { x: fx, y: fy, z: fz };
+    };
+
+    const applyTranslate = (modal: TransformModalState, delta: THREE.Vector3) => {
+      if (modal.target === 'mesh' && modal.meshId && modal.originalMeshPos) {
+        const orig = modal.originalMeshPos;
+        const newPos = { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z };
+        meshPositionsRef.current.set(modal.meshId, newPos);
+        setMeshPositions(prev => new Map(prev).set(modal.meshId!, newPos));
+      } else if (modal.target === 'skeleton' && modal.skeletonId && modal.originalSkeletonPos) {
+        const orig = modal.originalSkeletonPos;
+        const newPos = { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z };
+        skeletonPositionsRef.current.set(modal.skeletonId, newPos);
+        setSkeletonPositions(prev => new Map(prev).set(modal.skeletonId!, newPos));
+      } else if (modal.target === 'cloud' && modal.cloudIds && modal.originalCloudTranslations) {
+        setEditStates(prev => {
+          const next = new Map(prev);
+          for (const id of modal.cloudIds!) {
+            const orig = modal.originalCloudTranslations!.get(id);
+            if (!orig) continue;
+            const state = next.get(id) || {
+              translation: { x: 0, y: 0, z: 0 },
+              cropMin: null,
+              cropMax: null,
+              cropEnabled: false,
+              cropInvert: false,
+              erasedIndices: new Set<number>(),
+            };
+            next.set(id, {
+              ...state,
+              translation: { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z },
+            });
+          }
+          return next;
+        });
+      }
+    };
+
+    const applyScale = (modal: TransformModalState, factor: { x: number; y: number; z: number }) => {
+      if (modal.target === 'mesh' && modal.meshId && modal.originalMeshScale) {
+        const orig = modal.originalMeshScale;
+        const newScale = {
+          x: Math.max(0.001, orig.x * factor.x),
+          y: Math.max(0.001, orig.y * factor.y),
+          z: Math.max(0.001, orig.z * factor.z),
+        };
+        meshScalesRef.current.set(modal.meshId, newScale);
+        setMeshScales(prev => new Map(prev).set(modal.meshId!, newScale));
+      }
+    };
+
+    const parseNumeric = (s: string): number | null => {
+      if (!s) return null;
+      if (s === '-' || s === '.' || s === '-.') return null;
+      const n = parseFloat(s);
+      return isNaN(n) ? null : n;
+    };
+
+    const applyNumeric = (modal: TransformModalState, value: number) => {
+      if (modal.op === 'translate') {
+        let dx = 0, dy = 0, dz = 0;
+        if (modal.axis === 'x' || modal.axis === 'free') dx = value;
+        else if (modal.axis === 'y') dy = value;
+        else if (modal.axis === 'z') dz = value;
+        else if (modal.axis === 'xy') { dx = value; dy = value; }
+        else if (modal.axis === 'xz') { dx = value; dz = value; }
+        else if (modal.axis === 'yz') { dy = value; dz = value; }
+        applyTranslate(modal, new THREE.Vector3(dx, dy, dz));
+      } else {
+        const f = { x: 1, y: 1, z: 1 };
+        if (modal.axis === 'free') { f.x = value; f.y = value; f.z = value; }
+        else if (modal.axis === 'x') f.x = value;
+        else if (modal.axis === 'y') f.y = value;
+        else if (modal.axis === 'z') f.z = value;
+        else if (modal.axis === 'xy') { f.x = value; f.y = value; }
+        else if (modal.axis === 'xz') { f.x = value; f.z = value; }
+        else if (modal.axis === 'yz') { f.y = value; f.z = value; }
+        applyScale(modal, f);
+      }
+    };
+
+    const updateModal = (clientX: number, clientY: number) => {
+      const modal = transformModalRef.current;
+      if (!modal) return;
+      const numeric = parseNumeric(modal.numericBuffer);
+      if (numeric !== null) {
+        applyNumeric(modal, numeric);
+        return;
+      }
+      const camera = mainCameraRef.current;
+      const canvas = getCanvas();
+      if (!camera || !canvas) return;
+      const cur = { x: clientX, y: clientY };
+      if (modal.op === 'translate') {
+        const delta = computeTranslateDelta(camera, canvas, modal.axis, modal.pivot, modal.startScreen, cur);
+        applyTranslate(modal, delta);
+      } else {
+        const factor = computeScaleFactor(camera, canvas, modal.axis, modal.pivot, modal.startScreen, cur);
+        applyScale(modal, factor);
+      }
+    };
+
+    const cancelModal = () => {
+      const modal = transformModalRef.current;
+      if (!modal) return;
+      if (modal.target === 'mesh' && modal.meshId) {
+        if (modal.originalMeshPos) {
+          const orig = modal.originalMeshPos;
+          meshPositionsRef.current.set(modal.meshId, orig);
+          setMeshPositions(prev => new Map(prev).set(modal.meshId!, orig));
+        }
+        if (modal.originalMeshScale) {
+          const orig = modal.originalMeshScale;
+          meshScalesRef.current.set(modal.meshId, orig);
+          setMeshScales(prev => new Map(prev).set(modal.meshId!, orig));
+        }
+      } else if (modal.target === 'skeleton' && modal.skeletonId && modal.originalSkeletonPos) {
+        const orig = modal.originalSkeletonPos;
+        skeletonPositionsRef.current.set(modal.skeletonId, orig);
+        setSkeletonPositions(prev => new Map(prev).set(modal.skeletonId!, orig));
+      } else if (modal.target === 'cloud' && modal.cloudIds && modal.originalCloudTranslations) {
+        setEditStates(prev => {
+          const next = new Map(prev);
+          for (const id of modal.cloudIds!) {
+            const orig = modal.originalCloudTranslations!.get(id);
+            if (!orig) continue;
+            const state = next.get(id);
+            if (state) next.set(id, { ...state, translation: orig });
+          }
+          return next;
+        });
+      }
+      pendingHistoryRef.current = null;
+      transformModalRef.current = null;
+      setTransformModal(null);
+      setGizmoDragging(false);
+    };
+
+    const commitModal = () => {
+      if (!transformModalRef.current) return;
+      commitHistoryEntry();
+      transformModalRef.current = null;
+      setTransformModal(null);
+      setGizmoDragging(false);
+    };
+
+    const startModal = (op: 'translate' | 'scale') => {
+      if (transformModalRef.current) return;
+      if (!mainCameraRef.current) return;
+      if (!lastMouse.set) return;
+      const pivot = computePivot();
+      if (!pivot) return;
+
+      let state: TransformModalState | null = null;
+
+      if (selectedMesh) {
+        state = {
+          op,
+          axis: 'free',
+          startScreen: { x: lastMouse.x, y: lastMouse.y },
+          pivot,
+          target: 'mesh',
+          meshId: selectedMesh.id,
+          originalMeshPos: { ...(meshPositionsRef.current.get(selectedMesh.id) || { x: 0, y: 0, z: 0 }) },
+          originalMeshScale: { ...(meshScalesRef.current.get(selectedMesh.id) || { x: 1, y: 1, z: 1 }) },
+          numericBuffer: '',
+        };
+        startHistoryEntry('mesh', selectedMesh.id);
+      } else if (op === 'translate' && selectedSkeleton) {
+        state = {
+          op,
+          axis: 'free',
+          startScreen: { x: lastMouse.x, y: lastMouse.y },
+          pivot,
+          target: 'skeleton',
+          skeletonId: selectedSkeleton.id,
+          originalSkeletonPos: { ...(skeletonPositionsRef.current.get(selectedSkeleton.id) || { x: 0, y: 0, z: 0 }) },
+          numericBuffer: '',
+        };
+        startHistoryEntry('skeleton', selectedSkeleton.id);
+      } else if (op === 'translate' && selectedIds.size > 0) {
+        const originals = new Map<string, { x: number; y: number; z: number }>();
+        const ids: string[] = [];
+        for (const id of selectedIds) {
+          const s = editStates.get(id);
+          originals.set(id, { ...(s?.translation ?? { x: 0, y: 0, z: 0 }) });
+          ids.push(id);
+        }
+        // History only captures one entry at a time (existing limitation)
+        if (ids[0]) startHistoryEntry('cloud', ids[0]);
+        state = {
+          op,
+          axis: 'free',
+          startScreen: { x: lastMouse.x, y: lastMouse.y },
+          pivot,
+          target: 'cloud',
+          cloudIds: ids,
+          originalCloudTranslations: originals,
+          numericBuffer: '',
+        };
+      }
+
+      if (!state) return;
+      transformModalRef.current = state;
+      setTransformModal(state);
+      setGizmoDragging(true);
+      // Apply with the start position so the object doesn't visibly jump until the mouse moves.
+      updateModal(lastMouse.x, lastMouse.y);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const modal = transformModalRef.current;
+      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
+      if (!modal) {
+        if (isInputFocused()) return;
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        if (k === 't') { e.preventDefault(); startModal('translate'); }
+        else if (k === 's') { e.preventDefault(); startModal('scale'); }
+        return;
+      }
+
+      // Modal is active
+      if (k === 'x' || k === 'y' || k === 'z') {
+        e.preventDefault();
+        const planeMap = { x: 'yz', y: 'xz', z: 'xy' } as const;
+        const wanted: TransformAxis = e.shiftKey ? planeMap[k] : k;
+        const next: TransformAxis = modal.axis === wanted ? 'free' : wanted;
+        const updated = { ...modal, axis: next };
+        transformModalRef.current = updated;
+        setTransformModal(updated);
+        updateModal(lastMouse.x, lastMouse.y);
+      } else if (k === 'Enter') {
+        e.preventDefault();
+        commitModal();
+      } else if (k === 'Escape') {
+        e.preventDefault();
+        cancelModal();
+      } else if (k === 'Backspace') {
+        e.preventDefault();
+        const buf = modal.numericBuffer.slice(0, -1);
+        const updated = { ...modal, numericBuffer: buf };
+        transformModalRef.current = updated;
+        setTransformModal(updated);
+        updateModal(lastMouse.x, lastMouse.y);
+      } else if (/^[0-9]$/.test(k) || k === '.' || k === '-') {
+        e.preventDefault();
+        let buf = modal.numericBuffer;
+        if (k === '.') {
+          if (buf.includes('.')) return;
+          if (buf === '' || buf === '-') buf += '0';
+          buf += '.';
+        } else if (k === '-') {
+          buf = buf.startsWith('-') ? buf.slice(1) : '-' + buf;
+        } else {
+          buf += k;
+        }
+        const updated = { ...modal, numericBuffer: buf };
+        transformModalRef.current = updated;
+        setTransformModal(updated);
+        updateModal(lastMouse.x, lastMouse.y);
+      }
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      lastMouse.x = e.clientX;
+      lastMouse.y = e.clientY;
+      lastMouse.set = true;
+      if (transformModalRef.current) updateModal(e.clientX, e.clientY);
+    };
+
+    const handleMouseDown = (e: MouseEvent) => {
+      if (!transformModalRef.current) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.button === 2) cancelModal();
+      else commitModal();
+    };
+
+    const handleContextMenu = (e: MouseEvent) => {
+      if (transformModalRef.current) e.preventDefault();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mousedown', handleMouseDown, true);
+    window.addEventListener('contextmenu', handleContextMenu);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mousedown', handleMouseDown, true);
+      window.removeEventListener('contextmenu', handleContextMenu);
+    };
+  }, [
+    selectedMesh,
+    selectedSkeleton,
+    selectedIds,
+    clouds,
+    editStates,
+    startHistoryEntry,
+    commitHistoryEntry,
+  ]);
+
   // Determine what type of object is selected
   const selectionType = useMemo((): 'cloud' | 'multiCloud' | 'mesh' | 'multiMesh' | 'skeleton' | 'mixed' | 'none' => {
     const hasCloud = selectedIds.size > 0;
@@ -5140,6 +5826,7 @@ export default function PointCloudViewer({
       visible: true,
       color: shapeColors[shapeType],
       method: 'delaunay', // Just a placeholder since shapes aren't from triangulation
+      ...(shapeType === 'voxel' ? { gridSubdivisions: { x: 1, y: 1, z: 1 } } : {}),
     };
 
     setMeshes(prev => [...prev, newMesh]);
@@ -6291,6 +6978,57 @@ export default function PointCloudViewer({
     return clouds.find(c => c.id === id);
   }, [selectedIds, clouds]);
 
+  // Color modes that benefit from a colormap + colorbar (continuous scalars).
+  const isScalarColorMode = (
+    colorMode === 'x' ||
+    colorMode === 'y' ||
+    colorMode === 'height' ||
+    colorMode === 'intensity' ||
+    colorMode === 'scalar'
+  );
+
+  // Stable key for the active continuous mode (so per-mode min/max overrides
+  // don't leak across different fields/axes).
+  const colorRangeKey =
+    colorMode === 'scalar' && selectedScalarField
+      ? `scalar:${selectedScalarField}`
+      : colorMode;
+
+  // Compute the data-derived default min/max for the active mode against a
+  // representative cloud (the first visible selected cloud, or the first
+  // visible cloud overall). Returns null if no defaults apply.
+  const colorbarSourceCloud = useMemo(() => {
+    const firstSelected = Array.from(selectedIds)
+      .map(id => clouds.find(c => c.id === id))
+      .find(c => c?.visible);
+    if (firstSelected) return firstSelected;
+    return clouds.find(c => c.visible) ?? null;
+  }, [clouds, selectedIds]);
+
+  const dataRange = useMemo<{ min: number; max: number; label: string } | null>(() => {
+    if (!colorbarSourceCloud || !isScalarColorMode) return null;
+    const d = colorbarSourceCloud.data;
+    if (colorMode === 'x') return { min: d.bounds.min.x, max: d.bounds.max.x, label: 'X' };
+    if (colorMode === 'y') return { min: d.bounds.min.y, max: d.bounds.max.y, label: 'Y' };
+    if (colorMode === 'height') return { min: d.bounds.min.z, max: d.bounds.max.z, label: 'Z (Height)' };
+    if (colorMode === 'intensity') return { min: 0, max: 1, label: 'Intensity' };
+    if (colorMode === 'scalar' && selectedScalarField && d.scalarFields?.[selectedScalarField]) {
+      const f = d.scalarFields[selectedScalarField];
+      return { min: f.min, max: f.max, label: selectedScalarField };
+    }
+    return null;
+  }, [colorbarSourceCloud, colorMode, selectedScalarField, isScalarColorMode]);
+
+  // The actual min/max being applied to the colormap (override → fallback).
+  const activeRange = useMemo<{ min: number; max: number } | null>(() => {
+    if (!dataRange) return null;
+    const override = colorRanges[colorRangeKey];
+    return {
+      min: override?.min ?? dataRange.min,
+      max: override?.max ?? dataRange.max,
+    };
+  }, [dataRange, colorRanges, colorRangeKey]);
+
   return (
     <div className={`relative bg-neutral-900 ${className}`}>
       {/* 3D Canvas */}
@@ -6338,7 +7076,19 @@ export default function PointCloudViewer({
               key={cloud.id}
               position={usesDisplayData ? [0, 0, 0] : [editState.translation.x, editState.translation.y, editState.translation.z]}
             >
-              <PointCloud data={displayData} pointSize={pointSize} colorMode={colorMode} selectedScalarField={selectedScalarField} filters={cloudFilters.get(cloud.id)} />
+              <PointCloud
+                data={displayData}
+                pointSize={pointSize}
+                // 'per-scan' is rendered as 'single' with the cloud's own
+                // swatch color — keeps PointCloud unaware of multi-cloud state.
+                colorMode={colorMode === 'per-scan' ? 'single' : colorMode}
+                singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
+                selectedScalarField={selectedScalarField}
+                filters={cloudFilters.get(cloud.id)}
+                colormap={colormap}
+                rangeMin={activeRange?.min}
+                rangeMax={activeRange?.max}
+              />
             </group>
           );
         })}
@@ -6375,6 +7125,10 @@ export default function PointCloudViewer({
                 wireframe={meshWireframe}
                 useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
               />
+              {mesh.gridSubdivisions &&
+                (mesh.gridSubdivisions.x > 1 || mesh.gridSubdivisions.y > 1 || mesh.gridSubdivisions.z > 1) && (
+                  <VoxelGridOverlay subdivisions={mesh.gridSubdivisions} />
+                )}
             </group>
           );
         })}
@@ -6407,6 +7161,25 @@ export default function PointCloudViewer({
                 />
               )}
             </group>
+          );
+        })}
+
+        {/* Scanner markers for every scan that carries scan parameters.
+            Rendered at a fixed physical height (a typical tripod scanner is
+            ~0.3-0.4 m tall) — scene-relative scaling made them tower over
+            small trees and shrink to specks against large scans. */}
+        {scansWithParams.map(scan => {
+          if (!scan.visible) return null;
+          const scannerHeight = 0.35;
+          const isMarkerSelected = selectedMarkerScanId === scan.id;
+          return (
+            <ScannerMarker
+              key={scan.id}
+              origin={scan.params.origin}
+              heightMeters={scannerHeight}
+              color={scan.color}
+              selected={isMarkerSelected}
+            />
           );
         })}
 
@@ -6592,7 +7365,7 @@ export default function PointCloudViewer({
           />
         )}
 
-        {showAxes && <AxesDisplay size={staticBounds.size.length() / 3} />}
+        {showAxes && <ViewportAxesGizmo />}
       </Canvas>
 
       {/* Helios triangulation status indicator */}
@@ -6613,13 +7386,51 @@ export default function PointCloudViewer({
         </div>
       )}
 
+      {/* Modal transform indicator (Blender-style T/S) */}
+      {transformModal && (() => {
+        const axisLabel: Record<typeof transformModal.axis, string> = {
+          free: 'free',
+          x: 'X',
+          y: 'Y',
+          z: 'Z',
+          yz: 'YZ',
+          xz: 'XZ',
+          xy: 'XY',
+        };
+        const opLabel = transformModal.op === 'translate' ? 'Translate' : 'Scale';
+        const color = transformModal.op === 'translate' ? 'bg-blue-500' : 'bg-amber-500';
+        return (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/90 backdrop-blur-sm rounded-full border border-neutral-700/50 z-30 shadow-lg">
+            <span className={`inline-block w-2 h-2 rounded-full ${color}`} />
+            <span className="text-[11px] text-neutral-200 font-medium">{opLabel}</span>
+            <span className="text-[11px] text-neutral-400">·</span>
+            <span className="text-[11px] text-neutral-300 font-mono">{axisLabel[transformModal.axis]}</span>
+            {transformModal.numericBuffer && (
+              <span className="text-[11px] text-amber-300 font-mono bg-neutral-900/70 px-1.5 py-0.5 rounded">
+                {transformModal.numericBuffer}
+              </span>
+            )}
+            <span className="text-[10px] text-neutral-500 ml-2">type value · click / ↵ confirm · esc cancel</span>
+          </div>
+        );
+      })()}
+
       {/* Right Side Panels Container */}
       <div className="absolute top-4 right-4 flex flex-col gap-2 max-h-[calc(100vh-100px)]">
-        {/* Cloud List Panel */}
-        <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
+        {/* Unified Scans Panel — shows every scan whether it has data, params,
+            or both. Per-row actions adapt to which fields are present. */}
+        <div data-testid="scans-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
           <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
             <Layers className="w-4 h-4 text-neutral-400" />
-            <span className="text-xs font-medium text-neutral-300 flex-1">Point Clouds</span>
+            <span className="text-xs font-medium text-neutral-300 flex-1">Scans</span>
+            <button
+              data-testid="scan-add-button"
+              onClick={openAddScanPopup}
+              className="p-1 hover:bg-neutral-700 rounded"
+              title="Add scan"
+            >
+              <Plus className="w-3 h-3 text-neutral-300" />
+            </button>
             <button onClick={onSelectAll} className="p-1 hover:bg-neutral-700 rounded" title="Select All">
               <CheckSquare className="w-3 h-3 text-neutral-400" />
             </button>
@@ -6628,65 +7439,205 @@ export default function PointCloudViewer({
             </button>
           </div>
           <div className="overflow-y-auto flex-1 p-1">
-            {clouds.map(cloud => {
-              const isSelected = selectedIds.has(cloud.id);
-              const editState = getEditState(cloud.id);
-              const hasCloudEdits = editState.translation.x !== 0 || editState.translation.y !== 0 || editState.translation.z !== 0 || editState.erasedIndices.size > 0;
-              const effectivePointCount = cloud.data.pointCount - editState.erasedIndices.size;
+            {scansAll.map(scan => {
+              const isSelected = selectedScanIds.has(scan.id);
+              const scanHasData = hasData(scan);
+              const scanHasParams = hasParams(scan);
+              const editState = scanHasData ? getEditState(scan.id) : null;
+              const hasCloudEdits = editState
+                ? editState.translation.x !== 0 || editState.translation.y !== 0 || editState.translation.z !== 0 || editState.erasedIndices.size > 0
+                : false;
+              const effectivePointCount = scanHasData && editState
+                ? scan.data.pointCount - editState.erasedIndices.size
+                : 0;
+              const displayName = scanDisplayName(scan);
+              const isExpanded = expandedScanIds.has(scan.id);
+
+              // Build subtitle text based on which fields the scan carries.
+              const originText = scanHasParams
+                ? `(${scan.params.origin.x.toFixed(2)}, ${scan.params.origin.y.toFixed(2)}, ${scan.params.origin.z.toFixed(2)})`
+                : null;
+              let subtitle: React.ReactNode;
+              if (scanHasData && scanHasParams) {
+                subtitle = (<>
+                  {effectivePointCount.toLocaleString()} pts
+                  {hasCloudEdits && <span className="ml-1 text-amber-400">*</span>}
+                  <span className="mx-1">·</span>
+                  <span className="font-mono">origin {originText}</span>
+                </>);
+              } else if (scanHasData) {
+                subtitle = (<>
+                  {effectivePointCount.toLocaleString()} pts
+                  {hasCloudEdits && <span className="ml-1 text-amber-400">*</span>}
+                </>);
+              } else {
+                subtitle = (<>
+                  params <span className="mx-1">·</span>
+                  <span className="font-mono">origin {originText}</span>
+                </>);
+              }
 
               return (
-                <div
-                  key={cloud.id}
-                  data-testid="cloud-row"
-                  data-cloud-name={cloud.data.fileName || 'Unnamed'}
-                  data-point-count={effectivePointCount}
-                  data-selected={isSelected ? 'true' : 'false'}
-                  onClick={(e) => onToggleSelection(cloud.id, e.shiftKey || e.ctrlKey || e.metaKey)}
-                  className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
-                    isSelected ? 'bg-blue-600/30 border border-blue-500/50' : 'hover:bg-neutral-700/50'
-                  }`}
-                >
-                  <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: cloud.color }} />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs text-neutral-200 truncate" data-testid="cloud-row-name">{cloud.data.fileName || 'Unnamed'}</div>
-                    <div className="text-[10px] text-neutral-500" data-testid="cloud-row-count">
-                      {effectivePointCount.toLocaleString()} pts
-                      {hasCloudEdits && <span className="ml-1 text-amber-400">*</span>}
-                    </div>
-                  </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onToggleVisibility(cloud.id); }}
-                    className="p-1 hover:bg-neutral-600 rounded"
-                    title={cloud.visible ? 'Hide' : 'Show'}
-                  >
-                    {cloud.visible ? (
-                      <Eye className="w-3 h-3 text-neutral-400" />
-                    ) : (
-                      <EyeOff className="w-3 h-3 text-neutral-600" />
-                    )}
-                  </button>
-                  <button
+                <div key={scan.id} className="mb-0.5">
+                  <div
+                    data-testid="scan-row"
+                    data-scan-id={scan.id}
+                    data-scan-name={displayName}
+                    data-point-count={scanHasData ? effectivePointCount : 0}
+                    data-has-data={scanHasData ? 'true' : 'false'}
+                    data-has-params={scanHasParams ? 'true' : 'false'}
+                    data-selected={isSelected ? 'true' : 'false'}
                     onClick={(e) => {
-                      e.stopPropagation();
-                      if (colorDropdownCloudId === cloud.id) {
-                        setColorDropdownCloudId(null);
-                      } else {
-                        setColorDropdownCloudId(cloud.id);
+                      onToggleSelection(scan.id, e.shiftKey || e.ctrlKey || e.metaKey);
+                      if (scanHasParams) {
+                        setSelectedMarkerScanId(prev => prev === scan.id ? null : scan.id);
                       }
                     }}
-                    className="p-1 hover:bg-neutral-600 rounded"
-                    title="Color By"
-                    id={`color-btn-${cloud.id}`}
+                    className={`flex items-center gap-1.5 p-2 rounded cursor-pointer transition-colors ${
+                      isSelected ? 'bg-blue-600/30 border border-blue-500/50' : 'hover:bg-neutral-700/50'
+                    }`}
                   >
-                    <Palette className="w-3 h-3 text-neutral-400" />
-                  </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Point Cloud' }); }}
-                    className="p-1 hover:bg-red-600/30 rounded"
-                    title="Remove"
-                  >
-                    <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
-                  </button>
+                    <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: scan.color }} />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs text-neutral-200 truncate" data-testid="scan-row-name" title={displayName}>{displayName}</div>
+                      <div className="text-[10px] text-neutral-500" data-testid="scan-row-subtitle">
+                        {subtitle}
+                      </div>
+                    </div>
+                    {/* Expand chevron — only useful when there's something to show. */}
+                    {scanHasParams && (
+                      <button
+                        data-testid={`scan-expand-${scan.id}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setExpandedScanIds(prev => {
+                            const next = new Set(prev);
+                            if (next.has(scan.id)) next.delete(scan.id); else next.add(scan.id);
+                            return next;
+                          });
+                        }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title={isExpanded ? 'Collapse' : 'Expand'}
+                      >
+                        {isExpanded ? (
+                          <ChevronDown className="w-3 h-3 text-neutral-400" />
+                        ) : (
+                          <ChevronRight className="w-3 h-3 text-neutral-400" />
+                        )}
+                      </button>
+                    )}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onToggleVisibility(scan.id); }}
+                      className="p-1 hover:bg-neutral-600 rounded"
+                      title={scan.visible ? 'Hide' : 'Show'}
+                    >
+                      {scan.visible ? (
+                        <Eye className="w-3 h-3 text-neutral-400" />
+                      ) : (
+                        <EyeOff className="w-3 h-3 text-neutral-600" />
+                      )}
+                    </button>
+                    {scanHasData && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (colorDropdownCloudId === scan.id) {
+                            setColorDropdownCloudId(null);
+                          } else {
+                            setColorDropdownCloudId(scan.id);
+                          }
+                        }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title="Color By"
+                        id={`color-btn-${scan.id}`}
+                      >
+                        <Palette className="w-3 h-3 text-neutral-400" />
+                      </button>
+                    )}
+                    {!scanHasData && (
+                      <button
+                        data-testid={`scan-attach-data-${scan.id}`}
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          const picked = await window.electronAPI.dialog.open({
+                            title: 'Attach point cloud data',
+                            filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
+                          });
+                          if (!picked) return;
+                          const path = Array.isArray(picked) ? picked[0] : picked;
+                          try {
+                            const data = await parsePointCloudFromPath(path);
+                            onUpdateScanData(scan.id, data);
+                            showToast({ title: `Attached ${data.pointCount.toLocaleString()} points to ${scan.label}`, type: 'success' });
+                          } catch (err) {
+                            const msg = err instanceof Error ? err.message : 'Failed to read file';
+                            showToast({ title: `Could not attach point cloud: ${msg}`, type: 'error' });
+                          }
+                        }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title="Attach point cloud data…"
+                      >
+                        <FileUp className="w-3 h-3 text-neutral-400" />
+                      </button>
+                    )}
+                    {!scanHasParams && (
+                      <button
+                        data-testid={`scan-attach-params-${scan.id}`}
+                        onClick={(e) => { e.stopPropagation(); openAddParamsPopupFor(scan); }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title="Add scan parameters…"
+                      >
+                        <Radio className="w-3 h-3 text-neutral-400" />
+                      </button>
+                    )}
+                    {scanHasParams && (
+                      <button
+                        data-testid={`scan-edit-${scan.id}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setScanPopupState({ kind: 'edit', id: scan.id });
+                        }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title="Edit scan parameters"
+                      >
+                        <Pencil className="w-3 h-3 text-neutral-400" />
+                      </button>
+                    )}
+                    <button
+                      data-testid={`scan-delete-${scan.id}`}
+                      onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'cloud', id: scan.id, name: displayName }); }}
+                      className="p-1 hover:bg-red-600/30 rounded"
+                      title="Remove"
+                    >
+                      <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
+                    </button>
+                  </div>
+                  {/* Expanded parameters block. */}
+                  {isExpanded && scanHasParams && (
+                    <div data-testid={`scan-expanded-${scan.id}`} className="pl-6 pr-2 pb-2 pt-1 text-[10px] text-neutral-400 space-y-0.5">
+                      <div className="grid grid-cols-3 gap-x-2">
+                        <div>x: <span className="font-mono text-neutral-300">{scan.params.origin.x.toFixed(3)}</span></div>
+                        <div>y: <span className="font-mono text-neutral-300">{scan.params.origin.y.toFixed(3)}</span></div>
+                        <div>z: <span className="font-mono text-neutral-300">{scan.params.origin.z.toFixed(3)}</span></div>
+                      </div>
+                      <div>
+                        size: <span className="font-mono text-neutral-300">{scan.params.zenithPoints} × {scan.params.azimuthPoints}</span>
+                        <span className="mx-1">·</span>
+                        sweep: <span className="font-mono text-neutral-300">{scan.params.zenithRangeDeg.toFixed(0)}° × {scan.params.azimuthRangeDeg.toFixed(0)}°</span>
+                      </div>
+                      <div>
+                        return: <span className="text-neutral-300">{scan.params.returnType}</span>
+                        {scan.params.returnType === 'multi' && (
+                          <>
+                            <span className="mx-1">·</span>
+                            beam Ø <span className="font-mono text-neutral-300">{scan.params.beamExitDiameterM} m</span>
+                            <span className="mx-1">·</span>
+                            div <span className="font-mono text-neutral-300">{scan.params.beamDivergenceMrad} mrad</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -6885,6 +7836,9 @@ export default function PointCloudViewer({
             </div>
           </div>
         )}
+
+        {/* The standalone Scan Locations panel was unified into the Scans
+            panel above — every entry there can hold data, params, or both. */}
       </div>
 
       {/* Left Control Panel */}
@@ -6918,37 +7872,13 @@ export default function PointCloudViewer({
         {/* Create Shapes - always visible */}
         <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg">
           <div className="text-[10px] text-neutral-500 mb-1.5 text-center">Create</div>
-          <div className="grid grid-cols-2 gap-1">
+          <div className="grid grid-cols-3 gap-1">
             <button
               onClick={() => handleCreateShape('voxel')}
               className="p-2 rounded transition-colors hover:bg-cyan-600 hover:text-white bg-neutral-700"
               title="Create Voxel (Cube)"
             >
               <Box className="w-4 h-4 text-neutral-300" />
-            </button>
-            <button
-              onClick={() => handleCreateShape('cylinder')}
-              className="p-2 rounded transition-colors hover:bg-cyan-600 hover:text-white bg-neutral-700"
-              title="Create Cylinder"
-            >
-              <svg className="w-4 h-4 text-neutral-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <ellipse cx="12" cy="5" rx="8" ry="3" />
-                <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
-              </svg>
-            </button>
-            <button
-              onClick={() => handleCreateShape('sphere')}
-              className="p-2 rounded transition-colors hover:bg-cyan-600 hover:text-white bg-neutral-700"
-              title="Create Sphere"
-            >
-              <Circle className="w-4 h-4 text-neutral-300" />
-            </button>
-            <button
-              onClick={() => handleCreateShape('cone')}
-              className="p-2 rounded transition-colors hover:bg-cyan-600 hover:text-white bg-neutral-700"
-              title="Create Cone"
-            >
-              <Triangle className="w-4 h-4 text-neutral-300" />
             </button>
             <button
               data-testid="tool-plant-generate"
@@ -6962,6 +7892,14 @@ export default function PointCloudViewer({
               ) : (
                 <Sprout className="w-4 h-4 text-neutral-300" />
               )}
+            </button>
+            <button
+              data-testid="tool-add-scan"
+              onClick={openAddScanPopup}
+              className="p-2 rounded transition-colors hover:bg-neutral-600 bg-neutral-700"
+              title="Add Scan"
+            >
+              <Radio className="w-4 h-4 text-neutral-300" />
             </button>
           </div>
         </div>
@@ -7021,17 +7959,36 @@ export default function PointCloudViewer({
                       <Globe className={`w-4 h-4 ${selectedIds.size === 2 ? 'text-neutral-300' : 'text-neutral-500'}`} />
                     )}
                   </button>
-                  {/* Triangulate (Helios - multi-scan) - open popup directly */}
-                  <button
-                    onClick={() => {
-                      closeAllToolPanels();
-                      setShowHeliosPopup(true);
-                    }}
-                    className={`p-2 rounded transition-colors ${showHeliosPopup ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Triangulate (Helios)"
-                  >
-                    <Triangle className={`w-4 h-4 ${showHeliosPopup ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
+                  {/* Triangulate (Helios - multi-scan). Disabled when any
+                      selected data-bearing scan lacks scan parameters
+                      (origin), since Helios needs per-scan origins to
+                      reconstruct pulse directions. */}
+                  {(() => {
+                    const selectedDataScans = scans.filter(s => selectedScanIds.has(s.id) && hasData(s));
+                    const heliosReady = selectedDataScans.length >= 2 && selectedDataScans.every(hasParams);
+                    const tooltip = heliosReady
+                      ? 'Triangulate (Helios)'
+                      : 'Requires scan parameters (origin, etc.) — edit this scan to add them.';
+                    return (
+                      <button
+                        data-testid="tool-triangulate-helios"
+                        onClick={() => {
+                          if (!heliosReady) return;
+                          closeAllToolPanels();
+                          setShowHeliosPopup(true);
+                        }}
+                        disabled={!heliosReady}
+                        className={`p-2 rounded transition-colors ${
+                          !heliosReady
+                            ? 'opacity-50 cursor-not-allowed'
+                            : showHeliosPopup ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'
+                        }`}
+                        title={tooltip}
+                      >
+                        <Triangle className={`w-4 h-4 ${showHeliosPopup ? 'text-white' : 'text-neutral-300'}`} />
+                      </button>
+                    );
+                  })()}
                 </>
               )}
               {/* Multi-Mesh Tools (2+ meshes selected) */}
@@ -7274,39 +8231,15 @@ export default function PointCloudViewer({
               {/* Mesh Tools */}
               {selectionType === 'mesh' && selectedMesh && (
                 <>
-                  {/* 1. Move to Origin */}
-                  <button
-                    onClick={handleMoveToOrigin}
-                    className="p-2 rounded transition-colors hover:bg-neutral-700"
-                    title="Move to Origin"
-                  >
-                    <CircleDot className="w-4 h-4 text-neutral-300" />
-                  </button>
-                  {/* 2. Translate */}
-                  <button
-                    onClick={() => setEditMode(editMode === 'translate' ? 'none' : 'translate')}
-                    className={`p-2 rounded transition-colors ${editMode === 'translate' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Translate"
-                  >
-                    <Move className={`w-4 h-4 ${editMode === 'translate' ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 3. Resize */}
+                  {/* 1. Transform (position + rotation + scale) */}
                   <button
                     onClick={() => setShowResizePanel(!showResizePanel)}
                     className={`p-2 rounded transition-colors ${showResizePanel ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Resize"
+                    title="Transform"
                   >
                     <Maximize2 className={`w-4 h-4 ${showResizePanel ? 'text-white' : 'text-neutral-300'}`} />
                   </button>
-                  {/* 4. Rotate */}
-                  <button
-                    onClick={() => setEditMode(editMode === 'rotate' ? 'none' : 'rotate')}
-                    className={`p-2 rounded transition-colors ${editMode === 'rotate' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Rotate"
-                  >
-                    <RotateCcw className={`w-4 h-4 ${editMode === 'rotate' ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 5. Sample to Point Cloud */}
+                  {/* 2. Sample to Point Cloud */}
                   <button
                     onClick={() => setShowSamplingPopup(true)}
                     disabled={isSamplingMesh}
@@ -7477,12 +8410,10 @@ export default function PointCloudViewer({
                   return (
                     <div key={axis} className="flex flex-col">
                       <label className="text-[9px] text-neutral-500 mb-0.5">{axis}</label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={size}
-                        onChange={(e) => {
-                          const newSize = parseFloat(e.target.value) || 0;
+                      <DebouncedNumberInput
+                        step={0.1}
+                        value={parseFloat(size)}
+                        onCommit={(newSize) => {
                           if (editState.cropMin && editState.cropMax) {
                             const center = (editState.cropMin[axisKey] + editState.cropMax[axisKey]) / 2;
                             updateSelectedEditStates(s => ({
@@ -7511,12 +8442,10 @@ export default function PointCloudViewer({
                   return (
                     <div key={axis} className="flex flex-col">
                       <label className="text-[9px] text-neutral-500 mb-0.5">{axis}</label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={center}
-                        onChange={(e) => {
-                          const newCenter = parseFloat(e.target.value) || 0;
+                      <DebouncedNumberInput
+                        step={0.1}
+                        value={parseFloat(center)}
+                        onCommit={(newCenter) => {
                           if (editState.cropMin && editState.cropMax) {
                             const halfSize = (editState.cropMax[axisKey] - editState.cropMin[axisKey]) / 2;
                             updateSelectedEditStates(s => ({
@@ -8459,18 +9388,57 @@ export default function PointCloudViewer({
         </div>
       )}
 
-      {/* Resize Panel - shows when mesh is selected and resize mode is active */}
+      {/* Transform Panel - shows when a mesh is selected and the Transform button is toggled */}
       {showResizePanel && selectedMesh && (() => {
         const scale = meshScales.get(selectedMesh.id) || { x: 1, y: 1, z: 1 };
+        const pos = meshPositions.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
+        const rotation = meshRotations.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
         const isShape = selectedMesh.sourceCloudId.startsWith('shape-');
-        const isCylinder = selectedMesh.sourceCloudId.includes('cylinder');
-        const isCone = selectedMesh.sourceCloudId.includes('cone');
+        const isVoxel = selectedMesh.sourceCloudId.includes('voxel');
+        const grid = selectedMesh.gridSubdivisions || { x: 1, y: 1, z: 1 };
+        const translateActive = editMode === 'translate';
+        const rotateActive = editMode === 'rotate';
+
+        const handleSetGrid = (axis: 'x' | 'y' | 'z', value: string) => {
+          // Allow empty while editing; commit only valid positive integers.
+          if (value === '') return;
+          const v = Math.max(1, Math.floor(Number(value)));
+          if (!Number.isFinite(v)) return;
+          setMeshes(prev => prev.map(m => {
+            if (m.id !== selectedMesh.id) return m;
+            const cur = m.gridSubdivisions || { x: 1, y: 1, z: 1 };
+            return { ...m, gridSubdivisions: { ...cur, [axis]: v } };
+          }));
+        };
+
+        const handleSetMeshPos = (axis: 'x' | 'y' | 'z', value: string) => {
+          const v = parseFloat(value);
+          if (isNaN(v)) return;
+          setMeshPositions(prev => {
+            const next = new Map(prev);
+            const cur = next.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
+            next.set(selectedMesh.id, { ...cur, [axis]: v });
+            return next;
+          });
+        };
+
+        const handleSetMeshRot = (axis: 'x' | 'y' | 'z', value: string) => {
+          const v = parseFloat(value);
+          if (isNaN(v)) return;
+          setMeshRotations(prev => {
+            const next = new Map(prev);
+            const cur = next.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
+            next.set(selectedMesh.id, { ...cur, [axis]: v });
+            return next;
+          });
+        };
+
         return (
           <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
             <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
               <span className="flex items-center gap-2">
                 <Maximize2 className="w-3 h-3" />
-                Resize {isShape ? 'Shape' : 'Mesh'}
+                Transform {isShape ? 'Shape' : 'Mesh'}
               </span>
               <button
                 onClick={() => setShowResizePanel(false)}
@@ -8480,163 +9448,194 @@ export default function PointCloudViewer({
               </button>
             </div>
 
-            {/* Uniform Scale */}
-            <div className="mb-3">
-              <label className="text-[10px] text-neutral-400 block mb-1">
-                Uniform Scale: {scale.x.toFixed(2)}
-              </label>
-              <input
-                type="range"
-                min="0.1"
-                max="10"
-                step="0.1"
-                value={scale.x}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  setMeshScales(prev => {
+            {/* Position */}
+            <div className="mb-3 p-2 bg-neutral-900/50 rounded">
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[10px] text-neutral-400 flex items-center gap-1">
+                  <Move className="w-3 h-3" />
+                  Position
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={handleMoveToOrigin}
+                    className="p-0.5 hover:bg-neutral-700 rounded text-neutral-400 hover:text-neutral-200"
+                    title="Move to Origin"
+                  >
+                    <CircleDot className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={() => setEditMode(translateActive ? 'none' : 'translate')}
+                    className={`p-0.5 rounded ${translateActive ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-700'}`}
+                    title={translateActive ? 'Hide translate gizmo' : 'Show translate gizmo'}
+                  >
+                    <Move className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                {(['x', 'y', 'z'] as const).map((axis) => (
+                  <div key={axis} className="flex items-center gap-2">
+                    <label className="text-[10px] text-neutral-500 w-3 uppercase font-medium">{axis}</label>
+                    <DebouncedNumberInput
+                      step={0.1}
+                      value={pos[axis]}
+                      format={(n) => n.toFixed(3)}
+                      onCommit={(n) => handleSetMeshPos(axis, String(n))}
+                      className="flex-1 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => {
+                  setMeshPositions(prev => {
                     const next = new Map(prev);
-                    next.set(selectedMesh.id, { x: v, y: v, z: v });
+                    next.set(selectedMesh.id, { x: 0, y: 0, z: 0 });
                     return next;
                   });
                 }}
-                className="w-full h-2 bg-neutral-700 rounded appearance-none cursor-pointer"
-              />
+                className="w-full mt-2 py-1 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[10px]"
+              >
+                Reset Position
+              </button>
             </div>
 
-            {/* Cylinder/Cone-specific: Radius (XY) and Height (Z) */}
-            {(isCylinder || isCone) && (
-              <div className="mb-3 p-2 bg-neutral-900/50 rounded space-y-2">
-                <div className="text-[10px] text-neutral-400 mb-1">{isCone ? 'Cone' : 'Cylinder'} Controls</div>
-                <div>
-                  <label className="text-[9px] text-neutral-500 block">Radius: {scale.x.toFixed(2)}</label>
-                  <input
-                    type="range"
-                    min="0.1"
-                    max="10"
-                    step="0.1"
-                    value={scale.x}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      setMeshScales(prev => {
-                        const next = new Map(prev);
-                        next.set(selectedMesh.id, { x: v, y: v, z: scale.z });
-                        return next;
-                      });
-                    }}
-                    className="w-full h-1.5 bg-neutral-700 rounded appearance-none cursor-pointer"
-                  />
+            {/* Rotation */}
+            <div className="mb-3 p-2 bg-neutral-900/50 rounded">
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[10px] text-neutral-400 flex items-center gap-1">
+                  <RotateCcw className="w-3 h-3" />
+                  Rotation (°)
                 </div>
-                <div>
-                  <label className="text-[9px] text-neutral-500 block">Height: {scale.z.toFixed(2)}</label>
-                  <input
-                    type="range"
-                    min="0.1"
-                    max="10"
-                    step="0.1"
-                    value={scale.z}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      setMeshScales(prev => {
-                        const next = new Map(prev);
-                        next.set(selectedMesh.id, { ...scale, z: v });
-                        return next;
-                      });
-                    }}
-                    className="w-full h-1.5 bg-neutral-700 rounded appearance-none cursor-pointer"
-                  />
+                <button
+                  onClick={() => setEditMode(rotateActive ? 'none' : 'rotate')}
+                  className={`p-0.5 rounded ${rotateActive ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-700'}`}
+                  title={rotateActive ? 'Hide rotate gizmo' : 'Show rotate gizmo'}
+                >
+                  <RotateCcw className="w-3 h-3" />
+                </button>
+              </div>
+              <div className="space-y-1.5">
+                {(['x', 'y', 'z'] as const).map((axis) => (
+                  <div key={axis} className="flex items-center gap-2">
+                    <label className="text-[10px] text-neutral-500 w-3 uppercase font-medium">{axis}</label>
+                    <DebouncedNumberInput
+                      step={5}
+                      value={rotation[axis]}
+                      format={(n) => n.toFixed(1)}
+                      onCommit={(n) => handleSetMeshRot(axis, String(n))}
+                      className="flex-1 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => {
+                  setMeshRotations(prev => {
+                    const next = new Map(prev);
+                    next.set(selectedMesh.id, { x: 0, y: 0, z: 0 });
+                    return next;
+                  });
+                }}
+                className="w-full mt-2 py-1 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[10px]"
+              >
+                Reset Rotation
+              </button>
+            </div>
+
+            {/* Per-Axis Scale */}
+            <div className={`${isVoxel ? 'mb-3' : ''} p-2 bg-neutral-900/50 rounded`}>
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[10px] text-neutral-400 flex items-center gap-1">
+                  <Maximize2 className="w-3 h-3" />
+                  Scale
                 </div>
+                <label className="flex items-center gap-1 text-[10px] text-neutral-400 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={scaleLocked}
+                    onChange={(e) => setScaleLocked(e.target.checked)}
+                    className="accent-blue-500"
+                  />
+                  Lock
+                </label>
+              </div>
+              <div className="space-y-1.5">
+                {(['x', 'y', 'z'] as const).map((axis) => (
+                  <div key={axis} className="flex items-center gap-2">
+                    <label className="text-[10px] text-neutral-500 w-3 uppercase font-medium">{axis}</label>
+                    <DebouncedNumberInput
+                      step={0.1}
+                      min={0}
+                      value={scale[axis]}
+                      format={(n) => n.toFixed(2)}
+                      onCommit={(v) => {
+                        setMeshScales(prev => {
+                          const next = new Map(prev);
+                          next.set(selectedMesh.id, scaleLocked ? { x: v, y: v, z: v } : { ...scale, [axis]: v });
+                          return next;
+                        });
+                      }}
+                      className="flex-1 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => {
+                  setMeshScales(prev => {
+                    const next = new Map(prev);
+                    next.set(selectedMesh.id, { x: 1, y: 1, z: 1 });
+                    return next;
+                  });
+                }}
+                className="w-full mt-2 py-1 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[10px]"
+              >
+                Reset Scale
+              </button>
+            </div>
+
+            {/* Voxel-specific: Grid subdivision (for PyHelios LiDAR grid) */}
+            {isVoxel && (
+              <div className="p-2 bg-neutral-900/50 rounded">
+                <div className="text-[10px] text-neutral-400 mb-1.5 flex items-center gap-1">
+                  <Grid3x3 className="w-3 h-3" />
+                  Grid Resolution
+                </div>
+                <div className="space-y-1.5">
+                  {(['x', 'y', 'z'] as const).map((axis) => (
+                    <div key={axis} className="flex items-center gap-2">
+                      <label className="text-[10px] text-neutral-500 w-3 uppercase font-medium">{axis}</label>
+                      <DebouncedNumberInput
+                        min={1}
+                        step={1}
+                        parse={(s) => parseInt(s, 10)}
+                        value={grid[axis]}
+                        onCommit={(n) => handleSetGrid(axis, String(n))}
+                        className="flex-1 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <button
+                  onClick={() => setMeshes(prev => prev.map(m => m.id === selectedMesh.id ? { ...m, gridSubdivisions: { x: 1, y: 1, z: 1 } } : m))}
+                  className="w-full mt-2 py-1 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[10px]"
+                >
+                  Reset Grid
+                </button>
               </div>
             )}
-
-            {/* Individual Axis Scales */}
-            <div className="p-2 bg-neutral-900/50 rounded space-y-2">
-              <div className="text-[10px] text-neutral-400 mb-1">Per-Axis Scale</div>
-              <div>
-                <label className="text-[9px] text-neutral-500 block">X: {scale.x.toFixed(2)}</label>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="10"
-                  step="0.1"
-                  value={scale.x}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setMeshScales(prev => {
-                      const next = new Map(prev);
-                      next.set(selectedMesh.id, { ...scale, x: v });
-                      return next;
-                    });
-                  }}
-                  className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
-                />
-              </div>
-              <div>
-                <label className="text-[9px] text-neutral-500 block">Y: {scale.y.toFixed(2)}</label>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="10"
-                  step="0.1"
-                  value={scale.y}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setMeshScales(prev => {
-                      const next = new Map(prev);
-                      next.set(selectedMesh.id, { ...scale, y: v });
-                      return next;
-                    });
-                  }}
-                  className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
-                />
-              </div>
-              <div>
-                <label className="text-[9px] text-neutral-500 block">Z: {scale.z.toFixed(2)}</label>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="10"
-                  step="0.1"
-                  value={scale.z}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setMeshScales(prev => {
-                      const next = new Map(prev);
-                      next.set(selectedMesh.id, { ...scale, z: v });
-                      return next;
-                    });
-                  }}
-                  className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
-                />
-              </div>
-            </div>
-
-            {/* Reset button */}
-            <button
-              onClick={() => {
-                setMeshScales(prev => {
-                  const next = new Map(prev);
-                  next.set(selectedMesh.id, { x: 1, y: 1, z: 1 });
-                  return next;
-                });
-              }}
-              className="w-full mt-3 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-xs"
-            >
-              Reset Scale
-            </button>
           </div>
         );
       })()}
 
-      {/* Translate Coordinates Panel - shows when translate mode is active and something is selected */}
-      {editMode === 'translate' && (selectedMesh || selectedSkeletonId || selectedIds.size > 0) && (() => {
+      {/* Translate Coordinates Panel - shown for clouds/skeletons. Meshes use the Transform panel instead. */}
+      {editMode === 'translate' && !selectedMesh && (selectedSkeletonId || selectedIds.size > 0) && (() => {
         // Get current position based on selection type
         let currentPos = { x: 0, y: 0, z: 0 };
         let objectName = '';
 
-        if (selectedMesh) {
-          currentPos = meshPositions.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
-          objectName = selectedMesh.isPlant ? `${selectedMesh.plantType} Plant` : 'Mesh';
-        } else if (selectedSkeletonId) {
+        if (selectedSkeletonId) {
           currentPos = skeletonPositions.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
           const skeleton = skeletons.find(s => s.id === selectedSkeletonId);
           objectName = skeleton ? `Skeleton ${skeleton.id.slice(0, 8)}` : 'Skeleton';
@@ -8652,14 +9651,7 @@ export default function PointCloudViewer({
           const numValue = parseFloat(value);
           if (isNaN(numValue)) return;
 
-          if (selectedMesh) {
-            setMeshPositions(prev => {
-              const next = new Map(prev);
-              const pos = next.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
-              next.set(selectedMesh.id, { ...pos, [axis]: numValue });
-              return next;
-            });
-          } else if (selectedSkeletonId) {
+          if (selectedSkeletonId) {
             setSkeletonPositions(prev => {
               const next = new Map(prev);
               const pos = next.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
@@ -8700,11 +9692,11 @@ export default function PointCloudViewer({
                   <label className="text-[10px] text-neutral-400 w-3 uppercase font-medium">
                     {axis}
                   </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={currentPos[axis].toFixed(3)}
-                    onChange={(e) => handleCoordChange(axis, e.target.value)}
+                  <DebouncedNumberInput
+                    step={0.1}
+                    value={currentPos[axis]}
+                    format={(n) => n.toFixed(3)}
+                    onCommit={(n) => handleCoordChange(axis, String(n))}
                     className="flex-1 bg-neutral-700 text-neutral-200 text-xs px-2 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
                   />
                 </div>
@@ -8713,13 +9705,7 @@ export default function PointCloudViewer({
 
             <button
               onClick={() => {
-                if (selectedMesh) {
-                  setMeshPositions(prev => {
-                    const next = new Map(prev);
-                    next.set(selectedMesh.id, { x: 0, y: 0, z: 0 });
-                    return next;
-                  });
-                } else if (selectedSkeletonId) {
+                if (selectedSkeletonId) {
                   setSkeletonPositions(prev => {
                     const next = new Map(prev);
                     next.set(selectedSkeletonId, { x: 0, y: 0, z: 0 });
@@ -9049,109 +10035,6 @@ export default function PointCloudViewer({
         );
       })()}
 
-      {/* Rotation Panel - shows when mesh is selected and rotate mode is active */}
-      {editMode === 'rotate' && selectedMesh && (() => {
-        const rotation = meshRotations.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
-        const isShape = selectedMesh.sourceCloudId.startsWith('shape-');
-        return (
-          <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
-            <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
-              <span className="flex items-center gap-2">
-                <RotateCcw className="w-3 h-3" />
-                Rotate {isShape ? 'Shape' : 'Mesh'}
-              </span>
-              <button
-                onClick={() => setEditMode('none')}
-                className="text-neutral-500 hover:text-neutral-300"
-              >
-                ×
-              </button>
-            </div>
-
-            {/* Rotation axes */}
-            <div className="space-y-3">
-              <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">
-                  X Rotation: {rotation.x.toFixed(0)}°
-                </label>
-                <input
-                  type="range"
-                  min="-180"
-                  max="180"
-                  step="5"
-                  value={rotation.x}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setMeshRotations(prev => {
-                      const next = new Map(prev);
-                      next.set(selectedMesh.id, { ...rotation, x: v });
-                      return next;
-                    });
-                  }}
-                  className="w-full h-2 bg-neutral-700 rounded appearance-none cursor-pointer"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">
-                  Y Rotation: {rotation.y.toFixed(0)}°
-                </label>
-                <input
-                  type="range"
-                  min="-180"
-                  max="180"
-                  step="5"
-                  value={rotation.y}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setMeshRotations(prev => {
-                      const next = new Map(prev);
-                      next.set(selectedMesh.id, { ...rotation, y: v });
-                      return next;
-                    });
-                  }}
-                  className="w-full h-2 bg-neutral-700 rounded appearance-none cursor-pointer"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">
-                  Z Rotation: {rotation.z.toFixed(0)}°
-                </label>
-                <input
-                  type="range"
-                  min="-180"
-                  max="180"
-                  step="5"
-                  value={rotation.z}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setMeshRotations(prev => {
-                      const next = new Map(prev);
-                      next.set(selectedMesh.id, { ...rotation, z: v });
-                      return next;
-                    });
-                  }}
-                  className="w-full h-2 bg-neutral-700 rounded appearance-none cursor-pointer"
-                />
-              </div>
-            </div>
-
-            {/* Reset button */}
-            <button
-              onClick={() => {
-                setMeshRotations(prev => {
-                  const next = new Map(prev);
-                  next.set(selectedMesh.id, { x: 0, y: 0, z: 0 });
-                  return next;
-                });
-              }}
-              className="w-full mt-3 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-xs"
-            >
-              Reset Rotation
-            </button>
-          </div>
-        );
-      })()}
-
       {/* Alignment Results Panel */}
       {showAlignmentPanel && alignmentResults && (
         <div
@@ -9477,6 +10360,18 @@ export default function PointCloudViewer({
         </div>
       )}
 
+      {/* Colorbar overlay — visible whenever a continuous-scalar color mode is active */}
+      {isScalarColorMode && activeRange && dataRange && (
+        <div className="absolute bottom-4 right-56 z-20">
+          <Colorbar
+            colormap={colormap}
+            min={activeRange.min}
+            max={activeRange.max}
+            label={dataRange.label}
+          />
+        </div>
+      )}
+
       {/* Display Settings Panel */}
       <div className="absolute bottom-4 right-4 bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-48 overflow-hidden">
         {/* Collapsible Header */}
@@ -9570,6 +10465,7 @@ export default function PointCloudViewer({
                 Cancel
               </button>
               <button
+                data-testid="confirm-delete"
                 onClick={handleConfirmDelete}
                 className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
               >
@@ -9732,9 +10628,13 @@ export default function PointCloudViewer({
       <HeliosTriangulationPopup
         isOpen={showHeliosPopup}
         onClose={() => setShowHeliosPopup(false)}
-        clouds={clouds}
+        scans={scans}
         onStartTriangulate={handleHeliosTriangulate}
-        initialSelectedIds={selectedIds}
+        initialSelectedIds={selectedScanIds}
+        onOpenScanParams={(id) => {
+          setShowHeliosPopup(false);
+          setScanPopupState({ kind: 'edit', id });
+        }}
       />
 
       {/* Morph Plant Popup */}
@@ -9749,6 +10649,138 @@ export default function PointCloudViewer({
           heliosXml={selectedMesh.heliosXml || ''}
         />
       )}
+
+      {/* Scan Parameters Popup. Three modes:
+            - add: create a brand-new params-only scan
+            - add-params-to: attach params to an existing data-only scan
+            - edit: update an existing scan's params and label
+          The "Import from XML" affordance inside the popup uses the bulk
+          callback to materialise N scans at once, optionally auto-attaching
+          point data referenced by <filename>. */}
+      <ScanParametersPopup
+        isOpen={scanPopupState.kind !== 'closed'}
+        onClose={() => setScanPopupState({ kind: 'closed' })}
+        initial={(() => {
+          if (scanPopupState.kind === 'edit') {
+            const found = scans.find(s => s.id === scanPopupState.id);
+            if (found?.params) return { label: found.label, params: found.params };
+          }
+          return undefined;
+        })()}
+        defaults={scanPopupState.kind === 'add' || scanPopupState.kind === 'add-params-to' ? scanDefaults : undefined}
+        mode={
+          scanPopupState.kind === 'edit'
+            ? 'edit'
+            : scanPopupState.kind === 'add-params-to'
+              ? 'attach'
+              : 'create'
+        }
+        showBulkImport={scanPopupState.kind === 'add'}
+        onSubmit={(label, params) => {
+          if (scanPopupState.kind === 'edit') {
+            const editingId = scanPopupState.id;
+            onUpdateScanParams(editingId, params);
+            onUpdateScanLabel?.(editingId, label);
+          } else if (scanPopupState.kind === 'add-params-to') {
+            const targetId = scanPopupState.id;
+            onUpdateScanParams(targetId, params);
+            onUpdateScanLabel?.(targetId, label);
+          } else {
+            // Create a params-only scan. Allocate a color from the same
+            // palette as data-bearing scans so the dot is consistent.
+            const used = new Set(scans.map(s => s.color));
+            const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+            const nextColor = PALETTE.find(c => !used.has(c)) ?? PALETTE[scans.length % PALETTE.length];
+            const id = crypto.randomUUID();
+            onAddScan?.({
+              id,
+              label,
+              visible: true,
+              color: nextColor,
+              params,
+            });
+            setSelectedMarkerScanId(id);
+          }
+          setScanPopupState({ kind: 'closed' });
+        }}
+        onBulkImport={async (heliosScans, xmlPath) => {
+          if (heliosScans.length === 0) return;
+          const xmlDir = xmlPath ? dirname(xmlPath) : '';
+          const used = new Set(scans.map(s => s.color));
+          const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+          const allocateColor = () => {
+            const free = PALETTE.find(c => !used.has(c));
+            const chosen = free ?? PALETTE[(scans.length + used.size) % PALETTE.length];
+            used.add(chosen);
+            return chosen;
+          };
+          // Renumber labels off the current count so an import after manual
+          // adds doesn't collide with existing "Scan N" names.
+          const offset = scans.length;
+          const newScans: Scan[] = [];
+          let attachedCount = 0;
+          let attachFailed = 0;
+          // Show the progress modal immediately so the user knows the import
+          // is in flight — backend parsing of a multi-GB scan can take 30s+
+          // and the launching popup has already closed.
+          setBulkImportProgress({
+            current: 0,
+            total: heliosScans.length,
+            label: 'Preparing…',
+          });
+          try {
+            for (let i = 0; i < heliosScans.length; i++) {
+              const h = heliosScans[i];
+              const scan: Scan = {
+                id: crypto.randomUUID(),
+                label: `Scan ${offset + i + 1}`,
+                visible: true,
+                color: allocateColor(),
+                params: h.params,
+              };
+              setBulkImportProgress({
+                current: i,
+                total: heliosScans.length,
+                label: h.filename
+                  ? `Loading ${h.filename.split(/[\\/]/).pop()}`
+                  : `Loading ${scan.label}`,
+              });
+              if (h.filename) {
+                try {
+                  const resolved = await resolveAttachedScanFile(h.filename, xmlDir);
+                  if (resolved) {
+                    const data = await parsePointCloudFromPath(resolved, h.asciiFormat);
+                    scan.data = data;
+                    scan.sourcePath = resolved;
+                    attachedCount += 1;
+                  }
+                } catch (err) {
+                  attachFailed += 1;
+                  console.warn(`Could not attach point cloud for ${scan.label}:`, err);
+                }
+              }
+              newScans.push(scan);
+            }
+            onAddScans?.(newScans);
+            if (newScans.length > 0) {
+              setSelectedMarkerScanId(newScans[newScans.length - 1].id);
+            }
+            const parts = [`${newScans.length} scan(s)`];
+            if (attachedCount > 0) parts.push(`${attachedCount} with data`);
+            if (attachFailed > 0) parts.push(`${attachFailed} attach failed`);
+            showToast({ title: `Imported ${parts.join(', ')}`, type: attachFailed > 0 ? 'info' : 'success' });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error('Bulk import failed:', err);
+            showToast({ title: `Import failed: ${msg}`, type: 'error' });
+          } finally {
+            // Always clear the modal — leaving it up would lock the UI.
+            setBulkImportProgress(null);
+          }
+        }}
+      />
+
+      <BulkImportProgress progress={bulkImportProgress} />
 
       {/* Mesh Sampling Popup */}
       {showSamplingPopup && selectedMesh && (
@@ -9850,10 +10882,10 @@ export default function PointCloudViewer({
             />
             {/* Dropdown menu */}
             <div
-              className="fixed bg-neutral-800 border border-neutral-600 rounded-lg shadow-xl z-[9999] min-w-[160px] py-1 max-h-[400px] overflow-y-auto"
+              className="fixed bg-neutral-800 border border-neutral-600 rounded-lg shadow-xl z-[9999] min-w-[220px] py-1 max-h-[560px] overflow-y-auto"
               style={{
                 top: rect.bottom + 4,
-                left: Math.max(8, rect.right - 160),
+                left: Math.max(8, rect.right - 220),
               }}
               onClick={(e) => e.stopPropagation()}
             >
@@ -9866,6 +10898,7 @@ export default function PointCloudViewer({
                 { value: 'height', label: 'Z Axis (Height)' },
                 { value: 'intensity', label: 'Intensity' },
                 { value: 'rgb', label: 'RGB' },
+                { value: 'per-scan', label: 'Per-scan color' },
                 { value: 'single', label: 'Solid Color' },
               ].map((option) => (
                 <button
@@ -9905,6 +10938,88 @@ export default function PointCloudViewer({
                     </button>
                   ))}
                 </div>
+              )}
+
+              {/* Colormap + Range — only meaningful for continuous modes */}
+              {isScalarColorMode && (
+                <>
+                  <div className="border-t border-neutral-700 mt-1 pt-1">
+                    <div className="px-3 py-1 text-[10px] text-neutral-500 font-medium uppercase tracking-wide">
+                      Colormap
+                    </div>
+                    {COLORMAP_NAMES.map((name) => (
+                      <button
+                        key={name}
+                        onClick={() => setColormap(name)}
+                        className={`w-full px-3 py-1.5 flex items-center gap-2 text-left text-xs hover:bg-neutral-700 transition-colors ${
+                          colormap === name ? 'text-blue-400 bg-neutral-700/50' : 'text-neutral-300'
+                        }`}
+                      >
+                        <span
+                          className="inline-block h-3 w-12 rounded-sm border border-neutral-600 shrink-0"
+                          style={{ background: colormapToCssGradient(name, 16, 'to right') }}
+                        />
+                        <span>{COLORMAP_LABELS[name]}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {dataRange && (
+                    <div className="border-t border-neutral-700 mt-1 pt-1 px-3 pb-2">
+                      <div className="flex items-center justify-between py-1">
+                        <span className="text-[10px] text-neutral-500 font-medium uppercase tracking-wide">
+                          Range
+                        </span>
+                        <button
+                          onClick={() =>
+                            setColorRanges(prev => {
+                              const next = { ...prev };
+                              delete next[colorRangeKey];
+                              return next;
+                            })
+                          }
+                          className="text-[10px] text-neutral-400 hover:text-blue-400 transition-colors"
+                          title="Reset to data range"
+                        >
+                          Reset
+                        </button>
+                      </div>
+                      <div className="flex gap-2 mt-1">
+                        <label className="flex-1">
+                          <span className="block text-[10px] text-neutral-500 mb-0.5">Min</span>
+                          <DebouncedNumberInput
+                            step="any"
+                            value={colorRanges[colorRangeKey]?.min ?? dataRange.min}
+                            onCommit={(v) => {
+                              setColorRanges(prev => ({
+                                ...prev,
+                                [colorRangeKey]: { ...prev[colorRangeKey], min: v },
+                              }));
+                            }}
+                            className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </label>
+                        <label className="flex-1">
+                          <span className="block text-[10px] text-neutral-500 mb-0.5">Max</span>
+                          <DebouncedNumberInput
+                            step="any"
+                            value={colorRanges[colorRangeKey]?.max ?? dataRange.max}
+                            onCommit={(v) => {
+                              setColorRanges(prev => ({
+                                ...prev,
+                                [colorRangeKey]: { ...prev[colorRangeKey], max: v },
+                              }));
+                            }}
+                            className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </label>
+                      </div>
+                      <p className="text-[10px] text-neutral-500 mt-1">
+                        Data: {dataRange.min.toLocaleString(undefined, { maximumFractionDigits: 4 })} – {dataRange.max.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                      </p>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </>

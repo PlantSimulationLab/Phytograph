@@ -73,6 +73,29 @@ describe('useBackendReady', () => {
     await waitFor(() => expect(result.current.status).toBe('ready'));
   });
 
+  it('retry() restarts polling from a failed state and reaches ready', async () => {
+    let failNextNCalls = 100;
+    vi.spyOn(global, 'fetch').mockImplementation(async () => {
+      if (failNextNCalls > 0) {
+        failNextNCalls -= 1;
+        throw new Error('refused');
+      }
+      return new Response(JSON.stringify({ version: '0.2.0' }), { status: 200 });
+    });
+    const { result } = renderHook(() => useBackendReady(50, 5));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    await waitFor(() => expect(result.current.status).toBe('failed'));
+
+    // Now flip the fixture so subsequent fetches succeed, then trigger retry.
+    failNextNCalls = 0;
+    act(() => {
+      result.current.retry();
+    });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+  });
+
   it('stops polling after unmount (no state updates on cancelled hook)', async () => {
     const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ version: '0.2.0' }), { status: 200 }),

@@ -2,7 +2,7 @@
 // Mirrors the Tauri plugins the frontend currently uses: dialog, fs, store, file-drop events.
 
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
-import { readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile } from 'node:fs/promises';
 import Store from 'electron-store';
 import {
   IPC,
@@ -59,6 +59,16 @@ export function registerIpc(): void {
   ipcMain.handle(IPC.FsWriteBinary, async (_e, path: string, contents: ArrayBuffer) => {
     await writeFile(path, Buffer.from(contents));
   });
+  ipcMain.handle(IPC.FsExists, async (_e, path: string): Promise<boolean> => {
+    try {
+      await access(path);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle(IPC.AppGetCwd, (): string => process.cwd());
 
   ipcMain.handle(IPC.StoreGet, (_e, key: string) => store.get(key));
   ipcMain.handle(IPC.StoreSet, (_e, key: string, value: unknown) => {

@@ -1,18 +1,20 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Upload, Home, Box, Cog, Layers, FileUp, X, AlertCircle, Loader2, ChevronDown, Sparkles, GitBranch } from "lucide-react";
+import { Upload, Home, Box, Layers, FileUp, X, AlertCircle, Loader2, ChevronDown, Sparkles, GitBranch } from "lucide-react";
 import * as THREE from 'three';
 import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
-import { BackendStatusBanner } from "./components/BackendStatusBanner";
-import PointCloudViewer, { type PointCloudData, type PointCloudEntry, type ImportRefs } from "./components/PointCloudViewer";
+import { BackendSplash } from "./components/BackendSplash";
+import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
+import type { Scan } from "./lib/scan";
+import type { ScanParameters } from "./lib/scanParameters";
 import { parsePointCloud, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
 import logoImage from "./assets/logo.png";
 
 type NavItem = 'home' | 'viewer' | 'options';
 type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton';
 
-// Predefined colors for point clouds (for labels/identification)
-const CLOUD_COLORS = [
+// Predefined colors for scans (for labels/identification)
+const SCAN_COLORS = [
   '#3b82f6', // blue
   '#22c55e', // green
   '#f59e0b', // amber
@@ -25,8 +27,8 @@ const CLOUD_COLORS = [
 
 function App() {
   const [activeNav, setActiveNav] = useState<NavItem>('home');
-  const [pointClouds, setPointClouds] = useState<PointCloudEntry[]>([]);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [scans, setScans] = useState<Scan[]>([]);
+  const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -40,10 +42,11 @@ function App() {
     importRefsRef.current = refs;
   }, []);
 
-  // Stitch history for undo
+  // Stitch history for undo. We snapshot the full Scan objects (including any
+  // params) so undo restores the original scans exactly as they were.
   interface StitchHistoryEntry {
-    originalClouds: PointCloudEntry[];
-    stitchedCloudId: string;
+    originalScans: Scan[];
+    stitchedScanId: string;
   }
   const stitchHistoryRef = useRef<StitchHistoryEntry[]>([]);
 
@@ -60,11 +63,11 @@ function App() {
     }
   }, [showImportMenu]);
 
-  // Get next available color
+  // Get next available color (skips colors currently used by existing scans).
   const getNextColor = useCallback(() => {
-    const usedColors = new Set(pointClouds.map(pc => pc.color));
-    return CLOUD_COLORS.find(c => !usedColors.has(c)) || CLOUD_COLORS[pointClouds.length % CLOUD_COLORS.length];
-  }, [pointClouds]);
+    const usedColors = new Set(scans.map(s => s.color));
+    return SCAN_COLORS.find(c => !usedColors.has(c)) || SCAN_COLORS[scans.length % SCAN_COLORS.length];
+  }, [scans]);
 
   const handleFileUpload = useCallback(async (file: File) => {
     setLoading(true);
@@ -76,14 +79,13 @@ function App() {
       // Determine how to import based on user selection or auto-detect
       let shouldImportAsMesh = false;
       let shouldImportAsSkeleton = false;
-      let shouldImportAsPointCloud = false;
 
       if (importType === 'mesh') {
         shouldImportAsMesh = true;
       } else if (importType === 'skeleton') {
         shouldImportAsSkeleton = true;
       } else if (importType === 'pointcloud') {
-        shouldImportAsPointCloud = true;
+        // fall through to point cloud import (the implicit else branch below)
       } else {
         // Auto-detect based on file extension
         if (isMeshFile(file.name)) {
@@ -91,7 +93,7 @@ function App() {
         } else if (isSkeletonFile(file.name)) {
           shouldImportAsSkeleton = true;
         } else {
-          shouldImportAsPointCloud = true;
+          // fall through to point cloud import
         }
       }
 
@@ -141,17 +143,29 @@ function App() {
           showToast({ title: 'Viewer not ready for skeleton import', type: 'error' });
         }
       } else {
-        // Parse as point cloud (default)
+        // Parse as point cloud (default) → produces a Scan with data only.
+        // Params can be attached later via the row's "Add scan parameters"
+        // button. We try to record the on-disk source path when the file
+        // came from a native dialog/dropzone so the backend can read it
+        // directly instead of receiving the full point payload over HTTP.
         const data = await parsePointCloud(file);
-        const newEntry: PointCloudEntry = {
+        let sourcePath: string | undefined;
+        try {
+          sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
+        } catch {
+          sourcePath = undefined;
+        }
+        const newScan: Scan = {
           id: crypto.randomUUID(),
-          data,
+          label: data.fileName ?? 'Scan',
           visible: true,
           color: getNextColor(),
+          data,
+          sourcePath,
         };
 
-        setPointClouds(prev => [...prev, newEntry]);
-        setSelectedIds(new Set([newEntry.id])); // Select the newly added cloud
+        setScans(prev => [...prev, newScan]);
+        setSelectedScanIds(new Set([newScan.id])); // Select the newly added scan
         setActiveNav('viewer');
         showToast({ title: `Loaded ${data.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
       }
@@ -170,7 +184,7 @@ function App() {
   const handleMultipleFiles = useCallback(async (files: File[]) => {
     setLoading(true);
     setError(null);
-    const newEntries: PointCloudEntry[] = [];
+    const newScans: Scan[] = [];
     const errors: string[] = [];
     let meshCount = 0;
     let skeletonCount = 0;
@@ -179,12 +193,12 @@ function App() {
     const importType = pendingImportTypeRef.current;
 
     const getColorForFile = () => {
-      const usedColors = new Set([...pointClouds.map(pc => pc.color), ...newEntries.map(e => e.color)]);
+      const usedColors = new Set([...scans.map(s => s.color), ...newScans.map(e => e.color)]);
       // Skip colors that are already used
-      while (usedColors.has(CLOUD_COLORS[colorIndex % CLOUD_COLORS.length]) && colorIndex < CLOUD_COLORS.length * 2) {
+      while (usedColors.has(SCAN_COLORS[colorIndex % SCAN_COLORS.length]) && colorIndex < SCAN_COLORS.length * 2) {
         colorIndex++;
       }
-      const color = CLOUD_COLORS[colorIndex % CLOUD_COLORS.length];
+      const color = SCAN_COLORS[colorIndex % SCAN_COLORS.length];
       colorIndex++;
       return color;
     };
@@ -250,13 +264,21 @@ function App() {
             skeletonCount++;
           }
         } else {
-          // Parse as point cloud (default)
+          // Parse as point cloud (default) → produces a data-only Scan.
           const data = await parsePointCloud(file);
-          newEntries.push({
+          let sourcePath: string | undefined;
+          try {
+            sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
+          } catch {
+            sourcePath = undefined;
+          }
+          newScans.push({
             id: crypto.randomUUID(),
-            data,
+            label: data.fileName ?? 'Scan',
             visible: true,
             color: getColorForFile(),
+            data,
+            sourcePath,
           });
         }
       } catch (err) {
@@ -264,16 +286,16 @@ function App() {
       }
     }
 
-    if (newEntries.length > 0) {
-      setPointClouds(prev => [...prev, ...newEntries]);
-      setSelectedIds(new Set(newEntries.map(e => e.id)));
+    if (newScans.length > 0) {
+      setScans(prev => [...prev, ...newScans]);
+      setSelectedScanIds(new Set(newScans.map(e => e.id)));
     }
 
-    const loadedCount = newEntries.length + meshCount + skeletonCount;
+    const loadedCount = newScans.length + meshCount + skeletonCount;
     if (loadedCount > 0) {
       setActiveNav('viewer');
       const parts = [];
-      if (newEntries.length > 0) parts.push(`${newEntries.length} point cloud(s)`);
+      if (newScans.length > 0) parts.push(`${newScans.length} scan(s)`);
       if (meshCount > 0) parts.push(`${meshCount} mesh(es)`);
       if (skeletonCount > 0) parts.push(`${skeletonCount} skeleton(s)`);
       showToast({ title: `Loaded ${parts.join(', ')}`, type: 'success' });
@@ -287,7 +309,7 @@ function App() {
     setLoading(false);
     // Reset import type to auto after import
     pendingImportTypeRef.current = 'auto';
-  }, [pointClouds]);
+  }, [scans]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setIsDragOver(false);
@@ -307,29 +329,29 @@ function App() {
     multiple: true, // Allow multiple files
   });
 
-  const handleClearAllClouds = () => {
-    setPointClouds([]);
-    setSelectedIds(new Set());
+  const handleClearAllScans = () => {
+    setScans([]);
+    setSelectedScanIds(new Set());
     setActiveNav('home');
   };
 
-  const handleRemoveCloud = useCallback((id: string) => {
-    setPointClouds(prev => prev.filter(pc => pc.id !== id));
-    setSelectedIds(prev => {
+  const handleRemoveScan = useCallback((id: string) => {
+    setScans(prev => prev.filter(s => s.id !== id));
+    setSelectedScanIds(prev => {
       const next = new Set(prev);
       next.delete(id);
       return next;
     });
   }, []);
 
-  const handleToggleVisibility = useCallback((id: string) => {
-    setPointClouds(prev => prev.map(pc =>
-      pc.id === id ? { ...pc, visible: !pc.visible } : pc
+  const handleToggleScanVisibility = useCallback((id: string) => {
+    setScans(prev => prev.map(s =>
+      s.id === id ? { ...s, visible: !s.visible } : s
     ));
   }, []);
 
-  const handleToggleSelection = useCallback((id: string, multiSelect: boolean) => {
-    setSelectedIds(prev => {
+  const handleToggleScanSelection = useCallback((id: string, multiSelect: boolean) => {
+    setSelectedScanIds(prev => {
       const next = new Set(multiSelect ? prev : []);
       if (prev.has(id) && multiSelect) {
         next.delete(id);
@@ -341,52 +363,65 @@ function App() {
   }, []);
 
   const handleSelectAll = useCallback(() => {
-    setSelectedIds(new Set(pointClouds.map(pc => pc.id)));
-  }, [pointClouds]);
+    setSelectedScanIds(new Set(scans.map(s => s.id)));
+  }, [scans]);
 
   const handleDeselectAll = useCallback(() => {
-    setSelectedIds(new Set());
+    setSelectedScanIds(new Set());
   }, []);
 
-  const handleUpdateCloud = useCallback((id: string, data: PointCloudData) => {
-    setPointClouds(prev => prev.map(pc =>
-      pc.id === id ? { ...pc, data } : pc
+  const handleUpdateScanData = useCallback((id: string, data: PointCloudData) => {
+    setScans(prev => prev.map(s =>
+      s.id === id ? { ...s, data } : s
     ));
   }, []);
 
-  const handleAddCloud = useCallback((cloud: PointCloudEntry) => {
-    setPointClouds(prev => [...prev, cloud]);
-    setSelectedIds(new Set([cloud.id]));
+  const handleUpdateScanParams = useCallback((id: string, params: ScanParameters | undefined) => {
+    setScans(prev => prev.map(s =>
+      s.id === id ? { ...s, params } : s
+    ));
   }, []);
 
-  // Stitch multiple clouds into one
-  const handleStitchClouds = useCallback((ids: string[]) => {
+  const handleUpdateScanLabel = useCallback((id: string, label: string) => {
+    setScans(prev => prev.map(s =>
+      s.id === id ? { ...s, label } : s
+    ));
+  }, []);
+
+  const handleAddScan = useCallback((scan: Scan) => {
+    setScans(prev => [...prev, scan]);
+    setSelectedScanIds(new Set([scan.id]));
+  }, []);
+
+  const handleAddScans = useCallback((newOnes: Scan[]) => {
+    if (newOnes.length === 0) return;
+    setScans(prev => [...prev, ...newOnes]);
+    setSelectedScanIds(new Set(newOnes.map(s => s.id)));
+  }, []);
+
+  // Stitch multiple data-bearing scans into one. The result is data-only —
+  // a merged cloud has no single defined origin, so any source params are
+  // dropped. Undo restores the originals (params included) from the snapshot.
+  const handleStitchScans = useCallback((ids: string[]) => {
     if (ids.length < 2) return;
 
-    // Get the clouds to stitch
-    const cloudsToStitch = pointClouds.filter(pc => ids.includes(pc.id));
-    if (cloudsToStitch.length < 2) return;
+    const scansToStitch = scans.filter(s => ids.includes(s.id) && s.data);
+    if (scansToStitch.length < 2) return;
 
-    // Calculate total points
-    const totalPoints = cloudsToStitch.reduce((sum, pc) => sum + pc.data.pointCount, 0);
+    const totalPoints = scansToStitch.reduce((sum, s) => sum + (s.data?.pointCount ?? 0), 0);
 
-    // Check if any cloud has colors or intensities
-    const hasColors = cloudsToStitch.some(pc => pc.data.colors);
-    const hasIntensities = cloudsToStitch.some(pc => pc.data.intensities);
+    const hasColors = scansToStitch.some(s => s.data!.colors);
+    const hasIntensities = scansToStitch.some(s => s.data!.intensities);
 
-    // Allocate arrays for combined data
     const positions = new Float32Array(totalPoints * 3);
     const colors = hasColors ? new Float32Array(totalPoints * 3) : undefined;
     const intensities = hasIntensities ? new Float32Array(totalPoints) : undefined;
 
-    // Copy data from each cloud
     let offset = 0;
-    for (const cloud of cloudsToStitch) {
-      const { data } = cloud;
-      // Copy positions
+    for (const scan of scansToStitch) {
+      const data = scan.data!;
       positions.set(data.positions, offset * 3);
 
-      // Copy colors (default to white if not present)
       if (colors) {
         if (data.colors) {
           colors.set(data.colors, offset * 3);
@@ -399,7 +434,6 @@ function App() {
         }
       }
 
-      // Copy intensities (default to 1 if not present)
       if (intensities) {
         if (data.intensities) {
           intensities.set(data.intensities, offset);
@@ -413,7 +447,6 @@ function App() {
       offset += data.pointCount;
     }
 
-    // Calculate bounds
     const min = new THREE.Vector3(Infinity, Infinity, Infinity);
     const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
     for (let i = 0; i < totalPoints; i++) {
@@ -427,11 +460,9 @@ function App() {
     const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
     const size = new THREE.Vector3().subVectors(max, min);
 
-    // Create file name from source names
-    const fileNames = cloudsToStitch.map(c => c.data.fileName?.replace(/\.[^.]+$/, '') || 'cloud');
+    const fileNames = scansToStitch.map(s => s.data!.fileName?.replace(/\.[^.]+$/, '') || 'cloud');
     const newFileName = `${fileNames.join('_')}_stitched`;
 
-    // Create the combined cloud data
     const combinedData: PointCloudData = {
       positions,
       colors,
@@ -441,60 +472,54 @@ function App() {
       fileName: newFileName,
     };
 
-    // Create the new cloud entry
-    const newCloud: PointCloudEntry = {
+    const newScan: Scan = {
       id: crypto.randomUUID(),
-      data: combinedData,
+      label: newFileName,
       visible: true,
-      color: cloudsToStitch[0].color, // Use first cloud's color
+      color: scansToStitch[0].color,
+      data: combinedData,
+      // No params on the merged scan — origin is no longer meaningful.
     };
 
-    // Save to stitch history for undo
     stitchHistoryRef.current.push({
-      originalClouds: cloudsToStitch.map(c => ({ ...c })), // Deep copy entries
-      stitchedCloudId: newCloud.id,
+      originalScans: scansToStitch.map(s => ({ ...s })),
+      stitchedScanId: newScan.id,
     });
 
-    // Remove old clouds and add new one
-    setPointClouds(prev => {
-      const filtered = prev.filter(pc => !ids.includes(pc.id));
-      return [...filtered, newCloud];
+    setScans(prev => {
+      const filtered = prev.filter(s => !ids.includes(s.id));
+      return [...filtered, newScan];
     });
 
-    // Select the new stitched cloud
-    setSelectedIds(new Set([newCloud.id]));
+    setSelectedScanIds(new Set([newScan.id]));
 
     showToast({
       type: 'success',
-      title: 'Clouds Stitched',
-      message: `Combined ${cloudsToStitch.length} clouds into ${totalPoints.toLocaleString()} points`,
+      title: 'Scans Stitched',
+      message: `Combined ${scansToStitch.length} scans into ${totalPoints.toLocaleString()} points`,
     });
-  }, [pointClouds]);
+  }, [scans]);
 
-  // Undo stitch operation
   const handleUndoStitch = useCallback(() => {
     const lastStitch = stitchHistoryRef.current.pop();
     if (!lastStitch) return false;
 
-    // Remove the stitched cloud and restore original clouds
-    setPointClouds(prev => {
-      const filtered = prev.filter(pc => pc.id !== lastStitch.stitchedCloudId);
-      return [...filtered, ...lastStitch.originalClouds];
+    setScans(prev => {
+      const filtered = prev.filter(s => s.id !== lastStitch.stitchedScanId);
+      return [...filtered, ...lastStitch.originalScans];
     });
 
-    // Select the restored clouds
-    setSelectedIds(new Set(lastStitch.originalClouds.map(c => c.id)));
+    setSelectedScanIds(new Set(lastStitch.originalScans.map(s => s.id)));
 
     showToast({
       type: 'info',
       title: 'Stitch Undone',
-      message: `Restored ${lastStitch.originalClouds.length} original clouds`,
+      message: `Restored ${lastStitch.originalScans.length} original scans`,
     });
 
     return true;
   }, []);
 
-  // Check if there's a stitch to undo
   const canUndoStitch = useCallback(() => {
     return stitchHistoryRef.current.length > 0;
   }, []);
@@ -546,8 +571,60 @@ function App() {
     showToast({ title: `Saved ${data.pointCount.toLocaleString()} points to ${fileName}`, type: 'success' });
   }, []);
 
-  // Calculate total points
-  const totalPoints = pointClouds.reduce((sum, pc) => sum + pc.data.pointCount, 0);
+  // Subscribe to application-menu commands dispatched from main (src/main/menu.ts).
+  // Most menu items map to existing handlers; import re-uses the dropzone's
+  // open() with pendingImportTypeRef set, exactly like the in-window import menu.
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onMenuCommand((payload) => {
+      switch (payload.kind) {
+        case 'import-point-cloud':
+          pendingImportTypeRef.current = 'pointcloud';
+          setActiveNav('viewer');
+          open();
+          break;
+        case 'import-mesh':
+          pendingImportTypeRef.current = 'mesh';
+          setActiveNav('viewer');
+          open();
+          break;
+        case 'import-skeleton':
+          pendingImportTypeRef.current = 'skeleton';
+          setActiveNav('viewer');
+          open();
+          break;
+        case 'save':
+        case 'export':
+          setActiveNav('viewer');
+          (window as any).__openExportPanel?.();
+          break;
+        case 'undo':
+          (window as any).__handleUndo?.();
+          break;
+        case 'redo':
+          (window as any).__handleRedo?.();
+          break;
+        case 'select-all':
+          handleSelectAll();
+          break;
+        case 'deselect-all':
+          handleDeselectAll();
+          break;
+        case 'reset-camera':
+          (window as any).__resetPointCloudCamera?.();
+          break;
+        case 'snap-view':
+          (window as any).__snapToView?.(payload.direction);
+          break;
+        case 'nav':
+          setActiveNav(payload.target);
+          break;
+      }
+    });
+    return unsubscribe;
+  }, [open, handleSelectAll, handleDeselectAll]);
+
+  // Calculate total points across data-bearing scans only.
+  const totalPoints = scans.reduce((sum, s) => sum + (s.data?.pointCount ?? 0), 0);
 
   // Render the home screen
   const renderHome = () => (
@@ -575,13 +652,13 @@ function App() {
           {loading ? (
             <div className="flex flex-col items-center">
               <Loader2 className="w-12 h-12 text-slate-600 animate-spin mb-4" />
-              <p className="text-slate-600">Loading point cloud...</p>
+              <p className="text-slate-600">Loading scan...</p>
             </div>
           ) : (
             <>
               <FileUp className={`w-12 h-12 mx-auto mb-4 ${isDragOver ? 'text-slate-600' : 'text-slate-400'}`} />
               <p className="text-lg font-medium text-slate-700 mb-2">
-                Drop point cloud files here
+                Drop scan files here
               </p>
               <p className="text-slate-500 mb-4">or click to browse (multiple files supported)</p>
               <div className="flex flex-wrap justify-center gap-2">
@@ -634,7 +711,7 @@ function App() {
         <div className="flex items-center gap-2">
           <Box className="w-4 h-4 text-neutral-400" />
           <span className="text-sm font-medium text-neutral-200">
-            {pointClouds.length} Cloud{pointClouds.length !== 1 ? 's' : ''}
+            {scans.length} Scan{scans.length !== 1 ? 's' : ''}
           </span>
           <span className="text-xs text-neutral-500">
             ({totalPoints.toLocaleString()} total points)
@@ -690,8 +767,8 @@ function App() {
           )}
         </div>
         <button
-          data-testid="close-all-clouds"
-          onClick={handleClearAllClouds}
+          data-testid="close-all-scans"
+          onClick={handleClearAllScans}
           className="px-3 py-1.5 text-sm text-neutral-400 hover:text-neutral-200 hover:bg-neutral-700 rounded transition-colors"
         >
           Close All
@@ -700,17 +777,20 @@ function App() {
 
       {/* 3D Viewer */}
       <PointCloudViewer
-        clouds={pointClouds}
-        selectedIds={selectedIds}
-        onToggleVisibility={handleToggleVisibility}
-        onToggleSelection={handleToggleSelection}
-        onRemoveCloud={handleRemoveCloud}
+        scans={scans}
+        selectedScanIds={selectedScanIds}
+        onToggleVisibility={handleToggleScanVisibility}
+        onToggleSelection={handleToggleScanSelection}
+        onRemoveScan={handleRemoveScan}
         onSelectAll={handleSelectAll}
         onDeselectAll={handleDeselectAll}
-        onUpdateCloud={handleUpdateCloud}
+        onUpdateScanData={handleUpdateScanData}
+        onUpdateScanParams={handleUpdateScanParams}
+        onUpdateScanLabel={handleUpdateScanLabel}
         onSave={handleSavePointCloud}
-        onAddCloud={handleAddCloud}
-        onStitchClouds={handleStitchClouds}
+        onAddScan={handleAddScan}
+        onAddScans={handleAddScans}
+        onStitchScans={handleStitchScans}
         onUndoStitch={handleUndoStitch}
         canUndoStitch={canUndoStitch}
         importRefsCallback={handleImportRefsCallback}
@@ -792,7 +872,7 @@ function App() {
         <input {...getInputProps()} data-testid="app-dropzone-input" />
       </span>
 
-      <BackendStatusBanner />
+      <BackendSplash />
 
       <div className="flex flex-1 min-h-0">
 
@@ -835,19 +915,6 @@ function App() {
         </button>
 
         <div className="flex-1" />
-
-        <button
-          data-testid="nav-options"
-          onClick={() => setActiveNav('options')}
-          className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
-            activeNav === 'options'
-              ? 'bg-white text-neutral-900'
-              : 'text-neutral-400 hover:text-white hover:bg-neutral-800'
-          }`}
-          title="Settings"
-        >
-          <Cog className="w-5 h-5" />
-        </button>
       </div>
 
       {/* Main Content */}
@@ -867,7 +934,7 @@ function App() {
         <div className="fixed inset-0 bg-slate-500/20 backdrop-blur-sm flex items-center justify-center z-50 pointer-events-none">
           <div className="bg-white rounded-2xl p-8 shadow-2xl">
             <FileUp className="w-16 h-16 text-slate-600 mx-auto mb-4" />
-            <p className="text-xl font-medium text-slate-800">Drop to load point clouds</p>
+            <p className="text-xl font-medium text-slate-800">Drop to load scans</p>
           </div>
         </div>
       )}

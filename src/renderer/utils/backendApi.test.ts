@@ -15,6 +15,7 @@ import {
   icpRegisterMeshToCloud,
   icpRegisterMeshToMesh,
   importPointCloudLasLaz,
+  importPointCloudByPath,
   morphPlant,
   parsePlantMorphParameters,
   sampleMeshSurface,
@@ -32,13 +33,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function mockFetchOk(body: unknown): ReturnType<typeof vi.spyOn> {
+function mockFetchOk(body: unknown) {
   return vi
     .spyOn(global, 'fetch')
     .mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
 }
 
-function mockFetchError(status: number, body: unknown): ReturnType<typeof vi.spyOn> {
+function mockFetchError(status: number, body: unknown) {
   return vi
     .spyOn(global, 'fetch')
     .mockResolvedValue(
@@ -302,7 +303,7 @@ describe('plant morph', () => {
   });
 
   it('morphPlant POSTs to /api/plant/morph', async () => {
-    const req = { plant_type: 'bean', helios_xml: '<xml/>', shoots: [] };
+    const req = { plant_type: 'bean', helios_xml: '<xml/>' };
     const spy = mockFetchOk({
       success: true,
       vertices: [],
@@ -319,7 +320,7 @@ describe('plant morph', () => {
   it('morphPlant surfaces error', async () => {
     mockFetchError(500, { detail: 'morph blew up' });
     await expect(
-      morphPlant({ plant_type: 'bean', helios_xml: '<xml/>', shoots: [] }),
+      morphPlant({ plant_type: 'bean', helios_xml: '<xml/>' }),
     ).rejects.toThrow('morph blew up');
   });
 });
@@ -399,6 +400,100 @@ describe('point cloud LAS/LAZ import/export', () => {
     mockFetchError(400, { detail: 'corrupt header' });
     const file = new File([], 'broken.las');
     await expect(importPointCloudLasLaz(file)).rejects.toThrow('corrupt header');
+  });
+});
+
+describe('importPointCloudByPath (renamed from importXyzByPath; now also serves PLY/PCD)', () => {
+  // Build the same packed binary the backend streams back. Layout is
+  // documented on /api/pointcloud/import_xyz_by_path. Kept duplicate from
+  // pointCloudParsers.test.ts so each suite can be read in isolation.
+  function pack(
+    points: number[][],
+    opts: { colors?: number[][]; intensity?: number[] } = {},
+  ): ArrayBuffer {
+    const n = points.length;
+    const hasColors = !!opts.colors;
+    const hasIntensity = !!opts.intensity;
+    const HEADER = 32;
+    const posBytes = n * 3 * 4;
+    const colBytes = hasColors ? n * 3 * 4 : 0;
+    const intBytes = hasIntensity ? n * 4 : 0;
+    const buf = new ArrayBuffer(HEADER + posBytes + colBytes + intBytes);
+    const u8 = new Uint8Array(buf);
+    u8.set([0x50, 0x48, 0x58, 0x31], 0); // 'PHX1'
+    new DataView(buf).setUint32(4, n, true);
+    u8[8] = hasColors ? 1 : 0;
+    u8[9] = hasIntensity ? 1 : 0;
+    const pos = new Float32Array(buf, HEADER, n * 3);
+    for (let i = 0; i < n; i++) {
+      pos[i * 3] = points[i][0];
+      pos[i * 3 + 1] = points[i][1];
+      pos[i * 3 + 2] = points[i][2];
+    }
+    if (hasColors) {
+      const c = new Float32Array(buf, HEADER + posBytes, n * 3);
+      for (let i = 0; i < n; i++) {
+        c[i * 3] = opts.colors![i][0];
+        c[i * 3 + 1] = opts.colors![i][1];
+        c[i * 3 + 2] = opts.colors![i][2];
+      }
+    }
+    if (hasIntensity) {
+      const a = new Float32Array(buf, HEADER + posBytes + colBytes, n);
+      for (let i = 0; i < n; i++) a[i] = opts.intensity![i];
+    }
+    return buf;
+  }
+
+  it('POSTs JSON to /api/pointcloud/import_xyz_by_path and decodes a positions-only response', async () => {
+    const spy = vi
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(pack([[1, 2, 3], [4, 5, 6]]), { status: 200 }));
+    const result = await importPointCloudByPath('/abs/scan.xyz');
+    expect(result.pointCount).toBe(2);
+    expect(Array.from(result.positions)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(result.colors).toBeNull();
+    expect(result.intensity).toBeNull();
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:8008/api/pointcloud/import_by_path');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(init?.body as string)).toEqual({
+      file_path: '/abs/scan.xyz',
+      ascii_format: null,
+    });
+  });
+
+  it('forwards ascii_format when provided', async () => {
+    const spy = vi
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(pack([[0, 0, 0]]), { status: 200 }));
+    await importPointCloudByPath('/a.xyz', 'x y z reflectance');
+    const body = JSON.parse(spy.mock.calls[0][1]?.body as string);
+    expect(body.ascii_format).toBe('x y z reflectance');
+  });
+
+  it('decodes colors and intensity from the binary payload', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        pack([[0, 0, 0]], { colors: [[0.25, 0.5, 0.75]], intensity: [42] }),
+        { status: 200 },
+      ),
+    );
+    const result = await importPointCloudByPath('/a.xyz');
+    expect(Array.from(result.colors!)).toEqual([0.25, 0.5, 0.75]);
+    expect(Array.from(result.intensity!)).toEqual([42]);
+  });
+
+  it('rejects a non-OK response by parsing the JSON detail field', async () => {
+    mockFetchError(404, { detail: 'File not found: /missing.xyz' });
+    await expect(importPointCloudByPath('/missing.xyz')).rejects.toThrow(/File not found/);
+  });
+
+  it('rejects when the binary magic is wrong', async () => {
+    const bad = new ArrayBuffer(32);
+    new Uint8Array(bad).set([0, 0, 0, 0]);
+    vi.spyOn(global, 'fetch').mockResolvedValue(new Response(bad, { status: 200 }));
+    await expect(importPointCloudByPath('/a.xyz')).rejects.toThrow(/magic/);
   });
 });
 
@@ -552,7 +647,7 @@ describe('no-detail HTTP error fallbacks', () => {
   it('morphPlant falls back', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(noDetailResponse());
     await expect(
-      morphPlant({ plant_type: 'bean', helios_xml: '<x/>', shoots: [] }),
+      morphPlant({ plant_type: 'bean', helios_xml: '<x/>' }),
     ).rejects.toThrow(/HTTP 503/);
   });
 

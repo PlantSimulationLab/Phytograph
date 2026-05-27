@@ -1,0 +1,133 @@
+site_name: Phytograph
+site_description: A desktop application for working with LiDAR point clouds, plant meshes, skeletons, and procedural plant models.
+site_url: https://plantsimulationlab.github.io/phytograph/
+repo_url: https://github.com/PlantSimulationLab/phytograph
+repo_name: PlantSimulationLab/phytograph
+edit_uri: edit/main/docs/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  logo: assets/logo.png
+  favicon: assets/logo.png
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+
+extra_css:
+  - stylesheets/phytograph.css
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths:
+            - ../backend-api
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            heading_level: 3
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path:
+        - ..
+      check_paths: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - User Guide:
+      - guide/index.md
+      - Install Phytograph: guide/install.md
+      - Your first import: guide/first-import.md
+      - Tour of the interface: guide/interface-tour.md
+  - Concepts:
+      - concepts/index.md
+      - Scans: concepts/scans.md
+      - Point clouds: concepts/point-clouds.md
+      - Meshes: concepts/meshes.md
+      - Skeletons: concepts/skeletons.md
+      - Plant models: concepts/plant-models.md
+  - Workflows:
+      - workflows/index.md
+      - Import & export: workflows/import-export.md
+      - Viewer navigation: workflows/viewer-navigation.md
+      - Clean a point cloud: workflows/clean-point-cloud.md
+      - Triangulate a mesh: workflows/triangulate.md
+      - Extract a skeleton: workflows/extract-skeleton.md
+      - Generate a plant: workflows/generate-plant.md
+      - Morph a plant: workflows/morph-plant.md
+      - Register & compare: workflows/register-compare.md
+      - Simulate a LiDAR scan: workflows/simulate-scan.md
+  - Reference:
+      - reference/index.md
+      - File formats: reference/file-formats.md
+      - Color modes: reference/color-modes.md
+      - Keyboard shortcuts: reference/shortcuts.md
+  - For Developers:
+      - developers/index.md
+      - Getting started:
+          - developers/getting-started/index.md
+          - Installation: developers/getting-started/installation.md
+          - First run: developers/getting-started/first-run.md
+      - Architecture:
+          - developers/architecture/index.md
+          - Processes & IPC: developers/architecture/processes.md
+          - Backend sidecar: developers/architecture/backend.md
+          - Version lock: developers/architecture/version-lock.md
+      - Development:
+          - developers/development/index.md
+          - Dev loop: developers/development/dev-loop.md
+          - Building installers: developers/development/building.md
+          - Releasing: developers/development/releasing.md
+          - Testing: developers/development/testing.md
+      - Backend API:
+          - developers/api/index.md
+          - HTTP endpoints: developers/api/endpoints.md
+          - Python reference: developers/api/reference.md
+      - Troubleshooting: developers/troubleshooting.md

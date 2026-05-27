@@ -1,12 +1,13 @@
 {
   "name": "phytograph",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Phytograph desktop app.",
   "author": "Phytograph",
   "main": "dist-main/main.js",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/patch-electron-info-plist.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:renderer": "vite --config vite.renderer.config.ts",
     "build:renderer": "vite build --config vite.renderer.config.ts",
@@ -92,6 +93,11 @@
         "from": "resources",
         "to": "resources",
         "filter": ["phytograph_backend/**/*"]
+      },
+      {
+        "from": "build",
+        "to": "build",
+        "filter": ["icon.png", "icon.ico", "icon-dock.png"]
       }
     ],
     "mac": {

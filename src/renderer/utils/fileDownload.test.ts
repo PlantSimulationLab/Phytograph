@@ -48,11 +48,11 @@ describe('downloadFile (text)', () => {
     const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
     // Patch HTMLAnchorElement.click on this specific instance via DOM stub.
     const origCreateEl = document.createElement.bind(document);
-    vi.spyOn(document, 'createElement').mockImplementation((tag) => {
-      const el = origCreateEl(tag);
+    vi.spyOn(document, 'createElement').mockImplementation(((tag: string) => {
+      const el = origCreateEl(tag as keyof HTMLElementTagNameMap);
       if (tag === 'a') (el as HTMLAnchorElement).click = clickSpy;
       return el;
-    });
+    }) as typeof document.createElement);
 
     try {
       const result = await downloadFile('hello', 'out.csv');
@@ -77,7 +77,9 @@ describe('downloadBinaryFile', () => {
 
   it('writes via fs.writeBinary with the underlying ArrayBuffer', async () => {
     window.electronAPI.dialog.save = vi.fn(async () => '/tmp/out.las');
-    const writeBinary = vi.fn(async () => undefined);
+    const writeBinary = vi.fn<(path: string, contents: ArrayBuffer) => Promise<void>>(
+      async () => undefined,
+    );
     window.electronAPI.fs.writeBinary = writeBinary;
     const bytes = new Uint8Array([10, 20, 30, 40]);
     const result = await downloadBinaryFile(bytes, 'out.las');
@@ -85,7 +87,7 @@ describe('downloadBinaryFile', () => {
     const [savedPath, savedBuf] = writeBinary.mock.calls[0];
     expect(savedPath).toBe('/tmp/out.las');
     expect(savedBuf).toBeInstanceOf(ArrayBuffer);
-    expect(new Uint8Array(savedBuf as ArrayBuffer)).toEqual(bytes);
+    expect(new Uint8Array(savedBuf)).toEqual(bytes);
   });
 
   it('uses the file extension to set the dialog filter', async () => {
@@ -119,11 +121,11 @@ describe('downloadBinaryFile', () => {
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:bin');
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
     const origCreateEl = document.createElement.bind(document);
-    vi.spyOn(document, 'createElement').mockImplementation((tag) => {
-      const el = origCreateEl(tag);
+    vi.spyOn(document, 'createElement').mockImplementation(((tag: string) => {
+      const el = origCreateEl(tag as keyof HTMLElementTagNameMap);
       if (tag === 'a') (el as HTMLAnchorElement).click = clickSpy;
       return el;
-    });
+    }) as typeof document.createElement);
 
     try {
       const result = await downloadBinaryFile(new Uint8Array([1, 2, 3]), 'out.bin');

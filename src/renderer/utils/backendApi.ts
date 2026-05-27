@@ -763,6 +763,98 @@ export async function exportPointCloudLasLaz(
   }
 }
 
+// Result of a path-based point-cloud import. Positions/colors/intensity are
+// raw Float32Array slices from the backend's binary response; callers wrap
+// them into PointCloudData.
+export interface ImportPointCloudByPathResult {
+  pointCount: number;
+  positions: Float32Array;        // length = pointCount * 3
+  colors: Float32Array | null;    // length = pointCount * 3 (0-1) when present
+  intensity: Float32Array | null; // length = pointCount when present
+}
+
+// Pulls a point-cloud file from disk via the backend rather than reading it
+// into a string in the renderer (V8 caps strings at ~512 MB, which trips on
+// multi-hundred-MB TLS scans). Backend dispatches by extension: XYZ-family
+// via pandas (honours `asciiFormat`), PLY/PCD via open3d. `asciiFormat` is
+// ignored on the PLY/PCD path.
+export async function importPointCloudByPath(
+  filePath: string,
+  asciiFormat?: string | null,
+): Promise<ImportPointCloudByPathResult> {
+  const baseUrl = getBackendUrl();
+  // 10 minute timeout: a multi-GB scan takes tens of seconds to parse and
+  // additional time to stream back. Matches the triangulation budget.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 600000);
+  try {
+    const response = await fetch(`${baseUrl}/api/pointcloud/import_by_path`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file_path: filePath,
+        ascii_format: asciiFormat ?? null,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      // The endpoint returns JSON {detail: "..."} on error and octet-stream
+      // on success — only try to parse JSON when the request actually failed.
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    const buf = await response.arrayBuffer();
+    return decodePointCloudBinary(buf);
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Point-cloud by-path import failed:', error);
+    throw error;
+  }
+}
+
+// 32-byte header: 4s magic, I count, B has_colors, B has_intensity, 22x reserved.
+const POINTCLOUD_BIN_HEADER_SIZE = 32;
+const POINTCLOUD_BIN_MAGIC = 'PHX1';
+
+function decodePointCloudBinary(buf: ArrayBuffer): ImportPointCloudByPathResult {
+  if (buf.byteLength < POINTCLOUD_BIN_HEADER_SIZE) {
+    throw new Error(`Binary response too short: ${buf.byteLength} bytes`);
+  }
+  const view = new DataView(buf);
+  const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+  if (magic !== POINTCLOUD_BIN_MAGIC) {
+    throw new Error(`Unexpected binary magic: got "${magic}", want "${POINTCLOUD_BIN_MAGIC}"`);
+  }
+  const pointCount = view.getUint32(4, true);
+  const hasColors = view.getUint8(8) === 1;
+  const hasIntensity = view.getUint8(9) === 1;
+
+  let offset = POINTCLOUD_BIN_HEADER_SIZE;
+  const positions = new Float32Array(buf, offset, pointCount * 3);
+  offset += pointCount * 3 * 4;
+
+  let colors: Float32Array | null = null;
+  if (hasColors) {
+    colors = new Float32Array(buf, offset, pointCount * 3);
+    offset += pointCount * 3 * 4;
+  }
+
+  let intensity: Float32Array | null = null;
+  if (hasIntensity) {
+    intensity = new Float32Array(buf, offset, pointCount);
+    offset += pointCount * 4;
+  }
+
+  // Defensive: a short payload would silently truncate the typed-array view.
+  // Re-check that the response covered everything we expected.
+  if (offset > buf.byteLength) {
+    throw new Error(`Binary response shorter than declared: expected ${offset} bytes, got ${buf.byteLength}`);
+  }
+
+  return { pointCount, positions, colors, intensity };
+}
+
 /**
  * Import a LAS or LAZ file via the backend.
  * Uses laspy with lazrs for LAZ decompression.

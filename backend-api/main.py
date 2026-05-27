@@ -27,7 +27,7 @@ def unicode_to_ascii(s: str) -> str:
     return result
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.2.0"
+BACKEND_VERSION = "0.2.1"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1918,10 +1918,11 @@ async def sample_mesh(request: MeshSampleRequest):
 
     If the mesh has vertex colors, they are interpolated to the sampled points.
 
-    Parameters:
-        - num_points: Target number of points to sample (default: auto based on area)
-        - density: Points per square meter (alternative to num_points)
-        - seed: Random seed for reproducible results
+    Request fields (on ``MeshSampleRequest``):
+
+    * ``num_points`` — target number of points to sample (default: auto based on area)
+    * ``density`` — points per square meter (alternative to ``num_points``)
+    * ``seed`` — random seed for reproducible results
 
     Returns point positions and optionally colors.
     """
@@ -4733,6 +4734,267 @@ async def import_point_cloud_las(file: UploadFile = File(...)):
             success=False,
             error=f"Import failed: {str(e)}"
         )
+
+
+# ==================== POINT CLOUD PATH-BASED IMPORT ====================
+# Reads point-cloud files directly from disk rather than over HTTP. The
+# renderer's TS parsers (parseXYZ, parsePLY, parsePCD) all materialise the
+# whole file as a JS string and hit V8's max string size (~512 MB) on
+# multi-hundred-MB scans typical of TLS surveys. The endpoint here returns a
+# packed binary stream so we don't re-trip the same limit on the response.
+
+# Helios <ASCII_format> tokens we recognise for XYZ-family files. Roles in
+# DATA_ROLES populate fields in the response; the others (timestamp,
+# target_index, …) are parsed but dropped so pandas knows the column exists
+# and won't misalign downstream columns.
+_XYZ_DATA_ROLES = {
+    'x', 'y', 'z',
+    'r', 'g', 'b',
+    'r255', 'g255', 'b255',
+    'intensity', 'reflectance',
+}
+_XYZ_KNOWN_ROLES = _XYZ_DATA_ROLES | {
+    'timestamp', 'target_index', 'target_count', 'deviation',
+}
+
+# Magic bytes on the wire. Renderer aborts if it sees anything else, so the
+# format is implicitly versioned by this value.
+_POINTCLOUD_BIN_MAGIC = b'PHX1'
+
+# Extensions dispatched to the pandas-based ASCII path. Anything in this set
+# may be accompanied by a Helios `ascii_format` hint; PLY/PCD ignore it.
+_PANDAS_EXTENSIONS = {'xyz', 'txt', 'csv', 'pts', 'asc'}
+_OPEN3D_EXTENSIONS = {'ply', 'pcd'}
+
+
+class ImportPointCloudByPathRequest(BaseModel):
+    """Path-based point-cloud import.
+
+    `ascii_format` is a Helios <ASCII_format> string (e.g.
+    'x y z r255 g255 b255 reflectance') and applies only to XYZ-family
+    extensions; PLY/PCD ignore it because their column layout is in-file.
+    If omitted for an XYZ-family file, columns are sniffed from the first
+    non-blank, non-comment row.
+    """
+    file_path: str
+    ascii_format: Optional[str] = None
+
+
+def _tokenize_ascii_format(fmt: str) -> List[str]:
+    return [tok.lower() if tok.lower() in _XYZ_KNOWN_ROLES else 'skip'
+            for tok in fmt.split()]
+
+
+def _autodetect_xyz_columns(file_path: str) -> List[str]:
+    """Pick a column layout when the caller didn't supply <ASCII_format>.
+
+    Reads only the first data row. Conservative: xyz first, then r255/g255/b255
+    if there are six columns, then intensity at column seven. Matches the
+    convention used by legacy Helios projects shipped without a format tag."""
+    with open(file_path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#') or line.startswith('//'):
+                continue
+            ncols = len(line.split())
+            if ncols >= 7:
+                return ['x', 'y', 'z', 'r255', 'g255', 'b255', 'intensity']
+            if ncols >= 6:
+                return ['x', 'y', 'z', 'r255', 'g255', 'b255']
+            if ncols >= 4:
+                return ['x', 'y', 'z', 'intensity']
+            if ncols >= 3:
+                return ['x', 'y', 'z']
+            break
+    return ['x', 'y', 'z']
+
+
+def _first_data_row_has_letters(file_path: str) -> bool:
+    """Detect a leading text header row.
+
+    Helios scan files don't have one, but plain XYZ exports from other tools
+    sometimes do (e.g. 'X Y Z R G B'). We skip such a row so pandas can read
+    the rest as floats without falling off the C engine."""
+    with open(file_path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#') or line.startswith('//'):
+                continue
+            return any(re.search(r'[a-zA-Z]', tok) for tok in line.split())
+    return False
+
+
+def _pack_pointcloud_response(positions: np.ndarray,
+                              colors: Optional[np.ndarray],
+                              intensity: Optional[np.ndarray]) -> StreamingResponse:
+    """Stream a packed binary response matching the renderer decoder.
+
+    Response layout (little-endian):
+      offset  size   field
+      0       4      magic 'PHX1'
+      4       4      uint32 point_count
+      8       1      uint8  has_colors (0/1)
+      9       1      uint8  has_intensity (0/1)
+      10      22     reserved (zero)
+      32      pc*12  float32 positions [x0,y0,z0,x1,y1,z1,...]
+      ...     pc*12  float32 colors    [r0,g0,b0,...]      (if has_colors)
+      ...     pc*4   float32 intensity [i0,i1,...]         (if has_intensity)
+    """
+    import struct
+
+    point_count = int(positions.shape[0])
+    header = struct.pack(
+        '<4sIBB22x', _POINTCLOUD_BIN_MAGIC, point_count,
+        1 if colors is not None else 0,
+        1 if intensity is not None else 0,
+    )
+
+    def chunks():
+        yield header
+        yield np.ascontiguousarray(positions, dtype=np.float32).tobytes()
+        if colors is not None:
+            yield np.ascontiguousarray(colors, dtype=np.float32).tobytes()
+        if intensity is not None:
+            yield np.ascontiguousarray(intensity, dtype=np.float32).tobytes()
+
+    return StreamingResponse(chunks(), media_type='application/octet-stream')
+
+
+def _read_xyz_with_pandas(file_path: str, ascii_format: Optional[str]) -> StreamingResponse:
+    """Parse an ASCII xyz-family file via pandas and return a packed binary."""
+    columns = (_tokenize_ascii_format(ascii_format)
+               if ascii_format
+               else _autodetect_xyz_columns(file_path))
+
+    # role -> column index. Keep first occurrence on duplicates so pandas
+    # doesn't see a repeated column name.
+    role_to_idx: Dict[str, int] = {}
+    for idx, role in enumerate(columns):
+        if role in _XYZ_DATA_ROLES and role not in role_to_idx:
+            role_to_idx[role] = idx
+
+    if not all(r in role_to_idx for r in ('x', 'y', 'z')):
+        raise HTTPException(
+            status_code=400,
+            detail="ASCII format must include x, y, and z columns."
+        )
+
+    sorted_roles = sorted(role_to_idx.items(), key=lambda kv: kv[1])
+    usecols = [idx for _, idx in sorted_roles]
+    names = [role for role, _ in sorted_roles]
+
+    skiprows = 1 if _first_data_row_has_letters(file_path) else 0
+
+    try:
+        df = pd.read_csv(
+            file_path,
+            sep=r'\s+', header=None, comment='#',
+            usecols=usecols, names=names,
+            dtype=np.float32, engine='c', skip_blank_lines=True,
+            skiprows=skiprows, on_bad_lines='skip',
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to parse {file_path}: {e}")
+
+    if df.empty:
+        raise HTTPException(status_code=400, detail=f"No data rows found in {file_path}")
+
+    df = df.dropna(subset=['x', 'y', 'z'])
+    if df.empty:
+        raise HTTPException(status_code=400, detail=f"No valid xyz rows in {file_path}")
+
+    positions = np.column_stack([
+        df['x'].to_numpy(dtype=np.float32, copy=False),
+        df['y'].to_numpy(dtype=np.float32, copy=False),
+        df['z'].to_numpy(dtype=np.float32, copy=False),
+    ]).astype(np.float32, copy=False)
+
+    colors = None
+    if all(c in df.columns for c in ('r255', 'g255', 'b255')):
+        colors = np.column_stack([
+            df['r255'].to_numpy(dtype=np.float32, copy=False) / 255.0,
+            df['g255'].to_numpy(dtype=np.float32, copy=False) / 255.0,
+            df['b255'].to_numpy(dtype=np.float32, copy=False) / 255.0,
+        ]).astype(np.float32, copy=False)
+    elif all(c in df.columns for c in ('r', 'g', 'b')):
+        colors = np.column_stack([
+            df['r'].to_numpy(dtype=np.float32, copy=False),
+            df['g'].to_numpy(dtype=np.float32, copy=False),
+            df['b'].to_numpy(dtype=np.float32, copy=False),
+        ]).astype(np.float32, copy=False)
+
+    intensity = None
+    for role in ('intensity', 'reflectance'):
+        if role in df.columns:
+            intensity = df[role].to_numpy(dtype=np.float32, copy=False)
+            break
+
+    return _pack_pointcloud_response(positions, colors, intensity)
+
+
+def _read_ply_pcd_with_open3d(file_path: str) -> StreamingResponse:
+    """Parse PLY or PCD via open3d. Handles both ASCII and binary variants
+    (open3d picks based on the file header), so the renderer is freed from
+    streaming binary PLY/PCD too — same code path either way.
+
+    Open3D loses scalar fields (intensity, reflectance, …) on read for PLY
+    and PCD. If a downstream consumer needs them we'd need to parse the
+    formats directly; none for now."""
+    try:
+        import open3d as o3d
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="open3d is not available; PLY/PCD by-path import is disabled.",
+        )
+
+    try:
+        cloud = o3d.io.read_point_cloud(file_path)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to parse {file_path}: {e}")
+
+    points = np.asarray(cloud.points)
+    if points.size == 0:
+        raise HTTPException(status_code=400, detail=f"No points found in {file_path}")
+
+    positions = points.astype(np.float32, copy=False)
+    colors = np.asarray(cloud.colors).astype(np.float32, copy=False) if cloud.has_colors() else None
+    intensity = None
+    return _pack_pointcloud_response(positions, colors, intensity)
+
+
+@app.post("/api/pointcloud/import_by_path")
+async def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
+    """Parse a point-cloud file from disk and stream back a packed binary
+    representation. Dispatches by extension:
+
+    * `.xyz` / `.txt` / `.csv` / `.pts` / `.asc` → pandas + optional
+      Helios `ascii_format` hint.
+    * `.ply` / `.pcd` → open3d (handles ASCII and binary).
+    """
+    import os
+
+    file_path = request.file_path
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+    if ext in _PANDAS_EXTENSIONS:
+        return _read_xyz_with_pandas(file_path, request.ascii_format)
+    if ext in _OPEN3D_EXTENSIONS:
+        return _read_ply_pcd_with_open3d(file_path)
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Unsupported extension for path-based import: .{ext}. "
+            f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS)}"
+        ),
+    )
 
 
 # ==================== Cloud-to-Mesh Distance Comparison ====================

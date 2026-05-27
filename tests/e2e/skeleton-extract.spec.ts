@@ -16,11 +16,16 @@ test('extracts a skeleton from a Y-shaped plant cloud via the UI', async () => {
     await page.getByTestId('nav-viewer').click();
 
     // Import as point cloud (not auto) — exercises the non-default menu item.
+    // The handler calls react-dropzone's open() which fires a real OS file
+    // chooser; intercept it before the click so it never surfaces.
     await page.getByTestId('import-menu-button').click();
-    await page.getByTestId('import-menu-pointcloud').click();
-    await page.getByTestId('app-dropzone-input').setInputFiles(FIXTURE);
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      page.getByTestId('import-menu-pointcloud').click(),
+    ]);
+    await chooser.setFiles(FIXTURE);
 
-    const cloudRow = page.locator('[data-testid="cloud-row"][data-cloud-name="tree.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-point-count', '900');
 

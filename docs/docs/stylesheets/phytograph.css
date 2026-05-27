@@ -1,0 +1,130 @@
+/* Phytograph brand palette — derived from the app logo.
+ *
+ *   Deep forest green  #2f4a3a   primary surfaces, header
+ *   Sage green         #6b8e5a   secondary surfaces, hover
+ *   Lime / yellow-green #c5d34a  primary accent (links, active state)
+ *   Mustard            #d4b53a   warnings, callouts
+ *   Bright yellow      #f5d022   highlights
+ *   Cream              #faf3e3   light backgrounds
+ *   Charcoal           #222222   dark backgrounds, text on light
+ */
+
+:root {
+  --pg-forest: #2f4a3a;
+  --pg-forest-dark: #243a2e;
+  --pg-sage: #6b8e5a;
+  --pg-lime: #c5d34a;
+  --pg-lime-bright: #d4e15a;
+  --pg-mustard: #d4b53a;
+  --pg-yellow: #f5d022;
+  --pg-cream: #faf3e3;
+  --pg-charcoal: #222222;
+}
+
+/* Light mode (default scheme) */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: var(--pg-forest);
+  --md-primary-fg-color--light: var(--pg-sage);
+  --md-primary-fg-color--dark: var(--pg-forest-dark);
+  --md-primary-bg-color: var(--pg-cream);
+  --md-primary-bg-color--light: #ffffff;
+
+  --md-accent-fg-color: #6b8e5a;
+  --md-accent-fg-color--transparent: rgba(107, 142, 90, 0.1);
+
+  --md-typeset-a-color: #4a6b3a;
+}
+
+/* Dark mode */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--pg-forest-dark);
+  --md-primary-fg-color--light: var(--pg-sage);
+  --md-primary-fg-color--dark: #1a2922;
+  --md-primary-bg-color: var(--pg-cream);
+
+  --md-accent-fg-color: var(--pg-lime);
+  --md-accent-fg-color--transparent: rgba(197, 211, 74, 0.15);
+
+  --md-typeset-a-color: var(--pg-lime);
+}
+
+/* Header logo sits a hair larger than the default */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 1.6rem;
+}
+
+/* Make the site title weightier so the brand reads cleanly */
+.md-header__title {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Card grid used on landing pages */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid.cards > :is(ul, ol) > li,
+.md-typeset .grid > .card {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.4rem;
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+
+.md-typeset .grid.cards > ul > li:hover,
+.md-typeset .grid.cards > :is(ul, ol) > li:hover {
+  border-color: var(--pg-sage);
+  box-shadow: 0 4px 12px rgba(47, 74, 58, 0.08);
+  transform: translateY(-1px);
+}
+
+/* Color swatches used in the user guide to refer to the app's color-coded
+ * toolbar buttons (green = construct, cyan = analyze, amber = plant, etc.) */
+.pg-swatch {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  border-radius: 0.2em;
+  margin-right: 0.35em;
+  vertical-align: -0.1em;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+}
+.pg-swatch.green   { background: #16a34a; }
+.pg-swatch.cyan    { background: #0891b2; }
+.pg-swatch.amber   { background: #d97706; }
+.pg-swatch.blue    { background: #2563eb; }
+.pg-swatch.purple  { background: #9333ea; }
+.pg-swatch.red     { background: #dc2626; }
+
+/* Screenshot frames: subtle border + drop shadow so they read as artifacts,
+ * not part of the page chrome. */
+.md-typeset img:not(.no-frame) {
+  border-radius: 0.35rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.md-typeset .md-content img.logo-mark {
+  box-shadow: none;
+  border-radius: 0;
+}
+
+/* Landing page hero image — full container width, no shadow, soft rounded
+ * corners so it reads as a banner rather than a screenshot. */
+.md-typeset img.pg-cover {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  margin: -1rem 0 1.5rem;
+  border-radius: 0.5rem;
+}
+
+/* Lime accent under the section headings on landing pages */
+.md-typeset h1 {
+  border-bottom: 3px solid var(--pg-lime);
+  padding-bottom: 0.3rem;
+  display: inline-block;
+}
+
+/* Tighten code blocks against the cream-tinged background */
+[data-md-color-scheme="default"] .md-typeset code {
+  background: rgba(47, 74, 58, 0.06);
+}

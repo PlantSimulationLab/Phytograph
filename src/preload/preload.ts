@@ -3,6 +3,7 @@ import {
   IPC,
   type BackendInfo,
   type FileDropPayload,
+  type MenuCommandPayload,
   type OpenDialogOptions,
   type SaveDialogOptions,
 } from '../shared/ipc.js';
@@ -24,6 +25,10 @@ const api = {
       ipcRenderer.invoke(IPC.FsWriteText, path, contents),
     writeBinary: (path: string, contents: ArrayBuffer): Promise<void> =>
       ipcRenderer.invoke(IPC.FsWriteBinary, path, contents),
+    exists: (path: string): Promise<boolean> => ipcRenderer.invoke(IPC.FsExists, path),
+  },
+  app: {
+    getCwd: (): Promise<string> => ipcRenderer.invoke(IPC.AppGetCwd),
   },
   store: {
     get: <T = unknown>(key: string): Promise<T | undefined> => ipcRenderer.invoke(IPC.StoreGet, key),
@@ -37,6 +42,11 @@ const api = {
     const listener = (_e: unknown, payload: FileDropPayload) => handler(payload);
     ipcRenderer.on(IPC.FileDropEvent, listener);
     return () => ipcRenderer.removeListener(IPC.FileDropEvent, listener);
+  },
+  onMenuCommand: (handler: (payload: MenuCommandPayload) => void): (() => void) => {
+    const listener = (_e: unknown, payload: MenuCommandPayload) => handler(payload);
+    ipcRenderer.on(IPC.MenuCommand, listener);
+    return () => ipcRenderer.removeListener(IPC.MenuCommand, listener);
   },
 };
 

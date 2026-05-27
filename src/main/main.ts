@@ -1,13 +1,31 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startBackend, stopBackend } from './backend.js';
 import { registerIpc } from './ipc.js';
+import { installApplicationMenu } from './menu.js';
 import { setupAutoUpdater } from './updater.js';
 import { IPC, type FileDropPayload } from '../shared/ipc.js';
 import { RENDERER_DEV_PORT } from '../shared/constants.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Cap the initial window on very large monitors so the app doesn't open at 5K.
+// Matches the HeliosGUI reference (Dropbox/HeliosGUI_mockup/heliosgui-desktop/electron/main.ts).
+const MAX_W = 1920;
+const MAX_H = 1080;
+
+// Resolve the BrowserWindow icon. macOS ignores this (Dock uses .icns from the
+// app bundle), so we only really care about Windows (.ico) and Linux (.png).
+// In dev, build/ lives at the repo root, one level above the compiled dist-main/.
+// In packaged builds, build/icon.{png,ico} is shipped via extraResources to
+// process.resourcesPath/build/.
+function resolveIconPath(): string {
+  const file = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+  return app.isPackaged
+    ? join(process.resourcesPath, 'build', file)
+    : join(__dirname, '../build', file);
+}
 
 const isDev = !app.isPackaged;
 // PHYTOGRAPH_E2E=1 is set by the Playwright launcher (tests/e2e/helpers/launchApp.ts):
@@ -33,16 +51,44 @@ if (isE2E && process.platform === 'darwin') {
   app.setActivationPolicy('accessory');
 }
 
+// In dev, the running binary is node_modules/electron/dist/Electron.app, whose
+// Info.plist labels the macOS menu bar "Electron" and ships the generic
+// Electron .icns. Override both so dev runs feel like the real app — packaged
+// builds already get this right via electron-builder's productName + icon.
+// (Skip under E2E: tests assume an inert chrome.)
+if (!isE2E) {
+  app.setName('Phytograph');
+}
+
 let mainWindow: BrowserWindow | null = null;
 
 function createWindow(): void {
+  // E2E tests assume a known, stable 1200x800 window. The display-aware sizing
+  // below would otherwise make pixel coordinates depend on the test machine's
+  // monitor — that's not acceptable for the Playwright suite.
+  let winWidth = 1200;
+  let winHeight = 800;
+  let shouldMaximize = false;
+  if (!isE2E) {
+    const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
+    if (screenW <= MAX_W && screenH <= MAX_H) {
+      winWidth = screenW;
+      winHeight = screenH;
+      shouldMaximize = true;
+    } else {
+      winWidth = Math.min(screenW, MAX_W);
+      winHeight = Math.min(screenH, MAX_H);
+    }
+  }
+
   mainWindow = new BrowserWindow({
     title: 'Phytograph',
-    width: 1200,
-    height: 800,
+    width: winWidth,
+    height: winHeight,
     minWidth: 900,
     minHeight: 600,
     center: true,
+    icon: resolveIconPath(),
     // E2E invisibility stack:
     //   show:false        — never display the window
     //   skipTaskbar:true  — also keeps it out of the macOS Window menu
@@ -60,6 +106,8 @@ function createWindow(): void {
       sandbox: false,
     },
   });
+
+  if (shouldMaximize) mainWindow.maximize();
 
   // Under E2E, the Vite dev server isn't running — load the prebuilt
   // renderer from dist-renderer just like production would. (npm run
@@ -84,7 +132,20 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  // Override the dev Dock icon (node_modules/electron ships generic Electron
+  // artwork). icon-dock.png pads the logo into a 1024x1024 canvas at the
+  // ~80% safe-area size macOS expects, so it doesn't appear oversized next
+  // to system apps. On packaged builds the .icns from the bundle wins;
+  // calling setIcon there is harmless.
+  if (!isE2E && process.platform === 'darwin' && app.dock) {
+    const iconPath = app.isPackaged
+      ? join(process.resourcesPath, 'build', 'icon-dock.png')
+      : join(__dirname, '../build/icon-dock.png');
+    app.dock.setIcon(iconPath);
+  }
+
   registerIpc();
+  installApplicationMenu(() => mainWindow);
 
   // Bridge: main can broadcast file-drop events to the focused window.
   // (No-op placeholder for now; native drag/drop happens in the renderer.

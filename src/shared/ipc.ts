@@ -11,6 +11,9 @@ export const IPC = {
   FsReadBinary: 'fs:readBinary',
   FsWriteText: 'fs:writeText',
   FsWriteBinary: 'fs:writeBinary',
+  FsExists: 'fs:exists',
+  // App info
+  AppGetCwd: 'app:getCwd',
   // Persistent key/value store
   StoreGet: 'store:get',
   StoreSet: 'store:set',
@@ -19,6 +22,8 @@ export const IPC = {
   BackendGetInfo: 'backend:getInfo',
   // File-drop events (main -> renderer)
   FileDropEvent: 'fileDrop:event',
+  // Menu commands (main -> renderer)
+  MenuCommand: 'menu:command',
 } as const;
 
 export interface BackendInfo {
@@ -44,3 +49,19 @@ export type FileDropPayload =
   | { kind: 'hover'; paths: string[] }
   | { kind: 'drop'; paths: string[] }
   | { kind: 'cancel' };
+
+export type SnapViewDirection = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso';
+
+export type MenuCommandPayload =
+  | { kind: 'import-point-cloud' }
+  | { kind: 'import-mesh' }
+  | { kind: 'import-skeleton' }
+  | { kind: 'save' }
+  | { kind: 'export' }
+  | { kind: 'undo' }
+  | { kind: 'redo' }
+  | { kind: 'select-all' }
+  | { kind: 'deselect-all' }
+  | { kind: 'reset-camera' }
+  | { kind: 'snap-view'; direction: SnapViewDirection }
+  | { kind: 'nav'; target: 'home' | 'viewer' | 'options' };

@@ -10,6 +10,7 @@ import {
   parsePCD,
   parsePLY,
   parsePointCloud,
+  parsePointCloudFromPath,
   parseSkeleton,
   parseSkeletonJSON,
   parseSkeletonOBJ,
@@ -89,6 +90,26 @@ describe('parseXYZ', () => {
     const file = textFile('1;2;3\n4;5;6\n', 'cloud.csv');
     const data = await parseXYZ(file);
     expect(data.pointCount).toBe(2);
+  });
+
+  // RIEGL and some other LiDAR exporters write a comma-delimited header
+  // above space-delimited data rows. Detect the data delimiter from the
+  // first data row, not the header.
+  it('handles comma-delimited header over space-delimited data', async () => {
+    const content =
+      'XYZ[0][m],XYZ[1][m],XYZ[2][m],Reflectance[dB]\n' +
+      '2.79 -21.54 -16.10 -16.08\n' +
+      '2.80 -21.55 -16.09 -14.10\n';
+    const file = textFile(content, 'cloud.txt');
+    const data = await parseXYZ(file);
+    expect(data.pointCount).toBe(2);
+    expect(Array.from(data.positions.slice(0, 3))).toEqual([
+      expect.closeTo(2.79, 2),
+      expect.closeTo(-21.54, 2),
+      expect.closeTo(-16.10, 2),
+    ]);
+    expect(data.bounds.center.x).not.toBeNaN();
+    expect(data.intensities).toBeDefined();
   });
 });
 
@@ -535,6 +556,160 @@ describe('parsePointCloud (auto-detect)', () => {
     await expect(
       parsePointCloud(textFile('# this has no numbers\n', 'a.weird')),
     ).rejects.toThrow();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// parsePointCloudFromPath — XYZ-family, PLY and PCD files go to the
+// backend; LAS and other formats round-trip through fs.readBinary into
+// the in-renderer parsers.
+// ────────────────────────────────────────────────────────────────────────
+
+// 32-byte header: 4s magic, I count, B has_colors, B has_intensity, 22x pad.
+// Matches the layout documented on /api/pointcloud/import_xyz_by_path and
+// decoded by importXyzByPath in backendApi.ts.
+function makeXyzBinary(
+  points: number[][],
+  opts: { colors?: number[][]; intensity?: number[] } = {},
+): ArrayBuffer {
+  const n = points.length;
+  const colors = opts.colors ?? null;
+  const intensity = opts.intensity ?? null;
+  const hasColors = colors !== null;
+  const hasIntensity = intensity !== null;
+
+  const HEADER = 32;
+  const posBytes = n * 3 * 4;
+  const colBytes = hasColors ? n * 3 * 4 : 0;
+  const intBytes = hasIntensity ? n * 4 : 0;
+  const buf = new ArrayBuffer(HEADER + posBytes + colBytes + intBytes);
+  const u8 = new Uint8Array(buf);
+  u8[0] = 'P'.charCodeAt(0);
+  u8[1] = 'H'.charCodeAt(0);
+  u8[2] = 'X'.charCodeAt(0);
+  u8[3] = '1'.charCodeAt(0);
+  new DataView(buf).setUint32(4, n, true);
+  u8[8] = hasColors ? 1 : 0;
+  u8[9] = hasIntensity ? 1 : 0;
+
+  const positions = new Float32Array(buf, HEADER, n * 3);
+  for (let i = 0; i < n; i++) {
+    positions[i * 3] = points[i][0];
+    positions[i * 3 + 1] = points[i][1];
+    positions[i * 3 + 2] = points[i][2];
+  }
+  if (hasColors) {
+    const c = new Float32Array(buf, HEADER + posBytes, n * 3);
+    for (let i = 0; i < n; i++) {
+      c[i * 3] = colors![i][0];
+      c[i * 3 + 1] = colors![i][1];
+      c[i * 3 + 2] = colors![i][2];
+    }
+  }
+  if (hasIntensity) {
+    const arr = new Float32Array(buf, HEADER + posBytes + colBytes, n);
+    for (let i = 0; i < n; i++) arr[i] = intensity![i];
+  }
+  return buf;
+}
+
+describe('parsePointCloudFromPath', () => {
+  it('routes .xyz to the backend importer and decodes positions', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(makeXyzBinary([[1, 2, 3], [4, 5, 6]]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream' },
+      }),
+    );
+    const data = await parsePointCloudFromPath('/abs/path/scan.xyz');
+    expect(data.pointCount).toBe(2);
+    expect(Array.from(data.positions)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(data.fileName).toBe('scan.xyz');
+    // Bounds were computed from the decoded positions, not left as the
+    // identity-uninitialized {Infinity,-Infinity} values from the helper.
+    expect(data.bounds.min.x).toBe(1);
+    expect(data.bounds.max.x).toBe(4);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toContain('/api/pointcloud/import_by_path');
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body).toEqual({ file_path: '/abs/path/scan.xyz', ascii_format: null });
+  });
+
+  it('forwards ascii_format to the backend when provided', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(makeXyzBinary([[0, 0, 0]]), { status: 200 }),
+    );
+    await parsePointCloudFromPath('/p/a.xyz', 'x y z r255 g255 b255 reflectance');
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.ascii_format).toBe('x y z r255 g255 b255 reflectance');
+  });
+
+  it('decodes colors and normalises intensity to 0-1', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        makeXyzBinary([[0, 0, 0], [1, 1, 1]], {
+          colors: [[1, 0, 0], [0, 0.5, 0]],
+          intensity: [10, 30],
+        }),
+        { status: 200 },
+      ),
+    );
+    const data = await parsePointCloudFromPath('/p/scan.xyz');
+    expect(data.colors && Array.from(data.colors)).toEqual([1, 0, 0, 0, 0.5, 0]);
+    // intensity 10..30 → normalised 0..1
+    expect(data.intensities && Array.from(data.intensities)).toEqual([0, 1]);
+  });
+
+  it('surfaces a backend error response as a thrown Error', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ detail: 'File not found: /missing.xyz' }), { status: 404 }),
+    );
+    await expect(parsePointCloudFromPath('/missing.xyz')).rejects.toThrow(/File not found/);
+  });
+
+  it('throws when the binary response has the wrong magic', async () => {
+    const bad = new ArrayBuffer(32);
+    new Uint8Array(bad).set([1, 2, 3, 4]);
+    vi.spyOn(global, 'fetch').mockResolvedValue(new Response(bad, { status: 200 }));
+    await expect(parsePointCloudFromPath('/p/a.xyz')).rejects.toThrow(/magic/);
+  });
+
+  it('routes .ply through the backend importer', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(makeXyzBinary([[1, 2, 3]], { colors: [[0.5, 0.5, 0.5]] }), { status: 200 }),
+    );
+    const data = await parsePointCloudFromPath('/p/cloud.ply');
+    expect(data.pointCount).toBe(1);
+    expect(Array.from(data.positions)).toEqual([1, 2, 3]);
+    expect(Array.from(data.colors!)).toEqual([0.5, 0.5, 0.5]);
+    const [url] = fetchSpy.mock.calls[0];
+    expect(url).toContain('/api/pointcloud/import_by_path');
+  });
+
+  it('routes .pcd through the backend importer', async () => {
+    const fetchSpy = vi
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(makeXyzBinary([[0, 0, 0]]), { status: 200 }));
+    const data = await parsePointCloudFromPath('/p/cloud.pcd');
+    expect(data.pointCount).toBe(1);
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('falls back to fs.readBinary for non-routed extensions (.las)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    // Hand-crafted LAS bytes match parseLAS's own minimal-file test helper;
+    // we don't need to replicate the full geometry — just enough that
+    // parsePointCloud auto-dispatches and we can see fetch wasn't called.
+    const lasBuf = makeMinimalLasBuffer();
+    (globalThis as any).window = (globalThis as any).window ?? {};
+    (window as any).electronAPI = {
+      fs: { readBinary: vi.fn().mockResolvedValue(lasBuf) },
+    };
+    const data = await parsePointCloudFromPath('/p/cloud.las');
+    expect(data.pointCount).toBeGreaterThan(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect((window as any).electronAPI.fs.readBinary).toHaveBeenCalledWith('/p/cloud.las');
   });
 });
 

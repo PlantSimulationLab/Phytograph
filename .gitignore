@@ -19,3 +19,15 @@ backend-api/tests/__pycache__/
 playwright-report/
 test-results/
 coverage/
+
+# Docs build output and venv
+docs/site/
+docs/_site/
+docs/.venv/
+
+# Image source files — only the exported PNG/ICO goes in the repo
+*.psd
+src/renderer/assets/splash
+
+# Local-only sample datasets — not shipped, not referenced by tests or docs
+example-datasets/

@@ -25,15 +25,20 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
     // Go to Viewer (where Import lives).
     await page.getByTestId('nav-viewer').click();
 
-    // Import: open the menu, click Auto-detect, then push the fixture into
-    // the hidden file input that react-dropzone exposes.
+    // Import: open the menu, click Auto-detect. That handler calls
+    // react-dropzone's open() which fires a real OS file chooser, so we
+    // intercept via filechooser BEFORE the click (otherwise the dialog
+    // appears on screen and the click hangs waiting for it to close).
     await page.getByTestId('import-menu-button').click();
-    await page.getByTestId('import-menu-auto').click();
-    await page.getByTestId('app-dropzone-input').setInputFiles(FIXTURE);
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      page.getByTestId('import-menu-auto').click(),
+    ]);
+    await chooser.setFiles(FIXTURE);
 
     // Confirm the cloud appeared in the cloud list with the right point
     // count. tiny.xyz has 60 data lines (2 comment lines skipped).
-    const cloudRow = page.locator('[data-testid="cloud-row"][data-cloud-name="tiny.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-point-count', '60');
 

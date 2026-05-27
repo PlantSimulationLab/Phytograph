@@ -65,13 +65,18 @@ test('exports a generated mesh to OBJ via the Export panel', async () => {
       };
     });
 
-    // Import the cylinder fixture.
+    // Import the cylinder fixture. The Auto-detect menu item calls
+    // react-dropzone's open() under the hood, which fires a real OS file
+    // chooser; intercept it before the click so it never surfaces.
     await page.getByTestId('nav-viewer').click();
     await page.getByTestId('import-menu-button').click();
-    await page.getByTestId('import-menu-auto').click();
-    await page.getByTestId('app-dropzone-input').setInputFiles(FIXTURE);
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      page.getByTestId('import-menu-auto').click(),
+    ]);
+    await chooser.setFiles(FIXTURE);
 
-    const cloudRow = page.locator('[data-testid="cloud-row"][data-cloud-name="tiny.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await cloudRow.click();
 

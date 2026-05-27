@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { PointCloudData, ScalarField } from '../components/PointCloudViewer';
-import { importPointCloudLasLaz } from '../utils/backendApi';
+import { importPointCloudByPath, importPointCloudLasLaz } from '../utils/backendApi';
 
 // Calculate bounds from position array
 function calculateBounds(positions: Float32Array, pointCount: number): PointCloudData['bounds'] {
@@ -57,21 +57,31 @@ export async function parseXYZ(file: File): Promise<PointCloudData> {
 
   if (dataLines.length === 0) throw new Error('No data found in file');
 
-  // Detect delimiter from first line
-  const firstLine = dataLines[0];
-  let delimiter: string | RegExp = ' ';
-  if (firstLine.includes(',')) delimiter = ',';
-  else if (firstLine.includes('\t')) delimiter = '\t';
-  else if (firstLine.includes(';')) delimiter = ';';
-  else delimiter = /\s+/;
+  // Detect delimiter for the first line (which may or may not be a header).
+  // Some exporters use a comma-delimited header above space-delimited data
+  // (e.g. RIEGL exports: "XYZ[0][m],XYZ[1][m],..." then "2.79 -21.54 ..."),
+  // so we have to detect the data delimiter independently from the header.
+  function detectDelimiter(line: string): string | RegExp {
+    if (line.includes(',')) return ',';
+    if (line.includes('\t')) return '\t';
+    if (line.includes(';')) return ';';
+    return /\s+/;
+  }
 
-  // Split first line to check for headers
-  const firstParts = typeof delimiter === 'string'
-    ? firstLine.split(delimiter).map(s => s.trim())
-    : firstLine.split(delimiter).map(s => s.trim());
+  const firstLine = dataLines[0];
+  const headerDelimiter = detectDelimiter(firstLine);
+
+  // Split first line using its own delimiter to check for header tokens
+  const firstParts = firstLine.split(headerDelimiter).map(s => s.trim());
 
   // Detect if first line is a header row
   const hasHeader = firstParts.some(isHeaderValue);
+
+  // For data rows, detect delimiter from the first actual data row
+  // (which may differ from the header's delimiter).
+  const delimiter: string | RegExp = hasHeader && dataLines.length > 1
+    ? detectDelimiter(dataLines[1])
+    : headerDelimiter;
 
   // Determine column indices
   let xIdx = 0, yIdx = 1, zIdx = 2;
@@ -480,7 +490,6 @@ export async function parseLAS(file: File): Promise<PointCloudData> {
   // Read header
   const versionMajor = view.getUint8(24);
   const versionMinor = view.getUint8(25);
-  const headerSize = view.getUint16(94, true);
   const pointDataOffset = view.getUint32(96, true);
   const pointDataFormat = view.getUint8(104);
 
@@ -716,6 +725,89 @@ export async function parseLAZ(file: File): Promise<PointCloudData> {
     }
     throw error;
   }
+}
+
+// Extensions that the renderer parses via the path-based backend endpoint
+// instead of reading into memory. The TS parsers (parseXYZ, parsePLY,
+// parsePCD) all materialise the file as a JS string and throw RangeError
+// past V8's ~512 MB max string size, so the multi-hundred-MB scans that
+// are typical of TLS surveys have to be parsed in Python.
+//
+// LAS/LAZ aren't here: they already go through importPointCloudLasLaz as
+// a multipart upload and don't share the string-limit issue (laspy reads
+// binary chunks).
+const BACKEND_PATH_EXTENSIONS = new Set([
+  // ASCII delimited (pandas, honours Helios <ASCII_format>)
+  'xyz', 'txt', 'csv', 'pts', 'asc',
+  // PLY / PCD (open3d — handles ASCII and binary variants both)
+  'ply', 'pcd',
+]);
+
+// Read a file from disk via the main-process fs IPC and parse it. Used when
+// the renderer has a path string (e.g. resolved from a Helios XML <filename>)
+// rather than a File handle from a dropzone or <input type=file>.
+//
+// Extensions in BACKEND_PATH_EXTENSIONS go to the Python backend; everything
+// else (LAS, OBJ-points, …) falls back to the in-renderer parsers via
+// `parsePointCloud`. `asciiFormat` is forwarded to the backend when known
+// (Helios <ASCII_format>) and ignored on the PLY/PCD route.
+export async function parsePointCloudFromPath(
+  path: string,
+  asciiFormat?: string | null,
+): Promise<PointCloudData> {
+  const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
+  const ext = name.toLowerCase().split('.').pop() ?? '';
+
+  if (BACKEND_PATH_EXTENSIONS.has(ext)) {
+    const result = await importPointCloudByPath(path, asciiFormat ?? null);
+    return buildPointCloudFromBackend(result, name);
+  }
+
+  const buf = await window.electronAPI.fs.readBinary(path);
+  const file = new File([buf], name);
+  return parsePointCloud(file);
+}
+
+function buildPointCloudFromBackend(
+  result: { pointCount: number; positions: Float32Array; colors: Float32Array | null; intensity: Float32Array | null },
+  fileName: string,
+): PointCloudData {
+  // The backend returns positions as a single contiguous Float32Array view;
+  // copy into a fresh buffer so the renderer owns the memory and we don't
+  // pin the entire HTTP response. The view is also a multiple-of-12 length
+  // so calculateBounds can scan it directly.
+  const positions = new Float32Array(result.positions);
+
+  const data: PointCloudData = {
+    positions,
+    pointCount: result.pointCount,
+    bounds: calculateBounds(positions, result.pointCount),
+    fileName,
+  };
+
+  if (result.colors) {
+    data.colors = new Float32Array(result.colors);
+  }
+
+  if (result.intensity) {
+    // Match parseXYZ's behaviour: normalise intensity to 0-1 for the viewer.
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < result.intensity.length; i++) {
+      const v = result.intensity[i];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    const range = max - min || 1;
+    const normalized = new Float32Array(result.intensity.length);
+    for (let i = 0; i < result.intensity.length; i++) {
+      normalized[i] = (result.intensity[i] - min) / range;
+    }
+    data.intensities = normalized;
+  }
+
+  return data;
 }
 
 // Auto-detect format and parse

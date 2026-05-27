@@ -91,6 +91,74 @@ Three layers, three frameworks:
 4. **Coverage target: 80%** for backend (`pytest-cov` over `main.py`) and frontend (Vitest coverage over `src/renderer/lib/`, `src/renderer/utils/`, `src/renderer/hooks/` — the pure-logic surface). React components (`src/renderer/components/`, `App.tsx`) are covered by E2E instead — unit-testing 9,000+ lines of three.js viewer code yields rubber stamps, not signal. E2E is judged by workflow coverage, not line coverage.
 5. **Fixtures.** Fabricate minimal text fixtures (small CSV / XYZ point clouds, tiny OBJ meshes) that are safe to commit. If a workflow needs real LiDAR data too large to commit, ask the user — don't invent a synthetic substitute that won't exercise the real code paths.
 
+## Documentation
+
+User-facing docs live in `docs/` as an MkDocs Material site. They're built
+on push to `main` by `.github/workflows/docs.yml` and published to
+GitHub Pages at https://plantsimulationlab.github.io/phytograph/.
+
+### Layout
+
+- `docs/mkdocs.yml` — site config, nav structure, theme palette.
+- `docs/docs/` — content (Markdown). Top-level sections:
+  - `guide/` — install, first import, interface tour (end-user onboarding).
+  - `concepts/` — point clouds, meshes, skeletons, plant models, scans.
+  - `workflows/` — task-oriented walkthroughs (clean, triangulate, extract
+    skeleton, generate plant, morph, register, simulate scan, import/export).
+  - `reference/` — file formats, color modes, keyboard shortcuts.
+  - `developers/` — architecture, dev loop, releasing, testing, backend API
+    (this section, **not** the user guide, is where dev-facing details go).
+- `docs/docs/assets/screenshots/` — captured from the running app via
+  `docs/scripts/capture-screenshots.mjs` (Playwright `_electron` driver,
+  same launch path as `tests/e2e/helpers/launchApp.ts` but with the window
+  visible).
+- `docs/docs/stylesheets/phytograph.css` — brand palette (forest green
+  primary, lime accent, mustard highlights) derived from the app logo.
+- `docs/requirements.txt` — pinned MkDocs deps. Separate from
+  `backend-api/requirements.txt` on purpose (don't pollute the PyInstaller
+  bundle with docs tooling).
+- `docs/.venv/` — local docs venv. Gitignored and marked
+  `com.dropbox.ignored=1`; per-machine, re-create on a fresh checkout.
+
+### Preview locally
+
+```bash
+cd docs && .venv/bin/mkdocs serve     # http://127.0.0.1:8000
+```
+
+If the venv doesn't exist yet:
+
+```bash
+cd docs && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+xattr -w com.dropbox.ignored 1 .venv  # macOS only — keep Dropbox from syncing it
+```
+
+### After every task: check whether the docs need an update
+
+When you finish a code change, before declaring the task done, ask:
+
+- **Did this change anything a user sees or does?** Toolbar buttons, panel
+  layout, file formats, shortcuts, default values, workflow steps,
+  validation messages — anything visible. If yes, the relevant
+  `guide/`, `workflows/`, or `reference/` page may need updating.
+- **Did this change a concept?** New object type, new mode, new metric.
+  Update `concepts/`.
+- **Did this change the build, dev loop, release flow, API surface, or
+  architecture?** Update `developers/`.
+- **Did this add or rename a screenshot-worthy UI state?** Re-run
+  `node docs/scripts/capture-screenshots.mjs` from the repo root to
+  refresh captures (requires `npm run build && npm run build:backend`
+  first). Delete obsolete screenshots; don't leave dead image links.
+
+If the change is purely internal (refactor, test, build script tweak that
+doesn't change observable behavior), the docs are usually fine — but skim
+the relevant section anyway, since prior agents have occasionally written
+claims that didn't match the code.
+
+When a docs update is needed, make it in the **same commit** as the code
+change. Do not leave docs drift for "later" — it accumulates fast in a
+project that ships behavior changes frequently.
+
 ## Commit conventions
 
 Do **not** sign commits with AI co-author trailers. No `Co-Authored-By: Claude …`, no "Generated with Claude Code" lines in PR descriptions, no model attribution of any kind. Commits should appear authored solely by the human committer.

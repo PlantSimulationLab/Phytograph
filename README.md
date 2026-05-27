@@ -3,6 +3,8 @@
 Cross-platform desktop application for LiDAR point cloud and plant
 architecture tools.
 
+📖 **Full documentation**: <https://plantsimulationlab.github.io/phytograph/>
+
 - **Frontend**: React + TypeScript + Vite + TailwindCSS
 - **Desktop shell**: Electron 33 (ESM main process)
 - **Backend**: Python + FastAPI, bundled as a sidecar via PyInstaller
