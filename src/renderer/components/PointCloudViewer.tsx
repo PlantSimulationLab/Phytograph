@@ -401,6 +401,13 @@ function PointCloud({ data, pointSize = 2, colorMode = 'height', singleColor = '
     });
   }, [pointSize]);
 
+  // Dispose GPU resources when deps change or component unmounts. Without
+  // this, every recompute of the useMemo above leaks a BufferGeometry +
+  // its VBOs and a PointsMaterial. With erasing/cropping active this can
+  // leak on every parent re-render.
+  useEffect(() => () => { geometry?.dispose(); }, [geometry]);
+  useEffect(() => () => { material.dispose(); }, [material]);
+
   // Don't render if no geometry (empty point cloud)
   if (!geometry) {
     return null;
@@ -485,6 +492,9 @@ function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = fals
     }
   }, [color, opacity, wireframe, hasVertexColors]);
 
+  useEffect(() => () => { geometry.dispose(); }, [geometry]);
+  useEffect(() => () => { material.dispose(); }, [material]);
+
   return <mesh ref={meshRef} geometry={geometry} material={material} />;
 }
 
@@ -535,33 +545,43 @@ interface TexturedPlantMeshProps {
 // Helper to load base64 image as Three.js texture
 function useBase64Texture(base64Data: string | undefined): THREE.Texture | null {
   const [texture, setTexture] = useState<THREE.Texture | null>(null);
+  // Track the latest texture in a ref so cleanup disposes the actual current
+  // value, not the stale `texture` closed over at effect setup time.
+  const currentRef = useRef<THREE.Texture | null>(null);
 
   useEffect(() => {
     if (!base64Data) {
-      console.log('[useBase64Texture] No base64 data provided');
+      if (currentRef.current) {
+        currentRef.current.dispose();
+        currentRef.current = null;
+      }
       setTexture(null);
       return;
     }
 
-    console.log(`[useBase64Texture] Loading texture, data length: ${base64Data.length}`);
-
+    let cancelled = false;
     const img = new Image();
     img.onload = () => {
-      console.log(`[useBase64Texture] Image loaded: ${img.width}x${img.height}`);
+      if (cancelled) return;
       const tex = new THREE.Texture(img);
       tex.needsUpdate = true;
       tex.colorSpace = THREE.SRGBColorSpace;
+      if (currentRef.current) currentRef.current.dispose();
+      currentRef.current = tex;
       setTexture(tex);
     };
     img.onerror = (e) => {
+      if (cancelled) return;
       console.error('[useBase64Texture] Failed to load texture from base64:', e);
       setTexture(null);
     };
     img.src = `data:image/png;base64,${base64Data}`;
 
     return () => {
-      if (texture) {
-        texture.dispose();
+      cancelled = true;
+      if (currentRef.current) {
+        currentRef.current.dispose();
+        currentRef.current = null;
       }
     };
   }, [base64Data]);
@@ -642,6 +662,9 @@ function MaterialSubmesh({ vertices, normals, uvs, materialDef, opacity }: Mater
       mat.needsUpdate = true;
     }
   }, [texture, materialDef.hasAlpha]);
+
+  useEffect(() => () => { geometry.dispose(); }, [geometry]);
+  useEffect(() => () => { material.dispose(); }, [material]);
 
   return <mesh ref={meshRef} geometry={geometry} material={material} />;
 }
@@ -929,6 +952,9 @@ function Skeleton3D({ data, color = '#f59e0b', opacity = 1.0, tubeRadius = 0.02,
     });
   }, [color, opacity, colorByBranchOrder]);
 
+  useEffect(() => () => { geometry?.dispose(); }, [geometry]);
+  useEffect(() => () => { material.dispose(); }, [material]);
+
   if (!geometry) return null;
 
   return <mesh geometry={geometry} material={material} />;
@@ -986,6 +1012,9 @@ function SkeletonPoints({ data, color = '#f59e0b', pointSize = 8, colorByBranchO
       sizeAttenuation: false,
     });
   }, [pointSize]);
+
+  useEffect(() => () => { geometry?.dispose(); }, [geometry]);
+  useEffect(() => () => { material.dispose(); }, [material]);
 
   // Return null if geometry couldn't be created
   if (!geometry) return null;
@@ -2305,48 +2334,33 @@ export default function PointCloudViewer({
 
     if (!cloud || !state || !state.cropMin || !state.cropMax) return;
 
-    // Filter points based on crop bounds (respecting cropInvert)
-    const newPositions: number[] = [];
-    const newColors: number[] = [];
-    const newIntensities: number[] = [];
+    // Filter points based on crop bounds (respecting cropInvert).
+    // Two-pass over typed arrays: count survivors, allocate at the exact
+    // size, fill in place. Avoids a multi-GB JS `number[]` intermediate
+    // on large clouds (see getDisplayData for the same shape and why).
+    const cm = state.cropMin!;
+    const cM = state.cropMax!;
+    const invert = state.cropInvert;
+    const erased = state.erasedIndices;
+    const src = cloud.data;
+    const tx = state.translation.x;
+    const ty = state.translation.y;
+    const tz = state.translation.z;
 
-    for (let i = 0; i < cloud.data.pointCount; i++) {
-      // Skip erased points
-      if (state.erasedIndices.has(i)) continue;
-
-      const x = cloud.data.positions[i * 3];
-      const y = cloud.data.positions[i * 3 + 1];
-      const z = cloud.data.positions[i * 3 + 2];
-
-      const isInside = (
-        x >= state.cropMin!.x && x <= state.cropMax!.x &&
-        y >= state.cropMin!.y && y <= state.cropMax!.y &&
-        z >= state.cropMin!.z && z <= state.cropMax!.z
+    let pointCount = 0;
+    for (let i = 0; i < src.pointCount; i++) {
+      if (erased.has(i)) continue;
+      const x = src.positions[i * 3];
+      const y = src.positions[i * 3 + 1];
+      const z = src.positions[i * 3 + 2];
+      const inside = (
+        x >= cm.x && x <= cM.x &&
+        y >= cm.y && y <= cM.y &&
+        z >= cm.z && z <= cM.z
       );
-
-      const keepPoint = state.cropInvert ? !isInside : isInside;
-
-      if (keepPoint) {
-        // Apply translation to the point
-        newPositions.push(
-          x + state.translation.x,
-          y + state.translation.y,
-          z + state.translation.z
-        );
-        if (cloud.data.colors) {
-          newColors.push(
-            cloud.data.colors[i * 3],
-            cloud.data.colors[i * 3 + 1],
-            cloud.data.colors[i * 3 + 2]
-          );
-        }
-        if (cloud.data.intensities) {
-          newIntensities.push(cloud.data.intensities[i]);
-        }
-      }
+      if (invert ? !inside : inside) pointCount++;
     }
 
-    const pointCount = newPositions.length / 3;
     if (pointCount === 0) {
       // All points would be removed - trigger delete confirmation
       setDeleteConfirm({
@@ -2358,17 +2372,48 @@ export default function PointCloudViewer({
       return;
     }
 
-    // Calculate new bounds
+    const newPositions = new Float32Array(pointCount * 3);
+    const newColors = src.colors ? new Float32Array(pointCount * 3) : null;
+    const newIntensities = src.intensities ? new Float32Array(pointCount) : null;
+
+    // Calculate new bounds in the same pass that fills the typed arrays.
     const min = new THREE.Vector3(Infinity, Infinity, Infinity);
     const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-    for (let i = 0; i < pointCount; i++) {
-      min.x = Math.min(min.x, newPositions[i * 3]);
-      min.y = Math.min(min.y, newPositions[i * 3 + 1]);
-      min.z = Math.min(min.z, newPositions[i * 3 + 2]);
-      max.x = Math.max(max.x, newPositions[i * 3]);
-      max.y = Math.max(max.y, newPositions[i * 3 + 1]);
-      max.z = Math.max(max.z, newPositions[i * 3 + 2]);
+
+    let w = 0;
+    for (let i = 0; i < src.pointCount; i++) {
+      if (erased.has(i)) continue;
+      const x = src.positions[i * 3];
+      const y = src.positions[i * 3 + 1];
+      const z = src.positions[i * 3 + 2];
+      const inside = (
+        x >= cm.x && x <= cM.x &&
+        y >= cm.y && y <= cM.y &&
+        z >= cm.z && z <= cM.z
+      );
+      if (!(invert ? !inside : inside)) continue;
+
+      const wx = x + tx;
+      const wy = y + ty;
+      const wz = z + tz;
+      newPositions[w * 3] = wx;
+      newPositions[w * 3 + 1] = wy;
+      newPositions[w * 3 + 2] = wz;
+      if (wx < min.x) min.x = wx; if (wx > max.x) max.x = wx;
+      if (wy < min.y) min.y = wy; if (wy > max.y) max.y = wy;
+      if (wz < min.z) min.z = wz; if (wz > max.z) max.z = wz;
+
+      if (newColors && src.colors) {
+        newColors[w * 3] = src.colors[i * 3];
+        newColors[w * 3 + 1] = src.colors[i * 3 + 1];
+        newColors[w * 3 + 2] = src.colors[i * 3 + 2];
+      }
+      if (newIntensities && src.intensities) {
+        newIntensities[w] = src.intensities[i];
+      }
+      w++;
     }
+
     const center = new THREE.Vector3(
       (min.x + max.x) / 2,
       (min.y + max.y) / 2,
@@ -2382,9 +2427,9 @@ export default function PointCloudViewer({
 
     // Create new point cloud data
     const newData: PointCloudData = {
-      positions: new Float32Array(newPositions),
-      colors: cloud.data.colors ? new Float32Array(newColors) : undefined,
-      intensities: cloud.data.intensities ? new Float32Array(newIntensities) : undefined,
+      positions: newPositions,
+      colors: newColors ?? undefined,
+      intensities: newIntensities ?? undefined,
       pointCount,
       bounds: { min, max, center, size },
       fileName: cloud.data.fileName,
@@ -2424,52 +2469,16 @@ export default function PointCloudViewer({
 
     if (!cloud || !state || state.erasedIndices.size === 0) return;
 
-    // Filter out erased points and apply translation
-    const newPositions: number[] = [];
-    const newColors: number[] = [];
-    const newIntensities: number[] = [];
-    const newScalarFields: Record<string, number[]> = {};
+    // Filter out erased points and apply translation. Two-pass over typed
+    // arrays to avoid the multi-GB JS `number[]` intermediate that the
+    // earlier push-based version produced on large clouds.
+    const erased = state.erasedIndices;
+    const src = cloud.data;
+    const tx = state.translation.x;
+    const ty = state.translation.y;
+    const tz = state.translation.z;
 
-    // Initialize scalar field arrays
-    if (cloud.data.scalarFields) {
-      for (const fieldName of Object.keys(cloud.data.scalarFields)) {
-        newScalarFields[fieldName] = [];
-      }
-    }
-
-    for (let i = 0; i < cloud.data.pointCount; i++) {
-      // Skip erased points
-      if (state.erasedIndices.has(i)) continue;
-
-      const x = cloud.data.positions[i * 3];
-      const y = cloud.data.positions[i * 3 + 1];
-      const z = cloud.data.positions[i * 3 + 2];
-
-      // Apply translation to the point
-      newPositions.push(
-        x + state.translation.x,
-        y + state.translation.y,
-        z + state.translation.z
-      );
-      if (cloud.data.colors) {
-        newColors.push(
-          cloud.data.colors[i * 3],
-          cloud.data.colors[i * 3 + 1],
-          cloud.data.colors[i * 3 + 2]
-        );
-      }
-      if (cloud.data.intensities) {
-        newIntensities.push(cloud.data.intensities[i]);
-      }
-      // Copy scalar field values
-      if (cloud.data.scalarFields) {
-        for (const [fieldName, field] of Object.entries(cloud.data.scalarFields)) {
-          newScalarFields[fieldName].push(field.values[i]);
-        }
-      }
-    }
-
-    const pointCount = newPositions.length / 3;
+    const pointCount = src.pointCount - erased.size;
     if (pointCount === 0) {
       // All points would be removed - trigger delete confirmation
       setDeleteConfirm({
@@ -2481,17 +2490,59 @@ export default function PointCloudViewer({
       return;
     }
 
-    // Calculate new bounds
+    const newPositions = new Float32Array(pointCount * 3);
+    const newColors = src.colors ? new Float32Array(pointCount * 3) : null;
+    const newIntensities = src.intensities ? new Float32Array(pointCount) : null;
+
+    // Allocate scalar-field typed arrays up front too; we'll track min/max
+    // while filling.
+    const scalarOut: Record<string, { arr: Float32Array; src: Float32Array; min: number; max: number }> = {};
+    if (src.scalarFields) {
+      for (const [name, field] of Object.entries(src.scalarFields)) {
+        scalarOut[name] = {
+          arr: new Float32Array(pointCount),
+          src: field.values,
+          min: Infinity,
+          max: -Infinity,
+        };
+      }
+    }
+
+    // Single pass: fill typed arrays and compute bounds simultaneously.
     const min = new THREE.Vector3(Infinity, Infinity, Infinity);
     const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-    for (let i = 0; i < pointCount; i++) {
-      min.x = Math.min(min.x, newPositions[i * 3]);
-      min.y = Math.min(min.y, newPositions[i * 3 + 1]);
-      min.z = Math.min(min.z, newPositions[i * 3 + 2]);
-      max.x = Math.max(max.x, newPositions[i * 3]);
-      max.y = Math.max(max.y, newPositions[i * 3 + 1]);
-      max.z = Math.max(max.z, newPositions[i * 3 + 2]);
+
+    let w = 0;
+    for (let i = 0; i < src.pointCount; i++) {
+      if (erased.has(i)) continue;
+      const wx = src.positions[i * 3] + tx;
+      const wy = src.positions[i * 3 + 1] + ty;
+      const wz = src.positions[i * 3 + 2] + tz;
+      newPositions[w * 3] = wx;
+      newPositions[w * 3 + 1] = wy;
+      newPositions[w * 3 + 2] = wz;
+      if (wx < min.x) min.x = wx; if (wx > max.x) max.x = wx;
+      if (wy < min.y) min.y = wy; if (wy > max.y) max.y = wy;
+      if (wz < min.z) min.z = wz; if (wz > max.z) max.z = wz;
+
+      if (newColors && src.colors) {
+        newColors[w * 3] = src.colors[i * 3];
+        newColors[w * 3 + 1] = src.colors[i * 3 + 1];
+        newColors[w * 3 + 2] = src.colors[i * 3 + 2];
+      }
+      if (newIntensities && src.intensities) {
+        newIntensities[w] = src.intensities[i];
+      }
+      for (const name in scalarOut) {
+        const out = scalarOut[name];
+        const v = out.src[i];
+        out.arr[w] = v;
+        if (v < out.min) out.min = v;
+        if (v > out.max) out.max = v;
+      }
+      w++;
     }
+
     const center = new THREE.Vector3(
       (min.x + max.x) / 2,
       (min.y + max.y) / 2,
@@ -2503,26 +2554,17 @@ export default function PointCloudViewer({
       max.z - min.z
     );
 
-    // Convert scalar fields to typed arrays with min/max
-    const finalScalarFields: Record<string, ScalarField> | undefined = cloud.data.scalarFields
+    const finalScalarFields: Record<string, ScalarField> | undefined = src.scalarFields
       ? Object.fromEntries(
-          Object.entries(newScalarFields).map(([name, values]) => {
-            const arr = new Float32Array(values);
-            let sfMin = Infinity, sfMax = -Infinity;
-            for (const v of arr) {
-              if (v < sfMin) sfMin = v;
-              if (v > sfMax) sfMax = v;
-            }
-            return [name, { values: arr, min: sfMin, max: sfMax }];
-          })
+          Object.entries(scalarOut).map(([name, out]) => [name, { values: out.arr, min: out.min, max: out.max }])
         )
       : undefined;
 
     // Create new point cloud data
     const newData: PointCloudData = {
-      positions: new Float32Array(newPositions),
-      colors: cloud.data.colors ? new Float32Array(newColors) : undefined,
-      intensities: cloud.data.intensities ? new Float32Array(newIntensities) : undefined,
+      positions: newPositions,
+      colors: newColors ?? undefined,
+      intensities: newIntensities ?? undefined,
       scalarFields: finalScalarFields,
       pointCount,
       bounds: { min, max, center, size },
@@ -2577,75 +2619,44 @@ export default function PointCloudViewer({
       cropInvert: false,
     };
 
-    // Filter points based on active filters
-    const newPositions: number[] = [];
-    const newColors: number[] = [];
-    const newIntensities: number[] = [];
-    const newScalarFields: Record<string, number[]> = {};
+    // Filter points based on active filters. Two-pass over typed arrays
+    // to avoid the multi-GB JS `number[]` intermediate that the earlier
+    // push-based version produced on large clouds.
+    const erased = state.erasedIndices;
+    const src = cloud.data;
+    const tx = state.translation.x;
+    const ty = state.translation.y;
+    const tz = state.translation.z;
 
-    // Initialize scalar field arrays
-    if (cloud.data.scalarFields) {
-      Object.keys(cloud.data.scalarFields).forEach(name => {
-        newScalarFields[name] = [];
-      });
-    }
-
-    for (let i = 0; i < cloud.data.pointCount; i++) {
-      // Skip erased points
-      if (state.erasedIndices.has(i)) continue;
-
-      const x = cloud.data.positions[i * 3];
-      const y = cloud.data.positions[i * 3 + 1];
-      const z = cloud.data.positions[i * 3 + 2];
-
-      // Check coordinate filters
-      if (filters.x.enabled && (x < filters.x.min || x > filters.x.max)) continue;
-      if (filters.y.enabled && (y < filters.y.min || y > filters.y.max)) continue;
-      if (filters.z.enabled && (z < filters.z.min || z > filters.z.max)) continue;
-
-      // Check intensity filter
-      if (filters.intensity?.enabled && cloud.data.intensities) {
-        const intensity = cloud.data.intensities[i];
-        if (intensity < filters.intensity.min || intensity > filters.intensity.max) continue;
+    // Inline keep-predicate; called twice (count + fill) and we want the
+    // JIT to inline it both times.
+    const keep = (i: number): boolean => {
+      if (erased.has(i)) return false;
+      const x = src.positions[i * 3];
+      const y = src.positions[i * 3 + 1];
+      const z = src.positions[i * 3 + 2];
+      if (filters.x.enabled && (x < filters.x.min || x > filters.x.max)) return false;
+      if (filters.y.enabled && (y < filters.y.min || y > filters.y.max)) return false;
+      if (filters.z.enabled && (z < filters.z.min || z > filters.z.max)) return false;
+      if (filters.intensity?.enabled && src.intensities) {
+        const v = src.intensities[i];
+        if (v < filters.intensity.min || v > filters.intensity.max) return false;
       }
-
-      // Check scalar field filters
-      let passScalar = true;
-      for (const [name, sf] of Object.entries(filters.scalarFields)) {
-        if (sf.enabled && cloud.data.scalarFields?.[name]) {
-          const v = cloud.data.scalarFields[name].values[i];
-          if (v < sf.min || v > sf.max) {
-            passScalar = false;
-            break;
-          }
+      for (const name in filters.scalarFields) {
+        const sf = filters.scalarFields[name];
+        if (sf.enabled && src.scalarFields?.[name]) {
+          const v = src.scalarFields[name].values[i];
+          if (v < sf.min || v > sf.max) return false;
         }
       }
-      if (!passScalar) continue;
+      return true;
+    };
 
-      // Point passed all filters - keep it (apply translation)
-      newPositions.push(
-        x + state.translation.x,
-        y + state.translation.y,
-        z + state.translation.z
-      );
-      if (cloud.data.colors) {
-        newColors.push(
-          cloud.data.colors[i * 3],
-          cloud.data.colors[i * 3 + 1],
-          cloud.data.colors[i * 3 + 2]
-        );
-      }
-      if (cloud.data.intensities) {
-        newIntensities.push(cloud.data.intensities[i]);
-      }
-      if (cloud.data.scalarFields) {
-        Object.entries(cloud.data.scalarFields).forEach(([name, field]) => {
-          newScalarFields[name].push(field.values[i]);
-        });
-      }
+    let pointCount = 0;
+    for (let i = 0; i < src.pointCount; i++) {
+      if (keep(i)) pointCount++;
     }
 
-    const pointCount = newPositions.length / 3;
     if (pointCount === 0) {
       // All points would be removed - trigger delete confirmation
       setDeleteConfirm({
@@ -2656,17 +2667,55 @@ export default function PointCloudViewer({
       return;
     }
 
-    // Calculate new bounds
+    const newPositions = new Float32Array(pointCount * 3);
+    const newColors = src.colors ? new Float32Array(pointCount * 3) : null;
+    const newIntensities = src.intensities ? new Float32Array(pointCount) : null;
+    const scalarOut: Record<string, { arr: Float32Array; src: Float32Array; min: number; max: number }> = {};
+    if (src.scalarFields) {
+      for (const [name, field] of Object.entries(src.scalarFields)) {
+        scalarOut[name] = {
+          arr: new Float32Array(pointCount),
+          src: field.values,
+          min: Infinity,
+          max: -Infinity,
+        };
+      }
+    }
+
     const min = new THREE.Vector3(Infinity, Infinity, Infinity);
     const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-    for (let i = 0; i < pointCount; i++) {
-      min.x = Math.min(min.x, newPositions[i * 3]);
-      min.y = Math.min(min.y, newPositions[i * 3 + 1]);
-      min.z = Math.min(min.z, newPositions[i * 3 + 2]);
-      max.x = Math.max(max.x, newPositions[i * 3]);
-      max.y = Math.max(max.y, newPositions[i * 3 + 1]);
-      max.z = Math.max(max.z, newPositions[i * 3 + 2]);
+
+    let w = 0;
+    for (let i = 0; i < src.pointCount; i++) {
+      if (!keep(i)) continue;
+      const wx = src.positions[i * 3] + tx;
+      const wy = src.positions[i * 3 + 1] + ty;
+      const wz = src.positions[i * 3 + 2] + tz;
+      newPositions[w * 3] = wx;
+      newPositions[w * 3 + 1] = wy;
+      newPositions[w * 3 + 2] = wz;
+      if (wx < min.x) min.x = wx; if (wx > max.x) max.x = wx;
+      if (wy < min.y) min.y = wy; if (wy > max.y) max.y = wy;
+      if (wz < min.z) min.z = wz; if (wz > max.z) max.z = wz;
+
+      if (newColors && src.colors) {
+        newColors[w * 3] = src.colors[i * 3];
+        newColors[w * 3 + 1] = src.colors[i * 3 + 1];
+        newColors[w * 3 + 2] = src.colors[i * 3 + 2];
+      }
+      if (newIntensities && src.intensities) {
+        newIntensities[w] = src.intensities[i];
+      }
+      for (const name in scalarOut) {
+        const out = scalarOut[name];
+        const v = out.src[i];
+        out.arr[w] = v;
+        if (v < out.min) out.min = v;
+        if (v > out.max) out.max = v;
+      }
+      w++;
     }
+
     const center = new THREE.Vector3(
       (min.x + max.x) / 2,
       (min.y + max.y) / 2,
@@ -2678,23 +2727,17 @@ export default function PointCloudViewer({
       max.z - min.z
     );
 
-    // Build new scalar fields with recalculated min/max
     const newScalarFieldsData: Record<string, { values: Float32Array; min: number; max: number }> = {};
-    Object.entries(newScalarFields).forEach(([name, values]) => {
-      const arr = new Float32Array(values);
-      let sfMin = Infinity, sfMax = -Infinity;
-      for (let i = 0; i < arr.length; i++) {
-        sfMin = Math.min(sfMin, arr[i]);
-        sfMax = Math.max(sfMax, arr[i]);
-      }
-      newScalarFieldsData[name] = { values: arr, min: sfMin, max: sfMax };
-    });
+    for (const name in scalarOut) {
+      const out = scalarOut[name];
+      newScalarFieldsData[name] = { values: out.arr, min: out.min, max: out.max };
+    }
 
     // Create new point cloud data
     const newData: PointCloudData = {
-      positions: new Float32Array(newPositions),
-      colors: cloud.data.colors ? new Float32Array(newColors) : undefined,
-      intensities: cloud.data.intensities ? new Float32Array(newIntensities) : undefined,
+      positions: newPositions,
+      colors: newColors ?? undefined,
+      intensities: newIntensities ?? undefined,
       scalarFields: Object.keys(newScalarFieldsData).length > 0 ? newScalarFieldsData : undefined,
       pointCount,
       bounds: { min, max, center, size },
@@ -3355,42 +3398,42 @@ export default function PointCloudViewer({
     };
   }, [selectedMeshId, selectedSkeletonId, selectedIds, meshes, skeletons, clouds, meshPositions, skeletonPositions, getEditState]);
 
-  // Apply erased points permanently - returns new PointCloudData with points removed and bounds recalculated
+  // Apply erased points permanently - returns new PointCloudData with
+  // points removed and bounds recalculated. Two-pass typed-array fill so
+  // we don't build a multi-GB JS `number[]` intermediate on large clouds.
   const applyErasedPoints = useCallback((data: PointCloudData, erasedIndices: Set<number>): PointCloudData => {
     if (erasedIndices.size === 0) return data;
 
-    const newPositions: number[] = [];
-    const newColors: number[] = [];
-    const newIntensities: number[] = [];
+    const pointCount = data.pointCount - erasedIndices.size;
+    const newPositions = new Float32Array(pointCount * 3);
+    const newColors = data.colors ? new Float32Array(pointCount * 3) : null;
+    const newIntensities = data.intensities ? new Float32Array(pointCount) : null;
 
-    for (let i = 0; i < data.pointCount; i++) {
-      if (!erasedIndices.has(i)) {
-        const i3 = i * 3;
-        newPositions.push(data.positions[i3], data.positions[i3 + 1], data.positions[i3 + 2]);
-        if (data.colors) {
-          newColors.push(data.colors[i3], data.colors[i3 + 1], data.colors[i3 + 2]);
-        }
-        if (data.intensities) {
-          newIntensities.push(data.intensities[i]);
-        }
-      }
-    }
-
-    const pointCount = newPositions.length / 3;
-
-    // Recalculate bounds
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
-    for (let i = 0; i < pointCount; i++) {
+    let w = 0;
+    for (let i = 0; i < data.pointCount; i++) {
+      if (erasedIndices.has(i)) continue;
       const i3 = i * 3;
-      const x = newPositions[i3], y = newPositions[i3 + 1], z = newPositions[i3 + 2];
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (z < minZ) minZ = z;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-      if (z > maxZ) maxZ = z;
+      const x = data.positions[i3];
+      const y = data.positions[i3 + 1];
+      const z = data.positions[i3 + 2];
+      newPositions[w * 3] = x;
+      newPositions[w * 3 + 1] = y;
+      newPositions[w * 3 + 2] = z;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      if (newColors && data.colors) {
+        newColors[w * 3] = data.colors[i3];
+        newColors[w * 3 + 1] = data.colors[i3 + 1];
+        newColors[w * 3 + 2] = data.colors[i3 + 2];
+      }
+      if (newIntensities && data.intensities) {
+        newIntensities[w] = data.intensities[i];
+      }
+      w++;
     }
 
     // Handle empty point cloud
@@ -3401,9 +3444,9 @@ export default function PointCloudViewer({
 
     return {
       ...data,
-      positions: new Float32Array(newPositions),
-      colors: data.colors ? new Float32Array(newColors) : undefined,
-      intensities: data.intensities ? new Float32Array(newIntensities) : undefined,
+      positions: newPositions,
+      colors: newColors ?? undefined,
+      intensities: newIntensities ?? undefined,
       pointCount,
       bounds: {
         min: new THREE.Vector3(minX, minY, minZ),
@@ -3426,67 +3469,107 @@ export default function PointCloudViewer({
     let intensities = data.intensities;
     let pointCount = data.pointCount;
 
-    // Apply erasing first (uses original indices)
+    // Apply erasing first (uses original indices).
+    //
+    // Two-pass over typed arrays: count surviving points, allocate
+    // Float32Arrays directly at the right size, then fill. The earlier
+    // implementation pushed onto JS `number[]` arrays and then did
+    // `new Float32Array(jsArr)`, which keeps both alive at once — V8 stores
+    // them as PACKED_DOUBLE_ELEMENTS (8 bytes/entry), so on a 50M-point
+    // cloud the JS arrays alone exceed 3 GB and OOM'd the renderer.
     if (editState.erasedIndices && editState.erasedIndices.size > 0) {
-      const newPositions: number[] = [];
-      const newColors: number[] = [];
-      const newIntensities: number[] = [];
-
-      for (let i = 0; i < data.pointCount; i++) {
-        if (!editState.erasedIndices.has(i)) {
-          newPositions.push(data.positions[i * 3], data.positions[i * 3 + 1], data.positions[i * 3 + 2]);
-          if (data.colors) {
-            newColors.push(data.colors[i * 3], data.colors[i * 3 + 1], data.colors[i * 3 + 2]);
-          }
-          if (data.intensities) {
-            newIntensities.push(data.intensities[i]);
-          }
-        }
+      const erased = editState.erasedIndices;
+      const src = data;
+      let kept = 0;
+      for (let i = 0; i < src.pointCount; i++) {
+        if (!erased.has(i)) kept++;
       }
 
-      pointCount = newPositions.length / 3;
-      positions = new Float32Array(newPositions);
-      if (data.colors) colors = new Float32Array(newColors);
-      if (data.intensities) intensities = new Float32Array(newIntensities);
+      const newPositions = new Float32Array(kept * 3);
+      const newColors = src.colors ? new Float32Array(kept * 3) : null;
+      const newIntensities = src.intensities ? new Float32Array(kept) : null;
+
+      let w = 0;
+      for (let i = 0; i < src.pointCount; i++) {
+        if (erased.has(i)) continue;
+        newPositions[w * 3] = src.positions[i * 3];
+        newPositions[w * 3 + 1] = src.positions[i * 3 + 1];
+        newPositions[w * 3 + 2] = src.positions[i * 3 + 2];
+        if (newColors && src.colors) {
+          newColors[w * 3] = src.colors[i * 3];
+          newColors[w * 3 + 1] = src.colors[i * 3 + 1];
+          newColors[w * 3 + 2] = src.colors[i * 3 + 2];
+        }
+        if (newIntensities && src.intensities) {
+          newIntensities[w] = src.intensities[i];
+        }
+        w++;
+      }
+
+      pointCount = kept;
+      positions = newPositions;
+      if (newColors) colors = newColors;
+      if (newIntensities) intensities = newIntensities;
     }
 
-    // Apply crop preview (when in crop mode)
-    // Crop bounds are stored in LOCAL coordinates (relative to untranslated object)
-    // This way the crop moves with the object when translated
-    // IMPORTANT: Use the already-erased positions/colors/intensities, not original data
+    // Apply crop preview (when in crop mode). Two-pass for the same reason
+    // as the erase branch above: a JS `number[]` of 3·N doubles for a 50M
+    // cloud is multi-GB and OOMs the renderer the moment you click Crop.
+    //
+    // Crop bounds are stored in LOCAL coordinates (relative to untranslated
+    // object) so the crop moves with the object. Uses the already-erased
+    // positions/colors/intensities, not original data.
     if (showCropPreview && editState.cropMin && editState.cropMax) {
-      const newPositions: number[] = [];
-      const newColors: number[] = [];
-      const newIntensities: number[] = [];
+      const cm = editState.cropMin;
+      const cM = editState.cropMax;
+      const invert = editState.cropInvert;
 
+      let kept = 0;
       for (let i = 0; i < pointCount; i++) {
         const x = positions[i * 3];
         const y = positions[i * 3 + 1];
         const z = positions[i * 3 + 2];
-
-        const isInside = (
-          x >= editState.cropMin.x && x <= editState.cropMax.x &&
-          y >= editState.cropMin.y && y <= editState.cropMax.y &&
-          z >= editState.cropMin.z && z <= editState.cropMax.z
+        const inside = (
+          x >= cm.x && x <= cM.x &&
+          y >= cm.y && y <= cM.y &&
+          z >= cm.z && z <= cM.z
         );
-
-        const keepPoint = editState.cropInvert ? !isInside : isInside;
-
-        if (keepPoint) {
-          newPositions.push(x, y, z);
-          if (colors) {
-            newColors.push(colors[i * 3], colors[i * 3 + 1], colors[i * 3 + 2]);
-          }
-          if (intensities) {
-            newIntensities.push(intensities[i]);
-          }
-        }
+        if (invert ? !inside : inside) kept++;
       }
 
-      pointCount = newPositions.length / 3;
-      positions = new Float32Array(newPositions);
-      if (colors) colors = new Float32Array(newColors);
-      if (intensities) intensities = new Float32Array(newIntensities);
+      const newPositions = new Float32Array(kept * 3);
+      const newColors = colors ? new Float32Array(kept * 3) : null;
+      const newIntensities = intensities ? new Float32Array(kept) : null;
+
+      let w = 0;
+      for (let i = 0; i < pointCount; i++) {
+        const x = positions[i * 3];
+        const y = positions[i * 3 + 1];
+        const z = positions[i * 3 + 2];
+        const inside = (
+          x >= cm.x && x <= cM.x &&
+          y >= cm.y && y <= cM.y &&
+          z >= cm.z && z <= cM.z
+        );
+        if (!(invert ? !inside : inside)) continue;
+        newPositions[w * 3] = x;
+        newPositions[w * 3 + 1] = y;
+        newPositions[w * 3 + 2] = z;
+        if (newColors && colors) {
+          newColors[w * 3] = colors[i * 3];
+          newColors[w * 3 + 1] = colors[i * 3 + 1];
+          newColors[w * 3 + 2] = colors[i * 3 + 2];
+        }
+        if (newIntensities && intensities) {
+          newIntensities[w] = intensities[i];
+        }
+        w++;
+      }
+
+      pointCount = kept;
+      positions = newPositions;
+      if (newColors) colors = newColors;
+      if (newIntensities) intensities = newIntensities;
     }
 
     // Apply translation

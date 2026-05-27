@@ -31,3 +31,7 @@ src/renderer/assets/splash
 
 # Local-only sample datasets — not shipped, not referenced by tests or docs
 example-datasets/
+
+# Local scratch — heap snapshots, generated large fixtures
+tmp/
+*.heapsnapshot

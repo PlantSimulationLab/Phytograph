@@ -1,4 +1,4 @@
-import { Suspense, useMemo } from 'react';
+import { Suspense, useEffect, useMemo } from 'react';
 import { useLoader } from '@react-three/fiber';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import * as THREE from 'three';
@@ -17,7 +17,11 @@ function ScannerObject({ color, selected }: { color: string; selected: boolean }
   const obj = useLoader(OBJLoader, scannerObjUrl);
 
   // Clone the loaded scene so each marker gets its own material instance.
-  const scene = useMemo(() => {
+  // We track the per-marker materials we create so we can dispose them when
+  // color/selected changes (which builds a fresh cloned scene) or on unmount.
+  // The shared geometry comes from the cached OBJLoader result and must not
+  // be disposed here.
+  const { scene, materials } = useMemo(() => {
     const cloned = obj.clone(true);
     // Darken the scan's swatch color for the body of the marker — bright
     // Tailwind-500s wash out against dense, bright-green foliage scans.
@@ -31,22 +35,27 @@ function ScannerObject({ color, selected }: { color: string; selected: boolean }
     const hsl = { h: 0, s: 0, l: 0 };
     new THREE.Color(color).getHSL(hsl);
     const bodyColor = new THREE.Color().setHSL(hsl.h, hsl.s, Math.min(hsl.l, 0.30));
+    const mats: THREE.Material[] = [];
     cloned.traverse((child) => {
       const mesh = child as THREE.Mesh;
       if (mesh.isMesh) {
-        mesh.material = new THREE.MeshStandardMaterial({
+        const mat = new THREE.MeshStandardMaterial({
           color: bodyColor,
           metalness: 0.5,
           roughness: 0.4,
           emissive: selected ? new THREE.Color(color) : new THREE.Color(0x000000),
           emissiveIntensity: selected ? 0.55 : 0,
         });
+        mesh.material = mat;
+        mats.push(mat);
         mesh.castShadow = false;
         mesh.receiveShadow = false;
       }
     });
-    return cloned;
+    return { scene: cloned, materials: mats };
   }, [obj, color, selected]);
+
+  useEffect(() => () => { materials.forEach((m) => m.dispose()); }, [materials]);
 
   return <primitive object={scene} />;
 }
