@@ -17,8 +17,8 @@ The IPC bridge is intentionally narrow — only `dialog`, `fs`, `store`, `backen
 ### Port wiring (kept in `src/shared/constants.ts`)
 
 - Renderer dev server: **1427**
-- Backend prod port: **8008** — the renderer **always** hits 8008 via `getBackendUrl()` in `src/renderer/utils/backendApi.ts`, in both dev and packaged builds. `main.ts` calls `startBackend()` in dev too, so the supervised PyInstaller binary on 8008 is what serves requests by default.
-- Backend dev port: **8007** — only used if you want to iterate on Python code without rebuilding the sidecar. Run `uvicorn main:app --port 8007` manually; note the renderer won't automatically pick this up (you'd need to change `getBackendUrl()` to test against 8007).
+- Backend port: **8008** — the renderer **always** hits 8008 via `getBackendUrl()` in `src/renderer/utils/backendApi.ts`, in both dev and packaged builds. In dev, `scripts/dev.mjs` spawns `uvicorn --reload` (using `backend-api/venv`) on 8008; in packaged builds the supervised PyInstaller bundle takes that port. The supervisor in `src/main/backend.ts` checks `PHYTOGRAPH_DEV_BACKEND=1` (set by `scripts/dev.mjs` when uvicorn is running) and stands down so it doesn't clobber the dev backend.
+- Backend port: **8007** — legacy constant in `src/shared/constants.ts`, unused. Kept for now to avoid a separate migration.
 
 ### Version-lock contract
 
@@ -49,7 +49,7 @@ npm run dev          # builds main+preload once, starts Vite on 1427, launches E
 npm run typecheck    # tsc --noEmit
 ```
 
-Edits to `src/renderer/` hot-reload. Edits to `src/main/` or `src/preload/` require restarting `npm run dev`. Edits to Python require rebuilding the sidecar (`npm run build:backend`) OR running uvicorn separately and pointing the renderer at it.
+Edits to `src/renderer/` hot-reload. Edits to `src/main/` or `src/preload/` require restarting `npm run dev`. Edits to `backend-api/*.py` hot-reload via uvicorn's `--reload` (spawned automatically by `scripts/dev.mjs` when `backend-api/venv` exists). The PyInstaller sidecar is only rebuilt for packaged installers (`npm run build:backend`) — not part of the dev loop. Edits to native libs (open3d/pyhelios shared objects, anything outside Python source) still require a venv rebuild.
 
 ### Build
 

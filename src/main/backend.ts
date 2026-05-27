@@ -67,6 +67,20 @@ function killPort(port: number): void {
 export async function startBackend(): Promise<void> {
   console.log(`Expected backend version: ${EXPECTED_BACKEND_VERSION}`);
 
+  // PHYTOGRAPH_DEV_BACKEND=1 is set by scripts/dev.mjs when it has spawned
+  // uvicorn --reload against backend-api/venv. In that case the supervisor
+  // must stand down — killing the port and respawning the bundle would
+  // defeat the whole point of hot-reload.
+  if (process.env.PHYTOGRAPH_DEV_BACKEND === '1') {
+    const v = await fetchVersion();
+    if (v) {
+      console.log(`Dev backend (uvicorn --reload) running v${v} on port ${BACKEND_PORT_PROD}; supervisor standing down.`);
+    } else {
+      console.warn(`PHYTOGRAPH_DEV_BACKEND=1 set but nothing answering on port ${BACKEND_PORT_PROD}. Did uvicorn fail to start?`);
+    }
+    return;
+  }
+
   const existingVersion = await fetchVersion();
   let shouldStart = true;
 

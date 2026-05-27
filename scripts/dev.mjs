@@ -1,6 +1,13 @@
 // Dev runner: build main + preload once, start Vite for renderer,
 // wait for it to listen, then launch Electron pointing at the dev URL.
 // Restarts Electron when main/preload sources change.
+//
+// Also spawns uvicorn with --reload against backend-api/venv on the same port
+// (8008) the supervised PyInstaller bundle would normally use, so Python edits
+// hot-reload in ~1s without a sidecar rebuild. Electron is told via the
+// PHYTOGRAPH_DEV_BACKEND env var to skip its own backend supervision when this
+// is in effect. Falls back to today's behavior (supervised bundle) if the
+// backend venv isn't present.
 
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -13,6 +20,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
 const RENDERER_URL = 'http://localhost:1427';
+const BACKEND_URL = 'http://127.0.0.1:8008/version';
+const isWin = process.platform === 'win32';
+const backendDir = join(root, 'backend-api');
+const venvPython = isWin
+  ? join(backendDir, 'venv', 'Scripts', 'python.exe')
+  : join(backendDir, 'venv', 'bin', 'python');
 
 function run(cmd, args, opts = {}) {
   return spawn(cmd, args, { stdio: 'inherit', cwd: root, shell: process.platform === 'win32', ...opts });
@@ -29,25 +42,65 @@ async function runOnce(cmd, args) {
   await runOnce('npx', ['vite', 'build', '--config', 'vite.preload.config.ts']);
   await runOnce('npx', ['vite', 'build', '--config', 'vite.main.config.ts']);
 
+  let uvicorn = null;
+  const electronEnv = { ...process.env };
+
+  if (existsSync(venvPython)) {
+    console.log('[dev] starting uvicorn --reload (backend) on port 8008...');
+    // --reload-dir restricts watching to backend-api/ so edits under node_modules
+    // or resources/ don't trigger restarts. uvicorn uses watchfiles when
+    // available; it's installed in backend-api/venv.
+    uvicorn = spawn(
+      venvPython,
+      ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8008',
+       '--reload', '--reload-dir', '.'],
+      { stdio: 'inherit', cwd: backendDir, env: process.env },
+    );
+    uvicorn.on('exit', (code, signal) => {
+      console.log(`[dev] uvicorn exited (code=${code}, signal=${signal})`);
+    });
+    electronEnv.PHYTOGRAPH_DEV_BACKEND = '1';
+  } else {
+    console.log(
+      `[dev] backend venv not found at ${venvPython} — ` +
+      'falling back to the supervised PyInstaller bundle. ' +
+      'Create backend-api/venv to enable Python hot-reload.',
+    );
+  }
+
   console.log('[dev] starting Vite renderer dev server...');
   const vite = run('npx', ['vite', '--config', 'vite.renderer.config.ts']);
 
   console.log(`[dev] waiting for ${RENDERER_URL}...`);
   await waitOn({ resources: [RENDERER_URL], timeout: 60_000, interval: 200, validateStatus: () => true });
 
-  const electronBin = join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'electron.cmd' : 'electron');
+  if (uvicorn) {
+    console.log(`[dev] waiting for ${BACKEND_URL}...`);
+    // Use http-get: wait-on's default `http` probe sends HEAD, which FastAPI
+    // doesn't auto-register for GET routes and answers with a noisy 405.
+    await waitOn({
+      resources: [`http-get://127.0.0.1:8008/version`],
+      timeout: 120_000,
+      interval: 300,
+      validateStatus: (status) => status === 200,
+    });
+  }
+
+  const electronBin = join(root, 'node_modules', '.bin', isWin ? 'electron.cmd' : 'electron');
   if (!existsSync(electronBin)) {
     console.error('[dev] electron not installed. Run `npm install` first.');
     vite.kill('SIGTERM');
+    if (uvicorn) try { uvicorn.kill('SIGTERM'); } catch {}
     process.exit(1);
   }
 
   console.log('[dev] launching Electron...');
-  const electron = run(electronBin, ['.']);
+  const electron = spawn(electronBin, ['.'], { stdio: 'inherit', cwd: root, shell: isWin, env: electronEnv });
 
   const shutdown = () => {
     try { electron.kill('SIGTERM'); } catch {}
     try { vite.kill('SIGTERM'); } catch {}
+    if (uvicorn) try { uvicorn.kill('SIGTERM'); } catch {}
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

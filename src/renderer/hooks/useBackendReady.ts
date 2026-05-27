@@ -16,7 +16,12 @@ export interface BackendReadyState {
 // Polls GET /version until the backend answers. Cold-start of the bundled
 // PyInstaller backend is 10-40s (open3d + pyhelios + uvicorn init), so we
 // keep retrying for up to `timeoutMs` before declaring failure.
-export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000): BackendReadyState {
+//
+// `minSplashMs` is a floor on how long the splash stays up even if the
+// backend responds instantly (which happens in dev when uvicorn is already
+// hot, or on warm restarts). Without it the splash flashes for a frame
+// and looks like a render glitch.
+export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000, minSplashMs = 2500): BackendReadyState {
   // `retryNonce` re-runs the polling effect when the splash's Retry button
   // fires. We bump it instead of pulling polling logic out of useEffect so the
   // cleanup story (cancellation, timer teardown) stays in one place.
@@ -43,7 +48,19 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000): Backend
         const res = await fetch(`${baseUrl}/version`, { signal: AbortSignal.timeout(2000) });
         if (res.ok) {
           const json = (await res.json()) as { version?: string };
-          if (!cancelled) setState({ status: 'ready', elapsedMs, version: json.version });
+          // Honour the minimum splash time. If the backend was already warm
+          // (typical in dev or on a warm restart) we'd otherwise unmount the
+          // splash within a single frame.
+          const remaining = Math.max(0, minSplashMs - elapsedMs);
+          if (remaining > 0) {
+            setTimeout(() => {
+              if (!cancelled) {
+                setState({ status: 'ready', elapsedMs: Date.now() - startedAt.current, version: json.version });
+              }
+            }, remaining);
+          } else if (!cancelled) {
+            setState({ status: 'ready', elapsedMs, version: json.version });
+          }
           return;
         }
       } catch {
@@ -67,7 +84,7 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000): Backend
     return () => {
       cancelled = true;
     };
-  }, [timeoutMs, intervalMs, retryNonce]);
+  }, [timeoutMs, intervalMs, minSplashMs, retryNonce]);
 
   const retry = useCallback(() => {
     setRetryNonce((n) => n + 1);

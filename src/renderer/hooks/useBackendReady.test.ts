@@ -25,7 +25,8 @@ describe('useBackendReady', () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ version: '0.2.0' }), { status: 200 }),
     );
-    const { result } = renderHook(() => useBackendReady());
+    // minSplashMs=0 so the test doesn't need to wait out the splash floor.
+    const { result } = renderHook(() => useBackendReady(120_000, 1000, 0));
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(result.current.version).toBe('0.2.0');
   });
@@ -37,7 +38,7 @@ describe('useBackendReady', () => {
       if (calls < 3) throw new Error('connection refused');
       return new Response(JSON.stringify({ version: '0.2.0' }), { status: 200 });
     });
-    const { result } = renderHook(() => useBackendReady(120_000, 10));
+    const { result } = renderHook(() => useBackendReady(120_000, 10, 0));
     // Drive the setTimeout-based polling forward.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(50);
@@ -66,7 +67,7 @@ describe('useBackendReady', () => {
       }
       return new Response(JSON.stringify({ version: '0.2.0' }), { status: 200 });
     });
-    const { result } = renderHook(() => useBackendReady(60_000, 10));
+    const { result } = renderHook(() => useBackendReady(60_000, 10, 0));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(50);
     });
@@ -82,7 +83,7 @@ describe('useBackendReady', () => {
       }
       return new Response(JSON.stringify({ version: '0.2.0' }), { status: 200 });
     });
-    const { result } = renderHook(() => useBackendReady(50, 5));
+    const { result } = renderHook(() => useBackendReady(50, 5, 0));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(200);
     });
