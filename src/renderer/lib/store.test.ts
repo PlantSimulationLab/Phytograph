@@ -53,13 +53,29 @@ describe('store tags', () => {
 describe('store settings', () => {
   it('returns default light theme when nothing is stored', async () => {
     const settings = await getSettings();
-    expect(settings).toEqual({ theme: 'light' });
+    expect(settings).toEqual({ theme: 'light', triangulateMaxPoints: 5_000_000 });
   });
 
   it('updateSettings merges and persists', async () => {
     await updateSettings({ theme: 'dark' });
     const settings = await getSettings();
     expect(settings.theme).toBe('dark');
+  });
+
+  it('updateSettings persists triangulateMaxPoints', async () => {
+    await updateSettings({ triangulateMaxPoints: 2_000_000 });
+    const settings = await getSettings();
+    expect(settings.triangulateMaxPoints).toBe(2_000_000);
+    expect(settings.theme).toBe('light'); // untouched
+  });
+
+  it('a theme-only update preserves the triangulate cap', async () => {
+    // Updating one field must not wipe the other.
+    await updateSettings({ triangulateMaxPoints: 1_234_000 });
+    await updateSettings({ theme: 'dark' });
+    const settings = await getSettings();
+    expect(settings.theme).toBe('dark');
+    expect(settings.triangulateMaxPoints).toBe(1_234_000);
   });
 });
 
@@ -96,7 +112,7 @@ describe('store export/import', () => {
     const json = await exportData();
     const parsed = JSON.parse(json);
     expect(parsed.tags).toEqual([]);
-    expect(parsed.settings).toEqual({ theme: 'light' });
+    expect(parsed.settings).toEqual({ theme: 'light', triangulateMaxPoints: 5_000_000 });
   });
 });
 

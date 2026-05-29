@@ -27,7 +27,7 @@ def unicode_to_ascii(s: str) -> str:
     return result
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.2"
+BACKEND_VERSION = "0.3.3"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1259,9 +1259,38 @@ async def fit_prospect_model(request: ProspectFitRequest):
 
 # ==================== POINT CLOUD TRIANGULATION ====================
 
+class PointSource(BaseModel):
+    """Tell a downstream endpoint to read points from a file on disk instead
+    of an inline `points` array.
+
+    Octree-backed clouds keep no positions in the renderer (the geometry lives
+    only in the on-disk Potree octree, streamed to the GPU), so skeleton /
+    triangulate / c2m / icp / export read from the original source file here
+    — exactly as the M3 crop path does. The backend has no octree reader; the
+    source file is always the point of truth.
+
+    Resolved by `_read_points_from_source` (defined later, alongside the other
+    point-cloud loaders it reuses).
+    """
+    source_path: str
+    ascii_format: Optional[str] = None
+    # Stride-downsample cap. None = full resolution. Stride (not reservoir)
+    # preserves spatial uniformity, which skeleton/triangulation depend on.
+    max_points: Optional[int] = None
+    # [tx, ty, tz] ADDED to every point — matches the renderer's getDisplayData
+    # (`positions[i*3] + tx`) and `_filtered_xyz_to_las` (`xs + tx`).
+    translation: Optional[List[float]] = None
+    want_colors: bool = False
+
+
 class TriangulationRequest(BaseModel):
     """Request model for point cloud triangulation"""
-    points: List[List[float]]  # [[x, y, z], ...]
+    # Inline points for flat clouds; octree clouds send `source` instead.
+    points: Optional[List[List[float]]] = None
+    # Read points from a file on disk (octree-backed clouds). The renderer sets
+    # `source.max_points` from the global "triangulate max points" setting to
+    # bound open3d's memory on huge clouds.
+    source: Optional[PointSource] = None
     method: str = "ball_pivoting"  # "ball_pivoting", "poisson", "alpha_shape", "delaunay"
     # Ball pivoting parameters
     radii: Optional[List[float]] = None  # Ball radii for ball pivoting (auto if None)
@@ -1286,6 +1315,10 @@ class TriangulationResponse(BaseModel):
     num_vertices: int
     method_used: str
     error: Optional[str] = None
+    # Number of input points actually triangulated. For octree clouds this can
+    # be less than the cloud's full count when the `source.max_points` cap
+    # downsampled — the renderer compares it to warn the user.
+    points_used: Optional[int] = None
 
 
 @app.post("/api/triangulate", response_model=TriangulationResponse)
@@ -1304,7 +1337,11 @@ async def triangulate_point_cloud(request: TriangulationRequest):
     try:
         import open3d as o3d
 
-        points = np.array(request.points, dtype=np.float64)
+        if request.source is not None:
+            points, _, _ = _read_points_from_source(request.source)
+        else:
+            points = np.array(request.points or [], dtype=np.float64)
+        points_used = int(len(points))
 
         if len(points) < 3:
             return TriangulationResponse(
@@ -1314,6 +1351,7 @@ async def triangulate_point_cloud(request: TriangulationRequest):
                 num_triangles=0,
                 num_vertices=0,
                 method_used=request.method,
+                points_used=points_used,
                 error="Need at least 3 points for triangulation"
             )
 
@@ -1452,7 +1490,8 @@ async def triangulate_point_cloud(request: TriangulationRequest):
             surface_area=float(surface_area),
             num_triangles=len(triangles),
             num_vertices=len(vertices),
-            method_used=method_used
+            method_used=method_used,
+            points_used=points_used
         )
 
     except ImportError:
@@ -2004,7 +2043,13 @@ async def sample_mesh(request: MeshSampleRequest):
 
 class SkeletonRequest(BaseModel):
     """Request model for tree skeleton extraction using BFS graph-based algorithm"""
-    points: List[List[float]]  # [[x, y, z], ...]
+    # Inline points for flat clouds. Optional because octree-backed clouds send
+    # `source` instead (their renderer positions buffer is empty).
+    points: Optional[List[List[float]]] = None
+    # Read points from a file on disk (octree-backed clouds). Mutually exclusive
+    # with `points`; renderer sets max_points=20000 here so the backend does the
+    # downsample the renderer used to do in JS.
+    source: Optional[PointSource] = None
 
     # Pre-processing options
     remove_outliers: bool = True  # Statistical outlier removal
@@ -3122,7 +3167,11 @@ async def extract_stem_skeleton(request: SkeletonRequest):
     Returns skeleton points, edges, and metrics.
     """
     try:
-        points = np.array(request.points, dtype=np.float64)
+        if request.source is not None:
+            # Octree-backed cloud: read (and downsample) from the source file.
+            points, _, _ = _read_points_from_source(request.source)
+        else:
+            points = np.array(request.points or [], dtype=np.float64)
         points_original_count = len(points)
 
         if len(points) < 50:
@@ -3158,11 +3207,33 @@ async def extract_stem_skeleton(request: SkeletonRequest):
         points_after_filtering = len(points)
         print(f"[BFS Skeleton] After outlier removal: {points_after_filtering} points")
 
+        # Auto-calculate search_radius from point density when it's left unset
+        # (the UI sends 0 for "auto"). Done backend-side so octree clouds —
+        # whose renderer has no positions to sample — get a sensible radius;
+        # the flat path historically computed this in JS, but the backend KD-tree
+        # estimate is identical and works for both paths.
+        effective_search_radius = request.search_radius
+        if effective_search_radius is None or effective_search_radius < 0.001:
+            from scipy.spatial import KDTree as _KDTree
+            sample_n = min(500, len(points))
+            # Deterministic evenly-spaced sample (no RNG) — same density estimate
+            # without per-call variation.
+            sample_idx = np.linspace(0, len(points) - 1, sample_n).astype(np.int64)
+            tree = _KDTree(points)
+            # k=2: nearest is the point itself (dist 0), second is the true NN.
+            dists, _ = tree.query(points[sample_idx], k=2)
+            nn = dists[:, 1]
+            nn = nn[nn > 0]
+            avg_nn = float(nn.mean()) if nn.size > 0 else 0.05
+            effective_search_radius = avg_nn * 2.5
+            print(f"[BFS Skeleton] Auto search_radius={effective_search_radius:.4f} "
+                  f"(avg NN dist {avg_nn:.4f})")
+
         # Stage 2: Build KD-tree neighbor graph
-        print(f"[BFS Skeleton] Building neighbor graph with radius={request.search_radius}")
+        print(f"[BFS Skeleton] Building neighbor graph with radius={effective_search_radius}")
         graph_info = build_neighbor_graph(
             points,
-            search_radius=request.search_radius,
+            search_radius=effective_search_radius,
             max_neighbors=request.max_neighbors
         )
         neighbors = graph_info['neighbors']
@@ -4508,10 +4579,18 @@ async def generate_plant_model(request: PlantGenerationRequest):
 # Uses laspy for reading and writing LAS/LAZ files with compression support
 
 class PointCloudExportRequest(BaseModel):
-    """Request for exporting point cloud to LAS/LAZ format"""
-    points: List[List[float]]  # [[x, y, z], ...]
+    """Request for exporting a point cloud.
+
+    Flat clouds send inline `points` (+ optional `colors`) and `format` in
+    {"las","laz"}. Octree-backed clouds send `source` instead — and may request
+    any of {"las","laz","xyz","txt","csv","ply"} since the renderer has no
+    positions to format text from. The backend reads the source file, applies
+    pending translation, and returns base64-encoded output in all cases.
+    """
+    points: Optional[List[List[float]]] = None  # [[x, y, z], ...]
     colors: Optional[List[List[float]]] = None  # [[r, g, b], ...] in 0-1 range
-    format: str = "laz"  # "las" or "laz"
+    source: Optional[PointSource] = None         # octree-backed clouds read from disk
+    format: str = "laz"  # las | laz | xyz | txt | csv | ply
     filename: Optional[str] = None  # Optional filename for the export
 
 
@@ -4537,16 +4616,108 @@ class PointCloudImportResponse(BaseModel):
     error: Optional[str] = None
 
 
+def _format_points_as_text(
+    fmt: str,
+    points: np.ndarray,
+    colors: Optional[np.ndarray],
+    intensity: Optional[np.ndarray],
+) -> str:
+    """Format an (N,3) point array (+ optional 0-1 colors, intensity) as XYZ /
+    TXT / CSV / PLY / OBJ text. Column conventions match the renderer's flat
+    text export exactly: 6-decimal positions, colors as 0-255 ints, intensity
+    4-decimal."""
+    n = len(points)
+    has_colors = colors is not None and len(colors) == n
+    has_int = intensity is not None and len(intensity) == n
+    rgb = np.clip(np.rint(colors * 255.0), 0, 255).astype(int) if has_colors else None
+
+    lines: List[str] = []
+    if fmt == "xyz":
+        for i in range(n):
+            lines.append(f"{points[i, 0]:.6f} {points[i, 1]:.6f} {points[i, 2]:.6f}")
+    elif fmt in ("txt", "csv"):
+        sep = "," if fmt == "csv" else " "
+        head = ["X", "Y", "Z"]
+        if has_colors:
+            head += ["R", "G", "B"]
+        if has_int:
+            head += ["Intensity"]
+        lines.append(sep.join(head))
+        for i in range(n):
+            cols = [f"{points[i, 0]:.6f}", f"{points[i, 1]:.6f}", f"{points[i, 2]:.6f}"]
+            if has_colors:
+                cols += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
+            if has_int:
+                cols += [f"{float(intensity[i]):.4f}"]
+            lines.append(sep.join(cols))
+    elif fmt == "ply":
+        lines += ["ply", "format ascii 1.0", f"element vertex {n}",
+                  "property float x", "property float y", "property float z"]
+        if has_colors:
+            lines += ["property uchar red", "property uchar green", "property uchar blue"]
+        lines.append("end_header")
+        for i in range(n):
+            line = f"{points[i, 0]:.6f} {points[i, 1]:.6f} {points[i, 2]:.6f}"
+            if has_colors:
+                line += f" {rgb[i, 0]} {rgb[i, 1]} {rgb[i, 2]}"
+            lines.append(line)
+    elif fmt == "obj":
+        lines += ["# Point cloud exported from Phytograph", f"# {n} points"]
+        for i in range(n):
+            lines.append(f"v {points[i, 0]:.6f} {points[i, 1]:.6f} {points[i, 2]:.6f}")
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported text export format: {fmt}")
+    return "\n".join(lines)
+
+
 @app.post("/api/pointcloud/export", response_model=PointCloudExportResponse)
 async def export_point_cloud_las(request: PointCloudExportRequest):
     """
-    Export a point cloud to LAS or LAZ format.
+    Export a point cloud.
 
-    Uses laspy with lazrs backend for efficient LAZ compression.
-    Returns base64-encoded file data that can be downloaded on the frontend.
+    Flat clouds export LAS/LAZ via laspy. Octree-backed clouds send a `source`
+    descriptor and may export any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ — the backend
+    reads the source file (the renderer has no positions to format). Returns
+    base64-encoded file data that can be downloaded on the frontend.
     """
     import tempfile
     import base64
+
+    fmt = request.format.lower()
+
+    # Octree-backed export: read points (+ colors/intensity) from the source
+    # file, then dispatch by format. Text formats stream out here because the
+    # renderer can't iterate an empty positions buffer.
+    src_colors = None
+    src_intensity = None
+    if request.source is not None:
+        src = request.source
+        src.want_colors = True
+        points, src_colors, src_intensity = _read_points_from_source(src)
+        if fmt in ("xyz", "txt", "csv", "ply", "obj"):
+            try:
+                text = _format_points_as_text(fmt, points, src_colors, src_intensity)
+            except HTTPException:
+                raise
+            except Exception as e:
+                return PointCloudExportResponse(
+                    success=False, data=None, filename="", point_count=0,
+                    has_colors=False, format=request.format,
+                    error=f"Export failed: {e}",
+                )
+            ext = "." + fmt
+            filename = request.filename or f"pointcloud{ext}"
+            if not filename.endswith(ext):
+                filename = filename.rsplit(".", 1)[0] + ext
+            return PointCloudExportResponse(
+                success=True,
+                data=base64.b64encode(text.encode("utf-8")).decode("utf-8"),
+                filename=filename,
+                point_count=int(len(points)),
+                has_colors=src_colors is not None,
+                format=request.format,
+            )
+        # LAS/LAZ fall through to the laspy path below using `points`/`src_colors`.
 
     try:
         import laspy
@@ -4562,8 +4733,14 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
         )
 
     try:
-        points = np.array(request.points)
-        has_colors = request.colors is not None and len(request.colors) > 0
+        if request.source is not None:
+            # points already loaded above; colors come back as 0-1 (N,3) or None.
+            has_colors = src_colors is not None and len(src_colors) > 0
+            colors_arr = src_colors
+        else:
+            points = np.array(request.points or [])
+            has_colors = request.colors is not None and len(request.colors) > 0
+            colors_arr = np.array(request.colors) if has_colors else None
 
         if len(points) == 0:
             return PointCloudExportResponse(
@@ -4597,9 +4774,8 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
 
         # Add colors if available (convert from 0-1 to 16-bit)
         if has_colors:
-            colors = np.array(request.colors)
             # Ensure colors are in 0-1 range and convert to 16-bit
-            colors = np.clip(colors, 0, 1)
+            colors = np.clip(np.asarray(colors_arr, dtype=np.float64), 0, 1)
             las.red = (colors[:, 0] * 65535).astype(np.uint16)
             las.green = (colors[:, 1] * 65535).astype(np.uint16)
             las.blue = (colors[:, 2] * 65535).astype(np.uint16)
@@ -5005,6 +5181,44 @@ def _load_pointcloud_arrays(
             f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS)}"
         ),
     )
+
+
+def _read_points_from_source(
+    src: PointSource,
+) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    """Resolve a PointSource to (positions[N,3] float64, colors[N,3] float32 in
+    0-1 | None, intensity[N] float32 | None).
+
+    Reuses `_load_pointcloud_arrays` (which dispatches XYZ via pandas and
+    PLY/PCD via open3d, and 404s on a missing file), then applies the optional
+    stride-downsample and translation. Positions come back as float64 because
+    every consumer (open3d KD-trees, skeleton BFS, raycasting) wants double
+    precision; colors/intensity keep their loader dtype.
+    """
+    positions, colors, intensity = _load_pointcloud_arrays(
+        src.source_path, src.ascii_format
+    )
+
+    if src.max_points is not None and src.max_points > 0 and len(positions) > src.max_points:
+        stride = int(math.ceil(len(positions) / src.max_points))
+        positions = positions[::stride]
+        colors = colors[::stride] if colors is not None else None
+        intensity = intensity[::stride] if intensity is not None else None
+
+    positions = positions.astype(np.float64, copy=False)
+    if src.translation is not None:
+        t = np.asarray(src.translation, dtype=np.float64)
+        if t.shape != (3,):
+            raise HTTPException(
+                status_code=400,
+                detail=f"translation must be [tx, ty, tz]; got {src.translation!r}",
+            )
+        positions = positions + t
+
+    if not src.want_colors:
+        colors = None
+
+    return positions, colors, intensity
 
 
 @app.post("/api/pointcloud/import_by_path")
@@ -6124,8 +6338,11 @@ async def get_octree_metadata(cache_id: str):
 
 class C2MDistanceRequest(BaseModel):
     """Request for computing cloud-to-mesh distance statistics."""
-    # Point cloud data (flat array: x,y,z,x,y,z,...)
-    points: List[float]
+    # Point cloud data (flat array: x,y,z,x,y,z,...). Optional because
+    # octree-backed clouds send `source` instead.
+    points: Optional[List[float]] = None
+    # Read the cloud from a file on disk (octree-backed clouds).
+    source: Optional[PointSource] = None
     # Mesh vertices (flat array: x,y,z,x,y,z,...)
     mesh_vertices: List[float]
     # Mesh triangle indices (flat array: i0,i1,i2,i0,i1,i2,...)
@@ -6166,8 +6383,12 @@ async def compute_c2m_distance(request: C2MDistanceRequest):
         import open3d as o3d
         import numpy as np
 
-        # Convert flat arrays to numpy arrays
-        points = np.array(request.points, dtype=np.float64).reshape(-1, 3)
+        # Convert flat arrays to numpy arrays. The source reader already returns
+        # (N,3) — only the inline flat array needs reshaping.
+        if request.source is not None:
+            points, _, _ = _read_points_from_source(request.source)
+        else:
+            points = np.array(request.points or [], dtype=np.float64).reshape(-1, 3)
         vertices = np.array(request.mesh_vertices, dtype=np.float64).reshape(-1, 3)
         triangles = np.array(request.mesh_indices, dtype=np.int32).reshape(-1, 3)
 
@@ -6248,8 +6469,11 @@ async def compute_c2m_distance(request: C2MDistanceRequest):
 
 class ICPRegistrationRequest(BaseModel):
     """Request for ICP registration to align mesh to point cloud."""
-    # Point cloud data (flat array: x,y,z,x,y,z,...) - the TARGET (stays fixed)
-    points: List[float]
+    # Point cloud data (flat array: x,y,z,x,y,z,...) - the TARGET (stays fixed).
+    # Optional because octree-backed clouds send `source` instead.
+    points: Optional[List[float]] = None
+    # Read the target cloud from a file on disk (octree-backed clouds).
+    source: Optional[PointSource] = None
     # Mesh vertices (flat array: x,y,z,x,y,z,...) - the SOURCE (to be moved)
     mesh_vertices: List[float]
     # Mesh triangle indices (flat array: i0,i1,i2,i0,i1,i2,...)
@@ -6331,8 +6555,12 @@ async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest):
         import open3d as o3d
         import numpy as np
 
-        # Convert flat arrays to numpy arrays
-        points = np.array(request.points, dtype=np.float64).reshape(-1, 3)
+        # Convert flat arrays to numpy arrays. The source reader already returns
+        # (N,3) — only the inline flat array needs reshaping.
+        if request.source is not None:
+            points, _, _ = _read_points_from_source(request.source)
+        else:
+            points = np.array(request.points or [], dtype=np.float64).reshape(-1, 3)
         vertices = np.array(request.mesh_vertices, dtype=np.float64).reshape(-1, 3)
         triangles = np.array(request.mesh_indices, dtype=np.int32).reshape(-1, 3)
 
@@ -6434,10 +6662,16 @@ async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest):
 
 class CloudToCloudICPRequest(BaseModel):
     """Request for ICP registration to align one point cloud to another."""
-    # Target point cloud (flat array: x,y,z,x,y,z,...) - stays fixed
-    target_points: List[float]
-    # Source point cloud (flat array: x,y,z,x,y,z,...) - will be transformed
-    source_points: List[float]
+    # Target point cloud (flat array: x,y,z,x,y,z,...) - stays fixed. Optional
+    # because an octree-backed target sends `target_source` instead.
+    target_points: Optional[List[float]] = None
+    # Source point cloud (flat array: x,y,z,x,y,z,...) - will be transformed.
+    # Optional because an octree-backed source sends `source_source` instead.
+    source_points: Optional[List[float]] = None
+    # Read either side from a file on disk (octree-backed clouds). Each side is
+    # resolved independently, so a flat cloud and an octree cloud can be mixed.
+    target_source: Optional[PointSource] = None
+    source_source: Optional[PointSource] = None
     # Maximum correspondence distance threshold
     max_correspondence_distance: Optional[float] = None
     # Maximum iterations per ICP round
@@ -6458,9 +6692,17 @@ async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest):
         import open3d as o3d
         import numpy as np
 
-        # Convert flat arrays to numpy arrays
-        target_points = np.array(request.target_points, dtype=np.float64).reshape(-1, 3)
-        source_points = np.array(request.source_points, dtype=np.float64).reshape(-1, 3)
+        # Resolve each side independently — either may be a flat inline array
+        # or an octree source descriptor. The source reader returns (N,3);
+        # inline flat arrays need reshaping.
+        if request.target_source is not None:
+            target_points, _, _ = _read_points_from_source(request.target_source)
+        else:
+            target_points = np.array(request.target_points or [], dtype=np.float64).reshape(-1, 3)
+        if request.source_source is not None:
+            source_points, _, _ = _read_points_from_source(request.source_source)
+        else:
+            source_points = np.array(request.source_points or [], dtype=np.float64).reshape(-1, 3)
 
         if len(target_points) == 0:
             return ICPRegistrationResponse(

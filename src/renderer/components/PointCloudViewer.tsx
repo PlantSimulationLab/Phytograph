@@ -12,10 +12,11 @@ interface PotreeRequestManager {
 }
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Palette, Filter, Globe, Search, Dna, Radio, Pencil, FileUp } from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Palette, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, type CropOctreeRegion } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, type CropOctreeRegion, type BackendPointSource } from '../utils/backendApi';
 import { showToast } from './Toast';
+import { getSettings, updateSettings } from '../lib/store';
 import {
   ColormapName,
   COLORMAP_NAMES,
@@ -65,6 +66,14 @@ export interface OctreeRef {
   // lookups all hit the same texel and the cloud renders solid colour.
   attributeRanges?: Record<string, { min: number[]; max: number[] }>;
 }
+
+// Result of buildPointSource: either an in-memory cloud (flat path) or a
+// backend source descriptor (octree path). Downstream-op handlers branch on
+// `kind`. The `source` shape is the BackendPointSource fields the renderer
+// fills in (the per-op `max_points`/`want_colors` are added at the call site).
+export type PointSourcePayload =
+  | { kind: 'inline'; data: PointCloudData }
+  | { kind: 'source'; source: Pick<BackendPointSource, 'source_path' | 'ascii_format' | 'translation'> };
 
 // Point cloud data interface
 export interface PointCloudData {
@@ -2471,6 +2480,19 @@ export default function PointCloudViewer({
   // Export panel state
   const [showExportPanel, setShowExportPanel] = useState(false);
 
+  // Global app settings (persisted via electron-store). Currently just the
+  // triangulate point cap for octree clouds; loaded once on mount.
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [triangulateMaxPoints, setTriangulateMaxPoints] = useState(5_000_000);
+  useEffect(() => {
+    getSettings().then(s => setTriangulateMaxPoints(s.triangulateMaxPoints)).catch(() => {});
+  }, []);
+  const commitTriangulateMaxPoints = useCallback((value: number) => {
+    const v = Math.max(1000, Math.floor(value) || 5_000_000);
+    setTriangulateMaxPoints(v);
+    updateSettings({ triangulateMaxPoints: v }).catch(() => {});
+  }, []);
+
   // Alignment comparison state
   const [showAlignmentPanel, setShowAlignmentPanel] = useState(false);
   const [alignmentResults, setAlignmentResults] = useState<AlignmentDistanceResponse | null>(null);
@@ -4115,6 +4137,9 @@ export default function PointCloudViewer({
       // History
       { id: 'undo', name: 'Undo', keywords: ['back', 'revert'], action: () => handleUndo(), category: 'History', requires: null },
       { id: 'redo', name: 'Redo', keywords: ['forward'], action: () => handleRedo(), category: 'History', requires: null },
+
+      // Global settings (always available)
+      { id: 'settings', name: 'Settings', keywords: ['options', 'preferences', 'triangulate', 'max points', 'cap'], action: () => setShowSettingsPanel(v => !v), category: 'App', requires: null },
     ];
 
     return cmds;
@@ -4680,6 +4705,30 @@ export default function PointCloudViewer({
     return { positions, colors, intensities, pointCount, bounds: { min, max, center, size }, fileName: data.fileName };
   }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox]);
 
+  // Resolve a cloud to either its in-memory display data (flat clouds) or a
+  // backend point-source descriptor (octree clouds, whose positions buffer is
+  // empty). Downstream ops (skeleton, triangulate, c2m, icp, export) branch
+  // once on `kind` instead of each re-deriving the octree case. For octree
+  // clouds the only pending edit is translation (erase is disabled on them),
+  // read from the same edit state the crop-apply path uses.
+  const buildPointSource = useCallback((cloud: PointCloudEntry): PointSourcePayload => {
+    const octree = cloud.data.octree;
+    if (octree && octree.sourceXyzPath) {
+      const t = getEditState(cloud.id).translation;
+      const translation: [number, number, number] | null =
+        (t.x !== 0 || t.y !== 0 || t.z !== 0) ? [t.x, t.y, t.z] : null;
+      return {
+        kind: 'source',
+        source: {
+          source_path: octree.sourceXyzPath,
+          ascii_format: octree.asciiFormat ?? null,
+          translation,
+        },
+      };
+    }
+    return { kind: 'inline', data: getDisplayData(cloud) };
+  }, [getEditState, getDisplayData]);
+
   // Render-path companion to getDisplayData: returns ONLY a Uint32Array
   // of visible-point indices (or null when nothing is filtered). The JSX
   // renderer passes this to <PointCloud indices={...}> which uses it as
@@ -4758,8 +4807,45 @@ export default function PointCloudViewer({
     const cloud = clouds.find(c => c.id === id);
     if (!cloud) return;
 
-    const data = getDisplayData(cloud);
     const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
+
+    // Octree-backed cloud: it has no renderer positions to format, so every
+    // format goes through the backend, which streams from the source file
+    // (applying any pending translation) and returns base64 output.
+    const ps = buildPointSource(cloud);
+    if (ps.kind === 'source') {
+      try {
+        const response = await exportPointCloudLasLaz({
+          source: { ...ps.source, want_colors: true },
+          format,
+          filename: `${baseName}.${format}`,
+        });
+        if (response.success && response.data) {
+          const binaryString = atob(response.data);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: 'application/octet-stream' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = response.filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        } else {
+          showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
+        }
+      } catch (error) {
+        showToast({ title: 'Export Failed', message: error instanceof Error ? error.message : 'Unknown error', type: 'error' });
+      }
+      setShowExportPanel(false);
+      return;
+    }
+
+    const data = ps.data;
 
     // Handle LAZ export via backend (for compression)
     if (format === 'laz') {
@@ -5049,7 +5135,7 @@ export default function PointCloudViewer({
       URL.revokeObjectURL(url);
     }
     setShowExportPanel(false);
-  }, [selectedIds, clouds, getDisplayData, downloadFile]);
+  }, [selectedIds, clouds, getDisplayData, buildPointSource, downloadFile]);
 
   // Export mesh in various formats
   const exportMesh = useCallback((meshId: string, format: 'obj' | 'ply' | 'stl') => {
@@ -5478,27 +5564,32 @@ export default function PointCloudViewer({
     setTriangulationError(null);
 
     try {
-      // Get the display data (with any edits applied)
-      const displayData = getDisplayData(cloud);
+      const ps = buildPointSource(cloud);
 
-      // Convert positions to array of [x, y, z] points
-      const points: number[][] = [];
-      for (let i = 0; i < displayData.pointCount; i++) {
-        points.push([
-          displayData.positions[i * 3],
-          displayData.positions[i * 3 + 1],
-          displayData.positions[i * 3 + 2],
-        ]);
-      }
-
-      // Build triangulation request
+      // Build triangulation request. Octree clouds send a source descriptor
+      // capped at the global triangulateMaxPoints setting (open3d holds all
+      // points in RAM); flat clouds send inline points.
       const request: Parameters<typeof triangulatePointCloud>[0] = {
-        points,
         method: triangulationMethod,
         estimate_normals: true,
         normal_radius: 0.1,
         normal_max_nn: 30,
       };
+
+      if (ps.kind === 'source') {
+        request.source = { ...ps.source, max_points: triangulateMaxPoints };
+      } else {
+        const displayData = ps.data;
+        const points: number[][] = [];
+        for (let i = 0; i < displayData.pointCount; i++) {
+          points.push([
+            displayData.positions[i * 3],
+            displayData.positions[i * 3 + 1],
+            displayData.positions[i * 3 + 2],
+          ]);
+        }
+        request.points = points;
+      }
 
       // Add method-specific parameters
       if (triangulationMethod === 'poisson') {
@@ -5549,6 +5640,20 @@ export default function PointCloudViewer({
       setMeshes(prev => [...prev, meshEntry]);
       setShowTriangulationPanel(false);
       console.log('Triangulation completed successfully!');
+
+      // Warn when the global triangulate cap downsampled a streamed cloud.
+      if (
+        ps.kind === 'source' &&
+        typeof response.points_used === 'number' &&
+        response.points_used < cloud.data.pointCount
+      ) {
+        showToast({
+          type: 'warning',
+          title: 'Cloud downsampled for triangulation',
+          message: `Triangulated ${response.points_used.toLocaleString()} of ${cloud.data.pointCount.toLocaleString()} points (Settings → Triangulate max points). Raise the cap for more detail.`,
+        });
+      }
+
       showToast({
         type: 'success',
         title: 'Triangulation Complete',
@@ -5567,7 +5672,7 @@ export default function PointCloudViewer({
     } finally {
       setTriangulationInProgress(false);
     }
-  }, [selectedIds, clouds, getDisplayData, triangulationMethod, poissonDepth, alphaValue]);
+  }, [selectedIds, clouds, buildPointSource, triangulationMethod, poissonDepth, alphaValue, triangulateMaxPoints]);
 
   // Compute Alignment distance statistics
   const handleAlignmentCompute = useCallback(async () => {
@@ -5590,23 +5695,17 @@ export default function PointCloudViewer({
     setAlignmentResults(null);
 
     try {
-      // Get the display data for the cloud (with edits applied)
-      const displayData = getDisplayData(cloud);
-
-      // Prepare point cloud positions as flat array
-      const points: number[] = Array.from(displayData.positions);
-
-      // Get mesh vertices and indices as flat arrays
+      // Resolve the cloud to inline points (flat clouds) or a source descriptor
+      // (octree clouds). Mesh vertices/indices are always inline.
+      const ps = buildPointSource(cloud);
       const meshVertices: number[] = Array.from(mesh.data.vertices);
       const meshIndices: number[] = Array.from(mesh.data.indices);
 
-      console.log('Alignment computation - points:', points.length / 3, 'vertices:', meshVertices.length / 3, 'triangles:', meshIndices.length / 3);
-
-      const response = await computeAlignmentDistance({
-        points,
-        mesh_vertices: meshVertices,
-        mesh_indices: meshIndices,
-      });
+      const response = await computeAlignmentDistance(
+        ps.kind === 'source'
+          ? { source: ps.source, mesh_vertices: meshVertices, mesh_indices: meshIndices }
+          : { points: Array.from(ps.data.positions), mesh_vertices: meshVertices, mesh_indices: meshIndices },
+      );
 
       if (!response.success) {
         throw new Error(response.error || 'Alignment computation failed');
@@ -5621,7 +5720,7 @@ export default function PointCloudViewer({
     } finally {
       setIsComputingAlignment(false);
     }
-  }, [selectedIds, selectedMeshId, clouds, meshes, getDisplayData]);
+  }, [selectedIds, selectedMeshId, clouds, meshes, buildPointSource]);
 
   // ICP (Iterative Closest Point) snap-to-fit - align mesh to point cloud
   const handleICPSnapToFit = useCallback(async () => {
@@ -5643,11 +5742,9 @@ export default function PointCloudViewer({
     setIsRunningICP(true);
 
     try {
-      // Get the display data for the cloud (with edits applied)
-      const displayData = getDisplayData(cloud);
-
-      // Prepare point cloud positions as flat array (TARGET - stays fixed)
-      const points: number[] = Array.from(displayData.positions);
+      // Resolve the TARGET cloud to inline points (flat) or a source descriptor
+      // (octree). The cloud stays fixed; the mesh (SOURCE) is always inline.
+      const ps = buildPointSource(cloud);
 
       // Get current mesh position
       const currentPos = meshPositions.get(selectedMeshId) || { x: 0, y: 0, z: 0 };
@@ -5661,13 +5758,11 @@ export default function PointCloudViewer({
       }
       const meshIndices: number[] = Array.from(mesh.data.indices);
 
-      console.log('ICP registration - points:', points.length / 3, 'vertices:', meshVertices.length / 3);
-
-      const response = await icpRegisterMeshToCloud({
-        points,
-        mesh_vertices: meshVertices,
-        mesh_indices: meshIndices,
-      });
+      const response = await icpRegisterMeshToCloud(
+        ps.kind === 'source'
+          ? { source: ps.source, mesh_vertices: meshVertices, mesh_indices: meshIndices }
+          : { points: Array.from(ps.data.positions), mesh_vertices: meshVertices, mesh_indices: meshIndices },
+      );
 
       if (!response.success) {
         throw new Error(response.error || 'ICP registration failed');
@@ -5736,7 +5831,7 @@ export default function PointCloudViewer({
     } finally {
       setIsRunningICP(false);
     }
-  }, [selectedIds, selectedMeshId, clouds, meshes, getDisplayData, meshPositions, setMeshPositions, setMeshRotations]);
+  }, [selectedIds, selectedMeshId, clouds, meshes, buildPointSource, meshPositions, setMeshPositions, setMeshRotations]);
 
   // Handle Cloud-to-Cloud ICP alignment
   const handleCloudToCloudICP = useCallback(async () => {
@@ -5755,24 +5850,36 @@ export default function PointCloudViewer({
       return;
     }
 
+    // The ICP transform is baked into the SOURCE cloud's positions in the
+    // renderer. Octree clouds keep no positions (geometry lives on disk), and a
+    // rotation+translation can't be folded into a cached octree the way an AABB
+    // crop can — so we can't move a streamed source cloud. The TARGET may be an
+    // octree (it's only read). Block when the source is an octree.
+    if (sourceCloud.data.octree) {
+      showToast({
+        type: 'error',
+        title: 'Can’t align a streamed cloud',
+        message: 'Cloud-to-cloud ICP moves the second-selected cloud, which isn’t supported for large (streamed) clouds. Select it first so it becomes the fixed target instead.',
+      });
+      return;
+    }
+
     setIsRunningICP(true);
 
     try {
-      // Get display data for both clouds (with edits applied)
-      const targetDisplayData = getDisplayData(targetCloud);
-      const sourceDisplayData = getDisplayData(sourceCloud);
-
-      // Target cloud positions (stays fixed)
-      const targetPoints: number[] = Array.from(targetDisplayData.positions);
-
-      // Source cloud positions (already includes translation from getDisplayData)
-      const sourcePoints: number[] = Array.from(sourceDisplayData.positions);
-
-      console.log('Cloud-to-cloud ICP - target points:', targetPoints.length / 3, 'source points:', sourcePoints.length / 3);
+      // Resolve each cloud independently — the target can be flat (inline
+      // points) or octree (source descriptor, read from disk); the source is
+      // always flat (guarded above) so its transform can be baked locally.
+      const targetPs = buildPointSource(targetCloud);
+      const sourcePs = buildPointSource(sourceCloud);
 
       const response = await icpRegisterCloudToCloud({
-        target_points: targetPoints,
-        source_points: sourcePoints,
+        ...(targetPs.kind === 'source'
+          ? { target_source: targetPs.source }
+          : { target_points: Array.from(targetPs.data.positions) }),
+        ...(sourcePs.kind === 'source'
+          ? { source_source: sourcePs.source }
+          : { source_points: Array.from(sourcePs.data.positions) }),
       });
 
       if (!response.success) {
@@ -5873,7 +5980,7 @@ export default function PointCloudViewer({
     } finally {
       setIsRunningICP(false);
     }
-  }, [selectedIds, clouds, onUpdateCloud, getDisplayData, getEditState, setEditStates]);
+  }, [selectedIds, clouds, onUpdateCloud, buildPointSource, getEditState, setEditStates]);
 
   // Mesh-to-mesh ICP alignment
   const handleMeshToMeshICP = useCallback(async () => {
@@ -6022,73 +6129,83 @@ export default function PointCloudViewer({
     setSkeletonError(null);
 
     try {
-      // Get the display data (with any edits applied)
-      const displayData = getDisplayData(cloud);
-
-      // Convert positions to array of [x, y, z] points
-      // Downsample if too many points (skeleton extraction doesn't need 100K+ points)
       const MAX_SKELETON_POINTS = 20000;
-      const totalPoints = displayData.pointCount;
-      const skipRate = totalPoints > MAX_SKELETON_POINTS
-        ? Math.ceil(totalPoints / MAX_SKELETON_POINTS)
-        : 1;
+      const ps = buildPointSource(cloud);
 
-      const points: number[][] = [];
-      for (let i = 0; i < totalPoints; i += skipRate) {
-        points.push([
-          displayData.positions[i * 3],
-          displayData.positions[i * 3 + 1],
-          displayData.positions[i * 3 + 2],
-        ]);
-      }
-
-      if (skipRate > 1) {
-        console.log(`Downsampled from ${totalPoints} to ${points.length} points (skip rate: ${skipRate})`);
-      }
-
-      // Auto-calculate search_radius based on point density if set to 0
+      // Resolve the points source and the effective search radius. Octree
+      // clouds send a backend source descriptor (with the 20k cap) and let the
+      // backend auto-calculate the radius from a KD-tree NN estimate; flat
+      // clouds downsample + auto-estimate in JS as before.
+      let points: number[][] | undefined;
+      let source: BackendPointSource | undefined;
       let effectiveSearchRadius = skeletonSearchRadius;
-      if (effectiveSearchRadius === 0 || effectiveSearchRadius < 0.001) {
-        // Sample points to estimate average nearest neighbor distance
-        const sampleSize = Math.min(500, points.length);
-        const sampleIndices: number[] = [];
-        for (let i = 0; i < sampleSize; i++) {
-          sampleIndices.push(Math.floor(Math.random() * points.length));
+
+      if (ps.kind === 'source') {
+        source = { ...ps.source, max_points: MAX_SKELETON_POINTS };
+        // search_radius left as-is — the backend computes it when < 0.001.
+      } else {
+        const displayData = ps.data;
+        const totalPoints = displayData.pointCount;
+        const skipRate = totalPoints > MAX_SKELETON_POINTS
+          ? Math.ceil(totalPoints / MAX_SKELETON_POINTS)
+          : 1;
+
+        points = [];
+        for (let i = 0; i < totalPoints; i += skipRate) {
+          points.push([
+            displayData.positions[i * 3],
+            displayData.positions[i * 3 + 1],
+            displayData.positions[i * 3 + 2],
+          ]);
+        }
+        if (skipRate > 1) {
+          console.log(`Downsampled from ${totalPoints} to ${points.length} points (skip rate: ${skipRate})`);
         }
 
-        let totalMinDist = 0;
-        let validSamples = 0;
+        // Auto-calculate search_radius based on point density if set to 0
+        if (effectiveSearchRadius === 0 || effectiveSearchRadius < 0.001) {
+          // Sample points to estimate average nearest neighbor distance
+          const sampleSize = Math.min(500, points.length);
+          const sampleIndices: number[] = [];
+          for (let i = 0; i < sampleSize; i++) {
+            sampleIndices.push(Math.floor(Math.random() * points.length));
+          }
 
-        for (const idx of sampleIndices) {
-          const p = points[idx];
-          let minDist = Infinity;
+          let totalMinDist = 0;
+          let validSamples = 0;
 
-          // Find nearest neighbor (brute force on sample)
-          for (let j = 0; j < points.length; j++) {
-            if (j === idx) continue;
-            const q = points[j];
-            const dist = Math.sqrt(
-              (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2
-            );
-            if (dist < minDist && dist > 0) {
-              minDist = dist;
+          for (const idx of sampleIndices) {
+            const p = points[idx];
+            let minDist = Infinity;
+
+            // Find nearest neighbor (brute force on sample)
+            for (let j = 0; j < points.length; j++) {
+              if (j === idx) continue;
+              const q = points[j];
+              const dist = Math.sqrt(
+                (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2
+              );
+              if (dist < minDist && dist > 0) {
+                minDist = dist;
+              }
+            }
+
+            if (minDist < Infinity) {
+              totalMinDist += minDist;
+              validSamples++;
             }
           }
 
-          if (minDist < Infinity) {
-            totalMinDist += minDist;
-            validSamples++;
-          }
+          const avgNNDist = validSamples > 0 ? totalMinDist / validSamples : 0.05;
+          // Use 2.5x average NN distance for good graph connectivity
+          effectiveSearchRadius = avgNNDist * 2.5;
+          console.log(`Auto-calculated search_radius: ${effectiveSearchRadius.toFixed(4)} (avg NN dist: ${avgNNDist.toFixed(4)})`);
         }
-
-        const avgNNDist = validSamples > 0 ? totalMinDist / validSamples : 0.05;
-        // Use 2.5x average NN distance for good graph connectivity
-        effectiveSearchRadius = avgNNDist * 2.5;
-        console.log(`Auto-calculated search_radius: ${effectiveSearchRadius.toFixed(4)} (avg NN dist: ${avgNNDist.toFixed(4)})`);
       }
 
       const response = await extractSkeleton({
         points,
+        source,
         // Pre-processing
         remove_outliers: skeletonRemoveOutliers,
         // Graph building (BFS algorithm)
@@ -6151,7 +6268,7 @@ export default function PointCloudViewer({
     } finally {
       setSkeletonInProgress(false);
     }
-  }, [selectedIds, clouds, getDisplayData, skeletonRemoveOutliers, skeletonSearchRadius, skeletonRootThreshold, skeletonQuantizationLevels, skeletonUseNonlinearQuant, skeletonThresholdFilter, skeletonUseProportionFilter, skeletonProportionThreshold, skeletonSmooth, skeletonSmoothIterations]);
+  }, [selectedIds, clouds, buildPointSource, skeletonRemoveOutliers, skeletonSearchRadius, skeletonRootThreshold, skeletonQuantizationLevels, skeletonUseNonlinearQuant, skeletonThresholdFilter, skeletonUseProportionFilter, skeletonProportionThreshold, skeletonSmooth, skeletonSmoothIterations]);
 
   // Remove a skeleton
   const handleRemoveSkeleton = useCallback((skeletonId: string) => {
@@ -10550,6 +10667,45 @@ export default function PointCloudViewer({
           </div>
         );
       })()}
+
+      {/* Settings Panel (global) */}
+      {showSettingsPanel && (
+        <div data-testid="settings-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-30">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
+              <Settings className="w-3 h-3" />
+              Settings
+            </div>
+            <button
+              onClick={() => setShowSettingsPanel(false)}
+              className="p-1 hover:bg-neutral-700 rounded"
+            >
+              <X className="w-3 h-3 text-neutral-400" />
+            </button>
+          </div>
+
+          <div className="mb-2">
+            <label className="text-[10px] text-neutral-400 block mb-1">
+              Triangulate max points
+            </label>
+            <input
+              data-testid="settings-triangulate-max-points"
+              type="number"
+              min={1000}
+              step={100000}
+              value={triangulateMaxPoints}
+              onChange={(e) => setTriangulateMaxPoints(parseInt(e.target.value) || 0)}
+              onBlur={(e) => commitTriangulateMaxPoints(parseInt(e.target.value) || 5_000_000)}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
+            />
+            <div className="text-[9px] text-neutral-500 mt-1 leading-snug">
+              Streamed (octree) clouds are downsampled to this many points before
+              triangulation to bound memory. You'll be warned when a cloud is
+              downsampled.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Triangulation Panel */}
       {showTriangulationPanel && selectedIds.size === 1 && (

@@ -46,6 +46,15 @@ The resulting mesh appears in the Scene panel's **Meshes** list. The
 original cloud stays in the scene; hide it (eye icon) to see the mesh
 alone.
 
+!!! note "Large (streamed) clouds are capped"
+    Clouds imported from large XYZ scans are streamed from an on-disk octree
+    rather than held in memory. When you triangulate one, it is downsampled to
+    the **Triangulate max points** limit (default 5,000,000) before meshing,
+    which bounds memory use. If a cloud is downsampled you'll see a warning
+    toast telling you how many points were used. Raise the cap in **Settings**
+    (open the command palette and search "Settings") for more surface detail at
+    the cost of more memory.
+
 ## Helios Triangulation
 
 Helios triangulation uses the scanner geometry to triangulate only the

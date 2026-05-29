@@ -35,6 +35,10 @@ export interface Tag {
 
 export interface AppSettings {
   theme: 'light' | 'dark';
+  // Max points fed to triangulation for octree-backed clouds. open3d holds the
+  // whole point set in RAM, so an uncapped 100M-point octree would OOM; the
+  // backend stride-downsamples to this cap and the UI warns when it does.
+  triangulateMaxPoints: number;
 }
 
 export interface StoreData {
@@ -42,7 +46,7 @@ export interface StoreData {
   settings: AppSettings;
 }
 
-const DEFAULT_SETTINGS: AppSettings = { theme: 'light' };
+const DEFAULT_SETTINGS: AppSettings = { theme: 'light', triangulateMaxPoints: 5_000_000 };
 
 const hasElectron = (): boolean => typeof window !== 'undefined' && !!window.electronAPI;
 
@@ -64,8 +68,10 @@ export async function initStore(): Promise<void> {
 }
 
 export async function getSettings(): Promise<AppSettings> {
-  const settings = await kvGet<AppSettings>('settings');
-  return settings ?? DEFAULT_SETTINGS;
+  const settings = await kvGet<Partial<AppSettings>>('settings');
+  // Merge over defaults so a settings object persisted before a new field was
+  // added still gets that field (e.g. triangulateMaxPoints for older stores).
+  return { ...DEFAULT_SETTINGS, ...(settings ?? {}) };
 }
 
 export async function updateSettings(updates: Partial<AppSettings>): Promise<AppSettings> {

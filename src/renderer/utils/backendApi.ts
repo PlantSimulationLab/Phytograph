@@ -1,9 +1,28 @@
+// ==================== SHARED POINT SOURCE ====================
+
+/**
+ * Tells a downstream endpoint to read points from a file on disk instead of
+ * an inline `points` array. Octree-backed clouds keep no positions in the
+ * renderer (geometry lives only in the on-disk octree), so skeleton /
+ * triangulate / c2m / icp / export send this and the backend reads the
+ * original source file — mirrors the M3 crop path. Matches the backend
+ * `PointSource` Pydantic model.
+ */
+export interface BackendPointSource {
+  source_path: string;
+  ascii_format?: string | null;
+  max_points?: number | null;     // stride-downsample cap; omit/null = full res
+  translation?: [number, number, number] | null;  // ADDED to every point
+  want_colors?: boolean;
+}
+
 // ==================== TRIANGULATION API ====================
 
 export type TriangulationMethod = 'ball_pivoting' | 'poisson' | 'alpha_shape' | 'delaunay' | 'helios';
 
 export interface TriangulationRequest {
-  points: number[][];  // [[x, y, z], ...]
+  points?: number[][];  // [[x, y, z], ...] — omit when `source` is set
+  source?: BackendPointSource;  // octree-backed clouds read from disk
   method: TriangulationMethod;
   // Ball pivoting parameters
   radii?: number[];
@@ -27,6 +46,7 @@ export interface TriangulationResponse {
   num_vertices: number;
   method_used: string;
   error?: string;
+  points_used?: number;  // input points actually triangulated (octree cap may downsample)
 }
 
 import { BACKEND_PORT_PROD } from '../../shared/constants';
@@ -73,7 +93,7 @@ export async function triangulatePointCloud(
 
 export interface HeliosScanEntry {
   file_path?: string;       // Path to scan file on disk (preferred for large scans)
-  ascii_format?: string;    // Column format e.g. "x y z timestamp" (auto-detected if omitted)
+  ascii_format?: string | null;  // Column format e.g. "x y z timestamp" (auto-detected if omitted/null)
   points?: number[][];      // [[x, y, z], ...] fallback when no file_path
   colors?: number[][];      // [[r, g, b], ...] point colors (0-1 range)
   origin: number[];         // [x, y, z] scanner position
@@ -152,7 +172,8 @@ export async function heliosTriangulate(
 export type DominantAxis = 'x' | 'y' | 'z';
 
 export interface SkeletonRequest {
-  points: number[][];  // [[x, y, z], ...]
+  points?: number[][];  // [[x, y, z], ...] — omit when `source` is set
+  source?: BackendPointSource;  // octree-backed clouds read from disk
 
   // Pre-processing options
   remove_outliers?: boolean;  // Statistical outlier removal (default: true)
@@ -226,7 +247,7 @@ export async function extractSkeleton(
   request: SkeletonRequest
 ): Promise<SkeletonResponse> {
   const baseUrl = getBackendUrl();
-  console.log('Skeleton extraction - baseUrl:', baseUrl, 'points:', request.points.length);
+  console.log('Skeleton extraction - baseUrl:', baseUrl, 'points:', request.points?.length ?? `source:${request.source?.source_path}`);
 
   // Use AbortController for 5 minute timeout (skeleton extraction can be slow)
   const controller = new AbortController();
@@ -698,9 +719,12 @@ export async function sampleMeshSurface(
 // ==================== POINT CLOUD LAS/LAZ IMPORT/EXPORT API ====================
 
 export interface PointCloudExportRequest {
-  points: number[][];  // [[x, y, z], ...]
+  points?: number[][];  // [[x, y, z], ...] — omit when `source` is set
   colors?: number[][];  // [[r, g, b], ...] in 0-1 range
-  format: 'las' | 'laz';
+  source?: BackendPointSource;  // octree-backed clouds export from disk
+  // Flat clouds send 'las'/'laz' here (text formats are built in the renderer);
+  // octree clouds may send any of these (the backend formats the text).
+  format: 'las' | 'laz' | 'xyz' | 'txt' | 'csv' | 'ply' | 'obj';
   filename?: string;
 }
 
@@ -732,7 +756,7 @@ export async function exportPointCloudLasLaz(
   request: PointCloudExportRequest
 ): Promise<PointCloudExportResponse> {
   const baseUrl = getBackendUrl();
-  console.log('LAS/LAZ export - points:', request.points.length, 'format:', request.format);
+  console.log('Point cloud export -', request.points ? `${request.points.length} points` : `source:${request.source?.source_path}`, 'format:', request.format);
 
   // Use AbortController for timeout
   const controller = new AbortController();
@@ -958,7 +982,8 @@ export async function importPointCloudLasLaz(
 // ==================== ALIGNMENT DISTANCE API ====================
 
 export interface AlignmentDistanceRequest {
-  points: number[];      // Flattened [x, y, z, ...] point cloud positions
+  points?: number[];      // Flattened [x, y, z, ...] — omit when `source` is set
+  source?: BackendPointSource;  // octree-backed clouds read from disk
   mesh_vertices: number[];  // Flattened [x, y, z, ...] mesh vertices
   mesh_indices: number[];   // Triangle indices [i, j, k, ...]
 }
@@ -992,7 +1017,7 @@ export async function computeAlignmentDistance(
   request: AlignmentDistanceRequest
 ): Promise<AlignmentDistanceResponse> {
   const baseUrl = getBackendUrl();
-  console.log('Alignment distance - points:', request.points.length / 3, 'vertices:', request.mesh_vertices.length / 3);
+  console.log('Alignment distance - points:', request.points ? request.points.length / 3 : `source:${request.source?.source_path}`, 'vertices:', request.mesh_vertices.length / 3);
 
   // Use AbortController for timeout (can be slow for large clouds)
   const controller = new AbortController();
@@ -1026,7 +1051,8 @@ export async function computeAlignmentDistance(
 // ==================== ICP REGISTRATION (SNAP TO FIT) API ====================
 
 export interface ICPRegistrationRequest {
-  points: number[];          // Flattened [x, y, z, ...] point cloud positions (TARGET - stays fixed)
+  points?: number[];         // Flattened [x, y, z, ...] (TARGET - stays fixed); omit when `source` is set
+  source?: BackendPointSource;  // octree-backed TARGET cloud read from disk
   mesh_vertices: number[];   // Flattened [x, y, z, ...] mesh vertices (SOURCE - to be moved)
   mesh_indices: number[];    // Triangle indices [i, j, k, ...]
   max_correspondence_distance?: number;  // Optional max correspondence distance
@@ -1053,7 +1079,7 @@ export async function icpRegisterMeshToCloud(
   request: ICPRegistrationRequest
 ): Promise<ICPRegistrationResponse> {
   const baseUrl = getBackendUrl();
-  console.log('ICP registration - points:', request.points.length / 3, 'mesh vertices:', request.mesh_vertices.length / 3);
+  console.log('ICP registration - points:', request.points ? request.points.length / 3 : `source:${request.source?.source_path}`, 'mesh vertices:', request.mesh_vertices.length / 3);
 
   // Use AbortController for timeout
   const controller = new AbortController();
@@ -1087,8 +1113,13 @@ export async function icpRegisterMeshToCloud(
 // ==================== CLOUD-TO-CLOUD ICP REGISTRATION API ====================
 
 export interface CloudToCloudICPRequest {
-  target_points: number[];     // Flattened [x, y, z, ...] target point cloud (stays fixed)
-  source_points: number[];     // Flattened [x, y, z, ...] source point cloud (to be moved)
+  // Each side is flat inline points OR an octree source descriptor, resolved
+  // independently so a flat and an octree cloud can be mixed (the source must
+  // be flat in practice — its transform is baked renderer-side).
+  target_points?: number[];     // Flattened [x, y, z, ...] target (stays fixed); omit when target_source is set
+  source_points?: number[];     // Flattened [x, y, z, ...] source (to be moved); omit when source_source is set
+  target_source?: BackendPointSource;  // octree-backed target read from disk
+  source_source?: BackendPointSource;  // octree-backed source read from disk
   max_correspondence_distance?: number;  // Optional max correspondence distance
   max_iterations?: number;     // Optional max iterations (default 50)
 }
@@ -1103,7 +1134,7 @@ export async function icpRegisterCloudToCloud(
   request: CloudToCloudICPRequest
 ): Promise<ICPRegistrationResponse> {
   const baseUrl = getBackendUrl();
-  console.log('Cloud-to-cloud ICP - target points:', request.target_points.length / 3, 'source points:', request.source_points.length / 3);
+  console.log('Cloud-to-cloud ICP - target:', request.target_points ? `${request.target_points.length / 3} pts` : `source:${request.target_source?.source_path}`, 'source:', request.source_points ? `${request.source_points.length / 3} pts` : `source:${request.source_source?.source_path}`);
 
   // Use AbortController for timeout
   const controller = new AbortController();

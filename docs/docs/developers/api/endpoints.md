@@ -68,7 +68,7 @@ is defined.
 | POST | `/api/pointcloud/convert_to_octree` | `main.py` | Build a Potree 2.0 octree from an XYZ/LAS source. Pre-converts XYZ ASCII → LAS via laspy streaming, then runs the bundled PotreeConverter binary. Result is cached under `~/Library/Application Support/Phytograph/cache/octrees/<sha1>/`; repeat calls hit the cache. Returns `cache_id`, `tight_bounds`, attribute list. The renderer streams `metadata.json`/`hierarchy.bin`/`octree.bin` from that dir via the `app://octree/<cache_id>/...` Electron custom protocol |
 | GET | `/api/pointcloud/octree_metadata` | `main.py` | Look up metadata for a previously-converted octree by `cache_id`. Used when the renderer has only a cache id and needs the bounds/attribute schema (e.g. after a project reload) |
 | POST | `/api/pointcloud/crop_octree` | `main.py` | Re-convert a source XYZ into a new Potree 2.0 octree with a crop region applied (box or screen-space polygon, with optional translation baked in). Chunked streaming filter via laspy → PotreeConverter → atomic cache write. Returns the new `cache_id`; the renderer hot-swaps to it on the existing `OctreePointCloud` primitive. This is the M3 "Apply crop" path for octree-backed clouds — keeps renderer JS heap bounded regardless of source size |
-| POST | `/api/pointcloud/export` | `main.py` | Export a point cloud |
+| POST | `/api/pointcloud/export` | `main.py` | Export a point cloud to LAS/LAZ — or, for octree-backed clouds (via a `source` descriptor), to any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ. The backend streams from the source file and applies any pending translation |
 
 ## Registration & comparison
 
@@ -78,6 +78,34 @@ is defined.
 | POST | `/api/c2m/icp-register` | `main.py:4937` | Cloud-to-mesh ICP |
 | POST | `/api/c2c/icp-register` | `main.py:5064` | Cloud-to-cloud ICP |
 | POST | `/api/m2m/icp-register` | `main.py:5193` | Mesh-to-mesh ICP |
+
+!!! note "Reading points from disk — the `source` descriptor (M4)"
+    Octree-backed clouds keep no point positions in the renderer (the geometry
+    lives only in the on-disk Potree octree, streamed to the GPU). So the
+    downstream endpoints — `/api/skeleton/extract`, `/api/triangulate`,
+    `/api/c2m/distance`, `/api/c2m/icp-register`, `/api/c2c/icp-register`, and
+    `/api/pointcloud/export` — accept an **optional `source`** object in place
+    of the inline `points` array:
+
+    ```json
+    "source": {
+      "source_path": "/path/to/scan.xyz",
+      "ascii_format": "x y z r255 g255 b255 reflectance",
+      "max_points": 20000,
+      "translation": [tx, ty, tz],
+      "want_colors": true
+    }
+    ```
+
+    When `source` is set the backend reads (and optionally stride-downsamples)
+    the points from the original file via `_read_points_from_source`, applies
+    the pending translation (added to every point), and runs the same
+    computation. There is no octree reader — the source file is always the
+    point of truth. Flat (PLY/PCD) clouds keep sending inline `points`
+    unchanged. `/api/triangulate` returns `points_used` so the UI can warn when
+    the global *triangulate max points* cap downsampled a large cloud.
+    `/api/triangulate/helios` already reads each scan from `file_path`; M4 also
+    passes the known `ascii_format` so column mapping isn't guessed.
 
 !!! tip "Live API docs"
     FastAPI's interactive docs are exposed at

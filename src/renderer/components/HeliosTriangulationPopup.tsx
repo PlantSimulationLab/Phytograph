@@ -87,7 +87,10 @@ export function HeliosTriangulationPopup({
     const requestScans = selectedScans.map(scan => {
       const origin = [scan.params.origin.x, scan.params.origin.y, scan.params.origin.z];
       if (scan.sourcePath) {
-        return { file_path: scan.sourcePath, origin };
+        // Pass the known column format so the backend uses it instead of the
+        // column-count heuristic, which can mis-map e.g. reflectance vs
+        // intensity or RGB ordering. Octree scans always have a sourcePath.
+        return { file_path: scan.sourcePath, ascii_format: scan.asciiFormat ?? null, origin };
       }
       const points: number[][] = [];
       for (let i = 0; i < scan.data.pointCount; i++) {

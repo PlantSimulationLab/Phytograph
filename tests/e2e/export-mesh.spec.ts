@@ -22,36 +22,28 @@ test('exports a generated mesh to OBJ via the Export panel', async () => {
     // synchronous up to the anchor click; the blob.text() promise resolves
     // a tick later, which we poll for below.
     await page.evaluate(() => {
-      // We capture downloaded blobs in two stages because Blob.text() is
-      // async: first stage records the Blob and its sequence index when
-      // createObjectURL fires; second stage records the filename when
-      // the anchor.click() fires (which is synchronous in the renderer's
-      // downloadFile). We resolve them into named-text captures via a
-      // shared sequence counter so order is preserved even if multiple
-      // exports run concurrently.
-      const pendingTexts = new Map<number, Promise<string>>();
-      let nextSeq = 0;
+      // Capture downloaded blobs keyed by their object URL. Blob.text() is
+      // async, so we stash the text promise when createObjectURL fires and
+      // resolve it at anchor.click() (synchronous in the renderer's
+      // downloadFile) by looking up the anchor's href. Keying by URL — not a
+      // positional sequence — matters because potree-core/three.js create
+      // unrelated worker blobs while rendering the octree-backed cloud, which
+      // would otherwise be mis-claimed as the export blob.
+      const textByUrl = new Map<string, Promise<string>>();
       const captured: { name: string; text: string }[] = [];
       (window as unknown as { __exportedBlobs: typeof captured }).__exportedBlobs = captured;
-      const filenameBySeq = new Map<number, string>();
-      let claimSeq = 0;
 
       const origCreate = URL.createObjectURL;
       URL.createObjectURL = function (obj: Blob | MediaSource): string {
-        if (obj instanceof Blob) {
-          const seq = nextSeq++;
-          pendingTexts.set(seq, obj.text());
-        }
-        return origCreate.call(URL, obj);
+        const url = origCreate.call(URL, obj);
+        if (obj instanceof Blob) textByUrl.set(url, obj.text());
+        return url;
       };
 
       const origAnchorClick = HTMLAnchorElement.prototype.click;
       HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
         if (this.download) {
-          // Claim the next-in-order pending blob.
-          const seq = claimSeq++;
-          filenameBySeq.set(seq, this.download);
-          const textPromise = pendingTexts.get(seq);
+          const textPromise = textByUrl.get(this.href);
           if (textPromise) {
             textPromise.then((text) => {
               captured.push({ name: this.download, text });
