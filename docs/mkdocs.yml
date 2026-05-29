@@ -98,6 +98,7 @@ nav:
       - Import & export: workflows/import-export.md
       - Viewer navigation: workflows/viewer-navigation.md
       - Clean a point cloud: workflows/clean-point-cloud.md
+      - Segment ground points: workflows/segment-ground.md
       - Triangulate a mesh: workflows/triangulate.md
       - Extract a skeleton: workflows/extract-skeleton.md
       - Generate a plant: workflows/generate-plant.md

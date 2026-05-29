@@ -15,3 +15,7 @@ pytexit>=0.3.4
 pyhelios3d
 open3d>=0.18.0
 laspy[lazrs]>=2.5.0
+# Cloth Simulation Filter — ground/non-ground segmentation. SWIG C-extension
+# (imports as `import CSF`); prebuilt wheels for CPython 3.9-3.12 on
+# macOS/Linux/Windows. Bundled via `collectAll` in scripts/build-backend.mjs.
+cloth-simulation-filter>=1.1.7

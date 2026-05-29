@@ -27,7 +27,7 @@ def unicode_to_ascii(s: str) -> str:
     return result
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.4"
+BACKEND_VERSION = "0.3.5"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1505,6 +1505,100 @@ async def triangulate_point_cloud(request: TriangulationRequest):
         raise HTTPException(status_code=500, detail=f"Triangulation failed: {str(e)}")
 
 
+# ==================== GROUND SEGMENTATION ====================
+
+class GroundSegmentationRequest(BaseModel):
+    """Request model for ground/non-ground segmentation via CSF.
+
+    Provide either inline `points` (flat clouds) or a `source` descriptor
+    (octree-backed clouds — the backend re-reads the file). Unlike skeleton /
+    triangulate, segmentation must NOT downsample: the returned `labels` align
+    1:1 with the resolved point order so the renderer can attach them as a
+    per-point scalar. Callers leave `source.max_points` as None.
+    """
+    points: Optional[List[List[float]]] = None
+    source: Optional[PointSource] = None
+    # CSF parameters (defaults tuned for close-range plant scans on flat-ish
+    # ground, not airborne LiDAR — see segment_ground()).
+    cloth_resolution: float = 0.05
+    rigidness: int = 3
+    class_threshold: float = 0.02
+    iterations: int = 500
+    slope_smooth: bool = False
+
+
+class GroundSegmentationResponse(BaseModel):
+    """Per-point ground/plant labels aligned to the resolved point order."""
+    success: bool
+    labels: List[int] = []          # 1=ground, 2=plant
+    num_ground: int = 0
+    num_plant: int = 0
+    num_points: int = 0
+    error: Optional[str] = None
+
+
+def _resolve_segmentation_points(request: GroundSegmentationRequest) -> np.ndarray:
+    """Resolve a GroundSegmentationRequest to an Nx3 float64 array, reading from
+    the source file (full resolution) when `source` is set."""
+    if request.source is not None:
+        # Force full resolution: labels must align 1:1 with the cloud's points.
+        src = request.source.model_copy(update={"max_points": None})
+        points, _, _ = _read_points_from_source(src)
+        return points
+    if request.points is not None:
+        return np.array(request.points, dtype=np.float64)
+    raise HTTPException(status_code=400, detail="Provide either `points` or `source`.")
+
+
+@app.post("/api/segment/ground", response_model=GroundSegmentationResponse)
+async def segment_ground_points(request: GroundSegmentationRequest):
+    """Classify a point cloud into ground (1) and plant (2) points using the
+    Cloth Simulation Filter. Returns per-point labels aligned to input order;
+    persisting the result onto an octree-backed cloud is done by
+    `/api/segment/ground/apply`."""
+    try:
+        points = _resolve_segmentation_points(request)
+
+        if len(points) < 10:
+            return GroundSegmentationResponse(
+                success=False,
+                num_points=len(points),
+                error="Need at least 10 points for ground segmentation",
+            )
+
+        try:
+            labels = segment_ground(
+                points,
+                cloth_resolution=request.cloth_resolution,
+                rigidness=request.rigidness,
+                class_threshold=request.class_threshold,
+                iterations=request.iterations,
+                slope_smooth=request.slope_smooth,
+            )
+        except ImportError:
+            return GroundSegmentationResponse(
+                success=False,
+                num_points=len(points),
+                error="CSF (cloth-simulation-filter) not installed. Run: pip install cloth-simulation-filter",
+            )
+
+        num_ground = int(np.count_nonzero(labels == GROUND_CLASS_GROUND))
+        return GroundSegmentationResponse(
+            success=True,
+            labels=labels.tolist(),
+            num_ground=num_ground,
+            num_plant=len(labels) - num_ground,
+            num_points=len(labels),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Ground segmentation failed: {str(e)}")
+
+
 # ==================== HELIOS TRIANGULATION ====================
 
 class HeliosScanEntry(BaseModel):
@@ -2123,6 +2217,75 @@ class SkeletonResponse(BaseModel):
     num_slices: int = 0  # Alias for num_nodes
     diameters: Optional[List[float]] = None
     error: Optional[str] = None
+
+
+# ==================== GROUND SEGMENTATION HELPER (Cloth Simulation Filter) ====================
+
+# Ground/non-ground class labels. Matches the convention of the Helios
+# `object_label` column in our validation scans (1=ground, 2=plant), so a
+# segmented cloud can be compared directly against ground-truth annotations.
+GROUND_CLASS_GROUND = 1
+GROUND_CLASS_PLANT = 2
+
+
+def segment_ground(
+    points: np.ndarray,
+    cloth_resolution: float = 0.05,
+    rigidness: int = 3,
+    class_threshold: float = 0.02,
+    iterations: int = 500,
+    slope_smooth: bool = False,
+    time_step: float = 0.65,
+) -> np.ndarray:
+    """Classify each point as ground (1) or plant (2) via the Cloth Simulation
+    Filter (Zhang et al. 2016).
+
+    CSF drapes an inverted cloth over the point cloud and labels points the
+    cloth settles onto as ground. Defaults here are tuned for close-range plant
+    scans on roughly-flat ground (cm-scale cloth resolution, high rigidness),
+    NOT the airborne-LiDAR defaults the upstream docs assume.
+
+    Returns an int array of length len(points), aligned to input order, with
+    values GROUND_CLASS_GROUND / GROUND_CLASS_PLANT.
+
+    Raises ImportError if the `CSF` extension is unavailable — the caller turns
+    that into a clean error response rather than a 500.
+    """
+    import CSF  # SWIG C-extension; import here so a missing dep is catchable
+    import os
+    import tempfile
+
+    n = len(points)
+    csf = CSF.CSF()
+    csf.params.bSloopSmooth = bool(slope_smooth)
+    csf.params.cloth_resolution = float(cloth_resolution)
+    csf.params.rigidness = int(rigidness)
+    csf.params.class_threshold = float(class_threshold)
+    csf.params.time_step = float(time_step)
+    # NOTE: the CSF API misspells "iterations" as "interations".
+    csf.params.interations = int(iterations)
+
+    # CSF wants a contiguous float64 Nx3 array.
+    csf.setPointCloud(np.ascontiguousarray(points[:, :3], dtype=np.float64))
+
+    ground_idx, non_ground_idx = CSF.VecInt(), CSF.VecInt()
+    # do_filtering() unconditionally dumps a debug `cloth_nodes.txt` into the
+    # current working directory (hardcoded in the C++ lib). Run it from a temp
+    # dir so the packaged app doesn't litter the user's filesystem, then drop
+    # the artifact.
+    prev_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            os.chdir(tmp)
+            csf.do_filtering(ground_idx, non_ground_idx)
+        finally:
+            os.chdir(prev_cwd)
+
+    labels = np.full(n, GROUND_CLASS_PLANT, dtype=np.int32)
+    gi = np.fromiter(ground_idx, dtype=np.int64, count=len(ground_idx))
+    if gi.size:
+        labels[gi] = GROUND_CLASS_GROUND
+    return labels
 
 
 # ==================== BFS SKELETON HELPER FUNCTIONS (Li et al. 2017) ====================
@@ -6550,6 +6713,261 @@ async def crop_octree(request: CropOctreeRequest):
         "cached": False,
         **meta,
     }
+
+
+class SegmentGroundApplyRequest(BaseModel):
+    """Re-convert a source cloud into a new octree carrying a `ground_class`
+    scalar attribute (1=ground, 2=plant) computed by CSF.
+
+    Mirrors crop_octree's "derive points → write LAS with extra dims →
+    PotreeConverter → new octree ref" flow, but instead of masking points it
+    adds one extra dimension. CSF parameters are folded into the cache key so
+    re-running with the same params returns the cached octree byte-for-byte.
+    """
+    source_path: str
+    ascii_format: Optional[str] = None
+    cloth_resolution: float = 0.05
+    rigidness: int = 3
+    class_threshold: float = 0.02
+    iterations: int = 500
+    slope_smooth: bool = False
+    # When set (1=ground, 2=plant), keep ONLY points of that class — producing a
+    # split sub-cloud octree. None = classify in place (keep all points, add the
+    # ground_class attribute). Used by the "Split into ground + plant clouds" UI.
+    keep_class: Optional[int] = None
+
+
+# The on-disk slug / human label for the ground-classification scalar attribute.
+GROUND_CLASS_SLUG = "ground_class"
+GROUND_CLASS_LABEL = "Ground Class"
+
+
+def _segment_octree_cache_key(
+    source_path: str, ascii_format: Optional[str], csf_params: dict,
+    keep_class: Optional[int],
+) -> str:
+    """Cache key for a segment-apply result. Folds the source-octree key (so
+    source edits invalidate) with the canonical CSF parameter set and the
+    optional class filter."""
+    base = _octree_cache_key(source_path, ascii_format)
+    h = _hashlib.sha1()
+    h.update(b"segment_ground|")
+    h.update(base.encode())
+    h.update(b"\x00")
+    # Stable ordering of params for a deterministic key.
+    for k in sorted(csf_params):
+        h.update(f"{k}={csf_params[k]}".encode())
+        h.update(b"\x00")
+    h.update(f"keep={keep_class}".encode())
+    return h.hexdigest()
+
+
+def _segmented_xyz_to_las(
+    source_path: _Path,
+    ascii_format: Optional[str],
+    out_las: _Path,
+    csf_params: dict,
+    keep_class: Optional[int] = None,
+) -> tuple[int, List[dict]]:
+    """Load a full XYZ-family cloud, run CSF, and write a LAS carrying every
+    source scalar PLUS a `ground_class` extra dimension.
+
+    Unlike `_xyz_to_las` this is NOT chunked: CSF needs the whole cloud in
+    memory at once, and the per-point labels must align to the points written.
+    Returns (total_points, extra_dims) where extra_dims includes the carried
+    source scalars and the appended ground_class entry.
+    """
+    import laspy
+
+    names, extra_dims = _xyz_column_plan(source_path, ascii_format)
+
+    has_xyz = all(role in names for role in ("x", "y", "z"))
+    if not has_xyz:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ASCII format must include x/y/z. Got columns: {names}",
+        )
+    has_rgb = all(role in names for role in ("r255", "g255", "b255"))
+    intensity_role = next((r for r in ("intensity", "reflectance") if r in names), None)
+
+    skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
+    df = pd.read_csv(
+        source_path,
+        sep=r"\s+",
+        header=None,
+        names=names,
+        usecols=[i for i, c in enumerate(names) if c != "skip"],
+        comment="#",
+        skiprows=skiprows,
+        engine="c",
+    )
+
+    n = len(df)
+    if n < 10:
+        raise HTTPException(
+            status_code=400,
+            detail="Need at least 10 points for ground segmentation.",
+        )
+
+    xyz = np.column_stack([
+        df["x"].to_numpy(dtype=np.float64),
+        df["y"].to_numpy(dtype=np.float64),
+        df["z"].to_numpy(dtype=np.float64),
+    ])
+
+    try:
+        labels = segment_ground(xyz, **csf_params)
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="CSF (cloth-simulation-filter) not installed. Run: pip install cloth-simulation-filter",
+        )
+
+    # Optional class filter for the split workflow: keep only points of one
+    # class. Mask everything (positions, scalars, labels) together so they stay
+    # aligned.
+    if keep_class is not None:
+        mask = labels == keep_class
+        if not mask.any():
+            raise HTTPException(
+                status_code=400,
+                detail=f"No points classified as class {keep_class}.",
+            )
+        df = df[mask].reset_index(drop=True)
+        xyz = xyz[mask]
+        labels = labels[mask]
+
+    n_out = len(xyz)
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    for ed in extra_dims:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+    # Append the computed ground-classification dimension.
+    header.add_extra_dim(laspy.ExtraBytesParams(name=GROUND_CLASS_SLUG, type=np.float32))
+
+    record = laspy.ScaleAwarePointRecord.zeros(n_out, header=header)
+    record.x = xyz[:, 0]
+    record.y = xyz[:, 1]
+    record.z = xyz[:, 2]
+    if has_rgb:
+        record.red = df["r255"].to_numpy(dtype=np.uint16) * 256
+        record.green = df["g255"].to_numpy(dtype=np.uint16) * 256
+        record.blue = df["b255"].to_numpy(dtype=np.uint16) * 256
+    if intensity_role is not None:
+        refl = df[intensity_role].to_numpy(dtype=np.float32)
+        record.intensity = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
+    for ed in extra_dims:
+        record[ed["slug"]] = df[ed["col"]].to_numpy(dtype=np.float32)
+    record[GROUND_CLASS_SLUG] = labels.astype(np.float32)
+
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        writer.write_points(record)
+        # Pad the bbox by one scale step so boundary points survive
+        # PotreeConverter's strict bbox check (see _filtered_xyz_to_las).
+        pad = 0.001
+        writer.header.mins = (xyz.min(axis=0) - pad).tolist()
+        writer.header.maxs = (xyz.max(axis=0) + pad).tolist()
+
+    carried = [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
+    carried.append({"slug": GROUND_CLASS_SLUG, "label": GROUND_CLASS_LABEL})
+    return n_out, carried
+
+
+@app.post("/api/segment/ground/apply")
+async def segment_ground_apply(request: SegmentGroundApplyRequest):
+    """Segment the source cloud and re-convert it to a new octree carrying a
+    `ground_class` scalar attribute the renderer can colour by.
+
+    Returns the same octree-ref shape as convert_to_octree / crop_octree
+    (cache_id + metadata + attributes), so the renderer swaps the cloud's
+    OctreeRef to the returned one.
+    """
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(
+            status_code=404, detail=f"Source file not found: {request.source_path}",
+        )
+
+    ext = source_path.suffix.lower().lstrip(".")
+    if ext not in _PANDAS_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"segment_ground/apply currently supports XYZ-family sources only (got .{ext}).",
+        )
+
+    csf_params = {
+        "cloth_resolution": request.cloth_resolution,
+        "rigidness": request.rigidness,
+        "class_threshold": request.class_threshold,
+        "iterations": request.iterations,
+        "slope_smooth": request.slope_smooth,
+    }
+
+    if request.keep_class is not None and request.keep_class not in (
+        GROUND_CLASS_GROUND, GROUND_CLASS_PLANT,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"keep_class must be {GROUND_CLASS_GROUND} (ground) or {GROUND_CLASS_PLANT} (plant).",
+        )
+
+    cache_key = _segment_octree_cache_key(
+        str(source_path), request.ascii_format, csf_params, request.keep_class,
+    )
+    cache_dir = _octree_cache_root() / cache_key
+
+    cached = cache_dir / "metadata.json"
+    if cached.is_file():
+        meta = _read_octree_metadata(cache_dir)
+        return {"cache_id": cache_key, "cache_dir": str(cache_dir), "cached": True, **meta}
+
+    cache_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = cache_dir.parent / (cache_key + ".staging")
+    if staging_dir.exists():
+        _shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+    try:
+        seg_las = staging_dir / (source_path.stem + ".segmented.las")
+        # carried = source scalars + the appended ground_class entry.
+        _, carried = _segmented_xyz_to_las(
+            source_path, request.ascii_format, seg_las, csf_params, request.keep_class,
+        )
+        try:
+            _run_potree_converter(seg_las, staging_dir)
+        finally:
+            try:
+                seg_las.unlink()
+            except FileNotFoundError:
+                pass
+
+        # Persist labels for ALL carried dims (source scalars + ground_class);
+        # _write_octree_labels overwrites the sidecar, so pass the full set.
+        _write_octree_labels(staging_dir, carried)
+
+        if cache_dir.exists():
+            _shutil.rmtree(cache_dir)
+        staging_dir.rename(cache_dir)
+    except Exception:
+        try:
+            _shutil.rmtree(staging_dir)
+        except (FileNotFoundError, OSError):
+            pass
+        raise
+
+    meta = _read_octree_metadata(cache_dir)
+
+    try:
+        max_bytes = int(_os.environ.get(
+            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES",
+            _DEFAULT_OCTREE_CACHE_MAX_BYTES,
+        ))
+    except ValueError:
+        max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
+    _evict_octree_cache(max_bytes, keep=cache_dir)
+
+    return {"cache_id": cache_key, "cache_dir": str(cache_dir), "cached": False, **meta}
 
 
 @app.get("/api/pointcloud/octree_metadata")

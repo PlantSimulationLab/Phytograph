@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
 import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
 import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
+import { categoricalSchemeFor, buildCategoricalGradientStops } from '../../../lib/classification';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import { getPotreeManager, OctreeRequestManager } from '../potreeManager';
 
@@ -50,6 +51,11 @@ export interface OctreePointCloudProps {
     max: THREE.Vector3;
     invert?: boolean;
   } | null;
+  // Fired once, the first time LOD tiles have actually streamed in for this
+  // mount. The parent uses it to force a single fresh-material remount so a
+  // cloud that mounted directly into a gradient colour mode recompiles its
+  // shader with geometry present (see octreePaintGen in PointCloudViewer).
+  onFirstTilesReady?: () => void;
 }
 
 // Point a tile geometry's `intensity` attribute at the named scalar
@@ -91,8 +97,10 @@ export function OctreePointCloud({
   rangeMin,
   rangeMax,
   clipBox = null,
+  onFirstTilesReady,
 }: OctreePointCloudProps) {
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
+  const firstTilesFiredRef = useRef(false);
   // Ticks every time the material effect recreates the material. The
   // ClipBox effect depends on this so it re-applies the clip volume to
   // the fresh material instance — otherwise toggling color mode while a
@@ -339,14 +347,28 @@ export function OctreePointCloud({
     // colormap on screen exactly matches what the colourbar overlay
     // shows from the same sampleColormap call.
     if (colorMode === 'height' || colorMode === 'intensity' || scalarActive) {
-      const stopCount = 32;
-      const gradient: Array<[number, THREE.Color]> = [];
-      for (let i = 0; i < stopCount; i++) {
-        const t = i / (stopCount - 1);
-        const [r, g, b] = sampleColormap(colormap, t);
-        gradient.push([t, new THREE.Color(r, g, b)]);
+      // Categorical scalar (e.g. ground_class): build a STEP gradient so each
+      // class renders as a flat distinct colour rather than a position along a
+      // continuous ramp. Reuses the same INTENSITY_GRADIENT pipeline — only the
+      // stop array differs — so no shader change. The intensityRange set above
+      // (the attribute's [min,max]) is the value space the stops map against.
+      const categorical = scalarActive ? categoricalSchemeFor(selectedScalarField) : null;
+      if (categorical && scalarRange) {
+        const stops = buildCategoricalGradientStops(categorical, [
+          scalarRange.min[0],
+          scalarRange.max[0],
+        ]);
+        (m as any).gradient = stops.map(([t, [r, g, b]]) => [t, new THREE.Color(r, g, b)]);
+      } else {
+        const stopCount = 32;
+        const gradient: Array<[number, THREE.Color]> = [];
+        for (let i = 0; i < stopCount; i++) {
+          const t = i / (stopCount - 1);
+          const [r, g, b] = sampleColormap(colormap, t);
+          gradient.push([t, new THREE.Color(r, g, b)]);
+        }
+        (m as any).gradient = gradient;
       }
-      (m as any).gradient = gradient;
     }
 
     // Scalar mode: alias the selected attribute's buffer into `intensity` on
@@ -427,6 +449,12 @@ export function OctreePointCloud({
     const cur = octree.material;
     const visible = (octree as any).visibleNodes;
     if (Array.isArray(visible)) {
+      // Notify the parent the first time geometry is actually present, so it
+      // can force the one-shot recompile remount (mount-into-gradient-mode fix).
+      if (!firstTilesFiredRef.current && visible.length > 0) {
+        firstTilesFiredRef.current = true;
+        onFirstTilesReady?.();
+      }
       const scalarActive =
         colorMode === 'scalar' && !!selectedScalarField &&
         !!data.octree?.attributeRanges?.[selectedScalarField];

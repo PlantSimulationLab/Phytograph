@@ -35,6 +35,7 @@ first non-numeric row as a header if present.
 |---|---|
 | Reposition / level | [Clean a point cloud](../workflows/clean-point-cloud.md#translate-and-level) |
 | Crop out ground or unwanted regions | [Clean a point cloud](../workflows/clean-point-cloud.md#crop) |
+| Classify ground vs plant points | [Segment ground points](../workflows/segment-ground.md) |
 | Erase points by painting | [Clean a point cloud](../workflows/clean-point-cloud.md#erase) |
 | Filter by intensity / scalar range | [Clean a point cloud](../workflows/clean-point-cloud.md#filter) |
 | Resample to fewer points | [Clean a point cloud](../workflows/clean-point-cloud.md#resample) |

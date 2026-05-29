@@ -1,6 +1,7 @@
 import { useRef, useMemo, useEffect } from 'react';
 import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
+import { categoricalSchemeFor, colorForClassValue } from '../../../lib/classification';
 import type { PointCloudData, ColorMode, CloudFilters } from '../../../lib/pointCloudTypes';
 
 export interface PointCloudProps {
@@ -151,13 +152,22 @@ export function PointCloud({
       }
     } else if (colorMode === 'scalar' && selectedScalarField && data.scalarFields?.[selectedScalarField]) {
       const field = data.scalarFields[selectedScalarField];
-      const lo = rangeMin ?? field.min;
-      const hi = rangeMax ?? field.max;
-      const span = (hi - lo) || 1;
-      for (let i = 0; i < count; i++) {
-        const t = (field.values[i] - lo) / span;
-        const [r, g, b] = sampleColormap(colormap, t);
-        colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
+      const scheme = categoricalSchemeFor(selectedScalarField);
+      if (scheme) {
+        // Categorical attribute (e.g. ground_class): discrete per-class colors.
+        for (let i = 0; i < count; i++) {
+          const [r, g, b] = colorForClassValue(scheme, field.values[i]);
+          colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
+        }
+      } else {
+        const lo = rangeMin ?? field.min;
+        const hi = rangeMax ?? field.max;
+        const span = (hi - lo) || 1;
+        for (let i = 0; i < count; i++) {
+          const t = (field.values[i] - lo) / span;
+          const [r, g, b] = sampleColormap(colormap, t);
+          colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
+        }
       }
     } else if (colorMode === 'x' || colorMode === 'y' || colorMode === 'height') {
       const axis = colorMode === 'x' ? 0 : colorMode === 'y' ? 1 : 2;

@@ -42,6 +42,16 @@ the colorbar, and the **Min/Max** inputs let you window it.
     extra columns until re-imported — cached octrees built earlier don't
     carry the extra attributes.
 
+#### Categorical (classification) attributes
+
+Some scalar attributes are **categorical** — integer class labels rather
+than a continuous measurement. The **Ground Class** attribute produced by
+[Segment ground points](../workflows/segment-ground.md)
+(1 = ground, 2 = non-ground) is the first of these. These render with
+**discrete per-class colours** and a small class legend (ground in brown,
+non-ground in green) instead of a continuous colormap and colorbar, so each
+class reads as a distinct category rather than a position along a ramp.
+
 ## Per-mesh color modes
 
 | Mode | What it shows | When to use |

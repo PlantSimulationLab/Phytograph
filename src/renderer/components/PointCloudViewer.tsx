@@ -5,7 +5,7 @@ import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, type CropOctreeRegion, type BackendPointSource } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, segmentGround, segmentGroundApply, type CropOctreeRegion, type BackendPointSource } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import {
@@ -38,6 +38,8 @@ import {
   octreeScalarFieldOptions,
 } from '../lib/pointCloudHelpers';
 import { Colorbar } from './viewer/Colorbar';
+import { ClassLegend } from './viewer/ClassLegend';
+import { categoricalSchemeFor, GROUND_CLASS_ATTRIBUTE } from '../lib/classification';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
@@ -166,6 +168,7 @@ export default function PointCloudViewer({
   // those ids never collide with params-only scan ids.
   const selectedIds = selectedScanIds;
   const onRemoveCloud = onRemoveScan;
+
   const onUpdateCloud = onUpdateScanData;
   const onAddCloud = useMemo(() => {
     if (!onAddScan) return undefined;
@@ -184,6 +187,34 @@ export default function PointCloudViewer({
   const [colorMode, setColorMode] = useState<ColorMode>('per-scan');
   const [selectedScalarField, setSelectedScalarField] = useState<string | undefined>(undefined);
   const [colormap, setColormap] = useState<ColormapName>('viridis');
+  // One-shot remount generation per octree cacheId. An OctreePointCloud that
+  // MOUNTS directly into a gradient mode (height/scalar) — e.g. a freshly
+  // imported cloud while the global colorMode is already 'height' — compiles
+  // its colour shader before any tiles exist, so the first tiles render with a
+  // stale (grayscale) program until something forces a recompile. The
+  // colorMode/field remount key only fires on a *change*, not on mount-into.
+  // We bump this generation once, shortly after the cloud appears, to force a
+  // single fresh-material remount with tiles present (the same cure as a manual
+  // mode toggle). Keyed by cacheId and guarded so it fires at most once per
+  // octree — no remount loop.
+  const [octreePaintGen, setOctreePaintGen] = useState<Record<string, number>>({});
+  const octreePaintedRef = useRef<Set<string>>(new Set());
+  // Fired (via OctreePointCloud.onFirstTilesReady) the first time an octree's
+  // tiles paint. Forces a single fresh-material remount so a cloud that mounted
+  // directly into a gradient/scalar mode recompiles its shader with geometry
+  // present. rgb / per-scan / single render correctly on first paint, so they
+  // don't need it — and a later switch INTO a gradient mode is a colorMode
+  // change, which already remounts via the key. Guarded → fires once per
+  // cacheId, never loops.
+  const handleOctreeFirstTiles = useCallback((cacheId: string) => {
+    const needsRefresh =
+      colorMode === 'height' || colorMode === 'intensity' ||
+      colorMode === 'scalar' || colorMode === 'x' || colorMode === 'y';
+    if (!needsRefresh) return;
+    if (octreePaintedRef.current.has(cacheId)) return;
+    octreePaintedRef.current.add(cacheId);
+    setOctreePaintGen(prev => ({ ...prev, [cacheId]: (prev[cacheId] ?? 0) + 1 }));
+  }, [colorMode]);
   // Custom min/max overrides keyed by `${colorMode}:${field?}`. Undefined entries
   // mean "use the data-derived range."
   const [colorRanges, setColorRanges] = useState<Record<string, { min?: number; max?: number }>>({});
@@ -221,6 +252,15 @@ export default function PointCloudViewer({
   // Triangulation parameters
   const [poissonDepth, setPoissonDepth] = useState(8);
   const [alphaValue, setAlphaValue] = useState<number | null>(null);  // null = auto
+
+  // Ground segmentation state (Cloth Simulation Filter)
+  const [showGroundSegmentPanel, setShowGroundSegmentPanel] = useState(false);
+  const [groundSegmentInProgress, setGroundSegmentInProgress] = useState(false);
+  const [groundSegmentError, setGroundSegmentError] = useState<string | null>(null);
+  const [groundClothResolution, setGroundClothResolution] = useState(0.05);
+  const [groundClassThreshold, setGroundClassThreshold] = useState(0.02);
+  const [groundRigidness, setGroundRigidness] = useState(3);
+  const [groundSplitClouds, setGroundSplitClouds] = useState(false);
 
   // Skeleton state
   const [skeletons, setSkeletons] = useState<SkeletonEntry[]>([]);
@@ -616,6 +656,7 @@ export default function PointCloudViewer({
       setResamplePreview(null); // Clear resample preview when closing resample panel
     }
     if (except !== 'triangulation') setShowTriangulationPanel(false);
+    if (except !== 'ground-segment') setShowGroundSegmentPanel(false);
     if (except !== 'skeleton') setShowSkeletonPanel(false);
     if (except !== 'export') setShowExportPanel(false);
     if (except !== 'morph') setShowMorphPopup(false);
@@ -1917,6 +1958,7 @@ export default function PointCloudViewer({
       { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPanel(!showTriangulationPanel); }, category: 'Point Cloud', requires: 'cloud' },
+      { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-export', name: 'Export Point Cloud', keywords: ['save', 'las', 'laz', 'xyz'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => { if (selectedIds.size >= 2 && onStitchClouds) onStitchClouds(Array.from(selectedIds)); }, category: 'Point Cloud', requires: 'multiple-clouds' },
@@ -1943,7 +1985,7 @@ export default function PointCloudViewer({
     ];
 
     return cmds;
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showSkeletonPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, onSelectAll, onDeselectAll, onStitchClouds, selectedIds, handleUndo, handleRedo]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showSkeletonPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, onSelectAll, onDeselectAll, onStitchClouds, selectedIds, handleUndo, handleRedo]);
 
   // Filter and sort commands based on search
   const filteredCommands = useMemo(() => {
@@ -3473,6 +3515,171 @@ export default function PointCloudViewer({
       setTriangulationInProgress(false);
     }
   }, [selectedIds, clouds, buildPointSource, triangulationMethod, poissonDepth, alphaValue, triangulateMaxPoints]);
+
+  // Segment ground vs plant points (Cloth Simulation Filter). Writes a
+  // `ground_class` scalar attribute (1=ground, 2=plant) and colors by it.
+  // Octree clouds re-convert through the backend (the apply endpoint bakes the
+  // class into a new octree); flat clouds get the labels written into
+  // scalarFields directly. Optionally also splits into ground/plant clouds
+  // (flat clouds only — octree split would need a backend class filter).
+  const handleGroundSegment = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    if (!cloud) return;
+
+    setGroundSegmentInProgress(true);
+    setGroundSegmentError(null);
+
+    const csfParams = {
+      cloth_resolution: groundClothResolution,
+      rigidness: groundRigidness,
+      class_threshold: groundClassThreshold,
+    };
+
+    try {
+      const ps = buildPointSource(cloud);
+
+      // --- Octree-backed cloud: re-convert with ground_class baked in. ---
+      if (ps.kind === 'source') {
+        const octreeInfo = cloud.data.octree;
+        if (!octreeInfo?.sourceXyzPath) {
+          throw new Error('Octree cloud is missing its source file path.');
+        }
+        const srcPath = octreeInfo.sourceXyzPath;
+        const af = octreeInfo.asciiFormat ?? null;
+        const baseName = cloud.data.fileName ?? id;
+
+        // Classify in place: re-convert with ground_class baked in, swap the ref.
+        const meta = await segmentGroundApply({
+          source_path: srcPath,
+          ascii_format: af,
+          ...csfParams,
+        });
+        const newData = buildPointCloudFromOctree(meta, srcPath, baseName, af);
+        onUpdateCloud(id, newData);
+        setColorMode('scalar');
+        setSelectedScalarField(GROUND_CLASS_ATTRIBUTE);
+        setShowGroundSegmentPanel(false);
+
+        // Optional split: re-convert once per class into ground/plant octrees.
+        if (groundSplitClouds && onAddCloud) {
+          const addSplit = async (keepClass: number, suffix: string, color: string) => {
+            const sm = await segmentGroundApply({
+              source_path: srcPath,
+              ascii_format: af,
+              ...csfParams,
+              keep_class: keepClass,
+            });
+            onAddCloud({
+              id: crypto.randomUUID(),
+              data: buildPointCloudFromOctree(sm, srcPath, `${baseName} (${suffix})`, af),
+              visible: true,
+              color,
+            });
+          };
+          await addSplit(1, 'ground', '#8c6643');
+          await addSplit(2, 'non-ground', '#4caf50');
+        }
+
+        showToast({
+          type: 'success',
+          title: 'Ground Segmentation Complete',
+          message: `Classified ${meta.point_count.toLocaleString()} points (ground vs plant).`,
+        });
+        return;
+      }
+
+      // --- Flat cloud: classify in memory, write scalarFields. ---
+      const displayData = ps.data;
+      const count = displayData.pointCount;
+      const points: number[][] = new Array(count);
+      for (let i = 0; i < count; i++) {
+        points[i] = [
+          displayData.positions[i * 3],
+          displayData.positions[i * 3 + 1],
+          displayData.positions[i * 3 + 2],
+        ];
+      }
+
+      const response = await segmentGround({ points, ...csfParams });
+      if (!response.success) {
+        throw new Error(response.error || 'Ground segmentation failed');
+      }
+
+      const labels = Float32Array.from(response.labels);
+      const newScalarFields = {
+        ...(displayData.scalarFields ?? {}),
+        [GROUND_CLASS_ATTRIBUTE]: { values: labels, min: 1, max: 2 },
+      };
+      onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
+      setColorMode('scalar');
+      setSelectedScalarField(GROUND_CLASS_ATTRIBUTE);
+      setShowGroundSegmentPanel(false);
+
+      // Optional split into ground / plant child clouds.
+      if (groundSplitClouds && onAddCloud) {
+        const makeChild = (classValue: number, suffix: string, color: string) => {
+          const idxs: number[] = [];
+          for (let i = 0; i < count; i++) {
+            if (Math.round(response.labels[i]) === classValue) idxs.push(i);
+          }
+          if (idxs.length === 0) return;
+          const pos = new Float32Array(idxs.length * 3);
+          let col: Float32Array | undefined;
+          if (displayData.colors && displayData.colors.length >= count * 3) {
+            col = new Float32Array(idxs.length * 3);
+          }
+          idxs.forEach((srcIdx, k) => {
+            pos[k * 3] = displayData.positions[srcIdx * 3];
+            pos[k * 3 + 1] = displayData.positions[srcIdx * 3 + 1];
+            pos[k * 3 + 2] = displayData.positions[srcIdx * 3 + 2];
+            if (col && displayData.colors) {
+              col[k * 3] = displayData.colors[srcIdx * 3];
+              col[k * 3 + 1] = displayData.colors[srcIdx * 3 + 1];
+              col[k * 3 + 2] = displayData.colors[srcIdx * 3 + 2];
+            }
+          });
+          const baseName = displayData.fileName ?? 'cloud';
+          const bmin = new THREE.Vector3(Infinity, Infinity, Infinity);
+          const bmax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+          for (let k = 0; k < idxs.length; k++) {
+            bmin.x = Math.min(bmin.x, pos[k * 3]); bmax.x = Math.max(bmax.x, pos[k * 3]);
+            bmin.y = Math.min(bmin.y, pos[k * 3 + 1]); bmax.y = Math.max(bmax.y, pos[k * 3 + 1]);
+            bmin.z = Math.min(bmin.z, pos[k * 3 + 2]); bmax.z = Math.max(bmax.z, pos[k * 3 + 2]);
+          }
+          const { center, size } = computeBoundsFromPositions(pos, idxs.length);
+          onAddCloud({
+            id: crypto.randomUUID(),
+            data: {
+              positions: pos,
+              colors: col,
+              pointCount: idxs.length,
+              bounds: { min: bmin, max: bmax, center, size },
+              fileName: `${baseName} (${suffix})`,
+            },
+            visible: true,
+            color,
+          });
+        };
+        makeChild(1, 'ground', '#8c6643');
+        makeChild(2, 'non-ground', '#4caf50');
+      }
+
+      showToast({
+        type: 'success',
+        title: 'Ground Segmentation Complete',
+        message: `${response.num_ground.toLocaleString()} ground, ${response.num_plant.toLocaleString()} plant`,
+      });
+    } catch (error) {
+      console.error('Ground segmentation error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Ground segmentation failed';
+      setGroundSegmentError(errorMessage);
+      showToast({ type: 'error', title: 'Ground Segmentation Failed', message: errorMessage });
+    } finally {
+      setGroundSegmentInProgress(false);
+    }
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSplitClouds]);
 
   // Compute Alignment distance statistics
   const handleAlignmentCompute = useCallback(async () => {
@@ -6169,8 +6376,13 @@ export default function PointCloudViewer({
                   // just the colour mode — switching the field needs a fresh
                   // material + BindingStates so the new attribute's buffer
                   // (swapped into `intensity`) binds correctly.
-                  key={`octree-${colorMode}-${selectedScalarField ?? ''}`}
+                  key={`octree-${colorMode}-${selectedScalarField ?? ''}-${sourceData.octree ? (octreePaintGen[sourceData.octree.cacheId] ?? 0) : 0}`}
                   data={sourceData}
+                  onFirstTilesReady={
+                    sourceData.octree
+                      ? () => handleOctreeFirstTiles(sourceData.octree!.cacheId)
+                      : undefined
+                  }
                   pointSize={pointSize}
                   // 'per-scan' renders as a uniform single-colour swatch
                   // (the cloud's own colour), same convention as the flat
@@ -7420,6 +7632,23 @@ export default function PointCloudViewer({
                   >
                     <GitBranch className={`w-4 h-4 ${showSkeletonPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
                   </button>
+                  {/* 8b. Segment Ground (single cloud only) */}
+                  <button
+                    data-testid="tool-ground-segment"
+                    onClick={() => {
+                      if (showGroundSegmentPanel) {
+                        setShowGroundSegmentPanel(false);
+                      } else {
+                        closeAllToolPanels('ground-segment');
+                        setShowGroundSegmentPanel(true);
+                      }
+                    }}
+                    className={`p-2 rounded transition-colors ${showGroundSegmentPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
+                    title="Segment ground points"
+                    disabled={selectedIds.size !== 1}
+                  >
+                    <Layers className={`w-4 h-4 ${showGroundSegmentPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
+                  </button>
                   {/* 9. Export */}
                   <button
                     data-testid="tool-export-cloud"
@@ -8575,6 +8804,116 @@ export default function PointCloudViewer({
               )}
             </button>
           )}
+        </div>
+      )}
+
+      {/* Ground Segmentation Panel */}
+      {showGroundSegmentPanel && selectedIds.size === 1 && (
+        <div data-testid="ground-segment-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
+              <Layers className="w-3 h-3" />
+              Ground Segmentation
+            </div>
+            <button
+              onClick={() => setShowGroundSegmentPanel(false)}
+              className="p-1 hover:bg-neutral-700 rounded"
+            >
+              <X className="w-3 h-3 text-neutral-400" />
+            </button>
+          </div>
+
+          <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
+            Cloth Simulation Filter separates ground from plant points. Lower
+            tolerance keeps low plant material; higher merges it into ground.
+          </div>
+
+          {/* Cloth resolution */}
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 block mb-1">Cloth resolution (m)</label>
+            <DebouncedNumberInput
+              data-testid="ground-cloth-resolution"
+              value={groundClothResolution}
+              onCommit={(n) => setGroundClothResolution(n)}
+              min={0.005}
+              max={2}
+              step={0.01}
+              disabled={groundSegmentInProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
+
+          {/* Ground tolerance (class threshold) */}
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 block mb-1">Ground tolerance (m)</label>
+            <DebouncedNumberInput
+              data-testid="ground-class-threshold"
+              value={groundClassThreshold}
+              onCommit={(n) => setGroundClassThreshold(n)}
+              min={0.001}
+              max={1}
+              step={0.01}
+              disabled={groundSegmentInProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
+
+          {/* Rigidness */}
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 block mb-1">Rigidness (1–3)</label>
+            <DebouncedNumberInput
+              data-testid="ground-rigidness"
+              value={groundRigidness}
+              onCommit={(n) => setGroundRigidness(Math.max(1, Math.min(3, Math.round(n))))}
+              min={1}
+              max={3}
+              step={1}
+              disabled={groundSegmentInProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
+
+          {/* Split checkbox */}
+          <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-3">
+            <input
+              data-testid="ground-split-clouds"
+              type="checkbox"
+              checked={groundSplitClouds}
+              onChange={(e) => setGroundSplitClouds(e.target.checked)}
+              className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
+              disabled={groundSegmentInProgress}
+            />
+            Split into ground + plant clouds
+          </label>
+
+          {groundSegmentError && (
+            <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
+              {groundSegmentError}
+            </div>
+          )}
+
+          <button
+            data-testid="ground-segment-run-button"
+            onClick={handleGroundSegment}
+            disabled={groundSegmentInProgress}
+            className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
+              groundSegmentInProgress
+                ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
+                : 'bg-green-600 hover:bg-green-500 text-white'
+            }`}
+          >
+            {groundSegmentInProgress ? (
+              <>
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Segmenting...
+              </>
+            ) : (
+              <>
+                <Layers className="w-3 h-3" />
+                Segment Ground
+              </>
+            )}
+          </button>
         </div>
       )}
 
@@ -9763,8 +10102,24 @@ export default function PointCloudViewer({
         </div>
       )}
 
-      {/* Colorbar overlay — visible whenever a continuous-scalar color mode is active */}
-      {isScalarColorMode && activeRange && dataRange && (
+      {/* Scalar overlay — categorical attributes (e.g. ground_class) show a
+          discrete class legend; continuous scalars show the gradient colorbar.
+          Both require `dataRange`, which is null unless a visible cloud
+          actually carries the active field — so the overlay disappears when the
+          segmented scan is deleted. */}
+      {isScalarColorMode && colorMode === 'scalar' && selectedScalarField &&
+       dataRange && categoricalSchemeFor(selectedScalarField) ? (
+        <div
+          className="absolute bottom-4 right-56 z-20"
+          data-testid="class-legend"
+          data-legend-attribute={selectedScalarField}
+        >
+          <ClassLegend
+            scheme={categoricalSchemeFor(selectedScalarField)!}
+            label={dataRange.label}
+          />
+        </div>
+      ) : isScalarColorMode && activeRange && dataRange && (
         <div
           className="absolute bottom-4 right-56 z-20"
           data-testid="colorbar"

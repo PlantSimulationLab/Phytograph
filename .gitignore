@@ -44,9 +44,5 @@ findings.md
 progress.md
 HANDOFF_*.md
 
-# Local test data drops
-ground_scan*.xml
-ground_scan*.xyz
-
 # Local Claude Code settings (per-machine)
 .claude/

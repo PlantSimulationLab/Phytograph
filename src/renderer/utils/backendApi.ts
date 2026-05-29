@@ -89,6 +89,107 @@ export async function triangulatePointCloud(
   }
 }
 
+// ==================== GROUND SEGMENTATION API ====================
+
+/**
+ * Classify a point cloud into ground (1) and plant (2) points via the Cloth
+ * Simulation Filter. Send inline `points` for flat clouds or a `source`
+ * descriptor for octree-backed clouds (the backend re-reads the file at full
+ * resolution; labels align 1:1 with the resolved point order). The CSF defaults
+ * are tuned for close-range plant scans, not airborne LiDAR.
+ */
+export interface GroundSegmentationRequest {
+  points?: number[][];          // [[x, y, z], ...] — omit when `source` is set
+  source?: BackendPointSource;  // octree-backed clouds read from disk
+  cloth_resolution?: number;
+  rigidness?: number;
+  class_threshold?: number;
+  iterations?: number;
+  slope_smooth?: boolean;
+}
+
+export interface GroundSegmentationResponse {
+  success: boolean;
+  labels: number[];   // 1=ground, 2=plant, aligned to resolved point order
+  num_ground: number;
+  num_plant: number;
+  num_points: number;
+  error?: string;
+}
+
+/**
+ * Apply ground segmentation and re-convert the source cloud into a new octree
+ * carrying a `ground_class` scalar attribute (1=ground, 2=plant) the renderer
+ * can colour by. Returns the same octree-ref shape as `convertToOctree` /
+ * `cropOctree`; the caller swaps the cloud's OctreeRef to the returned one.
+ */
+export interface GroundSegmentationApplyRequest {
+  source_path: string;
+  ascii_format?: string | null;
+  cloth_resolution?: number;
+  rigidness?: number;
+  class_threshold?: number;
+  iterations?: number;
+  slope_smooth?: boolean;
+  // 1=ground, 2=plant → keep only that class (split sub-cloud). Omit to
+  // classify in place (all points, with the ground_class attribute).
+  keep_class?: number;
+}
+
+export async function segmentGround(
+  request: GroundSegmentationRequest
+): Promise<GroundSegmentationResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+
+  try {
+    const response = await fetch(`${baseUrl}/api/segment/ground`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Ground segmentation failed:', error);
+    throw error;
+  }
+}
+
+export async function segmentGroundApply(
+  request: GroundSegmentationApplyRequest
+): Promise<OctreeMetadata> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes (CSF + re-convert)
+
+  try {
+    const response = await fetch(`${baseUrl}/api/segment/ground/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as OctreeMetadata;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Ground segmentation apply failed:', error);
+    throw error;
+  }
+}
+
 // ==================== HELIOS TRIANGULATION API ====================
 
 export interface HeliosScanEntry {

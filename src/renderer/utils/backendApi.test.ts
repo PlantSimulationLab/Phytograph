@@ -20,6 +20,8 @@ import {
   morphPlant,
   parsePlantMorphParameters,
   sampleMeshSurface,
+  segmentGround,
+  segmentGroundApply,
   triangulatePointCloud,
 } from './backendApi';
 
@@ -173,6 +175,84 @@ describe('extractSkeleton', () => {
   it('surfaces detail on error', async () => {
     mockFetchError(422, { detail: 'too few points' });
     await expect(extractSkeleton(req)).rejects.toThrow('too few points');
+  });
+});
+
+describe('segmentGround', () => {
+  const req = {
+    points: [
+      [0, 0, 0],
+      [1, 0, 0],
+      [0, 1, 0],
+    ],
+    cloth_resolution: 0.05,
+    class_threshold: 0.02,
+  };
+
+  it('POSTs to /api/segment/ground and returns labels', async () => {
+    const expected = {
+      success: true,
+      labels: [1, 1, 2],
+      num_ground: 2,
+      num_plant: 1,
+      num_points: 3,
+    };
+    const spy = mockFetchOk(expected);
+    const result = await segmentGround(req);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:8008/api/segment/ground');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(init?.body as string)).toEqual(req);
+    expect(result).toEqual(expected);
+  });
+
+  it('accepts a source descriptor instead of inline points', async () => {
+    const spy = mockFetchOk({ success: true, labels: [], num_ground: 0, num_plant: 0, num_points: 0 });
+    await segmentGround({ source: { source_path: '/tmp/scan.xyz', ascii_format: 'x y z' } });
+    const body = JSON.parse(spy.mock.calls[0][1]?.body as string);
+    expect(body.source.source_path).toBe('/tmp/scan.xyz');
+  });
+
+  it('surfaces detail on error', async () => {
+    mockFetchError(500, { detail: 'CSF not installed' });
+    await expect(segmentGround(req)).rejects.toThrow('CSF not installed');
+  });
+});
+
+describe('segmentGroundApply', () => {
+  const req = {
+    source_path: '/tmp/scan.xyz',
+    ascii_format: 'x y z object_label',
+    class_threshold: 0.05,
+  };
+
+  it('POSTs to /api/segment/ground/apply and returns an octree ref', async () => {
+    const expected = {
+      cache_id: 'abc123',
+      cache_dir: '/cache/abc123',
+      cached: false,
+      version: '2.0',
+      point_count: 100,
+      spacing: 0.1,
+      scale: [1, 1, 1],
+      offset: [0, 0, 0],
+      bounds: { min: [0, 0, 0], max: [1, 1, 1] },
+      tight_bounds: { min: [0, 0, 0], max: [1, 1, 1] },
+      attributes: [{ name: 'ground_class', size: 4, type: 'float', num_elements: 1, label: 'Ground Class', min: [1], max: [2] }],
+    };
+    const spy = mockFetchOk(expected);
+    const result = await segmentGroundApply(req);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:8008/api/segment/ground/apply');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(init?.body as string)).toEqual(req);
+    expect(result.cache_id).toBe('abc123');
+    expect(result.attributes[0].name).toBe('ground_class');
+  });
+
+  it('surfaces detail on error', async () => {
+    mockFetchError(400, { detail: 'XYZ-family sources only' });
+    await expect(segmentGroundApply(req)).rejects.toThrow('XYZ-family sources only');
   });
 });
 

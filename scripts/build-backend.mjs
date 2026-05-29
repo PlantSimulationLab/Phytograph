@@ -75,7 +75,10 @@ const hiddenImports = [
 // pytexit reads __version__.txt at import time, so it must be collected as data.
 // pyhelios is the importable module name; the PyPI distribution is "pyhelios3d".
 // It ships native libs + textures + xml asset trees that must travel with the bundle.
-const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios'];
+// CSF (cloth-simulation-filter) is a SWIG C-extension; the import name is the
+// capitalized "CSF" (PyPI distribution is "cloth-simulation-filter"). collect-all
+// pulls its _CSF native module + SWIG wrapper.
+const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF'];
 
 // --onedir vs --onefile:
 //   --onefile produces a single self-extracting binary that unpacks ~300 MB

@@ -44,6 +44,16 @@ is defined.
 |---|---|---|---|
 | POST | `/api/skeleton/extract` | `main.py:3101` | Extract a topological skeleton |
 
+## Ground segmentation
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| POST | `/api/segment/ground` | `main.py` | Classify points into ground (1) / plant (2) via the Cloth Simulation Filter. Takes inline `points` or a `source` descriptor (read at full resolution — no downsampling, so labels align 1:1). Returns per-point `labels` + counts |
+| POST | `/api/segment/ground/apply` | `main.py` | Run CSF and re-convert the source XYZ into a new Potree 2.0 octree carrying a `ground_class` extra-dimension attribute the renderer can colour by. With `keep_class` (1 or 2) it writes only that class's points — the "split into ground + plant clouds" path. Returns the same octree-ref shape as `convert_to_octree` |
+
+The classifier is the `cloth-simulation-filter` package (`import CSF`), a
+SWIG C-extension bundled via `collectAll` in `scripts/build-backend.mjs`.
+
 ## Plant models & sessions
 
 | Method | Path | Source | Purpose |
