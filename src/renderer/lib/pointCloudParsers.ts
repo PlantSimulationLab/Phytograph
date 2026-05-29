@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { PointCloudData, ScalarField } from '../components/PointCloudViewer';
+import type { PointCloudData, ScalarField } from './pointCloudTypes';
 import {
   importPointCloudByPath,
   importPointCloudLasLaz,

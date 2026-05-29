@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import { hasData, hasParams, scanDisplayName, type Scan } from './scan';
 import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
-import type { PointCloudData } from '../components/PointCloudViewer';
+import type { PointCloudData } from './pointCloudTypes';
 
 function makeData(fileName?: string): PointCloudData {
   return {

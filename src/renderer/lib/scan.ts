@@ -1,4 +1,4 @@
-import type { PointCloudData } from '../components/PointCloudViewer';
+import type { PointCloudData } from './pointCloudTypes';
 import type { ScanParameters } from './scanParameters';
 
 // A Scan is the user-facing unit: it may have point data, scan parameters,
