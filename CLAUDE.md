@@ -162,3 +162,5 @@ project that ships behavior changes frequently.
 ## Commit conventions
 
 Do **not** sign commits with AI co-author trailers. No `Co-Authored-By: Claude …`, no "Generated with Claude Code" lines in PR descriptions, no model attribution of any kind. Commits should appear authored solely by the human committer.
+
+When asked to commit, commit on the **current branch**. Do **not** create a new/separate branch unless explicitly told to "commit to a separate branch" (or similar). Creating a branch on your own initiative disrupts the user's workflow.
