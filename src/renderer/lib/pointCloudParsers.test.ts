@@ -614,65 +614,68 @@ function makeXyzBinary(
 }
 
 describe('parsePointCloudFromPath', () => {
-  it('routes .xyz to the backend importer and decodes positions', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
-      new Response(makeXyzBinary([[1, 2, 3], [4, 5, 6]]), {
-        status: 200,
-        headers: { 'Content-Type': 'application/octet-stream' },
-      }),
-    );
+  // Helper: build an OctreeMetadata-shaped JSON response, matching the
+  // backend's convert_to_octree contract.
+  const makeOctreeMetadataResponse = (overrides: Record<string, unknown> = {}) => new Response(
+    JSON.stringify({
+      cache_id: 'a'.repeat(40),
+      cache_dir: `/cache/${'a'.repeat(40)}`,
+      cached: false,
+      version: '2.0',
+      point_count: 2,
+      spacing: 0.1,
+      scale: [0.001, 0.001, 0.001],
+      offset: [0, 0, 0],
+      bounds: { min: [1, 2, 3], max: [4, 5, 6] },
+      attributes: [
+        { name: 'position', size: 12, type: 'int32', num_elements: 3 },
+        { name: 'rgb', size: 6, type: 'uint16', num_elements: 3 },
+        { name: 'intensity', size: 2, type: 'uint16', num_elements: 1 },
+      ],
+      ...overrides,
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+
+  it('routes .xyz to convert_to_octree and produces an octree-backed cloud', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
     const data = await parsePointCloudFromPath('/abs/path/scan.xyz');
     expect(data.pointCount).toBe(2);
-    expect(Array.from(data.positions)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(data.fileName).toBe('scan.xyz');
-    // Bounds were computed from the decoded positions, not left as the
-    // identity-uninitialized {Infinity,-Infinity} values from the helper.
+    // Bounds come straight from the converter's metadata.
     expect(data.bounds.min.x).toBe(1);
     expect(data.bounds.max.x).toBe(4);
+    // The octree handle is the source of truth for rendering; positions
+    // is intentionally empty so V8 doesn't hold the whole flat cloud.
+    expect(data.octree?.cacheId).toBe('a'.repeat(40));
+    expect(data.octree?.sourceXyzPath).toBe('/abs/path/scan.xyz');
+    expect(data.positions.length).toBe(0);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain('/api/pointcloud/import_by_path');
+    expect(url).toContain('/api/pointcloud/convert_to_octree');
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body).toEqual({ file_path: '/abs/path/scan.xyz', ascii_format: null });
+    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null });
   });
 
-  it('forwards ascii_format to the backend when provided', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
-      new Response(makeXyzBinary([[0, 0, 0]]), { status: 200 }),
-    );
+  it('forwards ascii_format to convert_to_octree when provided', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
     await parsePointCloudFromPath('/p/a.xyz', 'x y z r255 g255 b255 reflectance');
     const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
     expect(body.ascii_format).toBe('x y z r255 g255 b255 reflectance');
+    expect(body.source_path).toBe('/p/a.xyz');
   });
 
-  it('decodes colors and normalises intensity to 0-1', async () => {
-    vi.spyOn(global, 'fetch').mockResolvedValue(
-      new Response(
-        makeXyzBinary([[0, 0, 0], [1, 1, 1]], {
-          colors: [[1, 0, 0], [0, 0.5, 0]],
-          intensity: [10, 30],
-        }),
-        { status: 200 },
-      ),
-    );
-    const data = await parsePointCloudFromPath('/p/scan.xyz');
-    expect(data.colors && Array.from(data.colors)).toEqual([1, 0, 0, 0, 0.5, 0]);
-    // intensity 10..30 → normalised 0..1
-    expect(data.intensities && Array.from(data.intensities)).toEqual([0, 1]);
+  it('preserves the asciiFormat hint on the octree handle for later re-crops', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
+    const data = await parsePointCloudFromPath('/p/scan.xyz', 'x y z reflectance');
+    expect(data.octree?.asciiFormat).toBe('x y z reflectance');
   });
 
   it('surfaces a backend error response as a thrown Error', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ detail: 'File not found: /missing.xyz' }), { status: 404 }),
+      new Response(JSON.stringify({ detail: 'Source file not found: /missing.xyz' }), { status: 404 }),
     );
-    await expect(parsePointCloudFromPath('/missing.xyz')).rejects.toThrow(/File not found/);
-  });
-
-  it('throws when the binary response has the wrong magic', async () => {
-    const bad = new ArrayBuffer(32);
-    new Uint8Array(bad).set([1, 2, 3, 4]);
-    vi.spyOn(global, 'fetch').mockResolvedValue(new Response(bad, { status: 200 }));
-    await expect(parsePointCloudFromPath('/p/a.xyz')).rejects.toThrow(/magic/);
+    await expect(parsePointCloudFromPath('/missing.xyz')).rejects.toThrow(/Source file not found/);
   });
 
   it('routes .ply through the backend importer', async () => {

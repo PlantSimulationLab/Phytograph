@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import type { PointCloudData, ScalarField } from '../components/PointCloudViewer';
-import { importPointCloudByPath, importPointCloudLasLaz } from '../utils/backendApi';
+import {
+  importPointCloudByPath,
+  importPointCloudLasLaz,
+  convertToOctree,
+  type OctreeMetadata,
+} from '../utils/backendApi';
 
 // Calculate bounds from position array
 function calculateBounds(positions: Float32Array, pointCount: number): PointCloudData['bounds'] {
@@ -751,6 +756,13 @@ const BACKEND_PATH_EXTENSIONS = new Set([
 // else (LAS, OBJ-points, …) falls back to the in-renderer parsers via
 // `parsePointCloud`. `asciiFormat` is forwarded to the backend when known
 // (Helios <ASCII_format>) and ignored on the PLY/PCD route.
+// XYZ-family extensions go through the Potree 2.0 octree pipeline as of
+// 0.3.0 — the flat-Float32Array path can't fit clouds large enough to
+// matter on a real workload. PLY / PCD still use the flat path; they
+// aren't in PotreeConverter's supported input list and are typically
+// small enough that the OOM ceiling isn't an issue.
+const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc']);
+
 export async function parsePointCloudFromPath(
   path: string,
   asciiFormat?: string | null,
@@ -758,6 +770,11 @@ export async function parsePointCloudFromPath(
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
   const ext = name.toLowerCase().split('.').pop() ?? '';
+
+  if (OCTREE_PATH_EXTENSIONS.has(ext)) {
+    const meta = await convertToOctree(path, asciiFormat ?? null);
+    return buildPointCloudFromOctree(meta, path, name, asciiFormat);
+  }
 
   if (BACKEND_PATH_EXTENSIONS.has(ext)) {
     const result = await importPointCloudByPath(path, asciiFormat ?? null);
@@ -769,16 +786,77 @@ export async function parsePointCloudFromPath(
   return parsePointCloud(file);
 }
 
-function buildPointCloudFromBackend(
+/**
+ * Construct a PointCloudData backed by a Potree 2.0 octree. The cloud's
+ * positions/colors arrays are LEFT EMPTY — the renderer dispatches to
+ * `OctreePointCloud` based on `data.octree`, which streams visible
+ * tiles directly from the cache via the `app://` protocol. Bounds and
+ * pointCount come from the converter's metadata.
+ *
+ * `sourceXyzPath` is preserved so M3's crop-apply can re-run the
+ * converter against the original file with an AABB filter.
+ */
+export function buildPointCloudFromOctree(
+  meta: OctreeMetadata,
+  sourceXyzPath: string,
+  fileName: string,
+  asciiFormat?: string | null,
+): PointCloudData {
+  // Prefer the tight data extent over the cube-padded octree bounds.
+  // Crop-box init, fit-to-bounds camera framing, and the bounds shown in
+  // the right-pane scan list all expect "where the data actually lives"
+  // not "where the octree's spatial index extends to".
+  const bnd = meta.tight_bounds ?? meta.bounds;
+  const min = new THREE.Vector3(bnd.min[0], bnd.min[1], bnd.min[2]);
+  const max = new THREE.Vector3(bnd.max[0], bnd.max[1], bnd.max[2]);
+  const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+  const size = new THREE.Vector3().subVectors(max, min);
+
+  // Index attribute ranges by name. The shader needs intensity range
+  // and (eventually) other per-attribute extrema to set its gradient
+  // uniforms; without them every point maps to the same texel and the
+  // mode renders as a solid colour.
+  const attributeRanges: Record<string, { min: number[]; max: number[] }> = {};
+  for (const a of meta.attributes ?? []) {
+    if (Array.isArray(a.min) && Array.isArray(a.max)) {
+      attributeRanges[a.name] = { min: a.min, max: a.max };
+    }
+  }
+
+  return {
+    // No flat arrays — the OctreePointCloud renderer reads from the
+    // octree directly. An empty Float32Array satisfies the type without
+    // consuming heap on a multi-gigabyte source.
+    positions: new Float32Array(0),
+    pointCount: meta.point_count,
+    bounds: { min, max, center, size },
+    fileName,
+    octree: {
+      cacheId: meta.cache_id,
+      sourceXyzPath,
+      asciiFormat: asciiFormat ?? null,
+      attributeRanges,
+    },
+  };
+}
+
+export function buildPointCloudFromBackend(
   result: { pointCount: number; positions: Float32Array; colors: Float32Array | null; intensity: Float32Array | null },
   fileName: string,
 ): PointCloudData {
-  // The backend returns positions as a single contiguous Float32Array view;
-  // copy into a fresh buffer so the renderer owns the memory and we don't
-  // pin the entire HTTP response. The view is also a multiple-of-12 length
-  // so calculateBounds can scan it directly.
-  const positions = new Float32Array(result.positions);
-
+  // Reuse the backend response's Float32Array views directly. The decoder
+  // already created Float32Array views over the response ArrayBuffer
+  // (see decodePointCloudBinary); copying them here would double peak
+  // memory transiently for no benefit — for a ~14M-point post-crop
+  // result that's an extra ~400 MB external memory at the exact moment
+  // the apply path is also holding the OLD scan in React state and
+  // every other live cloud's typed arrays. That extra ~400 MB is what
+  // was tipping V8's 4 GB old-space ceiling on multi-cloud apply.
+  //
+  // The shared ArrayBuffer stays alive as long as any view references
+  // it, which is exactly what we want — these views are the new
+  // cloud.data and they're meant to outlive the response object.
+  const positions = result.positions;
   const data: PointCloudData = {
     positions,
     pointCount: result.pointCount,
@@ -787,24 +865,26 @@ function buildPointCloudFromBackend(
   };
 
   if (result.colors) {
-    data.colors = new Float32Array(result.colors);
+    data.colors = result.colors;
   }
 
   if (result.intensity) {
-    // Match parseXYZ's behaviour: normalise intensity to 0-1 for the viewer.
+    // Match parseXYZ's behaviour: normalise intensity to 0-1 for the
+    // viewer. Done in place on the view so we don't allocate a fresh
+    // Float32Array of the same length.
+    const arr = result.intensity;
     let min = Infinity;
     let max = -Infinity;
-    for (let i = 0; i < result.intensity.length; i++) {
-      const v = result.intensity[i];
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
       if (v < min) min = v;
       if (v > max) max = v;
     }
     const range = max - min || 1;
-    const normalized = new Float32Array(result.intensity.length);
-    for (let i = 0; i < result.intensity.length; i++) {
-      normalized[i] = (result.intensity[i] - min) / range;
+    for (let i = 0; i < arr.length; i++) {
+      arr[i] = (arr[i] - min) / range;
     }
-    data.intensities = normalized;
+    data.intensities = arr;
   }
 
   return data;

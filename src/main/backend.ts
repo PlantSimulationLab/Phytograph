@@ -14,11 +14,14 @@ const BACKEND_DIR_NAME = 'phytograph_backend';
 
 let child: ChildProcess | null = null;
 
-function backendBinaryPath(): string {
-  const resourcesRoot = app.isPackaged
+function resourcesRoot(): string {
+  return app.isPackaged
     ? join(process.resourcesPath, 'resources')
     : join(app.getAppPath(), 'resources');
-  return join(resourcesRoot, BACKEND_DIR_NAME, BACKEND_BINARY_NAME);
+}
+
+function backendBinaryPath(): string {
+  return join(resourcesRoot(), BACKEND_DIR_NAME, BACKEND_BINARY_NAME);
 }
 
 async function fetchVersion(): Promise<string | null> {
@@ -121,9 +124,13 @@ export async function startBackend(): Promise<void> {
   }
 
   console.log(`Starting backend: ${binPath}`);
+  // PHYTOGRAPH_RESOURCES tells the backend where extraResources live in the
+  // packaged app, so it can locate the bundled PotreeConverter binary at
+  // <resourcesRoot>/potree_converter/<platform>/PotreeConverter.
   child = spawn(binPath, [], {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
+    env: { ...process.env, PHYTOGRAPH_RESOURCES: resourcesRoot() },
   });
 
   console.log(`Backend started with PID: ${child.pid}`);

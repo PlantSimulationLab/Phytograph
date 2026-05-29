@@ -813,6 +813,67 @@ export async function importPointCloudByPath(
   }
 }
 
+// Crop a point cloud on the backend rather than in the renderer's JS heap.
+// Same on-disk path the importer uses (renderer keeps it in
+// `Scan.sourcePath`); same PHX1 binary response. The backend reads the
+// original file, applies an AABB filter with NumPy, and streams the
+// kept points back.
+//
+// Moving this off the renderer keeps a multi-million-point apply from
+// hitting V8's 4 GB old-space ceiling — the renderer used to allocate
+// peak ~3+ GB of throwaway typed arrays for a single apply on a
+// 28M-point scan with RGB + intensity, and OOM'd. Backend memory is
+// only bound by host RAM.
+//
+// `crop_min` / `crop_max` are world-space AABB bounds. If `translation`
+// is provided, the backend bakes it into the cloud's positions before
+// the AABB test — matching the in-renderer apply semantics where the
+// editState translation gets folded into the new cloud.data.
+export async function cropPointCloudByPath(
+  filePath: string,
+  opts: {
+    asciiFormat?: string | null;
+    cropMin: { x: number; y: number; z: number };
+    cropMax: { x: number; y: number; z: number };
+    cropInvert: boolean;
+    translation?: { x: number; y: number; z: number } | null;
+  },
+): Promise<ImportPointCloudByPathResult> {
+  const baseUrl = getBackendUrl();
+  // Generous timeout — NumPy on a 28M-point scan is fast (single seconds),
+  // but file IO can be slow on cold caches and we'd rather not bail.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 600000);
+  try {
+    const response = await fetch(`${baseUrl}/api/pointcloud/crop_by_path`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file_path: filePath,
+        ascii_format: opts.asciiFormat ?? null,
+        crop_min: [opts.cropMin.x, opts.cropMin.y, opts.cropMin.z],
+        crop_max: [opts.cropMax.x, opts.cropMax.y, opts.cropMax.z],
+        crop_invert: opts.cropInvert,
+        translation: opts.translation
+          ? [opts.translation.x, opts.translation.y, opts.translation.z]
+          : null,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    const buf = await response.arrayBuffer();
+    return decodePointCloudBinary(buf);
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Point-cloud crop-by-path failed:', error);
+    throw error;
+  }
+}
+
 // 32-byte header: 4s magic, I count, B has_colors, B has_intensity, 22x reserved.
 const POINTCLOUD_BIN_HEADER_SIZE = 32;
 const POINTCLOUD_BIN_MAGIC = 'PHX1';
@@ -1124,4 +1185,183 @@ export async function icpRegisterMeshToMesh(
     console.error('Mesh-to-mesh ICP registration failed:', error);
     throw error;
   }
+}
+
+// ==================== POINT CLOUD → OCTREE PIPELINE (0.3.0) ====================
+
+export interface OctreeAttribute {
+  name: string;
+  size: number;
+  type: string;
+  num_elements: number;
+  // Per-attribute value range from PotreeConverter's metadata. Present
+  // when the converter knows the actual extrema for the attribute (true
+  // for the standard LAS schema fields: intensity, gpsTime, RGB,
+  // classification, etc.); absent otherwise.
+  min?: number[];
+  max?: number[];
+}
+
+export interface OctreeMetadata {
+  cache_id: string;
+  cache_dir: string;
+  cached: boolean;
+  version: string;
+  point_count: number;
+  spacing: number;
+  scale: [number, number, number];
+  offset: [number, number, number];
+  // `bounds` is PotreeConverter's cube-padded octree extent (used internally
+  // by the loader for LOD math). `tight_bounds` is the actual data extent —
+  // what the UI should use for camera framing and the crop box.
+  bounds: { min: [number, number, number]; max: [number, number, number] };
+  tight_bounds: { min: [number, number, number]; max: [number, number, number] };
+  attributes: OctreeAttribute[];
+}
+
+/**
+ * Triggers a Potree 2.0 octree build on the backend for an XYZ-family source
+ * file. The backend caches by sha1(sourcePath + mtime + asciiFormat) — repeat
+ * calls hit the cache and return immediately. The renderer streams tiles via
+ * the custom `app://octree/<cache_id>/...` protocol after this returns.
+ *
+ * Timeout: 5 minutes. A typical 13M-point Helios scan converts in ~7s; a
+ * 100M-point synthetic cloud would still finish comfortably under the cap.
+ */
+export async function convertToOctree(
+  filePath: string,
+  asciiFormat?: string | null,
+): Promise<OctreeMetadata> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(`${baseUrl}/api/pointcloud/convert_to_octree`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_path: filePath,
+        ascii_format: asciiFormat ?? null,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as OctreeMetadata;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('convert_to_octree failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Crop region accepted by `cropOctree`. Either an axis-aligned box or a
+ * screen-space polygon with frozen camera matrices (so the backend can
+ * reproject the source points without needing a live camera).
+ */
+export type CropOctreeRegion =
+  | {
+      kind: 'box';
+      min: [number, number, number];
+      max: [number, number, number];
+      invert?: boolean;
+    }
+  | {
+      kind: 'polygon';
+      points: Array<[number, number]>;       // canvas-pixel coordinates
+      projection: number[];                  // 16-element column-major matrix
+      view: number[];                        // 16-element column-major matrix
+      canvas: { width: number; height: number };
+      invert?: boolean;
+    };
+
+/**
+ * Response from `cropOctree`. Same shape as `OctreeMetadata` for non-empty
+ * crops, except `cache_id` and `cache_dir` are `null` when the crop kept
+ * zero points. Callers must check `point_count === 0` (renderer raises a
+ * delete-confirmation in that case rather than 4xx-ing — the backend
+ * returns HTTP 200 with the empty payload).
+ */
+export interface CropOctreeResult {
+  cache_id: string | null;
+  cache_dir: string | null;
+  cached: boolean;
+  version: string;
+  point_count: number;
+  spacing: number;
+  scale: [number, number, number];
+  offset: [number, number, number];
+  bounds: { min: [number, number, number]; max: [number, number, number] };
+  tight_bounds: { min: [number, number, number]; max: [number, number, number] };
+  attributes: OctreeAttribute[];
+}
+
+/**
+ * Re-convert an XYZ-family source into a new Potree 2.0 octree after
+ * applying a crop region (and optional translation). The returned
+ * `cache_id` is the renderer's hot-swap target — the old octree's `app://`
+ * resources are released once nothing references the prior cache id.
+ *
+ * Box and polygon regions are both backend-side: the renderer never sees
+ * the filtered point set. The 5-minute timeout matches `convertToOctree`
+ * (a 100M-point cloud's worst-case re-conversion still fits comfortably).
+ *
+ * Empty crops resolve with `cache_id === null` and `point_count === 0`;
+ * the call does NOT throw.
+ */
+export async function cropOctree(
+  sourcePath: string,
+  options: {
+    asciiFormat?: string | null;
+    region: CropOctreeRegion;
+    translation?: [number, number, number] | null;
+  },
+): Promise<CropOctreeResult> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(`${baseUrl}/api/pointcloud/crop_octree`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_path: sourcePath,
+        ascii_format: options.asciiFormat ?? null,
+        region: options.region,
+        translation: options.translation ?? null,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CropOctreeResult;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('crop_octree failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Read metadata for a previously-converted octree. Used by the renderer when
+ * it has only a cache id (e.g. after a project reload). For a fresh import,
+ * `convertToOctree` already returns this same shape — no need to round-trip.
+ */
+export async function getOctreeMetadata(cacheId: string): Promise<OctreeMetadata> {
+  const baseUrl = getBackendUrl();
+  const response = await fetch(
+    `${baseUrl}/api/pointcloud/octree_metadata?cache_id=${encodeURIComponent(cacheId)}`,
+  );
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+  }
+  return (await response.json()) as OctreeMetadata;
 }

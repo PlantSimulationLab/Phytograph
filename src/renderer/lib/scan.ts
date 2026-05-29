@@ -17,6 +17,12 @@ export interface Scan {
   data?: PointCloudData;
   params?: ScanParameters;
   sourcePath?: string;
+  // Helios <ASCII_format> hint preserved from XML import so the backend
+  // can re-parse the file (e.g. for crop-by-path) with the same column
+  // layout. Null/undefined falls back to backend auto-detection, which
+  // covers the legacy 6/7-column conventions but may misread a file
+  // that uses non-default column ordering.
+  asciiFormat?: string | null;
 }
 
 export function hasData(scan: Scan): scan is Scan & { data: PointCloudData } {

@@ -1,10 +1,20 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
-import { Canvas, useThree, ThreeEvent } from '@react-three/fiber';
+import { flushSync } from 'react-dom';
+import { Canvas, useThree, useFrame, ThreeEvent } from '@react-three/fiber';
+import { Potree, PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
+
+// potree-core's RequestManager interface isn't re-exported from the package
+// root in v2.0.15. The shape is small and stable, so mirror it locally
+// instead of importing from a deep subpath.
+interface PotreeRequestManager {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  getUrl(url: string): Promise<string>;
+}
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Palette, Filter, Globe, Search, Dna, Radio, Pencil, FileUp } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, type CropOctreeRegion } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   ColormapName,
@@ -22,9 +32,15 @@ import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import { type ScanParameters } from '../lib/scanParameters';
 import { type Scan, hasData, hasParams, scanDisplayName } from '../lib/scan';
-import { parsePointCloudFromPath } from '../lib/pointCloudParsers';
+import { parsePointCloudFromPath, buildPointCloudFromBackend, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import { dirname } from '../lib/pathUtils';
+import {
+  pointInPolygon,
+  projectWorldToCanvasPixel,
+  worldBoundsUnion,
+  polygonRegionFromCamera,
+} from '../lib/cropGeometry';
 
 // Scalar field data with min/max for normalization
 export interface ScalarField {
@@ -33,9 +49,26 @@ export interface ScalarField {
   max: number;
 }
 
+// Reference to a Potree 2.0 octree on disk (in the backend's cache). Present
+// on every cloud produced by the XYZ importer post-0.3.0; absent on
+// renderer-side synthetic data (skeleton/mesh-derived overlays). The viewer
+// renders via potree-core streaming when this is set, falling back to the
+// flat-typed-array path otherwise.
+export interface OctreeRef {
+  cacheId: string;            // sha1 hex; also the cache dir name
+  sourceXyzPath: string;       // original on-disk source — needed for re-crop
+  asciiFormat?: string | null; // Helios <ASCII_format> hint, when known
+  // Optional per-attribute min/max from PotreeConverter's metadata.
+  // Keyed by attribute name ("intensity", "rgb", "classification", …).
+  // The OctreePointCloud material effect uses these to set the shader's
+  // heightMin/Max + intensityRange uniforms — without them the gradient
+  // lookups all hit the same texel and the cloud renders solid colour.
+  attributeRanges?: Record<string, { min: number[]; max: number[] }>;
+}
+
 // Point cloud data interface
 export interface PointCloudData {
-  positions: Float32Array;  // x, y, z interleaved
+  positions: Float32Array;  // x, y, z interleaved — empty when `octree` is set
   colors?: Float32Array;    // r, g, b interleaved (0-1 range)
   intensities?: Float32Array;
   scalarFields?: Record<string, ScalarField>;  // name -> values with min/max
@@ -47,6 +80,7 @@ export interface PointCloudData {
     size: THREE.Vector3;
   };
   fileName?: string;
+  octree?: OctreeRef;  // present iff the cloud is streamed from an octree
 }
 
 // Point cloud entry with metadata. Internal alias matching the data-bearing
@@ -57,15 +91,22 @@ export interface PointCloudEntry {
   data: PointCloudData;
   visible: boolean;
   color: string; // Label color for identification
+  // On-disk source path, when known. Set at import time via the
+  // electron `webUtils.getPathForFile` bridge or the Helios XML
+  // resolver. Lets the apply-crop path delegate the heavy filter
+  // work to the Python backend (which can re-read the file) instead
+  // of allocating big intermediates in V8 — see handleApplyCrop.
+  sourcePath?: string;
+  // Helios <ASCII_format> hint preserved from the importing XML so the
+  // backend can re-parse XYZ-family files with the same column layout.
+  asciiFormat?: string | null;
 }
 
-// Per-cloud edit state
+// Per-cloud edit state. The crop region is no longer per-cloud — it
+// lives at the viewer level so a single crop applies uniformly across
+// every selected scan (see CropRegion / cropRegion state below).
 interface CloudEditState {
   translation: { x: number; y: number; z: number };
-  cropMin: { x: number; y: number; z: number } | null;
-  cropMax: { x: number; y: number; z: number } | null;
-  cropEnabled: boolean;
-  cropInvert: boolean;
   erasedIndices: Set<number>;  // Set of erased point indices
 }
 
@@ -182,6 +223,10 @@ interface CloudFilters {
 }
 
 interface PointCloudProps {
+  // Source point cloud — typed arrays are SHARED with three.js, never
+  // copied into a separate position attribute. This is what keeps a
+  // 50M-point cloud from blowing the renderer when the user enters crop
+  // mode or resizes a crop box.
   data: PointCloudData;
   pointSize?: number;
   colorMode?: ColorMode;
@@ -191,6 +236,14 @@ interface PointCloudProps {
   colormap?: ColormapName;
   rangeMin?: number;  // Overrides data-derived min for color mapping
   rangeMax?: number;  // Overrides data-derived max for color mapping
+  // Optional Uint32Array of visible-point indices. When provided, three.js
+  // draws only the indexed subset; the position/color attributes still
+  // cover the full point count and are shared with `data`. The crop
+  // preview and erase paths produce this via getDisplayIndices below;
+  // passing it instead of a separately-allocated filtered PointCloudData
+  // keeps each preview update at ~4 bytes per visible point instead of
+  // ~28-36 bytes (positions + colors + intensities).
+  indices?: Uint32Array | null;
 }
 
 // Format a numeric range tick so the colorbar labels stay readable across
@@ -234,185 +287,641 @@ function Colorbar({ colormap, min, max, label }: ColorbarProps) {
   );
 }
 
-// Point cloud mesh component
-function PointCloud({ data, pointSize = 2, colorMode = 'height', singleColor = '#a1a1aa', selectedScalarField, filters, colormap = 'viridis', rangeMin, rangeMax }: PointCloudProps) {
+// =====================================================================
+// Octree streaming (0.3.0+)
+// =====================================================================
+// Renders a point cloud whose source of truth is an on-disk Potree 2.0
+// octree (metadata.json + hierarchy.bin + octree.bin in the backend's
+// cache dir). Tiles stream into the GPU via the `app://octree/...`
+// protocol registered in src/main/octreeProtocol.ts. This replaces the
+// flat-Float32Array path for any cloud large enough to hit V8's heap
+// limit — the renderer never holds more than the visible point set
+// (capped by pointBudget).
+
+// Shared across all OctreePointCloud instances. potree-core's Potree
+// class owns the LRU node cache + load worker pool — having one per
+// component would fragment those.
+let _sharedPotreeManager: Potree | null = null;
+function getPotreeManager(): Potree {
+  if (!_sharedPotreeManager) {
+    _sharedPotreeManager = new Potree();
+    // 2M visible points ≈ 24 MB position data on GPU. The renderer is
+    // free to render fewer than the budget if the camera doesn't see
+    // that many.
+    _sharedPotreeManager.pointBudget = 2_000_000;
+  }
+  return _sharedPotreeManager;
+}
+
+// potree-core's RequestManager just wraps fetch + URL resolution. With
+// the `app://` scheme registered as supportFetchAPI, the global fetch
+// works transparently.
+const OctreeRequestManager: PotreeRequestManager = {
+  fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init),
+  getUrl: async (url: string) => url,
+};
+
+interface OctreePointCloudProps {
+  data: PointCloudData;  // must have data.octree set
+  pointSize?: number;
+  colorMode?: 'rgb' | 'intensity' | 'height' | 'single' | 'scalar';
+  singleColor?: string;
+  // Active colormap selected in the UI (viridis, plasma, etc.). When
+  // colorMode is 'height' or 'intensity' we build a potree-core
+  // IGradient from this and assign it to the material — without this,
+  // the cloud uses potree-core's default rainbow gradient instead of
+  // matching the toolbar selection (and the colorbar overlay).
+  colormap?: ColormapName;
+  // User-overridden colorbar range (toolbar's Min/Max inputs). When
+  // set, override the data-derived heightMin/Max + intensityRange so
+  // the on-screen gradient sweeps over the user's chosen window
+  // instead of the cloud's natural extrema.
+  rangeMin?: number;
+  rangeMax?: number;
+  // Optional AABB clip volume. When set, points outside the box are
+  // discarded by the shader on the GPU — no re-fetch, no re-mount, runs
+  // at frame rate. Used for the live crop preview while the user drags
+  // the gizmo. Apply still goes through the backend re-conversion so the
+  // final cropped octree is full-resolution. `invert=true` flips the
+  // semantic to "discard points INSIDE the box" so the preview matches
+  // the Crop tool's invert checkbox.
+  clipBox?: {
+    min: THREE.Vector3;
+    max: THREE.Vector3;
+    invert?: boolean;
+  } | null;
+}
+
+function OctreePointCloud({
+  data,
+  pointSize = 2,
+  colorMode = 'rgb',
+  singleColor = '#a1a1aa',
+  colormap = 'viridis',
+  rangeMin,
+  rangeMax,
+  clipBox = null,
+}: OctreePointCloudProps) {
+  const [octree, setOctree] = useState<PointCloudOctree | null>(null);
+  // Ticks every time the material effect recreates the material. The
+  // ClipBox effect depends on this so it re-applies the clip volume to
+  // the fresh material instance — otherwise toggling color mode while a
+  // crop preview is active would drop the ClipBox.
+  const [materialVersion, setMaterialVersion] = useState(0);
+  const manager = getPotreeManager();
+  const { gl, camera, scene } = useThree();
+
+  // Load on cacheId change, then attach the resulting PointCloudOctree
+  // directly to the scene. `<primitive object={...}/>` works but is fiddly
+  // when the same Potree manager has multiple clouds — explicit scene.add /
+  // scene.remove is what the potree-core README recommends and gives us a
+  // predictable lifecycle.
+  useEffect(() => {
+    if (!data.octree) return;
+    const url = `app://octree/${data.octree.cacheId}/metadata.json`;
+    let cancelled = false;
+    let pcoForCleanup: PointCloudOctree | null = null;
+    manager
+      .loadPointCloud(url, OctreeRequestManager)
+      .then((pco) => {
+        if (cancelled) {
+          pco.dispose();
+          return;
+        }
+        scene.add(pco);
+        pcoForCleanup = pco;
+        setOctree(pco);
+      })
+      .catch((err) => {
+        console.error(`Octree load failed for ${data.octree?.cacheId}:`, err);
+      });
+    return () => {
+      cancelled = true;
+      if (pcoForCleanup) {
+        scene.remove(pcoForCleanup);
+        pcoForCleanup.dispose();
+      }
+    };
+  }, [data.octree?.cacheId, manager, scene]);
+
+  // Material settings.
+  //
+  // Three coordinates have to land together for octree colour to look right:
+  //
+  //   1. `newFormat` is mutually exclusive with non-RGB modes. The shader's
+  //      POINT COLOR SELECTION starts with `#ifdef new_format → vColor = rgba`,
+  //      which short-circuits every pointColorType-keyed branch that comes
+  //      after. So `newFormat=true` only for colorMode==='rgb'; every other
+  //      mode needs newFormat=false so `#elif defined color_type_color /
+  //      height / intensity` can fire. newFormat is a plain instance field
+  //      (no @J() decorator), so changing it doesn't auto-trigger
+  //      updateShaderSource — we call it explicitly below.
+  //
+  //   2. `inputColorEncoding = LINEAR (0)` and `outputColorEncoding = LINEAR (0)`.
+  //      potree-core's defaults (input=sRGB, output=LINEAR) trigger a
+  //      `vColor = fromLinear(vColor)` at the bottom of the fragment shader.
+  //      That re-encodes the display-encoded uint8 RGB PotreeConverter wrote
+  //      into the cloud, collapsing every channel toward grayscale — the
+  //      "mostly white with random colour flecks" symptom. Matching them at
+  //      LINEAR makes the conditional fall through and vColor flows
+  //      untouched.
+  //
+  //   3. Component re-mount on colorMode change. The dispatch below keys
+  //      `<OctreePointCloud key={`octree-${colorMode}`}>` so React unmounts
+  //      and remounts when the mode changes. That gives us a fresh
+  //      PointCloudMaterial from potree-core's loader, fresh BindingStates
+  //      for every per-tile sceneNode, and a clean WebGLProgram compile.
+  //      Without the re-mount, three.js's BindingState cache keeps the old
+  //      attribute slot mapping (e.g. position@0 only) and the new attribute
+  //      (rgba@8 in newFormat=true mode) goes unbound — symptom: cloud
+  //      renders effectively black after a mode change. Re-mount cost on
+  //      the cached octree is ~10 ms (the octree.bin tiles stay in
+  //      potree-core's PCOGeometry cache; only the GPU material/program
+  //      gets rebuilt).
+  useEffect(() => {
+    if (!octree) return;
+
+    // Why dispose + recreate the material instead of mutating in place:
+    // three.js's WebGLPrograms cache is keyed on the material instance.
+    // potree-core's pointColorType setter rewrites the shader source
+    // string and flips `needsUpdate=true`, but in practice three.js
+    // continues serving the previously compiled program — toggling
+    // colour modes after the first frame leaves JS state matching the
+    // new mode while the GPU keeps drawing the old one. Replacing the
+    // material outright forces a fresh program compile on the next draw.
+    //
+    // Tile propagation: per-tile sceneNodes (created by potree-core's
+    // toTreeNode as the LOD streamer loads each node) capture the cloud
+    // material at construction time. The cloud's `set material(m)`
+    // setter only updates `octree._material` — it does NOT push the new
+    // material to existing tile.material refs. We walk the scene graph
+    // after the swap and overwrite each Points.material so tiles that
+    // were already loaded see the new instance. Tiles streamed AFTER
+    // this effect runs will see the new octree.material at their own
+    // construction time, so forward propagation is automatic.
+    // newFormat is mutually exclusive with non-RGB modes (the shader's
+    // POINT COLOR SELECTION starts with `#ifdef new_format → vColor =
+    // rgba`, short-circuiting every pointColorType-keyed branch). So
+    // newFormat only for colorMode==='rgb'.
+    const isRgbMode = colorMode === 'rgb';
+    const m = octree.material;
+
+    // Mutate newFormat directly. potree-core doesn't expose a setter for
+    // this — it's a plain instance field read at shader-compile time —
+    // so we have to force a shader rebuild after changing it.
+    (m as any).newFormat = isRgbMode;
+    // Force the shader to do linear→sRGB on its output so the framebuffer
+    // bytes match the user-intended display colour. Three.js's
+    // RawShaderMaterial bypasses the renderer's outputColorSpace conversion
+    // — whatever the shader writes goes to the framebuffer as raw bytes.
+    // potree-core's conditional that calls fromLinear() (linear→sRGB) is
+    // gated on `output_color_encoding_linear && input_color_encoding_sRGB`.
+    // That's the combination we want active.
+    // No shader-side conversion. Three.js's RawShaderMaterial bypasses
+    // the renderer's outputColorSpace conversion, so the shader's output
+    // bytes land in the framebuffer unchanged. To get a sRGB-display-
+    // correct render, we feed the shader uColor / gradient stops / rgba
+    // pre-encoded in sRGB (uniforms are stored in linear-as-sRGB-bytes,
+    // so `new THREE.Color(hex)` followed by `convertLinearToSRGB()` keeps
+    // them in [0,1] but with sRGB-encoded values that the shader passes
+    // straight to the framebuffer).
+    (m as any).inputColorEncoding = 0;
+    (m as any).outputColorEncoding = 0;
+    m.pointSizeType = PointSizeType.FIXED;
+    m.size = pointSize;
+
+    // Height: getElevation() in the shader is
+    //   w = (world.z - heightMin) / (heightMax - heightMin)
+    // and samples a gradient texture at (w, 1-w). Without setting
+    // heightMin/heightMax, the cloud's `set material` setter would have
+    // populated them from the tight bounding box — but only when the
+    // setter fires, which we bypass by mutating the existing material in
+    // place.
+    //
+    // When the user has explicitly set Min/Max in the Color By panel
+    // (rangeMin / rangeMax), honour those values directly. Otherwise
+    // derive from data.bounds.z and pad by 20% on each end so the top
+    // and bottom of the cloud aren't pinned exactly at the gradient
+    // texture's edge texels (mirrors potree-core's own setter).
+    if (rangeMin !== undefined && rangeMax !== undefined && rangeMax > rangeMin) {
+      (m as any).heightMin = rangeMin;
+      (m as any).heightMax = rangeMax;
+    } else {
+      const zMin = data.bounds.min.z;
+      const zMax = data.bounds.max.z;
+      const zPad = 0.2 * Math.max(zMax - zMin, 1e-6);
+      (m as any).heightMin = zMin - zPad;
+      (m as any).heightMax = zMax + zPad;
+    }
+
+    // Intensity: getIntensity() does
+    //   w = (intensity - intensityRange.x) / (intensityRange.y - intensityRange.x)
+    // potree-core's default is [0, 65000], but PotreeConverter's
+    // metadata carries the actual per-attribute extrema. For the typical
+    // BPPtree workflow `intensity = reflectance × 256` clamped to
+    // [0, 65535] — so a typical reflectance 0-255 maps to 0-65280 — but
+    // the actual range PotreeConverter saw is in the metadata.
+    // Without setting this, every point maps to roughly w ≈ 0 because
+    // [0, 65000] is much wider than typical input, and the cloud
+    // renders as the gradient's "low" texel — a uniform colour.
+    if (rangeMin !== undefined && rangeMax !== undefined && rangeMax > rangeMin) {
+      // User-overridden range from the Color By panel — use it directly.
+      // The backend backs this with the actual intensity (reflectance ×
+      // 256) so the user's UI values are in the same units as the
+      // gradient sweep.
+      (m as any).intensityRange = [rangeMin, rangeMax];
+    } else {
+      const intensityRange = data.octree?.attributeRanges?.intensity;
+      if (intensityRange && intensityRange.min.length > 0 && intensityRange.max.length > 0) {
+        const iMin = intensityRange.min[0];
+        const iMax = intensityRange.max[0];
+        // Guard against a zero-width range (constant intensity) — set
+        // [min-1, min+1] so the divisor isn't zero and the cloud renders
+        // as the middle of the gradient instead of NaN.
+        if (iMax > iMin) {
+          (m as any).intensityRange = [iMin, iMax];
+        } else {
+          (m as any).intensityRange = [iMin - 1, iMin + 1];
+        }
+      }
+    }
+
+    switch (colorMode) {
+      case 'rgb': m.pointColorType = PointColorType.RGB; break;
+      case 'intensity':
+        // INTENSITY_GRADIENT samples the cloud's gradient texture; the
+        // plain INTENSITY mode writes vColor=vec3(w) which renders as
+        // grayscale and is hard to distinguish from background. Use
+        // gradient by default — matches what the flat-array PointCloud
+        // dispatch does via its sampleColormap path.
+        m.pointColorType = PointColorType.INTENSITY_GRADIENT;
+        break;
+      case 'height': m.pointColorType = PointColorType.HEIGHT; break;
+      case 'single':
+      case 'scalar':
+        m.pointColorType = PointColorType.COLOR;
+        // Pre-encode the swatch as sRGB. THREE.Color('#hex') parses the
+        // hex as sRGB and stores it linearised (ColorManagement default
+        // since r152). The shader passes uColor straight to the
+        // framebuffer (potree-core's RawShaderMaterial bypasses
+        // three.js's outputColorSpace conversion), so we have to put
+        // sRGB-encoded values in the uniform ourselves —
+        // convertLinearToSRGB() takes the linear THREE.Color and
+        // applies the linear→sRGB encode so the bytes written by the
+        // shader display as the swatch the user picked.
+        m.color = new THREE.Color(singleColor ?? '#a1a1aa').convertLinearToSRGB();
+        break;
+      default: m.pointColorType = PointColorType.RGB;
+    }
+
+    // Gradient texture for height / intensity_gradient modes. sampleColormap
+    // returns sRGB display values directly — exactly what we want the
+    // shader to output. We feed those values into THREE.Color via the
+    // setRGB(...) overload WITHOUT a colorSpace argument, so THREE
+    // treats them as linear and stores them unchanged. The shader then
+    // passes the stop bytes straight to the framebuffer (RawShaderMaterial
+    // bypasses the renderer's outputColorSpace conversion), so the
+    // colormap on screen exactly matches what the colourbar overlay
+    // shows from the same sampleColormap call.
+    if (colorMode === 'height' || colorMode === 'intensity') {
+      const stopCount = 32;
+      const gradient: Array<[number, THREE.Color]> = [];
+      for (let i = 0; i < stopCount; i++) {
+        const t = i / (stopCount - 1);
+        const [r, g, b] = sampleColormap(colormap, t);
+        gradient.push([t, new THREE.Color(r, g, b)]);
+      }
+      (m as any).gradient = gradient;
+    }
+
+    // Force shader source rebuild (newFormat is a plain field with no
+    // setter that calls updateShaderSource for us).
+    if (typeof (m as any).updateShaderSource === 'function') {
+      (m as any).updateShaderSource();
+    }
+    m.needsUpdate = true;
+
+    setMaterialVersion(v => v + 1);
+  }, [octree, pointSize, colorMode, singleColor, colormap, rangeMin, rangeMax]);
+
+  // Live crop preview: attach an IClipBox to the cloud's material when a
+  // crop region is being drawn. The shader discards points outside the
+  // box at GPU level — no tile re-fetch, no JS-side iteration, runs at
+  // frame rate even on 100M-point clouds. When `clipBox` is null, clear
+  // the clip volume and put the material back into DISABLED clip mode so
+  // the cloud renders fully.
+  //
+  // `createClipBox(size, position)` takes a SIZE vector (not min/max) and
+  // a CENTER position; the box is rendered as a unit cube transformed by
+  // (scale=size, translate=position). The min/max-to-size+center
+  // conversion is done here to keep the prop API symmetric with the rest
+  // of the codebase's crop-box state.
+  //
+  // `invert` flips ClipMode.CLIP_OUTSIDE (keep inside) → CLIP_INSIDE
+  // (keep outside) so the preview matches the "remove points inside the
+  // box" UX when the user enables invert.
+  useEffect(() => {
+    if (!octree) return;
+    const m = octree.material;
+    if (clipBox) {
+      const size = new THREE.Vector3(
+        clipBox.max.x - clipBox.min.x,
+        clipBox.max.y - clipBox.min.y,
+        clipBox.max.z - clipBox.min.z,
+      );
+      const center = new THREE.Vector3(
+        (clipBox.min.x + clipBox.max.x) / 2,
+        (clipBox.min.y + clipBox.max.y) / 2,
+        (clipBox.min.z + clipBox.max.z) / 2,
+      );
+      const box = createClipBox(size, center);
+      (m as any).setClipBoxes([box]);
+      (m as any).clipMode = clipBox.invert
+        ? ClipMode.CLIP_INSIDE
+        : ClipMode.CLIP_OUTSIDE;
+    } else if ((m as any).numClipBoxes > 0 || (m as any).clipMode !== ClipMode.DISABLED) {
+      // Only clear when there's actually a clip volume to clear. Calling
+      // setClipBoxes([]) on a material that already has zero clip boxes
+      // unconditionally triggers updateShaderSource() (the `t` flag in
+      // its body fires when going 0↔non-zero), which thrashes the
+      // shader cache for no reason and can leave the per-tile draw
+      // calls in a state where they bind a freshly-recompiling program
+      // that hasn't finished — symptom: the cloud disappears entirely.
+      (m as any).setClipBoxes([]);
+      (m as any).clipMode = ClipMode.DISABLED;
+    }
+  }, [octree, materialVersion, clipBox?.min.x, clipBox?.min.y, clipBox?.min.z,
+       clipBox?.max.x, clipBox?.max.y, clipBox?.max.z, clipBox?.invert]);
+
+  // Per-frame LOD update. Potree decides which nodes to fetch / drop
+  // based on the camera's view of the octree's bounding boxes. Also
+  // keeps per-tile sceneNode.material in sync with the cloud's current
+  // material — tiles loaded between material-effect runs get their
+  // ref synced here on the next frame.
+  useFrame(() => {
+    if (!octree) return;
+    manager.updatePointClouds([octree], camera, gl);
+    const cur = octree.material;
+    const visible = (octree as any).visibleNodes;
+    if (Array.isArray(visible)) {
+      for (const node of visible) {
+        const sn = (node as any).sceneNode;
+        if (sn && sn.material !== cur) sn.material = cur;
+      }
+    }
+  });
+
+  // Scene attach/detach is handled in the loader effect above. This
+  // component returns null because the cloud lives directly on the scene
+  // root, not inside a React-managed `<primitive>` element. We still need
+  // to render *something* so the component participates in React's tree
+  // (useFrame requires a mounted component).
+  return null;
+}
+
+// Point cloud mesh component.
+//
+// Memory model: the position attribute is built from `data.positions`
+// directly (no copy). When filtering is needed (data-range filters or a
+// crop/erase index passed via `indices`), we set the geometry's INDEX
+// attribute — three.js draws only those points. This keeps preview-time
+// allocation to ~4 bytes per visible point (one Uint32 index entry)
+// instead of ~28-36 bytes (positions + colors + intensities copy), which
+// is the difference between fitting and OOM'ing on a multi-cloud crop
+// of a 50M-point scene.
+//
+// The color attribute is computed in its own useMemo so that resizing
+// the crop box (which changes `indices` but not the source cloud or
+// colorMode) doesn't recompute it. For 'rgb' we share data.colors; for
+// 'single'/'per-scan' we skip the attribute entirely and let
+// material.color carry the swatch.
+function PointCloud({
+  data,
+  pointSize = 2,
+  colorMode = 'height',
+  singleColor = '#a1a1aa',
+  selectedScalarField,
+  filters,
+  colormap = 'viridis',
+  rangeMin,
+  rangeMax,
+  indices,
+}: PointCloudProps) {
   const pointsRef = useRef<THREE.Points>(null);
 
-  const geometry = useMemo(() => {
-    // Handle empty point cloud or invalid data
-    if (!data || data.pointCount === 0 || !data.positions || data.positions.length === 0) {
-      return null;
-    }
+  // Combine the externally-supplied crop/erase indices with the optional
+  // data-range filter into a single Uint32Array (or null when nothing is
+  // filtered and we can let three.js draw all points without an index).
+  const drawIndices = useMemo<Uint32Array | null>(() => {
+    if (!data || data.pointCount === 0) return null;
 
-    // Validate positions array length matches pointCount
-    if (data.positions.length < data.pointCount * 3) {
-      console.warn('[PointCloud] Invalid positions array length:', data.positions.length, 'expected:', data.pointCount * 3);
-      return null;
-    }
+    const hasFilters = !!filters && (
+      filters.x.enabled || filters.y.enabled || filters.z.enabled ||
+      filters.intensity?.enabled ||
+      Object.values(filters.scalarFields).some(f => f.enabled)
+    );
 
-    // Apply filters to determine which points to show
-    let filteredIndices: number[] | null = null;
-    if (filters) {
-      const indices: number[] = [];
+    // No filtering needed — three.js will draw [0, pointCount).
+    if (!indices && !hasFilters) return null;
+
+    const passesFilters = (i: number): boolean => {
+      if (!hasFilters || !filters) return true;
+      const x = data.positions[i * 3];
+      const y = data.positions[i * 3 + 1];
+      const z = data.positions[i * 3 + 2];
+      if (filters.x.enabled && (x < filters.x.min || x > filters.x.max)) return false;
+      if (filters.y.enabled && (y < filters.y.min || y > filters.y.max)) return false;
+      if (filters.z.enabled && (z < filters.z.min || z > filters.z.max)) return false;
+      if (filters.intensity?.enabled && data.intensities) {
+        const v = data.intensities[i];
+        if (v < filters.intensity.min || v > filters.intensity.max) return false;
+      }
+      for (const name in filters.scalarFields) {
+        const sf = filters.scalarFields[name];
+        if (sf.enabled && data.scalarFields?.[name]) {
+          const v = data.scalarFields[name].values[i];
+          if (v < sf.min || v > sf.max) return false;
+        }
+      }
+      return true;
+    };
+
+    if (indices && !hasFilters) return indices;
+
+    // Fast paths exhausted — build a fresh Uint32Array. Two-pass so the
+    // typed array is allocated at the exact size.
+    let kept = 0;
+    if (indices) {
+      for (let k = 0; k < indices.length; k++) {
+        if (passesFilters(indices[k])) kept++;
+      }
+    } else {
       for (let i = 0; i < data.pointCount; i++) {
-        const x = data.positions[i * 3];
-        const y = data.positions[i * 3 + 1];
-        const z = data.positions[i * 3 + 2];
-
-        // Check X filter
-        if (filters.x.enabled && (x < filters.x.min || x > filters.x.max)) continue;
-        // Check Y filter
-        if (filters.y.enabled && (y < filters.y.min || y > filters.y.max)) continue;
-        // Check Z filter
-        if (filters.z.enabled && (z < filters.z.min || z > filters.z.max)) continue;
-        // Check intensity filter
-        if (filters.intensity?.enabled && data.intensities) {
-          const intensity = data.intensities[i];
-          if (intensity < filters.intensity.min || intensity > filters.intensity.max) continue;
-        }
-        // Check scalar field filters
-        let passScalarFilters = true;
-        for (const [fieldName, fieldFilter] of Object.entries(filters.scalarFields)) {
-          if (fieldFilter.enabled && data.scalarFields?.[fieldName]) {
-            const value = data.scalarFields[fieldName].values[i];
-            if (value < fieldFilter.min || value > fieldFilter.max) {
-              passScalarFilters = false;
-              break;
-            }
-          }
-        }
-        if (!passScalarFilters) continue;
-
-        indices.push(i);
+        if (passesFilters(i)) kept++;
       }
-      filteredIndices = indices;
     }
-
-    const pointCount = filteredIndices ? filteredIndices.length : data.pointCount;
-    if (pointCount === 0) return null;
-
-    // Build filtered positions and colors
-    const positions = new Float32Array(pointCount * 3);
-    const colors = new Float32Array(pointCount * 3);
-
-    // Helper to get original index
-    const getOriginalIndex = (i: number) => filteredIndices ? filteredIndices[i] : i;
-
-    // Copy positions
-    for (let i = 0; i < pointCount; i++) {
-      const origIdx = getOriginalIndex(i);
-      positions[i * 3] = data.positions[origIdx * 3];
-      positions[i * 3 + 1] = data.positions[origIdx * 3 + 1];
-      positions[i * 3 + 2] = data.positions[origIdx * 3 + 2];
+    if (kept === 0) return new Uint32Array(0);
+    const out = new Uint32Array(kept);
+    let w = 0;
+    if (indices) {
+      for (let k = 0; k < indices.length; k++) {
+        const i = indices[k];
+        if (passesFilters(i)) out[w++] = i;
+      }
+    } else {
+      for (let i = 0; i < data.pointCount; i++) {
+        if (passesFilters(i)) out[w++] = i;
+      }
     }
+    return out;
+  }, [data, indices, filters]);
 
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-
+  // Per-point colors. Cached on (data, colorMode, ...) ONLY — does not
+  // depend on the index buffer. This is why resizing the crop box
+  // doesn't reallocate ~hundreds of MB of color data: only the index
+  // attribute changes, three.js indexes into the same color buffer.
+  const colorAttr = useMemo<THREE.BufferAttribute | null>(() => {
+    if (!data || data.pointCount === 0) return null;
+    if (colorMode === 'single') {
+      // material.color carries the swatch; no per-vertex color attribute.
+      return null;
+    }
     if (colorMode === 'rgb' && data.colors && data.colors.length >= data.pointCount * 3) {
-      for (let i = 0; i < pointCount; i++) {
-        const origIdx = getOriginalIndex(i);
-        colors[i * 3] = data.colors[origIdx * 3];
-        colors[i * 3 + 1] = data.colors[origIdx * 3 + 1];
-        colors[i * 3 + 2] = data.colors[origIdx * 3 + 2];
-      }
-    } else if (colorMode === 'intensity' && data.intensities && data.intensities.length >= data.pointCount) {
+      // Share the cloud's own colors with three.js — no copy.
+      return new THREE.BufferAttribute(data.colors, 3);
+    }
+    const count = data.pointCount;
+    const colors = new Float32Array(count * 3);
+    if (colorMode === 'intensity' && data.intensities && data.intensities.length >= count) {
       const lo = rangeMin ?? 0;
       const hi = rangeMax ?? 1;
       const span = (hi - lo) || 1;
-      for (let i = 0; i < pointCount; i++) {
-        const origIdx = getOriginalIndex(i);
-        const t = (data.intensities[origIdx] - lo) / span;
+      for (let i = 0; i < count; i++) {
+        const t = (data.intensities[i] - lo) / span;
         const [r, g, b] = sampleColormap(colormap, t);
-        colors[i * 3] = r;
-        colors[i * 3 + 1] = g;
-        colors[i * 3 + 2] = b;
+        colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
       }
     } else if (colorMode === 'scalar' && selectedScalarField && data.scalarFields?.[selectedScalarField]) {
       const field = data.scalarFields[selectedScalarField];
       const lo = rangeMin ?? field.min;
       const hi = rangeMax ?? field.max;
       const span = (hi - lo) || 1;
-      for (let i = 0; i < pointCount; i++) {
-        const origIdx = getOriginalIndex(i);
-        const t = (field.values[origIdx] - lo) / span;
+      for (let i = 0; i < count; i++) {
+        const t = (field.values[i] - lo) / span;
         const [r, g, b] = sampleColormap(colormap, t);
-        colors[i * 3] = r;
-        colors[i * 3 + 1] = g;
-        colors[i * 3 + 2] = b;
+        colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
       }
-    } else if (colorMode === 'x') {
+    } else if (colorMode === 'x' || colorMode === 'y' || colorMode === 'height') {
+      const axis = colorMode === 'x' ? 0 : colorMode === 'y' ? 1 : 2;
       const { min, max } = data.bounds;
-      const lo = rangeMin ?? (isFinite(min.x) ? min.x : 0);
-      const hi = rangeMax ?? (isFinite(max.x) ? max.x : 1);
+      const minVal = axis === 0 ? min.x : axis === 1 ? min.y : min.z;
+      const maxVal = axis === 0 ? max.x : axis === 1 ? max.y : max.z;
+      const lo = rangeMin ?? (isFinite(minVal) ? minVal : 0);
+      const hi = rangeMax ?? (isFinite(maxVal) ? maxVal : 1);
       const span = (hi - lo) || 1;
-      for (let i = 0; i < pointCount; i++) {
-        const x = positions[i * 3];
-        const t = (x - lo) / span;
+      for (let i = 0; i < count; i++) {
+        const v = data.positions[i * 3 + axis];
+        const t = (v - lo) / span;
         const [r, g, b] = sampleColormap(colormap, t);
-        colors[i * 3] = r;
-        colors[i * 3 + 1] = g;
-        colors[i * 3 + 2] = b;
-      }
-    } else if (colorMode === 'y') {
-      const { min, max } = data.bounds;
-      const lo = rangeMin ?? (isFinite(min.y) ? min.y : 0);
-      const hi = rangeMax ?? (isFinite(max.y) ? max.y : 1);
-      const span = (hi - lo) || 1;
-      for (let i = 0; i < pointCount; i++) {
-        const y = positions[i * 3 + 1];
-        const t = (y - lo) / span;
-        const [r, g, b] = sampleColormap(colormap, t);
-        colors[i * 3] = r;
-        colors[i * 3 + 1] = g;
-        colors[i * 3 + 2] = b;
-      }
-    } else if (colorMode === 'height') {
-      const { min, max } = data.bounds;
-      const lo = rangeMin ?? (isFinite(min.z) ? min.z : 0);
-      const hi = rangeMax ?? (isFinite(max.z) ? max.z : 1);
-      const span = (hi - lo) || 1;
-      for (let i = 0; i < pointCount; i++) {
-        const z = positions[i * 3 + 2];
-        const t = (z - lo) / span;
-        const [r, g, b] = sampleColormap(colormap, t);
-        colors[i * 3] = r;
-        colors[i * 3 + 1] = g;
-        colors[i * 3 + 2] = b;
+        colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
       }
     } else {
-      const color = new THREE.Color(singleColor);
-      for (let i = 0; i < pointCount; i++) {
-        colors[i * 3] = color.r;
-        colors[i * 3 + 1] = color.g;
-        colors[i * 3 + 2] = color.b;
+      // Fallback: solid singleColor as a vertex attribute. Only happens
+      // when a non-recognized colorMode is passed.
+      const c = new THREE.Color(singleColor);
+      for (let i = 0; i < count; i++) {
+        colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
       }
     }
+    return new THREE.BufferAttribute(colors, 3);
+  }, [data, colorMode, singleColor, selectedScalarField, colormap, rangeMin, rangeMax]);
 
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  // Recreate the BufferGeometry whenever `data` changes (rare — only on
+  // import, apply-crop, apply-erase, etc.). This is the ONLY way to
+  // release the previous position GPU buffer: three.js's WebGLAttributes
+  // cache uses a WeakMap and never calls gl.deleteBuffer when an
+  // attribute is swapped via setAttribute() — only when the owning
+  // BufferGeometry's `dispose` event fires.
+  //
+  // Index and color swaps within the same geometry DO leak their GPU
+  // buffers, but those are small (~4 bytes/visible-point for the index,
+  // small or none for color in single-color mode) and infrequent enough
+  // to be tolerable. Position swaps are the killer: on a ~28M-point
+  // scan that's ~336 MB GPU per swap, and the user crashed at 3.7 GB
+  // because the apply path was leaking the old position buffer.
+  //
+  // Inline render-body mutation (rather than useEffect) so three.js
+  // sees a fully-populated geometry with a correct boundingSphere on
+  // the very first frame — useEffect ordering otherwise leaves the
+  // geometry empty when three.js computes the bounding sphere, caching
+  // a default (origin, radius=-1) and frustum-culling everything.
+  const geometry = useMemo<THREE.BufferGeometry>(() => {
+    const geo = new THREE.BufferGeometry();
+    if (data && data.pointCount > 0 && data.positions && data.positions.length >= data.pointCount * 3) {
+      geo.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+      geo.computeBoundingSphere();
+      geo.computeBoundingBox();
+    }
     return geo;
-  }, [data, colorMode, singleColor, selectedScalarField, filters, colormap, rangeMin, rangeMax]);
+  }, [data]);
+
+  // Dispose the previous geometry. Three.js dispatches a 'dispose' event
+  // that WebGLGeometries listens for, which then calls
+  // WebGLAttributes.remove() for every attached attribute — that's what
+  // actually invokes gl.deleteBuffer to release the GPU memory.
+  useEffect(() => () => { geometry.dispose(); }, [geometry]);
+
+  // Color and index attributes are mutated on the persistent geometry
+  // when they change. Tracked refs guard against redundant setAttribute
+  // calls; sync mutations during render keep three.js from rendering a
+  // mismatched intermediate state on the next frame.
+  //
+  // Re-attach color / index whenever the underlying geometry was
+  // replaced too — the new geometry starts empty besides position.
+  const setupRef = useRef<{
+    geometry: THREE.BufferGeometry | null;
+    colorAttr: THREE.BufferAttribute | null;
+    indices: Uint32Array | null | undefined;
+  }>({ geometry: null, colorAttr: null, indices: undefined });
+
+  if (setupRef.current.geometry !== geometry) {
+    // New geometry — clear our refs so the color/index setters below
+    // re-attach to it from scratch.
+    setupRef.current.geometry = geometry;
+    setupRef.current.colorAttr = null;
+    setupRef.current.indices = undefined;
+  }
+
+  if (setupRef.current.colorAttr !== colorAttr) {
+    if (colorAttr) {
+      geometry.setAttribute('color', colorAttr);
+    } else if (geometry.attributes.color) {
+      geometry.deleteAttribute('color');
+    }
+    setupRef.current.colorAttr = colorAttr;
+  }
+
+  if (setupRef.current.indices !== drawIndices) {
+    if (drawIndices) {
+      geometry.setIndex(new THREE.BufferAttribute(drawIndices, 1));
+    } else if (geometry.index) {
+      geometry.setIndex(null);
+    }
+    setupRef.current.indices = drawIndices;
+  }
 
   const material = useMemo(() => {
     return new THREE.PointsMaterial({
       size: pointSize,
-      vertexColors: true,
+      vertexColors: !!colorAttr,
+      color: colorAttr ? 0xffffff : new THREE.Color(singleColor),
       sizeAttenuation: false,
     });
-  }, [pointSize]);
+  }, [pointSize, colorAttr, singleColor]);
 
-  // Dispose GPU resources when deps change or component unmounts. Without
-  // this, every recompute of the useMemo above leaks a BufferGeometry +
-  // its VBOs and a PointsMaterial. With erasing/cropping active this can
-  // leak on every parent re-render.
-  useEffect(() => () => { geometry?.dispose(); }, [geometry]);
   useEffect(() => () => { material.dispose(); }, [material]);
 
-  // Don't render if no geometry (empty point cloud)
-  if (!geometry) {
-    return null;
-  }
-
+  if (!data || data.pointCount === 0) return null;
   return <points ref={pointsRef} geometry={geometry} material={material} />;
 }
 
@@ -1026,7 +1535,11 @@ function SkeletonPoints({ data, color = '#f59e0b', pointSize = 8, colorByBranchO
 type ViewDirection = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso';
 
 // Camera controller
-function CameraController({ bounds, enabled = true }: { bounds: PointCloudData['bounds']; enabled?: boolean }) {
+function CameraController({
+  bounds,
+  hasContent,
+  enabled = true,
+}: { bounds: PointCloudData['bounds']; hasContent: boolean; enabled?: boolean }) {
   const { camera } = useThree();
   const controlsRef = useRef<any>(null);
   const initializedRef = useRef(false);
@@ -1106,22 +1619,60 @@ function CameraController({ bounds, enabled = true }: { bounds: PointCloudData['
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Empty deps - truly only run once on mount
 
+  // Auto-frame on the empty→loaded transition. The mount effect above places
+  // the camera at a fixed iso view of origin, which leaves a real cloud out
+  // of frame whenever its bounds don't coincide with [-5,5]³. We want to
+  // fit on the first content load, but not fight the user every subsequent
+  // time they pan or add a second cloud. Latch: reset only when the scene
+  // goes empty again, so re-adding a cloud after Clear All re-frames.
+  const hasFramedContentRef = useRef(false);
+  useEffect(() => {
+    if (!hasContent) {
+      hasFramedContentRef.current = false;  // re-arm for the next load
+      return;
+    }
+    if (hasFramedContentRef.current) return;
+    if (!controlsRef.current) return;
+    // Wait one tick so OrbitControls is mounted (the mount effect above
+    // schedules its own setTimeout(0), so we don't have a hard ordering).
+    const timer = setTimeout(() => {
+      if (!controlsRef.current) return;
+      snapToView('iso', bounds);
+      hasFramedContentRef.current = true;
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [hasContent, bounds, snapToView]);
+
   useEffect(() => {
     (window as any).__resetPointCloudCamera = resetCamera;
     (window as any).__snapToView = snapToView;
+    // Test hook: read live camera + controls + scene state without poking
+    // R3F's internal store. Used by the M2 verification smoke test.
+    // Test hook for the M2 smoke test: read camera + auto-frame latch + bounds.
+    (window as any).__getCameraState = () => ({
+      position: [camera.position.x, camera.position.y, camera.position.z],
+      target: controlsRef.current
+        ? [controlsRef.current.target.x, controlsRef.current.target.y, controlsRef.current.target.z]
+        : null,
+      framedContent: hasFramedContentRef.current,
+      bounds: {
+        min: [boundsRef.current.min.x, boundsRef.current.min.y, boundsRef.current.min.z],
+        max: [boundsRef.current.max.x, boundsRef.current.max.y, boundsRef.current.max.z],
+      },
+    });
     return () => {
       delete (window as any).__resetPointCloudCamera;
       delete (window as any).__snapToView;
+      delete (window as any).__getCameraState;
     };
-  }, [resetCamera, snapToView]);
+  }, [resetCamera, snapToView, camera]);
 
   return (
     <OrbitControls
       ref={controlsRef}
       makeDefault
       enabled={enabled}
-      enableDamping
-      dampingFactor={0.05}
+      enableDamping={false}
       screenSpacePanning={true}
       minDistance={0.1}
       maxDistance={10000}
@@ -1510,6 +2061,67 @@ function CropBox({ min, max, onMinChange, onMaxChange, onDragStart, onDragEnd, k
   );
 }
 
+// Invisible click target that fills the canvas. While active (mounted),
+// every left-click is raycast against a horizontal plane at z=groundZ
+// and the world XY hit point is reported to the parent. Used for the
+// two-click in-viewport box draw and only mounted while the user is
+// actively placing corners — otherwise it would intercept every click
+// in the scene.
+function BoxDrawRaycaster({ groundZ, onPick }: { groundZ: number; onPick: (x: number, y: number) => void }) {
+  const { gl } = useThree();
+
+  useEffect(() => {
+    gl.domElement.style.cursor = 'crosshair';
+    return () => {
+      gl.domElement.style.cursor = 'auto';
+    };
+  }, [gl]);
+
+  const handleClick = (e: ThreeEvent<MouseEvent>) => {
+    // Raycaster gives us the world-space ray; intersect it with the
+    // ground plane z = groundZ.
+    const ray = e.ray;
+    if (Math.abs(ray.direction.z) < 1e-6) return;
+    const t = (groundZ - ray.origin.z) / ray.direction.z;
+    if (!isFinite(t)) return;
+    const hitX = ray.origin.x + t * ray.direction.x;
+    const hitY = ray.origin.y + t * ray.direction.y;
+    e.stopPropagation();
+    onPick(hitX, hitY);
+  };
+
+  // Render a huge transparent plane at the ground level so the click
+  // target exists in the scene graph. We orient it so its normal points
+  // +Z (the default), and set side=DoubleSide so picks register from
+  // either side of the plane.
+  return (
+    <mesh
+      position={[0, 0, groundZ]}
+      onClick={handleClick}
+      renderOrder={9999}
+    >
+      <planeGeometry args={[100000, 100000]} />
+      <meshBasicMaterial transparent opacity={0} depthWrite={false} side={THREE.DoubleSide} />
+    </mesh>
+  );
+}
+
+// Mirrors the active camera and canvas size out to refs held by the
+// parent component. Mounted only while a crop polygon is being drawn or
+// is already closed (the projection used for the in/out test gets
+// snapshotted at close time from these refs).
+function PolygonCameraSnapshotter({ cameraRef, sizeRef }: {
+  cameraRef: React.MutableRefObject<THREE.Camera | null>;
+  sizeRef: React.MutableRefObject<{ width: number; height: number } | null>;
+}) {
+  const { camera, size } = useThree();
+  useEffect(() => {
+    cameraRef.current = camera;
+    sizeRef.current = { width: size.width, height: size.height };
+  }, [camera, size.width, size.height, cameraRef, sizeRef]);
+  return null;
+}
+
 // Erase brush component for erasing points
 interface EraseBrushProps {
   brushSize: number;
@@ -1720,6 +2332,8 @@ export default function PointCloudViewer({
       data: s.data,
       visible: s.visible,
       color: s.color,
+      sourcePath: s.sourcePath,
+      asciiFormat: s.asciiFormat,
     })),
     [scans],
   );
@@ -1944,6 +2558,51 @@ export default function PointCloudViewer({
   const [editMode, setEditMode] = useState<EditMode>('none');
   const [editStates, setEditStates] = useState<Map<string, CloudEditState>>(new Map());
 
+  // Crop state lives at the viewer level (not per-cloud) so a single
+  // region applies uniformly across every selected scan. See cropGeometry.ts
+  // for the region types.
+  type CropMode = 'box' | 'polygon';
+  type CropDrawState =
+    | 'idle'
+    | 'awaiting-box-corner-1'
+    | 'awaiting-box-corner-2'
+    | 'drawing-polygon';
+  const [cropMode, setCropMode] = useState<CropMode>('box');
+  // World-space AABB. Null when crop mode hasn't been entered yet.
+  const [cropBox, setCropBox] = useState<{
+    min: { x: number; y: number; z: number };
+    max: { x: number; y: number; z: number };
+  } | null>(null);
+  // Closed screen-space polygon (camera-frozen at draw time).
+  const [cropPolygon, setCropPolygon] = useState<{
+    points: { x: number; y: number }[];
+    projection: number[];
+    view: number[];
+    canvasSize: { width: number; height: number };
+  } | null>(null);
+  const [cropInvert, setCropInvert] = useState(false);
+  const [cropDrawState, setCropDrawState] = useState<CropDrawState>('idle');
+  // In-progress polygon vertices while the user is clicking. Promoted to
+  // cropPolygon when they press Enter.
+  const [polygonInProgress, setPolygonInProgress] = useState<
+    { x: number; y: number }[]
+  >([]);
+  // First-corner stash while a two-click ground-plane box draw is in
+  // progress.
+  const boxDrawFirstCornerRef = useRef<{ x: number; y: number } | null>(null);
+  // Live snapshots of the rendering camera and canvas size, kept in sync
+  // by a tiny in-Canvas component (PolygonCameraSnapshotter). Read when
+  // the user presses Enter to close a polygon so the in/out test stays
+  // stable even if they orbit afterwards.
+  const polygonCameraRef = useRef<THREE.Camera | null>(null);
+  const polygonCanvasSizeRef = useRef<{ width: number; height: number } | null>(null);
+  // Live canvas-pixel position of the mouse while drawing a polygon —
+  // used to render the "next segment" preview line from the last vertex
+  // to the cursor. Stored on a ref since it updates on every mousemove
+  // and we don't want to re-render the panel for it.
+  const polygonCursorRef = useRef<{ x: number; y: number } | null>(null);
+  const [polygonCursorTick, setPolygonCursorTick] = useState(0);
+
   // Erase brush state
   const [eraseBrushSize, setEraseBrushSize] = useState(0.1);  // Default brush radius
   const [eraseBrushPosition, setEraseBrushPosition] = useState<THREE.Vector3 | null>(null);
@@ -2075,10 +2734,6 @@ export default function PointCloudViewer({
       if (!newEditStates.has(cloud.id)) {
         newEditStates.set(cloud.id, {
           translation: { x: 0, y: 0, z: 0 },
-          cropMin: { x: cloud.data.bounds.min.x, y: cloud.data.bounds.min.y, z: cloud.data.bounds.min.z },
-          cropMax: { x: cloud.data.bounds.max.x, y: cloud.data.bounds.max.y, z: cloud.data.bounds.max.z },
-          cropEnabled: false,
-          cropInvert: false,
           erasedIndices: new Set<number>(),
         });
         changed = true;
@@ -2130,13 +2785,42 @@ export default function PointCloudViewer({
   const getEditState = useCallback((id: string): CloudEditState => {
     return editStates.get(id) || {
       translation: { x: 0, y: 0, z: 0 },
-      cropMin: null,
-      cropMax: null,
-      cropEnabled: false,
-      cropInvert: false,
       erasedIndices: new Set<number>(),
     };
   }, [editStates]);
+
+  // Toggle the crop tool. Called from both the single-cloud toolbar and
+  // the multi-cloud toolbar so the same Crop button is available to N≥1
+  // selected scans. On entry the world-space cropBox is initialized to
+  // the union of every selected scan's translated bounds.
+  const toggleCropMode = useCallback(() => {
+    if (editMode === 'crop') {
+      setEditMode('none');
+      setCropDrawState('idle');
+      setPolygonInProgress([]);
+      return;
+    }
+    closeAllToolPanels('editMode');
+    const initial = worldBoundsUnion(
+      Array.from(selectedIds)
+        .map(id => clouds.find(c => c.id === id))
+        .filter((c): c is PointCloudEntry => !!c)
+        .map(c => ({
+          bounds: {
+            min: { x: c.data.bounds.min.x, y: c.data.bounds.min.y, z: c.data.bounds.min.z },
+            max: { x: c.data.bounds.max.x, y: c.data.bounds.max.y, z: c.data.bounds.max.z },
+          },
+          translation: getEditState(c.id).translation,
+        })),
+    );
+    if (initial) setCropBox(initial);
+    setCropPolygon(null);
+    setPolygonInProgress([]);
+    setCropDrawState('idle');
+    setCropMode('box');
+    setCropInvert(false);
+    setEditMode('crop');
+  }, [editMode, selectedIds, clouds, getEditState, closeAllToolPanels]);
 
   // Update edit state for selected clouds
   const updateSelectedEditStates = useCallback((updater: (state: CloudEditState) => CloudEditState) => {
@@ -2324,140 +3008,396 @@ export default function PointCloudViewer({
     };
   }, [handleUndo, handleRedo, closeAllToolPanels]);
 
-  // Apply crop to the selected cloud
+  // Build a world-space inclusion predicate for the active crop region.
+  // Returns null when there's no usable region (mode mismatch / nothing
+  // drawn yet). Callers pass world-space coords. Box mode is a simple
+  // AABB test; polygon mode projects to canvas pixels using the frozen
+  // camera matrices and runs a ray-casting point-in-polygon.
+  const buildCropPredicate = useCallback((): ((wx: number, wy: number, wz: number) => boolean) | null => {
+    if (cropMode === 'box') {
+      if (!cropBox) return null;
+      const { min, max } = cropBox;
+      return (wx, wy, wz) =>
+        wx >= min.x && wx <= max.x &&
+        wy >= min.y && wy <= max.y &&
+        wz >= min.z && wz <= max.z;
+    }
+    if (cropMode === 'polygon') {
+      if (!cropPolygon || cropPolygon.points.length < 3) return null;
+      const { points, projection, view, canvasSize } = cropPolygon;
+      return (wx, wy, wz) => {
+        const pixel = projectWorldToCanvasPixel(
+          { x: wx, y: wy, z: wz },
+          projection,
+          view,
+          canvasSize,
+        );
+        if (!pixel) return false;
+        return pointInPolygon(pixel, points);
+      };
+    }
+    return null;
+  }, [cropMode, cropBox, cropPolygon]);
+
+  // Apply the active crop region to every selected scan. Multi-scan crop
+  // produces N cropped scans — one per input — preserving per-scan
+  // identity (id, fileName, scan params live elsewhere). Translation is
+  // baked into the new positions, matching the existing erase/filter
+  // semantics so downstream code stays uniform.
+  //
+  // CRITICAL: clouds are processed one-per-task with setTimeout yields
+  // between them, reading the LATEST scans through `cloudsRef` rather
+  // than capturing the array in the useCallback closure. This is what
+  // keeps multi-cloud apply within V8's 4 GB heap limit on large scans.
+  //
+  // The synchronous-loop approach holds every old cloud.data buffer
+  // alive for the full duration of the callback (the closure pins the
+  // `clouds` array), so during the loop we transiently have:
+  //   (every old cloud.data) + (this iteration's new typed arrays)
+  // For two ~28M-point scans with RGB + intensity that's ~1.57 GB old +
+  // ~784 MB new + position GPU buffers + live preview indices ≈ 3 GB
+  // external — combined with React/three.js overhead it tips over the
+  // 4 GB ceiling.
+  //
+  // Sequential processing means each iteration's old cloud.data becomes
+  // unreachable after onUpdateCloud commits and React processes the
+  // resulting setScans, freeing it before the next iteration's
+  // allocation. Peak is now ~one cloud's old + new ≈ 1.2 GB transient,
+  // well under the ceiling.
+  const cloudsRef = useRef(clouds);
+  cloudsRef.current = clouds;
+  const editStatesRef = useRef(editStates);
+  editStatesRef.current = editStates;
+
   const handleApplyCrop = useCallback(() => {
-    if (editMode !== 'crop' || selectedIds.size !== 1) return;
+    if (editMode !== 'crop' || selectedIds.size === 0) return;
+    const predicate = buildCropPredicate();
+    if (!predicate) return;
 
-    const cloudId = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === cloudId);
-    const state = editStates.get(cloudId);
-
-    if (!cloud || !state || !state.cropMin || !state.cropMax) return;
-
-    // Filter points based on crop bounds (respecting cropInvert).
-    // Two-pass over typed arrays: count survivors, allocate at the exact
-    // size, fill in place. Avoids a multi-GB JS `number[]` intermediate
-    // on large clouds (see getDisplayData for the same shape and why).
-    const cm = state.cropMin!;
-    const cM = state.cropMax!;
-    const invert = state.cropInvert;
-    const erased = state.erasedIndices;
-    const src = cloud.data;
-    const tx = state.translation.x;
-    const ty = state.translation.y;
-    const tz = state.translation.z;
-
-    let pointCount = 0;
-    for (let i = 0; i < src.pointCount; i++) {
-      if (erased.has(i)) continue;
-      const x = src.positions[i * 3];
-      const y = src.positions[i * 3 + 1];
-      const z = src.positions[i * 3 + 2];
-      const inside = (
-        x >= cm.x && x <= cM.x &&
-        y >= cm.y && y <= cM.y &&
-        z >= cm.z && z <= cM.z
-      );
-      if (invert ? !inside : inside) pointCount++;
-    }
-
-    if (pointCount === 0) {
-      // All points would be removed - trigger delete confirmation
-      setDeleteConfirm({
-        type: 'cloud',
-        id: cloud.id,
-        name: cloud.data.fileName || 'Unnamed'
-      });
+    // Capture the inputs the apply needs BEFORE we tear down the crop UI.
+    // After flushSync(setEditMode('none')) below, cropBox/cropInvert in
+    // closure are still the values we want (closures don't re-bind on
+    // re-render), but the live preview's index buffer + setupRef
+    // Uint32Array are dropped — that frees ~hundreds of MB of GPU and
+    // JS memory before we start allocating for the apply. Without this
+    // teardown, the live preview indices coexist with the apply's new
+    // typed arrays and push V8 over its 4 GB old-space ceiling on
+    // multi-cloud, multi-million-point clouds.
+    flushSync(() => {
       setEditMode('none');
-      return;
-    }
-
-    const newPositions = new Float32Array(pointCount * 3);
-    const newColors = src.colors ? new Float32Array(pointCount * 3) : null;
-    const newIntensities = src.intensities ? new Float32Array(pointCount) : null;
-
-    // Calculate new bounds in the same pass that fills the typed arrays.
-    const min = new THREE.Vector3(Infinity, Infinity, Infinity);
-    const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-
-    let w = 0;
-    for (let i = 0; i < src.pointCount; i++) {
-      if (erased.has(i)) continue;
-      const x = src.positions[i * 3];
-      const y = src.positions[i * 3 + 1];
-      const z = src.positions[i * 3 + 2];
-      const inside = (
-        x >= cm.x && x <= cM.x &&
-        y >= cm.y && y <= cM.y &&
-        z >= cm.z && z <= cM.z
-      );
-      if (!(invert ? !inside : inside)) continue;
-
-      const wx = x + tx;
-      const wy = y + ty;
-      const wz = z + tz;
-      newPositions[w * 3] = wx;
-      newPositions[w * 3 + 1] = wy;
-      newPositions[w * 3 + 2] = wz;
-      if (wx < min.x) min.x = wx; if (wx > max.x) max.x = wx;
-      if (wy < min.y) min.y = wy; if (wy > max.y) max.y = wy;
-      if (wz < min.z) min.z = wz; if (wz > max.z) max.z = wz;
-
-      if (newColors && src.colors) {
-        newColors[w * 3] = src.colors[i * 3];
-        newColors[w * 3 + 1] = src.colors[i * 3 + 1];
-        newColors[w * 3 + 2] = src.colors[i * 3 + 2];
-      }
-      if (newIntensities && src.intensities) {
-        newIntensities[w] = src.intensities[i];
-      }
-      w++;
-    }
-
-    const center = new THREE.Vector3(
-      (min.x + max.x) / 2,
-      (min.y + max.y) / 2,
-      (min.z + max.z) / 2
-    );
-    const size = new THREE.Vector3(
-      max.x - min.x,
-      max.y - min.y,
-      max.z - min.z
-    );
-
-    // Create new point cloud data
-    const newData: PointCloudData = {
-      positions: newPositions,
-      colors: newColors ?? undefined,
-      intensities: newIntensities ?? undefined,
-      pointCount,
-      bounds: { min, max, center, size },
-      fileName: cloud.data.fileName,
-    };
-
-    // Update the cloud permanently
-    onUpdateCloud(cloud.id, newData);
-
-    // Reset edit state for this cloud (new bounds, no translation, no erased)
-    setEditStates(prev => {
-      const next = new Map(prev);
-      next.set(cloud.id, {
-        translation: { x: 0, y: 0, z: 0 },
-        cropMin: { x: min.x, y: min.y, z: min.z },
-        cropMax: { x: max.x, y: max.y, z: max.z },
-        cropEnabled: false,
-        cropInvert: false,
-        erasedIndices: new Set<number>(),
-      });
-      return next;
     });
 
-    // Clear history entries for this cloud since data changed
-    setHistory(prev => prev.filter(entry => entry.id !== cloud.id));
-    setHistoryIndex(prev => Math.max(-1, prev - 1));
+    const cloudIdsToProcess = Array.from(selectedIds);
+    const emptied: { id: string; name: string }[] = [];
+    const touchedCloudIds: string[] = [];
+    // Sum of kept point counts across all clouds touched in this apply.
+    // Used by finishUp to surface a "Cropped to N points" toast.
+    const keptCounts: number[] = [];
 
-    setEditMode('none');
-  }, [editMode, selectedIds, clouds, editStates, onUpdateCloud]);
+    const finishUp = () => {
+      if (touchedCloudIds.length > 0) {
+        setEditStates(prev => {
+          const next = new Map(prev);
+          for (const id of touchedCloudIds) {
+            next.set(id, {
+              translation: { x: 0, y: 0, z: 0 },
+              erasedIndices: new Set<number>(),
+            });
+          }
+          return next;
+        });
+        setHistory(prev => prev.filter(entry => !touchedCloudIds.includes(entry.id)));
+        setHistoryIndex(prev => Math.max(-1, prev - touchedCloudIds.length));
+
+        // Post-apply confirmation toast. Mirrors the "Loaded N points"
+        // toast from import — gives the user a concrete signal that the
+        // apply finished and which cloud(s) the new point count refers
+        // to. Surfaced for octree and flat apply paths alike.
+        const total = keptCounts.reduce((s, n) => s + n, 0);
+        if (total > 0) {
+          const cloudWord = touchedCloudIds.length === 1 ? 'cloud' : 'clouds';
+          showToast({
+            title: `Cropped ${touchedCloudIds.length} ${cloudWord} to ${total.toLocaleString()} points`,
+            type: 'success',
+          });
+        }
+      }
+
+      if (emptied.length > 0) {
+        setDeleteConfirm({ type: 'cloud', id: emptied[0].id, name: emptied[0].name });
+      }
+
+      setCropBox(null);
+      setCropPolygon(null);
+      setPolygonInProgress([]);
+      setCropDrawState('idle');
+      setEditMode('none');
+    };
+
+    // Per-cloud work. Box-mode + sourcePath + no-erased clouds delegate
+    // the filter to the backend (Python/NumPy can iterate a 28M-point
+    // typed array without hitting V8's 4 GB old-space ceiling). The
+    // in-renderer two-pass remains the fallback for stitched clouds (no
+    // sourcePath), clouds with erased indices the backend doesn't know
+    // about, and polygon-mode crop (camera-frozen predicate the backend
+    // can't evaluate). Returns a Promise so the outer loop awaits the
+    // HTTP round-trip between clouds — keeping the cross-iteration GC
+    // window the in-JS path relied on for memory headroom.
+    const processOne = async (cloudId: string): Promise<void> => {
+      // IMPORTANT: read from the ref, not from the closure-captured
+      // `clouds`. After the previous iteration's setScans commits, the
+      // ref points at the new scans array (without the old cloud.data
+      // we just replaced), so the old data is GC-eligible.
+      const cloud = cloudsRef.current.find(c => c.id === cloudId);
+      if (!cloud) return;
+      const state = editStatesRef.current.get(cloudId) ?? {
+        translation: { x: 0, y: 0, z: 0 },
+        erasedIndices: new Set<number>(),
+      };
+
+      const src = cloud.data;
+      const erased = state.erasedIndices;
+      const tx = state.translation.x;
+      const ty = state.translation.y;
+      const tz = state.translation.z;
+
+      // No-op short-circuit: when the box-mode crop fully encloses this
+      // cloud's translated bounds and there's nothing else to bake in,
+      // the apply would produce a byte-identical copy of cloud.data.
+      // Skip the allocation entirely.
+      if (
+        cropMode === 'box' && cropBox && !cropInvert &&
+        erased.size === 0 && tx === 0 && ty === 0 && tz === 0 &&
+        src.bounds.min.x >= cropBox.min.x && src.bounds.max.x <= cropBox.max.x &&
+        src.bounds.min.y >= cropBox.min.y && src.bounds.max.y <= cropBox.max.y &&
+        src.bounds.min.z >= cropBox.min.z && src.bounds.max.z <= cropBox.max.z
+      ) {
+        return;
+      }
+
+      // Octree-backed clouds: route through /api/pointcloud/crop_octree.
+      // The backend re-runs PotreeConverter on a filtered XYZ source and
+      // returns a new cache id; the renderer hot-swaps to it (the
+      // OctreePointCloud component depends on data.octree.cacheId, so
+      // changing it triggers dispose + reload of the underlying
+      // PointCloudOctree without remounting the React node).
+      //
+      // Both box and polygon regions go backend-side. Erased indices from
+      // the in-renderer brush are unreachable here because octree clouds
+      // don't expose flat positions to the brush in the first place —
+      // erase regions are handled by handleApplyErase via the same
+      // crop_octree endpoint.
+      if (cloud.data.octree && cloud.data.octree.sourceXyzPath) {
+        const octreeInfo = cloud.data.octree;
+        let region: CropOctreeRegion | null = null;
+        if (cropMode === 'box' && cropBox) {
+          region = {
+            kind: 'box',
+            min: [cropBox.min.x, cropBox.min.y, cropBox.min.z],
+            max: [cropBox.max.x, cropBox.max.y, cropBox.max.z],
+            invert: cropInvert,
+          };
+        } else if (cropMode === 'polygon' && cropPolygon && cropPolygon.points.length >= 3) {
+          region = {
+            kind: 'polygon',
+            points: cropPolygon.points.map(p => [p.x, p.y] as [number, number]),
+            projection: cropPolygon.projection,
+            view: cropPolygon.view,
+            canvas: {
+              width: cropPolygon.canvasSize.width,
+              height: cropPolygon.canvasSize.height,
+            },
+            invert: cropInvert,
+          };
+        }
+
+        if (region) {
+          try {
+            const result = await cropOctree(octreeInfo.sourceXyzPath, {
+              asciiFormat: octreeInfo.asciiFormat ?? null,
+              region,
+              translation: (tx !== 0 || ty !== 0 || tz !== 0)
+                ? [tx, ty, tz]
+                : null,
+            });
+            if (result.point_count === 0 || !result.cache_id) {
+              emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
+              return;
+            }
+            // buildPointCloudFromOctree builds the new PointCloudData
+            // (empty positions, tight_bounds for the new extent, new
+            // cacheId). React passes it to OctreePointCloud which
+            // observes the cacheId change and re-loads the streamed tiles.
+            const newData = buildPointCloudFromOctree(
+              {
+                cache_id: result.cache_id,
+                cache_dir: result.cache_dir ?? '',
+                cached: result.cached,
+                version: result.version,
+                point_count: result.point_count,
+                spacing: result.spacing,
+                scale: result.scale,
+                offset: result.offset,
+                bounds: result.bounds,
+                tight_bounds: result.tight_bounds,
+                attributes: result.attributes,
+              },
+              octreeInfo.sourceXyzPath,
+              src.fileName ?? cloud.id,
+              octreeInfo.asciiFormat ?? null,
+            );
+            onUpdateCloud(cloud.id, newData);
+            touchedCloudIds.push(cloud.id);
+            keptCounts.push(result.point_count);
+            return;
+          } catch (err) {
+            console.error('[handleApplyCrop] crop_octree failed:', err);
+            // No fallback for octree clouds — the in-renderer path below
+            // iterates data.positions which is empty for octrees. Surface
+            // the failure via a toast and skip the cloud.
+            showToast({
+              title: `Crop failed for ${src.fileName || 'cloud'}`,
+              type: 'error',
+            });
+            return;
+          }
+        }
+      }
+
+      // Backend-delegated path. Box mode with a known sourcePath and no
+      // erased points is the common case on freshly-imported scans —
+      // exactly the situation that OOM'd in JS. The backend re-reads the
+      // file, applies the AABB filter with NumPy, and streams the kept
+      // points back; the renderer just decodes one Float32Array per
+      // channel from the response and hands it to onUpdateCloud. No
+      // multi-GB intermediates in V8.
+      if (
+        cropMode === 'box' && cropBox &&
+        cloud.sourcePath && erased.size === 0
+      ) {
+        try {
+          const response = await cropPointCloudByPath(cloud.sourcePath, {
+            asciiFormat: cloud.asciiFormat ?? null,
+            cropMin: cropBox.min,
+            cropMax: cropBox.max,
+            cropInvert,
+            translation: (tx !== 0 || ty !== 0 || tz !== 0)
+              ? { x: tx, y: ty, z: tz }
+              : null,
+          });
+          if (response.pointCount === 0) {
+            emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
+            return;
+          }
+          const newData = buildPointCloudFromBackend(response, src.fileName ?? cloud.id);
+          onUpdateCloud(cloud.id, newData);
+          touchedCloudIds.push(cloud.id);
+          keptCounts.push(response.pointCount);
+          return;
+        } catch (err) {
+          // Fall through to the in-renderer path. We log so a 5xx from
+          // the backend (or a renamed/moved source file) surfaces in
+          // dev, but otherwise transparently take the slower path —
+          // it'll still work for small clouds.
+          console.warn('[handleApplyCrop] backend crop failed, falling back to in-renderer:', err);
+        }
+      }
+
+      // In-renderer fallback. Two-pass over typed arrays (count, then
+      // fill). Used for stitched clouds (no sourcePath), clouds with
+      // erased indices, polygon-mode crop, and any case where the
+      // backend call raised above.
+      let pointCount = 0;
+      for (let i = 0; i < src.pointCount; i++) {
+        if (erased.has(i)) continue;
+        const wx = src.positions[i * 3] + tx;
+        const wy = src.positions[i * 3 + 1] + ty;
+        const wz = src.positions[i * 3 + 2] + tz;
+        const inside = predicate(wx, wy, wz);
+        if (cropInvert ? !inside : inside) pointCount++;
+      }
+
+      if (pointCount === 0) {
+        emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
+        return;
+      }
+
+      const newPositions = new Float32Array(pointCount * 3);
+      const newColors = src.colors ? new Float32Array(pointCount * 3) : null;
+      const newIntensities = src.intensities ? new Float32Array(pointCount) : null;
+
+      const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+      const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+
+      let w = 0;
+      for (let i = 0; i < src.pointCount; i++) {
+        if (erased.has(i)) continue;
+        const wx = src.positions[i * 3] + tx;
+        const wy = src.positions[i * 3 + 1] + ty;
+        const wz = src.positions[i * 3 + 2] + tz;
+        const inside = predicate(wx, wy, wz);
+        if (!(cropInvert ? !inside : inside)) continue;
+        newPositions[w * 3] = wx;
+        newPositions[w * 3 + 1] = wy;
+        newPositions[w * 3 + 2] = wz;
+        if (wx < min.x) min.x = wx; if (wx > max.x) max.x = wx;
+        if (wy < min.y) min.y = wy; if (wy > max.y) max.y = wy;
+        if (wz < min.z) min.z = wz; if (wz > max.z) max.z = wz;
+        if (newColors && src.colors) {
+          newColors[w * 3] = src.colors[i * 3];
+          newColors[w * 3 + 1] = src.colors[i * 3 + 1];
+          newColors[w * 3 + 2] = src.colors[i * 3 + 2];
+        }
+        if (newIntensities && src.intensities) {
+          newIntensities[w] = src.intensities[i];
+        }
+        w++;
+      }
+
+      const center = new THREE.Vector3(
+        (min.x + max.x) / 2,
+        (min.y + max.y) / 2,
+        (min.z + max.z) / 2,
+      );
+      const size = new THREE.Vector3(
+        max.x - min.x,
+        max.y - min.y,
+        max.z - min.z,
+      );
+
+      const newData: PointCloudData = {
+        positions: newPositions,
+        colors: newColors ?? undefined,
+        intensities: newIntensities ?? undefined,
+        pointCount,
+        bounds: { min, max, center, size },
+        fileName: src.fileName,
+      };
+      onUpdateCloud(cloud.id, newData);
+      touchedCloudIds.push(cloud.id);
+      keptCounts.push(pointCount);
+    };
+
+    let i = 0;
+    const next = async (): Promise<void> => {
+      if (i >= cloudIdsToProcess.length) {
+        finishUp();
+        return;
+      }
+      const cloudId = cloudIdsToProcess[i];
+      i++;
+      // Await processOne — backend round-trips need to complete before
+      // the next iteration starts, otherwise we'd fire all crop requests
+      // in parallel and lose the cross-iteration GC headroom.
+      await processOne(cloudId);
+      // Yield via setTimeout so React commits the setScans triggered by
+      // onUpdateCloud, cloudsRef gets refreshed by our render-body
+      // assignment, and GC has a chance to reclaim the previous
+      // iteration's old cloud.data buffers before we allocate again.
+      setTimeout(next, 0);
+    };
+    void next();
+  }, [editMode, selectedIds, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon]);
 
   // Apply erased points permanently - removes erased points and bakes in translation
   const handleApplyErase = useCallback(() => {
@@ -2468,6 +3408,21 @@ export default function PointCloudViewer({
     const state = editStates.get(cloudId);
 
     if (!cloud || !state || state.erasedIndices.size === 0) return;
+
+    // Octree clouds: the free-form brush accumulates point indices into
+    // erasedIndices, but octree-backed data.positions is an empty
+    // Float32Array — those indices don't refer to anything. The M3 erase
+    // story for octrees is "use Crop with invert=true to remove a
+    // region", which handleApplyCrop already wires through crop_octree.
+    // Tell the user explicitly rather than silently doing nothing.
+    if (cloud.data.octree) {
+      showToast({
+        title: 'Brush erase is not available for octree clouds — use Crop with invert',
+        type: 'info',
+      });
+      setEditMode('none');
+      return;
+    }
 
     // Filter out erased points and apply translation. Two-pass over typed
     // arrays to avoid the multi-GB JS `number[]` intermediate that the
@@ -2574,15 +3529,11 @@ export default function PointCloudViewer({
     // Update the cloud permanently
     onUpdateCloud(cloud.id, newData);
 
-    // Reset edit state for this cloud (new bounds, no translation, no erased)
+    // Reset edit state for this cloud (no translation, no erased)
     setEditStates(prev => {
       const next = new Map(prev);
       next.set(cloud.id, {
         translation: { x: 0, y: 0, z: 0 },
-        cropMin: { x: min.x, y: min.y, z: min.z },
-        cropMax: { x: max.x, y: max.y, z: max.z },
-        cropEnabled: false,
-        cropInvert: false,
         erasedIndices: new Set<number>(),
       });
       return next;
@@ -2615,8 +3566,6 @@ export default function PointCloudViewer({
     const state = editStates.get(cloudId) || {
       translation: { x: 0, y: 0, z: 0 },
       erasedIndices: new Set<number>(),
-      cropEnabled: false,
-      cropInvert: false,
     };
 
     // Filter points based on active filters. Two-pass over typed arrays
@@ -2752,10 +3701,6 @@ export default function PointCloudViewer({
       const next = new Map(prev);
       next.set(cloud.id, {
         translation: { x: 0, y: 0, z: 0 },
-        cropMin: { x: min.x, y: min.y, z: min.z },
-        cropMax: { x: max.x, y: max.y, z: max.z },
-        cropEnabled: false,
-        cropInvert: false,
         erasedIndices: new Set<number>(),
       });
       return next;
@@ -2789,24 +3734,66 @@ export default function PointCloudViewer({
         e.preventDefault();
         handleRedo();
       }
-      // Enter: Apply crop (if in crop mode) or exit current edit mode
+      // Enter: while mid-polygon, close the polygon. Otherwise (in crop
+      // mode) Enter is a no-op — apply is bound exclusively to the
+      // explicit "Apply" button in the crop panel so the user can't
+      // accidentally trigger a multi-GB filter pass by hitting Enter
+      // after typing a coordinate. In other edit modes (translate,
+      // erase…) Enter still exits the mode.
       if (e.key === 'Enter' && editMode !== 'none') {
-        e.preventDefault();
         if (editMode === 'crop') {
-          handleApplyCrop();
+          if (cropDrawState === 'drawing-polygon') {
+            e.preventDefault();
+            if (polygonInProgress.length >= 3 && polygonCameraRef.current && polygonCanvasSizeRef.current) {
+              const region = polygonRegionFromCamera(
+                polygonInProgress,
+                polygonCameraRef.current,
+                polygonCanvasSizeRef.current,
+                false,
+              );
+              setCropPolygon({
+                points: region.points,
+                projection: region.projection,
+                view: region.view,
+                canvasSize: region.canvasSize,
+              });
+              setPolygonInProgress([]);
+              setCropDrawState('idle');
+            }
+            return;
+          }
+          // Crop mode + not drawing a polygon: don't preventDefault here
+          // (we don't want to interfere with form-level handling) and
+          // don't apply. The Apply button is the only entry point.
         } else {
+          e.preventDefault();
           setEditMode('none');
         }
       }
-      // Escape: Cancel/exit current edit mode
+      // Escape: cancel polygon-in-progress, or exit edit mode.
       if (e.key === 'Escape' && editMode !== 'none') {
         e.preventDefault();
+        if (editMode === 'crop' && cropDrawState === 'drawing-polygon') {
+          setPolygonInProgress([]);
+          setCropDrawState('idle');
+          return;
+        }
+        if (editMode === 'crop' && (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2')) {
+          boxDrawFirstCornerRef.current = null;
+          setCropDrawState('idle');
+          return;
+        }
         setEditMode('none');
+      }
+      // Backspace: pop the last polygon vertex while drawing.
+      if (e.key === 'Backspace' && editMode === 'crop' && cropDrawState === 'drawing-polygon') {
+        e.preventDefault();
+        setPolygonInProgress(prev => prev.slice(0, -1));
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, handleApplyCrop, editMode]);
+  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress]);
 
   // Track shift key state for mixed selection (cloud + mesh)
   useEffect(() => {
@@ -3464,6 +4451,35 @@ export default function PointCloudViewer({
     const editState = getEditState(cloud.id);
     const data = cloud.data;
 
+    // Fast path: if there's nothing to do, return the input data unchanged.
+    // Critical: returning the SAME object reference is what keeps
+    // PointCloud's geometry useMemo from re-executing (and reallocating
+    // its own ~hundreds of MB of Float32Arrays) on every parent render.
+    //
+    // Conditions for the fast path:
+    //   - no erased points
+    //   - no translation
+    //   - and the crop preview, if active, fully encloses this cloud
+    //     under an axis-aligned box (the default state of crop mode for
+    //     N≥1 selected clouds, since the initial region is the union of
+    //     every selected cloud's bounds).
+    const erased = editState.erasedIndices;
+    const tx = editState.translation.x;
+    const ty = editState.translation.y;
+    const tz = editState.translation.z;
+    const hasErase = erased && erased.size > 0;
+    const hasTranslation = tx !== 0 || ty !== 0 || tz !== 0;
+    const cropIsNoOp =
+      !showCropPreview ||
+      (cropMode === 'box' && cropBox && !cropInvert &&
+        data.bounds.min.x + tx >= cropBox.min.x && data.bounds.max.x + tx <= cropBox.max.x &&
+        data.bounds.min.y + ty >= cropBox.min.y && data.bounds.max.y + ty <= cropBox.max.y &&
+        data.bounds.min.z + tz >= cropBox.min.z && data.bounds.max.z + tz <= cropBox.max.z);
+
+    if (!hasErase && !hasTranslation && cropIsNoOp) {
+      return data;
+    }
+
     let positions = data.positions;
     let colors = data.colors;
     let intensities = data.intensities;
@@ -3516,60 +4532,75 @@ export default function PointCloudViewer({
     // as the erase branch above: a JS `number[]` of 3·N doubles for a 50M
     // cloud is multi-GB and OOMs the renderer the moment you click Crop.
     //
-    // Crop bounds are stored in LOCAL coordinates (relative to untranslated
-    // object) so the crop moves with the object. Uses the already-erased
-    // positions/colors/intensities, not original data.
-    if (showCropPreview && editState.cropMin && editState.cropMax) {
-      const cm = editState.cropMin;
-      const cM = editState.cropMax;
-      const invert = editState.cropInvert;
+    // The crop region lives in WORLD coordinates (shared across all
+    // selected scans). To test a point we add this cloud's translation to
+    // get its world position, then run the predicate. We still write the
+    // kept points back in local coordinates — the translate pass below
+    // bakes translation into the rendered geometry.
+    const cropPredicate = showCropPreview ? buildCropPredicate() : null;
+    if (cropPredicate) {
+      const tx = editState.translation.x;
+      const ty = editState.translation.y;
+      const tz = editState.translation.z;
+      const invert = cropInvert;
 
-      let kept = 0;
-      for (let i = 0; i < pointCount; i++) {
-        const x = positions[i * 3];
-        const y = positions[i * 3 + 1];
-        const z = positions[i * 3 + 2];
-        const inside = (
-          x >= cm.x && x <= cM.x &&
-          y >= cm.y && y <= cM.y &&
-          z >= cm.z && z <= cM.z
-        );
-        if (invert ? !inside : inside) kept++;
-      }
+      // Short-circuit: when the crop region is an AABB that fully encloses
+      // this cloud's translated bounds and we're not inverting, every
+      // point survives the filter — skip the per-render Float32Array copy
+      // entirely. This is the state of the world the instant the user
+      // clicks Crop with N≥1 clouds selected: the default region is the
+      // union of every selected cloud's bounds, so each cloud is by
+      // construction fully inside it. Without this short-circuit a
+      // multi-cloud crop on two ~28M-point scans allocates ~700 MB of
+      // throwaway typed-array copies per parent re-render, which combined
+      // with the original buffers and PointCloud's own geometry useMemo
+      // pushed V8's large-object space past the 4 GB ceiling.
+      const fullyInside =
+        cropMode === 'box' && cropBox && !invert &&
+        data.bounds.min.x + tx >= cropBox.min.x && data.bounds.max.x + tx <= cropBox.max.x &&
+        data.bounds.min.y + ty >= cropBox.min.y && data.bounds.max.y + ty <= cropBox.max.y &&
+        data.bounds.min.z + tz >= cropBox.min.z && data.bounds.max.z + tz <= cropBox.max.z;
 
-      const newPositions = new Float32Array(kept * 3);
-      const newColors = colors ? new Float32Array(kept * 3) : null;
-      const newIntensities = intensities ? new Float32Array(kept) : null;
-
-      let w = 0;
-      for (let i = 0; i < pointCount; i++) {
-        const x = positions[i * 3];
-        const y = positions[i * 3 + 1];
-        const z = positions[i * 3 + 2];
-        const inside = (
-          x >= cm.x && x <= cM.x &&
-          y >= cm.y && y <= cM.y &&
-          z >= cm.z && z <= cM.z
-        );
-        if (!(invert ? !inside : inside)) continue;
-        newPositions[w * 3] = x;
-        newPositions[w * 3 + 1] = y;
-        newPositions[w * 3 + 2] = z;
-        if (newColors && colors) {
-          newColors[w * 3] = colors[i * 3];
-          newColors[w * 3 + 1] = colors[i * 3 + 1];
-          newColors[w * 3 + 2] = colors[i * 3 + 2];
+      if (!fullyInside) {
+        let kept = 0;
+        for (let i = 0; i < pointCount; i++) {
+          const wx = positions[i * 3] + tx;
+          const wy = positions[i * 3 + 1] + ty;
+          const wz = positions[i * 3 + 2] + tz;
+          const inside = cropPredicate(wx, wy, wz);
+          if (invert ? !inside : inside) kept++;
         }
-        if (newIntensities && intensities) {
-          newIntensities[w] = intensities[i];
-        }
-        w++;
-      }
 
-      pointCount = kept;
-      positions = newPositions;
-      if (newColors) colors = newColors;
-      if (newIntensities) intensities = newIntensities;
+        const newPositions = new Float32Array(kept * 3);
+        const newColors = colors ? new Float32Array(kept * 3) : null;
+        const newIntensities = intensities ? new Float32Array(kept) : null;
+
+        let w = 0;
+        for (let i = 0; i < pointCount; i++) {
+          const x = positions[i * 3];
+          const y = positions[i * 3 + 1];
+          const z = positions[i * 3 + 2];
+          const inside = cropPredicate(x + tx, y + ty, z + tz);
+          if (!(invert ? !inside : inside)) continue;
+          newPositions[w * 3] = x;
+          newPositions[w * 3 + 1] = y;
+          newPositions[w * 3 + 2] = z;
+          if (newColors && colors) {
+            newColors[w * 3] = colors[i * 3];
+            newColors[w * 3 + 1] = colors[i * 3 + 1];
+            newColors[w * 3 + 2] = colors[i * 3 + 2];
+          }
+          if (newIntensities && intensities) {
+            newIntensities[w] = intensities[i];
+          }
+          w++;
+        }
+
+        pointCount = kept;
+        positions = newPositions;
+        if (newColors) colors = newColors;
+        if (newIntensities) intensities = newIntensities;
+      }
     }
 
     // Apply translation
@@ -3621,7 +4652,65 @@ export default function PointCloudViewer({
     }
 
     return { positions, colors, intensities, pointCount, bounds: { min, max, center, size }, fileName: data.fileName };
-  }, [getEditState]);
+  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox]);
+
+  // Render-path companion to getDisplayData: returns ONLY a Uint32Array
+  // of visible-point indices (or null when nothing is filtered). The JSX
+  // renderer passes this to <PointCloud indices={...}> which uses it as
+  // the geometry index attribute — three.js then draws just those points
+  // against the cloud's original (shared) position/color buffers.
+  //
+  // No Float32Array allocation, regardless of crop region or cloud size.
+  // Cost per call: one Uint32Array of size `kept` (~4 bytes per visible
+  // point). The "fully inside" and "nothing filtered" fast paths return
+  // null so three.js draws all points without an index attribute at all.
+  //
+  // Translation is NOT baked here — it's applied by the parent group's
+  // `position` prop. Crop predicate consumes translated world coords.
+  const getDisplayIndices = useCallback((cloud: PointCloudEntry, showCropPreview: boolean): Uint32Array | null => {
+    const editState = getEditState(cloud.id);
+    const data = cloud.data;
+    const erased = editState.erasedIndices;
+    const tx = editState.translation.x;
+    const ty = editState.translation.y;
+    const tz = editState.translation.z;
+
+    const cropPredicate = showCropPreview ? buildCropPredicate() : null;
+
+    // Fast path: nothing filters anything.
+    if (!erased.size && !cropPredicate) return null;
+
+    // Fast path: box crop fully encloses cloud's translated bounds, and
+    // no erase / no inversion. Nothing is filtered out — let three.js
+    // draw all of cloud.data.
+    if (!erased.size && cropPredicate && cropMode === 'box' && cropBox && !cropInvert) {
+      const fullyInside =
+        data.bounds.min.x + tx >= cropBox.min.x && data.bounds.max.x + tx <= cropBox.max.x &&
+        data.bounds.min.y + ty >= cropBox.min.y && data.bounds.max.y + ty <= cropBox.max.y &&
+        data.bounds.min.z + tz >= cropBox.min.z && data.bounds.max.z + tz <= cropBox.max.z;
+      if (fullyInside) return null;
+    }
+
+    // Two-pass: count survivors, allocate Uint32Array, fill.
+    const keep = (i: number): boolean => {
+      if (erased.has(i)) return false;
+      if (cropPredicate) {
+        const wx = data.positions[i * 3] + tx;
+        const wy = data.positions[i * 3 + 1] + ty;
+        const wz = data.positions[i * 3 + 2] + tz;
+        const inside = cropPredicate(wx, wy, wz);
+        return cropInvert ? !inside : inside;
+      }
+      return true;
+    };
+
+    let kept = 0;
+    for (let i = 0; i < data.pointCount; i++) if (keep(i)) kept++;
+    const out = new Uint32Array(kept);
+    let w = 0;
+    for (let i = 0; i < data.pointCount; i++) if (keep(i)) out[w++] = i;
+    return out;
+  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox]);
 
   // Helper to download a file
   const downloadFile = useCallback((content: string | Blob, fileName: string) => {
@@ -5304,10 +6393,6 @@ export default function PointCloudViewer({
             if (!orig) continue;
             const state = next.get(id) || {
               translation: { x: 0, y: 0, z: 0 },
-              cropMin: null,
-              cropMax: null,
-              cropEnabled: false,
-              cropInvert: false,
               erasedIndices: new Set<number>(),
             };
             next.set(id, {
@@ -7129,49 +8214,109 @@ export default function PointCloudViewer({
         {/* Camera capture for GIF generation */}
         <CameraCapture cameraRef={mainCameraRef} />
 
-        {/* Render all visible clouds */}
+        {/* Render all visible clouds.
+            We pass the source `cloud.data` (or the resample preview when
+            active) straight to <PointCloud> without copying. Crop preview
+            and erase produce a Uint32Array of visible indices that
+            three.js uses as the geometry index — see getDisplayIndices
+            for the rationale. Translation is applied to the parent group;
+            it is no longer baked into the position buffer. */}
         {clouds.map(cloud => {
           if (!cloud.visible) return null;
           const editState = getEditState(cloud.id);
           const isSelected = selectedIds.has(cloud.id);
-          // Show crop preview when this cloud is selected and in crop mode
           const showCropPreview = isSelected && editMode === 'crop';
-          // Check if there's a resample preview for this cloud
           const hasResamplePreview = resamplePreview?.cloudId === cloud.id;
-          // Always call getDisplayData to handle erasing, pass showCropPreview for crop filtering
-          // Use resample preview data if available
-          const displayData = hasResamplePreview
-            ? resamplePreview.previewData
-            : (showCropPreview || editState.erasedIndices.size > 0)
-              ? getDisplayData(cloud, showCropPreview)
-              : cloud.data;
 
-          // Skip rendering if the display data has no points (all erased)
-          if (!displayData || displayData.pointCount === 0) {
-            return null;
-          }
+          // Resample preview replaces the source dataset entirely; crop
+          // and erase do not apply to it.
+          const sourceData = hasResamplePreview ? resamplePreview.previewData : cloud.data;
+          if (!sourceData || sourceData.pointCount === 0) return null;
+          // Octree clouds don't have flat positions to filter against —
+          // their LOD streaming handles everything, and getDisplayIndices
+          // would return an empty Uint32Array (no positions → no matches).
+          // The kill-switch below would then hide the whole cloud the
+          // moment the user opens crop or any range filter. Crop preview
+          // for octree clouds is going to be a ClipBox in M3; for now,
+          // skip the indices path entirely.
+          const isOctreeCloud = !!cloud.data.octree;
+          const indices = hasResamplePreview || isOctreeCloud
+            ? null
+            : getDisplayIndices(cloud, showCropPreview);
+          if (indices && indices.length === 0) return null;
 
-          // When getDisplayData is called, it bakes translation into positions, so group position should be [0,0,0]
-          // getDisplayData is called when: showCropPreview || erasedIndices.size > 0
-          const usesDisplayData = showCropPreview || editState.erasedIndices.size > 0;
           return (
             <group
               key={cloud.id}
-              position={usesDisplayData ? [0, 0, 0] : [editState.translation.x, editState.translation.y, editState.translation.z]}
+              position={hasResamplePreview
+                ? [0, 0, 0]
+                : [editState.translation.x, editState.translation.y, editState.translation.z]}
             >
-              <PointCloud
-                data={displayData}
-                pointSize={pointSize}
-                // 'per-scan' is rendered as 'single' with the cloud's own
-                // swatch color — keeps PointCloud unaware of multi-cloud state.
-                colorMode={colorMode === 'per-scan' ? 'single' : colorMode}
-                singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
-                selectedScalarField={selectedScalarField}
-                filters={cloudFilters.get(cloud.id)}
-                colormap={colormap}
-                rangeMin={activeRange?.min}
-                rangeMax={activeRange?.max}
-              />
+              {sourceData.octree ? (
+                <OctreePointCloud
+                  // Re-mount the component when colorMode changes — the
+                  // octree's per-tile sceneNodes are constructed by
+                  // potree-core with the material at tile-load time, and
+                  // three.js's BindingState cache keeps the old attribute
+                  // slot mapping even when the cloud material's shader
+                  // source is replaced. A fresh mount means a fresh
+                  // material from potree-core's loader, which gets fresh
+                  // BindingStates for every tile that re-streams. The
+                  // octree.bin tiles themselves are cached on disk (and
+                  // potree-core caches PCOGeometry in memory across
+                  // loads), so re-mount cost is one shader compile per
+                  // mode switch — measured at ~10 ms.
+                  key={`octree-${colorMode}`}
+                  data={sourceData}
+                  pointSize={pointSize}
+                  // 'per-scan' renders as a uniform single-colour swatch
+                  // (the cloud's own colour), same convention as the flat
+                  // PointCloud dispatch below. 'x' and 'y' don't have a
+                  // clean octree equivalent yet (no axis-scalar shader),
+                  // so they fall through to 'height' which colours by Z.
+                  colorMode={
+                    colorMode === 'per-scan'
+                      ? 'single'
+                      : colorMode === 'x' || colorMode === 'y'
+                        ? 'height'
+                        : colorMode
+                  }
+                  singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
+                  colormap={colormap}
+                  rangeMin={activeRange?.min}
+                  rangeMax={activeRange?.max}
+                  // Live crop preview: pass the current crop box only in
+                  // box mode while a crop is being drawn AND this cloud
+                  // is in the selection. Polygon mode falls back to the
+                  // overlay-only preview (the gizmo-screen polygon is
+                  // already drawn); the apply still runs full polygon
+                  // through the backend.
+                  clipBox={
+                    showCropPreview && cropMode === 'box' && cropBox
+                      ? {
+                          min: new THREE.Vector3(cropBox.min.x, cropBox.min.y, cropBox.min.z),
+                          max: new THREE.Vector3(cropBox.max.x, cropBox.max.y, cropBox.max.z),
+                          invert: cropInvert,
+                        }
+                      : null
+                  }
+                />
+              ) : (
+                <PointCloud
+                  data={sourceData}
+                  indices={indices}
+                  pointSize={pointSize}
+                  // 'per-scan' is rendered as 'single' with the cloud's own
+                  // swatch color — keeps PointCloud unaware of multi-cloud state.
+                  colorMode={colorMode === 'per-scan' ? 'single' : colorMode}
+                  singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
+                  selectedScalarField={selectedScalarField}
+                  filters={cloudFilters.get(cloud.id)}
+                  colormap={colormap}
+                  rangeMin={activeRange?.min}
+                  rangeMax={activeRange?.max}
+                />
+              )}
             </group>
           );
         })}
@@ -7266,7 +8411,20 @@ export default function PointCloudViewer({
           );
         })}
 
-        <CameraController bounds={combinedBounds} enabled={!gizmoDragging} />
+        <CameraController
+          bounds={combinedBounds}
+          hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0}
+          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon'}
+        />
+
+        {/* Snapshots the camera/size for the polygon-crop in/out test.
+            Lives only while a polygon could be active. */}
+        {editMode === 'crop' && cropMode === 'polygon' && (
+          <PolygonCameraSnapshotter
+            cameraRef={polygonCameraRef}
+            sizeRef={polygonCanvasSizeRef}
+          />
+        )}
 
         {/* Translation Gizmo for selected clouds */}
         {editMode === 'translate' && firstSelectedCloud && (
@@ -7331,45 +8489,54 @@ export default function PointCloudViewer({
           );
         })()}
 
-        {/* Crop Box for selected cloud */}
-        {editMode === 'crop' && firstSelectedCloud && (() => {
-          const editState = getEditState(firstSelectedCloud.id);
-          if (!editState.cropMin || !editState.cropMax) return null;
-          const trans = editState.translation;
-          // Crop bounds stored in local coords, add translation for display
-          const displayMin = {
-            x: editState.cropMin.x + trans.x,
-            y: editState.cropMin.y + trans.y,
-            z: editState.cropMin.z + trans.z
-          };
-          const displayMax = {
-            x: editState.cropMax.x + trans.x,
-            y: editState.cropMax.y + trans.y,
-            z: editState.cropMax.z + trans.z
-          };
-          return (
-            <CropBox
-              min={displayMin}
-              max={displayMax}
-              onMinChange={(min) => {
-                // Subtract translation to store in local coords
-                const localMin = { x: min.x - trans.x, y: min.y - trans.y, z: min.z - trans.z };
-                updateSelectedEditStates(s => ({ ...s, cropMin: localMin }));
-              }}
-              onMaxChange={(max) => {
-                // Subtract translation to store in local coords
-                const localMax = { x: max.x - trans.x, y: max.y - trans.y, z: max.z - trans.z };
-                updateSelectedEditStates(s => ({ ...s, cropMax: localMax }));
-              }}
-              onDragStart={() => setGizmoDragging(true)}
-              onDragEnd={() => { setGizmoDragging(false); saveToHistory(); }}
-              keepInside={!editState.cropInvert}
-            />
-          );
-        })()}
+        {/* Crop Box (world-space) — shown only in box mode. The polygon
+            lasso is drawn as an SVG overlay outside the canvas so it
+            doesn't fight three.js event handling. */}
+        {editMode === 'crop' && cropMode === 'box' && cropBox && (
+          <CropBox
+            min={cropBox.min}
+            max={cropBox.max}
+            onMinChange={(min) => setCropBox(prev => prev ? { ...prev, min } : prev)}
+            onMaxChange={(max) => setCropBox(prev => prev ? { ...prev, max } : prev)}
+            onDragStart={() => setGizmoDragging(true)}
+            onDragEnd={() => setGizmoDragging(false)}
+            keepInside={!cropInvert}
+          />
+        )}
 
-        {/* Erase Brush - for erasing points from point cloud */}
-        {editMode === 'erase' && firstSelectedCloud && (() => {
+        {/* Two-click ground-plane box-draw raycaster. Active only while
+            the user has clicked "Draw box" in the panel. */}
+        {editMode === 'crop' &&
+          (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2') && (
+          <BoxDrawRaycaster
+            groundZ={combinedBounds.min.z}
+            onPick={(x, y) => {
+              if (cropDrawState === 'awaiting-box-corner-1') {
+                boxDrawFirstCornerRef.current = { x, y };
+                setCropDrawState('awaiting-box-corner-2');
+                return;
+              }
+              const first = boxDrawFirstCornerRef.current;
+              if (!first) { setCropDrawState('idle'); return; }
+              const minX = Math.min(first.x, x);
+              const minY = Math.min(first.y, y);
+              const maxX = Math.max(first.x, x);
+              const maxY = Math.max(first.y, y);
+              setCropBox({
+                min: { x: minX, y: minY, z: combinedBounds.min.z },
+                max: { x: maxX, y: maxY, z: combinedBounds.max.z },
+              });
+              boxDrawFirstCornerRef.current = null;
+              setCropDrawState('idle');
+            }}
+          />
+        )}
+
+        {/* Erase Brush - for erasing points from point cloud. Skipped for
+            octree-backed clouds: the brush picks the closest point in
+            data.positions (an empty Float32Array for octrees) and would
+            never select anything. Use Crop with invert instead. */}
+        {editMode === 'erase' && firstSelectedCloud && !firstSelectedCloud.data.octree && (() => {
           const editState = getEditState(firstSelectedCloud.id);
           return (
             <EraseBrush
@@ -7450,6 +8617,113 @@ export default function PointCloudViewer({
 
         {showAxes && <ViewportAxesGizmo />}
       </Canvas>
+
+      {/* Polygon lasso overlay — covers the canvas in screen space.
+          Captures clicks only while drawing; in "closed polygon" state
+          it's a non-interactive visualization that lets the user see
+          their selection before pressing Enter to apply. */}
+      {editMode === 'crop' && cropMode === 'polygon' && (cropDrawState === 'drawing-polygon' || cropPolygon) && (() => {
+        const isDrawing = cropDrawState === 'drawing-polygon';
+        const points = isDrawing ? polygonInProgress : (cropPolygon?.points ?? []);
+        const cursor = isDrawing ? polygonCursorRef.current : null;
+
+        const handleClick = (e: React.MouseEvent<SVGSVGElement>) => {
+          if (!isDrawing) return;
+          if (e.button !== 0) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          setPolygonInProgress(prev => [...prev, { x, y }]);
+        };
+        const handleContextMenu = (e: React.MouseEvent<SVGSVGElement>) => {
+          if (!isDrawing) return;
+          e.preventDefault();
+          setPolygonInProgress(prev => prev.slice(0, -1));
+        };
+        const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+          if (!isDrawing) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          polygonCursorRef.current = {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+          };
+          // Bump the tick so the cursor preview line re-renders. Cheap —
+          // the overlay's only a handful of SVG elements.
+          setPolygonCursorTick(t => t + 1);
+        };
+
+        const polylinePoints = points.map(p => `${p.x},${p.y}`).join(' ');
+        const closedPoints = !isDrawing && points.length >= 3 ? polylinePoints : null;
+        // Suppress unused-state warning — we read polygonCursorTick to force re-render.
+        void polygonCursorTick;
+
+        return (
+          <svg
+            data-testid="crop-polygon-overlay"
+            className="absolute inset-0 z-10"
+            style={{
+              pointerEvents: isDrawing ? 'auto' : 'none',
+              cursor: isDrawing ? 'crosshair' : 'default',
+            }}
+            onClick={handleClick}
+            onContextMenu={handleContextMenu}
+            onMouseMove={handleMouseMove}
+          >
+            {closedPoints && (
+              <polygon
+                points={closedPoints}
+                fill={cropInvert ? 'rgba(239,68,68,0.12)' : 'rgba(34,197,94,0.12)'}
+                stroke={cropInvert ? '#ef4444' : '#22c55e'}
+                strokeWidth={2}
+              />
+            )}
+            {isDrawing && points.length > 0 && (
+              <>
+                <polyline
+                  points={polylinePoints}
+                  fill="none"
+                  stroke="#22c55e"
+                  strokeWidth={2}
+                />
+                {cursor && (
+                  <line
+                    x1={points[points.length - 1].x}
+                    y1={points[points.length - 1].y}
+                    x2={cursor.x}
+                    y2={cursor.y}
+                    stroke="#22c55e"
+                    strokeWidth={1}
+                    strokeDasharray="4 4"
+                  />
+                )}
+                {points.length >= 3 && cursor && (
+                  <line
+                    x1={cursor.x}
+                    y1={cursor.y}
+                    x2={points[0].x}
+                    y2={points[0].y}
+                    stroke="#22c55e"
+                    strokeWidth={1}
+                    strokeDasharray="2 4"
+                    opacity={0.5}
+                  />
+                )}
+              </>
+            )}
+            {points.map((p, i) => (
+              <circle
+                key={i}
+                cx={p.x}
+                cy={p.y}
+                r={4}
+                fill={isDrawing ? '#22c55e' : (cropInvert ? '#ef4444' : '#22c55e')}
+                stroke="#0a0a0a"
+                strokeWidth={1.5}
+              />
+            ))}
+          </svg>
+        );
+      })()}
 
       {/* Helios triangulation status indicator */}
       {isHeliosRunning && (
@@ -8018,7 +9292,7 @@ export default function PointCloudViewer({
                   </button>
                 </>
               )}
-              {/* Multi-Cloud Selection Tools - Move to Origin and Alignment (Cloud-to-Cloud ICP) */}
+              {/* Multi-Cloud Selection Tools - Move to Origin, Crop, Alignment, Helios */}
               {selectionType === 'multiCloud' && (
                 <>
                   {/* Move to Origin */}
@@ -8028,6 +9302,16 @@ export default function PointCloudViewer({
                     title="Move to Origin"
                   >
                     <CircleDot className="w-4 h-4 text-neutral-300" />
+                  </button>
+                  {/* Crop — same world-space region applied across every
+                      selected scan. */}
+                  <button
+                    data-testid="tool-crop-multi"
+                    onClick={toggleCropMode}
+                    className={`p-2 rounded transition-colors ${editMode === 'crop' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
+                    title={`Crop ${selectedIds.size} scans`}
+                  >
+                    <Crop className={`w-4 h-4 ${editMode === 'crop' ? 'text-white' : 'text-neutral-300'}`} />
                   </button>
                   {/* Alignment (Cloud-to-Cloud ICP) */}
                   <button
@@ -8126,49 +9410,12 @@ export default function PointCloudViewer({
                   >
                     <Move className={`w-4 h-4 ${editMode === 'translate' ? 'text-white' : 'text-neutral-300'}`} />
                   </button>
-                  {/* 3. Crop */}
+                  {/* 3. Crop — works for one OR many selected scans. When
+                       multiple are selected the crop region lives in
+                       world space and applies uniformly across them. */}
                   <button
-                    onClick={() => {
-                      if (editMode === 'crop') {
-                        setEditMode('none');
-                      } else {
-                        closeAllToolPanels('editMode');
-                        // When entering crop mode, reset bounds to effective data bounds (accounting for erasure)
-                        // Crop bounds are in LOCAL coordinates (before translation)
-                        for (const cloudId of selectedIds) {
-                          const cloud = clouds.find(c => c.id === cloudId);
-                          if (cloud) {
-                            const state = getEditState(cloudId);
-                            // Get effective bounds (with erasure applied, but no crop preview)
-                            // getDisplayData returns bounds WITH translation applied,
-                            // but crop bounds need LOCAL coordinates (without translation)
-                            const effectiveData = getDisplayData(cloud, false);
-                            const tx = state.translation.x;
-                            const ty = state.translation.y;
-                            const tz = state.translation.z;
-                            setEditStates(prev => {
-                              const next = new Map(prev);
-                              const currentState = next.get(cloudId) || state;
-                              next.set(cloudId, {
-                                ...currentState,
-                                cropMin: {
-                                  x: effectiveData.bounds.min.x - tx,
-                                  y: effectiveData.bounds.min.y - ty,
-                                  z: effectiveData.bounds.min.z - tz
-                                },
-                                cropMax: {
-                                  x: effectiveData.bounds.max.x - tx,
-                                  y: effectiveData.bounds.max.y - ty,
-                                  z: effectiveData.bounds.max.z - tz
-                                },
-                              });
-                              return next;
-                            });
-                          }
-                        }
-                        setEditMode('crop');
-                      }
-                    }}
+                    data-testid="tool-crop"
+                    onClick={toggleCropMode}
                     className={`p-2 rounded transition-colors ${editMode === 'crop' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
                     title="Crop"
                   >
@@ -8453,115 +9700,252 @@ export default function PointCloudViewer({
         )}
       </div>
 
-      {/* Crop Panel */}
-      {editMode === 'crop' && firstSelectedCloud && (() => {
-        const editState = getEditState(firstSelectedCloud.id);
-        if (!editState.cropMin || !editState.cropMax) return null;
+      {/* Crop Panel — single panel handles both Box and Polygon modes
+          and applies to every selected scan when N > 1. */}
+      {editMode === 'crop' && selectedIds.size > 0 && (() => {
+        const closeCropPanel = () => {
+          setEditMode('none');
+          setCropDrawState('idle');
+          setPolygonInProgress([]);
+        };
+        const resetWorldBox = () => {
+          const initial = worldBoundsUnion(
+            Array.from(selectedIds)
+              .map(id => clouds.find(c => c.id === id))
+              .filter((c): c is PointCloudEntry => !!c)
+              .map(c => ({
+                bounds: {
+                  min: { x: c.data.bounds.min.x, y: c.data.bounds.min.y, z: c.data.bounds.min.z },
+                  max: { x: c.data.bounds.max.x, y: c.data.bounds.max.y, z: c.data.bounds.max.z },
+                },
+                translation: getEditState(c.id).translation,
+              })),
+          );
+          if (initial) setCropBox(initial);
+        };
 
+        const cropBoxMinStr = cropBox
+          ? `${cropBox.min.x.toFixed(3)},${cropBox.min.y.toFixed(3)},${cropBox.min.z.toFixed(3)}`
+          : '';
+        const cropBoxMaxStr = cropBox
+          ? `${cropBox.max.x.toFixed(3)},${cropBox.max.y.toFixed(3)},${cropBox.max.z.toFixed(3)}`
+          : '';
         return (
-          <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
-            <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center gap-2">
-              <Crop className="w-3 h-3" />
-              Crop Region
+          <div
+            data-testid="crop-panel"
+            data-selection-count={selectedIds.size}
+            data-crop-mode={cropMode}
+            data-crop-min={cropBoxMinStr}
+            data-crop-max={cropBoxMaxStr}
+            className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
+          >
+            <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
+              <span className="flex items-center gap-2">
+                <Crop className="w-3 h-3" />
+                Crop Region
+              </span>
+              <button
+                data-testid="crop-close"
+                onClick={closeCropPanel}
+                className="p-1 rounded hover:bg-neutral-700 transition-colors"
+                aria-label="Close"
+                title="Close (don't apply crop)"
+              >
+                <X className="w-4 h-4 text-neutral-400" />
+              </button>
             </div>
+
+            {selectedIds.size > 1 && (
+              <div data-testid="crop-multi-hint" className="text-[10px] text-blue-300 text-center mb-2 py-1 bg-blue-900/20 rounded">
+                Applies to {selectedIds.size} scans
+              </div>
+            )}
+
+            {/* Shape: Box vs Polygon */}
+            <div className="mb-3 p-2 bg-neutral-900/50 rounded">
+              <div className="text-[10px] text-neutral-400 mb-2">Shape</div>
+              <div className="flex gap-1">
+                <button
+                  data-testid="crop-shape-box"
+                  onClick={() => {
+                    setCropMode('box');
+                    setCropDrawState('idle');
+                    setPolygonInProgress([]);
+                    if (!cropBox) resetWorldBox();
+                  }}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropMode === 'box' ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
+                >
+                  Box
+                </button>
+                <button
+                  data-testid="crop-shape-polygon"
+                  onClick={() => {
+                    setCropMode('polygon');
+                    setCropDrawState('drawing-polygon');
+                    setPolygonInProgress([]);
+                    setCropPolygon(null);
+                  }}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropMode === 'polygon' ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
+                >
+                  Polygon
+                </button>
+              </div>
+            </div>
+
+            {/* Keep Inside / Keep Outside */}
             <div className="mb-3 p-2 bg-neutral-900/50 rounded">
               <div className="text-[10px] text-neutral-400 mb-2">Mode</div>
               <div className="flex gap-1">
                 <button
-                  onClick={() => { updateSelectedEditStates(s => ({ ...s, cropInvert: false })); setTimeout(saveToHistory, 0); }}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${!editState.cropInvert ? 'bg-green-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
+                  onClick={() => setCropInvert(false)}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded ${!cropInvert ? 'bg-green-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
                 >
                   Keep Inside
                 </button>
                 <button
-                  onClick={() => { updateSelectedEditStates(s => ({ ...s, cropInvert: true })); setTimeout(saveToHistory, 0); }}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${editState.cropInvert ? 'bg-red-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
+                  onClick={() => setCropInvert(true)}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropInvert ? 'bg-red-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
                 >
                   Keep Outside
                 </button>
               </div>
             </div>
-            {/* Crop Box Dimensions */}
-            <div className="mb-3 p-2 bg-neutral-900/50 rounded">
-              <div className="text-[10px] text-neutral-400 mb-2">Dimensions</div>
-              <div className="grid grid-cols-3 gap-1">
-                {['X', 'Y', 'Z'].map((axis) => {
-                  const axisKey = axis.toLowerCase() as 'x' | 'y' | 'z';
-                  const size = editState.cropMax && editState.cropMin
-                    ? (editState.cropMax[axisKey] - editState.cropMin[axisKey]).toFixed(2)
-                    : '0';
-                  return (
-                    <div key={axis} className="flex flex-col">
-                      <label className="text-[9px] text-neutral-500 mb-0.5">{axis}</label>
-                      <DebouncedNumberInput
-                        step={0.1}
-                        value={parseFloat(size)}
-                        onCommit={(newSize) => {
-                          if (editState.cropMin && editState.cropMax) {
-                            const center = (editState.cropMin[axisKey] + editState.cropMax[axisKey]) / 2;
-                            updateSelectedEditStates(s => ({
-                              ...s,
-                              cropMin: { ...s.cropMin!, [axisKey]: center - newSize / 2 },
-                              cropMax: { ...s.cropMax!, [axisKey]: center + newSize / 2 },
-                            }));
-                          }
-                        }}
-                        className="w-full px-1 py-0.5 text-[10px] bg-neutral-700 border border-neutral-600 rounded text-white text-center"
-                      />
-                    </div>
-                  );
-                })}
+
+            {cropMode === 'box' && cropBox && (
+              <>
+                {/* Box dimensions */}
+                <div className="mb-3 p-2 bg-neutral-900/50 rounded">
+                  <div className="text-[10px] text-neutral-400 mb-2">Dimensions</div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {(['x', 'y', 'z'] as const).map((axisKey) => {
+                      const size = cropBox.max[axisKey] - cropBox.min[axisKey];
+                      return (
+                        <div key={axisKey} className="flex flex-col">
+                          <label className="text-[9px] text-neutral-500 mb-0.5">{axisKey.toUpperCase()}</label>
+                          <DebouncedNumberInput
+                            data-testid={`crop-dim-${axisKey}`}
+                            step={0.1}
+                            value={parseFloat(size.toFixed(2))}
+                            onCommit={(newSize) => {
+                              setCropBox(prev => {
+                                if (!prev) return prev;
+                                const center = (prev.min[axisKey] + prev.max[axisKey]) / 2;
+                                return {
+                                  min: { ...prev.min, [axisKey]: center - newSize / 2 },
+                                  max: { ...prev.max, [axisKey]: center + newSize / 2 },
+                                };
+                              });
+                            }}
+                            className="w-full px-1 py-0.5 text-[10px] bg-neutral-700 border border-neutral-600 rounded text-white text-center"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                {/* Center position */}
+                <div className="mb-3 p-2 bg-neutral-900/50 rounded">
+                  <div className="text-[10px] text-neutral-400 mb-2">Center Position</div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {(['x', 'y', 'z'] as const).map((axisKey) => {
+                      const center = (cropBox.max[axisKey] + cropBox.min[axisKey]) / 2;
+                      return (
+                        <div key={axisKey} className="flex flex-col">
+                          <label className="text-[9px] text-neutral-500 mb-0.5">{axisKey.toUpperCase()}</label>
+                          <DebouncedNumberInput
+                            data-testid={`crop-center-${axisKey}`}
+                            step={0.1}
+                            value={parseFloat(center.toFixed(2))}
+                            onCommit={(newCenter) => {
+                              setCropBox(prev => {
+                                if (!prev) return prev;
+                                const halfSize = (prev.max[axisKey] - prev.min[axisKey]) / 2;
+                                return {
+                                  min: { ...prev.min, [axisKey]: newCenter - halfSize },
+                                  max: { ...prev.max, [axisKey]: newCenter + halfSize },
+                                };
+                              });
+                            }}
+                            className="w-full px-1 py-0.5 text-[10px] bg-neutral-700 border border-neutral-600 rounded text-white text-center"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                <button
+                  data-testid="crop-draw-box"
+                  onClick={() => {
+                    boxDrawFirstCornerRef.current = null;
+                    setCropDrawState('awaiting-box-corner-1');
+                  }}
+                  className={`w-full px-2 py-1.5 text-xs rounded mb-2 ${cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2' ? 'bg-amber-600 text-white' : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'}`}
+                >
+                  {cropDrawState === 'awaiting-box-corner-1'
+                    ? 'Click first corner on ground…'
+                    : cropDrawState === 'awaiting-box-corner-2'
+                      ? 'Click second corner on ground…'
+                      : 'Draw box in viewport'}
+                </button>
+                <button
+                  onClick={resetWorldBox}
+                  className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded mb-2"
+                >
+                  Reset Crop Box
+                </button>
+              </>
+            )}
+
+            {cropMode === 'polygon' && (
+              <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-300">
+                {cropDrawState === 'drawing-polygon' ? (
+                  <>
+                    <div className="font-medium text-neutral-200 mb-1">Drawing polygon</div>
+                    Click in the viewport to add vertices. Right-click or Backspace removes the last. Press Enter to close, Esc to cancel.
+                    <div className="mt-2 text-neutral-400">Vertices: {polygonInProgress.length}</div>
+                  </>
+                ) : cropPolygon ? (
+                  <>
+                    <div className="font-medium text-neutral-200 mb-1">Polygon ({cropPolygon.points.length} vertices)</div>
+                    Preview shown above. Press Enter to apply, or click below to redraw.
+                    <button
+                      onClick={() => {
+                        setCropPolygon(null);
+                        setPolygonInProgress([]);
+                        setCropDrawState('drawing-polygon');
+                      }}
+                      className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
+                    >
+                      Redraw polygon
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    No polygon yet.
+                    <button
+                      onClick={() => {
+                        setPolygonInProgress([]);
+                        setCropDrawState('drawing-polygon');
+                      }}
+                      className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
+                    >
+                      Start drawing
+                    </button>
+                  </>
+                )}
               </div>
-            </div>
-            {/* Crop Box Center Location */}
-            <div className="mb-3 p-2 bg-neutral-900/50 rounded">
-              <div className="text-[10px] text-neutral-400 mb-2">Center Position</div>
-              <div className="grid grid-cols-3 gap-1">
-                {['X', 'Y', 'Z'].map((axis) => {
-                  const axisKey = axis.toLowerCase() as 'x' | 'y' | 'z';
-                  const center = editState.cropMax && editState.cropMin
-                    ? ((editState.cropMax[axisKey] + editState.cropMin[axisKey]) / 2).toFixed(2)
-                    : '0';
-                  return (
-                    <div key={axis} className="flex flex-col">
-                      <label className="text-[9px] text-neutral-500 mb-0.5">{axis}</label>
-                      <DebouncedNumberInput
-                        step={0.1}
-                        value={parseFloat(center)}
-                        onCommit={(newCenter) => {
-                          if (editState.cropMin && editState.cropMax) {
-                            const halfSize = (editState.cropMax[axisKey] - editState.cropMin[axisKey]) / 2;
-                            updateSelectedEditStates(s => ({
-                              ...s,
-                              cropMin: { ...s.cropMin!, [axisKey]: newCenter - halfSize },
-                              cropMax: { ...s.cropMax!, [axisKey]: newCenter + halfSize },
-                            }));
-                          }
-                        }}
-                        className="w-full px-1 py-0.5 text-[10px] bg-neutral-700 border border-neutral-600 rounded text-white text-center"
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-            {/* Hint about applying */}
-            <div className="text-[10px] text-neutral-400 text-center mb-2 py-1">
-              Press <span className="text-green-400 font-medium">Enter</span> to apply crop
-            </div>
+            )}
+
             <button
-              onClick={() => {
-                // Reset crop box to current cloud bounds
-                updateSelectedEditStates(s => ({
-                  ...s,
-                  cropMin: { x: firstSelectedCloud.data.bounds.min.x, y: firstSelectedCloud.data.bounds.min.y, z: firstSelectedCloud.data.bounds.min.z },
-                  cropMax: { x: firstSelectedCloud.data.bounds.max.x, y: firstSelectedCloud.data.bounds.max.y, z: firstSelectedCloud.data.bounds.max.z },
-                  cropInvert: false,
-                }));
-              }}
-              className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
+              data-testid="crop-apply"
+              onClick={handleApplyCrop}
+              disabled={
+                (cropMode === 'box' && !cropBox) ||
+                (cropMode === 'polygon' && !cropPolygon)
+              }
+              className="w-full px-2 py-1.5 mt-1 text-xs font-medium rounded bg-green-600 hover:bg-green-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white disabled:cursor-not-allowed transition-colors"
             >
-              Reset Crop Box
+              Apply crop to {selectedIds.size} scan{selectedIds.size === 1 ? '' : 's'}
             </button>
           </div>
         );
@@ -9746,7 +11130,7 @@ export default function PointCloudViewer({
             setEditStates(prev => {
               const next = new Map(prev);
               for (const cloudId of selectedIds) {
-                const state = next.get(cloudId) || { translation: { x: 0, y: 0, z: 0 }, cropEnabled: false, cropInvert: false, cropMin: null, cropMax: null, erasedIndices: new Set<number>() };
+                const state = next.get(cloudId) || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
                 next.set(cloudId, {
                   ...state,
                   translation: { ...state.translation, [axis]: numValue }
@@ -10835,6 +12219,7 @@ export default function PointCloudViewer({
                     const data = await parsePointCloudFromPath(resolved, h.asciiFormat);
                     scan.data = data;
                     scan.sourcePath = resolved;
+                    scan.asciiFormat = h.asciiFormat;
                     attachedCount += 1;
                   }
                 } catch (err) {
@@ -10975,15 +12360,27 @@ export default function PointCloudViewer({
               <div className="px-3 py-1.5 text-[10px] text-neutral-500 font-medium uppercase tracking-wide border-b border-neutral-700">
                 Color By
               </div>
-              {[
-                { value: 'x', label: 'X Axis' },
-                { value: 'y', label: 'Y Axis' },
-                { value: 'height', label: 'Z Axis (Height)' },
-                { value: 'intensity', label: 'Intensity' },
-                { value: 'rgb', label: 'RGB' },
-                { value: 'per-scan', label: 'Per-scan color' },
-                { value: 'single', label: 'Solid Color' },
-              ].map((option) => (
+              {(() => {
+                const isOctree = !!cloud.data.octree;
+                // Octree clouds don't have an axis-scalar shader for X
+                // or Y; potree-core's gradient-by-axis only knows Z
+                // (getElevation reads world.z). Hide X / Y for those
+                // clouds so the user doesn't think the menu is broken
+                // — switching to X or Y on the same cloud would just
+                // re-render the Z gradient.
+                const base = [
+                  { value: 'x', label: 'X Axis' },
+                  { value: 'y', label: 'Y Axis' },
+                  { value: 'height', label: 'Z Axis (Height)' },
+                  { value: 'intensity', label: 'Intensity' },
+                  { value: 'rgb', label: 'RGB' },
+                  { value: 'per-scan', label: 'Per-scan color' },
+                  { value: 'single', label: 'Solid Color' },
+                ];
+                return isOctree
+                  ? base.filter(o => o.value !== 'x' && o.value !== 'y')
+                  : base;
+              })().map((option) => (
                 <button
                   key={option.value}
                   onClick={() => {
@@ -11074,10 +12471,17 @@ export default function PointCloudViewer({
                             step="any"
                             value={colorRanges[colorRangeKey]?.min ?? dataRange.min}
                             onCommit={(v) => {
-                              setColorRanges(prev => ({
-                                ...prev,
-                                [colorRangeKey]: { ...prev[colorRangeKey], min: v },
-                              }));
+                              setColorRanges(prev => {
+                                // Clamp so min stays ≤ existing max — without
+                                // this the user can flip the range and the
+                                // colormap renders inverted nonsense.
+                                const curMax = prev[colorRangeKey]?.max ?? dataRange.max;
+                                const clamped = v > curMax ? curMax : v;
+                                return {
+                                  ...prev,
+                                  [colorRangeKey]: { ...prev[colorRangeKey], min: clamped },
+                                };
+                              });
                             }}
                             className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                           />
@@ -11088,10 +12492,14 @@ export default function PointCloudViewer({
                             step="any"
                             value={colorRanges[colorRangeKey]?.max ?? dataRange.max}
                             onCommit={(v) => {
-                              setColorRanges(prev => ({
-                                ...prev,
-                                [colorRangeKey]: { ...prev[colorRangeKey], max: v },
-                              }));
+                              setColorRanges(prev => {
+                                const curMin = prev[colorRangeKey]?.min ?? dataRange.min;
+                                const clamped = v < curMin ? curMin : v;
+                                return {
+                                  ...prev,
+                                  [colorRangeKey]: { ...prev[colorRangeKey], max: clamped },
+                                };
+                              });
                             }}
                             className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                           />

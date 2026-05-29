@@ -101,12 +101,18 @@ export function DebouncedNumberInput({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
+      // Stop propagation so global keydown handlers (e.g. the crop
+      // panel's Enter-to-apply shortcut) don't fire on top of the
+      // input's own commit. Otherwise typing a coordinate and hitting
+      // Enter would commit AND apply the crop in the same keystroke.
       e.preventDefault();
+      e.stopPropagation();
       tryCommit((e.target as HTMLInputElement).value);
       (e.target as HTMLInputElement).blur();
     } else if (e.key === 'Escape') {
       // Discard the draft and restore the committed value.
       e.preventDefault();
+      e.stopPropagation();
       cancelDebounce();
       setDraft(format(value));
       (e.target as HTMLInputElement).blur();
@@ -116,14 +122,18 @@ export function DebouncedNumberInput({
   return (
     <input
       id={inputId}
-      type="number"
+      // type="text" + inputMode="decimal" gives us a plain numeric input
+      // with no native spinner arrows (which look out of place in a
+      // precision-typing app) and the correct soft keypad on mobile.
+      // Validation/clamping is all JS-side in tryCommit. Auto-select on
+      // focus is handled by a global listener in App.tsx.
+      type="text"
+      inputMode="decimal"
       value={draft}
       onChange={handleChange}
       onFocus={() => setFocused(true)}
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
-      min={min}
-      max={max}
       step={step}
       disabled={disabled}
       placeholder={placeholder}

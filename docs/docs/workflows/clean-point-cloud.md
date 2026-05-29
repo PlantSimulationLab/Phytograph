@@ -29,23 +29,66 @@ cloud's bounding box at (0, 0, 0) without rotating it.
 ## Crop
 
 Use **Crop** (scissors icon) to keep only points inside (or outside)
-a box.
+a region. Two shapes are supported — a 3D **Box** and a 2D **Polygon**
+lasso — and the same region applies to every scan you have selected.
 
-1. Click **Crop**. A red box appears around the cloud's bounding box.
-2. Drag the box's handles to resize it.
-3. In the side panel choose **Keep Inside** (default) or **Keep
-   Outside**.
-4. Press <kbd>Enter</kbd> or click **Apply**.
+1. Click **Crop**. A green box appears around the union of the selected
+   scans' bounding boxes.
+2. In the panel choose **Box** or **Polygon** at the top, and **Keep
+   Inside** (default) or **Keep Outside** below it.
+3. Shape the region (see below).
+4. Click **Apply** at the bottom of the panel. Click the **×** in the
+   panel header to dismiss without applying.
 
-Cropping is non-destructive in the sense that it's undoable
-(<kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd>), but it does discard points — if you
-need them back, re-import the original file.
+When more than one scan is selected, the panel shows "Applies to N scans"
+and each scan gets its own cropped result — identities are preserved.
+
+### Box mode
+
+Three ways to shape the box:
+
+- **Type dimensions / center** in the panel for an exact axis-aligned box.
+- **Drag the six face handles** on the box itself.
+- **Click "Draw box in viewport"** then click two opposite corners on the
+  ground plane. The box's Z extent auto-spans the data; refine with the
+  handles afterwards.
 
 !!! tip "Cropping out the ground"
     For TLS scans of a single plant, drag the box's bottom face up to
     the level of the lowest branch. With **Keep Inside** selected, this
     removes the ground in one click — much faster than filtering by
     height.
+
+### Polygon mode
+
+Polygon mode is a **screen-space lasso** — useful when the region you
+want isn't a tidy box.
+
+1. Pick **Polygon** in the panel; the camera locks so the lasso stays
+   anchored to the view.
+2. Click in the viewport to add vertices. Right-click or
+   <kbd>Backspace</kbd> removes the last vertex.
+3. Press <kbd>Enter</kbd> to close the polygon. A filled preview shows
+   what will be kept (green) or removed (red).
+4. Click **Apply** in the panel, or use **Redraw polygon** to start over.
+
+Because the polygon lives in screen space, the in/out test uses the
+camera as it was when you closed the polygon — orbiting afterwards is
+fine and doesn't change the result.
+
+Cropping is non-destructive in the sense that it's undoable
+(<kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd>), but it does discard points — if you
+need them back, re-import the original file.
+
+!!! note "Apply latency on large XYZ scans"
+    For XYZ-imported scans, **Apply** re-runs the octree converter on the
+    filtered source file. Typical cost is ~3 M points/sec on M-series
+    Macs — a 13 M-point Helios scan takes ~5 s, a 30 M-point scan ~12 s.
+    The render itself stays interactive throughout: the panel closes
+    immediately on click and the cropped cloud streams in when the new
+    octree is ready. Subsequent crops with identical parameters are
+    instant (cached). LAS/LAZ and PLY/PCD scans use the older flat-array
+    path and apply synchronously.
 
 ## Erase
 
@@ -61,6 +104,13 @@ capture — stray points, noise behind the plant, isolated outliers.
 The brush deletes points that fall within its 3D radius from the
 camera, so painting around the plant from different angles is sometimes
 necessary to clear everything you wanted to.
+
+!!! info "Erase Brush vs XYZ scans"
+    The free-form brush works only on LAS/LAZ and PLY/PCD scans, which
+    keep all points in memory. For XYZ-imported scans (which stream from
+    an on-disk octree), use **Crop** with **Keep Outside** to remove a
+    box or polygon region instead — it goes through the same backend
+    re-conversion path and gives the same full-resolution result.
 
 ## Filter
 

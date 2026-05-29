@@ -7,6 +7,12 @@ import { installApplicationMenu } from './menu.js';
 import { setupAutoUpdater } from './updater.js';
 import { IPC, type FileDropPayload } from '../shared/ipc.js';
 import { RENDERER_DEV_PORT } from '../shared/constants.js';
+import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
+
+// Must run before app.whenReady(). `protocol.registerSchemesAsPrivileged` is
+// a once-per-process call that has to be made while the protocol module is
+// still configurable. Late registration is a silent no-op.
+registerOctreeSchemeAsPrivileged();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -145,6 +151,7 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
+  registerOctreeProtocol();
   installApplicationMenu(() => mainWindow);
 
   // Bridge: main can broadcast file-drop events to the focused window.

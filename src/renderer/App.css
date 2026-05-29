@@ -418,6 +418,22 @@
   }
 }
 
+/* Hide the native spinner arrows on every number input across the app.
+   This is a precision-typing tool — the up/down chevrons add visual
+   noise, can be mis-clicked into changing a value by 1, and have no
+   keyboard equivalent that users actually reach for. The matching
+   `select-on-focus` JS handler lives in App.tsx so typing replaces the
+   committed value cleanly. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
 @keyframes slide-in {
   from {
     transform: translateX(100%);

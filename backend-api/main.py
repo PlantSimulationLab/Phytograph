@@ -27,7 +27,7 @@ def unicode_to_ascii(s: str) -> str:
     return result
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.2.1"
+BACKEND_VERSION = "0.3.2"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -4860,8 +4860,16 @@ def _pack_pointcloud_response(positions: np.ndarray,
     return StreamingResponse(chunks(), media_type='application/octet-stream')
 
 
-def _read_xyz_with_pandas(file_path: str, ascii_format: Optional[str]) -> StreamingResponse:
-    """Parse an ASCII xyz-family file via pandas and return a packed binary."""
+def _load_xyz_arrays(
+    file_path: str, ascii_format: Optional[str]
+) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    """Parse an ASCII xyz-family file via pandas and return numpy arrays.
+
+    Returns (positions[N,3] float32, colors[N,3] float32 | None,
+    intensity[N] float32 | None). Separated from the response-packing step
+    so the crop endpoint can reuse the loader and apply a boolean mask
+    before responding.
+    """
     columns = (_tokenize_ascii_format(ascii_format)
                if ascii_format
                else _autodetect_xyz_columns(file_path))
@@ -4931,10 +4939,12 @@ def _read_xyz_with_pandas(file_path: str, ascii_format: Optional[str]) -> Stream
             intensity = df[role].to_numpy(dtype=np.float32, copy=False)
             break
 
-    return _pack_pointcloud_response(positions, colors, intensity)
+    return positions, colors, intensity
 
 
-def _read_ply_pcd_with_open3d(file_path: str) -> StreamingResponse:
+def _load_ply_pcd_arrays(
+    file_path: str,
+) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
     """Parse PLY or PCD via open3d. Handles both ASCII and binary variants
     (open3d picks based on the file header), so the renderer is freed from
     streaming binary PLY/PCD too — same code path either way.
@@ -4964,7 +4974,37 @@ def _read_ply_pcd_with_open3d(file_path: str) -> StreamingResponse:
     positions = points.astype(np.float32, copy=False)
     colors = np.asarray(cloud.colors).astype(np.float32, copy=False) if cloud.has_colors() else None
     intensity = None
-    return _pack_pointcloud_response(positions, colors, intensity)
+    return positions, colors, intensity
+
+
+def _load_pointcloud_arrays(
+    file_path: str, ascii_format: Optional[str]
+) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    """Dispatch a path-based point-cloud load to the right backend by
+    extension and return the raw numpy arrays. Shared entry point for the
+    import and crop endpoints — keeps file-IO, format detection, and the
+    PLY/PCD vs ASCII dispatch in one place.
+
+    Raises HTTPException on missing file or unsupported extension.
+    """
+    import os
+
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+    if ext in _PANDAS_EXTENSIONS:
+        return _load_xyz_arrays(file_path, ascii_format)
+    if ext in _OPEN3D_EXTENSIONS:
+        return _load_ply_pcd_arrays(file_path)
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Unsupported extension for path-based import: .{ext}. "
+            f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS)}"
+        ),
+    )
 
 
 @app.post("/api/pointcloud/import_by_path")
@@ -4976,25 +5016,1108 @@ async def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
       Helios `ascii_format` hint.
     * `.ply` / `.pcd` → open3d (handles ASCII and binary).
     """
-    import os
+    positions, colors, intensity = _load_pointcloud_arrays(
+        request.file_path, request.ascii_format
+    )
+    return _pack_pointcloud_response(positions, colors, intensity)
 
-    file_path = request.file_path
-    if not os.path.isfile(file_path):
-        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
-    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
-    if ext in _PANDAS_EXTENSIONS:
-        return _read_xyz_with_pandas(file_path, request.ascii_format)
-    if ext in _OPEN3D_EXTENSIONS:
-        return _read_ply_pcd_with_open3d(file_path)
+class CropPointCloudByPathRequest(BaseModel):
+    """Path-based AABB crop. Re-reads the cloud from disk (the renderer's
+    `sourcePath`) via `_load_pointcloud_arrays`, applies an axis-aligned
+    box filter with NumPy boolean indexing, and returns the surviving
+    points in the same PHX1 binary format as `import_by_path`.
+
+    Moving this work into the backend keeps multi-GB renderer-side typed
+    arrays out of V8's 4 GB old-space — on a ~28 M-point scan with RGB
+    and intensity, the renderer's in-JS apply path OOM'd at peak; numpy
+    handles the same filter without that constraint.
+
+    `translation` is baked into the loaded positions BEFORE the AABB test
+    so `crop_min`/`crop_max` are always in the same world-space frame as
+    the renderer's gizmo box. The renderer resets its editState
+    translation after apply, matching the existing semantics.
+    """
+    file_path: str
+    ascii_format: Optional[str] = None
+    crop_min: List[float]
+    crop_max: List[float]
+    crop_invert: bool = False
+    translation: Optional[List[float]] = None
+
+
+@app.post("/api/pointcloud/crop_by_path")
+async def crop_pointcloud_by_path(request: CropPointCloudByPathRequest):
+    """Crop a point cloud via an axis-aligned box, returning the kept
+    points in the standard PHX1 binary format.
+
+    Box semantics match the renderer's in-JS implementation: a point at
+    `(x + tx, y + ty, z + tz)` (after applying the optional translation)
+    is kept when every component lies in `[crop_min, crop_max]`, or the
+    complement of that when `crop_invert` is true.
+
+    An empty result is a valid response (HTTP 200 with `point_count = 0`).
+    The renderer raises a delete-confirmation in that case rather than
+    erroring out.
+    """
+    if len(request.crop_min) != 3 or len(request.crop_max) != 3:
+        raise HTTPException(
+            status_code=400,
+            detail="crop_min and crop_max must each be 3-element [x, y, z] arrays.",
+        )
+    if request.translation is not None and len(request.translation) != 3:
+        raise HTTPException(
+            status_code=400,
+            detail="translation, if provided, must be a 3-element [x, y, z] array.",
+        )
+
+    positions, colors, intensity = _load_pointcloud_arrays(
+        request.file_path, request.ascii_format
+    )
+
+    if request.translation is not None:
+        offset = np.array(request.translation, dtype=np.float32)
+        # Use out= to avoid materialising an intermediate copy on top of
+        # `positions` (which can be hundreds of MB on big scans).
+        positions = positions + offset
+
+    cmin = np.array(request.crop_min, dtype=np.float32)
+    cmax = np.array(request.crop_max, dtype=np.float32)
+    # Vectorized AABB test. `all(axis=1)` collapses the per-component
+    # inside/outside flags into one bool per point.
+    inside = np.all((positions >= cmin) & (positions <= cmax), axis=1)
+    if request.crop_invert:
+        inside = ~inside
+
+    positions = positions[inside]
+    if colors is not None:
+        colors = colors[inside]
+    if intensity is not None:
+        intensity = intensity[inside]
+
+    return _pack_pointcloud_response(positions, colors, intensity)
+
+
+# ============================================================================
+# Point cloud → Potree 2.0 octree pipeline (added in 0.3.0)
+# ============================================================================
+# Flat-array import paths above OOM the renderer on multi-GB clouds. This
+# section converts source files into Potree 2.0 octrees (metadata.json +
+# hierarchy.bin + octree.bin) which the renderer streams via potree-core.
+#
+# PotreeConverter 2.x accepts LAS/LAZ only, so XYZ-family inputs are
+# pre-converted via laspy in chunks. Both phases combined run at ~3 M pts/sec
+# on M-series Macs with NVMe.
+
+import hashlib as _hashlib
+import os as _os
+import shutil as _shutil
+import subprocess as _subprocess
+import sys as _sys
+from pathlib import Path as _Path
+
+
+_OCTREE_CACHE_VERSION = 1  # bump if cache layout changes (forces re-conversion)
+
+# Default cache cap. Overridable via PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES.
+# A typical 28 M-point cloud is ~340 MB on disk; 20 GB holds ~60 such clouds.
+_DEFAULT_OCTREE_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024
+
+
+def _octree_cache_root() -> _Path:
+    """OS-appropriate user-data directory for cached octrees.
+
+    macOS: ~/Library/Application Support/Phytograph/cache/octrees
+    Linux: $XDG_CACHE_HOME/Phytograph/octrees (or ~/.cache/Phytograph/octrees)
+    Windows: %LOCALAPPDATA%/Phytograph/cache/octrees
+    Overridable via PHYTOGRAPH_OCTREE_CACHE_ROOT for tests."""
+    override = _os.environ.get("PHYTOGRAPH_OCTREE_CACHE_ROOT")
+    if override:
+        return _Path(override)
+    if _sys.platform == "darwin":
+        base = _Path.home() / "Library" / "Application Support" / "Phytograph" / "cache"
+    elif _sys.platform.startswith("win"):
+        base = _Path(_os.environ.get("LOCALAPPDATA", _Path.home() / "AppData" / "Local")) / "Phytograph" / "cache"
+    else:
+        base = _Path(_os.environ.get("XDG_CACHE_HOME", _Path.home() / ".cache")) / "Phytograph"
+    return base / "octrees"
+
+
+def _canonical_ascii_format(ascii_format: Optional[str]) -> str:
+    """Normalise whitespace and case so equivalent format strings hash the same."""
+    if not ascii_format:
+        return ""
+    return " ".join(ascii_format.split()).lower()
+
+
+def _octree_cache_key(source_path: str, ascii_format: Optional[str]) -> str:
+    """Stable cache key for (source file, format). Includes mtime so edits to the
+    source XYZ invalidate the cached octree."""
+    p = _Path(source_path).resolve()
+    try:
+        mtime_ns = p.stat().st_mtime_ns
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Source file not found: {source_path}")
+    h = _hashlib.sha1()
+    h.update(str(_OCTREE_CACHE_VERSION).encode())
+    h.update(b"\x00")
+    h.update(str(p).encode())
+    h.update(b"\x00")
+    h.update(str(mtime_ns).encode())
+    h.update(b"\x00")
+    h.update(_canonical_ascii_format(ascii_format).encode())
+    return h.hexdigest()
+
+
+def _octree_cache_dir(source_path: str, ascii_format: Optional[str]) -> _Path:
+    """Path where this (source, format) pair's octree lives. May not exist yet."""
+    return _octree_cache_root() / _octree_cache_key(source_path, ascii_format)
+
+
+def _resolve_potree_converter_path() -> _Path:
+    """Locate the PotreeConverter binary.
+
+    Resolution order:
+      1. $PHYTOGRAPH_POTREECONVERTER (explicit override, used by tests / CI).
+      2. $PHYTOGRAPH_RESOURCES/potree_converter/<platform>/PotreeConverter
+         (set by Electron main process for packaged builds).
+      3. <repo root>/resources/potree_converter/<platform>/PotreeConverter
+         (CI-built binary, dev fallback).
+      4. <repo root>/tmp/potree-converter-src/build/PotreeConverter
+         (locally built spike binary; dev convenience only).
+    """
+    override = _os.environ.get("PHYTOGRAPH_POTREECONVERTER")
+    if override:
+        p = _Path(override)
+        if p.is_file():
+            return p
+        raise HTTPException(
+            status_code=503,
+            detail=f"PHYTOGRAPH_POTREECONVERTER points to a missing file: {override}",
+        )
+
+    if _sys.platform == "darwin":
+        platform_dir = "darwin-arm64" if _os.uname().machine == "arm64" else "darwin-x64"
+        bin_name = "PotreeConverter"
+    elif _sys.platform.startswith("win"):
+        platform_dir = "win-x64"
+        bin_name = "PotreeConverter.exe"
+    else:
+        platform_dir = "linux-x64"
+        bin_name = "PotreeConverter"
+
+    candidates = []
+    resources_env = _os.environ.get("PHYTOGRAPH_RESOURCES")
+    if resources_env:
+        candidates.append(_Path(resources_env) / "potree_converter" / platform_dir / bin_name)
+
+    repo_root = _Path(__file__).resolve().parent.parent
+    candidates.append(repo_root / "resources" / "potree_converter" / platform_dir / bin_name)
+    candidates.append(repo_root / "tmp" / "potree-converter-src" / "build" / bin_name)
+
+    for c in candidates:
+        if c.is_file():
+            return c
 
     raise HTTPException(
-        status_code=400,
+        status_code=503,
         detail=(
-            f"Unsupported extension for path-based import: .{ext}. "
-            f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS)}"
+            f"PotreeConverter binary not found. Looked in: "
+            f"{[str(c) for c in candidates]}. "
+            f"Run `npm run build:potree-converter` or set PHYTOGRAPH_POTREECONVERTER."
         ),
     )
+
+
+def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path) -> int:
+    """Stream an XYZ-family ASCII file into a LAS file via laspy in chunks.
+
+    PotreeConverter 2.x accepts only LAS/LAZ; XYZ goes through here first.
+    Streaming keeps peak memory bounded by `chunk_rows` * (cols × 8B), not
+    by total point count.
+
+    Column layout uses the same `ascii_format` convention as
+    `_load_xyz_arrays` — roles are tokenised, with x/y/z mandatory and
+    r255/g255/b255/intensity (or reflectance, mapped to intensity) optional.
+    Returns the total point count written.
+    """
+    import laspy  # local: only when this code path runs
+
+    columns = (_tokenize_ascii_format(ascii_format)
+               if ascii_format
+               else _autodetect_xyz_columns(str(source_path)))
+
+    has_xyz = all(role in columns for role in ("x", "y", "z"))
+    if not has_xyz:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ASCII format must include x/y/z. Got columns: {columns}",
+        )
+
+    has_rgb = all(role in columns for role in ("r255", "g255", "b255"))
+    intensity_role = next((r for r in ("intensity", "reflectance") if r in columns), None)
+
+    # LAS point format 3 carries XYZ + intensity + RGB. Adequate for what
+    # the renderer will display; spare LAS attributes (return number, etc.)
+    # are written as zeros and PotreeConverter discards them when invoked
+    # with `--attributes "position rgb intensity"`.
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+    skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
+
+    chunk_rows = 2_000_000
+    total_points = 0
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        reader = pd.read_csv(
+            source_path,
+            sep=r"\s+",
+            header=None,
+            names=columns,
+            usecols=[i for i, c in enumerate(columns) if c != "skip"],
+            comment="#",
+            skiprows=skiprows,
+            chunksize=chunk_rows,
+            engine="c",
+        )
+        for chunk in reader:
+            n = len(chunk)
+            if n == 0:
+                continue
+            record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+            record.x = chunk["x"].to_numpy(dtype=np.float64)
+            record.y = chunk["y"].to_numpy(dtype=np.float64)
+            record.z = chunk["z"].to_numpy(dtype=np.float64)
+            if has_rgb:
+                # Source RGB is 0-255; LAS RGB is uint16 (16-bit per channel).
+                # Multiplying by 256 keeps perceptual brightness and lets the
+                # renderer right-shift to recover the 8-bit value.
+                record.red = chunk["r255"].to_numpy(dtype=np.uint16) * 256
+                record.green = chunk["g255"].to_numpy(dtype=np.uint16) * 256
+                record.blue = chunk["b255"].to_numpy(dtype=np.uint16) * 256
+            if intensity_role is not None:
+                # Both 'intensity' and 'reflectance' fields in Helios scans
+                # span 0-255. Map to LAS intensity's 0-65535 range.
+                refl = chunk[intensity_role].to_numpy(dtype=np.float32)
+                scaled = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
+                record.intensity = scaled
+            writer.write_points(record)
+            total_points += n
+
+    return total_points
+
+
+def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path) -> tuple[_Path, bool]:
+    """Get a LAS file path for `source_path`, converting from XYZ if needed.
+
+    Returns (las_path, is_temp) — caller deletes the file if is_temp.
+    """
+    ext = source_path.suffix.lower().lstrip(".")
+    if ext in ("las", "laz"):
+        return source_path, False
+    if ext in _PANDAS_EXTENSIONS:
+        out = work_dir / (source_path.stem + ".las")
+        _xyz_to_las(source_path, ascii_format, out)
+        return out, True
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unsupported source extension for octree conversion: .{ext}",
+    )
+
+
+def _run_potree_converter(input_las: _Path, out_dir: _Path) -> None:
+    """Invoke PotreeConverter on input_las, writing to out_dir.
+
+    PyInstaller-bundled Pythons inject DYLD_LIBRARY_PATH / LD_LIBRARY_PATH
+    pointing at the bundle's libs. Those collide with PotreeConverter's
+    expectation of system libs, so we scrub them before spawning the child.
+    """
+    converter = _resolve_potree_converter_path()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    env = _os.environ.copy()
+    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env.pop(var, None)
+
+    # No --attributes filter: PotreeConverter's default writes the full
+    # LAS attribute schema (37 bytes/point). The renderer's potree-core
+    # decoder is laid out for that exact byte ordering — filtering with
+    # `--attributes position rgb intensity` produces a 20-byte stride but
+    # the metadata's two `position` entries (Potree 2.0's morton-encoded
+    # double-uint32 position format) make the worker expect 16 bytes per
+    # point for position alone, which gives every-other-point garbage on
+    # the filtered layout. Trading ~17 bytes/point of cache size for a
+    # correct render.
+    cmd = [
+        str(converter),
+        str(input_las),
+        "-o", str(out_dir),
+    ]
+    result = _subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if result.returncode != 0:
+        # Surface the converter's stderr tail directly so failures are debuggable.
+        tail = (result.stderr or result.stdout or "")[-1500:]
+        raise HTTPException(
+            status_code=500,
+            detail=f"PotreeConverter failed (exit {result.returncode}): {tail}",
+        )
+
+
+def _read_octree_metadata(octree_dir: _Path) -> dict:
+    """Load metadata.json and return a renderer-friendly subset.
+
+    Two quirks of PotreeConverter 2.x output we work around here:
+      1. The JSON contains lowercase `inf`/`-inf` literals on uninitialised
+         min/max fields for one of the attribute entries. Standard JSON
+         rejects these, so we rewrite them to `null` before parsing.
+      2. The attribute list often contains a duplicate `position` entry —
+         a placeholder that never gets updated. We keep only the first
+         occurrence of each attribute name.
+    """
+    meta_path = octree_dir / "metadata.json"
+    if not meta_path.is_file():
+        raise HTTPException(
+            status_code=500,
+            detail=f"metadata.json missing from octree dir: {octree_dir}",
+        )
+    raw_text = meta_path.read_text()
+    raw_text = re.sub(r'(?<![\w\.])-?inf(?![\w\.])', 'null', raw_text)
+    raw_text = re.sub(r'(?<![\w\.])nan(?![\w\.])', 'null', raw_text)
+    raw = json.loads(raw_text)
+    bbox = raw.get("boundingBox", {})
+
+    # PotreeConverter writes the FULL position attribute schema as two
+    # entries: a primary "position" with the true min/max bounds, and a
+    # second "position" with morton-encoded extension bits (uninitialised
+    # min/max, hence the `inf` literals). The first occurrence is the one
+    # we want for tight bounds; subsequent ones get dropped here.
+    seen_attrs: set[str] = set()
+    deduped = []
+    tight_bounds = None
+    for a in raw.get("attributes", []):
+        name = a.get("name")
+        if not name or name in seen_attrs:
+            continue
+        seen_attrs.add(name)
+        # Preserve per-attribute min/max when present. The renderer needs
+        # these for the intensity / height shaders' uniform ranges
+        # (intensityRange, heightMin/Max) — without them the shader maps
+        # every point to the same gradient sample and the cloud renders
+        # as a solid colour.
+        amin = a.get("min")
+        amax = a.get("max")
+        entry: dict = {
+            "name": name,
+            "size": int(a.get("size", 0)),
+            "type": a.get("type"),
+            "num_elements": int(a.get("numElements", 0)),
+        }
+        if isinstance(amin, list) and isinstance(amax, list):
+            # Filter out None entries (came from `inf` rewrite).
+            if all(v is not None for v in amin) and all(v is not None for v in amax):
+                entry["min"] = [float(v) for v in amin]
+                entry["max"] = [float(v) for v in amax]
+        deduped.append(entry)
+        if name == "position" and tight_bounds is None:
+            mn = a.get("min")
+            mx = a.get("max")
+            # Skip if the values were rewritten to None by the `inf` sub.
+            if (isinstance(mn, list) and isinstance(mx, list)
+                and len(mn) == 3 and len(mx) == 3
+                and all(v is not None for v in mn + mx)):
+                tight_bounds = {"min": [float(v) for v in mn],
+                                "max": [float(v) for v in mx]}
+
+    return {
+        "version": raw.get("version", "2.0"),
+        "point_count": int(raw.get("points", 0)),
+        "spacing": float(raw.get("spacing", 0.0)),
+        "scale": list(raw.get("scale", [1.0, 1.0, 1.0])),
+        "offset": list(raw.get("offset", [0.0, 0.0, 0.0])),
+        # `bounds` is PotreeConverter's cube-padded octree extent (used by
+        # the loader for LOD math). `tight_bounds` is the actual data
+        # extent — what the UI should use for camera framing and crop-box
+        # initialisation. Fall back to the padded box if the tight values
+        # were missing.
+        "bounds": {
+            "min": list(bbox.get("min", [0.0, 0.0, 0.0])),
+            "max": list(bbox.get("max", [0.0, 0.0, 0.0])),
+        },
+        "tight_bounds": tight_bounds or {
+            "min": list(bbox.get("min", [0.0, 0.0, 0.0])),
+            "max": list(bbox.get("max", [0.0, 0.0, 0.0])),
+        },
+        "attributes": deduped,
+    }
+
+
+def _dir_total_size(p: _Path) -> int:
+    """Sum of sizes of regular files at any depth under p. Symlinks ignored."""
+    total = 0
+    for child in p.rglob("*"):
+        try:
+            if child.is_file() and not child.is_symlink():
+                total += child.stat().st_size
+        except (FileNotFoundError, PermissionError):
+            # File can disappear between iterdir and stat (concurrent eviction).
+            continue
+    return total
+
+
+def _evict_octree_cache(max_bytes: int, keep: Optional[_Path] = None) -> List[str]:
+    """Trim the octree cache to at most `max_bytes` of regular file content,
+    removing oldest-accessed cache directories first. Returns the cache_ids
+    that were evicted.
+
+    `keep`, if provided, is never evicted — pass the cache dir we just wrote
+    so a single fresh convert doesn't immediately drop itself when the cache
+    is at the limit.
+    """
+    root = _octree_cache_root()
+    if not root.is_dir():
+        return []
+
+    # Skip the .staging dirs and any non-sha1 entries (defensive against
+    # files dropped in here by other tools).
+    entries: list[tuple[float, _Path]] = []
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        if child.name.endswith(".staging"):
+            continue
+        if len(child.name) != 40 or not all(c in "0123456789abcdef" for c in child.name):
+            continue
+        try:
+            atime = child.stat().st_atime
+        except FileNotFoundError:
+            continue
+        entries.append((atime, child))
+
+    # Oldest first.
+    entries.sort(key=lambda e: e[0])
+
+    total = sum(_dir_total_size(p) for _, p in entries)
+    evicted: List[str] = []
+    if total <= max_bytes:
+        return evicted
+
+    for _, candidate in entries:
+        if total <= max_bytes:
+            break
+        if keep is not None and candidate.resolve() == keep.resolve():
+            continue
+        size = _dir_total_size(candidate)
+        try:
+            _shutil.rmtree(candidate)
+        except (FileNotFoundError, PermissionError):
+            continue
+        evicted.append(candidate.name)
+        total -= size
+
+    return evicted
+
+
+class ConvertToOctreeRequest(BaseModel):
+    """Request a Potree 2.0 octree build for a source point cloud.
+
+    `source_path` may be an XYZ-family ASCII file (xyz/txt/csv/pts/asc) or
+    a LAS/LAZ file. The result is cached at
+    `_octree_cache_dir(source_path, ascii_format)` and re-served on
+    subsequent calls without re-running the converter."""
+    source_path: str
+    ascii_format: Optional[str] = None
+
+
+@app.post("/api/pointcloud/convert_to_octree")
+async def convert_to_octree(request: ConvertToOctreeRequest):
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    cache_key = _octree_cache_key(str(source_path), request.ascii_format)
+    cache_dir = _octree_cache_root() / cache_key
+
+    cached = cache_dir / "metadata.json"
+    if cached.is_file():
+        meta = _read_octree_metadata(cache_dir)
+        return {
+            "cache_id": cache_key,
+            "cache_dir": str(cache_dir),
+            "cached": True,
+            **meta,
+        }
+
+    # Build into a sibling temp dir, then atomically rename. Prevents a
+    # partial directory from satisfying the cache check if the process
+    # crashes mid-conversion.
+    cache_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = cache_dir.parent / (cache_key + ".staging")
+    if staging_dir.exists():
+        _shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+    try:
+        las_path, las_is_temp = _source_to_las(source_path, request.ascii_format, staging_dir)
+        try:
+            _run_potree_converter(las_path, staging_dir)
+        finally:
+            if las_is_temp:
+                try:
+                    las_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+        if cache_dir.exists():
+            _shutil.rmtree(cache_dir)
+        staging_dir.rename(cache_dir)
+    except Exception:
+        # Best-effort cleanup; let the original exception propagate.
+        try:
+            _shutil.rmtree(staging_dir)
+        except (FileNotFoundError, OSError):
+            pass
+        raise
+
+    meta = _read_octree_metadata(cache_dir)
+
+    # Trim oldest-accessed cache entries if we're over the cap. Never evicts
+    # the entry we just created (it's the freshest by definition, but pass
+    # it explicitly so an under-cap-but-near-cap state can't drop it).
+    try:
+        max_bytes = int(_os.environ.get(
+            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES",
+            _DEFAULT_OCTREE_CACHE_MAX_BYTES,
+        ))
+    except ValueError:
+        max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
+    _evict_octree_cache(max_bytes, keep=cache_dir)
+
+    return {
+        "cache_id": cache_key,
+        "cache_dir": str(cache_dir),
+        "cached": False,
+        **meta,
+    }
+
+
+def _canonical_translation(translation: Optional[List[float]]) -> str:
+    """Stable string form for hashing. None and (0,0,0) collide on purpose —
+    a no-op translation has the same cache identity as no translation."""
+    if translation is None:
+        return ""
+    if len(translation) != 3:
+        raise HTTPException(
+            status_code=400,
+            detail="translation, if provided, must be a 3-element [x, y, z] array.",
+        )
+    if all(float(v) == 0.0 for v in translation):
+        return ""
+    return ",".join(f"{float(v):.9g}" for v in translation)
+
+
+def _canonical_region(region: dict) -> str:
+    """Stable string form of the crop region for cache keying. Same shape →
+    same string; same string → same octree. Polygon points and matrices are
+    serialised verbatim because re-cropping with even slightly different
+    camera framing produces a different filter mask."""
+    kind = region.get("kind")
+    if kind == "box":
+        mn = region.get("min", [])
+        mx = region.get("max", [])
+        invert = bool(region.get("invert", False))
+        if len(mn) != 3 or len(mx) != 3:
+            raise HTTPException(
+                status_code=400,
+                detail="region.min and region.max must each be 3-element arrays.",
+            )
+        return "box|{}|{}|{}".format(
+            ",".join(f"{float(v):.9g}" for v in mn),
+            ",".join(f"{float(v):.9g}" for v in mx),
+            "1" if invert else "0",
+        )
+    if kind == "polygon":
+        pts = region.get("points", [])
+        proj = region.get("projection", [])
+        view = region.get("view", [])
+        canvas = region.get("canvas", {})
+        invert = bool(region.get("invert", False))
+        if not isinstance(pts, list) or len(pts) < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="region.points must have at least 3 [x, y] entries.",
+            )
+        if len(proj) != 16 or len(view) != 16:
+            raise HTTPException(
+                status_code=400,
+                detail="region.projection and region.view must each be 16-element matrices.",
+            )
+        w = canvas.get("width")
+        h = canvas.get("height")
+        if not isinstance(w, (int, float)) or not isinstance(h, (int, float)) or w <= 0 or h <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="region.canvas must have positive width and height.",
+            )
+        pts_s = ";".join(f"{float(p[0]):.6g},{float(p[1]):.6g}" for p in pts)
+        return "polygon|{}|{}|{}|{}x{}|{}".format(
+            pts_s,
+            ",".join(f"{float(v):.6g}" for v in proj),
+            ",".join(f"{float(v):.6g}" for v in view),
+            int(w), int(h),
+            "1" if invert else "0",
+        )
+    raise HTTPException(
+        status_code=400,
+        detail=f"region.kind must be 'box' or 'polygon'. Got: {kind!r}",
+    )
+
+
+def _crop_octree_cache_key(
+    source_path: str,
+    ascii_format: Optional[str],
+    region: dict,
+    translation: Optional[List[float]],
+) -> str:
+    """Cache key for a crop_octree result.
+
+    Folds the source-octree cache key (so source-file edits invalidate) with
+    a canonical region + translation. A second crop with identical params
+    returns the same cache_id and reuses the prior octree byte-for-byte.
+    """
+    base = _octree_cache_key(source_path, ascii_format)
+    h = _hashlib.sha1()
+    h.update(b"crop|")
+    h.update(base.encode())
+    h.update(b"\x00")
+    h.update(_canonical_region(region).encode())
+    h.update(b"\x00")
+    h.update(_canonical_translation(translation).encode())
+    return h.hexdigest()
+
+
+def _project_world_to_pixel(
+    positions: np.ndarray,
+    projection: np.ndarray,
+    view: np.ndarray,
+    canvas_w: int,
+    canvas_h: int,
+) -> np.ndarray:
+    """Project Nx3 world positions to Nx2 canvas pixels via the renderer's
+    frozen camera matrices. Matches `projectWorldToCanvasPixel` in
+    src/renderer/lib/cropGeometry.ts so the polygon test produces identical
+    in/out membership to the renderer's preview.
+
+    THREE.js stores matrices in column-major order, so the renderer's
+    `Matrix4.elements` array applied as `m * v` is `elements.T @ v` in NumPy.
+    """
+    n = positions.shape[0]
+    if n == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    # column-major flat → 4x4 row-major: transpose
+    P = projection.reshape(4, 4, order="F").astype(np.float64)
+    V = view.reshape(4, 4, order="F").astype(np.float64)
+    M = P @ V  # 4x4
+
+    # Homogeneous Nx4
+    ones = np.ones((n, 1), dtype=np.float64)
+    homo = np.concatenate([positions.astype(np.float64), ones], axis=1)  # Nx4
+    clip = homo @ M.T  # Nx4 = (4x4 @ 4xN).T -> Nx4
+
+    w = clip[:, 3]
+    # Avoid division by zero — these points are behind the camera plane;
+    # mark them as outside polygon space.
+    safe = np.abs(w) > 1e-12
+    ndc = np.zeros((n, 2), dtype=np.float64)
+    ndc[safe, 0] = clip[safe, 0] / w[safe]
+    ndc[safe, 1] = clip[safe, 1] / w[safe]
+    # Points with w<=0 are behind the camera; push them well outside canvas.
+    ndc[~safe, 0] = -1e9
+    ndc[~safe, 1] = -1e9
+
+    px = (ndc[:, 0] + 1.0) * 0.5 * canvas_w
+    # Canvas Y flipped vs NDC.
+    py = (1.0 - (ndc[:, 1] + 1.0) * 0.5) * canvas_h
+    return np.stack([px, py], axis=1)
+
+
+def _points_in_polygon_mask(pixels: np.ndarray, polygon: np.ndarray) -> np.ndarray:
+    """Vectorised ray-cast point-in-polygon for Nx2 pixels against an Mx2
+    polygon. Returns a bool ndarray of length N.
+
+    Matches `pointInPolygon` in src/renderer/lib/cropGeometry.ts (winding
+    via crossing count: a point is inside iff the horizontal ray from it
+    crosses an odd number of edges)."""
+    n = pixels.shape[0]
+    m = polygon.shape[0]
+    if n == 0 or m < 3:
+        return np.zeros(n, dtype=bool)
+
+    inside = np.zeros(n, dtype=bool)
+    px = pixels[:, 0]
+    py = pixels[:, 1]
+    # Edges: (polygon[i], polygon[j]) with j = i-1 wrap-around.
+    j = m - 1
+    for i in range(m):
+        xi, yi = polygon[i, 0], polygon[i, 1]
+        xj, yj = polygon[j, 0], polygon[j, 1]
+        # Edge straddles the horizontal ray from the point (yi-py and yj-py
+        # have opposite signs). Compute intersection x; flip `inside` when
+        # the test point is to the left of that intersection.
+        cond1 = (yi > py) != (yj > py)
+        # Guard against zero-length vertical span (parallel edge): if (yj-yi)
+        # is 0, cond1 is False for all points anyway.
+        denom = (yj - yi)
+        # Where denom is 0, intersect_x is irrelevant (cond1 is False).
+        with np.errstate(divide="ignore", invalid="ignore"):
+            intersect_x = np.where(denom != 0, (xj - xi) * (py - yi) / denom + xi, 0.0)
+        cond2 = px < intersect_x
+        inside = np.where(cond1 & cond2, ~inside, inside)
+        j = i
+    return inside
+
+
+class CropOctreeRegion(BaseModel):
+    """Box or polygon crop region for crop_octree. See _canonical_region for
+    validation rules — the request handler delegates to that helper."""
+    kind: str
+    # Box fields
+    min: Optional[List[float]] = None
+    max: Optional[List[float]] = None
+    # Polygon fields (screen-space, frozen camera matrices)
+    points: Optional[List[List[float]]] = None
+    projection: Optional[List[float]] = None
+    view: Optional[List[float]] = None
+    canvas: Optional[dict] = None
+    invert: bool = False
+
+
+class CropOctreeRequest(BaseModel):
+    """Re-convert a source point cloud into a Potree 2.0 octree after
+    applying a crop region (and optional translation).
+
+    Behavior contract:
+      - Always operates on `source_path` (the immutable XYZ/LAS source),
+        never on a previously-cached octree. Crops compose by stacking
+        successive backend calls.
+      - `translation` is baked into positions BEFORE the region test,
+        matching the renderer's gizmo semantics.
+      - Cache key folds (source mtime, ascii_format, region, translation).
+        Identical requests return the same cache_id byte-for-byte.
+      - Empty result (no points survive the filter) → HTTP 200 with
+        `point_count = 0` and `cached = False`. The renderer raises a
+        delete-confirmation rather than 4xx-ing on this.
+    """
+    source_path: str
+    ascii_format: Optional[str] = None
+    region: CropOctreeRegion
+    translation: Optional[List[float]] = None
+
+
+def _filtered_xyz_to_las(
+    source_path: _Path,
+    ascii_format: Optional[str],
+    out_las: _Path,
+    region: dict,
+    translation: Optional[List[float]],
+) -> int:
+    """Streaming variant of `_xyz_to_las` that applies a per-chunk crop mask
+    before writing each chunk to LAS. Same chunk-size memory bound; total
+    points written = sum of survivors across chunks.
+
+    For polygon regions, projects each chunk's (x,y,z) through the frozen
+    camera matrices once per chunk; the mask is computed in NumPy so the
+    cost is bounded by chunk_rows × num_polygon_vertices.
+    """
+    import laspy
+
+    columns = (_tokenize_ascii_format(ascii_format)
+               if ascii_format
+               else _autodetect_xyz_columns(str(source_path)))
+
+    has_xyz = all(role in columns for role in ("x", "y", "z"))
+    if not has_xyz:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ASCII format must include x/y/z. Got columns: {columns}",
+        )
+    has_rgb = all(role in columns for role in ("r255", "g255", "b255"))
+    intensity_role = next((r for r in ("intensity", "reflectance") if r in columns), None)
+
+    # Precompute region inputs once.
+    kind = region["kind"]
+    invert = bool(region.get("invert", False))
+    if kind == "box":
+        cmin = np.array(region["min"], dtype=np.float64)
+        cmax = np.array(region["max"], dtype=np.float64)
+    elif kind == "polygon":
+        proj = np.array(region["projection"], dtype=np.float64)
+        view = np.array(region["view"], dtype=np.float64)
+        canvas = region["canvas"]
+        canvas_w = int(canvas["width"])
+        canvas_h = int(canvas["height"])
+        polygon = np.array(region["points"], dtype=np.float64)
+        if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="region.points must be at least 3 [x, y] entries.",
+            )
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
+
+    tx, ty, tz = 0.0, 0.0, 0.0
+    if translation is not None:
+        tx = float(translation[0])
+        ty = float(translation[1])
+        tz = float(translation[2])
+
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+    skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
+
+    chunk_rows = 2_000_000
+    total_kept = 0
+    # Track the actual extent of the kept points so we can write a header
+    # bounding box that PotreeConverter will accept. laspy's auto-computed
+    # header bbox can be one quantisation step too tight: at scale=0.001,
+    # a point landing exactly on the crop boundary (e.g. z=0.7) round-trips
+    # through the LAS reader as z=0.7000000000000001, which then sits one ULP
+    # outside the header's stated max. PotreeConverter refuses to ingest
+    # files where any point falls outside the declared bbox, so we pad the
+    # bbox we write by one full scale step (1 mm) on every axis.
+    data_min = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+    data_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        reader = pd.read_csv(
+            source_path,
+            sep=r"\s+",
+            header=None,
+            names=columns,
+            usecols=[i for i, c in enumerate(columns) if c != "skip"],
+            comment="#",
+            skiprows=skiprows,
+            chunksize=chunk_rows,
+            engine="c",
+        )
+        for chunk in reader:
+            n = len(chunk)
+            if n == 0:
+                continue
+            xs = chunk["x"].to_numpy(dtype=np.float64) + tx
+            ys = chunk["y"].to_numpy(dtype=np.float64) + ty
+            zs = chunk["z"].to_numpy(dtype=np.float64) + tz
+
+            if kind == "box":
+                mask = (
+                    (xs >= cmin[0]) & (xs <= cmax[0]) &
+                    (ys >= cmin[1]) & (ys <= cmax[1]) &
+                    (zs >= cmin[2]) & (zs <= cmax[2])
+                )
+            else:
+                positions = np.stack([xs, ys, zs], axis=1)
+                pixels = _project_world_to_pixel(
+                    positions, proj, view, canvas_w, canvas_h,
+                )
+                mask = _points_in_polygon_mask(pixels, polygon)
+
+            if invert:
+                mask = ~mask
+
+            kept = int(mask.sum())
+            if kept == 0:
+                continue
+
+            kept_xs = xs[mask]
+            kept_ys = ys[mask]
+            kept_zs = zs[mask]
+
+            data_min[0] = min(data_min[0], float(kept_xs.min()))
+            data_min[1] = min(data_min[1], float(kept_ys.min()))
+            data_min[2] = min(data_min[2], float(kept_zs.min()))
+            data_max[0] = max(data_max[0], float(kept_xs.max()))
+            data_max[1] = max(data_max[1], float(kept_ys.max()))
+            data_max[2] = max(data_max[2], float(kept_zs.max()))
+
+            record = laspy.ScaleAwarePointRecord.zeros(kept, header=header)
+            record.x = kept_xs
+            record.y = kept_ys
+            record.z = kept_zs
+            if has_rgb:
+                r = chunk["r255"].to_numpy(dtype=np.uint16)[mask] * 256
+                g = chunk["g255"].to_numpy(dtype=np.uint16)[mask] * 256
+                b = chunk["b255"].to_numpy(dtype=np.uint16)[mask] * 256
+                record.red = r
+                record.green = g
+                record.blue = b
+            if intensity_role is not None:
+                refl = chunk[intensity_role].to_numpy(dtype=np.float32)[mask]
+                record.intensity = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
+            writer.write_points(record)
+            total_kept += kept
+
+        # Explicitly set the header bbox before the writer closes. Pad by
+        # one scale step on every axis so points sitting exactly on the
+        # crop boundary survive PotreeConverter's strict bbox check (see
+        # comment above).
+        if total_kept > 0:
+            pad = 0.001  # matches header.scales above
+            writer.header.mins = (data_min - pad).tolist()
+            writer.header.maxs = (data_max + pad).tolist()
+
+    return total_kept
+
+
+@app.post("/api/pointcloud/crop_octree")
+async def crop_octree(request: CropOctreeRequest):
+    """Re-convert a source cloud into a new octree with a crop applied.
+
+    Why a fresh re-conversion rather than masking the streamed LOD nodes:
+    Potree 2.0 nodes are poisson-disk-sampled per level, so a render-time
+    mask only hides points — it cannot produce a correct full-resolution
+    cropped octree. Re-running PotreeConverter on the filtered source XYZ
+    is the only correct full-res apply, and the chunked filter keeps peak
+    backend memory bounded regardless of source size.
+    """
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(
+            status_code=404, detail=f"Source file not found: {request.source_path}",
+        )
+
+    # Validate region shape up-front (the helper raises on malformed input);
+    # also produces the canonical string for cache keying.
+    region_dict = request.region.model_dump()
+    _canonical_region(region_dict)  # raises 400 on bad shape
+    _canonical_translation(request.translation)  # raises 400 on bad length
+
+    cache_key = _crop_octree_cache_key(
+        str(source_path), request.ascii_format, region_dict, request.translation,
+    )
+    cache_dir = _octree_cache_root() / cache_key
+
+    cached = cache_dir / "metadata.json"
+    if cached.is_file():
+        meta = _read_octree_metadata(cache_dir)
+        return {
+            "cache_id": cache_key,
+            "cache_dir": str(cache_dir),
+            "cached": True,
+            **meta,
+        }
+
+    cache_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = cache_dir.parent / (cache_key + ".staging")
+    if staging_dir.exists():
+        _shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+    try:
+        ext = source_path.suffix.lower().lstrip(".")
+        if ext in ("las", "laz"):
+            # Source is already LAS/LAZ. We still need to apply the mask,
+            # which means reading the LAS into NumPy and writing a filtered
+            # LAS. Defer support for this branch — the renderer routes
+            # LAS/LAZ through the flat path today; M3 only needs XYZ.
+            raise HTTPException(
+                status_code=400,
+                detail="crop_octree currently supports XYZ-family sources only.",
+            )
+        if ext not in _PANDAS_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported source extension for crop_octree: .{ext}",
+            )
+
+        filtered_las = staging_dir / (source_path.stem + ".cropped.las")
+        kept = _filtered_xyz_to_las(
+            source_path, request.ascii_format, filtered_las,
+            region_dict, request.translation,
+        )
+
+        if kept == 0:
+            # Empty crop — drop the staging dir and report 0 points without
+            # creating a cache entry (it would be a directory with just an
+            # empty LAS file and no metadata.json).
+            _shutil.rmtree(staging_dir)
+            return {
+                "cache_id": None,
+                "cache_dir": None,
+                "cached": False,
+                "version": "2.0",
+                "point_count": 0,
+                "spacing": 0.0,
+                "scale": [1.0, 1.0, 1.0],
+                "offset": [0.0, 0.0, 0.0],
+                "bounds": {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]},
+                "tight_bounds": {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]},
+                "attributes": [],
+            }
+
+        try:
+            _run_potree_converter(filtered_las, staging_dir)
+        finally:
+            try:
+                filtered_las.unlink()
+            except FileNotFoundError:
+                pass
+
+        if cache_dir.exists():
+            _shutil.rmtree(cache_dir)
+        staging_dir.rename(cache_dir)
+    except Exception:
+        try:
+            _shutil.rmtree(staging_dir)
+        except (FileNotFoundError, OSError):
+            pass
+        raise
+
+    meta = _read_octree_metadata(cache_dir)
+
+    try:
+        max_bytes = int(_os.environ.get(
+            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES",
+            _DEFAULT_OCTREE_CACHE_MAX_BYTES,
+        ))
+    except ValueError:
+        max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
+    _evict_octree_cache(max_bytes, keep=cache_dir)
+
+    return {
+        "cache_id": cache_key,
+        "cache_dir": str(cache_dir),
+        "cached": False,
+        **meta,
+    }
+
+
+@app.get("/api/pointcloud/octree_metadata")
+async def get_octree_metadata(cache_id: str):
+    """Read metadata for a previously-converted octree by cache id.
+
+    The renderer calls this once when constructing an OctreePointCloud
+    primitive to learn the bounds / point count / attribute layout. The
+    actual hierarchy.bin and octree.bin are streamed by the renderer
+    through the Electron main-process `app://octree/<cache_id>/...`
+    protocol, not through this server.
+    """
+    # Disallow path traversal; cache ids are sha1 hex.
+    if not all(c in "0123456789abcdef" for c in cache_id) or len(cache_id) != 40:
+        raise HTTPException(status_code=400, detail="cache_id must be a sha1 hex string")
+
+    cache_dir = _octree_cache_root() / cache_id
+    if not cache_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Octree cache miss: {cache_id}")
+
+    meta = _read_octree_metadata(cache_dir)
+    return {
+        "cache_id": cache_id,
+        "cache_dir": str(cache_dir),
+        **meta,
+    }
 
 
 # ==================== Cloud-to-Mesh Distance Comparison ====================

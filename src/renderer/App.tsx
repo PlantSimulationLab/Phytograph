@@ -7,7 +7,12 @@ import { BackendSplash } from "./components/BackendSplash";
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
 import type { Scan } from "./lib/scan";
 import type { ScanParameters } from "./lib/scanParameters";
-import { parsePointCloud, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
+import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
+
+// Extensions that go through the backend's Potree 2.0 octree pipeline when
+// we have a disk path. Anything outside this set (PLY/PCD/LAS/LAZ/OBJ) stays
+// on the in-renderer flat-array path for now.
+const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc']);
 import logoImage from "./assets/logo.png";
 
 type NavItem = 'home' | 'viewer' | 'options';
@@ -62,6 +67,33 @@ function App() {
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
   }, [showImportMenu]);
+
+  // Auto-select the current value when any numeric input gains focus so
+  // the user can type to replace it. Paired with the
+  // `input[type="number"]` spinner-removal CSS in App.css.
+  //
+  // A capture-phase document listener covers every input mounted anywhere
+  // in the tree (raw `<input type="number">` plus DebouncedNumberInput,
+  // which renders as text+inputMode=decimal). select() runs on the next
+  // task to win the race against the click that triggered the focus —
+  // calling it synchronously inside focusin lets WebKit's click handler
+  // collapse the selection afterwards.
+  useEffect(() => {
+    const handleFocusIn = (e: FocusEvent) => {
+      const target = e.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      const t = target.type;
+      const isNumeric =
+        t === 'number' ||
+        (t === 'text' && target.inputMode === 'decimal');
+      if (!isNumeric) return;
+      setTimeout(() => {
+        if (document.activeElement === target) target.select();
+      }, 0);
+    };
+    document.addEventListener('focusin', handleFocusIn);
+    return () => document.removeEventListener('focusin', handleFocusIn);
+  }, []);
 
   // Get next available color (skips colors currently used by existing scans).
   const getNextColor = useCallback(() => {
@@ -148,13 +180,24 @@ function App() {
         // button. We try to record the on-disk source path when the file
         // came from a native dialog/dropzone so the backend can read it
         // directly instead of receiving the full point payload over HTTP.
-        const data = await parsePointCloud(file);
         let sourcePath: string | undefined;
         try {
           sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
         } catch {
           sourcePath = undefined;
         }
+
+        // Octree path: when we have a real on-disk path and the file is an
+        // XYZ-family extension, route through the backend converter so the
+        // renderer streams tiles instead of holding the full cloud in V8.
+        // Falls back to the in-renderer parser when no path is available
+        // (e.g. fixtures-as-Blob in tests) or the format isn't supported by
+        // PotreeConverter (PLY / PCD / LAS / LAZ).
+        const ext = file.name.toLowerCase().split('.').pop() ?? '';
+        const useOctree = !!sourcePath && OCTREE_DROP_EXTENSIONS.has(ext);
+        const data = useOctree
+          ? await parsePointCloudFromPath(sourcePath!)
+          : await parsePointCloud(file);
         const newScan: Scan = {
           id: crypto.randomUUID(),
           label: data.fileName ?? 'Scan',

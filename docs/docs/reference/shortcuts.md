@@ -24,12 +24,27 @@ start typing, press <kbd>Enter</kbd> to run, <kbd>Esc</kbd> to close.
 
 ## Tool modes
 
-When a tool mode is active (Crop, Filter, Translate, Erase…):
+When a tool mode is active (Filter, Translate, Erase…):
 
 | Shortcut | Action |
 |---|---|
 | <kbd>Enter</kbd> | Apply / confirm the current tool |
 | <kbd>Esc</kbd> | Cancel the current tool |
+
+The Crop tool is the exception — Enter inside its dimension/center
+inputs only commits the typed value. Click the panel's **Apply** button
+to actually run the crop, so you can't trigger one by accident while
+typing a coordinate.
+
+## Crop polygon (while drawing)
+
+| Shortcut | Action |
+|---|---|
+| Left-click | Add a polygon vertex |
+| Right-click | Remove the last vertex |
+| <kbd>Backspace</kbd> | Remove the last vertex |
+| <kbd>Enter</kbd> | Close the polygon |
+| <kbd>Esc</kbd> | Cancel the polygon |
 
 ## Transform mode (Blender-style)
 

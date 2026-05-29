@@ -5,6 +5,7 @@ dist-renderer/
 release/
 resources/phytograph_backend/
 resources/phytograph_backend.exe
+resources/potree_converter/
 backend-api/venv/
 .DS_Store
 *.log
@@ -35,3 +36,14 @@ example-datasets/
 # Local scratch — heap snapshots, generated large fixtures
 tmp/
 *.heapsnapshot
+
+# Local working notes from the planning-with-files skill and prior
+# handoff. Useful per-checkout but not part of the project.
+task_plan.md
+findings.md
+progress.md
+HANDOFF_*.md
+
+# Local test data drops
+ground_scan*.xml
+ground_scan*.xyz

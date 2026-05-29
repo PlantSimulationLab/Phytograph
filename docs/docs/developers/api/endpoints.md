@@ -63,8 +63,12 @@ is defined.
 | Method | Path | Source | Purpose |
 |---|---|---|---|
 | POST | `/api/pointcloud/import` | `main.py:4650` | Import a LAS/LAZ file (multipart upload) |
-| POST | `/api/pointcloud/import_by_path` | `main.py:4970` | Parse a point cloud from a path on disk (dispatches `.xyz`/`.txt`/`.csv`/`.pts`/`.asc` to pandas, `.ply`/`.pcd` to open3d). Returns a packed binary stream so multi-GB scans aren't bottlenecked by JSON encoding |
-| POST | `/api/pointcloud/export` | `main.py:4539` | Export a point cloud |
+| POST | `/api/pointcloud/import_by_path` | `main.py` | Parse a point cloud from a path on disk (dispatches `.xyz`/`.txt`/`.csv`/`.pts`/`.asc` to pandas, `.ply`/`.pcd` to open3d). Returns a packed binary stream so multi-GB scans aren't bottlenecked by JSON encoding |
+| POST | `/api/pointcloud/crop_by_path` | `main.py` | Re-read a point cloud from its `sourcePath` and apply an AABB box crop (with optional `translation` baked in and `crop_invert` flag), returning the kept points in the same PHX1 binary format. Used by the viewer's "Apply crop" for flat-array (PLY/PCD) clouds so the renderer doesn't have to hold the filtered intermediate in V8's 4 GB old-space — NumPy handles the filter without that constraint |
+| POST | `/api/pointcloud/convert_to_octree` | `main.py` | Build a Potree 2.0 octree from an XYZ/LAS source. Pre-converts XYZ ASCII → LAS via laspy streaming, then runs the bundled PotreeConverter binary. Result is cached under `~/Library/Application Support/Phytograph/cache/octrees/<sha1>/`; repeat calls hit the cache. Returns `cache_id`, `tight_bounds`, attribute list. The renderer streams `metadata.json`/`hierarchy.bin`/`octree.bin` from that dir via the `app://octree/<cache_id>/...` Electron custom protocol |
+| GET | `/api/pointcloud/octree_metadata` | `main.py` | Look up metadata for a previously-converted octree by `cache_id`. Used when the renderer has only a cache id and needs the bounds/attribute schema (e.g. after a project reload) |
+| POST | `/api/pointcloud/crop_octree` | `main.py` | Re-convert a source XYZ into a new Potree 2.0 octree with a crop region applied (box or screen-space polygon, with optional translation baked in). Chunked streaming filter via laspy → PotreeConverter → atomic cache write. Returns the new `cache_id`; the renderer hot-swaps to it on the existing `OctreePointCloud` primitive. This is the M3 "Apply crop" path for octree-backed clouds — keeps renderer JS heap bounded regardless of source size |
+| POST | `/api/pointcloud/export` | `main.py` | Export a point cloud |
 
 ## Registration & comparison
 

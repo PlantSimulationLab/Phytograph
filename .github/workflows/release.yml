@@ -71,6 +71,73 @@ jobs:
           ls -la resources/${{ matrix.backend_name }}
           du -sh resources/${{ matrix.backend_name }}
 
+      # ---------------- PotreeConverter build ----------------
+      # PotreeConverter converts XYZ/LAS to the Potree 2.0 octree format the
+      # renderer streams. It's a C++ binary, built from source per platform.
+      # The build needs upstream PR #686 (libc++ compile fix); the build
+      # script fetches and applies it. Drop the patch step when #686 merges.
+      - name: Compute PotreeConverter cache key (Unix)
+        if: runner.os != 'Windows'
+        id: potree-key-unix
+        shell: bash
+        run: |
+          script_hash=$(sha256sum scripts/build-potree-converter.mjs | cut -d' ' -f1)
+          echo "key=$script_hash" >> "$GITHUB_OUTPUT"
+
+      - name: Compute PotreeConverter cache key (Windows)
+        if: runner.os == 'Windows'
+        id: potree-key-win
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash scripts/build-potree-converter.mjs -Algorithm SHA256).Hash
+          echo "key=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Cache PotreeConverter binary
+        id: potree-cache
+        uses: actions/cache@v4
+        with:
+          path: resources/potree_converter
+          # Pinned to PR #686. Bump the suffix or rotate the key when
+          # tracking a different patchset.
+          key: potree-${{ runner.os }}-${{ matrix.arch }}-pr686-${{ steps.potree-key-unix.outputs.key || steps.potree-key-win.outputs.key }}
+
+      - name: Install TBB (macOS)
+        if: steps.potree-cache.outputs.cache-hit != 'true' && startsWith(matrix.platform, 'macos')
+        run: brew install tbb
+
+      - name: Build PotreeConverter
+        if: steps.potree-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/build-potree-converter.mjs
+
+      - name: Verify PotreeConverter binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bin=$(find resources/potree_converter -type f -name 'PotreeConverter*' | head -1)
+          if [ -z "$bin" ]; then
+            echo "FAIL: no PotreeConverter binary under resources/potree_converter/"
+            ls -laR resources/potree_converter || true
+            exit 1
+          fi
+          echo "found: $bin"
+          ls -la "$bin"
+          "$bin" --help | head -5
+
+      - name: Verify PotreeConverter binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem -Path resources/potree_converter -Recurse -Filter 'PotreeConverter.exe' | Select-Object -First 1
+          if (-not $bin) {
+            Write-Host "FAIL: no PotreeConverter.exe under resources/potree_converter/"
+            Get-ChildItem -Path resources/potree_converter -Recurse
+            exit 1
+          }
+          Write-Host "found: $($bin.FullName)"
+          & $bin.FullName --help | Select-Object -First 5
+
       # ---------------- macOS signing setup ----------------
       - name: Import Apple Certificate (macOS)
         if: startsWith(matrix.platform, 'macos')
@@ -96,6 +163,21 @@ jobs:
             --sign "$APPLE_SIGNING_IDENTITY" \
             resources/phytograph_backend/phytograph_backend
           codesign -dv --verbose=4 resources/phytograph_backend/phytograph_backend
+
+      - name: Sign PotreeConverter (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          # The converter is a plain CLI binary — same entitlements profile
+          # as the backend (hardened runtime + timestamp). Notarization
+          # otherwise rejects the bundle for an unsigned executable.
+          bin=$(find resources/potree_converter -type f -name 'PotreeConverter' | head -1)
+          codesign --force --options runtime --timestamp \
+            --entitlements build/backend.entitlements \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            "$bin"
+          codesign -dv --verbose=4 "$bin"
 
       # ---------------- App build ----------------
       - name: Install frontend dependencies

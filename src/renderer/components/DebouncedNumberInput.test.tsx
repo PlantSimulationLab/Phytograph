@@ -132,6 +132,14 @@ describe('DebouncedNumberInput', () => {
     expect(onCommit).toHaveBeenCalledWith(7);
   });
 
+  it('renders as a text input with decimal inputMode (no native spinner arrows)', () => {
+    const onCommit = vi.fn();
+    render(<DebouncedNumberInput value={1} onCommit={onCommit} data-testid="n" />);
+    const input = screen.getByTestId('n') as HTMLInputElement;
+    expect(input.type).toBe('text');
+    expect(input.inputMode).toBe('decimal');
+  });
+
   it('uses the format prop when displaying values from the parent', () => {
     const onCommit = vi.fn();
     render(
