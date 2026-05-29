@@ -1,7 +1,7 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { flushSync } from 'react-dom';
 import { Canvas, useThree, useFrame, ThreeEvent } from '@react-three/fiber';
-import { Potree, PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
+import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings } from 'lucide-react';
@@ -14,7 +14,6 @@ import {
   COLORMAP_NAMES,
   COLORMAP_LABELS,
   sampleColormap,
-  colormapToCssGradient,
 } from '../lib/colormaps';
 import { PlantGenerationPopup } from './PlantGenerationPopup';
 import { HeliosTriangulationPopup } from './HeliosTriangulationPopup';
@@ -35,11 +34,12 @@ import {
   polygonRegionFromCamera,
 } from '../lib/cropGeometry';
 import {
-  formatColorbarTick,
   computeBoundsFromPositions,
   fuzzyMatch,
   generateShapeMesh,
 } from '../lib/pointCloudHelpers';
+import { Colorbar } from './viewer/Colorbar';
+import { getPotreeManager, OctreeRequestManager } from './viewer/potreeManager';
 
 // Shared viewer types now live in lib/pointCloudTypes.ts so the extracted leaf
 // components (components/viewer/**) and the lib parsers can import them without
@@ -47,7 +47,6 @@ import {
 // these types FROM this module (App.tsx, lib/scan.ts, lib/pointCloudParsers.ts)
 // keep working unchanged.
 import type {
-  PotreeRequestManager,
   ScalarField,
   PointSourcePayload,
   PointCloudData,
@@ -101,38 +100,6 @@ interface PointCloudProps {
   indices?: Uint32Array | null;
 }
 
-interface ColorbarProps {
-  colormap: ColormapName;
-  min: number;
-  max: number;
-  label?: string;
-}
-
-// Vertical colorbar overlay; min at the bottom, max at the top.
-function Colorbar({ colormap, min, max, label }: ColorbarProps) {
-  const mid = (min + max) / 2;
-  return (
-    <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg px-2 py-2 border border-neutral-700/50 pointer-events-none select-none">
-      {label && (
-        <div className="text-[10px] text-neutral-300 text-center mb-1 max-w-[80px] truncate" title={label}>
-          {label}
-        </div>
-      )}
-      <div className="flex items-stretch gap-2">
-        <div
-          className="w-4 rounded-sm border border-neutral-600"
-          style={{ height: 180, background: colormapToCssGradient(colormap, 32, 'to top') }}
-        />
-        <div className="flex flex-col justify-between text-[10px] text-neutral-300 leading-none" style={{ height: 180 }}>
-          <span>{formatColorbarTick(max)}</span>
-          <span className="text-neutral-400">{formatColorbarTick(mid)}</span>
-          <span>{formatColorbarTick(min)}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // =====================================================================
 // Octree streaming (0.3.0+)
 // =====================================================================
@@ -142,30 +109,8 @@ function Colorbar({ colormap, min, max, label }: ColorbarProps) {
 // protocol registered in src/main/octreeProtocol.ts. This replaces the
 // flat-Float32Array path for any cloud large enough to hit V8's heap
 // limit — the renderer never holds more than the visible point set
-// (capped by pointBudget).
-
-// Shared across all OctreePointCloud instances. potree-core's Potree
-// class owns the LRU node cache + load worker pool — having one per
-// component would fragment those.
-let _sharedPotreeManager: Potree | null = null;
-function getPotreeManager(): Potree {
-  if (!_sharedPotreeManager) {
-    _sharedPotreeManager = new Potree();
-    // 2M visible points ≈ 24 MB position data on GPU. The renderer is
-    // free to render fewer than the budget if the camera doesn't see
-    // that many.
-    _sharedPotreeManager.pointBudget = 2_000_000;
-  }
-  return _sharedPotreeManager;
-}
-
-// potree-core's RequestManager just wraps fetch + URL resolution. With
-// the `app://` scheme registered as supportFetchAPI, the global fetch
-// works transparently.
-const OctreeRequestManager: PotreeRequestManager = {
-  fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init),
-  getUrl: async (url: string) => url,
-};
+// (capped by pointBudget). getPotreeManager + OctreeRequestManager now
+// live in ./viewer/potreeManager.
 
 interface OctreePointCloudProps {
   data: PointCloudData;  // must have data.octree set
