@@ -21,6 +21,10 @@ export interface OctreePointCloudProps {
   data: PointCloudData;  // must have data.octree set
   pointSize?: number;
   colorMode?: 'rgb' | 'intensity' | 'height' | 'single' | 'scalar';
+  // When colorMode is 'scalar', the on-disk attribute slug to colour by
+  // (e.g. 'Reflectance_dB'). Matches a key in data.octree.attributeRanges and
+  // a named THREE.Float32 BufferAttribute on each loaded tile geometry.
+  selectedScalarField?: string;
   singleColor?: string;
   // Active colormap selected in the UI (viridis, plasma, etc.). When
   // colorMode is 'height' or 'intensity' we build a potree-core
@@ -48,10 +52,40 @@ export interface OctreePointCloudProps {
   } | null;
 }
 
+// Point a tile geometry's `intensity` attribute at the named scalar
+// attribute's buffer so the INTENSITY_GRADIENT shader path colours by it.
+// The Potree 2.0 loader decodes every non-builtin octree attribute into a
+// named Float32 BufferAttribute (geometry.attributes[field]); aliasing it
+// into `intensity` is a zero-copy reference swap. Idempotent — re-running on
+// an already-swapped geometry is a no-op (same buffer reference). Returns
+// true if the geometry had the field (so callers can detect missing data).
+function swapScalarIntoIntensity(geometry: any, field: string): boolean {
+  const src = geometry?.attributes?.[field];
+  if (!src) return false;
+  if (geometry.attributes.intensity !== src) {
+    geometry.setAttribute('intensity', src);
+  }
+  return true;
+}
+
+// Walk an octree's currently-loaded tiles and apply the scalar→intensity
+// buffer swap to each. Tiles stream in asynchronously, so this is called both
+// from the material effect (already-loaded tiles) and per-frame (newly
+// arrived tiles).
+function applyScalarSwapToVisibleNodes(octree: any, field: string): void {
+  const visible = octree?.visibleNodes;
+  if (!Array.isArray(visible)) return;
+  for (const node of visible) {
+    const geom = node?.sceneNode?.geometry;
+    if (geom) swapScalarIntoIntensity(geom, field);
+  }
+}
+
 export function OctreePointCloud({
   data,
   pointSize = 2,
   colorMode = 'rgb',
+  selectedScalarField,
   singleColor = '#a1a1aa',
   colormap = 'viridis',
   rangeMin,
@@ -160,6 +194,14 @@ export function OctreePointCloud({
     // rgba`, short-circuiting every pointColorType-keyed branch). So
     // newFormat only for colorMode==='rgb'.
     const isRgbMode = colorMode === 'rgb';
+    // Scalar mode is active only when a field is selected AND the octree
+    // actually carries a range for it (i.e. the attribute survived import).
+    // When inactive, scalar falls back to a solid colour like 'single'.
+    const scalarRange =
+      colorMode === 'scalar' && selectedScalarField
+        ? data.octree?.attributeRanges?.[selectedScalarField]
+        : undefined;
+    const scalarActive = !!scalarRange;
     const m = octree.material;
 
     // Mutate newFormat directly. potree-core doesn't expose a setter for
@@ -220,25 +262,30 @@ export function OctreePointCloud({
     // Without setting this, every point maps to roughly w ≈ 0 because
     // [0, 65000] is much wider than typical input, and the cloud
     // renders as the gradient's "low" texel — a uniform colour.
+    // The shader's getIntensity() reads the geometry attribute named
+    // `intensity` and maps it through intensityRange → gradient. Scalar mode
+    // reuses this exact pipeline by (a) pointing intensityRange at the
+    // selected attribute's extrema here, and (b) copying the selected
+    // attribute's buffer into each tile's `intensity` slot below.
+    const gradientRange = scalarActive
+      ? scalarRange
+      : data.octree?.attributeRanges?.intensity;
     if (rangeMin !== undefined && rangeMax !== undefined && rangeMax > rangeMin) {
       // User-overridden range from the Color By panel — use it directly.
       // The backend backs this with the actual intensity (reflectance ×
       // 256) so the user's UI values are in the same units as the
       // gradient sweep.
       (m as any).intensityRange = [rangeMin, rangeMax];
-    } else {
-      const intensityRange = data.octree?.attributeRanges?.intensity;
-      if (intensityRange && intensityRange.min.length > 0 && intensityRange.max.length > 0) {
-        const iMin = intensityRange.min[0];
-        const iMax = intensityRange.max[0];
-        // Guard against a zero-width range (constant intensity) — set
-        // [min-1, min+1] so the divisor isn't zero and the cloud renders
-        // as the middle of the gradient instead of NaN.
-        if (iMax > iMin) {
-          (m as any).intensityRange = [iMin, iMax];
-        } else {
-          (m as any).intensityRange = [iMin - 1, iMin + 1];
-        }
+    } else if (gradientRange && gradientRange.min.length > 0 && gradientRange.max.length > 0) {
+      const iMin = gradientRange.min[0];
+      const iMax = gradientRange.max[0];
+      // Guard against a zero-width range (constant values) — set
+      // [min-1, min+1] so the divisor isn't zero and the cloud renders
+      // as the middle of the gradient instead of NaN.
+      if (iMax > iMin) {
+        (m as any).intensityRange = [iMin, iMax];
+      } else {
+        (m as any).intensityRange = [iMin - 1, iMin + 1];
       }
     }
 
@@ -253,8 +300,20 @@ export function OctreePointCloud({
         m.pointColorType = PointColorType.INTENSITY_GRADIENT;
         break;
       case 'height': m.pointColorType = PointColorType.HEIGHT; break;
-      case 'single':
       case 'scalar':
+        if (scalarActive) {
+          // Reuse the intensity gradient pipeline; the selected attribute's
+          // buffer is swapped into `intensity` below so getIntensity()
+          // samples the chosen scalar. Range + gradient set above/below.
+          m.pointColorType = PointColorType.INTENSITY_GRADIENT;
+        } else {
+          // No usable attribute (unknown field, or octree predates this
+          // feature) — render a solid colour like 'single'.
+          m.pointColorType = PointColorType.COLOR;
+          m.color = new THREE.Color(singleColor ?? '#a1a1aa').convertLinearToSRGB();
+        }
+        break;
+      case 'single':
         m.pointColorType = PointColorType.COLOR;
         // Pre-encode the swatch as sRGB. THREE.Color('#hex') parses the
         // hex as sRGB and stores it linearised (ColorManagement default
@@ -279,7 +338,7 @@ export function OctreePointCloud({
     // bypasses the renderer's outputColorSpace conversion), so the
     // colormap on screen exactly matches what the colourbar overlay
     // shows from the same sampleColormap call.
-    if (colorMode === 'height' || colorMode === 'intensity') {
+    if (colorMode === 'height' || colorMode === 'intensity' || scalarActive) {
       const stopCount = 32;
       const gradient: Array<[number, THREE.Color]> = [];
       for (let i = 0; i < stopCount; i++) {
@@ -290,6 +349,14 @@ export function OctreePointCloud({
       (m as any).gradient = gradient;
     }
 
+    // Scalar mode: alias the selected attribute's buffer into `intensity` on
+    // every already-loaded tile. Tiles that arrive later get swapped in the
+    // per-frame loop below. (selectedScalarField is in the re-mount key, so
+    // changing fields gives a fresh material + a fresh pass here.)
+    if (scalarActive && selectedScalarField) {
+      applyScalarSwapToVisibleNodes(octree, selectedScalarField);
+    }
+
     // Force shader source rebuild (newFormat is a plain field with no
     // setter that calls updateShaderSource for us).
     if (typeof (m as any).updateShaderSource === 'function') {
@@ -298,7 +365,7 @@ export function OctreePointCloud({
     m.needsUpdate = true;
 
     setMaterialVersion(v => v + 1);
-  }, [octree, pointSize, colorMode, singleColor, colormap, rangeMin, rangeMax]);
+  }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax]);
 
   // Live crop preview: attach an IClipBox to the cloud's material when a
   // crop region is being drawn. The shader discards points outside the
@@ -360,9 +427,18 @@ export function OctreePointCloud({
     const cur = octree.material;
     const visible = (octree as any).visibleNodes;
     if (Array.isArray(visible)) {
+      const scalarActive =
+        colorMode === 'scalar' && !!selectedScalarField &&
+        !!data.octree?.attributeRanges?.[selectedScalarField];
       for (const node of visible) {
         const sn = (node as any).sceneNode;
         if (sn && sn.material !== cur) sn.material = cur;
+        // Re-apply the scalar→intensity buffer swap to tiles that streamed
+        // in since the last material effect. Cheap and idempotent (a
+        // reference compare short-circuits already-swapped geometries).
+        if (scalarActive && sn?.geometry) {
+          swapScalarIntoIntensity(sn.geometry, selectedScalarField!);
+        }
       }
     }
   });

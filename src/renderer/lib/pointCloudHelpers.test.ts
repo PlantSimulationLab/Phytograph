@@ -4,6 +4,7 @@ import {
   computeBoundsFromPositions,
   fuzzyMatch,
   generateShapeMesh,
+  octreeScalarFieldOptions,
 } from './pointCloudHelpers';
 
 describe('formatColorbarTick', () => {
@@ -105,5 +106,71 @@ describe('generateShapeMesh', () => {
       expect(mesh.vertexCount % 3).toBe(0);
       expect(mesh.indices.length).toBe(mesh.vertexCount);
     }
+  });
+});
+
+describe('octreeScalarFieldOptions', () => {
+  it('returns [] when attributeRanges is undefined', () => {
+    expect(octreeScalarFieldOptions(undefined, undefined)).toEqual([]);
+  });
+
+  it('filters out builtin LAS/Potree attributes', () => {
+    const ranges = {
+      position: { min: [0, 0, 0], max: [1, 1, 1] },
+      rgb: { min: [0], max: [255] },
+      intensity: { min: [0], max: [100] },
+      classification: { min: [0], max: [8] },
+      Reflectance_dB: { min: [-20], max: [-5] },
+    };
+    const opts = octreeScalarFieldOptions(ranges, {});
+    expect(opts.map(o => o.value)).toEqual(['Reflectance_dB']);
+  });
+
+  it('applies labels when present, falls back to slug otherwise', () => {
+    const ranges = {
+      Reflectance_dB: { min: [-20], max: [-5] },
+      Deviation: { min: [0], max: [3] },
+    };
+    const labels = { Reflectance_dB: 'Reflectance [dB]' };
+    const opts = octreeScalarFieldOptions(ranges, labels);
+    const byValue = Object.fromEntries(opts.map(o => [o.value, o.label]));
+    expect(byValue['Reflectance_dB']).toBe('Reflectance [dB]');
+    expect(byValue['Deviation']).toBe('Deviation'); // no label → slug
+  });
+
+  it('sorts options by display label', () => {
+    const ranges = {
+      Timestamp_s: { min: [0], max: [10] },
+      Reflectance_dB: { min: [-20], max: [-5] },
+    };
+    const labels = { Timestamp_s: 'Timestamp [s]', Reflectance_dB: 'Reflectance [dB]' };
+    const opts = octreeScalarFieldOptions(ranges, labels);
+    // 'Reflectance [dB]' < 'Timestamp [s]'
+    expect(opts.map(o => o.label)).toEqual(['Reflectance [dB]', 'Timestamp [s]']);
+  });
+
+  it('is case-insensitive when filtering builtins', () => {
+    const ranges = {
+      RGB: { min: [0], max: [255] },
+      Intensity: { min: [0], max: [1] },
+      MyScalar: { min: [0], max: [1] },
+    };
+    const opts = octreeScalarFieldOptions(ranges, {});
+    expect(opts.map(o => o.value)).toEqual(['MyScalar']);
+  });
+
+  it("filters PotreeConverter's spaced/hyphenated builtin names", () => {
+    // PotreeConverter 2.x writes the full LAS schema with these exact names.
+    const ranges = {
+      'return number': { min: [0], max: [1] },
+      'number of returns': { min: [0], max: [1] },
+      'scan angle rank': { min: [0], max: [0] },
+      'user data': { min: [0], max: [0] },
+      'point source id': { min: [0], max: [0] },
+      'gps-time': { min: [0], max: [0] },
+      Timestamp_s: { min: [100], max: [247] },
+    };
+    const opts = octreeScalarFieldOptions(ranges, { Timestamp_s: 'Timestamp [s]' });
+    expect(opts.map(o => o.value)).toEqual(['Timestamp_s']);
   });
 });

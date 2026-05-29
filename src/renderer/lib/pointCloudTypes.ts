@@ -36,6 +36,11 @@ export interface OctreeRef {
   // heightMin/Max + intensityRange uniforms — without them the gradient
   // lookups all hit the same texel and the cloud renders solid colour.
   attributeRanges?: Record<string, { min: number[]; max: number[] }>;
+  // Display-name map for imported extra-dimension scalars, keyed by the
+  // on-disk attribute slug (e.g. 'Reflectance_dB' → 'Reflectance [dB]').
+  // Drives the scalar picker's option labels; slugs without an entry fall
+  // back to showing the slug verbatim.
+  attributeLabels?: Record<string, string>;
 }
 
 // Result of buildPointSource: either an in-memory cloud (flat path) or a

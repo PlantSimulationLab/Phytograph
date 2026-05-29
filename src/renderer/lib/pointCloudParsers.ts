@@ -817,9 +817,13 @@ export function buildPointCloudFromOctree(
   // uniforms; without them every point maps to the same texel and the
   // mode renders as a solid colour.
   const attributeRanges: Record<string, { min: number[]; max: number[] }> = {};
+  const attributeLabels: Record<string, string> = {};
   for (const a of meta.attributes ?? []) {
     if (Array.isArray(a.min) && Array.isArray(a.max)) {
       attributeRanges[a.name] = { min: a.min, max: a.max };
+    }
+    if (a.label) {
+      attributeLabels[a.name] = a.label;
     }
   }
 
@@ -836,6 +840,7 @@ export function buildPointCloudFromOctree(
       sourceXyzPath,
       asciiFormat: asciiFormat ?? null,
       attributeRanges,
+      attributeLabels,
     },
   };
 }

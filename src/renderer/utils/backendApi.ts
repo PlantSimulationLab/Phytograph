@@ -1231,6 +1231,10 @@ export interface OctreeAttribute {
   // classification, etc.); absent otherwise.
   min?: number[];
   max?: number[];
+  // Human-readable display name for an imported extra-dimension scalar
+  // (e.g. attribute name 'Reflectance_dB' → label 'Reflectance [dB]').
+  // Present only for carried extra dims; absent for builtin LAS attributes.
+  label?: string;
 }
 
 export interface OctreeMetadata {

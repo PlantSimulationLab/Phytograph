@@ -35,6 +35,7 @@ import {
   computeBoundsFromPositions,
   fuzzyMatch,
   generateShapeMesh,
+  octreeScalarFieldOptions,
 } from '../lib/pointCloudHelpers';
 import { Colorbar } from './viewer/Colorbar';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
@@ -6063,9 +6064,19 @@ export default function PointCloudViewer({
     if (colorMode === 'y') return { min: d.bounds.min.y, max: d.bounds.max.y, label: 'Y' };
     if (colorMode === 'height') return { min: d.bounds.min.z, max: d.bounds.max.z, label: 'Z (Height)' };
     if (colorMode === 'intensity') return { min: 0, max: 1, label: 'Intensity' };
-    if (colorMode === 'scalar' && selectedScalarField && d.scalarFields?.[selectedScalarField]) {
-      const f = d.scalarFields[selectedScalarField];
-      return { min: f.min, max: f.max, label: selectedScalarField };
+    if (colorMode === 'scalar' && selectedScalarField) {
+      // Flat clouds carry per-field min/max in scalarFields; octree clouds
+      // carry it in octree.attributeRanges (keyed by on-disk slug). Prefer
+      // the human-readable label for the colorbar caption when we have one.
+      if (d.scalarFields?.[selectedScalarField]) {
+        const f = d.scalarFields[selectedScalarField];
+        return { min: f.min, max: f.max, label: selectedScalarField };
+      }
+      const r = d.octree?.attributeRanges?.[selectedScalarField];
+      if (r && r.min.length > 0 && r.max.length > 0) {
+        const label = d.octree?.attributeLabels?.[selectedScalarField] ?? selectedScalarField;
+        return { min: r.min[0], max: r.max[0], label };
+      }
     }
     return null;
   }, [colorbarSourceCloud, colorMode, selectedScalarField, isScalarColorMode]);
@@ -6154,7 +6165,11 @@ export default function PointCloudViewer({
                   // potree-core caches PCOGeometry in memory across
                   // loads), so re-mount cost is one shader compile per
                   // mode switch — measured at ~10 ms.
-                  key={`octree-${colorMode}`}
+                  // Re-mount also when the selected scalar field changes, not
+                  // just the colour mode — switching the field needs a fresh
+                  // material + BindingStates so the new attribute's buffer
+                  // (swapped into `intensity`) binds correctly.
+                  key={`octree-${colorMode}-${selectedScalarField ?? ''}`}
                   data={sourceData}
                   pointSize={pointSize}
                   // 'per-scan' renders as a uniform single-colour swatch
@@ -6169,6 +6184,7 @@ export default function PointCloudViewer({
                         ? 'height'
                         : colorMode
                   }
+                  selectedScalarField={selectedScalarField}
                   singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
                   colormap={colormap}
                   rangeMin={activeRange?.min}
@@ -9749,7 +9765,13 @@ export default function PointCloudViewer({
 
       {/* Colorbar overlay — visible whenever a continuous-scalar color mode is active */}
       {isScalarColorMode && activeRange && dataRange && (
-        <div className="absolute bottom-4 right-56 z-20">
+        <div
+          className="absolute bottom-4 right-56 z-20"
+          data-testid="colorbar"
+          data-colorbar-label={dataRange.label}
+          data-colorbar-min={activeRange.min}
+          data-colorbar-max={activeRange.max}
+        >
           <Colorbar
             colormap={colormap}
             min={activeRange.min}
@@ -9790,9 +9812,19 @@ export default function PointCloudViewer({
                 { value: 'per-scan', label: 'Per-scan color' },
                 { value: 'single', label: 'Solid Color' },
               ].filter(o => !isOctree || (o.value !== 'x' && o.value !== 'y'));
-              const scalarFields = cloud.data.scalarFields
-                ? Object.keys(cloud.data.scalarFields).sort()
-                : [];
+              // Scalar field options: flat clouds expose named scalarFields;
+              // octree clouds expose imported extra-dim attributes (value =
+              // on-disk slug, label = human-readable name). Builtin LAS
+              // attributes (intensity/rgb/classification/…) are filtered out
+              // of the octree list — they have their own modes.
+              const scalarFields: Array<{ value: string; label: string }> = isOctree
+                ? octreeScalarFieldOptions(
+                    cloud.data.octree?.attributeRanges,
+                    cloud.data.octree?.attributeLabels,
+                  )
+                : cloud.data.scalarFields
+                  ? Object.keys(cloud.data.scalarFields).sort().map(f => ({ value: f, label: f }))
+                  : [];
               // Encode scalar selections as `scalar:<field>` so the single
               // <select> can drive both colorMode and selectedScalarField.
               const selectValue =
@@ -9822,7 +9854,7 @@ export default function PointCloudViewer({
                     {scalarFields.length > 0 && (
                       <optgroup label="Scalar fields">
                         {scalarFields.map(f => (
-                          <option key={f} value={`scalar:${f}`}>{f}</option>
+                          <option key={f.value} value={`scalar:${f.value}`}>{f.label}</option>
                         ))}
                       </optgroup>
                     )}

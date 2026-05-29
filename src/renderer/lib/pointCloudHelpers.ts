@@ -47,6 +47,42 @@ export function fuzzyMatch(query: string, text: string): number {
   return qi === q.length ? 1 : 0;
 }
 
+// Octree attribute names that are builtin LAS/Potree schema fields, not
+// user-imported scalar columns. Excluded from the scalar picker because they
+// either have a dedicated color mode (intensity, rgb) or aren't meaningful as
+// a continuous gradient here (position, classification, return number, …).
+// Compared case-insensitively against attribute names from octree metadata.
+// Names are compared case-insensitively. PotreeConverter 2.x emits these with
+// spaces/hyphens ('return number', 'gps-time', 'point source id'); the
+// potree-core decoder / older tooling uses the squashed forms — list both.
+const OCTREE_BUILTIN_ATTRIBUTES = new Set([
+  'position', 'rgb', 'rgba', 'color', 'intensity', 'classification',
+  'returnnumber', 'return number',
+  'numberofreturns', 'number of returns',
+  'scananglerank', 'scan angle rank', 'scanangle', 'scan angle',
+  'userdata', 'user data',
+  'pointsourceid', 'point source id', 'sourceid', 'source id',
+  'gpstime', 'gps-time', 'gps time',
+  'normal', 'indices', 'spacing',
+]);
+
+// Derive the selectable scalar-field options for an octree-backed cloud from
+// its per-attribute ranges, filtering out builtin schema attributes and
+// applying human-readable labels. Returns `{ value, label }` pairs sorted by
+// label so the picker order is stable. `value` is the on-disk attribute slug
+// (what OctreePointCloud uses to find the geometry buffer); `label` is the
+// display text (falls back to the slug when no label was supplied).
+export function octreeScalarFieldOptions(
+  attributeRanges?: Record<string, { min: number[]; max: number[] }>,
+  attributeLabels?: Record<string, string>,
+): Array<{ value: string; label: string }> {
+  if (!attributeRanges) return [];
+  return Object.keys(attributeRanges)
+    .filter((name) => !OCTREE_BUILTIN_ATTRIBUTES.has(name.toLowerCase()))
+    .map((name) => ({ value: name, label: attributeLabels?.[name] ?? name }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 // Generate mesh data from shape type with default unit size
 export function generateShapeMesh(shapeType: ShapeType): MeshData {
   let geometry: THREE.BufferGeometry;

@@ -32,9 +32,19 @@ for an XYZ-family file, Phytograph forwards it to the parser; recognised
 column tokens are `x`, `y`, `z`, `r`/`g`/`b` (0–1 range),
 `r255`/`g255`/`b255` (0–255 range, normalised to 0–1 on read),
 `intensity`, `reflectance`, `timestamp`, `target_index`, `target_count`,
-`deviation`. Unknown tokens are still consumed (so column indices stay
-aligned) but their values are dropped. The hint is ignored for PLY/PCD
-because those formats encode their column layout in-file.
+`deviation`. Any other numeric columns are carried through as named
+**scalar fields** (color-mappable in the viewer) rather than discarded —
+on large octree-streamed clouds they travel into the octree as extra
+attributes. Field names come from the file's header row when present
+(e.g. `Reflectance[dB]` → `Reflectance [dB]`), else a positional
+fallback. The hint is ignored for PLY/PCD because those formats encode
+their column layout in-file.
+
+When no `<ASCII_format>` hint is given, Phytograph auto-detects the
+layout: a header row's column names are matched to roles where
+recognised (so `XYZ[0][m]`/`XYZ[1][m]`/`XYZ[2][m]` map to x/y/z and the
+rest become scalar fields), otherwise it falls back to a positional
+guess (xyz, then RGB at six columns, then intensity at seven).
 
 Open3D doesn't preserve PLY/PCD scalar fields (intensity, reflectance,
 etc.) when loading by path. If you need those fields for a `.ply` /

@@ -27,7 +27,7 @@ def unicode_to_ascii(s: str) -> str:
     return result
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.3"
+BACKEND_VERSION = "0.3.4"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -4961,16 +4961,68 @@ def _tokenize_ascii_format(fmt: str) -> List[str]:
             for tok in fmt.split()]
 
 
+def _role_from_header_name(name: str) -> Optional[str]:
+    """Map a header column name to a known XYZ role, or None if unrecognised.
+
+    Recognises the common terrestrial-scanner / Helios header conventions:
+    'XYZ[0][m]'/'X' → x, 'Reflectance[dB]' → reflectance, 'Intensity' → intensity,
+    'Red'/'R' → r255, etc. An unrecognised name returns None so the caller can
+    carry it as an extra-dimension scalar (e.g. 'Deviation[]', 'Timestamp[s]').
+    """
+    # Indexed position headers: 'XYZ[0][m]' → x, 'XYZ[1]' → y, 'XYZ[2]' → z.
+    m = re.match(r'\s*xyz\s*\[\s*([0-2])\s*\]', name.strip(), re.IGNORECASE)
+    if m:
+        return ('x', 'y', 'z')[int(m.group(1))]
+    base = re.sub(r'\[.*?\]', '', name).strip().lower()
+    base = re.sub(r'[^a-z0-9]+', '', base)
+    if base in ('x', 'easting'):
+        return 'x'
+    if base in ('y', 'northing'):
+        return 'y'
+    if base in ('z', 'height', 'elevation'):
+        return 'z'
+    if base in ('r', 'red'):
+        return 'r255'
+    if base in ('g', 'green'):
+        return 'g255'
+    if base in ('b', 'blue'):
+        return 'b255'
+    if base in ('intensity',):
+        return 'intensity'
+    if base in ('reflectance', 'reflectivity'):
+        return 'reflectance'
+    return None
+
+
 def _autodetect_xyz_columns(file_path: str) -> List[str]:
     """Pick a column layout when the caller didn't supply <ASCII_format>.
 
-    Reads only the first data row. Conservative: xyz first, then r255/g255/b255
-    if there are six columns, then intensity at column seven. Matches the
-    convention used by legacy Helios projects shipped without a format tag."""
+    When the file has a header row (comma- or whitespace-delimited names with
+    letters), map each header name to a known role via `_role_from_header_name`
+    and leave unrecognised columns as 'skip' — the LAS writer's column plan
+    then carries those as extra-dimension scalars under their header name.
+    This is what makes a Pistachio-style export's Reflectance/Deviation/...
+    columns colourable after import.
+
+    Without a header, fall back to the positional convention: xyz first, then
+    r255/g255/b255 if there are six columns, then intensity at column seven.
+    Matches legacy Helios projects shipped without a format tag.
+    """
+    header = _read_ascii_header_names(file_path)
+    if header is not None and len(header) >= 3:
+        roles = [_role_from_header_name(h) or 'skip' for h in header]
+        # Only trust the header mapping if it actually pinned x/y/z; otherwise
+        # the names were too exotic and the positional fallback is safer.
+        if all(r in roles for r in ('x', 'y', 'z')):
+            return roles
+
     with open(file_path) as f:
         for raw in f:
             line = raw.strip()
             if not line or line.startswith('#') or line.startswith('//'):
+                continue
+            # Skip a header row for the positional count — use the first data row.
+            if any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
                 continue
             ncols = len(line.split())
             if ncols >= 7:
@@ -4998,6 +5050,132 @@ def _first_data_row_has_letters(file_path: str) -> bool:
                 continue
             return any(re.search(r'[a-zA-Z]', tok) for tok in line.split())
     return False
+
+
+# Roles that already map to a dedicated LAS field — never carried as extra
+# dimensions (they'd duplicate position/rgb/intensity in the octree).
+_XYZ_RESERVED_ROLES = {
+    'x', 'y', 'z', 'r', 'g', 'b', 'r255', 'g255', 'b255',
+    'intensity', 'reflectance', 'skip',
+}
+
+
+def _sanitize_extra_dim_name(raw: str) -> str:
+    """Slugify a source header name into a laspy-safe LAS extra-dimension name.
+
+    laspy/LAS extra dimensions accept a restricted name set: we keep
+    [A-Za-z0-9_], collapse every other run to a single underscore, trim
+    leading/trailing underscores, and cap at the 32-char LAS limit. A name
+    that sanitises to empty (e.g. all punctuation) falls back to 'field'.
+    Callers dedupe collisions; this function is deterministic per input.
+
+    Examples:
+      'Reflectance[dB]' -> 'Reflectance_dB'
+      'Target Index[]'  -> 'Target_Index'
+      'XYZ[0][m]'       -> 'XYZ_0_m'
+    """
+    slug = re.sub(r'[^A-Za-z0-9_]+', '_', raw).strip('_')
+    if not slug:
+        slug = 'field'
+    return slug[:32]
+
+
+def _humanize_extra_dim_label(raw: str) -> str:
+    """Tidy a source header into a human-readable picker label.
+
+    Keeps unit brackets but normalises whitespace and drops empty brackets:
+      'Reflectance[dB]' -> 'Reflectance [dB]'
+      'Target Index[]'  -> 'Target Index'
+      'Deviation[]'     -> 'Deviation'
+    Falls back to the raw string (stripped) when nothing else applies.
+    """
+    s = raw.strip()
+    # Drop empty bracket pairs entirely ('Deviation[]' -> 'Deviation').
+    s = re.sub(r'\[\s*\]', '', s)
+    # Space out a unit bracket that abuts a word ('Reflectance[dB]' ->
+    # 'Reflectance [dB]') without touching brackets already preceded by space.
+    s = re.sub(r'(?<=\S)\[', ' [', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s or raw.strip()
+
+
+def _read_ascii_header_names(file_path: str) -> Optional[List[str]]:
+    """Return the column display names from a leading header row, if present.
+
+    XYZ-family files from terrestrial scanners often carry a comma-delimited
+    header (e.g. 'XYZ[0][m],XYZ[1][m],...,Reflectance[dB],Deviation[]') even
+    though the data rows are whitespace-delimited. We only treat the first
+    non-blank, non-comment line as a header when it actually contains letters
+    (mirrors `_first_data_row_has_letters`); otherwise there are no names to
+    recover and we return None.
+
+    Splits on commas when the line is comma-delimited, else on whitespace, so
+    multi-word names like 'Target Index[]' survive in the comma case.
+    """
+    with open(file_path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#') or line.startswith('//'):
+                continue
+            if not any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
+                return None
+            parts = line.split(',') if ',' in line else line.split()
+            return [p.strip() for p in parts]
+    return None
+
+
+def _xyz_column_plan(source_path: "_Path", ascii_format: Optional[str]):
+    """Resolve the column layout for an XYZ-family file, carrying unmapped
+    numeric columns as octree extra dimensions.
+
+    Returns (names, extra_dims) where:
+      - `names` is the per-column identifier list for pandas `names=` — known
+        roles keep their role token (x/y/z/r255/intensity/...), extras get a
+        unique 'extra:<slug>' identifier, and truly droppable columns (no
+        header name, beyond the recognised layout) stay 'skip'.
+      - `extra_dims` is an ordered list of dicts {col, slug, label} for each
+        carried extra column, where `col` is the matching entry in `names`.
+
+    Role tokens come from `_tokenize_ascii_format` / `_autodetect_xyz_columns`.
+    A column whose role is not reserved (see `_XYZ_RESERVED_ROLES`) is promoted
+    to an extra dimension; its display name is taken from the file's header row
+    when available, else a positional 'Column N' fallback. Slugs are
+    sanitised and de-duplicated so two headers can't collide on disk.
+    """
+    roles = (_tokenize_ascii_format(ascii_format)
+             if ascii_format
+             else _autodetect_xyz_columns(str(source_path)))
+
+    header_names = _read_ascii_header_names(str(source_path))
+
+    names: List[str] = []
+    extra_dims: List[dict] = []
+    used_slugs: set[str] = set()
+    for i, role in enumerate(roles):
+        if role in _XYZ_RESERVED_ROLES and role != 'skip':
+            names.append(role)
+            continue
+        # 'skip' and any unreserved role (timestamp, deviation, ...) are
+        # candidate extra dimensions. Always carry them (user chose "all
+        # numeric extras"); name from header when we have one.
+        if header_names is not None and i < len(header_names) and header_names[i]:
+            label = _humanize_extra_dim_label(header_names[i])
+            base = _sanitize_extra_dim_name(header_names[i])
+        else:
+            label = f"Column {i + 1}"
+            base = f"col_{i + 1}"
+        slug = base
+        n = 2
+        while slug in used_slugs:
+            suffix = f"_{n}"
+            slug = base[:32 - len(suffix)] + suffix
+            n += 1
+        used_slugs.add(slug)
+        col_id = f"extra:{slug}"
+        names.append(col_id)
+        extra_dims.append({"col": col_id, "slug": slug, "label": label})
+
+    return names, extra_dims
 
 
 def _pack_pointcloud_response(positions: np.ndarray,
@@ -5443,7 +5621,7 @@ def _resolve_potree_converter_path() -> _Path:
     )
 
 
-def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path) -> int:
+def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path) -> tuple[int, List[dict]]:
     """Stream an XYZ-family ASCII file into a LAS file via laspy in chunks.
 
     PotreeConverter 2.x accepts only LAS/LAZ; XYZ goes through here first.
@@ -5453,31 +5631,37 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path)
     Column layout uses the same `ascii_format` convention as
     `_load_xyz_arrays` — roles are tokenised, with x/y/z mandatory and
     r255/g255/b255/intensity (or reflectance, mapped to intensity) optional.
-    Returns the total point count written.
+    Any remaining numeric columns are carried into the octree as LAS extra
+    dimensions (float32) so the renderer can colour by them later.
+
+    Returns (total_points, extra_dims), where extra_dims is the
+    [{slug, label}, ...] list of carried scalar attributes (for the cache's
+    slug→label sidecar).
     """
     import laspy  # local: only when this code path runs
 
-    columns = (_tokenize_ascii_format(ascii_format)
-               if ascii_format
-               else _autodetect_xyz_columns(str(source_path)))
+    names, extra_dims = _xyz_column_plan(source_path, ascii_format)
 
-    has_xyz = all(role in columns for role in ("x", "y", "z"))
+    has_xyz = all(role in names for role in ("x", "y", "z"))
     if not has_xyz:
         raise HTTPException(
             status_code=400,
-            detail=f"ASCII format must include x/y/z. Got columns: {columns}",
+            detail=f"ASCII format must include x/y/z. Got columns: {names}",
         )
 
-    has_rgb = all(role in columns for role in ("r255", "g255", "b255"))
-    intensity_role = next((r for r in ("intensity", "reflectance") if r in columns), None)
+    has_rgb = all(role in names for role in ("r255", "g255", "b255"))
+    intensity_role = next((r for r in ("intensity", "reflectance") if r in names), None)
 
-    # LAS point format 3 carries XYZ + intensity + RGB. Adequate for what
-    # the renderer will display; spare LAS attributes (return number, etc.)
-    # are written as zeros and PotreeConverter discards them when invoked
-    # with `--attributes "position rgb intensity"`.
+    # LAS point format 3 carries XYZ + intensity + RGB. Extra numeric columns
+    # are added as float32 extra dimensions; PotreeConverter writes the full
+    # LAS schema (no --attributes filter), so they survive into the octree's
+    # metadata.json attributes list and decode into named buffers in the
+    # potree-core 2.0 loader.
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
     header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    for ed in extra_dims:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
     skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
 
@@ -5488,8 +5672,8 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path)
             source_path,
             sep=r"\s+",
             header=None,
-            names=columns,
-            usecols=[i for i, c in enumerate(columns) if c != "skip"],
+            names=names,
+            usecols=[i for i, c in enumerate(names) if c != "skip"],
             comment="#",
             skiprows=skiprows,
             chunksize=chunk_rows,
@@ -5516,24 +5700,28 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path)
                 refl = chunk[intensity_role].to_numpy(dtype=np.float32)
                 scaled = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
                 record.intensity = scaled
+            for ed in extra_dims:
+                record[ed["slug"]] = chunk[ed["col"]].to_numpy(dtype=np.float32)
             writer.write_points(record)
             total_points += n
 
-    return total_points
+    return total_points, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
 
 
-def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path) -> tuple[_Path, bool]:
+def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path) -> tuple[_Path, bool, List[dict]]:
     """Get a LAS file path for `source_path`, converting from XYZ if needed.
 
-    Returns (las_path, is_temp) — caller deletes the file if is_temp.
+    Returns (las_path, is_temp, extra_dims) — caller deletes the file if
+    is_temp. `extra_dims` is the [{slug, label}, ...] list of carried scalar
+    attributes (empty for LAS/LAZ sources, which we don't re-derive names for).
     """
     ext = source_path.suffix.lower().lstrip(".")
     if ext in ("las", "laz"):
-        return source_path, False
+        return source_path, False, []
     if ext in _PANDAS_EXTENSIONS:
         out = work_dir / (source_path.stem + ".las")
-        _xyz_to_las(source_path, ascii_format, out)
-        return out, True
+        _, extra_dims = _xyz_to_las(source_path, ascii_format, out)
+        return out, True, extra_dims
     raise HTTPException(
         status_code=400,
         detail=f"Unsupported source extension for octree conversion: .{ext}",
@@ -5578,6 +5766,41 @@ def _run_potree_converter(input_las: _Path, out_dir: _Path) -> None:
         )
 
 
+# Sidecar JSON mapping LAS extra-dimension slugs to human-readable labels.
+# Written alongside metadata.json at conversion time and read back by
+# _read_octree_metadata so the renderer can show clean picker labels
+# (e.g. slug 'Reflectance_dB' → label 'Reflectance [dB]') even on cache hits.
+_OCTREE_LABELS_FILENAME = "attribute_labels.json"
+
+
+def _write_octree_labels(octree_dir: _Path, extra_dims: List[dict]) -> None:
+    """Persist the slug→label map for an octree's extra dimensions.
+
+    No-op when there are no extra dims, so LAS/LAZ-sourced octrees don't grow
+    an empty sidecar. `extra_dims` is the list returned by `_xyz_to_las`.
+    """
+    if not extra_dims:
+        return
+    mapping = {ed["slug"]: ed["label"] for ed in extra_dims}
+    (octree_dir / _OCTREE_LABELS_FILENAME).write_text(json.dumps(mapping))
+
+
+def _read_octree_labels(octree_dir: _Path) -> dict:
+    """Load the slug→label sidecar, or {} if absent/unreadable.
+
+    Octrees built before this feature (or from LAS/LAZ) have no sidecar; the
+    renderer falls back to showing the raw slug in that case.
+    """
+    p = octree_dir / _OCTREE_LABELS_FILENAME
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def _read_octree_metadata(octree_dir: _Path) -> dict:
     """Load metadata.json and return a renderer-friendly subset.
 
@@ -5588,7 +5811,12 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
       2. The attribute list often contains a duplicate `position` entry —
          a placeholder that never gets updated. We keep only the first
          occurrence of each attribute name.
+
+    Extra-dimension attributes (carried from unmapped numeric source columns)
+    get a human-readable `label` attached from the slug→label sidecar so the
+    renderer's scalar picker can show clean names.
     """
+    labels = _read_octree_labels(octree_dir)
     meta_path = octree_dir / "metadata.json"
     if not meta_path.is_file():
         raise HTTPException(
@@ -5627,6 +5855,8 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
             "type": a.get("type"),
             "num_elements": int(a.get("numElements", 0)),
         }
+        if name in labels:
+            entry["label"] = labels[name]
         if isinstance(amin, list) and isinstance(amax, list):
             # Filter out None entries (came from `inf` rewrite).
             if all(v is not None for v in amin) and all(v is not None for v in amax):
@@ -5772,7 +6002,7 @@ async def convert_to_octree(request: ConvertToOctreeRequest):
     staging_dir.mkdir(parents=True)
 
     try:
-        las_path, las_is_temp = _source_to_las(source_path, request.ascii_format, staging_dir)
+        las_path, las_is_temp, extra_dims = _source_to_las(source_path, request.ascii_format, staging_dir)
         try:
             _run_potree_converter(las_path, staging_dir)
         finally:
@@ -5781,6 +6011,10 @@ async def convert_to_octree(request: ConvertToOctreeRequest):
                     las_path.unlink()
                 except FileNotFoundError:
                     pass
+
+        # Persist the slug→label sidecar into staging so it travels with the
+        # atomic rename and survives subsequent cache hits.
+        _write_octree_labels(staging_dir, extra_dims)
 
         if cache_dir.exists():
             _shutil.rmtree(cache_dir)
@@ -6035,7 +6269,7 @@ def _filtered_xyz_to_las(
     out_las: _Path,
     region: dict,
     translation: Optional[List[float]],
-) -> int:
+) -> tuple[int, List[dict]]:
     """Streaming variant of `_xyz_to_las` that applies a per-chunk crop mask
     before writing each chunk to LAS. Same chunk-size memory bound; total
     points written = sum of survivors across chunks.
@@ -6043,21 +6277,23 @@ def _filtered_xyz_to_las(
     For polygon regions, projects each chunk's (x,y,z) through the frozen
     camera matrices once per chunk; the mask is computed in NumPy so the
     cost is bounded by chunk_rows × num_polygon_vertices.
+
+    Carries unmapped numeric columns as LAS extra dimensions exactly like
+    `_xyz_to_las`, so a cropped octree keeps its scalar attributes. Returns
+    (total_kept, extra_dims).
     """
     import laspy
 
-    columns = (_tokenize_ascii_format(ascii_format)
-               if ascii_format
-               else _autodetect_xyz_columns(str(source_path)))
+    names, extra_dims = _xyz_column_plan(source_path, ascii_format)
 
-    has_xyz = all(role in columns for role in ("x", "y", "z"))
+    has_xyz = all(role in names for role in ("x", "y", "z"))
     if not has_xyz:
         raise HTTPException(
             status_code=400,
-            detail=f"ASCII format must include x/y/z. Got columns: {columns}",
+            detail=f"ASCII format must include x/y/z. Got columns: {names}",
         )
-    has_rgb = all(role in columns for role in ("r255", "g255", "b255"))
-    intensity_role = next((r for r in ("intensity", "reflectance") if r in columns), None)
+    has_rgb = all(role in names for role in ("r255", "g255", "b255"))
+    intensity_role = next((r for r in ("intensity", "reflectance") if r in names), None)
 
     # Precompute region inputs once.
     kind = region["kind"]
@@ -6089,6 +6325,8 @@ def _filtered_xyz_to_las(
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
     header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    for ed in extra_dims:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
     skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
 
@@ -6110,8 +6348,8 @@ def _filtered_xyz_to_las(
             source_path,
             sep=r"\s+",
             header=None,
-            names=columns,
-            usecols=[i for i, c in enumerate(columns) if c != "skip"],
+            names=names,
+            usecols=[i for i, c in enumerate(names) if c != "skip"],
             comment="#",
             skiprows=skiprows,
             chunksize=chunk_rows,
@@ -6170,6 +6408,8 @@ def _filtered_xyz_to_las(
             if intensity_role is not None:
                 refl = chunk[intensity_role].to_numpy(dtype=np.float32)[mask]
                 record.intensity = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
+            for ed in extra_dims:
+                record[ed["slug"]] = chunk[ed["col"]].to_numpy(dtype=np.float32)[mask]
             writer.write_points(record)
             total_kept += kept
 
@@ -6182,7 +6422,7 @@ def _filtered_xyz_to_las(
             writer.header.mins = (data_min - pad).tolist()
             writer.header.maxs = (data_max + pad).tolist()
 
-    return total_kept
+    return total_kept, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
 
 
 @app.post("/api/pointcloud/crop_octree")
@@ -6247,7 +6487,7 @@ async def crop_octree(request: CropOctreeRequest):
             )
 
         filtered_las = staging_dir / (source_path.stem + ".cropped.las")
-        kept = _filtered_xyz_to_las(
+        kept, extra_dims = _filtered_xyz_to_las(
             source_path, request.ascii_format, filtered_las,
             region_dict, request.translation,
         )
@@ -6278,6 +6518,10 @@ async def crop_octree(request: CropOctreeRequest):
                 filtered_las.unlink()
             except FileNotFoundError:
                 pass
+
+        # Persist the slug→label sidecar so the cropped octree keeps clean
+        # scalar picker labels (mirrors convert_to_octree).
+        _write_octree_labels(staging_dir, extra_dims)
 
         if cache_dir.exists():
             _shutil.rmtree(cache_dir)
