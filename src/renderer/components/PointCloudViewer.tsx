@@ -12,7 +12,7 @@ interface PotreeRequestManager {
 }
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Palette, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings } from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings } from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, type CropOctreeRegion, type BackendPointSource } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -1950,97 +1950,19 @@ function TranslationGizmo({ center, size, onTranslate, onDragStart, onDragEnd }:
   );
 }
 
-// Crop box with draggable handles
+// World-space crop box visualization. Purely a wireframe + faint fill — the
+// box is resized/repositioned through the numeric Center/Dimensions inputs in
+// the crop panel (which write cropBox.min/max via setCropBox), so no in-scene
+// drag handles are drawn.
 interface CropBoxProps {
   min: { x: number; y: number; z: number };
   max: { x: number; y: number; z: number };
-  onMinChange: (min: { x: number; y: number; z: number }) => void;
-  onMaxChange: (max: { x: number; y: number; z: number }) => void;
-  onDragStart: () => void;
-  onDragEnd: () => void;
   keepInside: boolean;
 }
 
-function CropBox({ min, max, onMinChange, onMaxChange, onDragStart, onDragEnd, keepInside }: CropBoxProps) {
-  const { camera, gl, size } = useThree();
-  const [activeHandle, setActiveHandle] = useState<string | null>(null);
-  const lastMouseRef = useRef<{ x: number; y: number } | null>(null);
-
+function CropBox({ min, max, keepInside }: CropBoxProps) {
   const center = useMemo(() => new THREE.Vector3((min.x + max.x) / 2, (min.y + max.y) / 2, (min.z + max.z) / 2), [min, max]);
   const dimensions = useMemo(() => new THREE.Vector3(max.x - min.x, max.y - min.y, max.z - min.z), [min, max]);
-
-  const handles = useMemo(() => [
-    { id: 'x-min', position: new THREE.Vector3(min.x, center.y, center.z), axis: 'x', isMin: true, color: '#ef4444' },
-    { id: 'x-max', position: new THREE.Vector3(max.x, center.y, center.z), axis: 'x', isMin: false, color: '#ef4444' },
-    { id: 'y-min', position: new THREE.Vector3(center.x, min.y, center.z), axis: 'y', isMin: true, color: '#22c55e' },
-    { id: 'y-max', position: new THREE.Vector3(center.x, max.y, center.z), axis: 'y', isMin: false, color: '#22c55e' },
-    { id: 'z-min', position: new THREE.Vector3(center.x, center.y, min.z), axis: 'z', isMin: true, color: '#3b82f6' },
-    { id: 'z-max', position: new THREE.Vector3(center.x, center.y, max.z), axis: 'z', isMin: false, color: '#3b82f6' },
-  ], [min, max, center]);
-
-  const handleSize = Math.min(dimensions.x, dimensions.y, dimensions.z) * 0.08;
-
-  useEffect(() => {
-    if (!activeHandle) return;
-
-    const handle = handles.find(h => h.id === activeHandle);
-    if (!handle) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!lastMouseRef.current) {
-        lastMouseRef.current = { x: e.clientX, y: e.clientY };
-        return;
-      }
-
-      const deltaX = e.clientX - lastMouseRef.current.x;
-      const deltaY = e.clientY - lastMouseRef.current.y;
-      lastMouseRef.current = { x: e.clientX, y: e.clientY };
-
-      const axisDir = new THREE.Vector3(handle.axis === 'x' ? 1 : 0, handle.axis === 'y' ? 1 : 0, handle.axis === 'z' ? 1 : 0);
-      const worldStart = handle.position.clone();
-      const worldEnd = handle.position.clone().add(axisDir);
-      const screenStart = worldStart.clone().project(camera);
-      const screenEnd = worldEnd.clone().project(camera);
-
-      const pixelStart = new THREE.Vector2((screenStart.x + 1) * size.width / 2, (-screenStart.y + 1) * size.height / 2);
-      const pixelEnd = new THREE.Vector2((screenEnd.x + 1) * size.width / 2, (-screenEnd.y + 1) * size.height / 2);
-
-      const screenAxis = pixelEnd.clone().sub(pixelStart);
-      const screenAxisLength = screenAxis.length();
-      if (screenAxisLength < 0.001) return;
-      screenAxis.normalize();
-
-      const mouseDelta = new THREE.Vector2(deltaX, deltaY);
-      const projectedDelta = mouseDelta.dot(screenAxis);
-      const worldDelta = projectedDelta / screenAxisLength;
-
-      if (handle.isMin) {
-        const newMin = { ...min };
-        newMin[handle.axis as 'x' | 'y' | 'z'] = Math.min(min[handle.axis as 'x' | 'y' | 'z'] + worldDelta, max[handle.axis as 'x' | 'y' | 'z'] - 0.1);
-        onMinChange(newMin);
-      } else {
-        const newMax = { ...max };
-        newMax[handle.axis as 'x' | 'y' | 'z'] = Math.max(max[handle.axis as 'x' | 'y' | 'z'] + worldDelta, min[handle.axis as 'x' | 'y' | 'z'] + 0.1);
-        onMaxChange(newMax);
-      }
-    };
-
-    const handleMouseUp = () => {
-      lastMouseRef.current = null;
-      setActiveHandle(null);
-      onDragEnd();
-    };
-
-    gl.domElement.style.cursor = 'grabbing';
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-
-    return () => {
-      gl.domElement.style.cursor = 'auto';
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [activeHandle, handles, min, max, camera, gl, size, onMinChange, onMaxChange, onDragEnd]);
 
   const boxColor = keepInside ? '#22c55e' : '#ef4444';
 
@@ -2054,18 +1976,6 @@ function CropBox({ min, max, onMinChange, onMaxChange, onDragStart, onDragEnd, k
         <boxGeometry args={[dimensions.x, dimensions.y, dimensions.z]} />
         <meshBasicMaterial color={boxColor} transparent opacity={0.05} side={THREE.DoubleSide} />
       </mesh>
-      {handles.map(handle => (
-        <mesh
-          key={handle.id}
-          position={handle.position}
-          onPointerDown={(e) => { e.stopPropagation(); setActiveHandle(handle.id); onDragStart(); }}
-          onPointerOver={(e) => { e.stopPropagation(); gl.domElement.style.cursor = 'grab'; }}
-          onPointerOut={(e) => { e.stopPropagation(); if (!activeHandle) gl.domElement.style.cursor = 'auto'; }}
-        >
-          <sphereGeometry args={[handleSize, 16, 16]} />
-          <meshBasicMaterial color={activeHandle === handle.id ? '#ffffff' : handle.color} transparent opacity={0.9} />
-        </mesh>
-      ))}
     </group>
   );
 }
@@ -2368,7 +2278,6 @@ export default function PointCloudViewer({
   const [pointSize, setPointSize] = useState(1);
   const [colorMode, setColorMode] = useState<ColorMode>('per-scan');
   const [selectedScalarField, setSelectedScalarField] = useState<string | undefined>(undefined);
-  const [colorDropdownCloudId, setColorDropdownCloudId] = useState<string | null>(null);
   const [colormap, setColormap] = useState<ColormapName>('viridis');
   // Custom min/max overrides keyed by `${colorMode}:${field?}`. Undefined entries
   // mean "use the data-derived range."
@@ -8644,10 +8553,6 @@ export default function PointCloudViewer({
           <CropBox
             min={cropBox.min}
             max={cropBox.max}
-            onMinChange={(min) => setCropBox(prev => prev ? { ...prev, min } : prev)}
-            onMaxChange={(max) => setCropBox(prev => prev ? { ...prev, max } : prev)}
-            onDragStart={() => setGizmoDragging(true)}
-            onDragEnd={() => setGizmoDragging(false)}
             keepInside={!cropInvert}
           />
         )}
@@ -9056,23 +8961,6 @@ export default function PointCloudViewer({
                         <EyeOff className="w-3 h-3 text-neutral-600" />
                       )}
                     </button>
-                    {scanHasData && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (colorDropdownCloudId === scan.id) {
-                            setColorDropdownCloudId(null);
-                          } else {
-                            setColorDropdownCloudId(scan.id);
-                          }
-                        }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title="Color By"
-                        id={`color-btn-${scan.id}`}
-                      >
-                        <Palette className="w-3 h-3 text-neutral-400" />
-                      </button>
-                    )}
                     {!scanHasData && (
                       <button
                         data-testid={`scan-attach-data-${scan.id}`}
@@ -9142,7 +9030,7 @@ export default function PointCloudViewer({
                       <div>
                         size: <span className="font-mono text-neutral-300">{scan.params.zenithPoints} × {scan.params.azimuthPoints}</span>
                         <span className="mx-1">·</span>
-                        sweep: <span className="font-mono text-neutral-300">{scan.params.zenithRangeDeg.toFixed(0)}° × {scan.params.azimuthRangeDeg.toFixed(0)}°</span>
+                        sweep: <span className="font-mono text-neutral-300">θ {scan.params.zenithMinDeg.toFixed(0)}–{scan.params.zenithMaxDeg.toFixed(0)}° · φ {scan.params.azimuthMinDeg.toFixed(0)}–{scan.params.azimuthMaxDeg.toFixed(0)}°</span>
                       </div>
                       <div>
                         return: <span className="text-neutral-300">{scan.params.returnType}</span>
@@ -12054,6 +11942,129 @@ export default function PointCloudViewer({
         {/* Collapsible Content */}
         {!displayPanelCollapsed && (
           <div className="px-3 pb-3 space-y-2">
+            {/* Color by — global across all clouds. Options are derived from a
+                representative cloud (first selected-visible, else first
+                visible): X/Y are hidden for octree clouds, and that cloud's
+                scalar fields are offered as additional modes. */}
+            {(() => {
+              const cloud = colorbarSourceCloud;
+              if (!cloud) return null;
+              const isOctree = !!cloud.data.octree;
+              const baseOptions = [
+                { value: 'x', label: 'X Axis' },
+                { value: 'y', label: 'Y Axis' },
+                { value: 'height', label: 'Z Axis (Height)' },
+                { value: 'intensity', label: 'Intensity' },
+                { value: 'rgb', label: 'RGB' },
+                { value: 'per-scan', label: 'Per-scan color' },
+                { value: 'single', label: 'Solid Color' },
+              ].filter(o => !isOctree || (o.value !== 'x' && o.value !== 'y'));
+              const scalarFields = cloud.data.scalarFields
+                ? Object.keys(cloud.data.scalarFields).sort()
+                : [];
+              // Encode scalar selections as `scalar:<field>` so the single
+              // <select> can drive both colorMode and selectedScalarField.
+              const selectValue =
+                colorMode === 'scalar' && selectedScalarField
+                  ? `scalar:${selectedScalarField}`
+                  : colorMode;
+              return (
+                <div>
+                  <label className="text-[10px] text-neutral-400 block mb-1">Color by</label>
+                  <select
+                    data-testid="display-color-mode"
+                    value={selectValue}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v.startsWith('scalar:')) {
+                        setColorMode('scalar');
+                        setSelectedScalarField(v.slice('scalar:'.length));
+                      } else {
+                        setColorMode(v as ColorMode);
+                      }
+                    }}
+                    className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+                  >
+                    {baseOptions.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                    {scalarFields.length > 0 && (
+                      <optgroup label="Scalar fields">
+                        {scalarFields.map(f => (
+                          <option key={f} value={`scalar:${f}`}>{f}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+
+                  {/* Colormap + range — only for continuous (scalar) modes. */}
+                  {isScalarColorMode && (
+                    <>
+                      <select
+                        data-testid="display-colormap"
+                        value={colormap}
+                        onChange={(e) => setColormap(e.target.value as ColormapName)}
+                        className="w-full mt-1 bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+                      >
+                        {COLORMAP_NAMES.map((name) => (
+                          <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>
+                        ))}
+                      </select>
+
+                      {dataRange && (
+                        <div className="mt-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-neutral-500">Range</span>
+                            <button
+                              onClick={() =>
+                                setColorRanges(prev => {
+                                  const next = { ...prev };
+                                  delete next[colorRangeKey];
+                                  return next;
+                                })
+                              }
+                              className="text-[10px] text-neutral-400 hover:text-blue-400 transition-colors"
+                              title="Reset to data range"
+                            >
+                              Reset
+                            </button>
+                          </div>
+                          <div className="flex gap-1 mt-0.5">
+                            <DebouncedNumberInput
+                              data-testid="display-range-min"
+                              step="any"
+                              value={colorRanges[colorRangeKey]?.min ?? dataRange.min}
+                              onCommit={(v) => {
+                                setColorRanges(prev => {
+                                  const curMax = prev[colorRangeKey]?.max ?? dataRange.max;
+                                  const clamped = v > curMax ? curMax : v;
+                                  return { ...prev, [colorRangeKey]: { ...prev[colorRangeKey], min: clamped } };
+                                });
+                              }}
+                              className="flex-1 w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            />
+                            <DebouncedNumberInput
+                              data-testid="display-range-max"
+                              step="any"
+                              value={colorRanges[colorRangeKey]?.max ?? dataRange.max}
+                              onCommit={(v) => {
+                                setColorRanges(prev => {
+                                  const curMin = prev[colorRangeKey]?.min ?? dataRange.min;
+                                  const clamped = v < curMin ? curMin : v;
+                                  return { ...prev, [colorRangeKey]: { ...prev[colorRangeKey], max: clamped } };
+                                });
+                              }}
+                              className="flex-1 w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Background */}
             <div>
               <label className="text-[10px] text-neutral-400 block mb-1">Background</label>
@@ -12407,7 +12418,7 @@ export default function PointCloudViewer({
                 params: h.params,
               };
               setBulkImportProgress({
-                current: i,
+                current: i + 1,
                 total: heliosScans.length,
                 label: h.filename
                   ? `Loading ${h.filename.split(/[\\/]/).pop()}`
@@ -12535,188 +12546,6 @@ export default function PointCloudViewer({
         </div>
       )}
 
-      {/* Color By Dropdown Overlay - rendered at root level for proper z-indexing */}
-      {colorDropdownCloudId && (() => {
-        const cloud = clouds.find(c => c.id === colorDropdownCloudId);
-        if (!cloud) return null;
-        const btn = document.getElementById(`color-btn-${colorDropdownCloudId}`);
-        if (!btn) return null;
-        const rect = btn.getBoundingClientRect();
-        return (
-          <>
-            {/* Click-outside backdrop */}
-            <div
-              className="fixed inset-0 z-[9998]"
-              onClick={() => setColorDropdownCloudId(null)}
-            />
-            {/* Dropdown menu */}
-            <div
-              className="fixed bg-neutral-800 border border-neutral-600 rounded-lg shadow-xl z-[9999] min-w-[220px] py-1 max-h-[560px] overflow-y-auto"
-              style={{
-                top: rect.bottom + 4,
-                left: Math.max(8, rect.right - 220),
-              }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="px-3 py-1.5 text-[10px] text-neutral-500 font-medium uppercase tracking-wide border-b border-neutral-700">
-                Color By
-              </div>
-              {(() => {
-                const isOctree = !!cloud.data.octree;
-                // Octree clouds don't have an axis-scalar shader for X
-                // or Y; potree-core's gradient-by-axis only knows Z
-                // (getElevation reads world.z). Hide X / Y for those
-                // clouds so the user doesn't think the menu is broken
-                // — switching to X or Y on the same cloud would just
-                // re-render the Z gradient.
-                const base = [
-                  { value: 'x', label: 'X Axis' },
-                  { value: 'y', label: 'Y Axis' },
-                  { value: 'height', label: 'Z Axis (Height)' },
-                  { value: 'intensity', label: 'Intensity' },
-                  { value: 'rgb', label: 'RGB' },
-                  { value: 'per-scan', label: 'Per-scan color' },
-                  { value: 'single', label: 'Solid Color' },
-                ];
-                return isOctree
-                  ? base.filter(o => o.value !== 'x' && o.value !== 'y')
-                  : base;
-              })().map((option) => (
-                <button
-                  key={option.value}
-                  onClick={() => {
-                    setColorMode(option.value as ColorMode);
-                    setColorDropdownCloudId(null);
-                  }}
-                  className={`w-full px-3 py-1.5 text-left text-xs hover:bg-neutral-700 transition-colors ${
-                    colorMode === option.value ? 'text-blue-400 bg-neutral-700/50' : 'text-neutral-300'
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
-              {/* Scalar fields section */}
-              {cloud.data.scalarFields && Object.keys(cloud.data.scalarFields).length > 0 && (
-                <div className="border-t border-neutral-700 mt-1 pt-1">
-                  <div className="px-3 py-1 text-[10px] text-neutral-500 font-medium">
-                    Scalar Fields
-                  </div>
-                  {Object.keys(cloud.data.scalarFields).sort().map((fieldName) => (
-                    <button
-                      key={fieldName}
-                      onClick={() => {
-                        setColorMode('scalar');
-                        setSelectedScalarField(fieldName);
-                        setColorDropdownCloudId(null);
-                      }}
-                      className={`w-full px-3 py-1.5 text-left text-xs hover:bg-neutral-700 transition-colors ${
-                        colorMode === 'scalar' && selectedScalarField === fieldName
-                          ? 'text-blue-400 bg-neutral-700/50'
-                          : 'text-neutral-300'
-                      }`}
-                    >
-                      {fieldName}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Colormap + Range — only meaningful for continuous modes */}
-              {isScalarColorMode && (
-                <>
-                  <div className="border-t border-neutral-700 mt-1 pt-1">
-                    <div className="px-3 py-1 text-[10px] text-neutral-500 font-medium uppercase tracking-wide">
-                      Colormap
-                    </div>
-                    {COLORMAP_NAMES.map((name) => (
-                      <button
-                        key={name}
-                        onClick={() => setColormap(name)}
-                        className={`w-full px-3 py-1.5 flex items-center gap-2 text-left text-xs hover:bg-neutral-700 transition-colors ${
-                          colormap === name ? 'text-blue-400 bg-neutral-700/50' : 'text-neutral-300'
-                        }`}
-                      >
-                        <span
-                          className="inline-block h-3 w-12 rounded-sm border border-neutral-600 shrink-0"
-                          style={{ background: colormapToCssGradient(name, 16, 'to right') }}
-                        />
-                        <span>{COLORMAP_LABELS[name]}</span>
-                      </button>
-                    ))}
-                  </div>
-
-                  {dataRange && (
-                    <div className="border-t border-neutral-700 mt-1 pt-1 px-3 pb-2">
-                      <div className="flex items-center justify-between py-1">
-                        <span className="text-[10px] text-neutral-500 font-medium uppercase tracking-wide">
-                          Range
-                        </span>
-                        <button
-                          onClick={() =>
-                            setColorRanges(prev => {
-                              const next = { ...prev };
-                              delete next[colorRangeKey];
-                              return next;
-                            })
-                          }
-                          className="text-[10px] text-neutral-400 hover:text-blue-400 transition-colors"
-                          title="Reset to data range"
-                        >
-                          Reset
-                        </button>
-                      </div>
-                      <div className="flex gap-2 mt-1">
-                        <label className="flex-1">
-                          <span className="block text-[10px] text-neutral-500 mb-0.5">Min</span>
-                          <DebouncedNumberInput
-                            step="any"
-                            value={colorRanges[colorRangeKey]?.min ?? dataRange.min}
-                            onCommit={(v) => {
-                              setColorRanges(prev => {
-                                // Clamp so min stays ≤ existing max — without
-                                // this the user can flip the range and the
-                                // colormap renders inverted nonsense.
-                                const curMax = prev[colorRangeKey]?.max ?? dataRange.max;
-                                const clamped = v > curMax ? curMax : v;
-                                return {
-                                  ...prev,
-                                  [colorRangeKey]: { ...prev[colorRangeKey], min: clamped },
-                                };
-                              });
-                            }}
-                            className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                          />
-                        </label>
-                        <label className="flex-1">
-                          <span className="block text-[10px] text-neutral-500 mb-0.5">Max</span>
-                          <DebouncedNumberInput
-                            step="any"
-                            value={colorRanges[colorRangeKey]?.max ?? dataRange.max}
-                            onCommit={(v) => {
-                              setColorRanges(prev => {
-                                const curMin = prev[colorRangeKey]?.min ?? dataRange.min;
-                                const clamped = v < curMin ? curMin : v;
-                                return {
-                                  ...prev,
-                                  [colorRangeKey]: { ...prev[colorRangeKey], max: clamped },
-                                };
-                              });
-                            }}
-                            className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                          />
-                        </label>
-                      </div>
-                      <p className="text-[10px] text-neutral-500 mt-1">
-                        Data: {dataRange.min.toLocaleString(undefined, { maximumFractionDigits: 4 })} – {dataRange.max.toLocaleString(undefined, { maximumFractionDigits: 4 })}
-                      </p>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </>
-        );
-      })()}
     </div>
   );
 }

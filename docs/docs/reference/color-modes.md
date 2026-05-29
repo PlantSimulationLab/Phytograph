@@ -1,7 +1,8 @@
 # Color modes
 
-Right-click any cloud, mesh, or skeleton entry in the Scene panel — or
-use its inline **Color By** dropdown — to change how it's drawn.
+Point-cloud color mode is **global** — it applies to every loaded cloud
+at once. Change it from the **Color by** dropdown in the Display panel
+(lower-right corner of the viewer).
 
 ## Per-cloud color modes
 

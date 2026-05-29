@@ -30,8 +30,10 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
     await page.getByTestId('scan-origin-z').fill('0.75');
     await page.getByTestId('scan-zenith-points').fill('50');
     await page.getByTestId('scan-azimuth-points').fill('180');
-    await page.getByTestId('scan-zenith-range').fill('120');
-    await page.getByTestId('scan-azimuth-range').fill('270');
+    await page.getByTestId('scan-zenith-min').fill('30');
+    await page.getByTestId('scan-zenith-max').fill('150');
+    await page.getByTestId('scan-azimuth-min').fill('45');
+    await page.getByTestId('scan-azimuth-max').fill('315');
 
     await page.getByTestId('scan-return-multi').click();
     const beamFields = page.getByTestId('scan-beam-fields');
@@ -140,15 +142,19 @@ test('bulk-import scans from a Helios XML file (filenames unresolved)', async ()
     }
 
     // Open one of the imported scans for edit and verify that the parsed
-    // angular ranges round-trip into the form. Scan 0 has thetaMax=150°
-    // and no phi bounds → 360° azimuth sweep.
+    // angular bounds round-trip into the form. Scan 0 has thetaMax=150°
+    // (thetaMin defaults to 0) and no phi bounds → 0–360° azimuth sweep.
     const firstId = await rows.nth(0).getAttribute('data-scan-id');
     await page.getByTestId(`scan-edit-${firstId}`).click();
     await expect(popup).toBeVisible();
-    const zenithRange = await page.getByTestId('scan-zenith-range').inputValue();
-    expect(Math.round(parseFloat(zenithRange))).toBe(150);
-    const azimuthRange = await page.getByTestId('scan-azimuth-range').inputValue();
-    expect(Math.round(parseFloat(azimuthRange))).toBe(360);
+    const zenithMin = await page.getByTestId('scan-zenith-min').inputValue();
+    expect(Math.round(parseFloat(zenithMin))).toBe(0);
+    const zenithMax = await page.getByTestId('scan-zenith-max').inputValue();
+    expect(Math.round(parseFloat(zenithMax))).toBe(150);
+    const azimuthMin = await page.getByTestId('scan-azimuth-min').inputValue();
+    expect(Math.round(parseFloat(azimuthMin))).toBe(0);
+    const azimuthMax = await page.getByTestId('scan-azimuth-max').inputValue();
+    expect(Math.round(parseFloat(azimuthMax))).toBe(360);
     // The XML import button is hidden in edit mode (showBulkImport is only
     // true when creating a brand-new scan).
     await expect(page.getByTestId('scan-import-xml')).toHaveCount(0);

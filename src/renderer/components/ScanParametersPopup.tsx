@@ -136,6 +136,24 @@ export function ScanParametersPopup({
     setParams(p => ({ ...p, [key]: Number.isFinite(v) ? Math.max(min, v) : min }));
   };
 
+  // Angular sweep min/max are a coupled pair: the min can't exceed its
+  // matching max, and vice-versa. Clamp on edit so the sweep is always a
+  // valid (min ≤ max) span and the backend never receives an inverted range.
+  const setAngle = (
+    key: 'zenithMinDeg' | 'zenithMaxDeg' | 'azimuthMinDeg' | 'azimuthMaxDeg',
+    lo: number,
+    hi: number,
+  ) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = parseFloat(e.target.value);
+    setParams(p => {
+      const v = Math.min(hi, Math.max(lo, Number.isFinite(raw) ? raw : lo));
+      if (key === 'zenithMinDeg') return { ...p, zenithMinDeg: Math.min(v, p.zenithMaxDeg) };
+      if (key === 'zenithMaxDeg') return { ...p, zenithMaxDeg: Math.max(v, p.zenithMinDeg) };
+      if (key === 'azimuthMinDeg') return { ...p, azimuthMinDeg: Math.min(v, p.azimuthMaxDeg) };
+      return { ...p, azimuthMaxDeg: Math.max(v, p.azimuthMinDeg) };
+    });
+  };
+
   const setOrigin = (axis: 'x' | 'y' | 'z') => (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = parseFloat(e.target.value);
     setParams(p => ({ ...p, origin: { ...p.origin, [axis]: Number.isFinite(v) ? v : 0 } }));
@@ -257,32 +275,56 @@ export function ScanParametersPopup({
 
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Angular sweep (degrees)</label>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-2">
               <div>
-                <label className="block text-xs text-neutral-500 mb-1">Zenith range</label>
-                <input
-                  data-testid="scan-zenith-range"
-                  type="number"
-                  min={0}
-                  max={180}
-                  step="any"
-                  value={params.zenithRangeDeg}
-                  onChange={setNum('zenithRangeDeg')}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                />
+                <label className="block text-xs text-neutral-500 mb-1">Zenith (θ) min / max</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    data-testid="scan-zenith-min"
+                    type="number"
+                    min={0}
+                    max={180}
+                    step="any"
+                    value={params.zenithMinDeg}
+                    onChange={setAngle('zenithMinDeg', 0, 180)}
+                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                  />
+                  <input
+                    data-testid="scan-zenith-max"
+                    type="number"
+                    min={0}
+                    max={180}
+                    step="any"
+                    value={params.zenithMaxDeg}
+                    onChange={setAngle('zenithMaxDeg', 0, 180)}
+                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                  />
+                </div>
               </div>
               <div>
-                <label className="block text-xs text-neutral-500 mb-1">Azimuth range</label>
-                <input
-                  data-testid="scan-azimuth-range"
-                  type="number"
-                  min={0}
-                  max={360}
-                  step="any"
-                  value={params.azimuthRangeDeg}
-                  onChange={setNum('azimuthRangeDeg')}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                />
+                <label className="block text-xs text-neutral-500 mb-1">Azimuth (φ) min / max</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    data-testid="scan-azimuth-min"
+                    type="number"
+                    min={0}
+                    max={360}
+                    step="any"
+                    value={params.azimuthMinDeg}
+                    onChange={setAngle('azimuthMinDeg', 0, 360)}
+                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                  />
+                  <input
+                    data-testid="scan-azimuth-max"
+                    type="number"
+                    min={0}
+                    max={360}
+                    step="any"
+                    value={params.azimuthMaxDeg}
+                    onChange={setAngle('azimuthMaxDeg', 0, 360)}
+                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                  />
+                </div>
               </div>
             </div>
           </div>

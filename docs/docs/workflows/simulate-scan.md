@@ -32,11 +32,13 @@ You need geometry in the scene to scan: typically a generated
     20,000 × 30,000 rays. For preview work, 500 × 1000 is fast and
     produces a usable cloud.
 
-5. **Angular sweep**:
-    - **Zenith range** — vertical FOV in degrees (typically 30–130
-      from straight up)
-    - **Azimuth range** — horizontal FOV (typically 0–360 for full
-      pan)
+5. **Angular sweep** — set the min and max angular positions of the
+   sweep; the range is the difference between them, so asymmetric
+   sweeps are supported:
+    - **Zenith (θ) min / max** — vertical bounds in degrees (e.g.
+      30–130 from straight up; 0–180 for full vertical coverage)
+    - **Azimuth (φ) min / max** — horizontal bounds (e.g. 0–360 for a
+      full pan)
 
 6. **Return type**:
 

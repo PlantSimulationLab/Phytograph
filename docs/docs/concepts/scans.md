@@ -47,8 +47,8 @@ per-pulse directions from `(point − origin)`.
 ## What's in the parameters
 
 - **Origin** — (x, y, z) position of the scanner head in metres
-- **Zenith range / points** — vertical sweep angle and number of rays
-- **Azimuth range / points** — horizontal sweep angle and number of rays
+- **Zenith (θ) min / max, points** — vertical sweep bounds (degrees) and number of rays
+- **Azimuth (φ) min / max, points** — horizontal sweep bounds (degrees) and number of rays
 - **Return type** — single (one return per ray) or multi (partial
   returns through foliage)
 - **Beam properties** (multi-return only) — exit diameter, divergence

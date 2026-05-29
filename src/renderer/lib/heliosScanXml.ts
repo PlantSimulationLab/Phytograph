@@ -86,15 +86,12 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
   // azimuth respectively. Maps directly onto our zenith/azimuth point counts.
   const [zenithPoints, azimuthPoints] = size;
 
+  // Theta/phi min/max map directly onto our zenith/azimuth sweep boundaries —
+  // stored verbatim so asymmetric sweeps survive a round-trip.
   const thetaMinDeg = parseNumberTag(el, 'thetaMin') ?? DEFAULT_THETA_MIN_DEG;
   const thetaMaxDeg = parseNumberTag(el, 'thetaMax') ?? DEFAULT_THETA_MAX_DEG;
   const phiMinDeg = parseNumberTag(el, 'phiMin') ?? DEFAULT_PHI_MIN_DEG;
   const phiMaxDeg = parseNumberTag(el, 'phiMax') ?? DEFAULT_PHI_MAX_DEG;
-
-  // Clamp negative spans (from min > max) to zero rather than throwing —
-  // Helios itself tolerates this and we'd rather import than refuse.
-  const zenithRangeDeg = Math.max(0, thetaMaxDeg - thetaMinDeg);
-  const azimuthRangeDeg = Math.max(0, phiMaxDeg - phiMinDeg);
 
   // <exitDiameter> / <beamDivergence> present → treat as multi-return.
   // beamDivergence in the Helios spec is radians; pyhelios/our UI use mrad.
@@ -109,8 +106,10 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
     origin: { x: origin[0], y: origin[1], z: origin[2] },
     zenithPoints: Math.max(1, zenithPoints),
     azimuthPoints: Math.max(1, azimuthPoints),
-    zenithRangeDeg,
-    azimuthRangeDeg,
+    zenithMinDeg: thetaMinDeg,
+    zenithMaxDeg: thetaMaxDeg,
+    azimuthMinDeg: phiMinDeg,
+    azimuthMaxDeg: phiMaxDeg,
     returnType: isMulti ? 'multi' : 'single',
     beamExitDiameterM: exitDiameterM ?? DEFAULT_SCAN_PARAMETERS.beamExitDiameterM,
     beamDivergenceMrad: beamDivergenceRad !== null

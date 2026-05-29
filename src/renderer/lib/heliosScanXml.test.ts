@@ -17,17 +17,22 @@ describe('parseHeliosScanXml', () => {
     expect(s0.params.origin).toEqual({ x: -2, y: 0, z: 0.5 });
     expect(s0.params.zenithPoints).toBe(100);
     expect(s0.params.azimuthPoints).toBe(200);
-    expect(s0.params.zenithRangeDeg).toBeCloseTo(150, 3);
-    // No phiMin/phiMax → defaults to 0..2π → 360°.
-    expect(s0.params.azimuthRangeDeg).toBeCloseTo(360, 3);
+    // theta 0..150° stored as min/max verbatim (thetaMin defaults to 0).
+    expect(s0.params.zenithMinDeg).toBeCloseTo(0, 3);
+    expect(s0.params.zenithMaxDeg).toBeCloseTo(150, 3);
+    // phi 0..360°.
+    expect(s0.params.azimuthMinDeg).toBeCloseTo(0, 3);
+    expect(s0.params.azimuthMaxDeg).toBeCloseTo(360, 3);
     expect(s0.params.returnType).toBe('single');
     expect(s0.filename).toBe('../data/sphere_scan0.xyz');
 
-    // Second scan: no thetaMin/thetaMax → defaults to 0..π → 180°.
+    // Second scan: no thetaMin/thetaMax → defaults to 0..180°.
     const s1 = scans[1];
     expect(s1.params.origin).toEqual({ x: 0, y: -2, z: 0.5 });
-    expect(s1.params.zenithRangeDeg).toBeCloseTo(180, 3);
-    expect(s1.params.azimuthRangeDeg).toBeCloseTo(360, 3);
+    expect(s1.params.zenithMinDeg).toBeCloseTo(0, 3);
+    expect(s1.params.zenithMaxDeg).toBeCloseTo(180, 3);
+    expect(s1.params.azimuthMinDeg).toBeCloseTo(0, 3);
+    expect(s1.params.azimuthMaxDeg).toBeCloseTo(360, 3);
     expect(s1.filename).toBe('../data/sphere_scan1.xyz');
     expect(s1.asciiFormat).toBe('row column x y z r g b reflectance');
 
@@ -130,12 +135,14 @@ describe('parseHeliosScanXml', () => {
       </scan>
     `;
     const { scans } = parseHeliosScanXml(xml);
-    expect(scans[0].params.zenithRangeDeg).toBeCloseTo(150, 6);
+    expect(scans[0].params.zenithMinDeg).toBeCloseTo(0, 6);
+    expect(scans[0].params.zenithMaxDeg).toBeCloseTo(150, 6);
     // phi defaults to 0..360°.
-    expect(scans[0].params.azimuthRangeDeg).toBeCloseTo(360, 6);
+    expect(scans[0].params.azimuthMinDeg).toBeCloseTo(0, 6);
+    expect(scans[0].params.azimuthMaxDeg).toBeCloseTo(360, 6);
   });
 
-  it('clamps inverted theta/phi ranges to zero rather than throwing', () => {
+  it('preserves asymmetric (and even inverted) theta bounds verbatim', () => {
     const xml = `
       <scan>
         <origin>0 0 0</origin>
@@ -145,6 +152,7 @@ describe('parseHeliosScanXml', () => {
       </scan>
     `;
     const { scans } = parseHeliosScanXml(xml);
-    expect(scans[0].params.zenithRangeDeg).toBe(0);
+    expect(scans[0].params.zenithMinDeg).toBe(180);
+    expect(scans[0].params.zenithMaxDeg).toBe(0);
   });
 });

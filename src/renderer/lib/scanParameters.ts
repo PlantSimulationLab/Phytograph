@@ -14,9 +14,13 @@ export interface ScanParameters {
   // Number of sample rays in each angular direction.
   zenithPoints: number;
   azimuthPoints: number;
-  // Angular sweep, in degrees, centered around the scanner's local axis.
-  zenithRangeDeg: number;
-  azimuthRangeDeg: number;
+  // Angular sweep boundaries, in degrees. Min/max positions define the sweep
+  // explicitly (the range is max - min), allowing asymmetric sweeps. These map
+  // to Helios theta_min/theta_max (zenith) and phi_min/phi_max (azimuth).
+  zenithMinDeg: number;
+  zenithMaxDeg: number;
+  azimuthMinDeg: number;
+  azimuthMaxDeg: number;
   returnType: ReturnType;
   // Multi-return only. Beam exit diameter in meters and divergence in
   // milliradians (the units pyhelios uses).
@@ -28,8 +32,10 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   origin: { x: 0, y: 0, z: 0 },
   zenithPoints: 100,
   azimuthPoints: 360,
-  zenithRangeDeg: 180,
-  azimuthRangeDeg: 360,
+  zenithMinDeg: 0,
+  zenithMaxDeg: 180,
+  azimuthMinDeg: 0,
+  azimuthMaxDeg: 360,
   returnType: 'single',
   beamExitDiameterM: 0.01,
   beamDivergenceMrad: 0.5,

@@ -1,10 +1,10 @@
 import { Loader2 } from 'lucide-react';
 
 export interface BulkImportProgressState {
-  // 0-indexed count of scans completed so far. Renders as `current/total` in
-  // the modal and as a filled bar at `current/total` width. While the
-  // currently-pending scan is parsing, this stays at the index of *that*
-  // scan (so the label below the bar matches the file we're waiting on).
+  // 1-indexed position of the scan currently being processed (e.g. `1/2`
+  // while the first of two scans is parsing). Renders as `current/total` in
+  // the modal and as a filled bar at `current/total` width. The label below
+  // the bar names that same in-flight scan.
   current: number;
   total: number;
   // Filename or scan label currently being processed. Shown below the bar.

@@ -47,19 +47,18 @@ and each scan gets its own cropped result — identities are preserved.
 
 ### Box mode
 
-Three ways to shape the box:
+Two ways to shape the box:
 
 - **Type dimensions / center** in the panel for an exact axis-aligned box.
-- **Drag the six face handles** on the box itself.
 - **Click "Draw box in viewport"** then click two opposite corners on the
   ground plane. The box's Z extent auto-spans the data; refine with the
-  handles afterwards.
+  dimension / center fields afterwards.
 
 !!! tip "Cropping out the ground"
-    For TLS scans of a single plant, drag the box's bottom face up to
-    the level of the lowest branch. With **Keep Inside** selected, this
-    removes the ground in one click — much faster than filtering by
-    height.
+    For TLS scans of a single plant, raise the box's lower Z bound to
+    the level of the lowest branch (adjust the Z center / dimension
+    fields). With **Keep Inside** selected, this removes the ground in
+    one step — much faster than filtering by height.
 
 ### Polygon mode
 
