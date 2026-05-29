@@ -121,6 +121,12 @@ test('multi-scan crop applies one world-space box across two selected scans', as
     // Panel closes after apply.
     await expect(panel).toHaveCount(0, { timeout: 10_000 });
 
+    // A "Cropping…" indicator surfaces while the crop is processed, so the
+    // user isn't left wondering whether it failed. It clears once done.
+    // (Tiny fixtures crop near-instantly, so we only assert it disappears —
+    // racing to catch the transient visible state would be flaky here.)
+    await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
+
     // ── Assertions: both scans are cropped to their exact expected count ──
     // Each cylinder has 5 z-layers of 12 pts each. The crop keeps z=0.375
     // and z=0.75 only → 2 × 12 = 24 pts per scan. The X-widening step is a

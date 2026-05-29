@@ -37,8 +37,10 @@ lasso — and the same region applies to every scan you have selected.
 2. In the panel choose **Box** or **Polygon** at the top, and **Keep
    Inside** (default) or **Keep Outside** below it.
 3. Shape the region (see below).
-4. Click **Apply** at the bottom of the panel. Click the **×** in the
-   panel header to dismiss without applying.
+4. Click **Apply** at the bottom of the panel. A **Cropping…** indicator
+   appears while the crop is processed, and the removed points stay
+   hidden the whole time. Click the **×** in the panel header to dismiss
+   without applying.
 
 When more than one scan is selected, the panel shows "Applies to N scans"
 and each scan gets its own cropped result — identities are preserved.
@@ -85,10 +87,11 @@ need them back, re-import the original file.
     filtered source file. Typical cost is ~3 M points/sec on M-series
     Macs — a 13 M-point Helios scan takes ~5 s, a 30 M-point scan ~12 s.
     The render itself stays interactive throughout: the panel closes
-    immediately on click and the cropped cloud streams in when the new
-    octree is ready. Subsequent crops with identical parameters are
-    instant (cached). LAS/LAZ and PLY/PCD scans use the older flat-array
-    path and apply synchronously.
+    immediately on click, a **Cropping…** indicator shows the work is
+    running, the removed points stay hidden the whole time, and the
+    cropped cloud streams in when the new octree is ready. Subsequent
+    crops with identical parameters are instant (cached). LAS/LAZ and
+    PLY/PCD scans use the older flat-array path and apply synchronously.
 
 ## Erase
 

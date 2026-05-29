@@ -2494,6 +2494,10 @@ export default function PointCloudViewer({
   const [showHeliosPopup, setShowHeliosPopup] = useState(false);
   const [isHeliosRunning, setIsHeliosRunning] = useState(false);
   const heliosAbortRef = useRef<AbortController | null>(null);
+  // True while handleApplyCrop's backend round-trip is in flight. Keeps the
+  // crop preview (hidden to-be-cropped points) alive after editMode flips to
+  // 'none' and drives the "Cropping…" badge.
+  const [isApplyingCrop, setIsApplyingCrop] = useState(false);
   // Mesh sampling state
   const [isSamplingMesh, setIsSamplingMesh] = useState(false);
   const [showSamplingPopup, setShowSamplingPopup] = useState(false);
@@ -3071,18 +3075,35 @@ export default function PointCloudViewer({
 
   const handleApplyCrop = useCallback(() => {
     if (editMode !== 'crop' || selectedIds.size === 0) return;
+    if (isApplyingCrop) return;
     const predicate = buildCropPredicate();
     if (!predicate) return;
 
     // Capture the inputs the apply needs BEFORE we tear down the crop UI.
     // After flushSync(setEditMode('none')) below, cropBox/cropInvert in
     // closure are still the values we want (closures don't re-bind on
-    // re-render), but the live preview's index buffer + setupRef
-    // Uint32Array are dropped — that frees ~hundreds of MB of GPU and
-    // JS memory before we start allocating for the apply. Without this
-    // teardown, the live preview indices coexist with the apply's new
-    // typed arrays and push V8 over its 4 GB old-space ceiling on
-    // multi-cloud, multi-million-point clouds.
+    // re-render).
+    //
+    // isApplyingCrop is set first so the crop preview survives the editMode
+    // flip: the octree clipBox and the flat-cloud index filter are gated on
+    // (editMode === 'crop' || isApplyingCrop), so flipping editMode to 'none'
+    // here hides the draggable box handles + the crop panel while the
+    // to-be-cropped points stay HIDDEN until the new cropped data is live.
+    // That's the whole point — the backend round-trip can take 15-20 s
+    // (octree re-conversion), and flashing the cropped points back into
+    // view during that window made users think the crop had failed.
+    //
+    // Memory tradeoff: keeping the preview alive re-couples the flat-cloud
+    // index buffer with the apply's new typed arrays (the original teardown
+    // dropped the index buffer first to stay under V8's 4 GB old-space
+    // ceiling). This only matters for the in-renderer fallback path
+    // (stitched / erased / polygon clouds) on very large flat scans — the
+    // common slow case is octree clouds, whose preview is a GPU clip box
+    // with no large JS buffer, so keeping it alive is free. The flat
+    // backend path (cropPointCloudByPath) allocates in Python, not V8. If a
+    // large in-renderer crop is ever observed to OOM, release that cloud's
+    // preview right before its two-pass allocation below.
+    setIsApplyingCrop(true);
     flushSync(() => {
       setEditMode('none');
     });
@@ -3127,6 +3148,11 @@ export default function PointCloudViewer({
         setDeleteConfirm({ type: 'cloud', id: emptied[0].id, name: emptied[0].name });
       }
 
+      // Clear the apply flag together with the crop region: the preview
+      // (hidden points) stays alive right up until this point — after the new
+      // cropped cloud data has already been swapped in via onUpdateCloud — so
+      // the points never flash back into view.
+      setIsApplyingCrop(false);
       setCropBox(null);
       setCropPolygon(null);
       setPolygonInProgress([]);
@@ -3397,7 +3423,7 @@ export default function PointCloudViewer({
       setTimeout(next, 0);
     };
     void next();
-  }, [editMode, selectedIds, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon]);
+  }, [editMode, selectedIds, isApplyingCrop, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon]);
 
   // Apply erased points permanently - removes erased points and bakes in translation
   const handleApplyErase = useCallback(() => {
@@ -8225,7 +8251,12 @@ export default function PointCloudViewer({
           if (!cloud.visible) return null;
           const editState = getEditState(cloud.id);
           const isSelected = selectedIds.has(cloud.id);
-          const showCropPreview = isSelected && editMode === 'crop';
+          // Keep the crop preview (hidden to-be-cropped points) alive while
+          // the apply's backend round-trip is in flight. handleApplyCrop
+          // flips editMode to 'none' immediately (to hide the box handles +
+          // crop panel) but sets isApplyingCrop, so the clip box / index
+          // filter keep hiding the cropped points until the new data is live.
+          const showCropPreview = isSelected && (editMode === 'crop' || isApplyingCrop);
           const hasResamplePreview = resamplePreview?.cloudId === cloud.id;
 
           // Resample preview replaces the source dataset entirely; crop
@@ -8724,6 +8755,20 @@ export default function PointCloudViewer({
           </svg>
         );
       })()}
+
+      {/* Crop apply status indicator. Mirrors the Helios pill but without a
+          cancel button — the crop apply isn't cancelable today. Shown while
+          the backend crop round-trip runs (octree re-conversion is ~15-20s);
+          the to-be-cropped points stay hidden via isApplyingCrop. */}
+      {isApplyingCrop && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/80 backdrop-blur-sm rounded-full border border-neutral-700/50 z-20">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+          </span>
+          <span className="text-[11px] text-neutral-300">Cropping…</span>
+        </div>
+      )}
 
       {/* Helios triangulation status indicator */}
       {isHeliosRunning && (
