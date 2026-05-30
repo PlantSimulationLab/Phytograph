@@ -54,6 +54,17 @@ is defined.
 The classifier is the `cloth-simulation-filter` package (`import CSF`), a
 SWIG C-extension bundled via `collectAll` in `scripts/build-backend.mjs`.
 
+## Tree segmentation
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| POST | `/api/segment/trees` | `main.py` | Segment individual trees with **TreeIso** (cut-pursuit graph method, CPU-only). Takes inline `points` or a `source` descriptor (full resolution; labels align 1:1) and optional `seed_points` (trunk seeds for human-in-the-loop — each seed yields one tree). Returns per-point `labels` (`0` = unassigned, `1..N` = trees), `num_trees`, and a `ground_warning` flag |
+| POST | `/api/segment/trees/apply` | `main.py` | Run TreeIso and re-convert the source XYZ into a new Potree 2.0 octree carrying a `tree_instance` extra-dimension attribute. With `keep_instance` (1..N) it writes only that tree's points — a split sub-cloud. Returns the same octree-ref shape as `convert_to_octree` |
+
+TreeIso is vendored (MIT) under `backend-api/vendor/treeiso/`; its graph-cut
+backend `cut_pursuit_py` is bundled via `collectAll` in
+`scripts/build-backend.mjs`. No GPU or PyTorch required.
+
 ## Plant models & sessions
 
 | Method | Path | Source | Purpose |

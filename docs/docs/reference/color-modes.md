@@ -52,6 +52,12 @@ than a continuous measurement. The **Ground Class** attribute produced by
 non-ground in green) instead of a continuous colormap and colorbar, so each
 class reads as a distinct category rather than a position along a ramp.
 
+The **`tree_instance`** attribute produced by
+[Segment individual trees](../workflows/segment-trees.md) (`0` = unassigned,
+`1..N` = individual trees) is also categorical, but its class count isn't fixed:
+each tree's colour is generated on the fly (a perceptually-spaced hue rotation)
+and the legend lists Tree 1, Tree 2, …, with unassigned points in grey.
+
 ## Per-mesh color modes
 
 | Mode | What it shows | When to use |
