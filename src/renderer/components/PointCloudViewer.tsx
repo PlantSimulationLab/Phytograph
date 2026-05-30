@@ -6773,6 +6773,16 @@ export default function PointCloudViewer({
           <svg
             data-testid="crop-polygon-overlay"
             className="absolute inset-0 z-10"
+            // An <svg> has an intrinsic 300×150 default size; `inset-0`
+            // only positions its edges, it does NOT stretch the element.
+            // Without an explicit 100%×100% the overlay collapses to
+            // 300×150 in the top-left while the three.js canvas fills the
+            // full container — so lasso clicks (recorded in the SVG's
+            // pixel space) and the crop projection (computed in the
+            // canvas' pixel space) use different coordinate systems and
+            // the polygon encloses the wrong region (usually nothing).
+            width="100%"
+            height="100%"
             style={{
               pointerEvents: isDrawing ? 'auto' : 'none',
               cursor: isDrawing ? 'crosshair' : 'default',
@@ -6969,6 +6979,7 @@ export default function PointCloudViewer({
                     data-point-count={scanHasData ? effectivePointCount : 0}
                     data-has-data={scanHasData ? 'true' : 'false'}
                     data-has-params={scanHasParams ? 'true' : 'false'}
+                    data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
                     data-selected={isSelected ? 'true' : 'false'}
                     onClick={(e) => {
                       onToggleSelection(scan.id, e.shiftKey || e.ctrlKey || e.metaKey);
@@ -7031,6 +7042,14 @@ export default function PointCloudViewer({
                           });
                           if (!picked) return;
                           const path = Array.isArray(picked) ? picked[0] : picked;
+                          // Show the progress modal while the backend parses —
+                          // a large scan can take 15-30s and otherwise the UI
+                          // would sit idle until the points appear.
+                          setBulkImportProgress({
+                            current: 1,
+                            total: 1,
+                            label: `Loading ${path.split(/[\\/]/).pop()}`,
+                          });
                           try {
                             const data = await parsePointCloudFromPath(path);
                             onUpdateScanData(scan.id, data);
@@ -7038,6 +7057,8 @@ export default function PointCloudViewer({
                           } catch (err) {
                             const msg = err instanceof Error ? err.message : 'Failed to read file';
                             showToast({ title: `Could not attach point cloud: ${msg}`, type: 'error' });
+                          } finally {
+                            setBulkImportProgress(null);
                           }
                         }}
                         className="p-1 hover:bg-neutral-600 rounded"
@@ -7863,7 +7884,11 @@ export default function PointCloudViewer({
             data-crop-mode={cropMode}
             data-crop-min={cropBoxMinStr}
             data-crop-max={cropBoxMaxStr}
-            className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
+            // z-20 keeps the panel above the polygon lasso overlay (z-10),
+            // which now fills the whole viewport while drawing — without
+            // this the transparent SVG would swallow clicks on the panel's
+            // controls (shape toggle, Keep In/Out, Apply, dim inputs).
+            className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56 z-20"
           >
             <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
               <span className="flex items-center gap-2">

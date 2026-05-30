@@ -31,10 +31,15 @@ Three entry points. All three accept the same set of formats — see
 
 ### Importing several files at once
 
-Drop multiple files together — Phytograph imports them in order and
-assigns each a distinct color. Each becomes its own entry in the Scene
-panel; nothing is merged automatically. If you want to merge clouds, use
+Drop multiple files together, or select several at once from the
+**Import** menu — Phytograph imports them in order and assigns each a
+distinct color. Each becomes its own entry in the Scene panel; nothing is
+merged automatically. If you want to merge clouds, use
 [Stitch](register-compare.md#stitch) after import.
+
+While a large import is in progress a modal shows the file currently being
+read and overall progress, so you know the app is working — reading a
+multi-GB scan from disk can take 30 seconds or more.
 
 ### Importing ASCII clouds with custom columns
 

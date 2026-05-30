@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
 import { BackendSplash } from "./components/BackendSplash";
+import { BulkImportProgress, type BulkImportProgressState } from "./components/BulkImportProgress";
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
 import type { Scan } from "./lib/scan";
 import type { ScanParameters } from "./lib/scanParameters";
@@ -35,6 +36,11 @@ function App() {
   const [scans, setScans] = useState<Scan[]>([]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
+  // Progress shown over the viewer while an import triggered from the viewer
+  // header (Import menu / File menu) is in flight. Reuses BulkImportProgress
+  // so every import pathway shows the same spinner + bar + filename modal.
+  // The home screen has its own inline spinner, so this only renders off-home.
+  const [importProgress, setImportProgress] = useState<BulkImportProgressState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
@@ -103,6 +109,7 @@ function App() {
 
   const handleFileUpload = useCallback(async (file: File) => {
     setLoading(true);
+    setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
     setError(null);
 
     const importType = pendingImportTypeRef.current;
@@ -218,6 +225,7 @@ function App() {
       showToast({ title: message, type: 'error' });
     } finally {
       setLoading(false);
+      setImportProgress(null);
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
     }
@@ -226,6 +234,7 @@ function App() {
   // Handle multiple files
   const handleMultipleFiles = useCallback(async (files: File[]) => {
     setLoading(true);
+    setImportProgress({ current: 0, total: files.length, label: 'Preparing…' });
     setError(null);
     const newScans: Scan[] = [];
     const errors: string[] = [];
@@ -246,7 +255,9 @@ function App() {
       return color;
     };
 
-    for (const file of files) {
+    for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
+      const file = files[fileIdx];
+      setImportProgress({ current: fileIdx + 1, total: files.length, label: `Loading ${file.name}` });
       try {
         // Determine how to import based on user selection or auto-detect
         let shouldImportAsMesh = false;
@@ -308,13 +319,23 @@ function App() {
           }
         } else {
           // Parse as point cloud (default) → produces a data-only Scan.
-          const data = await parsePointCloud(file);
+          // Resolve the on-disk path FIRST so XYZ-family files route through
+          // the backend octree converter (streams tiles) instead of the
+          // in-renderer parser, which holds the whole cloud in V8 and throws
+          // on 100MB+ files. This mirrors the single-file path in
+          // handleFileUpload — without it, multi-select fails on large scans
+          // that import fine one at a time.
           let sourcePath: string | undefined;
           try {
             sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
           } catch {
             sourcePath = undefined;
           }
+          const ext = file.name.toLowerCase().split('.').pop() ?? '';
+          const useOctree = !!sourcePath && OCTREE_DROP_EXTENSIONS.has(ext);
+          const data = useOctree
+            ? await parsePointCloudFromPath(sourcePath!)
+            : await parsePointCloud(file);
           newScans.push({
             id: crypto.randomUUID(),
             label: data.fileName ?? 'Scan',
@@ -350,6 +371,7 @@ function App() {
     }
 
     setLoading(false);
+    setImportProgress(null);
     // Reset import type to auto after import
     pendingImportTypeRef.current = 'auto';
   }, [scans]);
@@ -971,6 +993,13 @@ function App() {
           {renderViewer()}
         </div>
       </div>
+
+      {/* Import progress modal for imports triggered from the viewer header
+          (Import menu / File menu). The home screen renders its own inline
+          spinner, so suppress this there to avoid doubling up. Reuses the
+          same BulkImportProgress component as the Helios XML and per-scan
+          attach pathways so every import shows an identical modal. */}
+      {activeNav !== 'home' && <BulkImportProgress progress={importProgress} />}
 
       {/* Drag overlay */}
       {isDragOver && (
