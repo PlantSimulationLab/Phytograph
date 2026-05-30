@@ -128,8 +128,10 @@ async function main() {
       await autoBtn.click();
     }
     await page.getByTestId('app-dropzone-input').setInputFiles(FIXTURE);
-    // Wait for the cloud to appear in the scene panel.
-    await page.locator('[data-testid="cloud-row"]').first().waitFor({ timeout: 60_000 });
+    // Wait for the cloud to appear in the scene panel. The row testid is
+    // "scan-row" (matches tests/e2e). Allow a generous timeout — a real TLS
+    // scan can be hundreds of MB and take a while to parse and render.
+    await page.locator('[data-testid="scan-row"]').first().waitFor({ timeout: 180_000 });
     // Extra beat for the viewer camera to settle on the imported data.
     await page.waitForTimeout(2500);
     await page.screenshot({ path: join(outDir, '03-first-scan.png') });
