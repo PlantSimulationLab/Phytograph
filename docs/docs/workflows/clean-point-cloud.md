@@ -117,21 +117,38 @@ necessary to clear everything you wanted to.
 ## Filter
 
 Use **Filter Points** (filter icon) to keep only points whose values
-fall within a range — useful
-when the file carries intensity, classification, or custom scalars.
+fall within a range — useful when the file carries intensity,
+classification, or custom scalars. This works for large, octree-backed
+clouds too: their imported scalar attributes (the same ones offered in
+the **Color by** picker) appear in the filter field list alongside
+X, Y, and Z.
 
-The panel shows one row per available channel (X, Y, Z, intensity, any
-scalar fields). For each:
+To set a filter:
 
-- A dual-handle slider sets the min/max of the keep range.
-- A live histogram shows the distribution.
-- A checkbox enables or disables that filter.
+1. Pick a **field** from the dropdown (X, Y, Z, intensity, or any scalar).
+2. Enter a **min** and **max**. The range takes effect immediately.
+3. Repeat for other fields to stack filters — they compose with **AND**,
+   so only points passing every active filter are "in range".
 
-Multiple filters compose with AND — only points that pass every active
-filter survive.
+Then choose how to commit (there is no separate Apply step):
 
-Click **Apply** to commit; the discarded points are removed. Use
-<kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> to undo.
+- **Filter (remove points)** — deletes the out-of-range points, keeping
+  only the in-range ones.
+- **Segment (split into two clouds)** — keeps the in-range points on the
+  original cloud and adds the out-of-range points as a **second cloud**
+  (`<name> (filtered out)`). Nothing is discarded; the two clouds
+  together equal the original. Handy for separating, say, a canopy from
+  the rest by height without losing the rest.
+
+Use <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> to undo. If a filter excludes every
+point, you're offered the chance to delete the cloud instead.
+
+!!! info "Small vs large clouds"
+    Small (in-memory) clouds preview the filter live in the viewport as
+    you edit the range. Large, octree-backed clouds have no live preview —
+    committing re-converts the cloud on the backend (the same path
+    **Crop** uses on large clouds), so the change appears once that
+    finishes.
 
 ## Resample
 

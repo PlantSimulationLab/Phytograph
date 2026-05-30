@@ -452,3 +452,265 @@ def test_project_world_to_pixel_identity_round_trip():
     np.testing.assert_allclose(pixels[0], [50.0, 50.0], atol=1e-9)
     np.testing.assert_allclose(pixels[1], [100.0, 0.0], atol=1e-9)
     np.testing.assert_allclose(pixels[2], [0.0, 100.0], atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Scalar-attribute filtering (crop_octree `scalar_filters`)
+#
+# Uses the committed fixtures/scalars.xyz: a comma-headered XYZ whose
+# `Deviation[]` column becomes an imported extra-dim scalar (slug "Deviation")
+# under the ascii_format below. Reference counts are computed in-test via the
+# same pandas read the endpoint uses, so the assertions don't hard-code values
+# that could drift if the fixture changes.
+# ---------------------------------------------------------------------------
+
+SCALARS_FIXTURE = Path(__file__).parent / "fixtures" / "scalars.xyz"
+SCALARS_FORMAT = "x y z reflectance deviation"
+
+
+@pytest.fixture
+def scalars_df():
+    """The fixture read exactly as the endpoint reads it, so reference masks
+    match the survivor set byte-for-byte (float32 for the scalar column, since
+    that's how extra dims are stored)."""
+    import pandas as pd_local
+    df = pd_local.read_csv(
+        SCALARS_FIXTURE,
+        sep=r"\s+",
+        header=None,
+        skiprows=1,  # comma header row
+        names=["x", "y", "z", "refl", "dev"],
+        engine="c",
+    )
+    df["dev"] = df["dev"].astype(np.float32)
+    return df
+
+
+def test_scalar_only_filter_matches_numpy_reference(
+    client, cache_root, scalars_df,
+):
+    """A scalar-only filter (no region) keeps exactly the points whose
+    Deviation attribute falls in [lo, hi]."""
+    lo, hi = 1.0, 2.0
+    expected = int(((scalars_df["dev"] >= lo) & (scalars_df["dev"] <= hi)).sum())
+    assert expected > 0  # sanity
+
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(SCALARS_FIXTURE),
+            "ascii_format": SCALARS_FORMAT,
+            "scalar_filters": [{"slug": "Deviation", "min": lo, "max": hi}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == expected
+    assert body["cache_id"] is not None
+
+
+def test_scalar_and_box_intersection(client, cache_root, scalars_df):
+    """A scalar filter AND a box region keep only the intersection. The box
+    excludes the high-x points (cloud x spans {0..2}), so the intersection is a
+    strict subset of both the box-only and scalar-only survivors."""
+    cmin = [0.0, -1.0, -1.0]
+    cmax = [1.0, 1.0, 2.0]
+    lo, hi = 3.0, 4.0
+    box_mask = (
+        (scalars_df["x"] >= cmin[0]) & (scalars_df["x"] <= cmax[0]) &
+        (scalars_df["y"] >= cmin[1]) & (scalars_df["y"] <= cmax[1]) &
+        (scalars_df["z"] >= cmin[2]) & (scalars_df["z"] <= cmax[2])
+    )
+    dev_mask = (scalars_df["dev"] >= lo) & (scalars_df["dev"] <= hi)
+    expected = int((box_mask & dev_mask).sum())
+    assert expected > 0
+
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(SCALARS_FIXTURE),
+            "ascii_format": SCALARS_FORMAT,
+            "region": {"kind": "box", "min": cmin, "max": cmax, "invert": False},
+            "scalar_filters": [{"slug": "Deviation", "min": lo, "max": hi}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["point_count"] == expected
+
+
+def test_scalar_invert_applies_only_to_spatial_mask(
+    client, cache_root, scalars_df,
+):
+    """The spatial `invert` flag flips only the box mask; the scalar filter is
+    never inverted. Expected = (NOT in box) AND (dev in window). The box keeps a
+    proper subset (low-x), so its complement is non-empty and the scalar AND
+    can actually bite."""
+    cmin = [0.0, -1.0, -1.0]
+    cmax = [1.0, 1.0, 1.0]
+    lo, hi = 3.0, 3.0
+    box_mask = (
+        (scalars_df["x"] >= cmin[0]) & (scalars_df["x"] <= cmax[0]) &
+        (scalars_df["y"] >= cmin[1]) & (scalars_df["y"] <= cmax[1]) &
+        (scalars_df["z"] >= cmin[2]) & (scalars_df["z"] <= cmax[2])
+    )
+    dev_mask = (scalars_df["dev"] >= lo) & (scalars_df["dev"] <= hi)
+    expected = int((~box_mask & dev_mask).sum())
+    assert expected > 0
+
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(SCALARS_FIXTURE),
+            "ascii_format": SCALARS_FORMAT,
+            "region": {"kind": "box", "min": cmin, "max": cmax, "invert": True},
+            "scalar_filters": [{"slug": "Deviation", "min": lo, "max": hi}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["point_count"] == expected
+
+
+def test_unknown_scalar_slug_returns_400(client, cache_root):
+    """An unknown slug fails loudly rather than silently keeping all points."""
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(SCALARS_FIXTURE),
+            "ascii_format": SCALARS_FORMAT,
+            "scalar_filters": [{"slug": "does_not_exist", "min": 0, "max": 1}],
+        },
+    )
+    assert res.status_code == 400
+    assert "does_not_exist" in res.text or "Unknown scalar" in res.text
+
+
+def test_scalar_empty_window_returns_zero_no_cache(client, cache_root):
+    """A scalar window matching no points → HTTP 200, point_count=0, no cache."""
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(SCALARS_FIXTURE),
+            "ascii_format": SCALARS_FORMAT,
+            "scalar_filters": [{"slug": "Deviation", "min": 1000, "max": 2000}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == 0
+    assert body["cache_id"] is None
+    assert body["cache_dir"] is None
+
+
+def test_scalar_filter_cache_key_folds_bounds(client, cache_root):
+    """Identical scalar filters hit cache; changing a bound misses (proves the
+    cache key folds scalar filters)."""
+    base = {
+        "source_path": str(SCALARS_FIXTURE),
+        "ascii_format": SCALARS_FORMAT,
+        "scalar_filters": [{"slug": "Deviation", "min": 0, "max": 2}],
+    }
+    body1 = client.post("/api/pointcloud/crop_octree", json=base).json()
+    assert body1["cached"] is False
+    body2 = client.post("/api/pointcloud/crop_octree", json=base).json()
+    assert body2["cached"] is True
+    assert body2["cache_id"] == body1["cache_id"]
+
+    shifted = {
+        "source_path": str(SCALARS_FIXTURE),
+        "ascii_format": SCALARS_FORMAT,
+        "scalar_filters": [{"slug": "Deviation", "min": 0, "max": 3}],
+    }
+    body3 = client.post("/api/pointcloud/crop_octree", json=shifted).json()
+    assert body3["cache_id"] != body1["cache_id"]
+    assert body3["cached"] is False
+
+
+def test_scalar_filter_order_independent_cache_key():
+    """Two scalar filters in different order produce the same canonical string
+    (and thus the same cache id) — order doesn't change survivors."""
+    a = [{"slug": "Deviation", "min": 0, "max": 2}, {"slug": "Other", "min": 1, "max": 5}]
+    b = [{"slug": "Other", "min": 1, "max": 5}, {"slug": "Deviation", "min": 0, "max": 2}]
+    assert main._canonical_scalar_filters(a) == main._canonical_scalar_filters(b)
+    assert main._canonical_scalar_filters(None) == ""
+    assert main._canonical_scalar_filters([]) == ""
+
+
+def test_crop_octree_requires_region_or_scalar(client, cache_root):
+    """A request with neither region nor scalar_filters is rejected."""
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(SCALARS_FIXTURE),
+            "ascii_format": SCALARS_FORMAT,
+        },
+    )
+    assert res.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# invert_all — the true complement of the kept set (filter tool "Segment").
+# ---------------------------------------------------------------------------
+
+def test_invert_all_is_exact_complement(client, cache_root, scalars_df):
+    """The inverted call keeps exactly the points the non-inverted call drops:
+    kept + inverted == total, with no overlap."""
+    lo, hi = 1.0, 2.0
+    total = len(scalars_df)
+    in_range = int(((scalars_df["dev"] >= lo) & (scalars_df["dev"] <= hi)).sum())
+
+    base = {
+        "source_path": str(SCALARS_FIXTURE),
+        "ascii_format": SCALARS_FORMAT,
+        "scalar_filters": [{"slug": "Deviation", "min": lo, "max": hi}],
+    }
+    kept = client.post("/api/pointcloud/crop_octree", json=base).json()
+    inv = client.post(
+        "/api/pointcloud/crop_octree",
+        json={**base, "invert_all": True},
+    ).json()
+
+    assert kept["point_count"] == in_range
+    assert inv["point_count"] == total - in_range
+    assert kept["point_count"] + inv["point_count"] == total
+
+
+def test_invert_all_complements_box_and_scalar(client, cache_root, scalars_df):
+    """invert_all complements the FULL combined mask (box AND scalar), not just
+    one part. Expected inverted count = total - intersection."""
+    cmin = [0.0, -1.0, -1.0]
+    cmax = [1.0, 1.0, 2.0]
+    lo, hi = 3.0, 4.0
+    box = (
+        (scalars_df["x"] >= cmin[0]) & (scalars_df["x"] <= cmax[0]) &
+        (scalars_df["y"] >= cmin[1]) & (scalars_df["y"] <= cmax[1]) &
+        (scalars_df["z"] >= cmin[2]) & (scalars_df["z"] <= cmax[2])
+    )
+    dev = (scalars_df["dev"] >= lo) & (scalars_df["dev"] <= hi)
+    intersection = int((box & dev).sum())
+    total = len(scalars_df)
+
+    req = {
+        "source_path": str(SCALARS_FIXTURE),
+        "ascii_format": SCALARS_FORMAT,
+        "region": {"kind": "box", "min": cmin, "max": cmax, "invert": False},
+        "scalar_filters": [{"slug": "Deviation", "min": lo, "max": hi}],
+        "invert_all": True,
+    }
+    inv = client.post("/api/pointcloud/crop_octree", json=req).json()
+    assert inv["point_count"] == total - intersection
+
+
+def test_invert_all_changes_cache_id(client, cache_root):
+    """A request differing only in invert_all must miss the cache (different
+    survivor set) — proves invert_all is folded into the cache key."""
+    base = {
+        "source_path": str(SCALARS_FIXTURE),
+        "ascii_format": SCALARS_FORMAT,
+        "scalar_filters": [{"slug": "Deviation", "min": 0, "max": 2}],
+    }
+    a = client.post("/api/pointcloud/crop_octree", json=base).json()
+    b = client.post(
+        "/api/pointcloud/crop_octree",
+        json={**base, "invert_all": True},
+    ).json()
+    assert a["cache_id"] != b["cache_id"]

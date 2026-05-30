@@ -27,7 +27,7 @@ def unicode_to_ascii(s: str) -> str:
     return result
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.5"
+BACKEND_VERSION = "0.3.6"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -6284,24 +6284,48 @@ def _canonical_region(region: dict) -> str:
     )
 
 
+def _canonical_scalar_filters(filters: Optional[List[dict]]) -> str:
+    """Stable, order-independent string form of the scalar filters for cache
+    keying. Sorted so [{a},{b}] and [{b},{a}] collide on purpose — filter
+    order does not change which points survive. Empty/None → "" so a
+    scalar-free crop keeps its prior cache identity."""
+    if not filters:
+        return ""
+    parts = sorted(
+        "{}:{:.9g}:{:.9g}".format(f["slug"], float(f["min"]), float(f["max"]))
+        for f in filters
+    )
+    return "scalar|" + ";".join(parts)
+
+
 def _crop_octree_cache_key(
     source_path: str,
     ascii_format: Optional[str],
-    region: dict,
+    region: Optional[dict],
+    scalar_filters: Optional[List[dict]],
     translation: Optional[List[float]],
+    invert_all: bool = False,
 ) -> str:
     """Cache key for a crop_octree result.
 
     Folds the source-octree cache key (so source-file edits invalidate) with
-    a canonical region + translation. A second crop with identical params
-    returns the same cache_id and reuses the prior octree byte-for-byte.
+    a canonical region + scalar filters + invert_all + translation. A second
+    crop with identical params returns the same cache_id and reuses the prior
+    octree byte-for-byte. A missing region hashes to "" — identical to the
+    prior region-only keying for region-only requests. invert_all is folded in
+    so the "kept" and "leftover" (segment) calls — identical except for that
+    flag — don't collide on one cache dir.
     """
     base = _octree_cache_key(source_path, ascii_format)
     h = _hashlib.sha1()
     h.update(b"crop|")
     h.update(base.encode())
     h.update(b"\x00")
-    h.update(_canonical_region(region).encode())
+    h.update((_canonical_region(region) if region else "").encode())
+    h.update(b"\x00")
+    h.update(_canonical_scalar_filters(scalar_filters).encode())
+    h.update(b"\x00")
+    h.update(b"1" if invert_all else b"0")
     h.update(b"\x00")
     h.update(_canonical_translation(translation).encode())
     return h.hexdigest()
@@ -6404,25 +6428,52 @@ class CropOctreeRegion(BaseModel):
     invert: bool = False
 
 
+class ScalarFilter(BaseModel):
+    """Keep only points whose imported scalar attribute `slug` falls in the
+    inclusive range [min, max]. `slug` is the on-disk extra-dimension name
+    (matches a key in the octree's `attributeRanges` / the `extra_dims` slugs
+    produced by `_xyz_column_plan`)."""
+    slug: str
+    min: float
+    max: float
+
+
 class CropOctreeRequest(BaseModel):
     """Re-convert a source point cloud into a Potree 2.0 octree after
-    applying a crop region (and optional translation).
+    applying a crop region and/or scalar-attribute filters (and optional
+    translation).
 
     Behavior contract:
       - Always operates on `source_path` (the immutable XYZ/LAS source),
         never on a previously-cached octree. Crops compose by stacking
         successive backend calls.
+      - `region` is optional. When omitted, no spatial crop is applied and
+        only `scalar_filters` (if any) constrain the survivors. The filter
+        tool sends scalar-only requests this way.
+      - `scalar_filters` are AND-combined with each other and with the
+        spatial region. The spatial `invert` flips only the spatial mask;
+        scalar filters are never inverted.
+      - `invert_all` inverts the ENTIRE combined mask (spatial AND scalars)
+        as the final step — the true complement of the kept set. The filter
+        tool's "Segment" action uses this to produce the leftover (out-of-
+        range) cloud: kept + leftover == the original, with nothing lost or
+        duplicated, regardless of how many filters are active. (The complement
+        of an AND is an OR, which per-filter inversion cannot express — hence a
+        single top-level flag.)
       - `translation` is baked into positions BEFORE the region test,
         matching the renderer's gizmo semantics.
-      - Cache key folds (source mtime, ascii_format, region, translation).
-        Identical requests return the same cache_id byte-for-byte.
+      - Cache key folds (source mtime, ascii_format, region, scalar_filters,
+        invert_all, translation). Identical requests return the same cache_id
+        byte-for-byte.
       - Empty result (no points survive the filter) → HTTP 200 with
         `point_count = 0` and `cached = False`. The renderer raises a
         delete-confirmation rather than 4xx-ing on this.
     """
     source_path: str
     ascii_format: Optional[str] = None
-    region: CropOctreeRegion
+    region: Optional[CropOctreeRegion] = None
+    scalar_filters: Optional[List[ScalarFilter]] = None
+    invert_all: bool = False
     translation: Optional[List[float]] = None
 
 
@@ -6430,12 +6481,24 @@ def _filtered_xyz_to_las(
     source_path: _Path,
     ascii_format: Optional[str],
     out_las: _Path,
-    region: dict,
+    region: Optional[dict],
     translation: Optional[List[float]],
+    scalar_filters: Optional[List[dict]] = None,
+    invert_all: bool = False,
 ) -> tuple[int, List[dict]]:
-    """Streaming variant of `_xyz_to_las` that applies a per-chunk crop mask
+    """Streaming variant of `_xyz_to_las` that applies a per-chunk filter mask
     before writing each chunk to LAS. Same chunk-size memory bound; total
     points written = sum of survivors across chunks.
+
+    The mask is the AND of:
+      - the spatial region (box or polygon), or all-True when `region` is
+        None. The region's `invert` flips only this spatial portion.
+      - each scalar filter: `min <= attribute <= max`, resolved from the
+        source column carrying that extra-dimension slug.
+
+    When `invert_all` is set, the final combined mask is complemented as the
+    last step — yielding exactly the points the un-inverted call would drop.
+    Used by the filter tool's "Segment" action for the leftover cloud.
 
     For polygon regions, projects each chunk's (x,y,z) through the frozen
     camera matrices once per chunk; the mask is computed in NumPy so the
@@ -6458,9 +6521,26 @@ def _filtered_xyz_to_las(
     has_rgb = all(role in names for role in ("r255", "g255", "b255"))
     intensity_role = next((r for r in ("intensity", "reflectance") if r in names), None)
 
-    # Precompute region inputs once.
-    kind = region["kind"]
-    invert = bool(region.get("invert", False))
+    # Resolve scalar filters to source columns up-front so a bad slug fails
+    # fast (rather than silently keeping all points). The slug is the
+    # extra-dimension name surfaced to the renderer as an octree attribute.
+    slug_to_col = {ed["slug"]: ed["col"] for ed in extra_dims}
+    resolved_scalar_filters: List[tuple] = []
+    for f in (scalar_filters or []):
+        col = slug_to_col.get(f["slug"])
+        if col is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown scalar attribute: {f['slug']!r}. "
+                    f"Available: {sorted(slug_to_col)}"
+                ),
+            )
+        resolved_scalar_filters.append((col, float(f["min"]), float(f["max"])))
+
+    # Precompute region inputs once. region is None → no spatial crop.
+    kind = region["kind"] if region else None
+    invert = bool(region.get("invert", False)) if region else False
     if kind == "box":
         cmin = np.array(region["min"], dtype=np.float64)
         cmax = np.array(region["max"], dtype=np.float64)
@@ -6476,7 +6556,7 @@ def _filtered_xyz_to_las(
                 status_code=400,
                 detail="region.points must be at least 3 [x, y] entries.",
             )
-    else:
+    elif kind is not None:
         raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
 
     tx, ty, tz = 0.0, 0.0, 0.0
@@ -6532,14 +6612,30 @@ def _filtered_xyz_to_las(
                     (ys >= cmin[1]) & (ys <= cmax[1]) &
                     (zs >= cmin[2]) & (zs <= cmax[2])
                 )
-            else:
+            elif kind == "polygon":
                 positions = np.stack([xs, ys, zs], axis=1)
                 pixels = _project_world_to_pixel(
                     positions, proj, view, canvas_w, canvas_h,
                 )
                 mask = _points_in_polygon_mask(pixels, polygon)
+            else:
+                # No spatial region — keep all points spatially, then let the
+                # scalar filters below narrow the survivor set.
+                mask = np.ones(n, dtype=bool)
 
             if invert:
+                mask = ~mask
+
+            # AND in each scalar filter after the spatial invert, so invert
+            # never flips the scalar constraints. Source extra dims are float32
+            # on disk (see add_extra_dim below), so filter on float32 values to
+            # keep survivors consistent with what gets written.
+            for col, lo, hi in resolved_scalar_filters:
+                vals = chunk[col].to_numpy(dtype=np.float32)
+                mask &= (vals >= lo) & (vals <= hi)
+
+            # Complement the entire combined mask last — the true leftover set.
+            if invert_all:
                 mask = ~mask
 
             kept = int(mask.sum())
@@ -6606,13 +6702,25 @@ async def crop_octree(request: CropOctreeRequest):
         )
 
     # Validate region shape up-front (the helper raises on malformed input);
-    # also produces the canonical string for cache keying.
-    region_dict = request.region.model_dump()
-    _canonical_region(region_dict)  # raises 400 on bad shape
+    # also produces the canonical string for cache keying. region is optional
+    # — a scalar-only filter request omits it.
+    region_dict = request.region.model_dump() if request.region else None
+    if region_dict is not None:
+        _canonical_region(region_dict)  # raises 400 on bad shape
+    scalar_filter_dicts = (
+        [f.model_dump() for f in request.scalar_filters]
+        if request.scalar_filters else None
+    )
+    if region_dict is None and not scalar_filter_dicts:
+        raise HTTPException(
+            status_code=400,
+            detail="crop_octree requires at least one of `region` or `scalar_filters`.",
+        )
     _canonical_translation(request.translation)  # raises 400 on bad length
 
     cache_key = _crop_octree_cache_key(
-        str(source_path), request.ascii_format, region_dict, request.translation,
+        str(source_path), request.ascii_format, region_dict,
+        scalar_filter_dicts, request.translation, request.invert_all,
     )
     cache_dir = _octree_cache_root() / cache_key
 
@@ -6652,7 +6760,8 @@ async def crop_octree(request: CropOctreeRequest):
         filtered_las = staging_dir / (source_path.stem + ".cropped.las")
         kept, extra_dims = _filtered_xyz_to_las(
             source_path, request.ascii_format, filtered_las,
-            region_dict, request.translation,
+            region_dict, request.translation, scalar_filter_dicts,
+            request.invert_all,
         )
 
         if kept == 0:

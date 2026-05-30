@@ -1416,6 +1416,18 @@ export type CropOctreeRegion =
     };
 
 /**
+ * Keep only points whose imported scalar attribute `slug` falls within the
+ * inclusive range [min, max]. `slug` is the on-disk extra-dimension name —
+ * the same key used in `OctreeRef.attributeRanges` and the value (after the
+ * `scalar:` prefix) the filter panel's field dropdown emits for octrees.
+ */
+export interface ScalarFilter {
+  slug: string;
+  min: number;
+  max: number;
+}
+
+/**
  * Response from `cropOctree`. Same shape as `OctreeMetadata` for non-empty
  * crops, except `cache_id` and `cache_dir` are `null` when the crop kept
  * zero points. Callers must check `point_count === 0` (renderer raises a
@@ -1453,7 +1465,16 @@ export async function cropOctree(
   sourcePath: string,
   options: {
     asciiFormat?: string | null;
-    region: CropOctreeRegion;
+    // Spatial crop. Optional — omit for a scalar-only filter (at least one of
+    // `region` or `scalarFilters` must be present, enforced by the backend).
+    region?: CropOctreeRegion | null;
+    // Imported-scalar value filters, AND-combined with each other and with
+    // the region.
+    scalarFilters?: ScalarFilter[] | null;
+    // Invert the entire combined mask (spatial AND scalars) as the final step,
+    // yielding the complement/leftover set. Used by the filter tool's "Segment"
+    // action to produce the out-of-range cloud.
+    invertAll?: boolean;
     translation?: [number, number, number] | null;
   },
 ): Promise<CropOctreeResult> {
@@ -1467,7 +1488,9 @@ export async function cropOctree(
       body: JSON.stringify({
         source_path: sourcePath,
         ascii_format: options.asciiFormat ?? null,
-        region: options.region,
+        region: options.region ?? null,
+        scalar_filters: options.scalarFilters ?? null,
+        invert_all: options.invertAll ?? false,
         translation: options.translation ?? null,
       }),
       signal: controller.signal,

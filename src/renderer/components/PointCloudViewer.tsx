@@ -5,7 +5,7 @@ import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, segmentGround, segmentGroundApply, type CropOctreeRegion, type BackendPointSource } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, segmentGround, segmentGroundApply, type CropOctreeRegion, type CropOctreeResult, type BackendPointSource } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import {
@@ -1449,40 +1449,179 @@ export default function PointCloudViewer({
     setEditMode('none');
   }, [editMode, selectedIds, clouds, editStates, onUpdateCloud]);
 
-  // Apply filter permanently - removes filtered out points from the point cloud
-  const handleApplyFilterPermanently = useCallback(() => {
-    if (selectedIds.size !== 1) return;
+  // Build the crop_octree args (region + scalarFilters + translation) for an
+  // octree-backed cloud from its active filters. X/Y/Z range filters become a
+  // box region (full extent on any disabled axis); enabled scalar filters
+  // become scalar_filters AND-combined with it. Shared by Filter and Segment.
+  const buildOctreeFilterArgs = useCallback((cloud: PointCloudEntry, filters: CloudFilters) => {
+    const editState = editStates.get(cloud.id);
+    const otx = editState?.translation.x ?? 0;
+    const oty = editState?.translation.y ?? 0;
+    const otz = editState?.translation.z ?? 0;
 
-    const cloudId = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === cloudId);
-    const filters = cloudFilters.get(cloudId);
+    const scalarFilters = Object.entries(filters.scalarFields)
+      .filter(([, f]) => f.enabled)
+      .map(([slug, f]) => ({ slug, min: f.min, max: f.max }));
 
-    if (!cloud || !filters) return;
+    let region: CropOctreeRegion | null = null;
+    if (filters.x.enabled || filters.y.enabled || filters.z.enabled) {
+      const b = cloud.data.bounds;
+      region = {
+        kind: 'box',
+        min: [
+          filters.x.enabled ? filters.x.min : b.min.x,
+          filters.y.enabled ? filters.y.min : b.min.y,
+          filters.z.enabled ? filters.z.min : b.min.z,
+        ],
+        max: [
+          filters.x.enabled ? filters.x.max : b.max.x,
+          filters.y.enabled ? filters.y.max : b.max.y,
+          filters.z.enabled ? filters.z.max : b.max.z,
+        ],
+        invert: false,
+      };
+    }
 
-    // Check if any filter is active
-    const hasAnyFilter = filters.x.enabled || filters.y.enabled || filters.z.enabled ||
-      filters.intensity?.enabled ||
-      Object.values(filters.scalarFields).some(f => f.enabled);
-
-    if (!hasAnyFilter) return;
-
-    const state = editStates.get(cloudId) || {
-      translation: { x: 0, y: 0, z: 0 },
-      erasedIndices: new Set<number>(),
+    return {
+      region,
+      scalarFilters: scalarFilters.length > 0 ? scalarFilters : null,
+      translation: (otx !== 0 || oty !== 0 || otz !== 0)
+        ? [otx, oty, otz] as [number, number, number]
+        : null,
     };
+  }, [editStates]);
 
-    // Filter points based on active filters. Two-pass over typed arrays
-    // to avoid the multi-GB JS `number[]` intermediate that the earlier
-    // push-based version produced on large clouds.
-    const erased = state.erasedIndices;
+  // Convert a crop_octree result into PointCloudData (or null when empty).
+  const octreeResultToData = useCallback((
+    result: CropOctreeResult,
+    sourceXyzPath: string,
+    fileName: string,
+    asciiFormat: string | null,
+  ): PointCloudData | null => {
+    if (result.point_count === 0 || !result.cache_id) return null;
+    return buildPointCloudFromOctree(
+      {
+        cache_id: result.cache_id,
+        cache_dir: result.cache_dir ?? '',
+        cached: result.cached,
+        version: result.version,
+        point_count: result.point_count,
+        spacing: result.spacing,
+        scale: result.scale,
+        offset: result.offset,
+        bounds: result.bounds,
+        tight_bounds: result.tight_bounds,
+        attributes: result.attributes,
+      },
+      sourceXyzPath,
+      fileName,
+      asciiFormat,
+    );
+  }, []);
+
+  // Clear edit state, filters, and history for a cloud after a filter commit,
+  // then close the panel. Shared by Filter and Segment.
+  const clearFilterStateForCloud = useCallback((cloudId: string) => {
+    setEditStates(prev => {
+      const next = new Map(prev);
+      next.set(cloudId, { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() });
+      return next;
+    });
+    setCloudFilters(prev => {
+      const next = new Map(prev);
+      next.delete(cloudId);
+      return next;
+    });
+    setHistory(prev => prev.filter(entry => entry.id !== cloudId));
+    setHistoryIndex(prev => Math.max(-1, prev - 1));
+    setShowFilterPanel(false);
+  }, []);
+
+  // Rebuild a flat cloud's PointCloudData from the points satisfying `keepFn`
+  // (carrying colors / intensities / scalarFields, recomputing bounds). Returns
+  // null when no point matches. Used for both the kept set (keep) and the
+  // leftover set (!keep) in Segment, and the kept set in Filter.
+  const rebuildFlatCloudData = useCallback((
+    cloud: PointCloudEntry,
+    keepFn: (i: number) => boolean,
+    translation: { x: number; y: number; z: number },
+  ): PointCloudData | null => {
     const src = cloud.data;
-    const tx = state.translation.x;
-    const ty = state.translation.y;
-    const tz = state.translation.z;
+    const { x: tx, y: ty, z: tz } = translation;
 
-    // Inline keep-predicate; called twice (count + fill) and we want the
-    // JIT to inline it both times.
-    const keep = (i: number): boolean => {
+    let pointCount = 0;
+    for (let i = 0; i < src.pointCount; i++) {
+      if (keepFn(i)) pointCount++;
+    }
+    if (pointCount === 0) return null;
+
+    const newPositions = new Float32Array(pointCount * 3);
+    const newColors = src.colors ? new Float32Array(pointCount * 3) : null;
+    const newIntensities = src.intensities ? new Float32Array(pointCount) : null;
+    const scalarOut: Record<string, { arr: Float32Array; src: Float32Array; min: number; max: number }> = {};
+    if (src.scalarFields) {
+      for (const [name, field] of Object.entries(src.scalarFields)) {
+        scalarOut[name] = { arr: new Float32Array(pointCount), src: field.values, min: Infinity, max: -Infinity };
+      }
+    }
+
+    const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+
+    let w = 0;
+    for (let i = 0; i < src.pointCount; i++) {
+      if (!keepFn(i)) continue;
+      const wx = src.positions[i * 3] + tx;
+      const wy = src.positions[i * 3 + 1] + ty;
+      const wz = src.positions[i * 3 + 2] + tz;
+      newPositions[w * 3] = wx;
+      newPositions[w * 3 + 1] = wy;
+      newPositions[w * 3 + 2] = wz;
+      if (wx < min.x) min.x = wx; if (wx > max.x) max.x = wx;
+      if (wy < min.y) min.y = wy; if (wy > max.y) max.y = wy;
+      if (wz < min.z) min.z = wz; if (wz > max.z) max.z = wz;
+      if (newColors && src.colors) {
+        newColors[w * 3] = src.colors[i * 3];
+        newColors[w * 3 + 1] = src.colors[i * 3 + 1];
+        newColors[w * 3 + 2] = src.colors[i * 3 + 2];
+      }
+      if (newIntensities && src.intensities) {
+        newIntensities[w] = src.intensities[i];
+      }
+      for (const name in scalarOut) {
+        const out = scalarOut[name];
+        const v = out.src[i];
+        out.arr[w] = v;
+        if (v < out.min) out.min = v;
+        if (v > out.max) out.max = v;
+      }
+      w++;
+    }
+
+    const center = new THREE.Vector3((min.x + max.x) / 2, (min.y + max.y) / 2, (min.z + max.z) / 2);
+    const size = new THREE.Vector3(max.x - min.x, max.y - min.y, max.z - min.z);
+
+    const newScalarFieldsData: Record<string, { values: Float32Array; min: number; max: number }> = {};
+    for (const name in scalarOut) {
+      const out = scalarOut[name];
+      newScalarFieldsData[name] = { values: out.arr, min: out.min, max: out.max };
+    }
+
+    return {
+      positions: newPositions,
+      colors: newColors ?? undefined,
+      intensities: newIntensities ?? undefined,
+      scalarFields: Object.keys(newScalarFieldsData).length > 0 ? newScalarFieldsData : undefined,
+      pointCount,
+      bounds: { min, max, center, size },
+      fileName: cloud.data.fileName,
+    };
+  }, []);
+
+  // Build the keep-predicate for a flat cloud from its active filters.
+  const buildFlatKeepPredicate = useCallback((cloud: PointCloudEntry, filters: CloudFilters, erased: Set<number>) => {
+    const src = cloud.data;
+    return (i: number): boolean => {
       if (erased.has(i)) return false;
       const x = src.positions[i * 3];
       const y = src.positions[i * 3 + 1];
@@ -1503,126 +1642,141 @@ export default function PointCloudViewer({
       }
       return true;
     };
+  }, []);
 
-    let pointCount = 0;
-    for (let i = 0; i < src.pointCount; i++) {
-      if (keep(i)) pointCount++;
-    }
+  // Apply filter permanently - removes filtered out points from the point cloud
+  const handleApplyFilterPermanently = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
 
-    if (pointCount === 0) {
-      // All points would be removed - trigger delete confirmation
-      setDeleteConfirm({
-        type: 'cloud',
-        id: cloud.id,
-        name: cloud.data.fileName || 'Unnamed'
-      });
+    const cloudId = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === cloudId);
+    const filters = cloudFilters.get(cloudId);
+
+    if (!cloud || !filters) return;
+
+    // Check if any filter is active
+    const hasAnyFilter = filters.x.enabled || filters.y.enabled || filters.z.enabled ||
+      filters.intensity?.enabled ||
+      Object.values(filters.scalarFields).some(f => f.enabled);
+
+    if (!hasAnyFilter) return;
+
+    // Octree-backed clouds hold no flat positions to iterate; apply the filter
+    // via backend re-conversion (crop_octree). No live preview — applies
+    // directly, like crop on large clouds.
+    if (cloud.data.octree?.sourceXyzPath) {
+      const octreeInfo = cloud.data.octree;
+      const args = buildOctreeFilterArgs(cloud, filters);
+      try {
+        const result = await cropOctree(octreeInfo.sourceXyzPath, {
+          asciiFormat: octreeInfo.asciiFormat ?? null,
+          ...args,
+        });
+        const newData = octreeResultToData(
+          result, octreeInfo.sourceXyzPath, cloud.data.fileName ?? cloud.id, octreeInfo.asciiFormat ?? null,
+        );
+        if (!newData) {
+          // Filter excluded everything — offer to delete the cloud.
+          setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+          return;
+        }
+        onUpdateCloud(cloud.id, newData);
+      } catch (err) {
+        console.error('[handleApplyFilterPermanently] crop_octree failed:', err);
+        showToast({ title: `Filter failed for ${cloud.data.fileName || 'cloud'}`, type: 'error' });
+        return;
+      }
+      clearFilterStateForCloud(cloud.id);
       return;
     }
 
-    const newPositions = new Float32Array(pointCount * 3);
-    const newColors = src.colors ? new Float32Array(pointCount * 3) : null;
-    const newIntensities = src.intensities ? new Float32Array(pointCount) : null;
-    const scalarOut: Record<string, { arr: Float32Array; src: Float32Array; min: number; max: number }> = {};
-    if (src.scalarFields) {
-      for (const [name, field] of Object.entries(src.scalarFields)) {
-        scalarOut[name] = {
-          arr: new Float32Array(pointCount),
-          src: field.values,
-          min: Infinity,
-          max: -Infinity,
-        };
-      }
-    }
-
-    const min = new THREE.Vector3(Infinity, Infinity, Infinity);
-    const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-
-    let w = 0;
-    for (let i = 0; i < src.pointCount; i++) {
-      if (!keep(i)) continue;
-      const wx = src.positions[i * 3] + tx;
-      const wy = src.positions[i * 3 + 1] + ty;
-      const wz = src.positions[i * 3 + 2] + tz;
-      newPositions[w * 3] = wx;
-      newPositions[w * 3 + 1] = wy;
-      newPositions[w * 3 + 2] = wz;
-      if (wx < min.x) min.x = wx; if (wx > max.x) max.x = wx;
-      if (wy < min.y) min.y = wy; if (wy > max.y) max.y = wy;
-      if (wz < min.z) min.z = wz; if (wz > max.z) max.z = wz;
-
-      if (newColors && src.colors) {
-        newColors[w * 3] = src.colors[i * 3];
-        newColors[w * 3 + 1] = src.colors[i * 3 + 1];
-        newColors[w * 3 + 2] = src.colors[i * 3 + 2];
-      }
-      if (newIntensities && src.intensities) {
-        newIntensities[w] = src.intensities[i];
-      }
-      for (const name in scalarOut) {
-        const out = scalarOut[name];
-        const v = out.src[i];
-        out.arr[w] = v;
-        if (v < out.min) out.min = v;
-        if (v > out.max) out.max = v;
-      }
-      w++;
-    }
-
-    const center = new THREE.Vector3(
-      (min.x + max.x) / 2,
-      (min.y + max.y) / 2,
-      (min.z + max.z) / 2
-    );
-    const size = new THREE.Vector3(
-      max.x - min.x,
-      max.y - min.y,
-      max.z - min.z
-    );
-
-    const newScalarFieldsData: Record<string, { values: Float32Array; min: number; max: number }> = {};
-    for (const name in scalarOut) {
-      const out = scalarOut[name];
-      newScalarFieldsData[name] = { values: out.arr, min: out.min, max: out.max };
-    }
-
-    // Create new point cloud data
-    const newData: PointCloudData = {
-      positions: newPositions,
-      colors: newColors ?? undefined,
-      intensities: newIntensities ?? undefined,
-      scalarFields: Object.keys(newScalarFieldsData).length > 0 ? newScalarFieldsData : undefined,
-      pointCount,
-      bounds: { min, max, center, size },
-      fileName: cloud.data.fileName,
+    // Flat clouds: rebuild in-memory from the points that pass the filter.
+    const state = editStates.get(cloudId) || {
+      translation: { x: 0, y: 0, z: 0 },
+      erasedIndices: new Set<number>(),
     };
-
-    // Update the cloud permanently
+    const keep = buildFlatKeepPredicate(cloud, filters, state.erasedIndices);
+    const newData = rebuildFlatCloudData(cloud, keep, state.translation);
+    if (!newData) {
+      // All points would be removed - trigger delete confirmation.
+      setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+      return;
+    }
     onUpdateCloud(cloud.id, newData);
+    clearFilterStateForCloud(cloud.id);
+  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, buildOctreeFilterArgs, octreeResultToData, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
 
-    // Reset edit state for this cloud
-    setEditStates(prev => {
-      const next = new Map(prev);
-      next.set(cloud.id, {
-        translation: { x: 0, y: 0, z: 0 },
-        erasedIndices: new Set<number>(),
-      });
-      return next;
-    });
+  // Segment by filter: keep the in-range points on the original cloud AND add
+  // the out-of-range points as a second cloud. Nothing is discarded — kept +
+  // leftover == the original. Mirrors the ground-segment "split into clouds".
+  const handleSegmentFilter = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
+    const cloudId = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === cloudId);
+    const filters = cloudFilters.get(cloudId);
+    if (!cloud || !filters) return;
 
-    // Clear filters for this cloud
-    setCloudFilters(prev => {
-      const next = new Map(prev);
-      next.delete(cloud.id);
-      return next;
-    });
+    const hasAnyFilter = filters.x.enabled || filters.y.enabled || filters.z.enabled ||
+      filters.intensity?.enabled ||
+      Object.values(filters.scalarFields).some(f => f.enabled);
+    if (!hasAnyFilter) return;
 
-    // Clear history entries for this cloud since data changed
-    setHistory(prev => prev.filter(entry => entry.id !== cloud.id));
-    setHistoryIndex(prev => Math.max(-1, prev - 1));
+    if (!onAddCloud) {
+      showToast({ title: 'Cannot segment: add-cloud not available', type: 'error' });
+      return;
+    }
 
-    // Close filter panel
-    setShowFilterPanel(false);
-  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud]);
+    const leftoverName = `${cloud.data.fileName ?? 'cloud'} (filtered out)`;
+
+    // Octree: two backend calls — kept (as-is) and leftover (invert_all). The
+    // leftover is the exact complement, so the two never overlap or drop a point.
+    if (cloud.data.octree?.sourceXyzPath) {
+      const octreeInfo = cloud.data.octree;
+      const args = buildOctreeFilterArgs(cloud, filters);
+      try {
+        const [keptResult, leftoverResult] = await Promise.all([
+          cropOctree(octreeInfo.sourceXyzPath, { asciiFormat: octreeInfo.asciiFormat ?? null, ...args }),
+          cropOctree(octreeInfo.sourceXyzPath, { asciiFormat: octreeInfo.asciiFormat ?? null, ...args, invertAll: true }),
+        ]);
+        const keptData = octreeResultToData(keptResult, octreeInfo.sourceXyzPath, cloud.data.fileName ?? cloud.id, octreeInfo.asciiFormat ?? null);
+        const leftoverData = octreeResultToData(leftoverResult, octreeInfo.sourceXyzPath, leftoverName, octreeInfo.asciiFormat ?? null);
+        if (!keptData) {
+          // Nothing in range — offer to delete rather than blank the cloud.
+          setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+          return;
+        }
+        onUpdateCloud(cloud.id, keptData);
+        if (leftoverData) {
+          onAddCloud({ id: crypto.randomUUID(), data: leftoverData, visible: true, color: cloud.color });
+        }
+      } catch (err) {
+        console.error('[handleSegmentFilter] crop_octree failed:', err);
+        showToast({ title: `Segment failed for ${cloud.data.fileName || 'cloud'}`, type: 'error' });
+        return;
+      }
+      clearFilterStateForCloud(cloud.id);
+      return;
+    }
+
+    // Flat: rebuild both halves in-memory from keep / !keep.
+    const state = editStates.get(cloudId) || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+    const keep = buildFlatKeepPredicate(cloud, filters, state.erasedIndices);
+    const keptData = rebuildFlatCloudData(cloud, keep, state.translation);
+    if (!keptData) {
+      setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+      return;
+    }
+    // Leftover excludes erased points too (they're gone either way), so the
+    // leftover predicate is "not erased and not kept".
+    const leftover = (i: number) => !state.erasedIndices.has(i) && !keep(i);
+    const leftoverData = rebuildFlatCloudData(cloud, leftover, state.translation);
+    onUpdateCloud(cloud.id, keptData);
+    if (leftoverData) {
+      leftoverData.fileName = leftoverName;
+      onAddCloud({ id: crypto.randomUUID(), data: leftoverData, visible: true, color: cloud.color });
+    }
+    clearFilterStateForCloud(cloud.id);
+  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, onAddCloud, buildOctreeFilterArgs, octreeResultToData, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -7554,6 +7708,7 @@ export default function PointCloudViewer({
                   {/* 4. Filter (single cloud only) */}
                   {selectedIds.size === 1 && (
                     <button
+                      data-testid="tool-filter"
                       onClick={() => {
                         if (showFilterPanel) {
                           setShowFilterPanel(false);
@@ -8196,6 +8351,24 @@ export default function PointCloudViewer({
         Object.entries(data.scalarFields || {}).forEach(([name, field]) => {
           availableFields.push({ value: `scalar:${name}`, label: name, bounds: { min: field.min, max: field.max } });
         });
+        // Octree-backed clouds hold no flat `scalarFields`; their imported
+        // scalar attributes live in `octree.attributeRanges` (keyed by on-disk
+        // slug). Mirror the Color-by dropdown: reuse octreeScalarFieldOptions
+        // so builtin LAS attributes are filtered out, and read each scalar's
+        // range from attributeRanges[slug].{min,max}[0]. The `scalar:<slug>`
+        // value encoding matches the flat path, so getFieldFilter/applyFilter/
+        // removeFilter and the backend slug lookup all work unchanged.
+        if (data.octree?.attributeRanges) {
+          const ranges = data.octree.attributeRanges;
+          for (const { value: slug, label } of octreeScalarFieldOptions(ranges, data.octree.attributeLabels)) {
+            const r = ranges[slug];
+            availableFields.push({
+              value: `scalar:${slug}`,
+              label,
+              bounds: { min: r?.min?.[0] ?? 0, max: r?.max?.[0] ?? 0 },
+            });
+          }
+        }
 
         // Get current filter values for selected field
         const getFieldFilter = (fieldValue: string): FilterRange | undefined => {
@@ -8211,10 +8384,14 @@ export default function PointCloudViewer({
         };
 
         // Apply filter for the selected field
-        const applyFilter = () => {
+        // Commit the selected field's range into cloudFilters. Called live from
+        // the Min/Max inputs (no Apply button) so flat clouds preview as you
+        // type; the values are passed in explicitly because the pending* state
+        // hasn't re-rendered yet inside the input's onChange.
+        const commitFilter = (minStr: string, maxStr: string) => {
           if (!selectedFilterField) return;
-          const min = parseFloat(pendingFilterMin);
-          const max = parseFloat(pendingFilterMax);
+          const min = parseFloat(minStr);
+          const max = parseFloat(maxStr);
           if (isNaN(min) || isNaN(max)) return;
 
           const newFilters = { ...filters };
@@ -8321,6 +8498,7 @@ export default function PointCloudViewer({
             <div className="mb-3">
               <label className="text-[10px] text-neutral-400 block mb-1">Field</label>
               <select
+                data-testid="filter-field-select"
                 value={selectedFilterField || ''}
                 onChange={(e) => handleFieldChange(e.target.value)}
                 className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
@@ -8344,10 +8522,10 @@ export default function PointCloudViewer({
                   <div className="flex-1">
                     <label className="text-[10px] text-neutral-400 block mb-1">Min</label>
                     <input
+                      data-testid="filter-min-input"
                       type="number"
                       value={pendingFilterMin}
-                      onChange={(e) => setPendingFilterMin(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && applyFilter()}
+                      onChange={(e) => { setPendingFilterMin(e.target.value); commitFilter(e.target.value, pendingFilterMax); }}
                       step="any"
                       className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
                     />
@@ -8355,32 +8533,23 @@ export default function PointCloudViewer({
                   <div className="flex-1">
                     <label className="text-[10px] text-neutral-400 block mb-1">Max</label>
                     <input
+                      data-testid="filter-max-input"
                       type="number"
                       value={pendingFilterMax}
-                      onChange={(e) => setPendingFilterMax(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && applyFilter()}
+                      onChange={(e) => { setPendingFilterMax(e.target.value); commitFilter(pendingFilterMin, e.target.value); }}
                       step="any"
                       className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
                     />
                   </div>
                 </div>
-                <div className="flex gap-2">
+                {currentFilter?.enabled && (
                   <button
-                    onClick={applyFilter}
-                    className="flex-1 px-2 py-1.5 text-xs bg-cyan-600 hover:bg-cyan-500 rounded text-white"
+                    onClick={removeFilter}
+                    className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
                   >
-                    Apply
+                    Remove this filter
                   </button>
-                  {currentFilter?.enabled && (
-                    <button
-                      onClick={removeFilter}
-                      className="px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-                <div className="text-[9px] text-neutral-500 mt-1">Press Enter to apply</div>
+                )}
               </div>
             )}
 
@@ -8411,14 +8580,25 @@ export default function PointCloudViewer({
               </button>
             )}
 
-            {/* Permanently apply filter */}
+            {/* Commit actions: remove the out-of-range points, or segment the
+                cloud into in-range + out-of-range (keeps both). */}
             {hasAnyFilter && (
-              <button
-                onClick={handleApplyFilterPermanently}
-                className="w-full px-2 py-1.5 text-xs bg-red-600 hover:bg-red-500 rounded text-white"
-              >
-                Permanently Filter Point Cloud
-              </button>
+              <div className="flex flex-col gap-2">
+                <button
+                  data-testid="filter-remove"
+                  onClick={handleApplyFilterPermanently}
+                  className="w-full px-2 py-1.5 text-xs bg-red-600 hover:bg-red-500 rounded text-white"
+                >
+                  Filter (remove points)
+                </button>
+                <button
+                  data-testid="filter-segment"
+                  onClick={handleSegmentFilter}
+                  className="w-full px-2 py-1.5 text-xs bg-cyan-600 hover:bg-cyan-500 rounded text-white"
+                >
+                  Segment (split into two clouds)
+                </button>
+              </div>
             )}
           </div>
         );
