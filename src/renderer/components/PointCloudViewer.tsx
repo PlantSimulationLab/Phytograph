@@ -58,6 +58,7 @@ import { TranslationGizmo } from './viewer/gizmos/TranslationGizmo';
 import { CropBox } from './viewer/gizmos/CropBox';
 import { BoxDrawRaycaster } from './viewer/gizmos/BoxDrawRaycaster';
 import { PolygonCameraSnapshotter } from './viewer/gizmos/PolygonCameraSnapshotter';
+import { OrthoProjectionOverride } from './viewer/gizmos/OrthoProjectionOverride';
 import { EraseBrush } from './viewer/gizmos/EraseBrush';
 
 // Shared viewer types now live in lib/pointCloudTypes.ts so the extracted leaf
@@ -441,12 +442,13 @@ export default function PointCloudViewer({
   // Crop state lives at the viewer level (not per-cloud) so a single
   // region applies uniformly across every selected scan. See cropGeometry.ts
   // for the region types.
-  type CropMode = 'box' | 'polygon';
+  type CropMode = 'box' | 'rect' | 'polygon';
   type CropDrawState =
     | 'idle'
     | 'awaiting-box-corner-1'
     | 'awaiting-box-corner-2'
-    | 'drawing-polygon';
+    | 'drawing-polygon'
+    | 'drawing-rect';
   const [cropMode, setCropMode] = useState<CropMode>('box');
   // World-space AABB. Null when crop mode hasn't been entered yet.
   const [cropBox, setCropBox] = useState<{
@@ -474,6 +476,12 @@ export default function PointCloudViewer({
   // First-corner stash while a two-click ground-plane box draw is in
   // progress.
   const boxDrawFirstCornerRef = useRef<{ x: number; y: number } | null>(null);
+  // Live world-XY cursor position on the ground plane while placing box
+  // corners, used to render the corner-1 marker and the live preview box
+  // that follows the cursor before corner 2 is clicked. On a ref (plus a
+  // tick to force re-render) so the panel doesn't re-render per mousemove.
+  const boxDrawCursorRef = useRef<{ x: number; y: number } | null>(null);
+  const [boxDrawCursorTick, setBoxDrawCursorTick] = useState(0);
   // Live snapshots of the rendering camera and canvas size, kept in sync
   // by a tiny in-Canvas component (PolygonCameraSnapshotter). Read when
   // the user presses Enter to close a polygon so the in/out test stays
@@ -486,6 +494,15 @@ export default function PointCloudViewer({
   // and we don't want to re-render the panel for it.
   const polygonCursorRef = useRef<{ x: number; y: number } | null>(null);
   const [polygonCursorTick, setPolygonCursorTick] = useState(0);
+  // Rect-drag state (canvas-pixel space). A rectangle crop is a screen-space
+  // drag that works from any view; on mouse-up its 4 corners are frozen into
+  // cropPolygon, so it reuses the entire polygon project-and-test pipeline.
+  // `rectDragStart` is the mousedown corner (non-null ⇒ a drag is in
+  // progress); the live opposite corner lives on a ref + tick so dragging
+  // doesn't re-render the panel.
+  const [rectDragStart, setRectDragStart] = useState<{ x: number; y: number } | null>(null);
+  const rectDragCurrentRef = useRef<{ x: number; y: number } | null>(null);
+  const [rectDragTick, setRectDragTick] = useState(0);
 
   // Erase brush state
   const [eraseBrushSize, setEraseBrushSize] = useState(0.1);  // Default brush radius
@@ -701,6 +718,8 @@ export default function PointCloudViewer({
     if (initial) setCropBox(initial);
     setCropPolygon(null);
     setPolygonInProgress([]);
+    setRectDragStart(null);
+    rectDragCurrentRef.current = null;
     setCropDrawState('idle');
     setCropMode('box');
     setCropInvert(false);
@@ -908,7 +927,10 @@ export default function PointCloudViewer({
         wy >= min.y && wy <= max.y &&
         wz >= min.z && wz <= max.z;
     }
-    if (cropMode === 'polygon') {
+    // Rect and Polygon both produce a frozen screen-space polygon
+    // (rect = 4 corners), so they share the project-then-point-in-polygon
+    // predicate and the backend `polygon` region payload.
+    if (cropMode === 'polygon' || cropMode === 'rect') {
       if (!cropPolygon || cropPolygon.points.length < 3) return null;
       const { points, projection, view, canvasSize } = cropPolygon;
       return (wx, wy, wz) => {
@@ -1058,6 +1080,8 @@ export default function PointCloudViewer({
       setCropBox(null);
       setCropPolygon(null);
       setPolygonInProgress([]);
+      setRectDragStart(null);
+      rectDragCurrentRef.current = null;
       setCropDrawState('idle');
       setCropSegment(false);
       setEditMode('none');
@@ -1126,7 +1150,7 @@ export default function PointCloudViewer({
             max: [cropBox.max.x, cropBox.max.y, cropBox.max.z],
             invert: cropInvert,
           };
-        } else if (cropMode === 'polygon' && cropPolygon && cropPolygon.points.length >= 3) {
+        } else if ((cropMode === 'polygon' || cropMode === 'rect') && cropPolygon && cropPolygon.points.length >= 3) {
           region = {
             kind: 'polygon',
             points: cropPolygon.points.map(p => [p.x, p.y] as [number, number]),
@@ -1974,8 +1998,15 @@ export default function PointCloudViewer({
           setCropDrawState('idle');
           return;
         }
+        if (editMode === 'crop' && cropDrawState === 'drawing-rect') {
+          setRectDragStart(null);
+          rectDragCurrentRef.current = null;
+          setCropDrawState('idle');
+          return;
+        }
         if (editMode === 'crop' && (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2')) {
           boxDrawFirstCornerRef.current = null;
+          boxDrawCursorRef.current = null;
           setCropDrawState('idle');
           return;
         }
@@ -6823,16 +6854,26 @@ export default function PointCloudViewer({
         <CameraController
           bounds={combinedBounds}
           hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0}
-          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon'}
+          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect'}
         />
 
-        {/* Snapshots the camera/size for the polygon-crop in/out test.
-            Lives only while a polygon could be active. */}
-        {editMode === 'crop' && cropMode === 'polygon' && (
+        {/* Snapshots the camera/size for the polygon- and rect-crop in/out
+            test. Both freeze the camera at draw time, so the snapshotter
+            lives whenever either screen-space shape could be active. */}
+        {editMode === 'crop' && (cropMode === 'polygon' || cropMode === 'rect') && (
           <PolygonCameraSnapshotter
             cameraRef={polygonCameraRef}
             sizeRef={polygonCanvasSizeRef}
           />
+        )}
+
+        {/* While drawing a Rect, project orthographically so the screen
+            rectangle extrudes as a straight prism (true rectangle footprint)
+            instead of a perspective trapezoid. The projection is snapshotted
+            into the region on mouse-up, so it only needs to be active up to
+            the commit. */}
+        {editMode === 'crop' && cropMode === 'rect' && cropDrawState === 'drawing-rect' && (
+          <OrthoProjectionOverride />
         )}
 
         {/* Translation Gizmo for selected clouds */}
@@ -6915,6 +6956,12 @@ export default function PointCloudViewer({
           (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2') && (
           <BoxDrawRaycaster
             groundZ={combinedBounds.min.z}
+            onMove={(x, y) => {
+              boxDrawCursorRef.current = { x, y };
+              // Re-render so the corner-1 marker / preview box follows the
+              // cursor. Cheap — the preview is a single wireframe box.
+              setBoxDrawCursorTick(t => t + 1);
+            }}
             onPick={(x, y) => {
               if (cropDrawState === 'awaiting-box-corner-1') {
                 boxDrawFirstCornerRef.current = { x, y };
@@ -6932,10 +6979,53 @@ export default function PointCloudViewer({
                 max: { x: maxX, y: maxY, z: combinedBounds.max.z },
               });
               boxDrawFirstCornerRef.current = null;
+              boxDrawCursorRef.current = null;
               setCropDrawState('idle');
             }}
           />
         )}
+
+        {/* Live in-viewport feedback while placing box corners: a small
+            marker at the first corner and, once it's placed, a preview box
+            spanning corner 1 → current cursor that updates on every move.
+            Mirrors the polygon lasso's cursor-follows preview. */}
+        {editMode === 'crop' &&
+          (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2') && (() => {
+          // Read the tick so this re-renders as the cursor moves.
+          void boxDrawCursorTick;
+          const first = boxDrawFirstCornerRef.current;
+          const cursor = boxDrawCursorRef.current;
+          const markerColor = cropInvert ? '#ef4444' : '#22c55e';
+          const markerSize = Math.max(
+            (combinedBounds.max.x - combinedBounds.min.x),
+            (combinedBounds.max.y - combinedBounds.min.y),
+          ) * 0.01 || 0.1;
+          return (
+            <group>
+              {first && (
+                <mesh position={[first.x, first.y, combinedBounds.min.z]}>
+                  <sphereGeometry args={[markerSize, 16, 16]} />
+                  <meshBasicMaterial color={markerColor} />
+                </mesh>
+              )}
+              {first && cursor && (
+                <CropBox
+                  min={{
+                    x: Math.min(first.x, cursor.x),
+                    y: Math.min(first.y, cursor.y),
+                    z: combinedBounds.min.z,
+                  }}
+                  max={{
+                    x: Math.max(first.x, cursor.x),
+                    y: Math.max(first.y, cursor.y),
+                    z: combinedBounds.max.z,
+                  }}
+                  keepInside={!cropInvert}
+                />
+              )}
+            </group>
+          );
+        })()}
 
         {/* Erase Brush - for erasing points from point cloud. Skipped for
             octree-backed clouds: the brush picks the closest point in
@@ -7132,6 +7222,127 @@ export default function PointCloudViewer({
                 cy={p.y}
                 r={4}
                 fill={isDrawing ? '#22c55e' : (cropInvert ? '#ef4444' : '#22c55e')}
+                stroke="#0a0a0a"
+                strokeWidth={1.5}
+              />
+            ))}
+          </svg>
+        );
+      })()}
+
+      {/* Rect crop overlay — a screen-space rectangle drag that works from
+          any view. While drawing, mousedown sets one corner and the drag
+          rubber-bands the opposite corner; mouseup freezes the four corners
+          into cropPolygon (camera snapshotted), so the backend / predicate
+          path is identical to the polygon lasso. */}
+      {editMode === 'crop' && cropMode === 'rect' && (cropDrawState === 'drawing-rect' || cropPolygon) && (() => {
+        const isDrawing = cropDrawState === 'drawing-rect';
+        // Read the tick so the rubber-band re-renders as the cursor moves.
+        void rectDragTick;
+
+        // Build the 4 corners (TL, TR, BR, BL) of the axis-aligned rect
+        // spanned by two diagonal canvas-pixel points.
+        const cornersOf = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+          const minX = Math.min(a.x, b.x);
+          const minY = Math.min(a.y, b.y);
+          const maxX = Math.max(a.x, b.x);
+          const maxY = Math.max(a.y, b.y);
+          return [
+            { x: minX, y: minY },
+            { x: maxX, y: minY },
+            { x: maxX, y: maxY },
+            { x: minX, y: maxY },
+          ];
+        };
+
+        let corners: { x: number; y: number }[] | null = null;
+        if (isDrawing && rectDragStart && rectDragCurrentRef.current) {
+          corners = cornersOf(rectDragStart, rectDragCurrentRef.current);
+        } else if (!isDrawing && cropPolygon && cropPolygon.points.length >= 3) {
+          corners = cropPolygon.points;
+        }
+
+        const commit = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+          // Ignore zero-area drags (a click without movement).
+          if (Math.abs(end.x - start.x) < 3 || Math.abs(end.y - start.y) < 3) {
+            setRectDragStart(null);
+            rectDragCurrentRef.current = null;
+            setCropDrawState('idle');
+            return;
+          }
+          if (polygonCameraRef.current && polygonCanvasSizeRef.current) {
+            const region = polygonRegionFromCamera(
+              cornersOf(start, end),
+              polygonCameraRef.current,
+              polygonCanvasSizeRef.current,
+              false,
+            );
+            setCropPolygon({
+              points: region.points,
+              projection: region.projection,
+              view: region.view,
+              canvasSize: region.canvasSize,
+            });
+          }
+          setRectDragStart(null);
+          rectDragCurrentRef.current = null;
+          setCropDrawState('idle');
+        };
+
+        const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+          if (!isDrawing || e.button !== 0) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+          setRectDragStart(p);
+          rectDragCurrentRef.current = p;
+          setRectDragTick(t => t + 1);
+        };
+        const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+          if (!isDrawing || !rectDragStart) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          rectDragCurrentRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+          setRectDragTick(t => t + 1);
+        };
+        const handleMouseUp = (e: React.MouseEvent<SVGSVGElement>) => {
+          if (!isDrawing || e.button !== 0 || !rectDragStart) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          commit(rectDragStart, { x: e.clientX - rect.left, y: e.clientY - rect.top });
+        };
+
+        const polyPoints = corners ? corners.map(p => `${p.x},${p.y}`).join(' ') : '';
+        const strokeColor = cropInvert ? '#ef4444' : '#22c55e';
+        const fillColor = cropInvert ? 'rgba(239,68,68,0.12)' : 'rgba(34,197,94,0.12)';
+
+        return (
+          <svg
+            data-testid="crop-rect-overlay"
+            className="absolute inset-0 z-10"
+            width="100%"
+            height="100%"
+            style={{
+              pointerEvents: isDrawing ? 'auto' : 'none',
+              cursor: isDrawing ? 'crosshair' : 'default',
+            }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+          >
+            {corners && (
+              <polygon
+                points={polyPoints}
+                fill={fillColor}
+                stroke={strokeColor}
+                strokeWidth={2}
+                strokeDasharray={isDrawing ? '6 4' : undefined}
+              />
+            )}
+            {corners && !isDrawing && corners.map((p, i) => (
+              <circle
+                key={i}
+                cx={p.x}
+                cy={p.y}
+                r={4}
+                fill={strokeColor}
                 stroke="#0a0a0a"
                 strokeWidth={1.5}
               />
@@ -8141,13 +8352,15 @@ export default function PointCloudViewer({
         )}
       </div>
 
-      {/* Crop Panel — single panel handles both Box and Polygon modes
+      {/* Crop Panel — single panel handles Box, Rect, and Polygon modes
           and applies to every selected scan when N > 1. */}
       {editMode === 'crop' && selectedIds.size > 0 && (() => {
         const closeCropPanel = () => {
           setEditMode('none');
           setCropDrawState('idle');
           setPolygonInProgress([]);
+          setRectDragStart(null);
+          rectDragCurrentRef.current = null;
         };
         const resetWorldBox = () => {
           const initial = worldBoundsUnion(
@@ -8178,6 +8391,19 @@ export default function PointCloudViewer({
             data-crop-mode={cropMode}
             data-crop-min={cropBoxMinStr}
             data-crop-max={cropBoxMaxStr}
+            // Projection kind of a committed screen-space region (rect /
+            // polygon). An orthographic projection matrix has m[15]=1, m[11]=0;
+            // a perspective one has m[15]=0, m[11]=-1. The Rect tool draws
+            // orthographically so its extrusion is a true prism — this exposes
+            // that for the trapezoid-regression test. Empty until committed.
+            data-crop-projection-kind={
+              cropPolygon
+                ? (Math.abs(cropPolygon.projection[15] - 1) < 1e-6 &&
+                   Math.abs(cropPolygon.projection[11]) < 1e-6
+                    ? 'orthographic'
+                    : 'perspective')
+                : ''
+            }
             // z-20 keeps the panel above the polygon lasso overlay (z-10),
             // which now fills the whole viewport while drawing — without
             // this the transparent SVG would swallow clicks on the panel's
@@ -8206,7 +8432,8 @@ export default function PointCloudViewer({
               </div>
             )}
 
-            {/* Shape: Box vs Polygon */}
+            {/* Shape: Box (world AABB) vs Rect (screen-space rectangle, any
+                view) vs Polygon (freeform lasso, any view). */}
             <div className="mb-3 p-2 bg-neutral-900/50 rounded">
               <div className="text-[10px] text-neutral-400 mb-2">Shape</div>
               <div className="flex gap-1">
@@ -8216,11 +8443,28 @@ export default function PointCloudViewer({
                     setCropMode('box');
                     setCropDrawState('idle');
                     setPolygonInProgress([]);
+                    setCropPolygon(null);
+                    setRectDragStart(null);
+                    rectDragCurrentRef.current = null;
                     if (!cropBox) resetWorldBox();
                   }}
                   className={`flex-1 px-2 py-1.5 text-xs rounded ${cropMode === 'box' ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
                 >
                   Box
+                </button>
+                <button
+                  data-testid="crop-shape-rect"
+                  onClick={() => {
+                    setCropMode('rect');
+                    setCropDrawState('drawing-rect');
+                    setPolygonInProgress([]);
+                    setCropPolygon(null);
+                    setRectDragStart(null);
+                    rectDragCurrentRef.current = null;
+                  }}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropMode === 'rect' ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
+                >
+                  Rect
                 </button>
                 <button
                   data-testid="crop-shape-polygon"
@@ -8229,6 +8473,8 @@ export default function PointCloudViewer({
                     setCropDrawState('drawing-polygon');
                     setPolygonInProgress([]);
                     setCropPolygon(null);
+                    setRectDragStart(null);
+                    rectDragCurrentRef.current = null;
                   }}
                   className={`flex-1 px-2 py-1.5 text-xs rounded ${cropMode === 'polygon' ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
                 >
@@ -8344,6 +8590,7 @@ export default function PointCloudViewer({
                   data-testid="crop-draw-box"
                   onClick={() => {
                     boxDrawFirstCornerRef.current = null;
+                    boxDrawCursorRef.current = null;
                     setCropDrawState('awaiting-box-corner-1');
                   }}
                   className={`w-full px-2 py-1.5 text-xs rounded mb-2 ${cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2' ? 'bg-amber-600 text-white' : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'}`}
@@ -8403,12 +8650,53 @@ export default function PointCloudViewer({
               </div>
             )}
 
+            {cropMode === 'rect' && (
+              <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-300">
+                {cropDrawState === 'drawing-rect' ? (
+                  <>
+                    <div className="font-medium text-neutral-200 mb-1">Drawing rectangle</div>
+                    Drag in the viewport to draw a rectangle from any angle. Esc to cancel.
+                  </>
+                ) : cropPolygon ? (
+                  <>
+                    <div className="font-medium text-neutral-200 mb-1">Rectangle ready</div>
+                    Preview shown above. Press Apply, or click below to redraw.
+                    <button
+                      onClick={() => {
+                        setCropPolygon(null);
+                        setRectDragStart(null);
+                        rectDragCurrentRef.current = null;
+                        setCropDrawState('drawing-rect');
+                      }}
+                      className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
+                    >
+                      Redraw rectangle
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    No rectangle yet.
+                    <button
+                      onClick={() => {
+                        setRectDragStart(null);
+                        rectDragCurrentRef.current = null;
+                        setCropDrawState('drawing-rect');
+                      }}
+                      className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
+                    >
+                      Start drawing
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
             <button
               data-testid="crop-apply"
               onClick={handleApplyCrop}
               disabled={
                 (cropMode === 'box' && !cropBox) ||
-                (cropMode === 'polygon' && !cropPolygon)
+                ((cropMode === 'polygon' || cropMode === 'rect') && !cropPolygon)
               }
               className="w-full px-2 py-1.5 mt-1 text-xs font-medium rounded bg-green-600 hover:bg-green-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white disabled:cursor-not-allowed transition-colors"
             >

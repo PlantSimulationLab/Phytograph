@@ -46,6 +46,20 @@ typing a coordinate.
 | <kbd>Enter</kbd> | Close the polygon |
 | <kbd>Esc</kbd> | Cancel the polygon |
 
+## Crop rect (while drawing)
+
+| Shortcut | Action |
+|---|---|
+| Left-click-drag | Draw the rectangle (release to commit) |
+| <kbd>Esc</kbd> | Cancel the rectangle |
+
+## Crop box draw (while placing corners)
+
+| Shortcut | Action |
+|---|---|
+| Left-click | Place a corner on the ground plane (two clicks) |
+| <kbd>Esc</kbd> | Cancel the draw |
+
 ## Transform mode (Blender-style)
 
 When the Translate tool is active:

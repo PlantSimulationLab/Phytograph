@@ -29,15 +29,16 @@ cloud's bounding box at (0, 0, 0) without rotating it.
 ## Crop
 
 Use **Crop** (scissors icon) to keep only points inside (or outside)
-a region. Two shapes are supported — a 3D **Box** and a 2D **Polygon**
-lasso — and the same region applies to every scan you have selected.
+a region. Three shapes are supported — a 3D **Box**, a screen-space
+**Rect**(angle), and a freeform **Polygon** lasso — and the same region
+applies to every scan you have selected.
 
 1. Click **Crop**. A green box appears around the union of the selected
    scans' bounding boxes.
-2. In the panel choose **Box** or **Polygon** at the top, then a **Mode**
-   below it: **Keep Inside** (default), **Keep Outside**, or **Segment**.
-   The first two discard the points you don't keep; **Segment** keeps both
-   halves as separate clouds (see below).
+2. In the panel choose **Box**, **Rect**, or **Polygon** at the top, then a
+   **Mode** below it: **Keep Inside** (default), **Keep Outside**, or
+   **Segment**. The first two discard the points you don't keep;
+   **Segment** keeps both halves as separate clouds (see below).
 3. Shape the region (see below).
 4. Click **Apply** at the bottom of the panel. A **Cropping…** indicator
    appears while the crop is processed, and the removed points stay
@@ -53,14 +54,40 @@ Two ways to shape the box:
 
 - **Type dimensions / center** in the panel for an exact axis-aligned box.
 - **Click "Draw box in viewport"** then click two opposite corners on the
-  ground plane. The box's Z extent auto-spans the data; refine with the
-  dimension / center fields afterwards.
+  ground plane. After the first click a marker shows where it landed and a
+  live preview box follows the cursor until you click the second corner.
+  The box's Z extent auto-spans the data; refine with the dimension /
+  center fields afterwards. <kbd>Esc</kbd> cancels.
+
+Box mode is axis-aligned and easiest from a roughly top-down view. To crop
+from an angled view, use **Rect** instead.
 
 !!! tip "Cropping out the ground"
     For TLS scans of a single plant, raise the box's lower Z bound to
     the level of the lowest branch (adjust the Z center / dimension
     fields). With **Keep Inside** selected, this removes the ground in
     one step — much faster than filtering by height.
+
+### Rect mode
+
+Rect mode is a **screen-space rectangle** — the quick, any-view counterpart
+to Box. Unlike the world-space box, it works from any camera angle.
+
+1. Pick **Rect** in the panel; the view switches to a straight-on
+   (orthographic) projection and the camera locks so the rectangle stays
+   anchored to the view.
+2. **Click-drag** in the viewport from one corner to the opposite corner.
+   A dashed preview rectangle follows the cursor; release to commit it.
+3. Click **Apply** in the panel, or use **Redraw rectangle** to start over.
+   <kbd>Esc</kbd> cancels.
+
+Like the polygon, the rectangle lives in screen space, so the in/out test
+uses the camera as it was when you released the drag — orbiting afterwards
+doesn't change the result. Because the draw is orthographic, the selection
+extrudes straight into the scene: the cropped region is a true rectangular
+slab from **any** viewing angle, not a perspective wedge. So you can, for
+example, orbit to a side view, drag a rectangle around the part of a plant
+you want, and get a clean axis-true cut.
 
 ### Polygon mode
 
@@ -85,8 +112,8 @@ fine and doesn't change the result.
 **Segment** instead splits each selected scan in two: the original scan
 keeps the in-region points (the same set **Keep Inside** would keep), and a
 new **"… (segment)"** cloud is added to the scene holding the cropped-out
-points. No points are lost. It works with both **Box** and **Polygon**
-shapes.
+points. No points are lost. It works with all three shapes — **Box**,
+**Rect**, and **Polygon**.
 
 The new cloud is added in a distinct colour so it's easy to tell apart;
 recolour or rename it from the scan list like any other scan. It's handy
@@ -129,7 +156,7 @@ necessary to clear everything you wanted to.
     The free-form brush works only on LAS/LAZ and PLY/PCD scans, which
     keep all points in memory. For XYZ-imported scans (which stream from
     an on-disk octree), use **Crop** with **Keep Outside** to remove a
-    box or polygon region instead — it goes through the same backend
+    box, rect, or polygon region instead — it goes through the same backend
     re-conversion path and gives the same full-resolution result.
 
 ## Filter
