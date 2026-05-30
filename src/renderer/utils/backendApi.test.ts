@@ -7,7 +7,9 @@ import {
   deletePlantSession,
   exportPointCloudLasLaz,
   extractSkeleton,
+  generatePlantCanopy,
   generatePlantModel,
+  generatePlantStreaming,
   getAvailablePlantModels,
   getBackendUrl,
   getPlantSessionStatus,
@@ -289,6 +291,87 @@ describe('generatePlantModel', () => {
   it('surfaces detail on error', async () => {
     mockFetchError(400, { detail: 'unknown species' });
     await expect(generatePlantModel(req)).rejects.toThrow('unknown species');
+  });
+});
+
+describe('generatePlantCanopy', () => {
+  const req = {
+    plant_type: 'bean', age: 15,
+    center_x: 0, center_y: 0, center_z: 0,
+    spacing_x: 0.5, spacing_y: 0.5,
+    count_x: 2, count_y: 2, germination_rate: 1.0,
+  };
+
+  it('POSTs the canopy request to /api/plant/canopy/generate', async () => {
+    const expected = {
+      success: true, vertices: [], indices: [], vertex_count: 0, triangle_count: 0,
+      plant_type: 'bean', age: 15, plant_count: 4, count_x: 2, count_y: 2,
+    };
+    const spy = mockFetchOk(expected);
+    await generatePlantCanopy(req);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:8008/api/plant/canopy/generate');
+    expect(JSON.parse(init?.body as string)).toEqual(req);
+  });
+
+  it('surfaces detail on error', async () => {
+    mockFetchError(400, { detail: 'counts must be positive' });
+    await expect(generatePlantCanopy(req)).rejects.toThrow('counts must be positive');
+  });
+});
+
+// Build a text/event-stream Response from raw SSE frame strings.
+function mockSSE(frames: string[]) {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const enc = new TextEncoder();
+      for (const f of frames) controller.enqueue(enc.encode(f));
+      controller.close();
+    },
+  });
+  return vi
+    .spyOn(global, 'fetch')
+    .mockResolvedValue(new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }));
+}
+
+describe('generatePlantStreaming', () => {
+  const payload = { mode: 'canopy' as const, request: { plant_type: 'bean', age: 10, count_x: 2, count_y: 2 } };
+
+  it('reports progress and resolves with the result event', async () => {
+    const spy = mockSSE([
+      'event: progress\ndata: {"progress":0.3,"message":"Growing plants..."}\n\n',
+      'event: progress\ndata: {"progress":0.8,"message":"Packing geometry..."}\n\n',
+      'event: result\ndata: {"success":true,"triangle_count":1234,"plant_count":4}\n\n',
+    ]);
+    const seen: Array<[number, string]> = [];
+    const res = await generatePlantStreaming(payload, (p, m) => seen.push([p, m]));
+
+    // POSTs the flattened mode + request to the stream endpoint.
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:8008/api/plant/generate/stream');
+    expect(JSON.parse(init?.body as string)).toEqual({ mode: 'canopy', plant_type: 'bean', age: 10, count_x: 2, count_y: 2 });
+
+    expect(seen).toEqual([[0.3, 'Growing plants...'], [0.8, 'Packing geometry...']]);
+    expect(res.success).toBe(true);
+    expect(res.triangle_count).toBe(1234);
+  });
+
+  it('throws on an error event', async () => {
+    mockSSE(['event: error\ndata: {"detail":"No plants germinated."}\n\n']);
+    await expect(generatePlantStreaming(payload, () => {})).rejects.toThrow('No plants germinated.');
+  });
+
+  it('handles frames split across stream chunks', async () => {
+    // The result frame arrives in two reads; the parser must buffer across them.
+    mockSSE([
+      'event: result\ndata: {"success":true,',
+      '"triangle_count":7}\n\n',
+    ]);
+    const res = await generatePlantStreaming(payload, () => {});
+    expect(res.triangle_count).toBe(7);
   });
 });
 

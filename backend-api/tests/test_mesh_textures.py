@@ -147,6 +147,195 @@ def test_plant_session_advance_returns_textures(client):
 
 
 # ---------------------------------------------------------------------------
+# Plant canopy generation
+# ---------------------------------------------------------------------------
+
+@requires_pyhelios
+def test_plant_canopy_builds_grid_of_plants(client):
+    """A 2x2 bean canopy must build 4 plants into one merged mesh: it returns
+    the canopy echo fields and substantially more geometry than a single plant
+    of the same species/age, plus decodable leaf textures."""
+    single = client.post(
+        "/api/plant/generate",
+        json={"plant_type": "bean", "age": 15, "random_seed": 3},
+    )
+    assert single.status_code == 200, single.text
+    single_tris = single.json()["triangle_count"]
+    assert single_tris > 0
+
+    canopy = client.post(
+        "/api/plant/canopy/generate",
+        json={
+            "plant_type": "bean",
+            "age": 15,
+            "spacing_x": 0.5,
+            "spacing_y": 0.5,
+            "count_x": 2,
+            "count_y": 2,
+            "germination_rate": 1.0,
+            "random_seed": 3,
+        },
+    )
+    assert canopy.status_code == 200, canopy.text
+    body = canopy.json()
+    assert body["success"] is True
+
+    # Echo fields describe the grid actually built.
+    assert body["count_x"] == 2
+    assert body["count_y"] == 2
+    assert body["spacing_x"] == 0.5
+    assert body["spacing_y"] == 0.5
+    assert body["plant_count"] == 4
+
+    # 4 plants → meaningfully more geometry than one. Use a conservative 2.5x
+    # lower bound to stay robust to per-plant stochastic variation.
+    assert body["triangle_count"] > single_tris * 2.5
+    assert body["vertex_count"] == body["triangle_count"] * 3
+
+    # Same textured payload as the single-plant path.
+    assert body["uv_coordinates"] is not None
+    assert len(body["uv_coordinates"]) == body["vertex_count"]
+    assert body["materials"], "canopy should return leaf materials"
+    assert body["textures"], "canopy should return base64 textures"
+    for b64 in body["textures"].values():
+        assert base64.b64decode(b64)[:4] == b"\x89PNG"
+
+
+@requires_pyhelios
+def test_plant_canopy_germination_rate_reduces_plant_count(client):
+    """A germination rate below 1.0 leaves some grid positions empty, so a large
+    grid germinates fewer than the full count_x * count_y."""
+    resp = client.post(
+        "/api/plant/canopy/generate",
+        json={
+            "plant_type": "bean",
+            "age": 10,
+            "count_x": 4,
+            "count_y": 4,
+            "germination_rate": 0.5,
+            "random_seed": 11,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is True
+    # 16 positions at 50% germination: expect fewer than all, and at least one.
+    assert 0 < body["plant_count"] < 16
+
+
+def test_plant_canopy_rejects_invalid_count(client):
+    """Validation happens before any pyhelios work, so this runs without a
+    native build: a non-positive count returns success=False with a message."""
+    resp = client.post(
+        "/api/plant/canopy/generate",
+        json={"plant_type": "bean", "age": 10, "count_x": 0, "count_y": 3},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert "count" in (body["error"] or "").lower()
+
+
+@requires_pyhelios
+def test_plant_stream_emits_progress_then_result(client):
+    """The SSE endpoint streams progress events (fractions in [0,1], with at
+    least one between 0 and 1) and ends with a result carrying the merged
+    canopy geometry."""
+    import json as _json
+
+    progresses = []
+    result = None
+    with client.stream(
+        "POST", "/api/plant/generate/stream",
+        json={"mode": "canopy", "plant_type": "bean", "age": 10,
+              "count_x": 2, "count_y": 2},
+    ) as resp:
+        assert resp.status_code == 200, resp.text
+        event = None
+        for line in resp.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data = _json.loads(line.split(":", 1)[1].strip())
+                if event == "progress":
+                    progresses.append(data["progress"])
+                    assert 0.0 <= data["progress"] <= 1.0
+                    assert isinstance(data["message"], str) and data["message"]
+                elif event == "result":
+                    result = data
+
+    assert progresses, "expected at least one progress event"
+    assert any(0.0 < p < 1.0 for p in progresses), "expected mid-build progress"
+    assert result is not None and result["success"] is True
+    assert result["triangle_count"] > 0
+    # 2x2 canopy → echo fields present.
+    assert result["plant_count"] == 4
+
+
+@requires_pyhelios
+def test_plant_stream_single_returns_session(client):
+    """A single-plant streaming build retains a session (for age scrubbing),
+    surfaced as session_id in the result."""
+    import json as _json
+
+    session_id = None
+    with client.stream(
+        "POST", "/api/plant/generate/stream",
+        json={"mode": "single", "plant_type": "bean", "age": 10},
+    ) as resp:
+        assert resp.status_code == 200, resp.text
+        event = None
+        for line in resp.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:") and event == "result":
+                session_id = _json.loads(line.split(":", 1)[1].strip()).get("session_id")
+
+    assert session_id, "single-plant stream should retain a session"
+    try:
+        # The session must be live and advanceable.
+        adv = client.post(f"/api/plant/session/{session_id}/advance", json={"dt": 5})
+        assert adv.status_code == 200, adv.text
+        assert adv.json()["success"] is True
+    finally:
+        client.delete(f"/api/plant/session/{session_id}")
+
+
+def test_plant_stream_rejects_invalid_count(client):
+    """Validation errors arrive as an SSE error event (no native work)."""
+    import json as _json
+
+    err = None
+    with client.stream(
+        "POST", "/api/plant/generate/stream",
+        json={"mode": "canopy", "plant_type": "bean", "age": 10, "count_x": 0, "count_y": 2},
+    ) as resp:
+        assert resp.status_code == 200, resp.text
+        event = None
+        for line in resp.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:") and event == "error":
+                err = _json.loads(line.split(":", 1)[1].strip())["detail"]
+    assert err and "count" in err.lower()
+
+
+def test_plant_canopy_rejects_invalid_germination_rate(client):
+    """Germination rate must be in [0, 1]; validated before pyhelios work."""
+    resp = client.post(
+        "/api/plant/canopy/generate",
+        json={
+            "plant_type": "bean", "age": 10,
+            "count_x": 2, "count_y": 2, "germination_rate": 1.5,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert "germination" in (body["error"] or "").lower()
+
+
+# ---------------------------------------------------------------------------
 # OBJ + MTL import
 # ---------------------------------------------------------------------------
 

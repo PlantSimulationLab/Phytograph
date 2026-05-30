@@ -392,6 +392,21 @@ export interface PlantGenerationRequest {
   random_seed?: number;  // Random seed for reproducibility
 }
 
+export interface PlantCanopyRequest {
+  plant_type: string;  // Plant model name from library
+  age: number;         // Age of all plants in days
+  center_x?: number;   // Canopy center (meters)
+  center_y?: number;
+  center_z?: number;
+  spacing_x?: number;  // Spacing between plants in x (meters)
+  spacing_y?: number;  // Spacing between plants in y (meters)
+  count_x?: number;    // Plants in x
+  count_y?: number;    // Plants in y
+  germination_rate?: number;  // Probability (0-1) each grid position is filled
+  // Advanced parameters (optional)
+  random_seed?: number;  // Random seed for reproducibility
+}
+
 export interface PlantMaterial {
   name: string;
   color?: number[];  // [r, g, b] ambient/diffuse color (0-1 range)
@@ -423,6 +438,14 @@ export interface PlantGenerationResponse {
   available_models?: string[];
   helios_xml?: string;   // Plant structure XML for Helios simulation
   error?: string;
+  // Retained session for age stepping (single-plant streaming builds)
+  session_id?: string;
+  // Canopy support (echoed back from /api/plant/canopy/generate)
+  plant_count?: number;  // Total plants actually built (after germination)
+  count_x?: number;      // Grid columns requested
+  count_y?: number;      // Grid rows requested
+  spacing_x?: number;    // Spacing used in x (meters)
+  spacing_y?: number;    // Spacing used in y (meters)
 }
 
 /**
@@ -484,6 +507,126 @@ export async function generatePlantModel(
     console.error('Plant generation failed:', error);
     throw error;
   }
+}
+
+/**
+ * Generate a canopy of regularly spaced plants using pyhelios PlantArchitecture.
+ * Returns one merged mesh (same shape as generatePlantModel) for all plants.
+ */
+export async function generatePlantCanopy(
+  request: PlantCanopyRequest
+): Promise<PlantGenerationResponse> {
+  const baseUrl = getBackendUrl();
+  console.log(
+    'Plant canopy - baseUrl:', baseUrl, 'type:', request.plant_type,
+    'grid:', `${request.count_x}x${request.count_y}`, 'age:', request.age,
+  );
+
+  // Canopies build N plants, so allow the full 5 minute timeout.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+
+  try {
+    const response = await fetch(`${baseUrl}/api/plant/canopy/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Plant canopy generation failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * A single plant or a canopy build, streamed with progress (SSE). The viewer
+ * uses this so large canopies (and single plants) report a live progress bar.
+ */
+export type PlantStreamPayload =
+  | { mode: 'single'; request: PlantGenerationRequest }
+  | { mode: 'canopy'; request: PlantCanopyRequest };
+
+/**
+ * Generate a plant or canopy via the SSE endpoint, reporting progress through
+ * `onProgress(fraction 0-1, message)`. Resolves with the final
+ * PlantGenerationResponse (single plants include a session_id). Pass an
+ * AbortSignal to cancel a long build.
+ */
+export async function generatePlantStreaming(
+  payload: PlantStreamPayload,
+  onProgress: (progress: number, message: string) => void,
+  signal?: AbortSignal,
+): Promise<PlantGenerationResponse> {
+  const baseUrl = getBackendUrl();
+  // The stream request flattens mode + the relevant fields; the backend reads
+  // the subset it needs per mode.
+  const body = { mode: payload.mode, ...payload.request };
+
+  const response = await fetch(`${baseUrl}/api/plant/generate/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line ("\n\n").
+      let boundary: number;
+      while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+
+        let eventType = 'message';
+        let data = '';
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) eventType = line.slice(6).trim();
+          else if (line.startsWith('data:')) data = line.slice(5).trim();
+        }
+        if (!data) continue;
+
+        if (eventType === 'progress') {
+          const parsed = JSON.parse(data);
+          onProgress(parsed.progress, parsed.message);
+        } else if (eventType === 'result') {
+          return JSON.parse(data) as PlantGenerationResponse;
+        } else if (eventType === 'error') {
+          const parsed = JSON.parse(data);
+          throw new Error(parsed.detail || 'Plant generation failed');
+        }
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+
+  throw new Error('Stream ended without a result');
 }
 
 // ==================== PLANT SESSION API (Age Stepping) ====================

@@ -47,6 +47,20 @@ organs use their organ colors. See [Meshes: Textures](meshes.md#textures).
 The same growth machinery is exposed live via the **Age slider** in the
 Plant panel, so you can scrub through development after generation.
 
+## Canopies
+
+A **canopy** is a regularly spaced grid of plants of the same species and
+age — a synthetic crop stand or orchard block. Rather than placing plants
+one at a time, you specify a center, the spacing between plants in X and Y,
+and the number of columns and rows; Phytograph builds the whole grid in a
+single pass. A **germination rate** below 1.0 randomly leaves grid positions
+empty, mimicking a real stand with missing plants.
+
+The entire canopy is returned as one merged mesh (a single object in the
+scene), which is convenient for whole-stand operations like simulating a
+LiDAR scan over the plot. See [Generate a
+canopy](../workflows/generate-plant.md#generate-a-canopy).
+
 ## Morphing a generated plant
 
 Every plant exposes a set of **morphable parameters**:

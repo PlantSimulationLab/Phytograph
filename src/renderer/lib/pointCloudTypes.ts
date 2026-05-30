@@ -156,6 +156,9 @@ export interface MeshEntry {
   regenerationKey?: number;  // Counter that increments on each regeneration to force React remount
   heliosXml?: string;  // Plant structure XML for Helios simulation export
   plantMaterials?: PlantMaterialDef[];  // Materials with textures for plant rendering
+  // Canopy-specific: grid dimensions when this plant mesh is a multi-plant canopy.
+  // Drives the display name (e.g. "bean canopy 3×3 (30d)"); absent for single plants.
+  plantCanopy?: { countX: number; countY: number; plantCount: number };
   // Voxel-specific: per-axis grid subdivision count for the PyHelios LiDAR grid.
   // Only set on shape-voxel meshes; renders as a wireframe overlay when any axis > 1.
   gridSubdivisions?: { x: number; y: number; z: number };

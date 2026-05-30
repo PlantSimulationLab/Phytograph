@@ -86,7 +86,7 @@ def unicode_to_ascii(s: str) -> str:
     return result
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.7"
+BACKEND_VERSION = "0.3.8"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -3657,6 +3657,52 @@ class PlantGenerationRequest(BaseModel):
     random_seed: Optional[int] = None  # Random seed for reproducibility
 
 
+class PlantCanopyRequest(BaseModel):
+    """Request for generating a canopy of regularly spaced plants"""
+    plant_type: str = "bean"  # Plant model name from library
+    age: float = 30.0  # Age of all plants in days
+    # Cartesian center of the canopy grid (defaults to origin)
+    center_x: float = 0.0
+    center_y: float = 0.0
+    center_z: float = 0.0
+    # Spacing between plants (meters) in the x- and y-directions
+    spacing_x: float = 0.5
+    spacing_y: float = 0.5
+    # Number of plants in the x- and y-directions
+    count_x: int = 3
+    count_y: int = 3
+    # Probability (0-1) that each grid position is occupied; 1.0 fills all
+    germination_rate: float = 1.0
+    # Advanced parameters (optional)
+    random_seed: Optional[int] = None  # Random seed for reproducibility
+
+
+class PlantStreamRequest(BaseModel):
+    """Request for streaming plant/canopy generation with progress (SSE).
+
+    `mode` selects single-plant vs. canopy; the relevant subset of fields is
+    used for each. Single plants additionally create a retained session so the
+    age slider keeps working after generation.
+    """
+    mode: str = "single"  # "single" | "canopy"
+    plant_type: str = "bean"
+    age: float = 30.0
+    random_seed: Optional[int] = None
+    # Single-plant position (mode == "single")
+    position_x: float = 0.0
+    position_y: float = 0.0
+    position_z: float = 0.0
+    # Canopy parameters (mode == "canopy")
+    center_x: float = 0.0
+    center_y: float = 0.0
+    center_z: float = 0.0
+    spacing_x: float = 0.5
+    spacing_y: float = 0.5
+    count_x: int = 3
+    count_y: int = 3
+    germination_rate: float = 1.0
+
+
 class PlantMaterial(BaseModel):
     """Material definition for plant rendering"""
     name: str
@@ -3693,6 +3739,12 @@ class PlantGenerationResponse(BaseModel):
     error: Optional[str] = None
     # Session support for age stepping
     session_id: Optional[str] = None  # Session ID for time-stepping
+    # Canopy support (echoed back so the frontend can label/store the grid)
+    plant_count: Optional[int] = None  # Total plants actually built (after germination)
+    count_x: Optional[int] = None      # Grid columns requested
+    count_y: Optional[int] = None      # Grid rows requested
+    spacing_x: Optional[float] = None  # Spacing used in x (meters)
+    spacing_y: Optional[float] = None  # Spacing used in y (meters)
 
 
 # ==================== PLANT SESSION MANAGEMENT ====================
@@ -4857,6 +4909,521 @@ async def generate_plant_model(request: PlantGenerationRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Plant generation failed: {str(e)}")
+
+
+# Woody species get brown stems, herbaceous species get green stems. Shared by
+# the single-plant and canopy generation paths.
+_WOODY_SPECIES = {
+    'almond', 'apple', 'apple_fruitingwall', 'easternredbud', 'olive',
+    'pistachio', 'walnut', 'bougainvillea', 'grapevine_VSP', 'grapevine_Wye',
+    'grapevine_GDC', 'grapevine_geneva_double_curtain', 'grapevine_vertical_shoot_positioned',
+    'grapevine_sprawl', 'grapevine_unilateral_cordon'
+}
+
+
+def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -> tuple:
+    """
+    Extract merged plant geometry from every object in a pyhelios Context.
+
+    Walks context.getAllObjectIDs(), so a canopy of N plants (all added to the
+    same context) comes back as one merged mesh. UVs are Helios's real
+    per-vertex coordinates, V-flipped for three.js — identical convention to
+    /api/plant/generate and _extract_session_geometry.
+
+    If progress_cb is given, it is called with a fraction in [0, 1] as objects
+    are processed, so a streaming caller can report extraction progress.
+
+    Returns (vertices, faces, colors, normals, uvs, materials_list,
+             material_groups_list, textures_data).
+    """
+    import os
+    import base64
+
+    object_ids = context.getAllObjectIDs()
+    total_objects = len(object_ids) or 1
+
+    vertices = []
+    colors = []
+    normals = []
+    uvs = []
+    faces = []
+    vertex_index = 0
+    triangle_index = 0
+
+    materials_dict = {}        # mat_label -> PlantMaterial
+    material_groups_dict = {}  # mat_label -> [triangle index, ...]
+    texture_files = {}         # texture basename -> source path
+
+    for obj_idx, obj_id in enumerate(object_ids):
+        if progress_cb is not None and (obj_idx % 64 == 0):
+            progress_cb(obj_idx / total_objects)
+        try:
+            prim_infos = context.getPrimitivesInfoForObject(obj_id)
+        except Exception:
+            continue
+
+        if not prim_infos:
+            continue
+
+        first_prim = prim_infos[0]
+        try:
+            mat_label = context.getPrimitiveMaterialLabel(first_prim.uuid)
+            texture_path = context.getMaterialTexture(mat_label) if mat_label else None
+        except Exception:
+            mat_label = None
+            texture_path = None
+
+        is_textured = texture_path and len(texture_path) > 0
+        texture_name_lower = texture_path.lower() if texture_path else ""
+        is_leaf_texture = 'leaf' in texture_name_lower or 'Leaf' in (texture_path or "")
+
+        if is_textured:
+            texture_name = os.path.basename(texture_path)
+            if mat_label not in materials_dict:
+                materials_dict[mat_label] = PlantMaterial(
+                    name=mat_label,
+                    texture_name=texture_name,
+                    has_alpha=True,
+                )
+                material_groups_dict[mat_label] = []
+                texture_files[texture_name] = texture_path
+
+        for prim_info in prim_infos:
+            try:
+                if prim_info.primitive_type.value != 1:
+                    continue
+
+                tri_verts = prim_info.vertices
+                if len(tri_verts) != 3:
+                    continue
+
+                prim_color = prim_info.color
+                color_rgb = [prim_color.r, prim_color.g, prim_color.b]
+
+                # Vertex-color fallback (matches /api/plant/generate).
+                if is_textured and (color_rgb[0] == 0 and color_rgb[1] == 0 and color_rgb[2] == 0):
+                    if is_leaf_texture:
+                        color_rgb = [0.3, 0.55, 0.2]
+                    elif is_woody:
+                        color_rgb = [0.45, 0.3, 0.15]
+                    else:
+                        color_rgb = [0.3, 0.55, 0.2]
+                elif not is_textured and is_woody:
+                    brightness = color_rgb[0] + color_rgb[1] + color_rgb[2]
+                    if brightness < 0.5:
+                        color_rgb = [0.45, 0.3, 0.15]
+
+                prim_normal = prim_info.normal
+                normal_xyz = [prim_normal.x, prim_normal.y, prim_normal.z]
+
+                prim_uvs = prim_info.texture_uv if is_textured else None
+                tri_is_textured = (
+                    is_textured and prim_uvs is not None and len(prim_uvs) == 3
+                )
+
+                face_indices = []
+                for vi, v in enumerate(tri_verts):
+                    vertices.append([v.x, v.y, v.z])
+                    colors.append(color_rgb)
+                    normals.append(normal_xyz)
+                    if tri_is_textured:
+                        uv = prim_uvs[vi]
+                        uvs.append([uv.x, 1.0 - uv.y])
+                    else:
+                        uvs.append([0.0, 0.0])
+                    face_indices.append(vertex_index)
+                    vertex_index += 1
+
+                faces.append(face_indices)
+
+                if tri_is_textured and mat_label in material_groups_dict:
+                    material_groups_dict[mat_label].append(triangle_index)
+
+                triangle_index += 1
+            except Exception:
+                continue
+
+    textures_data = {}
+    for tex_name, tex_path in texture_files.items():
+        if os.path.exists(tex_path):
+            try:
+                with open(tex_path, 'rb') as f:
+                    textures_data[tex_name] = base64.b64encode(f.read()).decode('utf-8')
+            except Exception:
+                pass
+
+    if progress_cb is not None:
+        progress_cb(1.0)
+
+    materials_list = list(materials_dict.values()) if materials_dict else None
+    material_groups_list = [
+        PlantMaterialGroup(material_name=name, triangle_indices=tris)
+        for name, tris in material_groups_dict.items() if tris
+    ] if material_groups_dict else None
+
+    return (
+        vertices, faces, colors, normals, uvs,
+        materials_list, material_groups_list, textures_data,
+    )
+
+
+@app.post("/api/plant/canopy/generate", response_model=PlantGenerationResponse)
+async def generate_plant_canopy(request: PlantCanopyRequest):
+    """
+    Generate a canopy of regularly spaced plants using pyhelios PlantArchitecture.
+
+    Builds a grid of `count_x` x `count_y` plants of the same species, spaced by
+    `spacing_x` / `spacing_y` meters and centered on the canopy center. All plants
+    are added to a single context and returned as one merged mesh, matching the
+    single-plant /api/plant/generate response shape so the renderer is identical.
+    """
+    try:
+        from pyhelios import Context, PlantArchitecture
+        from pyhelios.wrappers.DataTypes import vec3, vec2, int2
+
+        # Validate canopy parameters with actionable errors.
+        if request.count_x <= 0 or request.count_y <= 0:
+            return PlantGenerationResponse(
+                success=False, vertices=[], indices=[], vertex_count=0,
+                triangle_count=0, plant_type=request.plant_type, age=request.age,
+                error=f"Plant counts must be positive (got {request.count_x} x {request.count_y}).",
+            )
+        if request.age < 0:
+            return PlantGenerationResponse(
+                success=False, vertices=[], indices=[], vertex_count=0,
+                triangle_count=0, plant_type=request.plant_type, age=request.age,
+                error=f"Age must be non-negative (got {request.age}).",
+            )
+        if not (0.0 <= request.germination_rate <= 1.0):
+            return PlantGenerationResponse(
+                success=False, vertices=[], indices=[], vertex_count=0,
+                triangle_count=0, plant_type=request.plant_type, age=request.age,
+                error=f"Germination rate must be between 0 and 1 (got {request.germination_rate}).",
+            )
+
+        print(f"[Plant Canopy] Starting: type={request.plant_type}, age={request.age}, "
+              f"grid={request.count_x}x{request.count_y}, spacing=({request.spacing_x},{request.spacing_y}), "
+              f"germination={request.germination_rate}")
+        is_woody = request.plant_type in _WOODY_SPECIES
+
+        with Context() as context:
+            with PlantArchitecture(context) as plantarch:
+                available_models = plantarch.getAvailablePlantModels()
+
+                if request.plant_type not in available_models:
+                    return PlantGenerationResponse(
+                        success=False, vertices=[], indices=[], vertex_count=0,
+                        triangle_count=0, plant_type=request.plant_type, age=request.age,
+                        available_models=available_models,
+                        error=f"Unknown plant type '{request.plant_type}'. Available: {', '.join(available_models[:10])}...",
+                    )
+
+                plantarch.loadPlantModelFromLibrary(request.plant_type)
+
+                build_params = {}
+                if request.random_seed is not None:
+                    build_params['random_seed'] = request.random_seed
+
+                plant_ids = plantarch.buildPlantCanopyFromLibrary(
+                    canopy_center=vec3(request.center_x, request.center_y, request.center_z),
+                    plant_spacing=vec2(request.spacing_x, request.spacing_y),
+                    plant_count=int2(request.count_x, request.count_y),
+                    age=request.age,
+                    germination_rate=request.germination_rate,
+                    build_parameters=build_params if build_params else None,
+                )
+
+                if not plant_ids:
+                    return PlantGenerationResponse(
+                        success=False, vertices=[], indices=[], vertex_count=0,
+                        triangle_count=0, plant_type=request.plant_type, age=request.age,
+                        plant_count=0, count_x=request.count_x, count_y=request.count_y,
+                        spacing_x=request.spacing_x, spacing_y=request.spacing_y,
+                        error="No plants germinated. Try a higher germination rate.",
+                    )
+
+                # Report the first plant's height as a representative value.
+                try:
+                    height = plantarch.getPlantHeight(plant_ids[0])
+                except Exception:
+                    height = None
+
+                print(f"[Plant Canopy] Built {len(plant_ids)} plants; extracting geometry...")
+
+                (vertices, faces, colors, normals, uvs,
+                 materials_list, material_groups_list, textures_data) = \
+                    _extract_context_plant_geometry(context, is_woody)
+
+                # XML export: a canopy is not a morph target, so write the first
+                # plant's structure (representative) without failing the request.
+                helios_xml = None
+                try:
+                    import tempfile
+                    import os
+                    with tempfile.NamedTemporaryFile(suffix='.xml', delete=False) as tmp_xml:
+                        xml_path = tmp_xml.name
+                    plantarch.writePlantStructureXML(plant_ids[0], xml_path)
+                    with open(xml_path, 'r') as f:
+                        helios_xml = f.read()
+                    os.unlink(xml_path)
+                except Exception as xml_err:
+                    print(f"[Plant Canopy] Warning: failed to write XML: {xml_err}")
+
+                print(f"[Plant Canopy] Complete: {len(plant_ids)} plants, "
+                      f"{len(vertices)} vertices, {len(faces)} triangles")
+
+                return PlantGenerationResponse(
+                    success=True,
+                    vertices=vertices,
+                    indices=faces,
+                    normals=normals if normals else None,
+                    colors=colors,
+                    uv_coordinates=uvs if uvs else None,
+                    materials=materials_list,
+                    material_groups=material_groups_list,
+                    textures=textures_data if textures_data else None,
+                    vertex_count=len(vertices),
+                    triangle_count=len(faces),
+                    plant_type=request.plant_type,
+                    age=request.age,
+                    height=height,
+                    available_models=available_models,
+                    helios_xml=helios_xml,
+                    plant_count=len(plant_ids),
+                    count_x=request.count_x,
+                    count_y=request.count_y,
+                    spacing_x=request.spacing_x,
+                    spacing_y=request.spacing_y,
+                )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Plant canopy generation failed: {str(e)}")
+
+
+@app.post("/api/plant/generate/stream")
+async def generate_plant_stream(request: PlantStreamRequest):
+    """
+    Generate a single plant or a canopy with Server-Sent Events progress.
+
+    Emits:
+      event: progress  data: {"progress": 0.0-1.0, "message": "..."}
+      event: result    data: <PlantGenerationResponse-shaped JSON>
+      event: error     data: {"detail": "..."}
+
+    Progress maps the C++ growth phase to 0–0.6 (via setProgressCallback),
+    geometry extraction to 0.6–0.95, and JSON serialization to the final 1.0.
+    Single-plant builds create a retained session (echoed as session_id) so the
+    age slider keeps working; canopies are stateless.
+    """
+    import asyncio
+    import queue as _queue
+    import time
+
+    progress_queue: "_queue.Queue" = _queue.Queue()
+    is_canopy = request.mode == "canopy"
+
+    def _do():
+        from pyhelios import Context, PlantArchitecture
+        from pyhelios.wrappers.DataTypes import vec3, vec2, int2
+
+        is_woody = request.plant_type in _WOODY_SPECIES
+
+        # Validate canopy params up front (cheap, before any native work).
+        if is_canopy:
+            if request.count_x <= 0 or request.count_y <= 0:
+                progress_queue.put(("error", "Plant counts must be positive."))
+                return
+            if not (0.0 <= request.germination_rate <= 1.0):
+                progress_queue.put(("error", "Germination rate must be between 0 and 1."))
+                return
+        if request.age < 0:
+            progress_queue.put(("error", "Age must be non-negative."))
+            return
+
+        # Single plants retain the context/plantarch in a session (no `with`);
+        # canopies build inside a `with` and discard the context afterward.
+        context = Context()
+        context.__enter__()
+        plantarch = PlantArchitecture(context)
+        plantarch.__enter__()
+        keep_session = False
+
+        try:
+            available_models = plantarch.getAvailablePlantModels()
+            if request.plant_type not in available_models:
+                progress_queue.put(("error", f"Unknown plant type '{request.plant_type}'."))
+                return
+
+            plantarch.loadPlantModelFromLibrary(request.plant_type)
+
+            build_params = {}
+            if request.random_seed is not None:
+                build_params['random_seed'] = request.random_seed
+
+            # Growth progress (C++ advanceTime) → 0–0.6. The callback fires on a
+            # native thread; just enqueue, never touch the event loop here.
+            def on_progress(progress: float, message: str):
+                progress_queue.put(("progress", max(0.0, min(progress, 1.0)) * 0.6, "Growing plants..."))
+
+            plantarch.setProgressCallback(on_progress)
+            progress_queue.put(("progress", 0.0, "Growing plants..."))
+
+            if is_canopy:
+                plant_ids = plantarch.buildPlantCanopyFromLibrary(
+                    canopy_center=vec3(request.center_x, request.center_y, request.center_z),
+                    plant_spacing=vec2(request.spacing_x, request.spacing_y),
+                    plant_count=int2(request.count_x, request.count_y),
+                    age=request.age,
+                    germination_rate=request.germination_rate,
+                    build_parameters=build_params if build_params else None,
+                )
+                if not plant_ids:
+                    progress_queue.put(("error", "No plants germinated. Try a higher germination rate."))
+                    return
+                primary_id = plant_ids[0]
+            else:
+                primary_id = plantarch.buildPlantInstanceFromLibrary(
+                    base_position=vec3(request.position_x, request.position_y, request.position_z),
+                    age=request.age,
+                    build_parameters=build_params if build_params else None,
+                )
+                plant_ids = [primary_id]
+
+            plantarch.setProgressCallback(None)
+
+            try:
+                height = plantarch.getPlantHeight(primary_id)
+            except Exception:
+                height = None
+
+            # Geometry extraction → 0.6–0.95.
+            def extract_progress(frac: float):
+                progress_queue.put(("progress", 0.6 + max(0.0, min(frac, 1.0)) * 0.35, "Packing geometry..."))
+
+            (vertices, faces, colors, normals, uvs,
+             materials_list, material_groups_list, textures_data) = \
+                _extract_context_plant_geometry(context, is_woody, progress_cb=extract_progress)
+
+            # Plant structure XML (first/only plant).
+            helios_xml = None
+            try:
+                import tempfile
+                import os as _os2
+                with tempfile.NamedTemporaryFile(suffix='.xml', delete=False) as tmp_xml:
+                    xml_path = tmp_xml.name
+                plantarch.writePlantStructureXML(primary_id, xml_path)
+                with open(xml_path, 'r') as f:
+                    helios_xml = f.read()
+                _os2.unlink(xml_path)
+            except Exception as xml_err:
+                print(f"[Plant Stream] Warning: failed to write XML: {xml_err}")
+
+            result = {
+                "success": True,
+                "vertices": vertices,
+                "indices": faces,
+                "normals": normals if normals else None,
+                "colors": colors,
+                "uv_coordinates": uvs if uvs else None,
+                "materials": [m.model_dump() for m in materials_list] if materials_list else None,
+                "material_groups": [g.model_dump() for g in material_groups_list] if material_groups_list else None,
+                "textures": textures_data if textures_data else None,
+                "vertex_count": len(vertices),
+                "triangle_count": len(faces),
+                "plant_type": request.plant_type,
+                "age": request.age,
+                "height": height,
+                "available_models": available_models,
+                "helios_xml": helios_xml,
+            }
+
+            if is_canopy:
+                result.update({
+                    "plant_count": len(plant_ids),
+                    "count_x": request.count_x,
+                    "count_y": request.count_y,
+                    "spacing_x": request.spacing_x,
+                    "spacing_y": request.spacing_y,
+                })
+            else:
+                # Retain the session for age scrubbing (same shape as
+                # create_plant_session). Reuse the plant_type's current age.
+                session_id = str(uuid.uuid4())[:8]
+                current_age = plantarch.getPlantAge(primary_id)
+                session = PlantSession(
+                    session_id=session_id,
+                    plant_type=request.plant_type,
+                    plant_id=primary_id,
+                    context=context,
+                    plantarch=plantarch,
+                    current_age=current_age,
+                    position=(request.position_x, request.position_y, request.position_z),
+                    created_at=time.time(),
+                )
+                with _session_lock:
+                    _plant_sessions[session_id] = session
+                result["session_id"] = session_id
+                result["age"] = current_age
+                keep_session = True
+
+            # Serialize here, in the worker thread — for a large canopy this is
+            # the single most expensive uninstrumented step (millions of floats).
+            # Doing it in the SSE generator instead would freeze the bar at the
+            # last progress value while the event loop blocks on json.dumps.
+            progress_queue.put(("progress", 0.97, "Finalizing..."))
+            result_json = json.dumps(result)
+            progress_queue.put(("done", result_json))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            progress_queue.put(("error", str(e)))
+        finally:
+            try:
+                plantarch.setProgressCallback(None)
+            except Exception:
+                pass
+            # Tear down pyhelios resources unless a session owns them now.
+            if not keep_session:
+                try:
+                    plantarch.__exit__(None, None, None)
+                    context.__exit__(None, None, None)
+                except Exception:
+                    pass
+
+    async def event_generator():
+        loop = asyncio.get_event_loop()
+        task = loop.run_in_executor(None, _do)
+
+        while True:
+            try:
+                item = await asyncio.to_thread(progress_queue.get, True, 0.25)
+            except _queue.Empty:
+                if task.done():
+                    exc = task.exception()
+                    if exc:
+                        yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+                    break
+                continue
+
+            kind = item[0]
+            if kind == "progress":
+                _, progress_val, message = item
+                yield f"event: progress\ndata: {json.dumps({'progress': progress_val, 'message': message})}\n\n"
+            elif kind == "done":
+                # item[1] is already-serialized JSON (built in the worker thread).
+                yield f"event: result\ndata: {item[1]}\n\n"
+                break
+            elif kind == "error":
+                yield f"event: error\ndata: {json.dumps({'detail': item[1]})}\n\n"
+                break
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================

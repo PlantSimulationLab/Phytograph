@@ -68,6 +68,61 @@ SWIG C-extension bundled via `collectAll` in `scripts/build-backend.mjs`.
 | POST | `/api/plant/morph/parse` | `main.py:4043` | Parse a morph expression |
 | POST | `/api/plant/morph` | `main.py:4074` | Apply a morph to a plant |
 | POST | `/api/plant/generate` | `main.py:4235` | Generate a plant from parameters |
+| POST | `/api/plant/canopy/generate` | `main.py:5035` | Generate a grid of plants as one merged mesh |
+| POST | `/api/plant/generate/stream` | `main.py:5205` | Generate a plant or canopy with SSE progress |
+
+### `POST /api/plant/generate/stream`
+
+Generates a single plant or a canopy and streams **progress** as
+[Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events),
+so the UI can show a live progress bar (and cancel by aborting the request).
+This is the path the Generate Plant popup uses.
+
+Request (`PlantStreamRequest`) carries a `mode` (`"single"` or `"canopy"`)
+plus the relevant fields from `PlantGenerationRequest` / `PlantCanopyRequest`.
+The stream emits:
+
+```
+event: progress
+data: {"progress": 0.0-1.0, "message": "Growing plants..."}
+
+event: result
+data: <PlantGenerationResponse-shaped JSON>
+
+event: error
+data: {"detail": "..."}
+```
+
+Progress maps the C++ growth phase (via `pyhelios`
+`PlantArchitecture.setProgressCallback`) to 0–0.6, geometry extraction to
+0.6–0.95, and serialization to the final 1.0. Single-plant builds create a
+retained session (returned as `session_id` in the result) so the age slider
+keeps working; canopies are stateless and include the canopy echo fields.
+
+### `POST /api/plant/canopy/generate`
+
+Builds a regularly spaced grid of plants from one library species
+(`pyhelios` `buildPlantCanopyFromLibrary`) and returns the whole canopy as a
+single merged mesh — the same `PlantGenerationResponse` shape as
+`/api/plant/generate`, so the renderer is identical.
+
+Request (`PlantCanopyRequest`):
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `plant_type` | str | `"bean"` | Library species (see `/api/plant/models`) |
+| `age` | float | `30.0` | Age of every plant, days (≥ 0) |
+| `center_x/y/z` | float | `0.0` | Canopy center, meters |
+| `spacing_x/y` | float | `0.5` | Spacing between plants, meters |
+| `count_x/y` | int | `3` | Plants in X / Y (must be > 0) |
+| `germination_rate` | float | `1.0` | Probability (0–1) each position is filled |
+| `random_seed` | int? | `null` | Optional seed for reproducibility |
+
+The response echoes back `plant_count` (plants actually built after
+germination), `count_x`, `count_y`, `spacing_x`, and `spacing_y`. Invalid
+counts, age, or germination rate return `success: false` with an `error`
+message (no `pyhelios` work is done). `helios_xml` holds the first plant's
+structure as a representative sample.
 
 ## Point cloud I/O
 

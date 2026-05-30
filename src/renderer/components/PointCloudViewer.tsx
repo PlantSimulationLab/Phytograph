@@ -5,7 +5,7 @@ import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, segmentGround, segmentGroundApply, type CropOctreeRegion, type CropOctreeResult, type BackendPointSource } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, segmentGround, segmentGroundApply, type CropOctreeRegion, type CropOctreeResult, type BackendPointSource } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import {
@@ -13,7 +13,7 @@ import {
   COLORMAP_NAMES,
   COLORMAP_LABELS,
 } from '../lib/colormaps';
-import { PlantGenerationPopup } from './PlantGenerationPopup';
+import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenerationPopup';
 import { HeliosTriangulationPopup } from './HeliosTriangulationPopup';
 import { MorphPopup } from './MorphPopup';
 import { ScanParametersPopup } from './ScanParametersPopup';
@@ -377,6 +377,11 @@ export default function PointCloudViewer({
   // Plant generation state
   const [isGeneratingPlant, setIsGeneratingPlant] = useState(false);
   const [showPlantPopup, setShowPlantPopup] = useState(false);
+  // Live build progress (0-1) + phase message, shown in the popup's progress bar.
+  const [plantProgress, setPlantProgress] = useState<number | null>(null);
+  const [plantProgressMsg, setPlantProgressMsg] = useState('');
+  // Abort controller for an in-flight streaming build (Cancel button).
+  const plantAbortRef = useRef<AbortController | null>(null);
   // Helios triangulation popup + background task state
   const [showHeliosPopup, setShowHeliosPopup] = useState(false);
   const [isHeliosRunning, setIsHeliosRunning] = useState(false);
@@ -5553,66 +5558,61 @@ export default function PointCloudViewer({
 
   // Handle creating a plant model from pyhelios PlantArchitecture
   // Uses session-based approach to enable consistent plants across age steps
-  const handleCreatePlant = useCallback(async (request: PlantGenerationRequest) => {
+  const handleCreatePlant = useCallback(async (payload: PlantGenerationPayload) => {
     if (isGeneratingPlant) return;
 
     setIsGeneratingPlant(true);
-    setShowPlantPopup(false); // Close popup when generation starts
+    setPlantProgress(0);
+    setPlantProgressMsg('Preparing...');
+    // Keep the popup open so it can show the progress bar; it closes on success.
+
+    // Canopy info captured for the new mesh's display name (single plants leave it undefined).
+    let canopyInfo: { countX: number; countY: number; plantCount: number } | undefined;
+    // Position used for plant metadata: canopy center, or single-plant position.
+    let plantPosition: { x: number; y: number; z: number };
+    // The requested seed (single or canopy), used for reproducible regeneration.
+    const requestedSeed = payload.request.random_seed;
+
+    if (payload.mode === 'canopy') {
+      const { request } = payload;
+      plantPosition = { x: request.center_x ?? 0, y: request.center_y ?? 0, z: request.center_z ?? 0 };
+    } else {
+      const { request } = payload;
+      plantPosition = { x: request.position_x ?? 0, y: request.position_y ?? 0, z: request.position_z ?? 0 };
+    }
+
+    const abort = new AbortController();
+    plantAbortRef.current = abort;
 
     try {
-      // Create a plant session for consistent age stepping
-      const sessionResponse = await createPlantSession({
-        plant_type: request.plant_type,
-        initial_age: request.age,
-        position_x: request.position_x ?? 0,
-        position_y: request.position_y ?? 0,
-        position_z: request.position_z ?? 0,
-      });
+      // Stream the build so the popup shows live progress (and can cancel).
+      const response = await generatePlantStreaming(
+        payload,
+        (p, msg) => { setPlantProgress(p); setPlantProgressMsg(msg); },
+        abort.signal,
+      );
 
-      let sessionId: string | undefined;
-      let response;
+      // Single plants come back with a retained session for age scrubbing.
+      const sessionId = response.session_id;
 
-      if (sessionResponse.success && sessionResponse.session_id) {
-        sessionId = sessionResponse.session_id;
-        console.log(`[Plant] Created session ${sessionId} for consistent age stepping`);
-
-        // Get geometry by advancing 0 days
-        const advanceResponse = await advancePlantSession(sessionId, 0);
-        if (advanceResponse.success) {
-          // Convert session response format to plant generation response format.
-          // The session advance now returns the same texture payload (real
-          // Helios UVs, materials, base64 textures) as /api/plant/generate.
-          response = {
-            success: true,
-            vertices: advanceResponse.vertices,
-            indices: advanceResponse.indices,
-            colors: advanceResponse.colors,
-            vertex_count: advanceResponse.vertex_count,
-            triangle_count: advanceResponse.triangle_count,
-            plant_type: request.plant_type,
-            age: advanceResponse.current_age,
-            height: advanceResponse.height,
-            normals: advanceResponse.normals,
-            uv_coordinates: advanceResponse.uv_coordinates,
-            materials: advanceResponse.materials,
-            material_groups: advanceResponse.material_groups,
-            textures: advanceResponse.textures,
-            helios_xml: sessionResponse.helios_xml,
-          };
-        } else {
-          console.warn('[Plant] Session advance failed, falling back to stateless:', advanceResponse.error);
-          sessionId = undefined;
-          response = await generatePlantModel(request);
-        }
-      } else {
-        console.warn('[Plant] Session creation failed, falling back to stateless:', sessionResponse.error);
-        response = await generatePlantModel(request);
+      if (payload.mode === 'canopy' && response.success) {
+        const { request } = payload;
+        canopyInfo = {
+          countX: response.count_x ?? request.count_x ?? 0,
+          countY: response.count_y ?? request.count_y ?? 0,
+          plantCount: response.plant_count ?? 0,
+        };
       }
 
       if (!response.success) {
         showToast({ title: response.error || 'Plant generation failed', type: 'error' });
         return;
       }
+
+      // Result received; building the three.js geometry from a large canopy is
+      // itself non-trivial, so show a final phase instead of a frozen bar.
+      setPlantProgress(0.98);
+      setPlantProgressMsg('Building scene...');
 
       // Debug: Log response data
       console.log('[Plant] Response received:', {
@@ -5629,7 +5629,7 @@ export default function PointCloudViewer({
 
       const newMeshId = crypto.randomUUID();
       // Generate a random seed if not provided, for reproducible regeneration
-      const seed = request.random_seed ?? Math.floor(Math.random() * 1000000);
+      const seed = requestedSeed ?? Math.floor(Math.random() * 1000000);
       const newMesh: MeshEntry = {
         id: newMeshId,
         sourceCloudId: `plant-${response.plant_type}-${shapeCounter}`,
@@ -5641,12 +5641,13 @@ export default function PointCloudViewer({
         isPlant: true,
         plantType: response.plant_type,
         plantAge: response.age,
-        plantPosition: { x: request.position_x ?? 0, y: request.position_y ?? 0, z: request.position_z ?? 0 },
+        plantPosition,
         plantSeed: seed,
-        plantSessionId: sessionId, // Session ID for consistent age stepping
+        plantSessionId: sessionId, // Session ID for consistent age stepping (canopies have none)
         regenerationKey: 0, // Counter for forcing React remount on age change
         heliosXml: response.helios_xml,
         plantMaterials,
+        plantCanopy: canopyInfo,
       };
 
       // Debug: Log mesh data before adding
@@ -5665,6 +5666,9 @@ export default function PointCloudViewer({
       setMeshes(prev => [...prev, newMesh]);
       setShapeCounter(prev => prev + 1);
       console.log('[Plant] Mesh added to state');
+
+      // Mesh is in the scene — close the popup now.
+      setShowPlantPopup(false);
 
       // Initialize transforms for this mesh
       setMeshScales(prev => {
@@ -5699,12 +5703,25 @@ export default function PointCloudViewer({
       }
 
     } catch (error) {
-      console.error('Plant generation failed:', error);
-      showToast({ title: `Plant generation failed: ${error}`, type: 'error' });
+      // A user-initiated cancel aborts the fetch; that's not an error.
+      if (abort.signal.aborted) {
+        console.log('[Plant] Generation cancelled by user');
+      } else {
+        console.error('Plant generation failed:', error);
+        showToast({ title: `Plant generation failed: ${error}`, type: 'error' });
+      }
     } finally {
+      if (plantAbortRef.current === abort) plantAbortRef.current = null;
       setIsGeneratingPlant(false);
+      setPlantProgress(null);
+      setPlantProgressMsg('');
     }
   }, [isGeneratingPlant, shapeCounter, onDeselectAll]);
+
+  // Cancel an in-flight plant/canopy build (aborts the SSE stream).
+  const handleCancelPlantGenerate = useCallback(() => {
+    plantAbortRef.current?.abort();
+  }, []);
 
   // Handle morphing a plant with modified parameters
   const handleMorphPlant = useCallback(async (request: PlantMorphRequest) => {
@@ -7464,7 +7481,9 @@ export default function PointCloudViewer({
                 const isSelected = selectedMeshIds.has(mesh.id);
                 // Display name: for plants show type/age, otherwise show filename
                 const displayName = mesh.isPlant
-                  ? `${mesh.plantType} (${mesh.plantAge}d)`
+                  ? (mesh.plantCanopy
+                      ? `${mesh.plantType} canopy ${mesh.plantCanopy.countX}×${mesh.plantCanopy.countY} (${mesh.plantAge}d)`
+                      : `${mesh.plantType} (${mesh.plantAge}d)`)
                   : (sourceCloud?.data.fileName || 'Mesh');
                 return (
                   <div
@@ -10987,9 +11006,12 @@ export default function PointCloudViewer({
       {/* Plant Generation Popup */}
       <PlantGenerationPopup
         isOpen={showPlantPopup}
-        onClose={() => setShowPlantPopup(false)}
+        onClose={() => { if (!isGeneratingPlant) setShowPlantPopup(false); }}
         onGenerate={handleCreatePlant}
         isGenerating={isGeneratingPlant}
+        progress={plantProgress}
+        progressMessage={plantProgressMsg}
+        onCancelGenerate={handleCancelPlantGenerate}
       />
 
       {/* Helios Triangulation Popup */}

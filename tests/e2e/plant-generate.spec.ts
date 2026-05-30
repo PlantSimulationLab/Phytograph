@@ -118,3 +118,61 @@ test('a textured plant carries texture materials into the renderer', async () =>
     await close();
   }
 });
+
+// Building a canopy goes through the same popup with the "Generate as canopy"
+// toggle on, hitting /api/plant/canopy/generate (pyhelios
+// buildPlantCanopyFromLibrary). The whole grid comes back as one merged mesh,
+// so a 2x2 canopy must have substantially more geometry than a single plant.
+test('generates a 2x2 canopy as a single merged mesh', async () => {
+  const { page, close } = await launchApp();
+
+  try {
+    await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
+
+    await page.getByTestId('tool-plant-generate').click();
+    const popup = page.getByTestId('plant-generation-popup');
+    await expect(popup).toBeVisible();
+
+    const species = page.getByTestId('plant-species-select');
+    await expect(species).toBeVisible();
+    await expect(species.locator('option')).not.toHaveCount(0);
+    await species.selectOption('bean');
+
+    await page.getByTestId('plant-age-input').fill('15');
+
+    // Enable canopy mode — this reveals spacing + count fields and switches the
+    // submit to /api/plant/canopy/generate.
+    await page.getByTestId('plant-canopy-toggle').check();
+    const countX = page.getByTestId('canopy-count-x');
+    const countY = page.getByTestId('canopy-count-y');
+    await expect(countX).toBeVisible();
+    await countX.fill('2');
+    await countY.fill('2');
+    await page.getByTestId('canopy-spacing-x').fill('0.5');
+    await page.getByTestId('canopy-spacing-y').fill('0.5');
+
+    await page.getByTestId('plant-generate-button').click();
+
+    // The popup stays open during the build and shows a live progress bar
+    // (fed by Server-Sent Events from the canopy build).
+    await expect(page.getByTestId('plant-generate-progress')).toBeVisible();
+
+    // Building 4 plants takes longer than one; allow the full cold-init budget.
+    const meshRow = page.getByTestId('mesh-row').first();
+    await expect(meshRow).toBeVisible({ timeout: 180_000 });
+    await expect(meshRow).toHaveAttribute('data-is-plant', 'true');
+
+    // The canopy name encodes the grid, e.g. "bean canopy 2×2 (15d)".
+    const meshName = await meshRow.getAttribute('data-mesh-name');
+    expect(meshName).toContain('bean');
+    expect(meshName).toContain('2×2');
+    expect(meshName).toContain('15d');
+
+    // 4 plants merged: triangle count must dwarf a single plant's lower bound.
+    const trianglesStr = await meshRow.getAttribute('data-triangle-count');
+    expect(trianglesStr).not.toBeNull();
+    expect(parseInt(trianglesStr!, 10)).toBeGreaterThan(400);
+  } finally {
+    await close();
+  }
+});

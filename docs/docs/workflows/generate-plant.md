@@ -25,16 +25,22 @@ background.
    the world origin. Set this when generating multiple plants so they
    don't overlap.
 
-5. **Advanced → Random seed** — Phytograph uses a default seed for
+5. **Generate as canopy** — toggle this to build a regularly spaced
+   grid of plants instead of one. See
+   [Generate a canopy](#generate-a-canopy) below.
+
+6. **Advanced → Random seed** — Phytograph uses a default seed for
    reproducibility. Toggle the override and set your own seed to
    produce a different but reproducible variant.
 
-6. Click **Generate Plant**.
+7. Click **Generate Plant**.
 
 Generation takes anywhere from a couple of seconds (young vegetable) to
-a minute (mature tree). When it finishes, the mesh appears in the
-**Meshes** list and the **Plant** panel opens at the right for further
-control.
+a minute (mature tree). While it runs, the popup stays open and shows a
+**progress bar** with the current phase ("Growing plants…", "Packing
+geometry…") and a **Cancel** button if you want to abort a long build.
+When it finishes, the mesh appears in the **Meshes** list and the
+**Plant** panel opens at the right for further control.
 
 ## Live age scrubbing
 
@@ -46,15 +52,35 @@ Generate at different ages.
 When you find an age you want to keep, click **Render** in the Plant
 panel to commit. The plant is now anchored at that age in the scene.
 
-## Generate several plants at once
+## Generate a canopy
 
-Repeat the **Generate Plant** workflow with different positions to
-build a multi-plant scene. Each plant is its own mesh entry; you can
-hide, color, and export them independently.
+To build a regularly spaced stand of plants in one step, toggle
+**Generate as canopy** in the Generate Plant popup. The single-plant
+**Position** becomes the **Canopy center**, and these controls appear:
 
-For studies that need a regular grid or row of plants, consider
-scripting via the backend API directly — see the
-[developer docs](../developers/api/endpoints.md).
+- **Spacing (m)** — distance between neighboring plants in X and Y.
+- **Count (plants)** — number of columns (X) and rows (Y). The popup
+  shows the total (`columns × rows`).
+- **Advanced → Germination rate** — probability (0–1) that each grid
+  position is filled. `1.0` fills every position; lower values leave
+  random gaps, simulating a realistic stand with missing plants.
+
+All species share the chosen age. Click **Generate Canopy**. The whole
+grid comes back as a **single merged mesh** — one row in the **Meshes**
+list, named like `bean canopy 3×3 (30d)` — so you can hide, color, and
+export the canopy as one object. Because a canopy can build many plants,
+generation takes proportionally longer than a single plant — the popup's
+progress bar tracks the build, and **Cancel** stops it.
+
+!!! note "Canopies are fixed-age"
+    Unlike single plants, a canopy has no live age slider — it is built
+    at the chosen age. To change the age, regenerate the canopy.
+
+## Generate several plants individually
+
+If you need plants you can hide, color, and export independently, repeat
+the **Generate Plant** workflow (canopy toggle off) with different
+positions. Each plant is then its own mesh entry.
 
 ## Common follow-ups
 
