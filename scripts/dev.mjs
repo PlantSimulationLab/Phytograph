@@ -46,6 +46,21 @@ async function runOnce(cmd, args) {
   const electronEnv = { ...process.env };
 
   if (existsSync(venvPython)) {
+    // Build the PyHelios native library up front if it's missing, so the first
+    // API call that touches pyhelios doesn't trigger a silent multi-minute
+    // compile inside the backend. The backend's own staleness check still
+    // handles rebuilds after C++ edits; this just covers the cold-start case.
+    const libName =
+      process.platform === 'darwin' ? 'libhelios.dylib'
+      : isWin ? 'libhelios.dll'
+      : 'libhelios.so';
+    const libPath = join(root, 'pyhelios', 'pyhelios_build', 'build', 'lib', libName);
+    const pyheliosSrc = join(root, 'pyhelios', 'pyhelios', '__init__.py');
+    if (existsSync(pyheliosSrc) && !existsSync(libPath)) {
+      console.log('[dev] PyHelios native library missing — building from source (one-time, may take a few minutes)...');
+      await runOnce('node', ['scripts/build-pyhelios.mjs']);
+    }
+
     console.log('[dev] starting uvicorn --reload (backend) on port 8008...');
     // --reload-dir restricts watching to backend-api/ so edits under node_modules
     // or resources/ don't trigger restarts. uvicorn uses watchfiles when

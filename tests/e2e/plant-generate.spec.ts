@@ -10,6 +10,9 @@ test('generates a procedural plant model with non-default species and age', asyn
 
   try {
 
+    // On a fresh launch the empty-state hint is shown over the viewer.
+    await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
+
     // Open plant generation popup.
     await page.getByTestId('tool-plant-generate').click();
     const popup = page.getByTestId('plant-generation-popup');
@@ -62,6 +65,11 @@ test('generates a procedural plant model with non-default species and age', asyn
 
     // The visible row should label this as a Helios plant.
     await expect(meshRow.getByTestId('mesh-row-count')).toContainText('Helios Plant');
+
+    // A generated plant is a mesh, not a scan — but the viewer is no longer
+    // empty, so the import hint must be gone (regression: it used to linger
+    // because the hint was gated on scan count only).
+    await expect(page.getByTestId('empty-viewer-hint')).toHaveCount(0);
   } finally {
     await close();
   }

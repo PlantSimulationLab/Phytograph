@@ -39,10 +39,12 @@ Read the rest of this section in order:
 
 ## Why a Python sidecar instead of native bindings
 
-The bulk of the scientific stack (open3d, scipy, pyhelios) ships as Python
-wheels. Bundling them via PyInstaller is the fastest path to a shippable
-cross-platform build. Native Helios bindings are a future direction (would
-skip Python for hot paths) but not on the current roadmap.
+The bulk of the scientific stack (open3d, scipy) ships as Python wheels;
+PyHelios is built from a source submodule (see
+[Backend](backend.md)) so the Helios C++ core can be co-developed. Bundling
+them via PyInstaller is the fastest path to a shippable cross-platform build.
+Native Helios bindings beyond PyHelios are a future direction (would skip
+Python for hot paths) but not on the current roadmap.
 
 ## Why Electron over Tauri
 

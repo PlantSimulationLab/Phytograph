@@ -1,0 +1,152 @@
+// Builds the PyHelios native library (libhelios) from the source submodule at
+// ./pyhelios and installs the package editable into the backend venv so both
+// dev (uvicorn) and packaging (PyInstaller) resolve the source build instead of
+// the old pyhelios3d wheel.
+//
+// Usage:
+//   node scripts/build-pyhelios.mjs                 # release, plantarchitecture+lidar
+//   node scripts/build-pyhelios.mjs --debug         # debug build
+//   node scripts/build-pyhelios.mjs --clean         # force a clean rebuild
+//   PYTHON=/path/to/python node scripts/build-pyhelios.mjs   # bypass venv discovery
+//
+// Python interpreter resolution mirrors scripts/build-backend.mjs:
+//   1. $PYTHON env var (explicit override)
+//   2. backend-api/venv/bin/python (Unix) / Scripts/python.exe (Windows)
+//   3. `python3` (Unix) / `python` (Windows) on PATH (CI fallback)
+//
+// Why only plantarchitecture + lidar: those are the only Helios plugins
+// Phytograph's backend uses (procedural plants + LiDAR triangulation). Both are
+// gpu_required=False, so --nogpu drops the radiation/OptiX (CUDA) toolchain.
+// NOTE: the lidar plugin has a C++-level dependency on the visualizer that the
+// Helios CMake auto-loads ("[LiDAR] Automatically loading visualizer
+// dependency"), so the visualizer + its OpenGL deps (glfw/glew/freetype) DO get
+// compiled regardless of this list. On macOS (Cocoa) and Windows (native GL)
+// that needs no extra system packages; on Linux it needs OpenGL/X11 dev headers
+// (libgl1-mesa-dev, xorg-dev). Phytograph's release matrix is macOS + Windows
+// only, so CI doesn't hit the Linux case.
+
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = resolve(__dirname, '..');
+const backendDir = join(root, 'backend-api');
+const pyheliosDir = join(root, 'pyhelios');
+const isWin = process.platform === 'win32';
+
+// Plugins the backend actually uses. Keep in sync with the imports in
+// backend-api/main.py (LiDARCloud, PlantArchitecture).
+const PLUGINS = ['plantarchitecture', 'lidar'];
+
+const args = process.argv.slice(2);
+const buildMode = args.includes('--debug') ? 'debug' : 'release';
+const clean = args.includes('--clean');
+
+// The submodule must be initialized (and its nested helios-core sub-submodule).
+if (!existsSync(join(pyheliosDir, 'build_scripts', 'build_helios.py'))) {
+  console.error('[build-pyhelios] PyHelios submodule not initialized.');
+  console.error('[build-pyhelios] Run: git submodule update --init --recursive');
+  process.exit(1);
+}
+if (!existsSync(join(pyheliosDir, 'helios-core', 'core'))) {
+  console.error('[build-pyhelios] helios-core sub-submodule not initialized.');
+  console.error('[build-pyhelios] Run: git submodule update --init --recursive');
+  process.exit(1);
+}
+
+function resolvePython() {
+  if (process.env.PYTHON) {
+    if (!existsSync(process.env.PYTHON)) {
+      console.error(`[build-pyhelios] PYTHON=${process.env.PYTHON} does not exist`);
+      process.exit(1);
+    }
+    return process.env.PYTHON;
+  }
+  const venvPython = isWin
+    ? join(backendDir, 'venv', 'Scripts', 'python.exe')
+    : join(backendDir, 'venv', 'bin', 'python');
+  if (existsSync(venvPython)) return venvPython;
+  // CI fallback: whatever python the runner activated.
+  return isWin ? 'python' : 'python3';
+}
+
+const python = resolvePython();
+
+function runStep(label, cmd, cmdArgs, opts = {}) {
+  console.log(`[build-pyhelios] ${label}`);
+  console.log(`[build-pyhelios]   ${cmd} ${cmdArgs.join(' ')}`);
+  const r = spawnSync(cmd, cmdArgs, { stdio: 'inherit', ...opts });
+  if (r.error) {
+    console.error(`[build-pyhelios] failed to spawn: ${r.error.message}`);
+    process.exit(1);
+  }
+  if (r.status !== 0) {
+    console.error(`[build-pyhelios] ${label} exited ${r.status}`);
+    process.exit(r.status ?? 1);
+  }
+}
+
+console.log(`[build-pyhelios] python:   ${python}`);
+console.log(`[build-pyhelios] source:   ${pyheliosDir}`);
+console.log(`[build-pyhelios] mode:     ${buildMode}`);
+console.log(`[build-pyhelios] plugins:  ${PLUGINS.join(', ')}`);
+
+// 1. Compile the native library via PyHelios's own build script.
+const buildArgs = [
+  'build_scripts/build_helios.py',
+  '--buildmode', buildMode,
+  '--nogpu',
+  '--plugins', ...PLUGINS,
+  '--verbose',
+];
+if (clean) buildArgs.push('--clean');
+runStep('Building native library...', python, buildArgs, { cwd: pyheliosDir });
+
+// 2. Editable install so `import pyhelios` resolves to the source tree.
+runStep('Installing PyHelios (editable)...', python, ['-m', 'pip', 'install', '-e', pyheliosDir]);
+
+// 2b. Stage the runtime asset tree (textures, plant models, shaders, fonts) into
+// pyhelios_build/build/assets_for_wheel/. PyHelios's setup.py runs this during a
+// wheel build, but an editable install skips it — and at runtime the asset
+// manager (pyhelios/assets/__init__.py) treats the editable layout as a "wheel
+// install" (the dist-info is present) and demands assets at
+// pyhelios/assets/build/lib/images. We reuse PyHelios's own prepare_wheel logic
+// so the staged tree exactly matches what a real wheel ships, then
+// build-backend.mjs bundles it into the PyInstaller output.
+runStep('Staging runtime assets (assets_for_wheel)...', python, [
+  '-c',
+  [
+    'import sys; sys.path.insert(0, "build_scripts")',
+    'import prepare_wheel',
+    'from pathlib import Path',
+    'prepare_wheel.copy_assets_for_packaging(Path(".").resolve())',
+  ].join('; '),
+], { cwd: pyheliosDir });
+
+// 3. Verify the native library landed where we expect.
+const libName = isWin ? 'libhelios.dll' : process.platform === 'darwin' ? 'libhelios.dylib' : 'libhelios.so';
+const libPath = join(pyheliosDir, 'pyhelios_build', 'build', 'lib', libName);
+if (!existsSync(libPath)) {
+  console.error(`[build-pyhelios] expected native library not found: ${libPath}`);
+  console.error('[build-pyhelios] check the build output above for errors.');
+  process.exit(1);
+}
+
+// Verify the staged asset tree the runtime requires (lib/images must be non-empty).
+const stagedImages = join(pyheliosDir, 'pyhelios_build', 'build', 'assets_for_wheel', 'lib', 'images');
+if (!existsSync(stagedImages)) {
+  console.error(`[build-pyhelios] staged assets missing: ${stagedImages}`);
+  console.error('[build-pyhelios] prepare_wheel asset staging did not produce lib/images.');
+  process.exit(1);
+}
+
+// The build tree is large and per-machine (the submodule's own .gitignore keeps
+// it out of git). On macOS, keep Dropbox from syncing it — same convention as
+// the venvs (see CLAUDE.md).
+if (process.platform === 'darwin') {
+  spawnSync('xattr', ['-w', 'com.dropbox.ignored', '1', join(pyheliosDir, 'pyhelios_build')], { stdio: 'ignore' });
+}
+
+console.log(`[build-pyhelios] done. native library: ${libPath}`);

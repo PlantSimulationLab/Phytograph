@@ -35,10 +35,12 @@ The supervisor refuses to talk to a mismatched backend. When a backend change re
 ### Setup (one time)
 
 ```bash
+git submodule update --init --recursive     # PyHelios source + nested helios-core
 cd backend-api
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt pyinstaller
 deactivate && cd ..
+node scripts/build-pyhelios.mjs             # compile libhelios from the submodule (minutes)
 npm install
 ```
 
@@ -49,7 +51,7 @@ npm run dev          # builds main+preload once, starts Vite on 1427, launches E
 npm run typecheck    # tsc --noEmit
 ```
 
-Edits to `src/renderer/` hot-reload. Edits to `src/main/` or `src/preload/` require restarting `npm run dev`. Edits to `backend-api/*.py` hot-reload via uvicorn's `--reload` (spawned automatically by `scripts/dev.mjs` when `backend-api/venv` exists). The PyInstaller sidecar is only rebuilt for packaged installers (`npm run build:backend`) — not part of the dev loop. Edits to native libs (open3d/pyhelios shared objects, anything outside Python source) still require a venv rebuild.
+Edits to `src/renderer/` hot-reload. Edits to `src/main/` or `src/preload/` require restarting `npm run dev`. Edits to `backend-api/*.py` hot-reload via uvicorn's `--reload` (spawned automatically by `scripts/dev.mjs` when `backend-api/venv` exists). The PyInstaller sidecar is only rebuilt for packaged installers (`npm run build:backend`) — not part of the dev loop. Edits to the PyHelios/Helios C++ source (under `pyhelios/helios-core/` or `pyhelios/native/`) are recompiled automatically: the backend rebuilds `libhelios` on startup when the lib is stale (restart the backend to pick up C++ edits). Edits to other native libs (open3d shared objects, anything outside Python source) still require a venv rebuild.
 
 ### Build
 
@@ -71,7 +73,8 @@ Push a tag (`git tag v0.2.0 && git push origin v0.2.0`); `.github/workflows/rele
 - **Build outputs** (`dist-main/`, `dist-preload/`, `dist-renderer/`, `release/`, `resources/phytograph_backend/`) are all gitignored and produced by the scripts above — don't hand-edit them.
 - **TS path aliases**: `@renderer/*`, `@main/*`, `@shared/*` are defined in `tsconfig.json`.
 - **`backend-api/main.py` is a ~5000-line single file.** All endpoints live there. When grepping for routes use `^@app\.` to find them quickly.
-- **pyhelios gotcha**: the importable module is `pyhelios` but the PyPI distribution is `pyhelios3d`. Native libs + textures + xml asset trees must travel with the bundle — that's why `pyhelios` is in `collectAll` in `scripts/build-backend.mjs`.
+- **PyHelios is a source submodule, not a wheel.** It lives at `pyhelios/` (with its own nested `helios-core` C++ submodule) so we can co-develop it; there is **no** `pyhelios3d` pip fallback. `scripts/build-pyhelios.mjs` compiles the native `libhelios` (plugins: `plantarchitecture` + `lidar`; `--nogpu` drops the radiation/OptiX CUDA toolchain) into `pyhelios/pyhelios_build/build/lib/` and `pip install -e`s the package. Note: the `lidar` plugin pulls in the `visualizer` plugin at the C++ level, so OpenGL (glfw/glew/freetype) gets compiled too — fine on macOS (Cocoa) and Windows (native GL) with no extra packages; on Linux it would need `libgl1-mesa-dev`/`xorg-dev` (not a CI concern — the release matrix is macOS + Windows). Prereqs: cmake + a C++ compiler (Xcode CLT on macOS, MSVC on Windows). The native libs + textures + xml asset trees travel with the PyInstaller bundle via `--collect-all pyhelios` in `scripts/build-backend.mjs`. The first `npm run dev` / `build:backend` on a fresh clone compiles Helios (several minutes); `build-backend.mjs` and `dev.mjs` auto-build it if the lib is missing.
+- **PyHelios auto-rebuild**: `backend-api/main.py` puts `pyhelios/` on `sys.path` at import time and rebuilds `libhelios` if any `.cpp/.hpp/.h` under `helios-core/` or `native/` is newer than the compiled lib. So editing the Helios C++ and restarting the backend recompiles automatically. After bumping the submodule, also bump the version-lock trio (`BACKEND_VERSION`, `EXPECTED_BACKEND_VERSION`, `package.json`) if the change requires a fresh packaged build.
 - **macOS quarantine on fresh installs**: `xattr -dr com.apple.quarantine /Applications/Phytograph.app` (only works on unsigned builds; signed builds' CodeSignature seal makes xattrs immutable, so use Finder drag instead).
 - **Stale backend on 8008**: if the supervised backend won't start, check for a leftover process: `kill $(lsof -ti :8008)`.
 

@@ -19,7 +19,7 @@
 // the venv's python sidesteps PATH precedence AND any broken shebangs in
 // venv/bin/pyinstaller (which can happen if the venv was relocated).
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +34,51 @@ if (!existsSync(join(backendDir, 'backend_wrapper.py'))) {
   console.error(`[build-backend] backend_wrapper.py not found in ${backendDir}`);
   console.error('[build-backend] set BACKEND_DIR to the backend-api directory, or create the venv as documented in README.md.');
   process.exit(1);
+}
+
+// PyHelios is vendored as a source submodule. `--collect-all pyhelios` pulls
+// the Python package + assets from the (editable) install, but the native
+// library lives OUTSIDE the package tree (pyhelios_build/build/lib/), so
+// collect-all misses it. We compile it first (if missing) and then add it
+// explicitly via --add-binary into pyhelios/plugins/ — the first location the
+// runtime loader (pyhelios/plugins/loader.py) searches, matching the wheel
+// layout. PyInstaller follows libhelios's own dylib deps (e.g. libomp) from
+// there. The compiled plugin libs (liblidar.a, libplantarchitecture.a,
+// libvisualizer.a) are STATIC and already linked into libhelios, so only the
+// one .dylib/.dll/.so needs bundling.
+const pyheliosSrc = join(root, 'pyhelios', 'pyhelios', '__init__.py');
+const pyheliosExtraArgs = [];
+if (existsSync(pyheliosSrc)) {
+  const libName = isWin ? 'libhelios.dll' : process.platform === 'darwin' ? 'libhelios.dylib' : 'libhelios.so';
+  const libPath = join(root, 'pyhelios', 'pyhelios_build', 'build', 'lib', libName);
+  if (!existsSync(libPath)) {
+    console.log('[build-backend] PyHelios native library missing — building from source first...');
+    const r = spawnSync('node', [join(root, 'scripts', 'build-pyhelios.mjs')], { stdio: 'inherit' });
+    if (r.status !== 0) {
+      console.error('[build-backend] PyHelios build failed; aborting backend bundle.');
+      process.exit(r.status ?? 1);
+    }
+  }
+  if (!existsSync(libPath)) {
+    console.error(`[build-backend] PyHelios native library still missing at ${libPath}; aborting.`);
+    process.exit(1);
+  }
+  // PyInstaller --add-binary/--add-data SRC:DESTDIR (':' on Unix, ';' on Windows).
+  const sep = isWin ? ';' : ':';
+  pyheliosExtraArgs.push('--add-binary', `${libPath}${sep}pyhelios/plugins`);
+  console.log(`[build-backend] bundling PyHelios native lib: ${libPath} -> pyhelios/plugins/`);
+
+  // The runtime asset tree (textures, plant models, shaders) staged by
+  // build-pyhelios.mjs. The asset manager (pyhelios/assets/__init__.py) treats
+  // the bundled package as a wheel install and looks for these under
+  // pyhelios/assets/build/, so map assets_for_wheel/ -> pyhelios/assets/build/.
+  const assetsSrc = join(root, 'pyhelios', 'pyhelios_build', 'build', 'assets_for_wheel');
+  if (!existsSync(join(assetsSrc, 'lib', 'images'))) {
+    console.error(`[build-backend] PyHelios staged assets missing at ${assetsSrc}; re-run scripts/build-pyhelios.mjs.`);
+    process.exit(1);
+  }
+  pyheliosExtraArgs.push('--add-data', `${assetsSrc}${sep}pyhelios/assets/build`);
+  console.log(`[build-backend] bundling PyHelios assets: ${assetsSrc} -> pyhelios/assets/build/`);
 }
 
 mkdirSync(distPath, { recursive: true });
@@ -73,8 +118,11 @@ const hiddenImports = [
 
 // --collect-all bundles a package's binaries + data files + submodules.
 // pytexit reads __version__.txt at import time, so it must be collected as data.
-// pyhelios is the importable module name; the PyPI distribution is "pyhelios3d".
-// It ships native libs + textures + xml asset trees that must travel with the bundle.
+// pyhelios is the importable module name; it is vendored as a git submodule at
+// <repo>/pyhelios and installed editable (see scripts/build-pyhelios.mjs), not a
+// pip wheel. collect-all gathers the package's Python code, textures, and xml
+// asset trees — but NOT the native libhelios, which lives outside the package
+// tree in the source layout; that's added separately via pyheliosExtraArgs.
 // CSF (cloth-simulation-filter) is a SWIG C-extension; the import name is the
 // capitalized "CSF" (PyPI distribution is "cloth-simulation-filter"). collect-all
 // pulls its _CSF native module + SWIG wrapper.
@@ -96,6 +144,7 @@ const pyinstallerArgs = [
   '--specpath', join(distPath, 'build'),
   ...hiddenImports.flatMap((m) => ['--hidden-import', m]),
   ...collectAll.flatMap((m) => ['--collect-all', m]),
+  ...pyheliosExtraArgs,
   'backend_wrapper.py',
 ];
 
