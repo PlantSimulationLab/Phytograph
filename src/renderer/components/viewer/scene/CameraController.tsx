@@ -72,6 +72,32 @@ export function CameraController({
     controlsRef.current.update();
   }, [camera]);
 
+  // Rotate the view to look straight down a world axis WITHOUT reframing.
+  // Unlike snapToView (which recomputes distance from bounds and re-zooms),
+  // this preserves the current orbit target and the current camera-to-target
+  // distance — clicking the viewport gizmo should only change orientation,
+  // not zoom. `axis` is a unit world-direction pointing from the target toward
+  // where the camera should sit (e.g. (0,0,1) places the camera above for a
+  // top-down view). Up is kept Z-up except for top/bottom, where looking along
+  // ±Z is degenerate and we fall back to Y-up (matching snapToView).
+  const orientToAxis = useCallback((axis: { x: number; y: number; z: number }) => {
+    if (!controlsRef.current) return;
+    const controls = controlsRef.current;
+    const target: THREE.Vector3 = controls.target;
+    const radius = camera.position.distanceTo(target) || 1;
+
+    const dir = new THREE.Vector3(axis.x, axis.y, axis.z).normalize();
+    camera.position.copy(target).addScaledVector(dir, radius);
+
+    // Looking straight along ±Z makes a Z-up basis degenerate; use Y-up there.
+    if (Math.abs(dir.z) > 0.999) {
+      camera.up.set(0, 1, 0);
+    } else {
+      camera.up.set(0, 0, 1);
+    }
+    controls.update();
+  }, [camera]);
+
   const resetCamera = useCallback(() => {
     snapToView('iso');
   }, [snapToView]);
@@ -119,11 +145,13 @@ export function CameraController({
   useEffect(() => {
     (window as any).__resetPointCloudCamera = resetCamera;
     (window as any).__snapToView = snapToView;
+    (window as any).__orientToAxis = orientToAxis;
     // Test hook: read live camera + controls + scene state without poking
     // R3F's internal store. Used by the M2 verification smoke test.
     // Test hook for the M2 smoke test: read camera + auto-frame latch + bounds.
     (window as any).__getCameraState = () => ({
       position: [camera.position.x, camera.position.y, camera.position.z],
+      up: [camera.up.x, camera.up.y, camera.up.z],
       target: controlsRef.current
         ? [controlsRef.current.target.x, controlsRef.current.target.y, controlsRef.current.target.z]
         : null,
@@ -136,9 +164,10 @@ export function CameraController({
     return () => {
       delete (window as any).__resetPointCloudCamera;
       delete (window as any).__snapToView;
+      delete (window as any).__orientToAxis;
       delete (window as any).__getCameraState;
     };
-  }, [resetCamera, snapToView, camera]);
+  }, [resetCamera, snapToView, orientToAxis, camera]);
 
   return (
     <OrbitControls

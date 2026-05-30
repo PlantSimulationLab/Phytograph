@@ -25,14 +25,22 @@ orthographic and isometric views:
 
 After snapping you can still orbit; the snap doesn't lock the camera.
 
+You can also click an axis head on the **orientation gizmo** in the
+bottom-left corner (the red/green/blue X-Y-Z widget) to look straight
+down that world axis. Clicking only rotates the view to that axis with Z
+up — it keeps your current orbit target and zoom, so the scene doesn't
+jump closer or farther.
+
 ## Show or hide the grid and axes
 
 In the right-side properties panel, toggle:
 
 - **Grid** — a 1m × 1m grid on the world XY plane. Helpful for sanity-
   checking units and scale.
-- **Axes** — a small XYZ gizmo at the world origin (red = X, green = Y,
-  blue = Z).
+
+The **orientation gizmo** in the bottom-left corner (red = X, green = Y,
+blue = Z) always tracks the current camera orientation; click its axis
+heads to snap the view as described above.
 
 ## Isolate one object
 
