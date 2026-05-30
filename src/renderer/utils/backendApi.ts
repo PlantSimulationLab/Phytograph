@@ -190,6 +190,126 @@ export async function segmentGroundApply(
   }
 }
 
+// ==================== TREE INSTANCE SEGMENTATION API ====================
+
+/**
+ * Segment a multi-tree point cloud into per-point tree instance ids via TreeIso
+ * (cut-pursuit graph method, CPU-only). Send inline `points` for flat clouds or
+ * a `source` descriptor for octree-backed clouds (full resolution; labels align
+ * 1:1 with the resolved point order). Labels are 0 = unassigned, 1..N = trees.
+ * TreeIso expects ground-removed input — `ground_warning` flags a likely
+ * un-removed ground surface. Optional `seed_points` ([[x,y,z], ...]) are trunk
+ * seeds for human-in-the-loop: each seed yields exactly one tree.
+ */
+export interface TreeSegmentationRequest {
+  points?: number[][];          // [[x, y, z], ...] — omit when `source` is set
+  source?: BackendPointSource;  // octree-backed clouds read from disk
+  seed_points?: number[][];     // [[x, y, z], ...] trunk seeds (HITL)
+  // TreeIso parameters (defaults match the backend / Xi & Hopkinson 2022).
+  reg_strength1?: number;
+  min_nn1?: number;
+  decimate_res1?: number;
+  reg_strength2?: number;
+  min_nn2?: number;
+  decimate_res2?: number;
+  max_gap?: number;
+  rel_height_length_ratio?: number;
+  vertical_weight?: number;
+  min_nn3?: number;
+  score_candidate_thresh?: number;
+  init_stem_rel_length_thresh?: number;
+  max_outlier_gap?: number;
+}
+
+export interface TreeSegmentationResponse {
+  success: boolean;
+  labels: number[];        // 0 = unassigned, 1..N = tree ids; aligned to input
+  num_trees: number;
+  num_points: number;
+  ground_warning: boolean;
+  error?: string;
+}
+
+/**
+ * Apply tree segmentation and re-convert the source cloud into a new octree
+ * carrying a `tree_instance` scalar attribute (0 = unassigned, 1..N = trees) the
+ * renderer can colour by. Mirrors `segmentGroundApply`; `keep_instance` extracts
+ * a single tree as a sub-cloud.
+ */
+export interface TreeSegmentationApplyRequest {
+  source_path: string;
+  ascii_format?: string | null;
+  seed_points?: number[][];
+  reg_strength1?: number;
+  min_nn1?: number;
+  decimate_res1?: number;
+  reg_strength2?: number;
+  min_nn2?: number;
+  decimate_res2?: number;
+  max_gap?: number;
+  rel_height_length_ratio?: number;
+  vertical_weight?: number;
+  min_nn3?: number;
+  score_candidate_thresh?: number;
+  init_stem_rel_length_thresh?: number;
+  max_outlier_gap?: number;
+  keep_instance?: number;   // 1..N → keep only that tree (split sub-cloud)
+}
+
+export async function segmentTrees(
+  request: TreeSegmentationRequest
+): Promise<TreeSegmentationResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+
+  try {
+    const response = await fetch(`${baseUrl}/api/segment/trees`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Tree segmentation failed:', error);
+    throw error;
+  }
+}
+
+export async function segmentTreesApply(
+  request: TreeSegmentationApplyRequest
+): Promise<OctreeMetadata> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes (TreeIso + re-convert)
+
+  try {
+    const response = await fetch(`${baseUrl}/api/segment/trees/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as OctreeMetadata;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Tree segmentation apply failed:', error);
+    throw error;
+  }
+}
+
 // ==================== HELIOS TRIANGULATION API ====================
 
 export interface HeliosScanEntry {

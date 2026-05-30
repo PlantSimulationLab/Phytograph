@@ -85,6 +85,13 @@ def unicode_to_ascii(s: str) -> str:
         result = result.replace(subscript, ascii_char)
     return result
 
+# Vendored libraries live under backend-api/vendor/. Put it on sys.path so
+# `from treeiso.treeiso_core import ...` resolves in dev and in the PyInstaller
+# bundle (where vendor/ travels with main.py via build-backend.mjs).
+_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+if str(_VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR_DIR))
+
 # Backend version - bump this when making backend changes that require restart
 BACKEND_VERSION = "0.3.8"
 
@@ -1656,6 +1663,188 @@ async def segment_ground_points(request: GroundSegmentationRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Ground segmentation failed: {str(e)}")
+
+
+# ==================== TREE INSTANCE SEGMENTATION (TreeIso) ====================
+# `tree_instance` is the per-point scalar field this writes: 0 = unassigned,
+# 1..N = tree ids. Categorical coloring + legend live in the renderer's
+# classification.ts. TreeIso isolates above-ground tree structure, so callers
+# should remove ground first (see `ground_warning`). Mirrors the ground-segment
+# endpoints above (inline `points` or `source`; full-resolution; per-point labels).
+TREE_INSTANCE_SLUG = "tree_instance"
+TREE_INSTANCE_LABEL = "Tree instance"
+
+
+class TreeSegmentationRequest(BaseModel):
+    """Request model for individual-tree segmentation via TreeIso.
+
+    Like ground segmentation, provide inline `points` or a `source` descriptor;
+    the result must NOT be downsampled so per-point `labels` align 1:1. Optional
+    `seed_points` ([[x,y,z], ...]) anchor trees for human-in-the-loop seeding —
+    each seed yields exactly one tree id. The remaining fields are TreeIso
+    parameters (defaults match Xi & Hopkinson 2022)."""
+    points: Optional[List[List[float]]] = None
+    source: Optional[PointSource] = None
+    seed_points: Optional[List[List[float]]] = None
+    reg_strength1: float = 1.0
+    min_nn1: int = 5
+    decimate_res1: float = 0.05
+    reg_strength2: float = 15.0
+    min_nn2: int = 20
+    decimate_res2: float = 0.1
+    max_gap: float = 2.0
+    rel_height_length_ratio: float = 0.5
+    vertical_weight: float = 0.5
+    min_nn3: int = 20
+    score_candidate_thresh: float = 0.7
+    init_stem_rel_length_thresh: float = 1.5
+    max_outlier_gap: float = 3.0
+
+
+class TreeSegmentationResponse(BaseModel):
+    """Per-point tree instance ids aligned to the resolved point order."""
+    success: bool
+    labels: List[int] = []          # 0 = unassigned, 1..N = tree ids
+    num_trees: int = 0
+    num_points: int = 0
+    ground_warning: bool = False
+    error: Optional[str] = None
+
+
+def _treeiso_params(request: "TreeSegmentationRequest"):
+    """Build a vendored TreeIsoParams from the request's tuning fields."""
+    from treeiso.treeiso_core import TreeIsoParams
+
+    return TreeIsoParams(
+        reg_strength1=request.reg_strength1,
+        min_nn1=request.min_nn1,
+        decimate_res1=request.decimate_res1,
+        reg_strength2=request.reg_strength2,
+        min_nn2=request.min_nn2,
+        decimate_res2=request.decimate_res2,
+        max_gap=request.max_gap,
+        rel_height_length_ratio=request.rel_height_length_ratio,
+        vertical_weight=request.vertical_weight,
+        min_nn3=request.min_nn3,
+        score_candidate_thresh=request.score_candidate_thresh,
+        init_stem_rel_length_thresh=request.init_stem_rel_length_thresh,
+        max_outlier_gap=request.max_outlier_gap,
+    )
+
+
+def _looks_like_ground_present(points: np.ndarray) -> bool:
+    """Cheap advisory heuristic: is there a broad, flat, dense layer at the bottom?
+
+    TreeIso expects ground-removed input. We flag (never block) when the lowest
+    vertical slab holds a large share of points spread across the full XY extent
+    — the signature of an un-removed ground surface."""
+    if len(points) < 100:
+        return False
+    z = points[:, 2]
+    z0, z1 = float(np.min(z)), float(np.max(z))
+    span = z1 - z0
+    if span <= 1e-6:
+        return False
+    slab = points[z <= z0 + 0.05 * span]
+    if len(slab) < 50:
+        return False
+    frac = len(slab) / len(points)
+    xy_extent = np.ptp(points[:, :2], axis=0)
+    slab_extent = np.ptp(slab[:, :2], axis=0)
+    wide = bool(np.all(slab_extent > 0.6 * np.maximum(xy_extent, 1e-6)))
+    return bool(frac > 0.12 and wide)
+
+
+def segment_trees(
+    points: np.ndarray,
+    params=None,
+    seeds: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Assign each point a tree id (0 = unassigned, 1..N) via TreeIso.
+
+    With `seeds`, every TreeIso segment is reassigned to the id of its nearest
+    seed (each seed -> exactly one tree); otherwise TreeIso's own 1..N labels
+    are returned, aligned 1:1 to the input order."""
+    from treeiso.treeiso_core import segment_trees as _ti_segment
+
+    labels = _ti_segment(points, params)
+    if seeds is None or len(seeds) == 0:
+        return labels.astype(np.int64)
+
+    # Reconcile TreeIso's segments with user trunk seeds so each seed yields one
+    # tree. Greedily give every seed its nearest still-unclaimed segment (so no
+    # seed is dropped when there are at least as many segments as seeds), then
+    # assign any leftover segments to their nearest seed.
+    seeds = np.asarray(seeds, dtype=np.float64)[:, :3]
+    seg_ids = np.unique(labels)
+    centroids = np.array([points[labels == s, :3].mean(axis=0) for s in seg_ids])
+    cost = np.linalg.norm(centroids[:, None, :] - seeds[None, :, :], axis=2)  # (segs, seeds)
+
+    seg_to_seed: dict[int, int] = {}
+    unclaimed = set(range(len(seg_ids)))
+    # Seeds whose closest segment is nearest get first pick of that segment.
+    for j in np.argsort(cost.min(axis=0)):
+        if not unclaimed:
+            break
+        cand = min(unclaimed, key=lambda i, jj=int(j): cost[i, jj])
+        seg_to_seed[int(seg_ids[cand])] = int(j) + 1
+        unclaimed.discard(cand)
+    for i in unclaimed:
+        seg_to_seed[int(seg_ids[i])] = int(np.argmin(cost[i])) + 1
+
+    return np.array([seg_to_seed[int(s)] for s in labels], dtype=np.int64)
+
+
+@app.post("/api/segment/trees", response_model=TreeSegmentationResponse)
+async def segment_trees_points(request: TreeSegmentationRequest):
+    """Segment a multi-tree cloud into per-point tree instance ids via TreeIso.
+
+    Mirrors `/api/segment/ground`: inline `points` or a `source` descriptor in,
+    per-point integer labels out (0 = unassigned, 1..N = trees), full resolution
+    so labels align 1:1. Persisting onto an octree-backed cloud is done by
+    `/api/segment/trees/apply`."""
+    try:
+        points = _resolve_segmentation_points(
+            GroundSegmentationRequest(points=request.points, source=request.source)
+        )
+
+        if len(points) < 10:
+            return TreeSegmentationResponse(
+                success=False, num_points=len(points),
+                error="Need at least 10 points to segment trees",
+            )
+
+        ground_warning = _looks_like_ground_present(points)
+        seeds = (
+            np.asarray(request.seed_points, dtype=np.float64)
+            if request.seed_points else None
+        )
+        try:
+            labels = segment_trees(points, _treeiso_params(request), seeds)
+        except ImportError as e:
+            return TreeSegmentationResponse(
+                success=False, num_points=len(points),
+                error=f"TreeIso dependencies not installed ({e}). "
+                      "Run: pip install -r backend-api/requirements.txt",
+            )
+
+        labels = np.asarray(labels)
+        num_trees = int(len(np.unique(labels[labels > 0]))) if len(labels) else 0
+        return TreeSegmentationResponse(
+            success=True,
+            labels=[int(x) for x in labels],
+            num_trees=num_trees,
+            num_points=len(points),
+            ground_warning=ground_warning,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return TreeSegmentationResponse(
+            success=False, num_points=0, error=str(e),
+        )
 
 
 # ==================== HELIOS TRIANGULATION ====================
@@ -8002,6 +8191,233 @@ async def segment_ground_apply(request: SegmentGroundApplyRequest):
         max_bytes = int(_os.environ.get(
             "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES",
             _DEFAULT_OCTREE_CACHE_MAX_BYTES,
+        ))
+    except ValueError:
+        max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
+    _evict_octree_cache(max_bytes, keep=cache_dir)
+
+    return {"cache_id": cache_key, "cache_dir": str(cache_dir), "cached": False, **meta}
+
+
+# ---- Tree segmentation /apply (octree bake of tree_instance) ---------------
+# Mirrors the ground-segment apply trio above, swapping CSF for TreeIso and
+# `ground_class` for `tree_instance`. Supports `keep_instance` to extract a
+# single tree as a split sub-cloud, and `seed_points` for human-in-the-loop.
+
+class TreeSegmentationApplyRequest(BaseModel):
+    """Re-convert a source cloud into a new octree carrying a `tree_instance`
+    scalar attribute (0=unassigned, 1..N=trees) computed by TreeIso."""
+    source_path: str
+    ascii_format: Optional[str] = None
+    seed_points: Optional[List[List[float]]] = None
+    reg_strength1: float = 1.0
+    min_nn1: int = 5
+    decimate_res1: float = 0.05
+    reg_strength2: float = 15.0
+    min_nn2: int = 20
+    decimate_res2: float = 0.1
+    max_gap: float = 2.0
+    rel_height_length_ratio: float = 0.5
+    vertical_weight: float = 0.5
+    min_nn3: int = 20
+    score_candidate_thresh: float = 0.7
+    init_stem_rel_length_thresh: float = 1.5
+    max_outlier_gap: float = 3.0
+    # When set (1..N), keep ONLY points of that tree — a split sub-cloud octree.
+    keep_instance: Optional[int] = None
+
+
+def _segment_trees_octree_cache_key(
+    source_path: str, ascii_format: Optional[str], ti_params: dict,
+    seeds: Optional[list], keep_instance: Optional[int],
+) -> str:
+    """Cache key for a tree-segment-apply result (source key + TreeIso params +
+    seeds + the optional instance filter)."""
+    base = _octree_cache_key(source_path, ascii_format)
+    h = _hashlib.sha1()
+    h.update(b"segment_trees|")
+    h.update(base.encode())
+    h.update(b"\x00")
+    for k in sorted(ti_params):
+        h.update(f"{k}={ti_params[k]}".encode())
+        h.update(b"\x00")
+    if seeds:
+        for s in seeds:
+            h.update(("%.4f,%.4f,%.4f" % (s[0], s[1], s[2])).encode())
+            h.update(b"\x00")
+    h.update(f"keep={keep_instance}".encode())
+    return h.hexdigest()
+
+
+def _tree_segmented_xyz_to_las(
+    source_path: _Path,
+    ascii_format: Optional[str],
+    out_las: _Path,
+    ti_params: dict,
+    seeds: Optional[np.ndarray],
+    keep_instance: Optional[int] = None,
+) -> tuple[int, List[dict]]:
+    """Load a full XYZ-family cloud, run TreeIso, and write a LAS carrying every
+    source scalar PLUS a `tree_instance` extra dimension. Returns
+    (total_points, extra_dims) including the appended tree_instance entry."""
+    import laspy
+
+    names, extra_dims = _xyz_column_plan(source_path, ascii_format)
+    has_xyz = all(role in names for role in ("x", "y", "z"))
+    if not has_xyz:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ASCII format must include x/y/z. Got columns: {names}",
+        )
+    has_rgb = all(role in names for role in ("r255", "g255", "b255"))
+    intensity_role = next((r for r in ("intensity", "reflectance") if r in names), None)
+
+    skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
+    df = pd.read_csv(
+        source_path, sep=r"\s+", header=None, names=names,
+        usecols=[i for i, c in enumerate(names) if c != "skip"],
+        comment="#", skiprows=skiprows, engine="c",
+    )
+
+    if len(df) < 10:
+        raise HTTPException(status_code=400, detail="Need at least 10 points to segment trees.")
+
+    xyz = np.column_stack([
+        df["x"].to_numpy(dtype=np.float64),
+        df["y"].to_numpy(dtype=np.float64),
+        df["z"].to_numpy(dtype=np.float64),
+    ])
+
+    from treeiso.treeiso_core import TreeIsoParams
+    try:
+        labels = segment_trees(xyz, TreeIsoParams(**ti_params), seeds)
+    except ImportError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"TreeIso dependencies not installed ({e}). "
+                   "Run: pip install -r backend-api/requirements.txt",
+        )
+
+    if keep_instance is not None:
+        mask = labels == keep_instance
+        if not mask.any():
+            raise HTTPException(
+                status_code=400, detail=f"No points assigned to tree {keep_instance}.",
+            )
+        df = df[mask].reset_index(drop=True)
+        xyz = xyz[mask]
+        labels = labels[mask]
+
+    n_out = len(xyz)
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    for ed in extra_dims:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+    header.add_extra_dim(laspy.ExtraBytesParams(name=TREE_INSTANCE_SLUG, type=np.float32))
+
+    record = laspy.ScaleAwarePointRecord.zeros(n_out, header=header)
+    record.x = xyz[:, 0]
+    record.y = xyz[:, 1]
+    record.z = xyz[:, 2]
+    if has_rgb:
+        record.red = df["r255"].to_numpy(dtype=np.uint16) * 256
+        record.green = df["g255"].to_numpy(dtype=np.uint16) * 256
+        record.blue = df["b255"].to_numpy(dtype=np.uint16) * 256
+    if intensity_role is not None:
+        refl = df[intensity_role].to_numpy(dtype=np.float32)
+        record.intensity = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
+    for ed in extra_dims:
+        record[ed["slug"]] = df[ed["col"]].to_numpy(dtype=np.float32)
+    record[TREE_INSTANCE_SLUG] = labels.astype(np.float32)
+
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        writer.write_points(record)
+        pad = 0.001
+        writer.header.mins = (xyz.min(axis=0) - pad).tolist()
+        writer.header.maxs = (xyz.max(axis=0) + pad).tolist()
+
+    carried = [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
+    carried.append({"slug": TREE_INSTANCE_SLUG, "label": TREE_INSTANCE_LABEL})
+    return n_out, carried
+
+
+@app.post("/api/segment/trees/apply")
+async def segment_trees_apply(request: TreeSegmentationApplyRequest):
+    """Segment trees and re-convert the source cloud into a new octree carrying a
+    `tree_instance` scalar attribute. Same octree-ref response shape as
+    convert_to_octree / segment_ground_apply."""
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    ext = source_path.suffix.lower().lstrip(".")
+    if ext not in _PANDAS_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"segment_trees/apply currently supports XYZ-family sources only (got .{ext}).",
+        )
+
+    ti_params = {
+        "reg_strength1": request.reg_strength1,
+        "min_nn1": request.min_nn1,
+        "decimate_res1": request.decimate_res1,
+        "reg_strength2": request.reg_strength2,
+        "min_nn2": request.min_nn2,
+        "decimate_res2": request.decimate_res2,
+        "max_gap": request.max_gap,
+        "rel_height_length_ratio": request.rel_height_length_ratio,
+        "vertical_weight": request.vertical_weight,
+        "min_nn3": request.min_nn3,
+        "score_candidate_thresh": request.score_candidate_thresh,
+        "init_stem_rel_length_thresh": request.init_stem_rel_length_thresh,
+        "max_outlier_gap": request.max_outlier_gap,
+    }
+    seeds_list = request.seed_points if request.seed_points else None
+    seeds_arr = np.asarray(seeds_list, dtype=np.float64) if seeds_list else None
+
+    cache_key = _segment_trees_octree_cache_key(
+        str(source_path), request.ascii_format, ti_params, seeds_list, request.keep_instance,
+    )
+    cache_dir = _octree_cache_root() / cache_key
+
+    if (cache_dir / "metadata.json").is_file():
+        meta = _read_octree_metadata(cache_dir)
+        return {"cache_id": cache_key, "cache_dir": str(cache_dir), "cached": True, **meta}
+
+    cache_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = cache_dir.parent / (cache_key + ".staging")
+    if staging_dir.exists():
+        _shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+    try:
+        seg_las = staging_dir / (source_path.stem + ".trees.las")
+        _, carried = _tree_segmented_xyz_to_las(
+            source_path, request.ascii_format, seg_las, ti_params, seeds_arr, request.keep_instance,
+        )
+        try:
+            _run_potree_converter(seg_las, staging_dir)
+        finally:
+            try:
+                seg_las.unlink()
+            except FileNotFoundError:
+                pass
+        _write_octree_labels(staging_dir, carried)
+        if cache_dir.exists():
+            _shutil.rmtree(cache_dir)
+        staging_dir.rename(cache_dir)
+    except Exception:
+        try:
+            _shutil.rmtree(staging_dir)
+        except (FileNotFoundError, OSError):
+            pass
+        raise
+
+    meta = _read_octree_metadata(cache_dir)
+    try:
+        max_bytes = int(_os.environ.get(
+            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES", _DEFAULT_OCTREE_CACHE_MAX_BYTES,
         ))
     except ValueError:
         max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES

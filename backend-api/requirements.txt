@@ -25,3 +25,13 @@ laspy[lazrs]>=2.5.0
 # (imports as `import CSF`); prebuilt wheels for CPython 3.9-3.12 on
 # macOS/Linux/Windows. Bundled via `collectAll` in scripts/build-backend.mjs.
 cloth-simulation-filter>=1.1.7
+# TreeIso individual-tree segmentation deps. The TreeIso algorithm itself is
+# vendored (MIT) under backend-api/vendor/treeiso/; these are its runtime deps.
+# cut_pursuit_py is a pybind11 C-extension (imports as `import cut_pursuit_py`)
+# with prebuilt wheels for CPython 3.10-3.13 on macOS arm64 / Linux / Windows;
+# bundled via `collectAll` in scripts/build-backend.mjs. The others are pure/
+# wheeled scientific deps. No PyTorch/CUDA — TreeIso is CPU-only.
+cut_pursuit_py>=1.0.12
+numpy-indexed>=0.3.7
+scikit-image>=0.22.0
+PyMaxflow>=1.3.0
