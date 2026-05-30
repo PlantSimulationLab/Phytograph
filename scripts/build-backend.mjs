@@ -126,7 +126,25 @@ const hiddenImports = [
 // CSF (cloth-simulation-filter) is a SWIG C-extension; the import name is the
 // capitalized "CSF" (PyPI distribution is "cloth-simulation-filter"). collect-all
 // pulls its _CSF native module + SWIG wrapper.
-const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF'];
+// TreeIso tree segmentation: cut_pursuit_py is a pybind11 C-extension (its
+// .so/.pyd must travel with the bundle); skimage/numpy_indexed pull in
+// submodules PyInstaller doesn't always trace. The TreeIso algorithm itself is
+// vendored under backend-api/vendor/treeiso/ and handled by treeisoExtraArgs.
+const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'numpy_indexed'];
+
+// Vendored TreeIso (MIT) lives under backend-api/vendor/ and is imported lazily
+// via a runtime sys.path tweak in main.py. Add vendor/ to the analysis path so
+// PyInstaller resolves `treeiso.treeiso_core`, and ship the package as data so
+// its files travel in the bundle.
+const sep = isWin ? ';' : ':';
+const treeisoExtraArgs = [
+  '--paths', join(backendDir, 'vendor'),
+  '--hidden-import', 'treeiso.treeiso_core',
+  '--hidden-import', 'cut_pursuit_py',
+  '--hidden-import', 'maxflow',
+  '--hidden-import', 'skimage.draw',
+  '--add-data', `${join(backendDir, 'vendor', 'treeiso')}${sep}treeiso`,
+];
 
 // --onedir vs --onefile:
 //   --onefile produces a single self-extracting binary that unpacks ~300 MB
@@ -145,6 +163,7 @@ const pyinstallerArgs = [
   ...hiddenImports.flatMap((m) => ['--hidden-import', m]),
   ...collectAll.flatMap((m) => ['--collect-all', m]),
   ...pyheliosExtraArgs,
+  ...treeisoExtraArgs,
   'backend_wrapper.py',
 ];
 

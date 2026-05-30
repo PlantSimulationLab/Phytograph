@@ -1,0 +1,149 @@
+"""Tree (individual-tree) instance segmentation tests (TreeIso).
+
+`fixtures/multi_tree_small.xyz` is a voxel-downsampled excerpt of TreeIso's MIT
+demo cloud (see fixtures/README.md). Columns: x y z treeiso_label. These tests
+assert on a fresh re-run of the vendored engine (not on the stored label
+column), so they validate the algorithm + endpoint rather than "didn't crash".
+"""
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+import main
+
+FIXTURE = Path(__file__).parent / "fixtures" / "multi_tree_small.xyz"
+
+
+def _treeiso_available() -> bool:
+    try:
+        import cut_pursuit_py  # noqa: F401
+        from treeiso.treeiso_core import segment_trees  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+requires_treeiso = pytest.mark.skipif(
+    not _treeiso_available(),
+    reason="TreeIso deps not installed (cut_pursuit_py / vendored treeiso)",
+)
+
+
+def _load_fixture():
+    df = pd.read_csv(FIXTURE, sep=r"\s+", header=None, comment="#")
+    points = df.iloc[:, :3].to_numpy(dtype=np.float64)
+    ref = df.iloc[:, 3].to_numpy().astype(int) if df.shape[1] > 3 else None
+    return points, ref
+
+
+def _purity(pred, truth):
+    shares = []
+    for u in np.unique(pred):
+        t = truth[pred == u]
+        shares.append(np.bincount(t).max() / len(t))
+    return float(np.mean(shares))
+
+
+@requires_treeiso
+def test_core_segments_multiple_trees_deterministically():
+    from treeiso.treeiso_core import segment_trees, TreeIsoParams
+
+    points, ref = _load_fixture()
+    labels = segment_trees(points, TreeIsoParams())
+
+    assert labels.shape == (len(points),)
+    assert labels.min() == 1                       # contiguous 1-based ids
+    n_trees = len(np.unique(labels))
+    print(f"\nmulti_tree fixture: {len(points)} pts -> {n_trees} trees")
+    assert n_trees >= 2, "fixture should segment into multiple trees"
+
+    # deterministic: a second run is identical
+    labels2 = segment_trees(points, TreeIsoParams())
+    assert np.array_equal(labels, labels2)
+
+    # agrees with the stored reference partition (same trees, same points)
+    if ref is not None:
+        assert _purity(labels, ref) > 0.95
+
+
+@requires_treeiso
+def test_endpoint_inline(client):
+    points, _ = _load_fixture()
+    res = client.post("/api/segment/trees", json={"points": points.tolist()})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is True
+    assert body["num_points"] == len(points)
+    assert len(body["labels"]) == len(points)
+    assert body["num_trees"] >= 2
+    assert min(body["labels"]) == 1
+    # ground-removed fixture -> no false ground warning
+    assert body["ground_warning"] is False
+
+
+@requires_treeiso
+def test_endpoint_from_source(client):
+    res = client.post(
+        "/api/segment/trees",
+        json={"source": {"source_path": str(FIXTURE), "ascii_format": "x y z treeiso_label"}},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is True
+    points, _ = _load_fixture()
+    assert body["num_points"] == len(points)
+    assert body["num_trees"] >= 2
+
+
+@requires_treeiso
+def test_seed_points_yield_one_instance_per_seed(client):
+    """Human-in-the-loop: N trunk seeds -> exactly N tree ids."""
+    points, _ = _load_fixture()
+    # Seed at the base (lowest 5%) centroid of each reference tree cluster.
+    _, ref = _load_fixture()
+    seeds = []
+    for u in np.unique(ref):
+        cluster = points[ref == u]
+        base = cluster[cluster[:, 2] <= np.percentile(cluster[:, 2], 5)]
+        seeds.append(base.mean(axis=0).tolist())
+    res = client.post(
+        "/api/segment/trees",
+        json={"points": points.tolist(), "seed_points": seeds},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is True
+    assert body["num_trees"] == len(seeds), (body["num_trees"], len(seeds))
+
+
+@requires_treeiso
+def test_ground_warning_fires_when_ground_present(client):
+    points, _ = _load_fixture()
+    rng = np.random.RandomState(0)
+    lo = points.min(axis=0)
+    span = np.ptp(points[:, :2], axis=0)
+    ground = np.c_[
+        lo[0] + rng.uniform(0, span[0], 6000),
+        lo[1] + rng.uniform(0, span[1], 6000),
+        lo[2] + rng.uniform(0, 0.05, 6000),
+    ]
+    withg = np.vstack([ground, points])
+    res = client.post("/api/segment/trees", json={"points": withg.tolist()})
+    assert res.status_code == 200, res.text
+    assert res.json()["ground_warning"] is True
+
+
+def test_too_few_points(client):
+    res = client.post("/api/segment/trees", json={"points": [[0, 0, 0], [1, 1, 1]]})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is False
+    assert "at least 10" in body["error"]
+
+
+def test_requires_input(client):
+    res = client.post("/api/segment/trees", json={})
+    # _resolve_segmentation_points raises HTTPException(400) when neither given
+    assert res.status_code == 400
