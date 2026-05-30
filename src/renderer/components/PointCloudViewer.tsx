@@ -461,6 +461,10 @@ export default function PointCloudViewer({
     canvasSize: { width: number; height: number };
   } | null>(null);
   const [cropInvert, setCropInvert] = useState(false);
+  // When true, Apply partitions each cloud in two: the original keeps the
+  // in-region points (normal crop) and the cropped-out (inverse) points
+  // become a brand-new cloud added to the scene — no points are discarded.
+  const [cropSegment, setCropSegment] = useState(false);
   const [cropDrawState, setCropDrawState] = useState<CropDrawState>('idle');
   // In-progress polygon vertices while the user is clicking. Promoted to
   // cropPolygon when they press Enter.
@@ -700,6 +704,7 @@ export default function PointCloudViewer({
     setCropDrawState('idle');
     setCropMode('box');
     setCropInvert(false);
+    setCropSegment(false);
     setEditMode('crop');
   }, [editMode, selectedIds, clouds, getEditState, closeAllToolPanels]);
 
@@ -991,6 +996,15 @@ export default function PointCloudViewer({
     // Sum of kept point counts across all clouds touched in this apply.
     // Used by finishUp to surface a "Cropped to N points" toast.
     const keptCounts: number[] = [];
+    // Segment mode: keep the cropped-out (inverse) points as a new cloud
+    // rather than discarding them. Captured here so the value is stable for
+    // the whole apply even though the panel is torn down mid-run.
+    const segment = cropSegment;
+    // Number of new "(segment)" clouds added this apply — drives the toast.
+    let segmentedCount = 0;
+    // Distinct color for the new segment cloud so it's separable from the
+    // source in the scene (mustard, matching the brand highlight palette).
+    const SEGMENT_COLOR = '#f59e0b';
 
     const finishUp = () => {
       if (touchedCloudIds.length > 0) {
@@ -1021,6 +1035,17 @@ export default function PointCloudViewer({
         }
       }
 
+      // Segment-mode confirmation. Fires independently of the crop toast
+      // above (the source cloud may have been fully cropped away yet the
+      // inverse still produced a new cloud).
+      if (segmentedCount > 0) {
+        const segWord = segmentedCount === 1 ? 'cloud' : 'clouds';
+        showToast({
+          title: `Segmented ${segmentedCount} new ${segWord} from cropped-out points`,
+          type: 'success',
+        });
+      }
+
       if (emptied.length > 0) {
         setDeleteConfirm({ type: 'cloud', id: emptied[0].id, name: emptied[0].name });
       }
@@ -1034,6 +1059,7 @@ export default function PointCloudViewer({
       setCropPolygon(null);
       setPolygonInProgress([]);
       setCropDrawState('idle');
+      setCropSegment(false);
       setEditMode('none');
     };
 
@@ -1152,6 +1178,54 @@ export default function PointCloudViewer({
             onUpdateCloud(cloud.id, newData);
             touchedCloudIds.push(cloud.id);
             keptCounts.push(result.point_count);
+
+            // Segment mode: re-run the crop with the region inverted and add
+            // the cropped-out points as a new cloud. Same backend endpoint,
+            // just invert flipped. An empty inverse (region enclosed the whole
+            // cloud) is silently skipped — nothing to segment off.
+            if (segment && onAddCloud) {
+              try {
+                const invResult = await cropOctree(octreeInfo.sourceXyzPath, {
+                  asciiFormat: octreeInfo.asciiFormat ?? null,
+                  region: { ...region, invert: !cropInvert },
+                  translation: (tx !== 0 || ty !== 0 || tz !== 0)
+                    ? [tx, ty, tz]
+                    : null,
+                });
+                if (invResult.point_count > 0 && invResult.cache_id) {
+                  onAddCloud({
+                    id: crypto.randomUUID(),
+                    data: buildPointCloudFromOctree(
+                      {
+                        cache_id: invResult.cache_id,
+                        cache_dir: invResult.cache_dir ?? '',
+                        cached: invResult.cached,
+                        version: invResult.version,
+                        point_count: invResult.point_count,
+                        spacing: invResult.spacing,
+                        scale: invResult.scale,
+                        offset: invResult.offset,
+                        bounds: invResult.bounds,
+                        tight_bounds: invResult.tight_bounds,
+                        attributes: invResult.attributes,
+                      },
+                      octreeInfo.sourceXyzPath,
+                      `${src.fileName ?? cloud.id} (segment)`,
+                      octreeInfo.asciiFormat ?? null,
+                    ),
+                    visible: true,
+                    color: SEGMENT_COLOR,
+                  });
+                  segmentedCount++;
+                }
+              } catch (err) {
+                console.error('[handleApplyCrop] segment (octree inverse) failed:', err);
+                showToast({
+                  title: `Segment failed for ${src.fileName || 'cloud'}`,
+                  type: 'error',
+                });
+              }
+            }
             return;
           } catch (err) {
             console.error('[handleApplyCrop] crop_octree failed:', err);
@@ -1196,6 +1270,42 @@ export default function PointCloudViewer({
           onUpdateCloud(cloud.id, newData);
           touchedCloudIds.push(cloud.id);
           keptCounts.push(response.pointCount);
+
+          // Segment mode: re-read the file with the crop inverted and add the
+          // cropped-out points as a new cloud. Wrapped in its own try/catch so
+          // a failure here doesn't trigger the in-renderer fallback below (the
+          // kept set is already committed).
+          if (segment && onAddCloud) {
+            try {
+              const invResponse = await cropPointCloudByPath(cloud.sourcePath, {
+                asciiFormat: cloud.asciiFormat ?? null,
+                cropMin: cropBox.min,
+                cropMax: cropBox.max,
+                cropInvert: !cropInvert,
+                translation: (tx !== 0 || ty !== 0 || tz !== 0)
+                  ? { x: tx, y: ty, z: tz }
+                  : null,
+              });
+              if (invResponse.pointCount > 0) {
+                onAddCloud({
+                  id: crypto.randomUUID(),
+                  data: buildPointCloudFromBackend(
+                    invResponse,
+                    `${src.fileName ?? cloud.id} (segment)`,
+                  ),
+                  visible: true,
+                  color: SEGMENT_COLOR,
+                });
+                segmentedCount++;
+              }
+            } catch (err) {
+              console.error('[handleApplyCrop] segment (flat inverse) failed:', err);
+              showToast({
+                title: `Segment failed for ${src.fileName || 'cloud'}`,
+                type: 'error',
+              });
+            }
+          }
           return;
         } catch (err) {
           // Fall through to the in-renderer path. We log so a 5xx from
@@ -1210,75 +1320,104 @@ export default function PointCloudViewer({
       // fill). Used for stitched clouds (no sourcePath), clouds with
       // erased indices, polygon-mode crop, and any case where the
       // backend call raised above.
-      let pointCount = 0;
-      for (let i = 0; i < src.pointCount; i++) {
-        if (erased.has(i)) continue;
-        const wx = src.positions[i * 3] + tx;
-        const wy = src.positions[i * 3 + 1] + ty;
-        const wz = src.positions[i * 3 + 2] + tz;
-        const inside = predicate(wx, wy, wz);
-        if (cropInvert ? !inside : inside) pointCount++;
+      //
+      // buildSubset emits one partition of the cloud: with keepWhenInside
+      // true it keeps points the predicate accepts, with false it keeps the
+      // complement. Returns null when the partition is empty. The kept set
+      // (keepWhenInside = !cropInvert) preserves the prior behavior; segment
+      // mode also builds the inverse (keepWhenInside = cropInvert) as a new
+      // cloud. Colors/intensities follow the points; scalarFields are dropped
+      // here as they were before — only the octree path carries them.
+      const buildSubset = (keepWhenInside: boolean): PointCloudData | null => {
+        let pointCount = 0;
+        for (let i = 0; i < src.pointCount; i++) {
+          if (erased.has(i)) continue;
+          const wx = src.positions[i * 3] + tx;
+          const wy = src.positions[i * 3 + 1] + ty;
+          const wz = src.positions[i * 3 + 2] + tz;
+          const inside = predicate(wx, wy, wz);
+          if (keepWhenInside ? inside : !inside) pointCount++;
+        }
+
+        if (pointCount === 0) return null;
+
+        const newPositions = new Float32Array(pointCount * 3);
+        const newColors = src.colors ? new Float32Array(pointCount * 3) : null;
+        const newIntensities = src.intensities ? new Float32Array(pointCount) : null;
+
+        const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+        const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+
+        let w = 0;
+        for (let i = 0; i < src.pointCount; i++) {
+          if (erased.has(i)) continue;
+          const wx = src.positions[i * 3] + tx;
+          const wy = src.positions[i * 3 + 1] + ty;
+          const wz = src.positions[i * 3 + 2] + tz;
+          const inside = predicate(wx, wy, wz);
+          if (!(keepWhenInside ? inside : !inside)) continue;
+          newPositions[w * 3] = wx;
+          newPositions[w * 3 + 1] = wy;
+          newPositions[w * 3 + 2] = wz;
+          if (wx < min.x) min.x = wx; if (wx > max.x) max.x = wx;
+          if (wy < min.y) min.y = wy; if (wy > max.y) max.y = wy;
+          if (wz < min.z) min.z = wz; if (wz > max.z) max.z = wz;
+          if (newColors && src.colors) {
+            newColors[w * 3] = src.colors[i * 3];
+            newColors[w * 3 + 1] = src.colors[i * 3 + 1];
+            newColors[w * 3 + 2] = src.colors[i * 3 + 2];
+          }
+          if (newIntensities && src.intensities) {
+            newIntensities[w] = src.intensities[i];
+          }
+          w++;
+        }
+
+        const center = new THREE.Vector3(
+          (min.x + max.x) / 2,
+          (min.y + max.y) / 2,
+          (min.z + max.z) / 2,
+        );
+        const size = new THREE.Vector3(
+          max.x - min.x,
+          max.y - min.y,
+          max.z - min.z,
+        );
+
+        return {
+          positions: newPositions,
+          colors: newColors ?? undefined,
+          intensities: newIntensities ?? undefined,
+          pointCount,
+          bounds: { min, max, center, size },
+          fileName: src.fileName,
+        };
+      };
+
+      // Segment mode builds the inverse first, so if the kept set turns out
+      // empty (and we delete the source) the segment cloud still carries the
+      // points. onAddCloud is undefined when the host didn't wire onAddScan.
+      if (segment && onAddCloud) {
+        const inverseData = buildSubset(cropInvert);
+        if (inverseData) {
+          onAddCloud({
+            id: crypto.randomUUID(),
+            data: { ...inverseData, fileName: `${src.fileName ?? cloud.id} (segment)` },
+            visible: true,
+            color: SEGMENT_COLOR,
+          });
+          segmentedCount++;
+        }
       }
 
-      if (pointCount === 0) {
+      const keptData = buildSubset(!cropInvert);
+      if (!keptData) {
         emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
         return;
       }
-
-      const newPositions = new Float32Array(pointCount * 3);
-      const newColors = src.colors ? new Float32Array(pointCount * 3) : null;
-      const newIntensities = src.intensities ? new Float32Array(pointCount) : null;
-
-      const min = new THREE.Vector3(Infinity, Infinity, Infinity);
-      const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-
-      let w = 0;
-      for (let i = 0; i < src.pointCount; i++) {
-        if (erased.has(i)) continue;
-        const wx = src.positions[i * 3] + tx;
-        const wy = src.positions[i * 3 + 1] + ty;
-        const wz = src.positions[i * 3 + 2] + tz;
-        const inside = predicate(wx, wy, wz);
-        if (!(cropInvert ? !inside : inside)) continue;
-        newPositions[w * 3] = wx;
-        newPositions[w * 3 + 1] = wy;
-        newPositions[w * 3 + 2] = wz;
-        if (wx < min.x) min.x = wx; if (wx > max.x) max.x = wx;
-        if (wy < min.y) min.y = wy; if (wy > max.y) max.y = wy;
-        if (wz < min.z) min.z = wz; if (wz > max.z) max.z = wz;
-        if (newColors && src.colors) {
-          newColors[w * 3] = src.colors[i * 3];
-          newColors[w * 3 + 1] = src.colors[i * 3 + 1];
-          newColors[w * 3 + 2] = src.colors[i * 3 + 2];
-        }
-        if (newIntensities && src.intensities) {
-          newIntensities[w] = src.intensities[i];
-        }
-        w++;
-      }
-
-      const center = new THREE.Vector3(
-        (min.x + max.x) / 2,
-        (min.y + max.y) / 2,
-        (min.z + max.z) / 2,
-      );
-      const size = new THREE.Vector3(
-        max.x - min.x,
-        max.y - min.y,
-        max.z - min.z,
-      );
-
-      const newData: PointCloudData = {
-        positions: newPositions,
-        colors: newColors ?? undefined,
-        intensities: newIntensities ?? undefined,
-        pointCount,
-        bounds: { min, max, center, size },
-        fileName: src.fileName,
-      };
-      onUpdateCloud(cloud.id, newData);
+      onUpdateCloud(cloud.id, keptData);
       touchedCloudIds.push(cloud.id);
-      keptCounts.push(pointCount);
+      keptCounts.push(keptData.pointCount);
     };
 
     let i = 0;
@@ -8098,22 +8237,44 @@ export default function PointCloudViewer({
               </div>
             </div>
 
-            {/* Keep Inside / Keep Outside */}
+            {/* Mode: Keep Inside / Keep Outside / Segment.
+                These are mutually exclusive. Internally they map onto two
+                states: cropInvert picks which half the original keeps, and
+                cropSegment decides whether the other half is discarded or
+                spun off as a new cloud. Segment keeps the in-region points in
+                the original and the out-of-region points in the new cloud. */}
             <div className="mb-3 p-2 bg-neutral-900/50 rounded">
               <div className="text-[10px] text-neutral-400 mb-2">Mode</div>
               <div className="flex gap-1">
                 <button
-                  onClick={() => setCropInvert(false)}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${!cropInvert ? 'bg-green-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
+                  data-testid="crop-mode-inside"
+                  aria-pressed={!cropInvert && !cropSegment}
+                  onClick={() => { setCropInvert(false); setCropSegment(false); }}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded ${!cropInvert && !cropSegment ? 'bg-green-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
                 >
                   Keep Inside
                 </button>
                 <button
-                  onClick={() => setCropInvert(true)}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropInvert ? 'bg-red-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
+                  data-testid="crop-mode-outside"
+                  aria-pressed={cropInvert && !cropSegment}
+                  onClick={() => { setCropInvert(true); setCropSegment(false); }}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropInvert && !cropSegment ? 'bg-red-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
                 >
                   Keep Outside
                 </button>
+                <button
+                  data-testid="crop-mode-segment"
+                  aria-pressed={cropSegment}
+                  onClick={() => { setCropInvert(false); setCropSegment(true); }}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropSegment ? 'bg-amber-500 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
+                >
+                  Segment
+                </button>
+              </div>
+              <div className="text-[10px] text-neutral-500 mt-1.5 leading-tight">
+                {cropSegment
+                  ? 'Splits in two: original keeps the in-region points, a new cloud gets the rest.'
+                  : 'Cropped-out points are discarded.'}
               </div>
             </div>
 
@@ -8251,7 +8412,7 @@ export default function PointCloudViewer({
               }
               className="w-full px-2 py-1.5 mt-1 text-xs font-medium rounded bg-green-600 hover:bg-green-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white disabled:cursor-not-allowed transition-colors"
             >
-              Apply crop to {selectedIds.size} scan{selectedIds.size === 1 ? '' : 's'}
+              {cropSegment ? 'Segment' : 'Apply crop to'} {selectedIds.size} scan{selectedIds.size === 1 ? '' : 's'}
             </button>
           </div>
         );

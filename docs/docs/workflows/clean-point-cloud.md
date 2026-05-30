@@ -34,8 +34,10 @@ lasso — and the same region applies to every scan you have selected.
 
 1. Click **Crop**. A green box appears around the union of the selected
    scans' bounding boxes.
-2. In the panel choose **Box** or **Polygon** at the top, and **Keep
-   Inside** (default) or **Keep Outside** below it.
+2. In the panel choose **Box** or **Polygon** at the top, then a **Mode**
+   below it: **Keep Inside** (default), **Keep Outside**, or **Segment**.
+   The first two discard the points you don't keep; **Segment** keeps both
+   halves as separate clouds (see below).
 3. Shape the region (see below).
 4. Click **Apply** at the bottom of the panel. A **Cropping…** indicator
    appears while the crop is processed, and the removed points stay
@@ -77,9 +79,25 @@ Because the polygon lives in screen space, the in/out test uses the
 camera as it was when you closed the polygon — orbiting afterwards is
 fine and doesn't change the result.
 
+### Segment mode (keep both halves)
+
+**Keep Inside** and **Keep Outside** discard the points you don't keep.
+**Segment** instead splits each selected scan in two: the original scan
+keeps the in-region points (the same set **Keep Inside** would keep), and a
+new **"… (segment)"** cloud is added to the scene holding the cropped-out
+points. No points are lost. It works with both **Box** and **Polygon**
+shapes.
+
+The new cloud is added in a distinct colour so it's easy to tell apart;
+recolour or rename it from the scan list like any other scan. It's handy
+for separating a plant from its ground, or splitting one scan into named
+regions without re-importing.
+
 Cropping is non-destructive in the sense that it's undoable
-(<kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd>), but it does discard points — if you
-need them back, re-import the original file.
+(<kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd>). With **Keep Inside** / **Keep Outside**
+it discards the points outside the kept set — if you need them back,
+re-import the original file or use **Segment** so they're kept as a new
+cloud.
 
 !!! note "Apply latency on large XYZ scans"
     For XYZ-imported scans, **Apply** re-runs the octree converter on the
