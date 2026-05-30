@@ -64,4 +64,4 @@ export type MenuCommandPayload =
   | { kind: 'deselect-all' }
   | { kind: 'reset-camera' }
   | { kind: 'snap-view'; direction: SnapViewDirection }
-  | { kind: 'nav'; target: 'home' | 'viewer' | 'options' };
+  | { kind: 'nav'; target: 'viewer' | 'options' };

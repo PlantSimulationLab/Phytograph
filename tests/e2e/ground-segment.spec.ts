@@ -18,7 +18,6 @@ test('segments ground vs plant and colours by the ground_class attribute', async
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([
       page.waitForEvent('filechooser'),
@@ -79,7 +78,6 @@ test('hides the class legend after the segmented cloud is deleted', async () => 
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([
       page.waitForEvent('filechooser'),

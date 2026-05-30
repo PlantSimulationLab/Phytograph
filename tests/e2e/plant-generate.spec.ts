@@ -9,7 +9,6 @@ test('generates a procedural plant model with non-default species and age', asyn
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     // Open plant generation popup.
     await page.getByTestId('tool-plant-generate').click();

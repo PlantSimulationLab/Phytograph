@@ -95,7 +95,6 @@ test(`crop on ${FIXTURE_N.toLocaleString()}-point octree keeps heap under ${HEAP
   });
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     // ── Import via the file picker (same flow as crop-multi-scan) ────────
     // Goes through the Electron file-dialog → renderer

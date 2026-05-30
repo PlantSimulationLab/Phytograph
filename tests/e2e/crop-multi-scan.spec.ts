@@ -30,7 +30,6 @@ test('multi-scan crop applies one world-space box across two selected scans', as
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     // ── Import tiny.xyz ────────────────────────────────────────────────────
     await page.getByTestId('import-menu-button').click();
@@ -147,7 +146,6 @@ test('Enter inside a dim input commits the value without applying the crop', asy
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([
@@ -193,7 +191,6 @@ test('crop panel × button dismisses without applying', async () => {
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([

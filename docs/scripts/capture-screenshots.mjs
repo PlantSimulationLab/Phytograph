@@ -20,7 +20,7 @@
 // synthetic test fixture) so the screenshot matches the docs.
 //
 // Output:
-//   docs/docs/assets/screenshots/01-home.png
+//   docs/docs/assets/screenshots/01-empty-viewer.png
 //   docs/docs/assets/screenshots/02-import-dropdown.png
 //   docs/docs/assets/screenshots/03-first-scan.png
 //   docs/docs/assets/screenshots/05-command-palette.png
@@ -92,14 +92,14 @@ async function main() {
     // Give the renderer a beat to finish initial layout.
     await page.waitForTimeout(1500);
 
-    // ── 01: Home tab with drop zone ─────────────────────────────────────
-    await page.getByTestId('nav-home').click();
+    // ── 01: Empty viewer with the drag/import hint ──────────────────────
+    // The app boots directly into the 3D viewport; with no scans loaded it
+    // shows the empty-state hint over the canvas.
     await page.waitForTimeout(800);
-    await page.screenshot({ path: join(outDir, '01-home.png') });
-    console.log('Saved 01-home.png');
+    await page.screenshot({ path: join(outDir, '01-empty-viewer.png') });
+    console.log('Saved 01-empty-viewer.png');
 
     // ── 02: Import dropdown open ────────────────────────────────────────
-    await page.getByTestId('nav-viewer').click();
     await page.waitForTimeout(600);
     // The chevron toggle next to Import opens the dropdown. The main
     // import-menu-button click opens the file picker, which we don't want

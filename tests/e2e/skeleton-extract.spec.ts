@@ -13,7 +13,6 @@ test('extracts a skeleton from a Y-shaped plant cloud via the UI', async () => {
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     // Import as point cloud (not auto) — exercises the non-default menu item.
     // The handler calls react-dropzone's open() which fires a real OS file

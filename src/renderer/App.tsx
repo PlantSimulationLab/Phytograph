@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Upload, Home, Box, Layers, FileUp, X, AlertCircle, Loader2, ChevronDown, Sparkles, GitBranch } from "lucide-react";
+import { Upload, Box, Layers, FileUp, ChevronDown, Sparkles, GitBranch } from "lucide-react";
 import * as THREE from 'three';
 import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
@@ -16,7 +16,7 @@ import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isM
 const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc']);
 import logoImage from "./assets/logo.png";
 
-type NavItem = 'home' | 'viewer' | 'options';
+type NavItem = 'viewer' | 'options';
 type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton';
 
 // Predefined colors for scans (for labels/identification)
@@ -32,16 +32,13 @@ const SCAN_COLORS = [
 ];
 
 function App() {
-  const [activeNav, setActiveNav] = useState<NavItem>('home');
+  const [activeNav, setActiveNav] = useState<NavItem>('viewer');
   const [scans, setScans] = useState<Scan[]>([]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(false);
   // Progress shown over the viewer while an import triggered from the viewer
   // header (Import menu / File menu) is in flight. Reuses BulkImportProgress
   // so every import pathway shows the same spinner + bar + filename modal.
-  // The home screen has its own inline spinner, so this only renders off-home.
   const [importProgress, setImportProgress] = useState<BulkImportProgressState | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
   const pendingImportTypeRef = useRef<ImportType>('auto');
@@ -108,9 +105,7 @@ function App() {
   }, [scans]);
 
   const handleFileUpload = useCallback(async (file: File) => {
-    setLoading(true);
     setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
-    setError(null);
 
     const importType = pendingImportTypeRef.current;
 
@@ -221,10 +216,8 @@ function App() {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to parse file';
-      setError(message);
       showToast({ title: message, type: 'error' });
     } finally {
-      setLoading(false);
       setImportProgress(null);
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
@@ -233,9 +226,7 @@ function App() {
 
   // Handle multiple files
   const handleMultipleFiles = useCallback(async (files: File[]) => {
-    setLoading(true);
     setImportProgress({ current: 0, total: files.length, label: 'Preparing…' });
-    setError(null);
     const newScans: Scan[] = [];
     const errors: string[] = [];
     let meshCount = 0;
@@ -366,11 +357,9 @@ function App() {
     }
 
     if (errors.length > 0) {
-      setError(errors.join('\n'));
       showToast({ title: `Failed to load ${errors.length} file(s)`, type: 'error' });
     }
 
-    setLoading(false);
     setImportProgress(null);
     // Reset import type to auto after import
     pendingImportTypeRef.current = 'auto';
@@ -397,7 +386,6 @@ function App() {
   const handleClearAllScans = () => {
     setScans([]);
     setSelectedScanIds(new Set());
-    setActiveNav('home');
   };
 
   const handleRemoveScan = useCallback((id: string) => {
@@ -691,79 +679,35 @@ function App() {
   // Calculate total points across data-bearing scans only.
   const totalPoints = scans.reduce((sum, s) => sum + (s.data?.pointCount ?? 0), 0);
 
-  // Render the home screen
-  const renderHome = () => (
-    <div className="flex-1 flex items-center justify-center p-8">
-      <div className="text-center max-w-2xl">
-        <div className="flex items-center justify-center gap-3 mb-6">
-          <img src={logoImage} alt="Phytograph" className="w-12 h-12 object-contain" />
-          <h1 className="text-4xl font-bold text-slate-800">Phytograph</h1>
-        </div>
-        <p className="text-slate-600 mb-8 text-lg">
-          Point cloud processing for plant science research.
+  // Empty-state hint shown over the viewer canvas when no scans are loaded
+  // (fresh launch or after Close All). Faint and click-through so it never
+  // blocks canvas interaction or the drag-drop overlay; the global dropzone
+  // and the toolbar Import menu remain the actual entry points.
+  const renderEmptyHint = () => (
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+      <div className="text-center px-8">
+        <FileUp className="w-12 h-12 mx-auto mb-4 text-neutral-600" />
+        <p className="text-lg font-medium text-neutral-300 mb-2">
+          Drag scan files here or use Import
         </p>
-
-        {/* Upload area */}
-        <div
-          onClick={open}
-          className={`
-            border-2 border-dashed rounded-2xl p-12 cursor-pointer transition-all
-            ${isDragOver
-              ? 'border-slate-500 bg-slate-100'
-              : 'border-slate-300 hover:border-slate-400 hover:bg-slate-50'
-            }
-          `}
-        >
-          {loading ? (
-            <div className="flex flex-col items-center">
-              <Loader2 className="w-12 h-12 text-slate-600 animate-spin mb-4" />
-              <p className="text-slate-600">Loading scan...</p>
-            </div>
-          ) : (
-            <>
-              <FileUp className={`w-12 h-12 mx-auto mb-4 ${isDragOver ? 'text-slate-600' : 'text-slate-400'}`} />
-              <p className="text-lg font-medium text-slate-700 mb-2">
-                Drop scan files here
-              </p>
-              <p className="text-slate-500 mb-4">or click to browse (multiple files supported)</p>
-              <div className="flex flex-wrap justify-center gap-2">
-                {POINT_CLOUD_FORMATS.map(f => (
-                  <span key={f.ext} className="px-2 py-1 bg-blue-50 rounded text-xs text-blue-600">
-                    {f.ext}
-                  </span>
-                ))}
-                {MESH_FORMATS.map(f => (
-                  <span key={f.ext} className="px-2 py-1 bg-green-50 rounded text-xs text-green-600">
-                    {f.ext}
-                  </span>
-                ))}
-                {SKELETON_FORMATS.map(f => (
-                  <span key={f.ext} className="px-2 py-1 bg-amber-50 rounded text-xs text-amber-600">
-                    {f.ext}
-                  </span>
-                ))}
-              </div>
-            </>
-          )}
+        <p className="text-neutral-500 mb-4 text-sm">multiple files supported</p>
+        <div className="flex flex-wrap justify-center gap-2 max-w-xl">
+          {POINT_CLOUD_FORMATS.map(f => (
+            <span key={f.ext} className="px-2 py-1 bg-blue-500/10 rounded text-xs text-blue-400">
+              {f.ext}
+            </span>
+          ))}
+          {MESH_FORMATS.map(f => (
+            <span key={f.ext} className="px-2 py-1 bg-green-500/10 rounded text-xs text-green-400">
+              {f.ext}
+            </span>
+          ))}
+          {SKELETON_FORMATS.map(f => (
+            <span key={f.ext} className="px-2 py-1 bg-amber-500/10 rounded text-xs text-amber-400">
+              {f.ext}
+            </span>
+          ))}
         </div>
-
-        {/* Error display */}
-        {error && (
-          <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
-            <div className="text-left">
-              <p className="text-red-800 font-medium">Error loading file</p>
-              <p className="text-red-600 text-sm whitespace-pre-wrap">{error}</p>
-            </div>
-            <button
-              onClick={() => setError(null)}
-              className="ml-auto text-red-400 hover:text-red-600"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        )}
-
       </div>
     </div>
   );
@@ -773,6 +717,7 @@ function App() {
     <div className="flex-1 flex flex-col">
       {/* Toolbar */}
       <div className="bg-neutral-800 border-b border-neutral-700 px-4 py-2 flex items-center gap-4">
+        <img src={logoImage} alt="Phytograph" className="w-6 h-6 object-contain" />
         <div className="flex items-center gap-2">
           <Box className="w-4 h-4 text-neutral-400" />
           <span className="text-sm font-medium text-neutral-200">
@@ -841,26 +786,29 @@ function App() {
       </div>
 
       {/* 3D Viewer */}
-      <PointCloudViewer
-        scans={scans}
-        selectedScanIds={selectedScanIds}
-        onToggleVisibility={handleToggleScanVisibility}
-        onToggleSelection={handleToggleScanSelection}
-        onRemoveScan={handleRemoveScan}
-        onSelectAll={handleSelectAll}
-        onDeselectAll={handleDeselectAll}
-        onUpdateScanData={handleUpdateScanData}
-        onUpdateScanParams={handleUpdateScanParams}
-        onUpdateScanLabel={handleUpdateScanLabel}
-        onSave={handleSavePointCloud}
-        onAddScan={handleAddScan}
-        onAddScans={handleAddScans}
-        onStitchScans={handleStitchScans}
-        onUndoStitch={handleUndoStitch}
-        canUndoStitch={canUndoStitch}
-        importRefsCallback={handleImportRefsCallback}
-        className="flex-1"
-      />
+      <div className="relative flex-1 flex flex-col">
+        <PointCloudViewer
+          scans={scans}
+          selectedScanIds={selectedScanIds}
+          onToggleVisibility={handleToggleScanVisibility}
+          onToggleSelection={handleToggleScanSelection}
+          onRemoveScan={handleRemoveScan}
+          onSelectAll={handleSelectAll}
+          onDeselectAll={handleDeselectAll}
+          onUpdateScanData={handleUpdateScanData}
+          onUpdateScanParams={handleUpdateScanParams}
+          onUpdateScanLabel={handleUpdateScanLabel}
+          onSave={handleSavePointCloud}
+          onAddScan={handleAddScan}
+          onAddScans={handleAddScans}
+          onStitchScans={handleStitchScans}
+          onUndoStitch={handleUndoStitch}
+          canUndoStitch={canUndoStitch}
+          importRefsCallback={handleImportRefsCallback}
+          className="flex-1"
+        />
+        {scans.length === 0 && renderEmptyHint()}
+      </div>
     </div>
   );
 
@@ -941,51 +889,9 @@ function App() {
 
       <div className="flex flex-1 min-h-0">
 
-      {/* Sidebar */}
-      <div className="w-16 bg-neutral-900 flex flex-col items-center py-4 gap-2">
-        {/* Logo */}
-        <div className="mb-4">
-          <img
-            src={logoImage}
-            alt="Phytograph"
-            className="w-8 h-8 object-contain"
-          />
-        </div>
-
-        {/* Navigation */}
-        <button
-          data-testid="nav-home"
-          onClick={() => setActiveNav('home')}
-          className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
-            activeNav === 'home'
-              ? 'bg-white text-neutral-900'
-              : 'text-neutral-400 hover:text-white hover:bg-neutral-800'
-          }`}
-          title="Home"
-        >
-          <Home className="w-5 h-5" />
-        </button>
-
-        <button
-          data-testid="nav-viewer"
-          onClick={() => setActiveNav('viewer')}
-          className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors ${
-            activeNav === 'viewer'
-              ? 'bg-white text-neutral-900'
-              : 'text-neutral-400 hover:text-white hover:bg-neutral-800'
-          }`}
-          title="3D Viewer"
-        >
-          <Box className="w-5 h-5" />
-        </button>
-
-        <div className="flex-1" />
-      </div>
-
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden relative">
-        {/* Home and Options pages - conditionally rendered */}
-        {activeNav === 'home' && renderHome()}
+        {/* Settings page - conditionally rendered over the viewer */}
         {activeNav === 'options' && renderOptions()}
 
         {/* Viewer - always mounted but hidden when not active to preserve state */}
@@ -995,11 +901,10 @@ function App() {
       </div>
 
       {/* Import progress modal for imports triggered from the viewer header
-          (Import menu / File menu). The home screen renders its own inline
-          spinner, so suppress this there to avoid doubling up. Reuses the
-          same BulkImportProgress component as the Helios XML and per-scan
-          attach pathways so every import shows an identical modal. */}
-      {activeNav !== 'home' && <BulkImportProgress progress={importProgress} />}
+          (Import menu / File menu). Reuses the same BulkImportProgress
+          component as the Helios XML and per-scan attach pathways so every
+          import shows an identical modal. */}
+      <BulkImportProgress progress={importProgress} />
 
       {/* Drag overlay */}
       {isDragOver && (

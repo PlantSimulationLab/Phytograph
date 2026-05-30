@@ -10,7 +10,6 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     const panel = page.getByTestId('scans-panel');
     await expect(panel).toBeVisible();
@@ -105,7 +104,6 @@ test('bulk-import scans from a Helios XML file (filenames unresolved)', async ()
     // (user cancelled the locate-file prompts).
     await stubOpenDialog(app, [fixture, null, null, null, null]);
 
-    await page.getByTestId('nav-viewer').click();
 
     const panel = page.getByTestId('scans-panel');
     await expect(panel).toBeVisible();

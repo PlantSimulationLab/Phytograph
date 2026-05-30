@@ -19,7 +19,6 @@ test('imports multiple point clouds at once via Import → Point Cloud', async (
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     // Open Import menu, pick "Point Cloud", and feed the OS chooser BOTH
     // fixtures in one selection — this drives handleMultipleFiles.

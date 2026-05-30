@@ -16,7 +16,6 @@ test('Helios XML import auto-attaches referenced point data', async () => {
     // try `<xml-dir>/tiny.xyz` first and find it. No prompt happens.
     await stubOpenDialog(app, xmlFixture);
 
-    await page.getByTestId('nav-viewer').click();
 
     const panel = page.getByTestId('scans-panel');
     await expect(panel).toBeVisible();

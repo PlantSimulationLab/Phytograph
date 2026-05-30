@@ -6,22 +6,11 @@ memorize anything.
 
 ![Phytograph viewer with a scan loaded](../assets/screenshots/03-first-scan.png){ width="980" }
 
-## Left rail
-
-The narrow strip down the left side has two icons:
-
-- :material-home: **Home** — file import and supported formats
-- :material-cube-outline: **Viewer** — 3D workspace (where you'll spend
-  almost all your time)
-
-Below the icons, the cloud count ("0 Clouds", "1 Cloud", …) reports
-how many point clouds are currently loaded.
-
 ## Top bar
 
 | Region | What's there |
 |---|---|
-| Top-left | Current scene summary ("N Clouds, M Meshes…") |
+| Top-left | Phytograph logo and the current scene summary ("N Clouds, M Meshes…") |
 | Top-center | The active mode label |
 | Top-right | **Import** button (with a chevron for the format dropdown), **Close All** |
 
@@ -33,17 +22,19 @@ type for ambiguous formats like `.ply`.
 
 ## Left tool column
 
-A vertical column of icon buttons next to the left rail. Each opens a
+A vertical column of icon buttons down the left side. Each opens a
 panel or tool mode. Hover any button to see its name. The exact set
 depends on what's selected in the scene panel; tool buttons that
 require a selection are disabled until you pick something.
 
 ## Bottom-left view gizmo
 
-A small XYZ axis indicator and a row of view-snapping buttons:
+A small XYZ orientation gizmo and a row of view-snapping buttons:
 **Left**, **Right**, **Front**, **Back**, **Top**, **Bottom**, plus
-**Isometric**. Click any to snap the camera. After snapping you can
-still orbit freely.
+**Isometric**. Click any button to snap the camera. The gizmo tracks the
+current orientation; clicking one of its axis heads looks straight down
+that world axis (Z stays up) without changing your zoom. After snapping
+you can still orbit freely.
 
 ## 3D canvas
 

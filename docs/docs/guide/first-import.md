@@ -8,20 +8,12 @@ multi-position datasets.
 
 ## Open the app
 
-When you launch Phytograph you land on the **Home** tab — a large
-drop zone for importing files.
+When you launch Phytograph you land directly in the **3D viewer**. With
+nothing loaded yet, the empty viewport shows a hint with the file
+extensions you can drop here: `.las`, `.laz`, `.ply`, `.pcd`, `.xyz`,
+`.txt`, `.csv`, `.pts`, `.asc`, `.obj`, `.stl`, `.json`.
 
-![Phytograph Home tab](../assets/screenshots/01-home.png){ width="900" }
-
-The left rail has two main areas:
-
-- :material-home: **Home** — file import and supported-format chips
-- :material-cube-outline: **Viewer** — the 3D workspace where everything happens
-
-The Home tab summarizes Phytograph's purpose ("Point cloud processing
-for plant science research") and shows which file extensions you can
-drop here: `.las`, `.laz`, `.ply`, `.pcd`, `.xyz`, `.txt`, `.csv`,
-`.pts`, `.asc`, `.obj`, `.stl`, `.json`.
+![Empty Phytograph viewer](../assets/screenshots/01-empty-viewer.png){ width="900" }
 
 ## Import the file
 
@@ -29,8 +21,8 @@ You have three ways to import:
 
 === "Drag and drop"
 
-    Drag the file from your file manager onto the drop zone in the Home
-    tab. Phytograph auto-detects the format.
+    Drag the file from your file manager anywhere onto the Phytograph
+    window. Phytograph auto-detects the format.
 
 === "Import button"
 
@@ -51,8 +43,8 @@ binary formats are faster still.
 
 ## See it in 3D
 
-Phytograph automatically switches to the **Viewer** tab and centers the
-camera on your data.
+Phytograph centers the camera on your data and the import hint
+disappears.
 
 ![First scan in the viewer](../assets/screenshots/03-first-scan.png){ width="900" }
 

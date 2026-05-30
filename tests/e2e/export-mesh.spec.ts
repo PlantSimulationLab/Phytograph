@@ -60,7 +60,6 @@ test('exports a generated mesh to OBJ via the Export panel', async () => {
     // Import the cylinder fixture. The Auto-detect menu item calls
     // react-dropzone's open() under the hood, which fires a real OS file
     // chooser; intercept it before the click so it never surfaces.
-    await page.getByTestId('nav-viewer').click();
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([
       page.waitForEvent('filechooser'),

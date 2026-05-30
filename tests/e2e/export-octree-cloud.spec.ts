@@ -44,7 +44,6 @@ test('exports an octree-backed cloud to XYZ via the backend', async () => {
       };
     });
 
-    await page.getByTestId('nav-viewer').click();
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([
       page.waitForEvent('filechooser'),

@@ -22,7 +22,6 @@ test('crop Segment splits a scan in two without losing points', async () => {
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     // ── Import tiny.xyz ────────────────────────────────────────────────────
     await page.getByTestId('import-menu-button').click();
@@ -99,7 +98,6 @@ test('crop without Segment discards cropped-out points (no new cloud)', async ()
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([

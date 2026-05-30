@@ -25,7 +25,6 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'scalars.xyz');
  */
 
 async function importAndSelect(page: import('@playwright/test').Page) {
-  await page.getByTestId('nav-viewer').click();
   await page.getByTestId('import-menu-button').click();
   const [chooser] = await Promise.all([
     page.waitForEvent('filechooser'),

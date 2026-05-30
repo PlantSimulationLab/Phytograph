@@ -30,7 +30,6 @@ test('polygon lasso crop: clicks add vertices, Enter closes, Apply keeps enclose
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     // ── Import tiny.xyz ────────────────────────────────────────────────────
     await page.getByTestId('import-menu-button').click();
@@ -123,7 +122,6 @@ test('polygon lasso crop: Keep Outside enclosing all points empties the cloud (d
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([
@@ -196,7 +194,6 @@ test('polygon lasso crop: half-viewport lasso keeps a strict subset of points', 
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
 
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([

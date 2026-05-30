@@ -22,9 +22,6 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
   try {
     expect(backendVersion).toMatch(/^\d+\.\d+\.\d+/);
 
-    // Go to Viewer (where Import lives).
-    await page.getByTestId('nav-viewer').click();
-
     // Import: open the menu, click Auto-detect. That handler calls
     // react-dropzone's open() which fires a real OS file chooser, so we
     // intercept via filechooser BEFORE the click (otherwise the dialog

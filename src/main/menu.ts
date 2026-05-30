@@ -129,18 +129,13 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
       label: 'View',
       submenu: [
         {
-          label: 'Home',
-          accelerator: 'CmdOrCtrl+1',
-          click: () => send({ kind: 'nav', target: 'home' }),
-        },
-        {
           label: 'Viewer',
-          accelerator: 'CmdOrCtrl+2',
+          accelerator: 'CmdOrCtrl+1',
           click: () => send({ kind: 'nav', target: 'viewer' }),
         },
         {
           label: 'Settings',
-          accelerator: 'CmdOrCtrl+3',
+          accelerator: 'CmdOrCtrl+2',
           click: () => send({ kind: 'nav', target: 'options' }),
         },
         { type: 'separator' },

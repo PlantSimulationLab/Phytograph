@@ -26,8 +26,7 @@ const page = await app.firstWindow();
 await waitForBackend();
 await page.waitForTimeout(1500);
 
-// Navigate to viewer (palette only works there).
-await page.getByTestId('nav-viewer').click();
+// The app boots directly into the viewer, where the palette works.
 await page.waitForTimeout(800);
 
 // Click on the canvas / app root to make sure the window is focused.

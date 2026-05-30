@@ -2,15 +2,15 @@
 
 ## Import
 
-Three entry points. All three accept the same set of formats — see
+Two entry points. Both accept the same set of formats — see
 **[File formats](../reference/file-formats.md)** for the full list.
 
 === "Drag and drop"
 
-    Drag any supported file from your file manager onto the Home tab's
-    drop zone or directly onto the Viewer canvas. Format is auto-detected
-    from the extension and, for ambiguous formats like `.ply` and `.obj`
-    (which can be either mesh or point cloud), from the file contents.
+    Drag any supported file from your file manager anywhere onto the
+    Phytograph window. Format is auto-detected from the extension and,
+    for ambiguous formats like `.ply` and `.obj` (which can be either
+    mesh or point cloud), from the file contents.
 
 === "Import button"
 
@@ -23,11 +23,6 @@ Three entry points. All three accept the same set of formats — see
     - **Skeleton** — for `.json` skeleton graphs
 
     Use this when auto-detection picks the wrong type.
-
-=== "Recent files"
-
-    The Home tab keeps a list of recently imported files. Click any to
-    re-import it. The list is per-machine and persists across launches.
 
 ### Importing several files at once
 

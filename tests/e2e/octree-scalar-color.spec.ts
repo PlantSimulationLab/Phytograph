@@ -19,7 +19,6 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
   const { page, close } = await launchApp();
 
   try {
-    await page.getByTestId('nav-viewer').click();
     await page.getByTestId('import-menu-button').click();
     const [chooser] = await Promise.all([
       page.waitForEvent('filechooser'),
