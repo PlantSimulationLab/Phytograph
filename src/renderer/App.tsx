@@ -50,6 +50,10 @@ function App() {
     importRefsRef.current = refs;
   }, []);
 
+  // Whether the viewer holds non-scan content (meshes/skeletons). Generated
+  // plants are meshes, so this — not just scans — must gate the empty-state hint.
+  const [viewerHasContent, setViewerHasContent] = useState(false);
+
   // Stitch history for undo. We snapshot the full Scan objects (including any
   // params) so undo restores the original scans exactly as they were.
   interface StitchHistoryEntry {
@@ -684,7 +688,7 @@ function App() {
   // blocks canvas interaction or the drag-drop overlay; the global dropzone
   // and the toolbar Import menu remain the actual entry points.
   const renderEmptyHint = () => (
-    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+    <div data-testid="empty-viewer-hint" className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
       <div className="text-center px-8">
         <FileUp className="w-12 h-12 mx-auto mb-4 text-neutral-600" />
         <p className="text-lg font-medium text-neutral-300 mb-2">
@@ -805,9 +809,10 @@ function App() {
           onUndoStitch={handleUndoStitch}
           canUndoStitch={canUndoStitch}
           importRefsCallback={handleImportRefsCallback}
+          onViewerContentChange={setViewerHasContent}
           className="flex-1"
         />
-        {scans.length === 0 && renderEmptyHint()}
+        {scans.length === 0 && !viewerHasContent && renderEmptyHint()}
       </div>
     </div>
   );

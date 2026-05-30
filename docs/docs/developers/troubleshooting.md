@@ -67,13 +67,20 @@ edit that function.
 
 ## Plant generation / Helios features fail in dev only
 
-pyhelios's native lib (`libhelios.dylib`) must be importable from the
-active Python env. If you replaced or recreated the venv, reinstall:
+PyHelios is built from the source submodule, not a pip wheel. Its native lib
+(`libhelios.dylib`) lives at `pyhelios/pyhelios_build/build/lib/` and must be
+importable from the active Python env. If you replaced or recreated the venv,
+or the submodule isn't initialized, rebuild from source:
 
 ```bash
+git submodule update --init --recursive   # if pyhelios/ is empty
 source backend-api/venv/bin/activate
-pip install --force-reinstall pyhelios3d
+node scripts/build-pyhelios.mjs            # compiles libhelios + editable install
 ```
+
+The backend also auto-rebuilds `libhelios` on startup when the C++ source is
+newer than the compiled lib, so a stale lib usually fixes itself on the next
+backend restart. A clean rebuild: `node scripts/build-pyhelios.mjs --clean`.
 
 ## Stale backend on port 8008
 

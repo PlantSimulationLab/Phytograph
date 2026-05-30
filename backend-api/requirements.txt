@@ -12,7 +12,13 @@ prosail>=2.0.0
 # Pin llvmlite to version with x86_64 wheels (0.46+ dropped Intel Mac support)
 llvmlite<0.46
 pytexit>=0.3.4
-pyhelios3d
+# PyHelios is NOT a pip dependency — it's vendored as a git submodule at
+# <repo>/pyhelios and installed editable from source by scripts/build-pyhelios.mjs
+# (run `git submodule update --init --recursive` first). pyyaml below is one of
+# PyHelios's own runtime deps (numpy is already declared above); installing the
+# submodule editable pulls it in too, but we pin it here so a plain
+# `pip install -r requirements.txt` is self-sufficient.
+pyyaml>=5.0.0
 open3d>=0.18.0
 laspy[lazrs]>=2.5.0
 # Cloth Simulation Filter — ground/non-ground segmentation. SWIG C-extension

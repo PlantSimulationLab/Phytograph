@@ -11,7 +11,66 @@ from typing import Optional, List, Dict, Any
 from scipy.optimize import curve_fit, minimize
 import re
 import math
+import os
+import sys
+import subprocess
+from pathlib import Path
 from pytexit import py2tex
+
+# ==================== PyHelios source submodule ====================
+#
+# PyHelios is vendored as a git submodule at <repo>/pyhelios (with its nested
+# helios-core C++ submodule) so we can co-develop it. The native library
+# (libhelios) is compiled from source by scripts/build-pyhelios.mjs and lives at
+# pyhelios/pyhelios_build/build/lib/. There is no pip wheel fallback.
+#
+# This block runs at import time, before any endpoint lazily imports pyhelios:
+#   1. put the submodule on sys.path so `import pyhelios` resolves to the source;
+#   2. auto-rebuild the native library if it's missing or stale (a C++/header
+#      file under helios-core/ or native/ is newer than the compiled lib).
+# In packaged (PyInstaller) builds the submodule and build script aren't present;
+# pyhelios is bundled via collect-all instead, so we skip the whole block.
+_PYHELIOS_SRC = Path(__file__).resolve().parent.parent / "pyhelios"
+
+if (_PYHELIOS_SRC / "pyhelios" / "__init__.py").exists():
+    if str(_PYHELIOS_SRC) not in sys.path:
+        sys.path.insert(0, str(_PYHELIOS_SRC))
+
+    if sys.platform == "darwin":
+        _lib_name = "libhelios.dylib"
+    elif sys.platform == "win32":
+        _lib_name = "libhelios.dll"
+    else:
+        _lib_name = "libhelios.so"
+    _lib_path = _PYHELIOS_SRC / "pyhelios_build" / "build" / "lib" / _lib_name
+
+    _needs_build = False
+    if not _lib_path.exists():
+        print(f"[pyhelios] native library not found at {_lib_path}", flush=True)
+        _needs_build = True
+    else:
+        _lib_mtime = _lib_path.stat().st_mtime
+        _newest_source = 0.0
+        for _src_dir in (_PYHELIOS_SRC / "helios-core", _PYHELIOS_SRC / "native"):
+            if _src_dir.exists():
+                for _pattern in ("*.cpp", "*.hpp", "*.h"):
+                    for _f in _src_dir.rglob(_pattern):
+                        _newest_source = max(_newest_source, _f.stat().st_mtime)
+        if _newest_source > _lib_mtime:
+            print("[pyhelios] native library is stale (C++ sources are newer); rebuilding", flush=True)
+            _needs_build = True
+
+    if _needs_build:
+        _build_script = _PYHELIOS_SRC.parent / "scripts" / "build-pyhelios.mjs"
+        if _build_script.exists():
+            print("[pyhelios] building from source (this may take a few minutes)...", flush=True)
+            _result = subprocess.run(["node", str(_build_script)], cwd=str(_build_script.parent.parent), timeout=1800)
+            if _result.returncode == 0 and _lib_path.exists():
+                print("[pyhelios] build complete", flush=True)
+            else:
+                print("[pyhelios] WARNING: build failed; PyHelios features may be unavailable", flush=True)
+        else:
+            print(f"[pyhelios] WARNING: build script not found at {_build_script}", flush=True)
 
 # Unicode subscript to ASCII conversion for phytorch compatibility
 SUBSCRIPT_TO_ASCII = {

@@ -31,6 +31,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # PyHelios is a source submodule (with its nested helios-core C++
+          # submodule); the backend builds the native libhelios from it.
+          submodules: recursive
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -46,12 +50,20 @@ jobs:
           cache: 'pip'
           cache-dependency-path: backend-api/requirements.txt
 
+      # Pin the cache to the exact PyHelios + helios-core commits so bumping
+      # either submodule rebuilds the bundled native library.
+      - name: Record submodule SHAs
+        id: submodules
+        shell: bash
+        run: |
+          echo "sha=$(git -C pyhelios rev-parse HEAD)-$(git -C pyhelios/helios-core rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache PyInstaller backend
         id: backend-cache
         uses: actions/cache@v4
         with:
           path: resources/${{ matrix.backend_name }}
-          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/**/*.py', 'backend-api/requirements.txt') }}
+          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}
 
       - name: Install Python dependencies
         if: steps.backend-cache.outputs.cache-hit != 'true'
@@ -60,6 +72,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+
+      # Compile the PyHelios native library (libhelios) and editable-install the
+      # package so PyInstaller's collect-all picks it up. plantarchitecture +
+      # lidar plugins; --nogpu drops the radiation/OptiX CUDA toolchain. (lidar
+      # pulls in the visualizer + OpenGL at the C++ level, which builds fine on
+      # the macOS/Windows runners with no extra packages — only Linux, which
+      # this matrix doesn't target, would need GL/X11 dev headers.) Runners
+      # provide cmake + a C++ toolchain (Xcode CLT on macOS, MSVC on Windows).
+      - name: Build PyHelios from source
+        if: steps.backend-cache.outputs.cache-hit != 'true'
+        run: node scripts/build-pyhelios.mjs
 
       - name: Build Python backend
         if: steps.backend-cache.outputs.cache-hit != 'true'

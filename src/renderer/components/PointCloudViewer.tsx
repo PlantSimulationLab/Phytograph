@@ -126,6 +126,11 @@ interface PointCloudViewerProps {
   canUndoStitch?: () => boolean;
   className?: string;
   importRefsCallback?: (refs: ImportRefs) => void;
+  // Fired when the set of viewer-owned content (meshes, skeletons) changes
+  // between empty and non-empty. App uses this to dismiss the empty-state hint
+  // when content arrives that isn't a scan — e.g. a generated Helios plant,
+  // which is a mesh, not a scan.
+  onViewerContentChange?: (hasContent: boolean) => void;
 }
 
 export default function PointCloudViewer({
@@ -146,7 +151,8 @@ export default function PointCloudViewer({
   onUndoStitch,
   canUndoStitch,
   className = '',
-  importRefsCallback
+  importRefsCallback,
+  onViewerContentChange
 }: PointCloudViewerProps) {
   // Legacy internal aliases. The bulk of this file was written against
   // `clouds` / `selectedIds` / `onUpdateCloud` etc., and assumes every entry
@@ -331,6 +337,12 @@ export default function PointCloudViewer({
       importRefsCallback({ importMesh, importSkeleton });
     }
   }, [importRefsCallback, importMesh, importSkeleton]);
+
+  // Report whether the viewer holds any non-scan content (meshes or skeletons)
+  // so App can dismiss the empty-state hint when e.g. a plant is generated.
+  useEffect(() => {
+    onViewerContentChange?.(meshes.length > 0 || skeletons.length > 0);
+  }, [onViewerContentChange, meshes.length, skeletons.length]);
 
   // Export panel state
   const [showExportPanel, setShowExportPanel] = useState(false);

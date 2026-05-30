@@ -1,0 +1,4 @@
+[submodule "pyhelios"]
+	path = pyhelios
+	url = https://github.com/PlantSimulationLab/PyHelios.git
+	branch = master

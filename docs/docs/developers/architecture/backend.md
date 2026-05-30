@@ -19,11 +19,27 @@ resources/phytograph_backend/
 The script auto-discovers `backend-api/venv/bin/python`. You can override
 with `PYTHON=/path/to/python` if needed.
 
-!!! note "pyhelios gotcha"
-    The importable module is `pyhelios` but the PyPI distribution is
-    `pyhelios3d`. Native libs + textures + xml asset trees must travel
-    with the bundle — that's why `pyhelios` is in `collectAll` in
-    `scripts/build-backend.mjs`.
+!!! note "PyHelios is a source submodule"
+    PyHelios is **not** a pip wheel — it's vendored as a git submodule at
+    `pyhelios/` (with its own nested `helios-core` C++ submodule) so it can
+    be co-developed alongside Phytograph. `scripts/build-pyhelios.mjs`
+    compiles the native `libhelios` from source (the `plantarchitecture` and
+    `lidar` plugins; `--nogpu` drops the radiation/OptiX CUDA toolchain) into
+    `pyhelios/pyhelios_build/build/lib/` and installs the package editable.
+    The `lidar` plugin pulls in the `visualizer` plugin at the C++ level, so
+    OpenGL (glfw/glew/freetype) compiles too — no extra packages on macOS
+    (Cocoa) or Windows (native GL); Linux would need `libgl1-mesa-dev` /
+    `xorg-dev`. Prereqs: cmake + a C++ compiler (Xcode Command Line Tools on
+    macOS, MSVC on Windows). Native libs + textures +
+    xml asset trees still travel with the PyInstaller bundle via
+    `--collect-all pyhelios` in `scripts/build-backend.mjs`.
+
+    `backend-api/main.py` puts the submodule on `sys.path` at import time and
+    **auto-rebuilds** `libhelios` when any `.cpp/.hpp/.h` under `helios-core/`
+    or `native/` is newer than the compiled lib — so editing the Helios C++
+    and restarting the backend recompiles automatically. The first
+    `npm run dev` / `npm run build:backend` on a fresh clone compiles Helios
+    (several minutes); both scripts pre-build it when the lib is missing.
 
 The build is **idempotent**: re-running `npm run build:backend` replaces
 the prior bundle in place.
