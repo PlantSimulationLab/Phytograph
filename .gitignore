@@ -30,8 +30,11 @@ docs/.venv/
 *.psd
 src/renderer/assets/splash
 
-# Local-only sample datasets — not shipped, not referenced by tests or docs
-example-datasets/
+# Local sample / benchmark datasets — not shipped, not referenced by tests or
+# docs. The eval harness (backend-api/scripts/eval_tree_segmentation.py) reads
+# these; only the README is tracked (see example-datasets/README.md).
+example-datasets/*
+!example-datasets/README.md
 
 # Local scratch — heap snapshots, generated large fixtures
 tmp/
