@@ -220,6 +220,16 @@ export async function parseXYZ(file: File): Promise<PointCloudData> {
   }
 
   const pointCount = points.length;
+  if (pointCount === 0) {
+    // Lines were present but none yielded a valid X Y Z triplet. Failing here
+    // prevents a silent "0 points / NaN center" import (e.g. an XML or other
+    // non-coordinate text file slipping through the parser).
+    throw new Error(
+      `No point coordinates found in "${file.name}". ` +
+      `Expected lines of numeric X Y Z values — check that this is a point ` +
+      `cloud file and not a header-only or metadata file.`,
+    );
+  }
   const positions = new Float32Array(pointCount * 3);
 
   for (let i = 0; i < pointCount; i++) {
@@ -919,6 +929,17 @@ export async function parsePointCloud(file: File): Promise<PointCloudData> {
     case 'pts':
     case 'asc':
       return parseXYZ(file);
+
+    case 'xml':
+      // Helios scan XML describes scan *parameters* and references a separate
+      // point cloud file — it contains no coordinates itself. Importing it
+      // directly used to fall through to the XYZ parser, which silently
+      // produced 0 points and a NaN center. Point users at the right path.
+      throw new Error(
+        `"${file.name}" is a scan definition (XML), not a point cloud. ` +
+        `Use the "Add Scan" tool and choose "Import from XML file" to load it — ` +
+        `that reads the scan parameters and the point cloud file it references.`,
+      );
 
     default:
       // Try XYZ parser as fallback

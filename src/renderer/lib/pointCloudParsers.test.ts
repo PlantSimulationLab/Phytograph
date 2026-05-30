@@ -80,6 +80,13 @@ describe('parseXYZ', () => {
     await expect(parseXYZ(file)).rejects.toThrow(/No data found/);
   });
 
+  it('rejects a file with lines but no parseable coordinates', async () => {
+    // Non-empty, but no line yields a numeric X Y Z triplet — must fail loudly
+    // instead of returning 0 points with a NaN center.
+    const file = textFile('<helios>\n  <scan>\n  </scan>\n</helios>\n', 'meta.xyz');
+    await expect(parseXYZ(file)).rejects.toThrow(/No point coordinates found/);
+  });
+
   it('parses tab-delimited variant', async () => {
     const file = textFile('1\t2\t3\n4\t5\t6\n', 'cloud.txt');
     const data = await parseXYZ(file);
@@ -110,6 +117,29 @@ describe('parseXYZ', () => {
     ]);
     expect(data.bounds.center.x).not.toBeNaN();
     expect(data.intensities).toBeDefined();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// parsePointCloud — format dispatch / actionable rejections.
+// ────────────────────────────────────────────────────────────────────────
+
+describe('parsePointCloud', () => {
+  it('routes a supported extension to the right parser', async () => {
+    const data = await parsePointCloud(textFile('1 2 3\n4 5 6\n', 'cloud.xyz'));
+    expect(data.pointCount).toBe(2);
+  });
+
+  it('rejects a Helios scan XML with a message pointing at New Scan', async () => {
+    // Importing scan-definition XML directly used to fall through to the XYZ
+    // parser and silently produce 0 points / a NaN center. It must now fail
+    // with an actionable message instead.
+    const xml =
+      '<?xml version="1.0"?>\n<helios>\n  <scan>\n    <origin>0 0 0.5</origin>\n' +
+      '    <filename>ground_scan_0.xyz</filename>\n  </scan>\n</helios>\n';
+    await expect(parsePointCloud(textFile(xml, 'ground_scan.xml'))).rejects.toThrow(
+      /scan definition.*Add Scan.*Import from XML file/s,
+    );
   });
 });
 

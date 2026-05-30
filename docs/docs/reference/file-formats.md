@@ -102,6 +102,12 @@ workflow and bulk scan import:
 | Plain text | `ScanName X Y Z` per row | Tab, space, or comma separated |
 | Helios XML | Single file with many scan definitions | The format Helios scan simulator uses |
 
+A Helios XML file describes scan *parameters* and references separate point
+cloud files — it holds no coordinates itself. Load it through the **Add Scan**
+tool's **Import from XML file** action, not by dropping it into the viewer.
+Dropping an XML file directly is rejected with a message pointing you to the
+right place.
+
 ## Plant parameter presets
 
 The Morph popup exports / imports JSON describing a complete parameter
