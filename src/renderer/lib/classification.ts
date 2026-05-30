@@ -39,12 +39,91 @@ const GROUND_SCHEME: CategoricalScheme = {
   ],
 };
 
+// Tree instance segmentation (TreeIso) writes a `tree_instance` attribute:
+// 0 = unassigned, 1..N = individual trees. Unlike ground_class, N is unbounded
+// and only known at runtime, so this scheme is GENERATED from the data's id
+// range rather than registered as a fixed class list. Each id gets a distinct,
+// repeating, perceptually-spaced color via the golden-angle hue rotation;
+// id 0 ("unassigned") is a muted gray.
+export const TREE_INSTANCE_ATTRIBUTE = 'tree_instance';
+
+const TREE_UNASSIGNED_COLOR: RGB = [0.55, 0.55, 0.55];
+// Golden-angle hue step keeps successive ids far apart on the color wheel.
+const GOLDEN_ANGLE_DEG = 137.508;
+
+function hslToRgb(h: number, s: number, l: number): RGB {
+  // h in [0,360), s,l in [0,1]. Standard HSL→sRGB.
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = (((h % 360) + 360) % 360) / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0, g = 0, b = 0;
+  if (hp < 1) [r, g, b] = [c, x, 0];
+  else if (hp < 2) [r, g, b] = [x, c, 0];
+  else if (hp < 3) [r, g, b] = [0, c, x];
+  else if (hp < 4) [r, g, b] = [0, x, c];
+  else if (hp < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = l - c / 2;
+  return [r + m, g + m, b + m];
+}
+
+// Deterministic color for a tree instance id. id 0 → gray; ids 1..N cycle the
+// hue wheel by the golden angle, alternating lightness/saturation slightly so
+// even hues that wrap around stay distinguishable.
+export function treeInstanceColor(id: number): RGB {
+  const i = Math.round(id);
+  if (i <= 0) return TREE_UNASSIGNED_COLOR;
+  const hue = ((i - 1) * GOLDEN_ANGLE_DEG) % 360;
+  const sat = 0.62 + 0.18 * ((i % 3) / 2);   // 0.62..0.80
+  const light = 0.50 + 0.12 * ((i % 2));     // 0.50 or 0.62
+  return hslToRgb(hue, sat, light);
+}
+
+// Build a categorical scheme spanning ids 0..maxId, so the existing
+// colorForClassValue / buildCategoricalGradientStops machinery (and the legend)
+// work unchanged for tree instances.
+export function buildTreeInstanceScheme(maxId: number): CategoricalScheme {
+  const top = Math.max(0, Math.round(maxId));
+  const classes: ClassDef[] = [];
+  for (let i = 0; i <= top; i++) {
+    classes.push({
+      value: i,
+      label: i === 0 ? 'Unassigned' : `Tree ${i}`,
+      color: treeInstanceColor(i),
+    });
+  }
+  return { attribute: TREE_INSTANCE_ATTRIBUTE, classes };
+}
+
 // Registry of known categorical schemes, keyed by attribute slug. Future
 // classifications (organ type, semantic labels, …) register here and get
 // discrete coloring + a legend for free.
 const SCHEMES: Record<string, CategoricalScheme> = {
   [GROUND_CLASS_ATTRIBUTE]: GROUND_SCHEME,
 };
+
+// True for attributes whose categorical scheme is generated from the data range
+// (e.g. tree_instance) rather than registered with a fixed class list. Callers
+// build the scheme via buildTreeInstanceScheme(maxId) using the attribute's
+// observed [min,max].
+export function isDynamicCategoricalAttribute(attribute: string | undefined | null): boolean {
+  if (!attribute) return false;
+  return attribute.toLowerCase() === TREE_INSTANCE_ATTRIBUTE;
+}
+
+// Resolve a categorical scheme for an attribute, generating it from `range`
+// (the attribute's [min,max]) when the attribute is dynamic (tree_instance),
+// otherwise falling back to the registered static schemes.
+export function categoricalSchemeForRange(
+  attribute: string | undefined | null,
+  range: [number, number] | undefined | null,
+): CategoricalScheme | null {
+  if (isDynamicCategoricalAttribute(attribute)) {
+    const maxId = range ? range[1] : 0;
+    return buildTreeInstanceScheme(maxId);
+  }
+  return categoricalSchemeFor(attribute);
+}
 
 // Return the categorical scheme for an attribute, or null if it should use the
 // continuous-gradient path. Matching is case-insensitive on the slug; an
@@ -56,7 +135,7 @@ export function categoricalSchemeFor(attribute: string | undefined | null): Cate
 }
 
 export function isCategoricalAttribute(attribute: string | undefined | null): boolean {
-  return categoricalSchemeFor(attribute) !== null;
+  return categoricalSchemeFor(attribute) !== null || isDynamicCategoricalAttribute(attribute);
 }
 
 const UNKNOWN_CLASS_COLOR: RGB = [0.6, 0.6, 0.6];

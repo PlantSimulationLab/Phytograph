@@ -5,7 +5,7 @@ import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, segmentGround, segmentGroundApply, type CropOctreeRegion, type CropOctreeResult, type BackendPointSource } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, PlantGenerationRequest, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, segmentGround, segmentGroundApply, segmentTrees, segmentTreesApply, type CropOctreeRegion, type CropOctreeResult, type BackendPointSource } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import {
@@ -39,7 +39,7 @@ import {
 } from '../lib/pointCloudHelpers';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
-import { categoricalSchemeFor, GROUND_CLASS_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForRange, GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
@@ -268,6 +268,17 @@ export default function PointCloudViewer({
   const [groundClassThreshold, setGroundClassThreshold] = useState(0.02);
   const [groundRigidness, setGroundRigidness] = useState(3);
   const [groundSplitClouds, setGroundSplitClouds] = useState(false);
+  // Tree (individual-tree) segmentation via TreeIso.
+  const [showTreeSegmentPanel, setShowTreeSegmentPanel] = useState(false);
+  const [treeSegmentInProgress, setTreeSegmentInProgress] = useState(false);
+  const [treeSegmentError, setTreeSegmentError] = useState<string | null>(null);
+  const [treeRegStrength1, setTreeRegStrength1] = useState(1.0);
+  const [treeRegStrength2, setTreeRegStrength2] = useState(15.0);
+  const [treeMaxGap, setTreeMaxGap] = useState(2.0);
+  const [treeSplitClouds, setTreeSplitClouds] = useState(false);
+  // Human-in-the-loop trunk seeding: when seeding, clicks drop a seed marker.
+  const [treeSeedMode, setTreeSeedMode] = useState(false);
+  const [treeSeedPoints, setTreeSeedPoints] = useState<Array<[number, number, number]>>([]);
 
   // Skeleton state
   const [skeletons, setSkeletons] = useState<SkeletonEntry[]>([]);
@@ -690,6 +701,7 @@ export default function PointCloudViewer({
     }
     if (except !== 'triangulation') setShowTriangulationPanel(false);
     if (except !== 'ground-segment') setShowGroundSegmentPanel(false);
+    if (except !== 'tree-segment') { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }
     if (except !== 'skeleton') setShowSkeletonPanel(false);
     if (except !== 'export') setShowExportPanel(false);
     if (except !== 'morph') setShowMorphPopup(false);
@@ -2295,6 +2307,7 @@ export default function PointCloudViewer({
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPanel(!showTriangulationPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
+      { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-export', name: 'Export Point Cloud', keywords: ['save', 'las', 'laz', 'xyz'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => { if (selectedIds.size >= 2 && onStitchClouds) onStitchClouds(Array.from(selectedIds)); }, category: 'Point Cloud', requires: 'multiple-clouds' },
@@ -2321,7 +2334,7 @@ export default function PointCloudViewer({
     ];
 
     return cmds;
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showSkeletonPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, onSelectAll, onDeselectAll, onStitchClouds, selectedIds, handleUndo, handleRedo]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, onSelectAll, onDeselectAll, onStitchClouds, selectedIds, handleUndo, handleRedo]);
 
   // Filter and sort commands based on search
   const filteredCommands = useMemo(() => {
@@ -4016,6 +4029,154 @@ export default function PointCloudViewer({
       setGroundSegmentInProgress(false);
     }
   }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSplitClouds]);
+
+  // Segment individual trees (TreeIso cut-pursuit). Writes a `tree_instance`
+  // scalar attribute (0=unassigned, 1..N=trees) and colors by it. Mirrors
+  // handleGroundSegment: octree clouds re-convert through the backend apply
+  // endpoint; flat clouds get labels written into scalarFields. Optional trunk
+  // seeds (treeSeedPoints) drive human-in-the-loop seeding, and an optional
+  // split extracts each tree into its own child cloud.
+  const handleSegmentTrees = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    if (!cloud) return;
+
+    setTreeSegmentInProgress(true);
+    setTreeSegmentError(null);
+
+    const tiParams = {
+      reg_strength1: treeRegStrength1,
+      reg_strength2: treeRegStrength2,
+      max_gap: treeMaxGap,
+    };
+    const seeds = treeSeedPoints.length > 0 ? treeSeedPoints.map(p => [p[0], p[1], p[2]]) : undefined;
+
+    try {
+      const ps = buildPointSource(cloud);
+
+      // --- Octree-backed cloud: re-convert with tree_instance baked in. ---
+      if (ps.kind === 'source') {
+        const octreeInfo = cloud.data.octree;
+        if (!octreeInfo?.sourceXyzPath) {
+          throw new Error('Octree cloud is missing its source file path.');
+        }
+        const srcPath = octreeInfo.sourceXyzPath;
+        const af = octreeInfo.asciiFormat ?? null;
+        const baseName = cloud.data.fileName ?? id;
+
+        const meta = await segmentTreesApply({
+          source_path: srcPath,
+          ascii_format: af,
+          seed_points: seeds,
+          ...tiParams,
+        });
+        const newData = buildPointCloudFromOctree(meta, srcPath, baseName, af);
+        onUpdateCloud(id, newData);
+        setColorMode('scalar');
+        setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
+        setShowTreeSegmentPanel(false);
+        setTreeSeedMode(false);
+        showToast({
+          type: 'success',
+          title: 'Tree Segmentation Complete',
+          message: `Segmented ${meta.point_count.toLocaleString()} points into individual trees.`,
+        });
+        return;
+      }
+
+      // --- Flat cloud: segment in memory, write scalarFields. ---
+      const displayData = ps.data;
+      const count = displayData.pointCount;
+      const points: number[][] = new Array(count);
+      for (let i = 0; i < count; i++) {
+        points[i] = [
+          displayData.positions[i * 3],
+          displayData.positions[i * 3 + 1],
+          displayData.positions[i * 3 + 2],
+        ];
+      }
+
+      const response = await segmentTrees({ points, seed_points: seeds, ...tiParams });
+      if (!response.success) {
+        throw new Error(response.error || 'Tree segmentation failed');
+      }
+
+      const labels = Float32Array.from(response.labels);
+      const newScalarFields = {
+        ...(displayData.scalarFields ?? {}),
+        [TREE_INSTANCE_ATTRIBUTE]: { values: labels, min: 0, max: response.num_trees },
+      };
+      onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
+      setColorMode('scalar');
+      setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
+      setShowTreeSegmentPanel(false);
+      setTreeSeedMode(false);
+
+      // Optional split: one child cloud per tree id (skip 0 = unassigned).
+      if (treeSplitClouds && onAddCloud) {
+        const byTree = new Map<number, number[]>();
+        for (let i = 0; i < count; i++) {
+          const t = Math.round(response.labels[i]);
+          if (t <= 0) continue;
+          (byTree.get(t) ?? byTree.set(t, []).get(t)!).push(i);
+        }
+        for (const [treeId, idxs] of Array.from(byTree.entries()).sort((a, b) => a[0] - b[0])) {
+          const pos = new Float32Array(idxs.length * 3);
+          let col: Float32Array | undefined;
+          if (displayData.colors && displayData.colors.length >= count * 3) {
+            col = new Float32Array(idxs.length * 3);
+          }
+          idxs.forEach((srcIdx, k) => {
+            pos[k * 3] = displayData.positions[srcIdx * 3];
+            pos[k * 3 + 1] = displayData.positions[srcIdx * 3 + 1];
+            pos[k * 3 + 2] = displayData.positions[srcIdx * 3 + 2];
+            if (col && displayData.colors) {
+              col[k * 3] = displayData.colors[srcIdx * 3];
+              col[k * 3 + 1] = displayData.colors[srcIdx * 3 + 1];
+              col[k * 3 + 2] = displayData.colors[srcIdx * 3 + 2];
+            }
+          });
+          const baseName = displayData.fileName ?? 'cloud';
+          const bmin = new THREE.Vector3(Infinity, Infinity, Infinity);
+          const bmax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+          for (let k = 0; k < idxs.length; k++) {
+            bmin.x = Math.min(bmin.x, pos[k * 3]); bmax.x = Math.max(bmax.x, pos[k * 3]);
+            bmin.y = Math.min(bmin.y, pos[k * 3 + 1]); bmax.y = Math.max(bmax.y, pos[k * 3 + 1]);
+            bmin.z = Math.min(bmin.z, pos[k * 3 + 2]); bmax.z = Math.max(bmax.z, pos[k * 3 + 2]);
+          }
+          const { center, size } = computeBoundsFromPositions(pos, idxs.length);
+          onAddCloud({
+            id: crypto.randomUUID(),
+            data: {
+              positions: pos,
+              colors: col,
+              pointCount: idxs.length,
+              bounds: { min: bmin, max: bmax, center, size },
+              fileName: `${baseName} (tree ${treeId})`,
+            },
+            visible: true,
+            color: '#4caf50',
+          });
+        }
+      }
+
+      showToast({
+        type: response.ground_warning ? 'error' : 'success',
+        title: 'Tree Segmentation Complete',
+        message: response.ground_warning
+          ? `Found ${response.num_trees} trees, but ground looks present — run Ground Segmentation first for best results.`
+          : `Segmented ${response.num_trees} trees.`,
+      });
+    } catch (error) {
+      console.error('Tree segmentation error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Tree segmentation failed';
+      setTreeSegmentError(errorMessage);
+      showToast({ type: 'error', title: 'Tree Segmentation Failed', message: errorMessage });
+    } finally {
+      setTreeSegmentInProgress(false);
+    }
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, treeRegStrength1, treeRegStrength2, treeMaxGap, treeSplitClouds, treeSeedPoints]);
 
   // Compute Alignment distance statistics
   const handleAlignmentCompute = useCallback(async () => {
@@ -8187,6 +8348,24 @@ export default function PointCloudViewer({
                   >
                     <Layers className={`w-4 h-4 ${showGroundSegmentPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
                   </button>
+                  {/* 8c. Segment Trees (single cloud only) */}
+                  <button
+                    data-testid="tool-tree-segment"
+                    onClick={() => {
+                      if (showTreeSegmentPanel) {
+                        setShowTreeSegmentPanel(false);
+                        setTreeSeedMode(false);
+                      } else {
+                        closeAllToolPanels('tree-segment');
+                        setShowTreeSegmentPanel(true);
+                      }
+                    }}
+                    className={`p-2 rounded transition-colors ${showTreeSegmentPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
+                    title="Segment individual trees"
+                    disabled={selectedIds.size !== 1}
+                  >
+                    <Sprout className={`w-4 h-4 ${showTreeSegmentPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
+                  </button>
                   {/* 9. Export */}
                   <button
                     data-testid="tool-export-cloud"
@@ -9583,6 +9762,137 @@ export default function PointCloudViewer({
         </div>
       )}
 
+      {/* Tree Segmentation Panel (TreeIso) */}
+      {showTreeSegmentPanel && selectedIds.size === 1 && (
+        <div data-testid="tree-segment-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
+              <Sprout className="w-3 h-3" />
+              Tree Segmentation
+            </div>
+            <button
+              onClick={() => { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }}
+              className="p-1 hover:bg-neutral-700 rounded"
+            >
+              <X className="w-3 h-3 text-neutral-400" />
+            </button>
+          </div>
+
+          <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
+            TreeIso isolates individual trees by cut-pursuit graph segmentation.
+            Works best on ground-removed clouds — run Ground Segmentation first.
+          </div>
+
+          {/* Regularization strength 1 (3D) */}
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 block mb-1">3D reg. strength (λ₁)</label>
+            <DebouncedNumberInput
+              data-testid="tree-reg-strength1"
+              value={treeRegStrength1}
+              onCommit={(n) => setTreeRegStrength1(n)}
+              min={0.1} max={10} step={0.1}
+              disabled={treeSegmentInProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
+
+          {/* Regularization strength 2 (2D) */}
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 block mb-1">2D reg. strength (λ₂)</label>
+            <DebouncedNumberInput
+              data-testid="tree-reg-strength2"
+              value={treeRegStrength2}
+              onCommit={(n) => setTreeRegStrength2(n)}
+              min={1} max={100} step={1}
+              disabled={treeSegmentInProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
+
+          {/* Max gap */}
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 block mb-1">Max intra-tree gap (m)</label>
+            <DebouncedNumberInput
+              data-testid="tree-max-gap"
+              value={treeMaxGap}
+              onCommit={(n) => setTreeMaxGap(n)}
+              min={0.1} max={10} step={0.1}
+              disabled={treeSegmentInProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
+
+          {/* Trunk seeding (human-in-the-loop) */}
+          <div className="mb-3 p-2 bg-neutral-900/50 rounded">
+            <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-2">
+              <input
+                data-testid="tree-seed-mode"
+                type="checkbox"
+                checked={treeSeedMode}
+                onChange={(e) => setTreeSeedMode(e.target.checked)}
+                className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
+                disabled={treeSegmentInProgress}
+              />
+              Seed trunks (click to add)
+            </label>
+            <div className="flex items-center justify-between text-[10px] text-neutral-500">
+              <span data-testid="tree-seed-count">{treeSeedPoints.length} seed{treeSeedPoints.length === 1 ? '' : 's'}</span>
+              {treeSeedPoints.length > 0 && (
+                <button
+                  className="px-2 py-0.5 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-300"
+                  onClick={() => setTreeSeedPoints([])}
+                  disabled={treeSegmentInProgress}
+                >
+                  Clear seeds
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Split checkbox */}
+          <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-3">
+            <input
+              data-testid="tree-split-clouds"
+              type="checkbox"
+              checked={treeSplitClouds}
+              onChange={(e) => setTreeSplitClouds(e.target.checked)}
+              className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
+              disabled={treeSegmentInProgress}
+            />
+            Split into one cloud per tree
+          </label>
+
+          {treeSegmentError && (
+            <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
+              {treeSegmentError}
+            </div>
+          )}
+
+          <button
+            data-testid="tree-segment-run-button"
+            onClick={handleSegmentTrees}
+            disabled={treeSegmentInProgress}
+            className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
+              treeSegmentInProgress
+                ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
+                : 'bg-green-600 hover:bg-green-500 text-white'
+            }`}
+          >
+            {treeSegmentInProgress ? (
+              <>
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Segmenting...
+              </>
+            ) : (
+              <>
+                <Sprout className="w-3 h-3" />
+                Segment Trees
+              </>
+            )}
+          </button>
+        </div>
+      )}
+
       {/* Skeleton Extraction Panel */}
       {showSkeletonPanel && selectedIds.size === 1 && (
         <div data-testid="skeleton-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto">
@@ -10774,14 +11084,14 @@ export default function PointCloudViewer({
           actually carries the active field — so the overlay disappears when the
           segmented scan is deleted. */}
       {isScalarColorMode && colorMode === 'scalar' && selectedScalarField &&
-       dataRange && categoricalSchemeFor(selectedScalarField) ? (
+       dataRange && categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max]) ? (
         <div
           className="absolute bottom-4 right-56 z-20"
           data-testid="class-legend"
           data-legend-attribute={selectedScalarField}
         >
           <ClassLegend
-            scheme={categoricalSchemeFor(selectedScalarField)!}
+            scheme={categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max])!}
             label={dataRange.label}
           />
         </div>
