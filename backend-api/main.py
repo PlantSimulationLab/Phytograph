@@ -86,7 +86,7 @@ def unicode_to_ascii(s: str) -> str:
     return result
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.6"
+BACKEND_VERSION = "0.3.7"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -3758,6 +3758,13 @@ class PlantSessionAdvanceResponse(BaseModel):
     vertices: List[List[float]]
     indices: List[List[int]]
     colors: Optional[List[List[float]]] = None
+    # Texture data (Helios real UVs, V-flipped) — lets the textured renderer
+    # show leaf/bark textures for session-generated plants too.
+    normals: Optional[List[List[float]]] = None
+    uv_coordinates: Optional[List[List[float]]] = None
+    materials: Optional[List[PlantMaterial]] = None
+    material_groups: Optional[List[PlantMaterialGroup]] = None
+    textures: Optional[Dict[str, str]] = None
     vertex_count: int
     triangle_count: int
     error: Optional[str] = None
@@ -3794,9 +3801,16 @@ async def get_available_plant_models():
 def _extract_session_geometry(session: PlantSession) -> tuple:
     """
     Extract geometry from an active plant session.
-    Returns (vertices, indices, colors, vertex_count, triangle_count)
+
+    Returns (vertices, indices, colors, vertex_count, triangle_count, textures)
+    where `textures` is a dict with the optional texture payload:
+      {"normals", "uvs", "materials", "material_groups", "textures"}
+    UVs are Helios's real per-vertex coordinates, V-flipped for three.js — the
+    same convention as /api/plant/generate, so the textured renderer handles
+    plants from either path identically.
     """
     import os
+    import base64
 
     context = session.context
     plantarch = session.plantarch
@@ -3815,8 +3829,15 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
 
     vertices = []
     colors = []
+    normals = []
+    uvs = []
     faces = []
     vertex_index = 0
+    triangle_index = 0
+
+    materials_dict = {}        # mat_label -> PlantMaterial
+    material_groups_dict = {}  # mat_label -> [triangle index, ...]
+    texture_files = {}         # texture basename -> source path
 
     for obj_id in object_ids:
         try:
@@ -3840,6 +3861,17 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
         texture_name_lower = texture_path.lower() if texture_path else ""
         is_leaf_texture = 'leaf' in texture_name_lower or 'Leaf' in (texture_path or "")
 
+        if is_textured:
+            texture_name = os.path.basename(texture_path)
+            if mat_label not in materials_dict:
+                materials_dict[mat_label] = PlantMaterial(
+                    name=mat_label,
+                    texture_name=texture_name,
+                    has_alpha=True,
+                )
+                material_groups_dict[mat_label] = []
+                texture_files[texture_name] = texture_path
+
         for prim_info in prim_infos:
             try:
                 if prim_info.primitive_type.value != 1:
@@ -3852,7 +3884,7 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
                 prim_color = prim_info.color
                 color_rgb = [prim_color.r, prim_color.g, prim_color.b]
 
-                # Color assignment logic
+                # Color assignment logic (vertex-color fallback)
                 if is_textured and (color_rgb[0] == 0 and color_rgb[1] == 0 and color_rgb[2] == 0):
                     if is_leaf_texture:
                         color_rgb = [0.3, 0.55, 0.2]
@@ -3865,18 +3897,63 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
                     if brightness < 0.5:
                         color_rgb = [0.45, 0.3, 0.15]
 
+                prim_normal = prim_info.normal
+                normal_xyz = [prim_normal.x, prim_normal.y, prim_normal.z]
+
+                # Real Helios UVs (V-flipped). A textured primitive without UVs
+                # falls back to vertex color and is left out of the group.
+                prim_uvs = prim_info.texture_uv if is_textured else None
+                tri_is_textured = (
+                    is_textured and prim_uvs is not None and len(prim_uvs) == 3
+                )
+
                 face_indices = []
-                for v in tri_verts:
+                for vi, v in enumerate(tri_verts):
                     vertices.append([v.x, v.y, v.z])
                     colors.append(color_rgb)
+                    normals.append(normal_xyz)
+                    if tri_is_textured:
+                        uv = prim_uvs[vi]
+                        uvs.append([uv.x, 1.0 - uv.y])
+                    else:
+                        uvs.append([0.0, 0.0])
                     face_indices.append(vertex_index)
                     vertex_index += 1
 
                 faces.append(face_indices)
+
+                if tri_is_textured and mat_label in material_groups_dict:
+                    material_groups_dict[mat_label].append(triangle_index)
+
+                triangle_index += 1
             except:
                 continue
 
-    return vertices, faces, colors, len(vertices), len(faces)
+    # Load textures as base64.
+    textures_data = {}
+    for tex_name, tex_path in texture_files.items():
+        if os.path.exists(tex_path):
+            try:
+                with open(tex_path, 'rb') as f:
+                    textures_data[tex_name] = base64.b64encode(f.read()).decode('utf-8')
+            except Exception:
+                pass
+
+    materials_list = list(materials_dict.values()) if materials_dict else None
+    material_groups_list = [
+        PlantMaterialGroup(material_name=name, triangle_indices=tris)
+        for name, tris in material_groups_dict.items() if tris
+    ] if material_groups_dict else None
+
+    texture_payload = {
+        "normals": normals if normals else None,
+        "uvs": uvs if any(u != [0.0, 0.0] for u in uvs) else None,
+        "materials": materials_list,
+        "material_groups": material_groups_list,
+        "textures": textures_data if textures_data else None,
+    }
+
+    return vertices, faces, colors, len(vertices), len(faces), texture_payload
 
 
 @app.post("/api/plant/session/create", response_model=PlantSessionCreateResponse)
@@ -4009,8 +4086,8 @@ async def advance_plant_session(session_id: str, request: PlantSessionAdvanceReq
         height = session.plantarch.getPlantHeight(session.plant_id)
         session.current_age = current_age
 
-        # Extract geometry
-        vertices, faces, colors, vertex_count, triangle_count = _extract_session_geometry(session)
+        # Extract geometry (+ real Helios UVs / materials / textures)
+        vertices, faces, colors, vertex_count, triangle_count, tex = _extract_session_geometry(session)
 
         print(f"[Plant Session] Advanced {session_id}: {previous_age:.1f} -> {current_age:.1f} days, {vertex_count} vertices")
 
@@ -4023,6 +4100,11 @@ async def advance_plant_session(session_id: str, request: PlantSessionAdvanceReq
             vertices=vertices,
             indices=faces,
             colors=colors,
+            normals=tex["normals"],
+            uv_coordinates=tex["uvs"],
+            materials=tex["materials"],
+            material_groups=tex["material_groups"],
+            textures=tex["textures"],
             vertex_count=vertex_count,
             triangle_count=triangle_count
         )
@@ -4326,6 +4408,12 @@ class PlantMorphResponse(BaseModel):
     vertices: List[List[float]] = []
     indices: List[List[int]] = []
     colors: Optional[List[List[float]]] = None
+    # Texture data so a morphed plant stays textured.
+    normals: Optional[List[List[float]]] = None
+    uv_coordinates: Optional[List[List[float]]] = None
+    materials: Optional[List[PlantMaterial]] = None
+    material_groups: Optional[List[PlantMaterialGroup]] = None
+    textures: Optional[Dict[str, str]] = None
     vertex_count: int = 0
     triangle_count: int = 0
     current_age: float = 0
@@ -4429,8 +4517,8 @@ async def morph_plant(request: PlantMorphRequest):
             created_at=time.time()
         )
 
-        # Extract geometry
-        vertices, faces, colors, vertex_count, triangle_count = _extract_session_geometry(session)
+        # Extract geometry (+ real Helios UVs / materials / textures)
+        vertices, faces, colors, vertex_count, triangle_count, tex = _extract_session_geometry(session)
 
         # Write new XML from rebuilt plant (non-fatal if it fails)
         new_helios_xml = request.helios_xml  # fallback to input XML
@@ -4456,6 +4544,11 @@ async def morph_plant(request: PlantMorphRequest):
             vertices=vertices,
             indices=faces,
             colors=colors,
+            normals=tex["normals"],
+            uv_coordinates=tex["uvs"],
+            materials=tex["materials"],
+            material_groups=tex["material_groups"],
+            textures=tex["textures"],
             vertex_count=vertex_count,
             triangle_count=triangle_count,
             current_age=current_age,
@@ -4477,62 +4570,14 @@ async def morph_plant(request: PlantMorphRequest):
         )
 
 
-def compute_leaf_uvs(vertices: list) -> list:
-    """
-    Compute UV coordinates for a planar leaf mesh using PCA.
-
-    Each leaf object is nearly-planar, so we project vertices onto the leaf's
-    principal plane to get 2D UV coordinates.
-
-    Args:
-        vertices: List of [x, y, z] vertex positions
-
-    Returns:
-        List of [u, v] coordinates normalized to 0-1 range
-    """
-    import numpy as np
-
-    verts = np.array(vertices)
-    if len(verts) < 3:
-        return [[0.5, 0.5]] * len(verts)
-
-    center = verts.mean(axis=0)
-    centered = verts - center
-
-    # PCA to find leaf plane
-    cov = np.cov(centered.T)
-    eigenvalues, eigenvectors = np.linalg.eigh(cov)
-
-    # Project onto 2D plane (largest variance axes)
-    # eigenvalues are sorted ascending, so index 2 is largest, 1 is second
-    u_axis = eigenvectors[:, 2]
-    v_axis = eigenvectors[:, 1]
-
-    uvs = []
-    for vert in centered:
-        u = np.dot(vert, u_axis)
-        v = np.dot(vert, v_axis)
-        uvs.append([u, v])
-
-    # Normalize to 0-1 range
-    uvs = np.array(uvs)
-    uv_min = uvs.min(axis=0)
-    uv_max = uvs.max(axis=0)
-    uv_range = uv_max - uv_min
-    # Avoid division by zero
-    uv_range = np.where(uv_range < 1e-10, 1.0, uv_range)
-    normalized_uvs = (uvs - uv_min) / uv_range
-
-    return normalized_uvs.tolist()
-
-
 @app.post("/api/plant/generate", response_model=PlantGenerationResponse)
 async def generate_plant_model(request: PlantGenerationRequest):
     """
     Generate a procedural plant model using pyhelios PlantArchitecture.
 
     Uses direct primitive extraction from pyhelios Context API to get valid geometry.
-    For textured leaves, computes UV coordinates via PCA projection.
+    Textured organs carry Helios's own per-vertex UV coordinates (V-flipped for
+    three.js), so leaf textures sample the correct cell of the leaf atlas.
     """
     import tempfile
     import os
@@ -4660,10 +4705,12 @@ async def generate_plant_model(request: PlantGenerationRequest):
                     if not object_triangles:
                         continue
 
-                    # Compute UVs for textured objects
-                    object_uvs = None
-                    if is_textured and len(object_vertices) >= 3:
-                        object_uvs = compute_leaf_uvs(object_vertices)
+                    # Track the material for textured objects. UVs come straight
+                    # from Helios per-primitive (prim_info.texture_uv) — NOT a
+                    # PCA projection — so each leaf samples the correct cell of
+                    # the leaf texture atlas. They are V-flipped per triangle
+                    # below for three.js (which expects V increasing upward).
+                    if is_textured:
                         texture_name = os.path.basename(texture_path)
 
                         # Track material
@@ -4677,14 +4724,15 @@ async def generate_plant_model(request: PlantGenerationRequest):
                             texture_files[texture_name] = texture_path
 
                     # Add triangles to main mesh
-                    uv_index = 0
                     for prim_info, tri_verts in object_triangles:
                         # Get color (RGBcolor has r, g, b attributes)
                         prim_color = prim_info.color
                         color_rgb = [prim_color.r, prim_color.g, prim_color.b]
 
-                        # Color assignment logic for vertex color rendering
-                        # (textures are currently disabled, so we rely on vertex colors)
+                        # Vertex-color fallback. Textured organs render their
+                        # real texture RGB, so these fixups only matter for the
+                        # untextured fallback path (e.g. a textured leaf whose
+                        # primitive lacked UVs, or non-textured stems/flowers).
 
                         if is_textured and (color_rgb[0] == 0 and color_rgb[1] == 0 and color_rgb[2] == 0):
                             # Textured objects often have black [0,0,0] colors from Helios
@@ -4711,27 +4759,41 @@ async def generate_plant_model(request: PlantGenerationRequest):
                         prim_normal = prim_info.normal
                         normal_xyz = [prim_normal.x, prim_normal.y, prim_normal.z]
 
+                        # Real Helios UVs for this triangle, aligned to its
+                        # vertices. A primitive may carry a texture file yet have
+                        # no UVs (e.g. a flat-colored organ that shares a
+                        # material); in that case fall back to degenerate UVs and
+                        # don't add it to the textured material group, so it
+                        # renders via vertex color instead of smearing the atlas.
+                        prim_uvs = prim_info.texture_uv if is_textured else None
+                        tri_is_textured = (
+                            is_textured
+                            and prim_uvs is not None
+                            and len(prim_uvs) == 3
+                        )
+
                         # Add vertices, colors, normals, and UVs for this triangle
                         tri_indices = []
-                        for v in tri_verts:
+                        for vi, v in enumerate(tri_verts):
                             vertices.append([v.x, v.y, v.z])
                             colors.append(color_rgb)
                             normals.append(normal_xyz)
 
-                            # Add UV if textured
-                            if object_uvs and uv_index < len(object_uvs):
-                                uvs.append(object_uvs[uv_index])
+                            if tri_is_textured:
+                                uv = prim_uvs[vi]
+                                # V-flip for three.js (flipY=false on the frontend)
+                                uvs.append([uv.x, 1.0 - uv.y])
                             else:
-                                uvs.append([0.0, 0.0])  # Default UV for non-textured
-                            uv_index += 1
+                                uvs.append([0.0, 0.0])
 
                             tri_indices.append(vertex_index)
                             vertex_index += 1
 
                         faces.append(tri_indices)
 
-                        # Track which material this triangle uses
-                        if is_textured and mat_label in material_groups_dict:
+                        # Track which material this triangle uses (only when it
+                        # actually has texture coordinates to sample with)
+                        if tri_is_textured and mat_label in material_groups_dict:
                             material_groups_dict[mat_label].append(triangle_index)
 
                         triangle_index += 1
@@ -4795,6 +4857,249 @@ async def generate_plant_model(request: PlantGenerationRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Plant generation failed: {str(e)}")
+
+
+# ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
+# Parses an OBJ (with its sibling MTL and texture images) from a disk path and
+# returns geometry + real per-vertex UVs + base64 textures, in the same shape
+# the renderer already consumes for plant models (so the same textured renderer
+# handles both). Triangles are emitted non-indexed (3 vertices each), matching
+# the plant path's expanded-geometry convention.
+
+class MeshImportRequest(BaseModel):
+    """Request to import a textured mesh from a file on disk."""
+    path: str  # Absolute path to the .obj file
+
+
+class MeshImportResponse(BaseModel):
+    """Imported mesh geometry + textures (mirrors PlantGenerationResponse)."""
+    success: bool
+    vertices: List[List[float]] = []          # [[x, y, z], ...]
+    indices: List[List[int]] = []             # [[v0, v1, v2], ...]
+    normals: Optional[List[List[float]]] = None
+    colors: Optional[List[List[float]]] = None        # per-vertex (from Kd)
+    uv_coordinates: Optional[List[List[float]]] = None  # [[u, v], ...] V-flipped
+    materials: Optional[List[PlantMaterial]] = None
+    material_groups: Optional[List[PlantMaterialGroup]] = None
+    textures: Optional[Dict[str, str]] = None         # {basename: base64 png/jpg}
+    vertex_count: int = 0
+    triangle_count: int = 0
+    filename: Optional[str] = None
+    has_textures: bool = False
+    error: Optional[str] = None
+
+
+def _parse_mtl(mtl_path: Path) -> Dict[str, dict]:
+    """Parse a .mtl file into {material_name: {"Kd": [r,g,b], "map_Kd": str}}.
+
+    `map_Kd` keeps the raw token as written in the MTL (may be relative); the
+    caller resolves it against the MTL's directory."""
+    materials: Dict[str, dict] = {}
+    current = None
+    try:
+        with open(mtl_path, 'r', errors='ignore') as f:
+            for line in f:
+                parts = line.split()
+                if not parts:
+                    continue
+                key = parts[0]
+                if key == 'newmtl' and len(parts) >= 2:
+                    current = parts[1]
+                    materials[current] = {}
+                elif current is None:
+                    continue
+                elif key == 'Kd' and len(parts) >= 4:
+                    materials[current]['Kd'] = [float(parts[1]), float(parts[2]), float(parts[3])]
+                elif key == 'map_Kd' and len(parts) >= 2:
+                    # The texture path is the last token (skip any options like -s).
+                    materials[current]['map_Kd'] = parts[-1]
+    except FileNotFoundError:
+        pass
+    return materials
+
+
+@app.post("/api/mesh/import", response_model=MeshImportResponse)
+async def import_textured_mesh(request: MeshImportRequest):
+    """Parse an OBJ (+ MTL + texture images) from disk into textured geometry."""
+    import base64
+
+    obj_path = Path(request.path)
+    if not obj_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Mesh file not found: {request.path}")
+    if obj_path.suffix.lower() != '.obj':
+        raise HTTPException(status_code=400, detail="Only .obj files are supported for textured import")
+
+    base_dir = obj_path.parent
+
+    # Pass 1: collect raw vertex / uv / normal tables and material library refs.
+    positions: List[List[float]] = []   # v
+    tex_coords: List[List[float]] = []  # vt
+    vert_normals: List[List[float]] = []  # vn
+    mtl_libs: List[str] = []
+
+    # Expanded (non-indexed) output, grouped per active material.
+    out_vertices: List[List[float]] = []
+    out_normals: List[List[float]] = []
+    out_uvs: List[List[float]] = []
+    out_faces: List[List[int]] = []
+    tri_material: List[Optional[str]] = []  # material name active for each triangle
+
+    current_material: Optional[str] = None
+    vertex_index = 0
+
+    def _idx(token: str, table_len: int) -> Optional[int]:
+        """Resolve an OBJ index token (1-based, negatives relative to end)."""
+        if token == '' or token is None:
+            return None
+        i = int(token)
+        if i < 0:
+            return table_len + i
+        return i - 1
+
+    try:
+        with open(obj_path, 'r', errors='ignore') as f:
+            for line in f:
+                parts = line.split()
+                if not parts:
+                    continue
+                cmd = parts[0]
+                if cmd == 'v' and len(parts) >= 4:
+                    positions.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                elif cmd == 'vt' and len(parts) >= 3:
+                    tex_coords.append([float(parts[1]), float(parts[2])])
+                elif cmd == 'vn' and len(parts) >= 4:
+                    vert_normals.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                elif cmd == 'mtllib' and len(parts) >= 2:
+                    mtl_libs.append(' '.join(parts[1:]))
+                elif cmd == 'usemtl' and len(parts) >= 2:
+                    current_material = parts[1]
+                elif cmd == 'f' and len(parts) >= 4:
+                    # Resolve each corner to (pos, vt, vn) indices.
+                    corners = []
+                    for tok in parts[1:]:
+                        comp = tok.split('/')
+                        pi = _idx(comp[0], len(positions)) if len(comp) >= 1 else None
+                        ti = _idx(comp[1], len(tex_coords)) if len(comp) >= 2 and comp[1] != '' else None
+                        ni = _idx(comp[2], len(vert_normals)) if len(comp) >= 3 and comp[2] != '' else None
+                        corners.append((pi, ti, ni))
+                    # Fan-triangulate polygons.
+                    for k in range(1, len(corners) - 1):
+                        tri = [corners[0], corners[k], corners[k + 1]]
+                        face_idx = []
+                        for (pi, ti, ni) in tri:
+                            if pi is None or pi < 0 or pi >= len(positions):
+                                # Malformed corner; skip the whole triangle.
+                                face_idx = []
+                                break
+                            out_vertices.append(positions[pi])
+                            if ni is not None and 0 <= ni < len(vert_normals):
+                                out_normals.append(vert_normals[ni])
+                            else:
+                                out_normals.append([0.0, 0.0, 0.0])  # filled below
+                            if ti is not None and 0 <= ti < len(tex_coords):
+                                u, v = tex_coords[ti]
+                                out_uvs.append([u, 1.0 - v])  # V-flip for three.js
+                            else:
+                                out_uvs.append([0.0, 0.0])
+                            face_idx.append(vertex_index)
+                            vertex_index += 1
+                        if not face_idx:
+                            continue
+                        out_faces.append(face_idx)
+                        tri_material.append(current_material)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse OBJ: {e}")
+
+    if not out_faces:
+        raise HTTPException(status_code=400, detail="No triangles found in OBJ file")
+
+    # Compute flat normals for any triangle that had no vn.
+    has_any_normals = any(n != [0.0, 0.0, 0.0] for n in out_normals)
+    for ti, face in enumerate(out_faces):
+        if all(out_normals[i] == [0.0, 0.0, 0.0] for i in face):
+            a = np.array(out_vertices[face[0]])
+            b = np.array(out_vertices[face[1]])
+            c = np.array(out_vertices[face[2]])
+            n = np.cross(b - a, c - a)
+            ln = np.linalg.norm(n)
+            n = (n / ln).tolist() if ln > 1e-12 else [0.0, 0.0, 1.0]
+            for i in face:
+                out_normals[i] = n
+            has_any_normals = True
+
+    # Parse all referenced MTL files; first definition of a name wins.
+    mtl_materials: Dict[str, dict] = {}
+    for lib in mtl_libs:
+        for name, props in _parse_mtl(base_dir / lib).items():
+            mtl_materials.setdefault(name, props)
+
+    # Load textures (resolved relative to the OBJ dir) as base64, keyed by basename.
+    textures_data: Dict[str, str] = {}
+    material_texture_name: Dict[str, str] = {}  # material -> texture basename
+    for name, props in mtl_materials.items():
+        tex_token = props.get('map_Kd')
+        if not tex_token:
+            continue
+        tex_path = (base_dir / tex_token)
+        if not tex_path.is_file():
+            # Try just the basename in the OBJ directory.
+            tex_path = base_dir / os.path.basename(tex_token)
+        if tex_path.is_file():
+            tex_name = tex_path.name
+            material_texture_name[name] = tex_name
+            if tex_name not in textures_data:
+                try:
+                    with open(tex_path, 'rb') as tf:
+                        textures_data[tex_name] = base64.b64encode(tf.read()).decode('utf-8')
+                except Exception:
+                    pass
+
+    # Build per-vertex colors from each triangle's material Kd (fallback grey).
+    out_colors: List[List[float]] = [[0.8, 0.8, 0.8]] * len(out_vertices)
+    for ti, face in enumerate(out_faces):
+        mat = tri_material[ti]
+        kd = mtl_materials.get(mat, {}).get('Kd') if mat else None
+        if kd:
+            for i in face:
+                out_colors[i] = kd
+
+    # Material groups: only for materials that actually have a loaded texture.
+    materials_list: List[PlantMaterial] = []
+    groups: Dict[str, List[int]] = {}
+    for ti, mat in enumerate(tri_material):
+        if mat and mat in material_texture_name and material_texture_name[mat] in textures_data:
+            groups.setdefault(mat, []).append(ti)
+    for mat, tri_indices in groups.items():
+        tex_name = material_texture_name[mat]
+        kd = mtl_materials.get(mat, {}).get('Kd')
+        materials_list.append(PlantMaterial(
+            name=mat,
+            color=kd,
+            texture_name=tex_name,
+            has_alpha=tex_name.lower().endswith('.png'),  # assume PNG may carry alpha
+        ))
+    material_groups_list = [
+        PlantMaterialGroup(material_name=mat, triangle_indices=tris)
+        for mat, tris in groups.items()
+    ]
+
+    has_textures = bool(textures_data) and bool(material_groups_list)
+
+    return MeshImportResponse(
+        success=True,
+        vertices=out_vertices,
+        indices=out_faces,
+        normals=out_normals if has_any_normals else None,
+        colors=out_colors,
+        uv_coordinates=out_uvs if has_textures else None,
+        materials=materials_list or None,
+        material_groups=material_groups_list or None,
+        textures=textures_data or None,
+        vertex_count=len(out_vertices),
+        triangle_count=len(out_faces),
+        filename=obj_path.name,
+        has_textures=has_textures,
+    )
 
 
 # ==================== POINT CLOUD LAS/LAZ IMPORT/EXPORT ====================

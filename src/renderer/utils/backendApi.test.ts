@@ -17,6 +17,7 @@ import {
   icpRegisterMeshToMesh,
   importPointCloudLasLaz,
   importPointCloudByPath,
+  importTexturedMesh,
   morphPlant,
   parsePlantMorphParameters,
   sampleMeshSurface,
@@ -288,6 +289,30 @@ describe('generatePlantModel', () => {
   it('surfaces detail on error', async () => {
     mockFetchError(400, { detail: 'unknown species' });
     await expect(generatePlantModel(req)).rejects.toThrow('unknown species');
+  });
+});
+
+describe('importTexturedMesh', () => {
+  it('POSTs the disk path to /api/mesh/import', async () => {
+    const expected = {
+      success: true,
+      vertices: [[0, 0, 0]],
+      indices: [[0, 1, 2]],
+      vertex_count: 6,
+      triangle_count: 2,
+      has_textures: true,
+    };
+    const spy = mockFetchOk(expected);
+    const res = await importTexturedMesh('/abs/path/model.obj');
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:8008/api/mesh/import');
+    expect(JSON.parse(init?.body as string)).toEqual({ path: '/abs/path/model.obj' });
+    expect(res.has_textures).toBe(true);
+  });
+
+  it('surfaces detail on error', async () => {
+    mockFetchError(404, { detail: 'Mesh file not found' });
+    await expect(importTexturedMesh('/missing.obj')).rejects.toThrow('Mesh file not found');
   });
 });
 

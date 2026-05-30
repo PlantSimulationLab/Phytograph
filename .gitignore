@@ -46,3 +46,4 @@ HANDOFF_*.md
 
 # Local Claude Code settings (per-machine)
 .claude/
+tests/e2e/visual/plant-render.png

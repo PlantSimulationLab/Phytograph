@@ -3,13 +3,6 @@ import * as THREE from 'three';
 import type { MeshData, PlantMaterialDef } from '../../../lib/pointCloudTypes';
 import { TriangleMesh } from './TriangleMesh';
 
-// Textured plant mesh component - renders plant with multiple materials and textures
-export interface TexturedPlantMeshProps {
-  data: MeshData;
-  plantMaterials: PlantMaterialDef[];
-  opacity?: number;
-}
-
 // Helper to load base64 image as Three.js texture
 function useBase64Texture(base64Data: string | undefined): THREE.Texture | null {
   const [texture, setTexture] = useState<THREE.Texture | null>(null);
@@ -32,8 +25,14 @@ function useBase64Texture(base64Data: string | undefined): THREE.Texture | null 
     img.onload = () => {
       if (cancelled) return;
       const tex = new THREE.Texture(img);
-      tex.needsUpdate = true;
+      // UVs are V-flipped on the backend (Helios is V-down, three.js is V-up),
+      // so disable three.js's own image flip to avoid double-flipping.
+      tex.flipY = false;
       tex.colorSpace = THREE.SRGBColorSpace;
+      tex.generateMipmaps = false;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.needsUpdate = true;
       if (currentRef.current) currentRef.current.dispose();
       currentRef.current = tex;
       setTexture(tex);
@@ -64,9 +63,10 @@ interface MaterialSubmeshProps {
   uvs?: Float32Array;
   materialDef: PlantMaterialDef;
   opacity: number;
+  wireframe?: boolean;
 }
 
-function MaterialSubmesh({ vertices, normals, uvs, materialDef, opacity }: MaterialSubmeshProps) {
+function MaterialSubmesh({ vertices, normals, uvs, materialDef, opacity, wireframe }: MaterialSubmeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const texture = useBase64Texture(materialDef.textureData);
 
@@ -86,29 +86,34 @@ function MaterialSubmesh({ vertices, normals, uvs, materialDef, opacity }: Mater
       geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
     }
 
-    console.log(`[MaterialSubmesh] ${materialDef.name} geo created: ${vertices.length / 3} verts, ${(uvs?.length ?? 0) / 2} uvs`);
     return geo;
   }, [vertices, normals, uvs, materialDef.name]);
 
   const material = useMemo(() => {
+    // Leaf textures are RGBA: the diffuse map's OWN alpha channel cuts out the
+    // leaf silhouette via alphaTest, which discards transparent pixels cleanly
+    // (no blending, so leaves don't vanish behind each other from transparency
+    // sorting). Do NOT use alphaMap — alphaMap reads the green channel, not the
+    // alpha channel, so it would cut leaves out by greenness. Render opaque so a
+    // textured plant isn't washed out by the mesh-opacity slider's 0.7 default;
+    // only blend when the user explicitly dials opacity below 1.
+    const isCutout = !!(texture && materialDef.hasAlpha);
+    const blended = opacity < 1 && !isCutout;
+
     const mat = new THREE.MeshStandardMaterial({
       side: THREE.DoubleSide,
-      transparent: true,
-      opacity,
-      // Use polygon offset to render textured mesh in front of base mesh (prevents z-fighting)
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
+      transparent: blended,
+      opacity: isCutout ? 1 : opacity,
+      wireframe: !!wireframe,
+      roughness: 0.85,
+      metalness: 0.0,
     });
 
-    // Apply texture or color
-    if (texture && materialDef.hasAlpha) {
+    if (texture) {
       mat.map = texture;
-      mat.alphaMap = texture;
-      mat.alphaTest = 0.5;  // Alpha cutoff for leaf shapes
-      mat.transparent = true;
-    } else if (texture) {
-      mat.map = texture;
+      if (isCutout) {
+        mat.alphaTest = 0.5;  // cut out the leaf shape using the map's alpha
+      }
     } else if (materialDef.color) {
       mat.color = new THREE.Color(materialDef.color[0], materialDef.color[1], materialDef.color[2]);
     } else {
@@ -116,15 +121,15 @@ function MaterialSubmesh({ vertices, normals, uvs, materialDef, opacity }: Mater
     }
 
     return mat;
-  }, [texture, materialDef, opacity]);
+  }, [texture, materialDef, opacity, wireframe]);
 
-  // Update material when texture loads
+  // Attach the texture once it finishes loading (the material is created before
+  // the async image resolves).
   useEffect(() => {
     if (meshRef.current && texture) {
       const mat = meshRef.current.material as THREE.MeshStandardMaterial;
       mat.map = texture;
       if (materialDef.hasAlpha) {
-        mat.alphaMap = texture;
         mat.alphaTest = 0.5;
       }
       mat.needsUpdate = true;
@@ -137,116 +142,112 @@ function MaterialSubmesh({ vertices, normals, uvs, materialDef, opacity }: Mater
   return <mesh ref={meshRef} geometry={geometry} material={material} />;
 }
 
-export function TexturedPlantMesh({ data, plantMaterials, opacity = 0.9 }: TexturedPlantMeshProps) {
-  // Build submeshes for each material group
-  const submeshes = useMemo(() => {
-    // If no UVs or no materials with textures, render as single colored mesh
-    if (!data.uvCoordinates || data.uvCoordinates.length === 0) {
-      console.log('[TexturedPlantMesh] No UV coordinates, falling back');
-      return null;
-    }
+export interface TexturedPlantMeshProps {
+  data: MeshData;
+  plantMaterials: PlantMaterialDef[];
+  opacity?: number;
+  wireframe?: boolean;
+}
 
-    console.log('[TexturedPlantMesh] Building submeshes', {
-      vertexCount: data.vertexCount,
-      triangleCount: data.triangleCount,
-      verticesLength: data.vertices.length,
-      uvsLength: data.uvCoordinates.length,
-      materialsCount: plantMaterials.length,
-    });
-
-    // Group triangles by material and extract submesh data
-    const results: {
+export function TexturedPlantMesh({ data, plantMaterials, opacity = 1, wireframe }: TexturedPlantMeshProps) {
+  // Partition triangles into one textured submesh per material group plus a
+  // single untextured remainder (stems, branches, flowers — vertex-colored).
+  // Plant geometry is non-indexed and triangle-expanded: triangle t occupies
+  // vertices [t*3, t*3+1, t*3+2] in `data.vertices`.
+  const { submeshes, untexturedMesh } = useMemo(() => {
+    const subs: {
       materialDef: PlantMaterialDef;
       vertices: Float32Array;
       normals?: Float32Array;
       uvs: Float32Array;
     }[] = [];
 
-    for (const mat of plantMaterials) {
-      if (mat.triangleIndices.length === 0) continue;
+    const totalTris = data.triangleCount;
+    const hasUVs = !!(data.uvCoordinates && data.uvCoordinates.length > 0);
+    const claimed = new Uint8Array(totalTris);
 
-      const numTris = mat.triangleIndices.length;
-      const numVerts = numTris * 3;
+    if (hasUVs) {
+      for (const mat of plantMaterials) {
+        if (!mat.textureData || mat.triangleIndices.length === 0) continue;
 
-      console.log(`[TexturedPlantMesh] Material ${mat.name}: ${numTris} triangles, indices range [${Math.min(...mat.triangleIndices)}-${Math.max(...mat.triangleIndices)}]`);
+        const numTris = mat.triangleIndices.length;
+        const numVerts = numTris * 3;
+        const verts = new Float32Array(numVerts * 3);
+        const uvs = new Float32Array(numVerts * 2);
+        const norms = data.normals ? new Float32Array(numVerts * 3) : undefined;
 
-      // Extract vertices for this material group using actual triangle indices
-      const verts = new Float32Array(numVerts * 3);
-      const uvs = new Float32Array(numVerts * 2);
-      const norms = data.normals ? new Float32Array(numVerts * 3) : undefined;
+        for (let t = 0; t < numTris; t++) {
+          const triIdx = mat.triangleIndices[t];
+          if (triIdx < totalTris) claimed[triIdx] = 1;
+          for (let v = 0; v < 3; v++) {
+            const src = triIdx * 3 + v;
+            const dst = t * 3 + v;
+            if (src * 3 + 2 >= data.vertices!.length) continue;
+            if (src * 2 + 1 >= data.uvCoordinates!.length) continue;
 
-      for (let t = 0; t < numTris; t++) {
-        const triIdx = mat.triangleIndices[t];
-        // Each triangle has 3 vertices in the expanded geometry
-        for (let v = 0; v < 3; v++) {
-          const srcVertIdx = triIdx * 3 + v;  // Source vertex index in expanded geometry
-          const dstVertIdx = t * 3 + v;        // Destination vertex index in submesh
+            verts[dst * 3] = data.vertices[src * 3];
+            verts[dst * 3 + 1] = data.vertices[src * 3 + 1];
+            verts[dst * 3 + 2] = data.vertices[src * 3 + 2];
 
-          // Bounds checking
-          if (srcVertIdx * 3 + 2 >= data.vertices.length) {
-            console.error(`[TexturedPlantMesh] Vertex out of bounds: srcVertIdx=${srcVertIdx}, max=${data.vertices.length / 3}`);
-            continue;
-          }
-          if (srcVertIdx * 2 + 1 >= data.uvCoordinates.length) {
-            console.error(`[TexturedPlantMesh] UV out of bounds: srcVertIdx=${srcVertIdx}, max=${data.uvCoordinates.length / 2}`);
-            continue;
-          }
+            uvs[dst * 2] = data.uvCoordinates![src * 2];
+            uvs[dst * 2 + 1] = data.uvCoordinates![src * 2 + 1];
 
-          // Copy vertex position
-          verts[dstVertIdx * 3] = data.vertices[srcVertIdx * 3];
-          verts[dstVertIdx * 3 + 1] = data.vertices[srcVertIdx * 3 + 1];
-          verts[dstVertIdx * 3 + 2] = data.vertices[srcVertIdx * 3 + 2];
-
-          // Copy UVs
-          uvs[dstVertIdx * 2] = data.uvCoordinates[srcVertIdx * 2];
-          uvs[dstVertIdx * 2 + 1] = data.uvCoordinates[srcVertIdx * 2 + 1];
-
-          // Copy normals if available
-          if (norms && data.normals) {
-            norms[dstVertIdx * 3] = data.normals[srcVertIdx * 3];
-            norms[dstVertIdx * 3 + 1] = data.normals[srcVertIdx * 3 + 1];
-            norms[dstVertIdx * 3 + 2] = data.normals[srcVertIdx * 3 + 2];
+            if (norms && data.normals) {
+              norms[dst * 3] = data.normals[src * 3];
+              norms[dst * 3 + 1] = data.normals[src * 3 + 1];
+              norms[dst * 3 + 2] = data.normals[src * 3 + 2];
+            }
           }
         }
-      }
 
-      // Log first triangle for debugging
-      if (numTris > 0) {
-        console.log(`[TexturedPlantMesh] ${mat.name} first tri verts:`, [
-          [verts[0], verts[1], verts[2]],
-          [verts[3], verts[4], verts[5]],
-          [verts[6], verts[7], verts[8]],
-        ]);
-        console.log(`[TexturedPlantMesh] ${mat.name} first tri UVs:`, [
-          [uvs[0], uvs[1]],
-          [uvs[2], uvs[3]],
-          [uvs[4], uvs[5]],
-        ]);
+        subs.push({ materialDef: mat, vertices: verts, normals: norms, uvs });
       }
-
-      results.push({
-        materialDef: mat,
-        vertices: verts,
-        normals: norms,
-        uvs,
-      });
     }
 
-    console.log(`[TexturedPlantMesh] Created ${results.length} submeshes`);
-    return results;
-  }, [data, plantMaterials]);
+    // Remaining (unclaimed) triangles → vertex-colored TriangleMesh.
+    let remainder: MeshData | null = null;
+    let unclaimedCount = 0;
+    for (let t = 0; t < totalTris; t++) if (!claimed[t]) unclaimedCount++;
 
-  // Fallback: render with vertex colors if no texture data
-  if (!submeshes) {
-    return (
-      <TriangleMesh
-        data={data}
-        color="#4ade80"
-        opacity={opacity}
-        useVertexColors={data.vertexColors !== undefined && data.vertexColors.length > 0}
-      />
-    );
-  }
+    if (unclaimedCount > 0) {
+      const rVerts = new Float32Array(unclaimedCount * 9);
+      const rIdx = new Uint32Array(unclaimedCount * 3);
+      const rNorm = data.normals ? new Float32Array(unclaimedCount * 9) : undefined;
+      const rCol = data.vertexColors ? new Float32Array(unclaimedCount * 9) : undefined;
+      let w = 0;
+      for (let t = 0; t < totalTris; t++) {
+        if (claimed[t]) continue;
+        for (let v = 0; v < 3; v++) {
+          const src = t * 3 + v;
+          rVerts[w * 3] = data.vertices[src * 3];
+          rVerts[w * 3 + 1] = data.vertices[src * 3 + 1];
+          rVerts[w * 3 + 2] = data.vertices[src * 3 + 2];
+          if (rNorm && data.normals) {
+            rNorm[w * 3] = data.normals[src * 3];
+            rNorm[w * 3 + 1] = data.normals[src * 3 + 1];
+            rNorm[w * 3 + 2] = data.normals[src * 3 + 2];
+          }
+          if (rCol && data.vertexColors) {
+            rCol[w * 3] = data.vertexColors[src * 3];
+            rCol[w * 3 + 1] = data.vertexColors[src * 3 + 1];
+            rCol[w * 3 + 2] = data.vertexColors[src * 3 + 2];
+          }
+          rIdx[w] = w;
+          w++;
+        }
+      }
+      remainder = {
+        vertices: rVerts,
+        indices: rIdx,
+        normals: rNorm,
+        vertexColors: rCol,
+        vertexCount: unclaimedCount * 3,
+        triangleCount: unclaimedCount,
+      };
+    }
+
+    return { submeshes: subs, untexturedMesh: remainder };
+  }, [data, plantMaterials]);
 
   return (
     <group>
@@ -258,8 +259,18 @@ export function TexturedPlantMesh({ data, plantMaterials, opacity = 0.9 }: Textu
           uvs={sm.uvs}
           materialDef={sm.materialDef}
           opacity={opacity}
+          wireframe={wireframe}
         />
       ))}
+      {untexturedMesh && (
+        <TriangleMesh
+          data={untexturedMesh}
+          color="#4ade80"
+          opacity={opacity}
+          wireframe={wireframe}
+          useVertexColors={untexturedMesh.vertexColors !== undefined && untexturedMesh.vertexColors.length > 0}
+        />
+      )}
     </group>
   );
 }

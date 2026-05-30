@@ -36,6 +36,15 @@ While a large import is in progress a modal shows the file currently being
 read and overall progress, so you know the app is working — reading a
 multi-GB scan from disk can take 30 seconds or more.
 
+### Importing textured meshes
+
+A `.obj` that references a `.mtl` material library is imported with its image
+textures applied, as long as the `.mtl` and the image files it names sit in the
+same folder as the `.obj`. Phytograph reads the diffuse texture (`map_Kd`) and
+diffuse color (`Kd`) for each material; faces with no image fall back to that
+material's color. Untextured `.obj` files (and `.stl`) import as plain geometry
+as before. See [Meshes: Textures](../concepts/meshes.md#textures).
+
 ### Importing ASCII clouds with custom columns
 
 For `.xyz`, `.txt`, and `.csv` files, the first three columns are

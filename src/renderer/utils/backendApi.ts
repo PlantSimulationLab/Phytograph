@@ -520,6 +520,13 @@ export interface PlantSessionAdvanceResponse {
   vertices: number[][];
   indices: number[][];
   colors?: number[][];
+  // Texture data (real Helios UVs, V-flipped) so session-generated plants
+  // render textured, matching /api/plant/generate.
+  normals?: number[][];
+  uv_coordinates?: number[][];
+  materials?: PlantMaterial[];
+  material_groups?: PlantMaterialGroup[];
+  textures?: Record<string, string>;
   vertex_count: number;
   triangle_count: number;
   error?: string;
@@ -692,6 +699,11 @@ export interface PlantMorphResponse {
   vertices: number[][];
   indices: number[][];
   colors?: number[][];
+  normals?: number[][];
+  uv_coordinates?: number[][];
+  materials?: PlantMaterial[];
+  material_groups?: PlantMaterialGroup[];
+  textures?: Record<string, string>;
   vertex_count: number;
   triangle_count: number;
   current_age: number;
@@ -934,6 +946,55 @@ export async function importPointCloudByPath(
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Point-cloud by-path import failed:', error);
+    throw error;
+  }
+}
+
+// ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
+
+export interface MeshImportResponse {
+  success: boolean;
+  vertices: number[][];          // [[x, y, z], ...]
+  indices: number[][];           // [[v0, v1, v2], ...]
+  normals?: number[][];
+  colors?: number[][];           // per-vertex colors (0-1)
+  uv_coordinates?: number[][];   // [[u, v], ...] V-flipped for three.js
+  materials?: PlantMaterial[];
+  material_groups?: PlantMaterialGroup[];
+  textures?: Record<string, string>;  // {basename: base64}
+  vertex_count: number;
+  triangle_count: number;
+  filename?: string;
+  has_textures: boolean;
+  error?: string;
+}
+
+/**
+ * Import a textured mesh (OBJ + sibling MTL + texture images) from a disk path.
+ * The backend resolves the MTL and image files relative to the OBJ and returns
+ * geometry, real per-vertex UVs, and base64 textures in the same shape the
+ * textured renderer already consumes for plant models.
+ */
+export async function importTexturedMesh(filePath: string): Promise<MeshImportResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  try {
+    const response = await fetch(`${baseUrl}/api/mesh/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Textured mesh import failed:', error);
     throw error;
   }
 }

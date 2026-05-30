@@ -40,6 +40,10 @@ When you click **Generate Plant**, Phytograph:
 2. Advances it day by day to the target age.
 3. Returns the final mesh — stems, branches, leaves, optionally fruit.
 
+Leaves and bark are rendered with the species' textures from the Helios plant
+library, with leaf silhouettes cut out by the image's transparency; untextured
+organs use their organ colors. See [Meshes: Textures](meshes.md#textures).
+
 The same growth machinery is exposed live via the **Age slider** in the
 Plant panel, so you can scrub through development after generation.
 

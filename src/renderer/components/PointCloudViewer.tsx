@@ -44,9 +44,7 @@ import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
 import { VoxelGridOverlay } from './viewer/renderers/VoxelGridOverlay';
-// TexturedPlantMesh isn't rendered by this component (meshes render via
-// TriangleMesh), but it was historically exported from this module — re-export
-// to preserve that public surface.
+import { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
 export { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
 import { Skeleton3D } from './viewer/renderers/Skeleton3D';
 import { SkeletonPoints } from './viewer/renderers/SkeletonPoints';
@@ -74,7 +72,6 @@ import type {
   CloudEditState,
   HistoryEntry,
   MeshData,
-  PlantMaterialDef,
   MeshEntry,
   SkeletonData,
   SkeletonEntry,
@@ -95,6 +92,7 @@ export type {
   SkeletonData,
   SkeletonEntry,
 } from '../lib/pointCloudTypes';
+import { plantResponseToMeshData } from '../lib/plantMeshData';
 
 // Grid plane options
 type GridPlane = 'z-up' | 'y-up';
@@ -5581,7 +5579,9 @@ export default function PointCloudViewer({
         // Get geometry by advancing 0 days
         const advanceResponse = await advancePlantSession(sessionId, 0);
         if (advanceResponse.success) {
-          // Convert session response format to plant generation response format
+          // Convert session response format to plant generation response format.
+          // The session advance now returns the same texture payload (real
+          // Helios UVs, materials, base64 textures) as /api/plant/generate.
           response = {
             success: true,
             vertices: advanceResponse.vertices,
@@ -5592,12 +5592,11 @@ export default function PointCloudViewer({
             plant_type: request.plant_type,
             age: advanceResponse.current_age,
             height: advanceResponse.height,
-            // Session doesn't return these - leave undefined
-            normals: undefined as number[][] | undefined,
-            uv_coordinates: undefined as number[][] | undefined,
-            materials: undefined,
-            material_groups: undefined,
-            textures: undefined,
+            normals: advanceResponse.normals,
+            uv_coordinates: advanceResponse.uv_coordinates,
+            materials: advanceResponse.materials,
+            material_groups: advanceResponse.material_groups,
+            textures: advanceResponse.textures,
             helios_xml: sessionResponse.helios_xml,
           };
         } else {
@@ -5625,88 +5624,8 @@ export default function PointCloudViewer({
         textures: Object.keys(response.textures || {}).length,
       });
 
-      // Convert response data to MeshData format
-      // Flatten vertices array and create Float32Array
-      const vertices = new Float32Array(response.vertex_count * 3);
-      for (let i = 0; i < response.vertex_count; i++) {
-        vertices[i * 3] = response.vertices[i][0];
-        vertices[i * 3 + 1] = response.vertices[i][1];
-        vertices[i * 3 + 2] = response.vertices[i][2];
-      }
-
-      // Flatten indices array and create Uint32Array
-      const indices = new Uint32Array(response.triangle_count * 3);
-      for (let i = 0; i < response.triangle_count; i++) {
-        indices[i * 3] = response.indices[i][0];
-        indices[i * 3 + 1] = response.indices[i][1];
-        indices[i * 3 + 2] = response.indices[i][2];
-      }
-
-      // Flatten normals if available
-      let normals: Float32Array | undefined;
-      if (response.normals && response.normals.length > 0) {
-        normals = new Float32Array(response.normals.length * 3);
-        for (let i = 0; i < response.normals.length; i++) {
-          normals[i * 3] = response.normals[i][0];
-          normals[i * 3 + 1] = response.normals[i][1];
-          normals[i * 3 + 2] = response.normals[i][2];
-        }
-      }
-
-      // Flatten vertex colors if available (from Helios organ coloring)
-      let vertexColors: Float32Array | undefined;
-      if (response.colors && response.colors.length > 0) {
-        vertexColors = new Float32Array(response.colors.length * 3);
-        for (let i = 0; i < response.colors.length; i++) {
-          vertexColors[i * 3] = response.colors[i][0];
-          vertexColors[i * 3 + 1] = response.colors[i][1];
-          vertexColors[i * 3 + 2] = response.colors[i][2];
-        }
-      }
-
-      // Flatten UV coordinates if available (for textures)
-      let uvCoordinates: Float32Array | undefined;
-      if (response.uv_coordinates && response.uv_coordinates.length > 0) {
-        uvCoordinates = new Float32Array(response.uv_coordinates.length * 2);
-        for (let i = 0; i < response.uv_coordinates.length; i++) {
-          uvCoordinates[i * 2] = response.uv_coordinates[i][0];
-          uvCoordinates[i * 2 + 1] = response.uv_coordinates[i][1];
-        }
-      }
-
-      // Process materials and textures
-      let plantMaterials: PlantMaterialDef[] | undefined;
-      if (response.materials && response.material_groups) {
-        plantMaterials = response.materials.map((mat) => {
-          // Find the material group for this material
-          const group = response.material_groups?.find(g => g.material_name === mat.name);
-          const triangleIndices = group?.triangle_indices || [];
-
-          // Get texture data if material has a texture
-          const textureData = mat.texture_name && response.textures
-            ? response.textures[mat.texture_name]
-            : undefined;
-
-          return {
-            name: mat.name,
-            color: mat.color as [number, number, number] | undefined,
-            textureData,
-            hasAlpha: mat.has_alpha,
-            triangleIndices,
-          };
-        });
-        console.log(`[Plant] Processed ${plantMaterials.length} materials, ${plantMaterials.filter(m => m.textureData).length} with textures`);
-      }
-
-      const meshData: MeshData = {
-        vertices,
-        indices,
-        normals,
-        vertexColors,
-        uvCoordinates,
-        vertexCount: response.vertex_count,
-        triangleCount: response.triangle_count,
-      };
+      // Convert response data to MeshData + materials (real Helios UVs + textures).
+      const { data: meshData, plantMaterials } = plantResponseToMeshData(response);
 
       const newMeshId = crypto.randomUUID();
       // Generate a random seed if not provided, for reproducible regeneration
@@ -5817,44 +5736,16 @@ export default function PointCloudViewer({
         return;
       }
 
-      // Convert response arrays to typed arrays
-      const vertices = new Float32Array(response.vertex_count * 3);
-      for (let i = 0; i < response.vertex_count; i++) {
-        vertices[i * 3] = response.vertices[i][0];
-        vertices[i * 3 + 1] = response.vertices[i][1];
-        vertices[i * 3 + 2] = response.vertices[i][2];
-      }
-
-      const indices = new Uint32Array(response.triangle_count * 3);
-      for (let i = 0; i < response.triangle_count; i++) {
-        indices[i * 3] = response.indices[i][0];
-        indices[i * 3 + 1] = response.indices[i][1];
-        indices[i * 3 + 2] = response.indices[i][2];
-      }
-
-      let vertexColors: Float32Array | undefined;
-      if (response.colors && response.colors.length > 0) {
-        vertexColors = new Float32Array(response.colors.length * 3);
-        for (let i = 0; i < response.colors.length; i++) {
-          vertexColors[i * 3] = response.colors[i][0];
-          vertexColors[i * 3 + 1] = response.colors[i][1];
-          vertexColors[i * 3 + 2] = response.colors[i][2];
-        }
-      }
+      // Convert response (+ real Helios UVs / textures) to MeshData.
+      const { data: morphedData, plantMaterials } = plantResponseToMeshData(response);
 
       // Replace mesh in-place with new geometry
       setMeshes(prev => prev.map(m => {
         if (m.id === selectedMeshId) {
           return {
             ...m,
-            data: {
-              vertices,
-              indices,
-              normals: undefined,
-              vertexColors,
-              vertexCount: response.vertex_count,
-              triangleCount: response.triangle_count,
-            },
+            data: morphedData,
+            plantMaterials,
             plantAge: response.current_age,
             plantSessionId: response.session_id,
             heliosXml: response.helios_xml ?? m.heliosXml,
@@ -5911,44 +5802,16 @@ export default function PointCloudViewer({
           // Fall back to stateless regeneration
           console.log('[Plant] Falling back to stateless regeneration...');
         } else {
-          // Convert response data to MeshData format
-          const vertices = new Float32Array(response.vertex_count * 3);
-          for (let i = 0; i < response.vertex_count; i++) {
-            vertices[i * 3] = response.vertices[i][0];
-            vertices[i * 3 + 1] = response.vertices[i][1];
-            vertices[i * 3 + 2] = response.vertices[i][2];
-          }
-
-          const indices = new Uint32Array(response.triangle_count * 3);
-          for (let i = 0; i < response.triangle_count; i++) {
-            indices[i * 3] = response.indices[i][0];
-            indices[i * 3 + 1] = response.indices[i][1];
-            indices[i * 3 + 2] = response.indices[i][2];
-          }
-
-          let vertexColors: Float32Array | undefined;
-          if (response.colors && response.colors.length > 0) {
-            vertexColors = new Float32Array(response.colors.length * 3);
-            for (let i = 0; i < response.colors.length; i++) {
-              vertexColors[i * 3] = response.colors[i][0];
-              vertexColors[i * 3 + 1] = response.colors[i][1];
-              vertexColors[i * 3 + 2] = response.colors[i][2];
-            }
-          }
+          // Convert response data (+ real Helios UVs / textures) to MeshData.
+          const { data: advancedData, plantMaterials } = plantResponseToMeshData(response);
 
           // Update the mesh with new geometry from session
           setMeshes(prev => prev.map(m => {
             if (m.id === meshId) {
               return {
                 ...m,
-                data: {
-                  vertices,
-                  indices,
-                  normals: undefined,
-                  vertexColors,
-                  vertexCount: response.vertex_count,
-                  triangleCount: response.triangle_count,
-                },
+                data: advancedData,
+                plantMaterials,
                 plantAge: response.current_age,
                 regenerationKey: (m.regenerationKey ?? 0) + 1,
               };
@@ -5992,33 +5855,14 @@ export default function PointCloudViewer({
         }
 
         // Convert and update (stateless fallback)
-        const vertices = new Float32Array(response.vertex_count * 3);
-        for (let i = 0; i < response.vertex_count; i++) {
-          vertices[i * 3] = response.vertices[i][0];
-          vertices[i * 3 + 1] = response.vertices[i][1];
-          vertices[i * 3 + 2] = response.vertices[i][2];
-        }
-        const indices = new Uint32Array(response.triangle_count * 3);
-        for (let i = 0; i < response.triangle_count; i++) {
-          indices[i * 3] = response.indices[i][0];
-          indices[i * 3 + 1] = response.indices[i][1];
-          indices[i * 3 + 2] = response.indices[i][2];
-        }
-        let vertexColors: Float32Array | undefined;
-        if (response.colors && response.colors.length > 0) {
-          vertexColors = new Float32Array(response.colors.length * 3);
-          for (let i = 0; i < response.colors.length; i++) {
-            vertexColors[i * 3] = response.colors[i][0];
-            vertexColors[i * 3 + 1] = response.colors[i][1];
-            vertexColors[i * 3 + 2] = response.colors[i][2];
-          }
-        }
+        const { data: regenData, plantMaterials } = plantResponseToMeshData(response);
 
         setMeshes(prev => prev.map(m => {
           if (m.id === meshId) {
             return {
               ...m,
-              data: { vertices, indices, normals: undefined, vertexColors, vertexCount: response.vertex_count, triangleCount: response.triangle_count },
+              data: regenData,
+              plantMaterials,
               plantAge: newAge,
               regenerationKey: (m.regenerationKey ?? 0) + 1,
               heliosXml: response.helios_xml,
@@ -6039,44 +5883,16 @@ export default function PointCloudViewer({
         return;
       }
 
-      // Convert response data to MeshData format
-      const vertices = new Float32Array(advanceResponse.vertex_count * 3);
-      for (let i = 0; i < advanceResponse.vertex_count; i++) {
-        vertices[i * 3] = advanceResponse.vertices[i][0];
-        vertices[i * 3 + 1] = advanceResponse.vertices[i][1];
-        vertices[i * 3 + 2] = advanceResponse.vertices[i][2];
-      }
-
-      const indices = new Uint32Array(advanceResponse.triangle_count * 3);
-      for (let i = 0; i < advanceResponse.triangle_count; i++) {
-        indices[i * 3] = advanceResponse.indices[i][0];
-        indices[i * 3 + 1] = advanceResponse.indices[i][1];
-        indices[i * 3 + 2] = advanceResponse.indices[i][2];
-      }
-
-      let vertexColors: Float32Array | undefined;
-      if (advanceResponse.colors && advanceResponse.colors.length > 0) {
-        vertexColors = new Float32Array(advanceResponse.colors.length * 3);
-        for (let i = 0; i < advanceResponse.colors.length; i++) {
-          vertexColors[i * 3] = advanceResponse.colors[i][0];
-          vertexColors[i * 3 + 1] = advanceResponse.colors[i][1];
-          vertexColors[i * 3 + 2] = advanceResponse.colors[i][2];
-        }
-      }
+      // Convert response data (+ real Helios UVs / textures) to MeshData.
+      const { data: newSessionData, plantMaterials } = plantResponseToMeshData(advanceResponse);
 
       // Update the mesh with new session
       setMeshes(prev => prev.map(m => {
         if (m.id === meshId) {
           return {
             ...m,
-            data: {
-              vertices,
-              indices,
-              normals: undefined,
-              vertexColors,
-              vertexCount: advanceResponse.vertex_count,
-              triangleCount: advanceResponse.triangle_count,
-            },
+            data: newSessionData,
+            plantMaterials,
             plantAge: advanceResponse.current_age,
             plantSessionId: sessionResponse.session_id,
             regenerationKey: (m.regenerationKey ?? 0) + 1,
@@ -6155,40 +5971,13 @@ export default function PointCloudViewer({
 
       // Update mesh with starting geometry and session
       const updateMeshGeometry = (response: typeof advanceResponse) => {
-        const vertices = new Float32Array(response.vertex_count * 3);
-        for (let i = 0; i < response.vertex_count; i++) {
-          vertices[i * 3] = response.vertices[i][0];
-          vertices[i * 3 + 1] = response.vertices[i][1];
-          vertices[i * 3 + 2] = response.vertices[i][2];
-        }
-        const indices = new Uint32Array(response.triangle_count * 3);
-        for (let i = 0; i < response.triangle_count; i++) {
-          indices[i * 3] = response.indices[i][0];
-          indices[i * 3 + 1] = response.indices[i][1];
-          indices[i * 3 + 2] = response.indices[i][2];
-        }
-        let vertexColors: Float32Array | undefined;
-        if (response.colors && response.colors.length > 0) {
-          vertexColors = new Float32Array(response.colors.length * 3);
-          for (let i = 0; i < response.colors.length; i++) {
-            vertexColors[i * 3] = response.colors[i][0];
-            vertexColors[i * 3 + 1] = response.colors[i][1];
-            vertexColors[i * 3 + 2] = response.colors[i][2];
-          }
-        }
-
+        const { data: animData, plantMaterials } = plantResponseToMeshData(response);
         setMeshes(prev => prev.map(m => {
           if (m.id === meshId) {
             return {
               ...m,
-              data: {
-                vertices,
-                indices,
-                normals: undefined,
-                vertexColors,
-                vertexCount: response.vertex_count,
-                triangleCount: response.triangle_count,
-              },
+              data: animData,
+              plantMaterials,
               plantAge: response.current_age,
               plantSessionId: sessionId,
               regenerationKey: (m.regenerationKey ?? 0) + 1,
@@ -6419,7 +6208,9 @@ export default function PointCloudViewer({
       const sessionId = sessionResponse.session_id;
       console.log(`[GIF] Created session ${sessionId} at age ${startAge}`);
 
-      // Helper to create mesh from response
+      // Helper to create an offscreen mesh for GIF frames. This uses vertex
+      // colors only (no image textures) — the GIF export renders organ colors,
+      // not leaf textures, which keeps the offscreen pipeline simple.
       const createMeshFromResponse = (response: Awaited<ReturnType<typeof advancePlantSession>>) => {
         const geometry = new THREE.BufferGeometry();
 
@@ -6795,16 +6586,29 @@ export default function PointCloudViewer({
               rotation={[meshRot.x * Math.PI / 180, meshRot.y * Math.PI / 180, meshRot.z * Math.PI / 180]}
               scale={[meshScale.x, meshScale.y, meshScale.z]}
             >
-              {/* Render mesh with vertex colors (texture rendering disabled - UV computation doesn't match Helios texture layout) */}
-              {/* Key includes regenerationKey to force remount when plant is regenerated */}
-              <TriangleMesh
-                key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
-                data={mesh.data}
-                color={mesh.color}
-                opacity={meshOpacity}
-                wireframe={meshWireframe}
-                useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
-              />
+              {/* Render textured (plant / imported OBJ+MTL) meshes through the
+                  material-group renderer when UVs and a textured material are
+                  present; otherwise fall back to the vertex-colored mesh.
+                  Key includes regenerationKey to force remount on regeneration. */}
+              {mesh.data.uvCoordinates && mesh.data.uvCoordinates.length > 0 &&
+               mesh.plantMaterials && mesh.plantMaterials.some(m => m.textureData) ? (
+                <TexturedPlantMesh
+                  key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
+                  data={mesh.data}
+                  plantMaterials={mesh.plantMaterials}
+                  opacity={meshOpacity}
+                  wireframe={meshWireframe}
+                />
+              ) : (
+                <TriangleMesh
+                  key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
+                  data={mesh.data}
+                  color={mesh.color}
+                  opacity={meshOpacity}
+                  wireframe={meshWireframe}
+                  useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
+                />
+              )}
               {mesh.gridSubdivisions &&
                 (mesh.gridSubdivisions.x > 1 || mesh.gridSubdivisions.y > 1 || mesh.gridSubdivisions.z > 1) && (
                   <VoxelGridOverlay subdivisions={mesh.gridSubdivisions} />
@@ -7669,6 +7473,7 @@ export default function PointCloudViewer({
                     data-mesh-name={displayName}
                     data-triangle-count={mesh.data.triangleCount}
                     data-is-plant={mesh.isPlant ? 'true' : 'false'}
+                    data-textured-materials={mesh.plantMaterials?.filter(m => m.textureData).length ?? 0}
                     data-selected={isSelected ? 'true' : 'false'}
                     onClick={() => handleSelectMesh(mesh.id)}
                     className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${

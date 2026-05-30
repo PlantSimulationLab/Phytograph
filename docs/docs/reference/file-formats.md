@@ -56,12 +56,14 @@ an `<ASCII_format>` tag.
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.obj` | ✅ | ✅ | Vertices + faces + normals + vertex colors. |
+| `.obj` | ✅ | ✅ | Vertices + faces + normals + vertex colors. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied. |
 | `.ply` | ✅ | ✅ | Full fidelity including arbitrary per-vertex scalars. |
 | `.stl` | ✅ | ✅ | Triangles only — no color or topology metadata. |
 
 Polygonal faces with more than three vertices are triangulated on
-import.
+import. Textured `.obj` import reads UV coordinates (`vt`) and per-material
+diffuse color (`Kd`) and texture (`map_Kd`); textures are **not** written on
+export.
 
 ## Skeletons
 

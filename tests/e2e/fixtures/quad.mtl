@@ -1,0 +1,3 @@
+newmtl quad_mat
+Kd 0.300000 0.550000 0.200000
+map_Kd quad_texture.png

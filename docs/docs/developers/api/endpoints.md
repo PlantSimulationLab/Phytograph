@@ -37,6 +37,7 @@ is defined.
 | POST | `/api/triangulate` | `main.py:1291` | Triangulate a point cloud |
 | POST | `/api/triangulate/helios` | `main.py:1773` | Helios-style triangulation |
 | POST | `/api/mesh/sample` | `main.py:1910` | Sample points on a mesh |
+| POST | `/api/mesh/import` | `main.py` | Parse a textured `.obj` (+ sibling `.mtl` + images) from a disk `path` into geometry, V-flipped per-vertex UVs, per-material triangle groups, and base64-encoded textures — the same response shape the textured renderer consumes for plant models |
 
 ## Skeleton extraction
 

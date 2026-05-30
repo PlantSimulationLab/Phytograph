@@ -9,6 +9,8 @@ import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./compon
 import type { Scan } from "./lib/scan";
 import type { ScanParameters } from "./lib/scanParameters";
 import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
+import { importTexturedMesh, type MeshImportResponse } from "./utils/backendApi";
+import { plantResponseToMeshData } from "./lib/plantMeshData";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
 // we have a disk path. Anything outside this set (PLY/PCD/LAS/LAZ/OBJ) stays
@@ -136,26 +138,62 @@ function App() {
       }
 
       if (shouldImportAsMesh) {
-        // Parse as mesh
-        const meshData = await parseMesh(file);
-        if (importRefsRef.current) {
-          importRefsRef.current.importMesh({
-            sourceCloudId: 'imported',
-            data: {
-              vertices: meshData.vertices,
-              indices: meshData.indices,
-              normals: meshData.normals,
-              vertexCount: meshData.vertexCount,
-              triangleCount: meshData.triangleCount,
-            },
-            visible: true,
-            color: getNextColor(),
-            method: 'delaunay', // Default for imported meshes
-          });
-          setActiveNav('viewer');
-          showToast({ title: `Loaded mesh with ${meshData.triangleCount.toLocaleString()} triangles from ${file.name}`, type: 'success' });
-        } else {
+        if (!importRefsRef.current) {
           showToast({ title: 'Viewer not ready for mesh import', type: 'error' });
+        } else {
+          // For OBJ files we have an on-disk path for, try the backend importer
+          // first: it parses the sibling MTL + texture images and returns real
+          // UVs + base64 textures so the mesh renders textured. Fall back to the
+          // in-renderer geometry-only parser when there's no path, it's not an
+          // OBJ, the backend import fails, or the OBJ carries no textures.
+          const ext = file.name.toLowerCase().split('.').pop() ?? '';
+          let objPath: string | undefined;
+          try {
+            objPath = window.electronAPI?.getPathForFile?.(file) || undefined;
+          } catch {
+            objPath = undefined;
+          }
+
+          let textured: MeshImportResponse | null = null;
+          if (ext === 'obj' && objPath) {
+            try {
+              const resp = await importTexturedMesh(objPath);
+              if (resp.success && resp.has_textures) textured = resp;
+            } catch (e) {
+              console.warn('Textured OBJ import failed, falling back to geometry-only parse:', e);
+            }
+          }
+
+          if (textured) {
+            const { data, plantMaterials } = plantResponseToMeshData(textured);
+            importRefsRef.current.importMesh({
+              sourceCloudId: 'imported',
+              data,
+              plantMaterials,
+              visible: true,
+              color: getNextColor(),
+              method: 'delaunay',
+            });
+            setActiveNav('viewer');
+            showToast({ title: `Loaded textured mesh with ${textured.triangle_count.toLocaleString()} triangles from ${file.name}`, type: 'success' });
+          } else {
+            const meshData = await parseMesh(file);
+            importRefsRef.current.importMesh({
+              sourceCloudId: 'imported',
+              data: {
+                vertices: meshData.vertices,
+                indices: meshData.indices,
+                normals: meshData.normals,
+                vertexCount: meshData.vertexCount,
+                triangleCount: meshData.triangleCount,
+              },
+              visible: true,
+              color: getNextColor(),
+              method: 'delaunay', // Default for imported meshes
+            });
+            setActiveNav('viewer');
+            showToast({ title: `Loaded mesh with ${meshData.triangleCount.toLocaleString()} triangles from ${file.name}`, type: 'success' });
+          }
         }
       } else if (shouldImportAsSkeleton) {
         // Parse as skeleton

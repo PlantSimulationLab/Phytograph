@@ -74,3 +74,47 @@ test('generates a procedural plant model with non-default species and age', asyn
     await close();
   }
 });
+
+// Bean has leaf textures in the Helios library, so generation must surface
+// textured materials (the data the textured renderer consumes). This guards the
+// real-Helios-UV fix: previously textures were disabled and no material carried
+// texture data into the renderer.
+//
+// SCOPE / LIMITATION: this asserts the data that DRIVES the render reaches the
+// renderer (a textured material count > 0). It does NOT assert the rendered
+// pixels — the offscreen E2E window (`show:false`) returns a black WebGL buffer
+// to toDataURL/drawImage, so pixel checks aren't possible here. A material-setup
+// bug (e.g. wrong opacity/alpha) would still pass this. Pixel-accurate leaf
+// rendering is verified with a visible window via
+// `node tests/e2e/visual/capture-plant.mjs` (see that file); keep it in sync
+// when changing the textured material.
+test('a textured plant carries texture materials into the renderer', async () => {
+  const { page, close } = await launchApp();
+
+  try {
+    await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
+
+    await page.getByTestId('tool-plant-generate').click();
+    const popup = page.getByTestId('plant-generation-popup');
+    await expect(popup).toBeVisible();
+
+    const species = page.getByTestId('plant-species-select');
+    await expect(species).toBeVisible();
+    await expect(species.locator('option')).not.toHaveCount(0);
+
+    // Bean is the default and is textured.
+    await species.selectOption('bean');
+    await page.getByTestId('plant-age-input').fill('20');
+    await page.getByTestId('plant-generate-button').click();
+
+    const meshRow = page.getByTestId('mesh-row').first();
+    await expect(meshRow).toBeVisible({ timeout: 120_000 });
+    await expect(meshRow).toHaveAttribute('data-is-plant', 'true');
+
+    // At least one textured material reached the renderer.
+    const texturedStr = await meshRow.getAttribute('data-textured-materials');
+    expect(parseInt(texturedStr ?? '0', 10)).toBeGreaterThan(0);
+  } finally {
+    await close();
+  }
+});
