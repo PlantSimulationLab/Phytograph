@@ -40,6 +40,7 @@ import {
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
 import { categoricalSchemeForRange, GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
+import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
@@ -279,6 +280,10 @@ export default function PointCloudViewer({
   // Human-in-the-loop trunk seeding: when seeding, clicks drop a seed marker.
   const [treeSeedMode, setTreeSeedMode] = useState(false);
   const [treeSeedPoints, setTreeSeedPoints] = useState<Array<[number, number, number]>>([]);
+  // Refine controls (post-segmentation merge/split of the tree_instance field).
+  const [treeMergeA, setTreeMergeA] = useState(1);
+  const [treeMergeB, setTreeMergeB] = useState(2);
+  const [treeSplitId, setTreeSplitId] = useState(1);
 
   // Skeleton state
   const [skeletons, setSkeletons] = useState<SkeletonEntry[]>([]);
@@ -4177,6 +4182,50 @@ export default function PointCloudViewer({
       setTreeSegmentInProgress(false);
     }
   }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, treeRegStrength1, treeRegStrength2, treeMaxGap, treeSplitClouds, treeSeedPoints]);
+
+  // Refine the tree_instance field in place (flat clouds only — octree clouds
+  // bake the attribute on disk and would need a backend re-run). Reads the
+  // active cloud's labels, applies a pure merge/split, writes them back, and
+  // keeps the scalar coloring active.
+  const refineTreeLabels = useCallback((
+    transform: (labels: Float32Array, positions: Float32Array) => Float32Array,
+    actionLabel: string,
+  ) => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    const field = cloud?.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE];
+    if (!cloud || !field) {
+      showToast({ type: 'error', title: 'No tree segmentation', message: 'Run Segment Trees first (flat clouds only).' });
+      return;
+    }
+    try {
+      const newLabels = transform(field.values, cloud.data.positions);
+      let maxId = 0;
+      for (let i = 0; i < newLabels.length; i++) maxId = Math.max(maxId, newLabels[i]);
+      onUpdateCloud(id, {
+        ...cloud.data,
+        scalarFields: {
+          ...cloud.data.scalarFields,
+          [TREE_INSTANCE_ATTRIBUTE]: { values: newLabels, min: 0, max: maxId },
+        },
+      });
+      setColorMode('scalar');
+      setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
+      showToast({ type: 'success', title: actionLabel, message: `${maxId} trees now.` });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Refine failed';
+      showToast({ type: 'error', title: 'Refine Failed', message: msg });
+    }
+  }, [selectedIds, clouds, onUpdateCloud]);
+
+  const handleMergeTrees = useCallback(() => {
+    refineTreeLabels((labels) => mergeTrees(labels, [treeMergeA, treeMergeB]), 'Trees Merged');
+  }, [refineTreeLabels, treeMergeA, treeMergeB]);
+
+  const handleSplitTree = useCallback(() => {
+    refineTreeLabels((labels, positions) => splitTreeByGaps(positions, labels, treeSplitId, treeMaxGap), 'Tree Split');
+  }, [refineTreeLabels, treeSplitId, treeMaxGap]);
 
   // Compute Alignment distance statistics
   const handleAlignmentCompute = useCallback(async () => {
@@ -9953,6 +10002,69 @@ export default function PointCloudViewer({
               </>
             )}
           </button>
+
+          {/* Refine: merge / split the current tree_instance field (flat clouds). */}
+          {(() => {
+            const c = clouds.find(cl => selectedIds.has(cl.id));
+            const hasTrees = !!c?.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE];
+            if (!hasTrees) return null;
+            return (
+              <div data-testid="tree-refine" className="mt-3 pt-3 border-t border-neutral-700">
+                <div className="text-[10px] font-medium text-neutral-300 mb-2">Refine</div>
+                {/* Merge */}
+                <div className="flex items-end gap-1 mb-2">
+                  <div className="flex-1">
+                    <label className="text-[10px] text-neutral-500 block">Merge tree</label>
+                    <DebouncedNumberInput
+                      data-testid="tree-merge-a"
+                      value={treeMergeA}
+                      onCommit={(n) => setTreeMergeA(Math.max(1, Math.round(n)))}
+                      min={1} step={1}
+                      className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+                    />
+                  </div>
+                  <span className="text-[10px] text-neutral-500 pb-1">+</span>
+                  <div className="flex-1">
+                    <label className="text-[10px] text-neutral-500 block">into</label>
+                    <DebouncedNumberInput
+                      data-testid="tree-merge-b"
+                      value={treeMergeB}
+                      onCommit={(n) => setTreeMergeB(Math.max(1, Math.round(n)))}
+                      min={1} step={1}
+                      className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+                    />
+                  </div>
+                  <button
+                    data-testid="tree-merge-run"
+                    onClick={handleMergeTrees}
+                    className="px-2 py-1 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
+                  >
+                    Merge
+                  </button>
+                </div>
+                {/* Split */}
+                <div className="flex items-end gap-1">
+                  <div className="flex-1">
+                    <label className="text-[10px] text-neutral-500 block">Split tree (by gaps)</label>
+                    <DebouncedNumberInput
+                      data-testid="tree-split-id"
+                      value={treeSplitId}
+                      onCommit={(n) => setTreeSplitId(Math.max(1, Math.round(n)))}
+                      min={1} step={1}
+                      className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+                    />
+                  </div>
+                  <button
+                    data-testid="tree-split-run"
+                    onClick={handleSplitTree}
+                    className="px-2 py-1 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
+                  >
+                    Split
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
