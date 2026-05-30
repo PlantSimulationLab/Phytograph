@@ -7290,6 +7290,64 @@ export default function PointCloudViewer({
           Captures clicks only while drawing; in "closed polygon" state
           it's a non-interactive visualization that lets the user see
           their selection before pressing Enter to apply. */}
+      {/* Trunk-seed capture overlay (TreeIso human-in-the-loop). Active while
+          the Tree Segmentation panel's "Seed trunks" mode is on. Left-click
+          unprojects onto the cloud's ground plane (via the live camera) and
+          records a world-space seed; right-click removes the last one. Markers
+          are drawn at their projected screen positions. The overlay captures
+          pointer events, so the camera is effectively fixed while seeding. */}
+      {showTreeSegmentPanel && treeSeedMode && selectedIds.size === 1 && (() => {
+        const cam = mainCameraRef.current;
+        const cloud = clouds.find(c => selectedIds.has(c.id));
+        const groundZ = cloud?.data.bounds?.min.z ?? 0;
+        const project = (p: [number, number, number]) => {
+          if (!cam) return null;
+          const v = new THREE.Vector3(p[0], p[1], p[2]).project(cam);
+          return { x: (v.x * 0.5 + 0.5) * 100, y: (-v.y * 0.5 + 0.5) * 100, behind: v.z > 1 };
+        };
+        const onSeedClick = (e: React.MouseEvent<SVGSVGElement>) => {
+          if (e.button !== 0 || !cam) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const ndc = new THREE.Vector2(
+            ((e.clientX - rect.left) / rect.width) * 2 - 1,
+            -(((e.clientY - rect.top) / rect.height) * 2 - 1),
+          );
+          const rc = new THREE.Raycaster();
+          rc.setFromCamera(ndc, cam);
+          const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -groundZ);
+          const hit = new THREE.Vector3();
+          if (rc.ray.intersectPlane(plane, hit)) {
+            setTreeSeedPoints(prev => [...prev, [hit.x, hit.y, hit.z]]);
+          }
+        };
+        const onSeedContextMenu = (e: React.MouseEvent<SVGSVGElement>) => {
+          e.preventDefault();
+          setTreeSeedPoints(prev => prev.slice(0, -1));
+        };
+        return (
+          <svg
+            data-testid="tree-seed-overlay"
+            className="absolute inset-0 z-10"
+            width="100%"
+            height="100%"
+            style={{ pointerEvents: 'auto', cursor: 'crosshair' }}
+            onClick={onSeedClick}
+            onContextMenu={onSeedContextMenu}
+          >
+            {treeSeedPoints.map((p, i) => {
+              const s = project(p);
+              if (!s || s.behind) return null;
+              return (
+                <g key={i}>
+                  <circle cx={`${s.x}%`} cy={`${s.y}%`} r={6} fill="rgba(34,197,94,0.85)" stroke="#fff" strokeWidth={1.5} />
+                  <text x={`${s.x}%`} y={`${s.y}%`} dy={-10} fill="#fff" fontSize={11} textAnchor="middle">{i + 1}</text>
+                </g>
+              );
+            })}
+          </svg>
+        );
+      })()}
+
       {editMode === 'crop' && cropMode === 'polygon' && (cropDrawState === 'drawing-polygon' || cropPolygon) && (() => {
         const isDrawing = cropDrawState === 'drawing-polygon';
         const points = isDrawing ? polygonInProgress : (cropPolygon?.points ?? []);
@@ -9833,8 +9891,13 @@ export default function PointCloudViewer({
                 className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
                 disabled={treeSegmentInProgress}
               />
-              Seed trunks (click to add)
+              Seed trunks (left-click to add)
             </label>
+            {treeSeedMode && (
+              <div className="text-[10px] text-neutral-500 mb-1">
+                Click trunks in the view (camera locked); right-click removes the last seed.
+              </div>
+            )}
             <div className="flex items-center justify-between text-[10px] text-neutral-500">
               <span data-testid="tree-seed-count">{treeSeedPoints.length} seed{treeSeedPoints.length === 1 ? '' : 's'}</span>
               {treeSeedPoints.length > 0 && (
