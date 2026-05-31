@@ -1,0 +1,320 @@
+"""Unit tests for the Helios triangulation plumbing in main.py.
+
+These cover the pure XML/grid/bounds helpers and the request-shaping logic of
+`_do_helios_computation` that decides per-scan resolution, angular bounds, and
+the grid. To avoid requiring a compiled pyhelios in CI, the test that exercises
+`_do_helios_computation` monkeypatches the pyhelios entry points and captures
+the arguments passed to `_generate_helios_xml` — asserting on what *would* be
+fed to Helios, which is exactly the integration this change fixes.
+"""
+
+import os
+import re
+
+import pytest
+
+import main
+
+# The committed sphere fixture mirrors the C++ lidar self-test's sphere.xml.
+_SPHERE_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..",
+                 "tests", "e2e", "fixtures", "sphere-scan"))
+_SPHERE_FMT = "row column x y z r g b reflectance"
+_SPHERE_ORIGINS = [(-2, 0, 0.5), (0, -2, 0.5), (2, 0, 0.5), (0, 2, 0.5)]
+
+
+# ---------------------------------------------------------------------------
+# _file_xyz_bounds
+# ---------------------------------------------------------------------------
+
+class TestXyzColumnIndices:
+    def test_defaults_to_first_three_columns(self):
+        assert main._xyz_column_indices(None) == (0, 1, 2)
+        assert main._xyz_column_indices("x y z") == (0, 1, 2)
+
+    def test_locates_xyz_when_not_leading(self):
+        # The sphere fixture's format: coords are columns 2-4.
+        assert main._xyz_column_indices("row column x y z r g b reflectance") == (2, 3, 4)
+
+    def test_falls_back_when_format_lacks_xyz(self):
+        assert main._xyz_column_indices("a b c d") == (0, 1, 2)
+
+
+class TestFileXyzBounds:
+    def test_returns_count_and_bounds(self, tmp_path):
+        f = tmp_path / "scan.xyz"
+        f.write_text("0 0 0\n1 2 3\n-1 5 2\n")
+        n, lo, hi = main._file_xyz_bounds(str(f))
+        assert n == 3
+        assert lo == [-1.0, 0.0, 0.0]
+        assert hi == [1.0, 5.0, 3.0]
+
+    def test_uses_ascii_format_to_locate_coords(self, tmp_path):
+        # "row column x y z ..." → coords in columns 2-4, not 0-2.
+        f = tmp_path / "scan.xyz"
+        f.write_text(
+            "0 0 -1.0 2.0 3.0 255 0 0 0.5\n"
+            "1 0 4.0 -5.0 6.0 255 0 0 0.5\n")
+        n, lo, hi = main._file_xyz_bounds(str(f), _SPHERE_FMT)
+        assert n == 2
+        assert lo == [-1.0, -5.0, 3.0]
+        assert hi == [4.0, 2.0, 6.0]
+
+    def test_skips_comments_and_short_lines(self, tmp_path):
+        f = tmp_path / "scan.xyz"
+        f.write_text("# header\n0 0 0\n\nbad line\n2 2 2 99\n")
+        n, lo, hi = main._file_xyz_bounds(str(f))
+        # Two valid coordinate lines (the 4-col one keeps its first 3 cols).
+        assert n == 2
+        assert lo == [0.0, 0.0, 0.0]
+        assert hi == [2.0, 2.0, 2.0]
+
+    def test_empty_file_returns_none_bounds(self, tmp_path):
+        f = tmp_path / "scan.xyz"
+        f.write_text("# only a comment\n")
+        n, lo, hi = main._file_xyz_bounds(str(f))
+        assert n == 0 and lo is None and hi is None
+
+
+# ---------------------------------------------------------------------------
+# _generate_helios_xml
+# ---------------------------------------------------------------------------
+
+def _scan_info(**overrides):
+    base = {
+        "filepath": "/tmp/a.xyz",
+        "ascii_format": "x y z",
+        "origin": [0.0, 0.0, 1.0],
+        "n_theta": 100,
+        "n_phi": 200,
+        "theta_min": 10.0,
+        "theta_max": 120.0,
+        "phi_min": 0.0,
+        "phi_max": 360.0,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestGenerateHeliosXml:
+    def test_per_scan_angles_and_size_are_written(self, tmp_path):
+        scans = [
+            _scan_info(origin=[0, 0, 1], n_theta=50, n_phi=60,
+                       theta_min=5, theta_max=95, phi_min=10, phi_max=350),
+            _scan_info(origin=[1, 1, 2], n_theta=70, n_phi=80,
+                       theta_min=20, theta_max=160, phi_min=0, phi_max=180),
+        ]
+        path = main._generate_helios_xml(
+            str(tmp_path), scans, grid_center=[0, 0, 0], grid_size=[10, 10, 10])
+        xml = open(path).read()
+
+        # Two distinct <scan> blocks, each with its own size + angular bounds.
+        blocks = re.findall(r"<scan>.*?</scan>", xml, re.DOTALL)
+        assert len(blocks) == 2
+        assert "<size>50 60</size>" in blocks[0]
+        assert "<thetaMin>5</thetaMin>" in blocks[0]
+        assert "<phiMax>350</phiMax>" in blocks[0]
+        assert "<size>70 80</size>" in blocks[1]
+        assert "<thetaMax>160</thetaMax>" in blocks[1]
+        assert "<phiMax>180</phiMax>" in blocks[1]
+
+    def test_grid_subdivisions_default_to_single_cell(self, tmp_path):
+        path = main._generate_helios_xml(
+            str(tmp_path), [_scan_info()], grid_center=[1, 2, 3], grid_size=[4, 5, 6])
+        xml = open(path).read()
+        assert "<Nx>1</Nx>" in xml
+        assert "<Ny>1</Ny>" in xml
+        assert "<Nz>1</Nz>" in xml
+        assert "<center>1 2 3</center>" in xml
+        assert "<size>4 5 6</size>" in xml
+
+    def test_grid_subdivisions_are_honored(self, tmp_path):
+        path = main._generate_helios_xml(
+            str(tmp_path), [_scan_info()], grid_center=[0, 0, 0],
+            grid_size=[1, 1, 1], grid_nx=2, grid_ny=3, grid_nz=4)
+        xml = open(path).read()
+        assert "<Nx>2</Nx>" in xml
+        assert "<Ny>3</Ny>" in xml
+        assert "<Nz>4</Nz>" in xml
+
+    def test_xml_name_lets_per_scan_configs_coexist(self, tmp_path):
+        # Per-scan triangulation writes one config per scan into one temp dir.
+        p0 = main._generate_helios_xml(
+            str(tmp_path), [_scan_info()], [0, 0, 0], [1, 1, 1],
+            xml_name="helios_config_0.xml")
+        p1 = main._generate_helios_xml(
+            str(tmp_path), [_scan_info()], [0, 0, 0], [1, 1, 1],
+            xml_name="helios_config_1.xml")
+        assert p0 != p1
+        assert p0.endswith("helios_config_0.xml")
+        assert p1.endswith("helios_config_1.xml")
+
+
+# ---------------------------------------------------------------------------
+# _do_helios_computation — request shaping (pyhelios stubbed)
+# ---------------------------------------------------------------------------
+
+class _FakeCloud:
+    """Minimal stand-in: load the XML we generated, report zero triangles."""
+    def __init__(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def disableMessages(self):
+        pass
+
+    def loadXML(self, path):
+        pass
+
+    def triangulateHitPoints(self, lmax, aspect):
+        pass
+
+    def getTriangleCount(self):
+        return 0  # short-circuits before needing a real Context
+
+
+@pytest.fixture
+def captured_xml(monkeypatch):
+    """Capture the args passed to _generate_helios_xml, and stub pyhelios so the
+    computation runs without a compiled native lib."""
+    captured = {}
+
+    real = main._generate_helios_xml
+
+    # Per-scan triangulation calls this once per scan with a single-element
+    # scans_info; accumulate them so single-scan tests still read [0] and the
+    # grid (shared across calls) is captured from the last call.
+    captured.setdefault("scans_info", [])
+
+    def spy(tmpdir, scans_info, grid_center, grid_size,
+            grid_nx=1, grid_ny=1, grid_nz=1, xml_name="helios_config.xml"):
+        captured["scans_info"].extend(scans_info)
+        captured["grid_center"] = grid_center
+        captured["grid_size"] = grid_size
+        captured["grid_nxyz"] = (grid_nx, grid_ny, grid_nz)
+        return real(tmpdir, scans_info, grid_center, grid_size,
+                    grid_nx, grid_ny, grid_nz, xml_name)
+
+    monkeypatch.setattr(main, "_generate_helios_xml", spy)
+
+    # Stub the pyhelios import inside _do_helios_computation.
+    import sys
+    import types
+    fake = types.ModuleType("pyhelios")
+    fake.LiDARCloud = _FakeCloud
+    fake.Context = _FakeCloud
+    monkeypatch.setitem(sys.modules, "pyhelios", fake)
+
+    return captured
+
+
+def _points_scan(points, origin, **extra):
+    return main.HeliosScanEntry(points=points, origin=origin, **extra)
+
+
+class TestDoHeliosComputationShaping:
+    def test_per_scan_resolution_used_when_supplied(self, captured_xml):
+        req = main.HeliosTriangulationRequest(scans=[
+            _points_scan(
+                [[0, 0, 0], [1, 1, 1], [2, 0, 1]],
+                origin=[0, 0, 5],
+                n_theta=33, n_phi=44,
+                theta_min=15, theta_max=140, phi_min=5, phi_max=355,
+            ),
+        ])
+        result = main._do_helios_computation(req)
+        assert result["success"] is True
+        si = captured_xml["scans_info"][0]
+        # The supplied values are used verbatim — not the count-based guess.
+        assert si["n_theta"] == 33 and si["n_phi"] == 44
+        assert si["theta_min"] == 15 and si["theta_max"] == 140
+        assert si["phi_min"] == 5 and si["phi_max"] == 355
+
+    def test_resolution_falls_back_to_count_estimate(self, captured_xml):
+        # No per-scan n_theta/n_phi → backend estimates from point count.
+        pts = [[float(i), 0.0, 0.0] for i in range(400)]
+        req = main.HeliosTriangulationRequest(scans=[_points_scan(pts, origin=[0, 0, 5])])
+        main._do_helios_computation(req)
+        si = captured_xml["scans_info"][0]
+        assert si["n_theta"] >= 10 and si["n_phi"] >= 10
+        # Falls back to request-level angles (defaults) when scan omits them.
+        assert si["theta_min"] == req.theta_min
+        assert si["phi_max"] == req.phi_max
+
+    def test_no_grid_autocreates_single_cell_over_bbox_with_warning(self, captured_xml):
+        pts = [[-1, -2, -3], [4, 5, 6]]
+        req = main.HeliosTriangulationRequest(scans=[_points_scan(pts, origin=[0, 0, 5])])
+        result = main._do_helios_computation(req)
+
+        assert result["grid_warning"] is True
+        assert "bounding box" in result["grid_message"]
+        assert captured_xml["grid_nxyz"] == (1, 1, 1)
+        # Center is the midpoint of the bbox; size encloses the full extent.
+        cx, cy, cz = captured_xml["grid_center"]
+        sx, sy, sz = captured_xml["grid_size"]
+        assert cx == pytest.approx(1.5) and cy == pytest.approx(1.5) and cz == pytest.approx(1.5)
+        assert sx >= 5.0 and sy >= 7.0 and sz >= 9.0  # padded extents
+
+    def test_explicit_grid_is_used_verbatim(self, captured_xml):
+        pts = [[0, 0, 0], [1, 1, 1]]
+        req = main.HeliosTriangulationRequest(
+            scans=[_points_scan(pts, origin=[0, 0, 5])],
+            grid=main.HeliosGrid(center=[10, 20, 30], size=[2, 3, 4], nx=2, ny=2, nz=3),
+        )
+        result = main._do_helios_computation(req)
+
+        assert result["grid_warning"] is False
+        assert captured_xml["grid_center"] == [10, 20, 30]
+        assert captured_xml["grid_size"] == [2, 3, 4]
+        assert captured_xml["grid_nxyz"] == (2, 2, 3)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end reproduction of the C++ lidar self-test, against real pyhelios.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not all(os.path.isfile(os.path.join(_SPHERE_DIR, f"sphere_scan{i}.xyz"))
+            for i in range(4)),
+    reason="sphere fixture data not present")
+class TestSphereReproduction:
+    """Mirror the C++ 'LiDAR Single Voxel Sphere Test', which loads four
+    100x200 scans of a unit sphere and triangulates to ~383 primitives. We feed
+    the same data through the real triangulation path (no pyhelios stub) and
+    expect the same count via the auto-fit single-cell grid."""
+
+    def _request(self, grid=None):
+        scans = [
+            main.HeliosScanEntry(
+                file_path=os.path.join(_SPHERE_DIR, f"sphere_scan{i}.xyz"),
+                ascii_format=_SPHERE_FMT, origin=list(o),
+                n_theta=100, n_phi=200,
+                theta_min=0, theta_max=180, phi_min=0, phi_max=360)
+            for i, o in enumerate(_SPHERE_ORIGINS)
+        ]
+        return main.HeliosTriangulationRequest(
+            scans=scans, lmax=0.5, max_aspect_ratio=5, grid=grid)
+
+    def test_autogrid_reproduces_cpp_triangle_count(self):
+        pytest.importorskip("pyhelios")
+        result = main._do_helios_computation(self._request())
+        assert result["success"] is True, result.get("error")
+        assert result["grid_warning"] is True
+        # C++ reference: 383 primitives. Allow a small band for platform variance.
+        assert 340 <= result["num_triangles"] <= 430
+
+    def test_triangle_scan_ids_cover_all_four_scans(self):
+        pytest.importorskip("pyhelios")
+        result = main._do_helios_computation(self._request())
+        ids = result["triangle_scan_ids"]
+        # One id per triangle, aligned with the triangle list.
+        assert len(ids) == len(result["triangles"]) == result["num_triangles"]
+        # Every id refers to a real scan, and all four scans contribute
+        # (per-scan triangulation tags each triangle with its origin scan).
+        assert all(0 <= i < 4 for i in ids)
+        assert set(ids) == {0, 1, 2, 3}

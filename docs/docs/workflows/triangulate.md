@@ -66,22 +66,63 @@ disabled with an explanatory tooltip otherwise.
 1. Make sure each scan you want to include has scan parameters
    attached. If a scan only has data, click the radio icon on its row
    in the Scans panel to add parameters (or import a Helios scan XML
-   that carries `<origin>` for each `<scan>`).
+   that carries `<origin>` and `<size>` for each `<scan>`).
 2. Select two or more eligible scans.
 3. Click the **Helios Triangulation** tool button (triangle icon). The
    popup opens. Each row shows the scan's origin read from its
    parameters — no manual entry. Click **Edit…** next to a row to open
-   the scan's parameters popup if you need to adjust the origin.
+   the scan's parameters popup if you need to adjust it.
+
+    Each scan is triangulated in the angular grid it was actually
+    sampled in: its **scanner origin**, **zenith/azimuth sample counts**
+    (Ntheta/Nphi) and **angular bounds** all come from that scan's own
+    parameters. Edit them per scan in the Scans panel — they are no
+    longer typed in once for the whole batch.
 4. **Parameters**:
     - **Lmax** — maximum allowed edge length in the mesh (meters)
-    - **Max Aspect Ratio** — drops triangles with bad shape (default 10)
-    - **Theta Min / Max** — zenith angle range to keep (degrees)
-    - **Phi Min / Max** — azimuth angle range to keep (degrees)
-5. Click **Triangulate**.
+    - **Max Aspect Ratio** — drops triangles with bad shape (default 4)
+5. **Grid** — the triangulation grid bounds the region that gets meshed:
+    - **Auto — fit to all points** (default when you haven't made a
+      box): Phytograph fits a single-cell grid around every point. A
+      warning reminds you that *all* points are triangulated, so the
+      ground and trunk should already be segmented or cropped away.
+    - **A voxel box**: create one with **Create Voxel** (it appears in
+      the Meshes list), position and size it over the region you care
+      about, and set its grid subdivisions in the mesh panel. It then
+      appears in the **Grid** dropdown; selecting it uses the box's
+      position, size and Nx×Ny×Nz cell counts as the grid.
+6. Click **Triangulate**.
 
 For most TLS data of stone-fruit trees, defaults work; adjust **Lmax**
 down (to ~5–10 cm) for finer branch surfaces, or up if your scan is
 sparse.
+
+## Color a mesh by surface geometry
+
+A triangulated mesh — one built by triangulating a point cloud, including
+Helios meshes — can be pseudocolored per triangle to inspect its surface,
+handy for checking a reconstruction or reading leaf/branch orientation.
+In the **Meshes** panel, click the chevron (▸) on the mesh's row to
+expand its **Color by** options (the chevron only appears on
+triangulation-generated meshes, not plants, shapes, or imported meshes):
+
+- **Inclination** — zenith angle of each triangle's normal, folded to
+  0–90° (a horizontal facet reads 0°, a vertical one 90°). Up- and
+  down-facing facets read the same.
+- **Azimuth** — compass bearing the triangle's normal points, 0–360°.
+  Triangulated surfaces have no consistent facet orientation, so each
+  normal is oriented into the upper hemisphere first (the standard
+  leaf-angle convention); a facet and its back read the same azimuth.
+- **Triangle area** — surface area of each triangle.
+- **Source scan** — *(Helios meshes only)* colors each triangle by the
+  scan it was reconstructed from, using that scan's swatch color. Helios
+  triangulates each scan independently, so every triangle belongs to one
+  scan. A legend lists the contributing scans and their triangle counts.
+
+For the scalar modes, pick the gradient with the colormap dropdown that
+appears below; a colorbar in the bottom-right shows the value range. The
+**Source scan** mode shows a per-scan legend instead. Choose **Solid
+color** to go back to the flat mesh color.
 
 ## Sample points on a mesh
 

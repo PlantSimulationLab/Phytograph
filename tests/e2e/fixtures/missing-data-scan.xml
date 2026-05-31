@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!--
+  Two scans whose <filename> point-cloud files do NOT exist anywhere (no
+  sibling on disk, not an absolute path). The E2E import-failure spec stubs the
+  "Locate file" dialog to cancel, so every scan fails to load its point data.
+  This exercises the all-or-nothing import path: no scans must be created.
+-->
+<helios>
+<scan>
+  <filename> does_not_exist_0.xyz </filename>
+  <origin> 0.0 0.0 0.0 </origin>
+  <size> 10 10 </size>
+</scan>
+<scan>
+  <filename> does_not_exist_1.xyz </filename>
+  <origin> 1.0 0.0 0.0 </origin>
+  <size> 10 10 </size>
+</scan>
+</helios>

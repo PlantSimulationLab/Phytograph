@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings } from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Palette } from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, segmentGround, segmentGroundApply, segmentTrees, segmentTreesApply, type CropOctreeRegion, type CropOctreeResult, type BackendPointSource } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -14,7 +14,7 @@ import {
   COLORMAP_LABELS,
 } from '../lib/colormaps';
 import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenerationPopup';
-import { HeliosTriangulationPopup } from './HeliosTriangulationPopup';
+import { HeliosTriangulationPopup, type GridOption } from './HeliosTriangulationPopup';
 import { MorphPopup } from './MorphPopup';
 import { ScanParametersPopup } from './ScanParametersPopup';
 import { ScannerMarker } from './ScannerMarker';
@@ -36,6 +36,12 @@ import {
   fuzzyMatch,
   generateShapeMesh,
   octreeScalarFieldOptions,
+  voxelMeshToHeliosGrid,
+  buildMeshTriangleColorBuffers,
+  buildMeshScanColorBuffers,
+  computeMeshTriangleScalars,
+  meshColorModeLabel,
+  meshHasScanColors,
 } from '../lib/pointCloudHelpers';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
@@ -77,6 +83,7 @@ import type {
   SkeletonData,
   SkeletonEntry,
   ColorMode,
+  MeshColorMode,
   ShapeType,
   FilterRange,
   CloudFilters,
@@ -248,6 +255,12 @@ export default function PointCloudViewer({
   const [meshes, setMeshes] = useState<MeshEntry[]>([]);
   const [meshOpacity, setMeshOpacity] = useState(0.7);
   const [meshWireframe, setMeshWireframe] = useState(false);
+  // Per-mesh pseudocolor mode (color by inclination / azimuth / area / scan).
+  // Absent entry means 'solid'. The colormap is shared with point-cloud scalar
+  // modes.
+  const [meshColorModes, setMeshColorModes] = useState<Map<string, MeshColorMode>>(new Map());
+  // Which mesh rows have their inline "Color by" section expanded.
+  const [expandedMeshIds, setExpandedMeshIds] = useState<Set<string>>(new Set());
 
   // Triangulation state
   const [showTriangulationPanel, setShowTriangulationPanel] = useState(false);
@@ -5707,8 +5720,110 @@ export default function PointCloudViewer({
     }, 50);
   }, [shapeCounter, onDeselectAll]);
 
-  // Handle Helios triangulation as a background task with cancel support
-  const handleHeliosTriangulate = useCallback(async (request: HeliosTriangulationRequest) => {
+  // Voxel boxes the user can pick as the Helios triangulation grid. A voxel
+  // mesh carries `gridSubdivisions`; its world center/size come from the
+  // mesh's position/scale transforms. Other shapes (sphere, cylinder…) and
+  // triangulated meshes are excluded.
+  const heliosGridOptions = useMemo<GridOption[]>(() => {
+    const options: GridOption[] = [];
+    for (const m of meshes) {
+      if (!m.gridSubdivisions) continue;
+      const grid = voxelMeshToHeliosGrid(
+        meshPositions.get(m.id),
+        meshScales.get(m.id),
+        m.gridSubdivisions,
+      );
+      if (!grid) continue;
+      const sx = grid.size[0], sy = grid.size[1], sz = grid.size[2];
+      const fmt = (n: number) => Number(n.toFixed(2)).toString();
+      options.push({
+        id: m.id,
+        label: `Voxel box (${fmt(sx)}×${fmt(sy)}×${fmt(sz)} m, ${grid.nx}×${grid.ny}×${grid.nz})`,
+        grid,
+      });
+    }
+    return options;
+  }, [meshes, meshPositions, meshScales]);
+
+  // Whether a mesh was produced by triangulating a point cloud (standard or
+  // Helios) — as opposed to a procedural plant, a shape/voxel primitive, or an
+  // imported OBJ. Only these meshes get the per-triangle "Color by" control,
+  // since the geometric/scan scalars are meaningful for reconstructed surfaces.
+  // Helios meshes use sourceCloudId 'helios'; standard triangulations point at
+  // a real cloud id. Plants/shapes/imports use synthetic ids ('plant-…',
+  // 'shape-…', 'imported') that won't match a cloud and aren't plants here.
+  const isTriangulatedMesh = useCallback((mesh: MeshEntry): boolean => {
+    if (mesh.isPlant) return false;
+    if (mesh.method === 'helios' || mesh.sourceCloudId === 'helios') return true;
+    return clouds.some(c => c.id === mesh.sourceCloudId);
+  }, [clouds]);
+
+  // Per-triangle pseudocolor buffers for any mesh with a non-solid color mode.
+  // Keyed by mesh id; entry is the non-indexed position/color buffers fed to
+  // TriangleMesh. Recomputed only when the mesh set, its modes, or the shared
+  // colormap change — the per-triangle scalar pass is O(triangles).
+  const meshTriangleColors = useMemo(() => {
+    const out = new Map<string, { positions: Float32Array; colors: Float32Array }>();
+    for (const mesh of meshes) {
+      const mode = meshColorModes.get(mesh.id);
+      if (!mode || mode === 'solid') continue;
+      // 'scan' is categorical (per-scan swatch); the rest are scalar gradients.
+      const built = mode === 'scan'
+        ? buildMeshScanColorBuffers(mesh.data)
+        : buildMeshTriangleColorBuffers(mesh.data, mode, colormap);
+      if (built) out.set(mesh.id, { positions: built.positions, colors: built.colors });
+    }
+    return out;
+  }, [meshes, meshColorModes, colormap]);
+
+  // Gradient colorbar range for the selected mesh's scalar pseudocolor mode
+  // (inclination/azimuth/area). Null for 'solid' and the categorical 'scan'
+  // mode (which gets a legend instead).
+  // The mesh whose pseudocolor readout (colorbar or scan legend) is shown. A
+  // legend should be visible whenever a mesh is being pseudocolored, not only
+  // while it's selected — so prefer the selected mesh if it has an active mode,
+  // otherwise fall back to any mesh that does (typically just one at a time).
+  const activeColorMesh = useMemo(() => {
+    const hasMode = (m: MeshEntry) => {
+      const mode = meshColorModes.get(m.id);
+      return !!mode && mode !== 'solid';
+    };
+    if (selectedMesh && hasMode(selectedMesh)) return selectedMesh;
+    return meshes.find(hasMode) ?? null;
+  }, [selectedMesh, meshes, meshColorModes]);
+
+  // Gradient colorbar range for the active mesh's scalar mode
+  // (inclination/azimuth/area). Null for 'solid' and the categorical 'scan'
+  // mode (which gets a legend instead).
+  const activeMeshColorInfo = useMemo(() => {
+    if (!activeColorMesh) return null;
+    const mode = meshColorModes.get(activeColorMesh.id);
+    if (!mode || mode === 'solid' || mode === 'scan') return null;
+    const scalars = computeMeshTriangleScalars(activeColorMesh.data, mode);
+    if (!scalars) return null;
+    return { mode, min: scalars.min, max: scalars.max, label: meshColorModeLabel(mode) };
+  }, [activeColorMesh, meshColorModes]);
+
+  // Per-scan legend entries (color + count) when the active mesh is colored by
+  // source scan. Null otherwise.
+  const activeMeshScanLegend = useMemo(() => {
+    if (!activeColorMesh) return null;
+    if (meshColorModes.get(activeColorMesh.id) !== 'scan') return null;
+    const { triangleScanIds, scanColors } = activeColorMesh.data;
+    if (!triangleScanIds || !scanColors) return null;
+    const counts = new Array(scanColors.length).fill(0);
+    for (let i = 0; i < triangleScanIds.length; i++) {
+      const sid = triangleScanIds[i];
+      if (sid >= 0 && sid < counts.length) counts[sid]++;
+    }
+    return scanColors.map((color, i) => ({ color, count: counts[i], index: i }))
+      .filter(e => e.count > 0);
+  }, [activeColorMesh, meshColorModes]);
+
+  // Handle Helios triangulation as a background task with cancel support.
+  // `scanColors` is aligned 1:1 with request.scans so we can stash per-triangle
+  // scan provenance (and the matching colors) on the resulting mesh.
+  const handleHeliosTriangulate = useCallback(async (request: HeliosTriangulationRequest, scanColors: string[] = []) => {
     if (isHeliosRunning) return;
 
     const abort = new AbortController();
@@ -5758,6 +5873,14 @@ export default function PointCloudViewer({
         }
       }
 
+      // Per-triangle scan provenance + the matching scan colors, so the mesh
+      // can be colored by source scan. Only attach when the backend returned
+      // ids aligned with the triangle list and we have colors for them.
+      const triangleScanIds = response.triangle_scan_ids
+        && response.triangle_scan_ids.length === response.num_triangles
+        ? Uint32Array.from(response.triangle_scan_ids)
+        : undefined;
+
       const meshData: MeshData = {
         vertices,
         indices,
@@ -5766,6 +5889,8 @@ export default function PointCloudViewer({
         vertexCount: response.num_vertices,
         triangleCount: response.num_triangles,
         surfaceArea: response.surface_area,
+        triangleScanIds,
+        scanColors: triangleScanIds && scanColors.length > 0 ? scanColors : undefined,
       };
 
       const meshEntry: MeshEntry = {
@@ -5784,6 +5909,16 @@ export default function PointCloudViewer({
         title: 'Helios Triangulation Complete',
         message: `Created mesh with ${meshData.triangleCount.toLocaleString()} triangles`,
       });
+      // No grid box was supplied: the backend fit one to all points. Warn so
+      // the user knows ground/trunk should already be segmented or cropped.
+      if (response.grid_warning) {
+        showToast({
+          type: 'warning',
+          title: 'No grid box specified',
+          message: response.grid_message
+            || 'Triangulated all points within their bounding box. This assumes ground and trunk are already segmented or cropped.',
+        });
+      }
     } catch (err) {
       if (abort.signal.aborted) return;
       showToast({
@@ -6871,6 +7006,7 @@ export default function PointCloudViewer({
                   opacity={meshOpacity}
                   wireframe={meshWireframe}
                   useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
+                  triangleColors={meshTriangleColors.get(mesh.id) ?? null}
                 />
               )}
               {mesh.gridSubdivisions &&
@@ -7790,9 +7926,14 @@ export default function PointCloudViewer({
                       ? `${mesh.plantType} canopy ${mesh.plantCanopy.countX}×${mesh.plantCanopy.countY} (${mesh.plantAge}d)`
                       : `${mesh.plantType} (${mesh.plantAge}d)`)
                   : (sourceCloud?.data.fileName || 'Mesh');
+                // Only triangulated surfaces (standard / Helios) expose the
+                // per-triangle "Color by" control.
+                const canColorByTriangle = isTriangulatedMesh(mesh);
+                const isExpanded = expandedMeshIds.has(mesh.id);
+                const colorMode = meshColorModes.get(mesh.id) ?? 'solid';
                 return (
+                  <div key={mesh.id}>
                   <div
-                    key={mesh.id}
                     data-testid="mesh-row"
                     data-mesh-name={displayName}
                     data-triangle-count={mesh.data.triangleCount}
@@ -7804,6 +7945,29 @@ export default function PointCloudViewer({
                       isSelected ? 'bg-green-600/30 border border-green-500/50' : 'hover:bg-neutral-700/50'
                     }`}
                   >
+                    {/* Expander for the per-mesh Color-by section (triangulated
+                        meshes only); a spacer keeps other rows aligned. */}
+                    {canColorByTriangle ? (
+                      <button
+                        data-testid="mesh-color-expand"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setExpandedMeshIds(prev => {
+                            const next = new Set(prev);
+                            if (next.has(mesh.id)) next.delete(mesh.id); else next.add(mesh.id);
+                            return next;
+                          });
+                        }}
+                        className="p-0.5 hover:bg-neutral-600 rounded flex-shrink-0"
+                        title="Color options"
+                      >
+                        {isExpanded
+                          ? <ChevronDown className="w-3 h-3 text-neutral-400" />
+                          : <ChevronRight className="w-3 h-3 text-neutral-400" />}
+                      </button>
+                    ) : (
+                      <div className="w-4 flex-shrink-0" />
+                    )}
                     {mesh.isPlant ? (
                       <Leaf className="w-3 h-3 flex-shrink-0 text-green-400" />
                     ) : (
@@ -7841,6 +8005,52 @@ export default function PointCloudViewer({
                     >
                       <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
                     </button>
+                  </div>
+
+                  {/* Inline Color-by section, expanded from the chevron. */}
+                  {canColorByTriangle && isExpanded && (
+                    <div className="ml-7 mr-2 mb-1 p-2 bg-neutral-900/50 rounded space-y-1.5">
+                      <div className="text-[10px] text-neutral-400 flex items-center gap-1">
+                        <Palette className="w-3 h-3" />
+                        Color by
+                      </div>
+                      <select
+                        data-testid="mesh-color-mode"
+                        value={colorMode}
+                        onChange={(e) => {
+                          const mode = e.target.value as MeshColorMode;
+                          setMeshColorModes(prev => {
+                            const next = new Map(prev);
+                            if (mode === 'solid') next.delete(mesh.id);
+                            else next.set(mesh.id, mode);
+                            return next;
+                          });
+                        }}
+                        className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                      >
+                        <option value="solid">Solid color</option>
+                        <option value="inclination">Inclination (zenith of normal)</option>
+                        <option value="azimuth">Azimuth (of normal)</option>
+                        <option value="area">Triangle area</option>
+                        {meshHasScanColors(mesh.data) && (
+                          <option value="scan">Source scan</option>
+                        )}
+                      </select>
+                      {/* Colormap picker applies only to the scalar gradient modes. */}
+                      {!['solid', 'scan'].includes(colorMode) && (
+                        <select
+                          data-testid="mesh-color-colormap"
+                          value={colormap}
+                          onChange={(e) => setColormap(e.target.value as ColormapName)}
+                          className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                        >
+                          {COLORMAP_NAMES.map(name => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  )}
                   </div>
                 );
               })}
@@ -8374,6 +8584,7 @@ export default function PointCloudViewer({
                 <>
                   {/* 1. Transform (position + rotation + scale) */}
                   <button
+                    data-testid="tool-mesh-transform"
                     onClick={() => setShowResizePanel(!showResizePanel)}
                     className={`p-2 rounded transition-colors ${showResizePanel ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
                     title="Transform"
@@ -11270,6 +11481,52 @@ export default function PointCloudViewer({
         </div>
       )}
 
+      {/* Mesh pseudocolor colorbar — shown whenever a mesh is colored by
+          inclination/azimuth/area (selected or not). Sits just above the
+          point-cloud colorbar slot so both can be visible at once. */}
+      {activeMeshColorInfo && (
+        <div
+          className={`absolute bottom-4 z-20 ${isScalarColorMode && activeRange && dataRange ? 'right-[360px]' : 'right-56'}`}
+          data-testid="mesh-colorbar"
+          data-colorbar-label={activeMeshColorInfo.label}
+          data-colorbar-min={activeMeshColorInfo.min}
+          data-colorbar-max={activeMeshColorInfo.max}
+        >
+          <Colorbar
+            colormap={colormap}
+            min={activeMeshColorInfo.min}
+            max={activeMeshColorInfo.max}
+            label={activeMeshColorInfo.label}
+          />
+        </div>
+      )}
+
+      {/* Source-scan legend — shown when a mesh is colored by scan. One swatch
+          per contributing scan, with its triangle count. */}
+      {activeMeshScanLegend && activeMeshScanLegend.length > 0 && (
+        <div
+          className={`absolute bottom-4 z-20 ${isScalarColorMode && activeRange && dataRange ? 'right-[360px]' : 'right-56'}`}
+          data-testid="mesh-scan-legend"
+          data-scan-count={activeMeshScanLegend.length}
+        >
+          <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg px-2.5 py-2 border border-neutral-700/50 select-none max-w-[200px]">
+            <div className="text-[10px] text-neutral-300 mb-1.5">Source scan</div>
+            <div className="space-y-1 max-h-[200px] overflow-y-auto">
+              {activeMeshScanLegend.map(entry => (
+                <div key={entry.index} className="flex items-center gap-2 text-[10px] text-neutral-300">
+                  <span
+                    className="w-3 h-3 rounded-sm border border-neutral-600 flex-shrink-0"
+                    style={{ backgroundColor: entry.color }}
+                  />
+                  <span className="flex-1 truncate">Scan {entry.index + 1}</span>
+                  <span className="text-neutral-500">{entry.count.toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Display Settings Panel */}
       <div className="absolute bottom-4 right-4 bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-48 overflow-hidden">
         {/* Collapsible Header */}
@@ -11663,6 +11920,7 @@ export default function PointCloudViewer({
         isOpen={showHeliosPopup}
         onClose={() => setShowHeliosPopup(false)}
         scans={scans}
+        gridOptions={heliosGridOptions}
         onStartTriangulate={handleHeliosTriangulate}
         initialSelectedIds={selectedScanIds}
         onOpenScanParams={(id) => {
@@ -11753,7 +12011,13 @@ export default function PointCloudViewer({
           const offset = scans.length;
           const newScans: Scan[] = [];
           let attachedCount = 0;
-          let attachFailed = 0;
+          // Failures attaching point data are fatal to the whole import:
+          // committing scans without points leaves the user with empty,
+          // useless entries (e.g. when the backend is down). We collect
+          // failures here and, if any occurred, abort without adding any
+          // scans so the user can fix the cause and re-import. See the
+          // throw-on-failure block after the loop.
+          const failures: { label: string; reason: string }[] = [];
           // Show the progress modal immediately so the user knows the import
           // is in flight — backend parsing of a multi-GB scan can take 30s+
           // and the launching popup has already closed.
@@ -11782,19 +12046,35 @@ export default function PointCloudViewer({
               if (h.filename) {
                 try {
                   const resolved = await resolveAttachedScanFile(h.filename, xmlDir);
-                  if (resolved) {
-                    const data = await parsePointCloudFromPath(resolved, h.asciiFormat);
-                    scan.data = data;
-                    scan.sourcePath = resolved;
-                    scan.asciiFormat = h.asciiFormat;
-                    attachedCount += 1;
+                  if (!resolved) {
+                    throw new Error(`could not locate file "${h.filename}"`);
                   }
+                  const data = await parsePointCloudFromPath(resolved, h.asciiFormat);
+                  scan.data = data;
+                  scan.sourcePath = resolved;
+                  scan.asciiFormat = h.asciiFormat;
+                  attachedCount += 1;
                 } catch (err) {
-                  attachFailed += 1;
+                  const reason = err instanceof Error ? err.message : String(err);
+                  failures.push({ label: scan.label, reason });
                   console.warn(`Could not attach point cloud for ${scan.label}:`, err);
                 }
               }
               newScans.push(scan);
+            }
+            // All-or-nothing: if any scan's point data failed to load, commit
+            // nothing and tell the user to fix it and re-import. Half-imported
+            // scans with no points can't happen for a real user.
+            if (failures.length > 0) {
+              const detail = failures
+                .slice(0, 3)
+                .map(f => `${f.label}: ${f.reason}`)
+                .join('; ');
+              const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
+              throw new Error(
+                `${failures.length} of ${heliosScans.length} scan(s) could not load point data — ${detail}${more}. ` +
+                  `No scans were imported; fix the issue and re-import.`,
+              );
             }
             onAddScans?.(newScans);
             if (newScans.length > 0) {
@@ -11802,12 +12082,13 @@ export default function PointCloudViewer({
             }
             const parts = [`${newScans.length} scan(s)`];
             if (attachedCount > 0) parts.push(`${attachedCount} with data`);
-            if (attachFailed > 0) parts.push(`${attachFailed} attach failed`);
-            showToast({ title: `Imported ${parts.join(', ')}`, type: attachFailed > 0 ? 'info' : 'success' });
+            showToast({ title: `Imported ${parts.join(', ')}`, type: 'success' });
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             console.error('Bulk import failed:', err);
-            showToast({ title: `Import failed: ${msg}`, type: 'error' });
+            // Persist (duration 0): a hard "nothing was imported" failure must
+            // not flash away in 3s — the user needs to read it and act.
+            showToast({ title: `Import failed: ${msg}`, type: 'error', duration: 0 });
           } finally {
             // Always clear the modal — leaving it up would lock the UI.
             setBulkImportProgress(null);

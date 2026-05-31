@@ -5,7 +5,223 @@ import {
   fuzzyMatch,
   generateShapeMesh,
   octreeScalarFieldOptions,
+  voxelMeshToHeliosGrid,
+  computeMeshTriangleScalars,
+  buildMeshTriangleColorBuffers,
+  buildMeshScanColorBuffers,
+  meshHasScanColors,
+  meshColorModeLabel,
 } from './pointCloudHelpers';
+import type { MeshData } from './pointCloudTypes';
+
+// Build a minimal MeshData from a flat vertex list and triangle index list.
+function makeMesh(
+  vertices: number[],
+  indices: number[],
+  extra?: Partial<MeshData>,
+): MeshData {
+  return {
+    vertices: new Float32Array(vertices),
+    indices: new Uint32Array(indices),
+    vertexCount: vertices.length / 3,
+    triangleCount: indices.length / 3,
+    ...extra,
+  };
+}
+
+describe('computeMeshTriangleScalars', () => {
+  it('returns null for solid mode', () => {
+    const mesh = makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]);
+    expect(computeMeshTriangleScalars(mesh, 'solid')).toBeNull();
+  });
+
+  it('reports 0deg inclination for a horizontal (XY-plane) triangle', () => {
+    const mesh = makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]);
+    const r = computeMeshTriangleScalars(mesh, 'inclination')!;
+    expect(r.values[0]).toBeCloseTo(0, 5);
+  });
+
+  it('reports 90deg inclination for a vertical triangle', () => {
+    // Triangle in the XZ plane → normal points along ±Y → vertical face.
+    const mesh = makeMesh([0, 0, 0, 1, 0, 0, 0, 0, 1], [0, 1, 2]);
+    const r = computeMeshTriangleScalars(mesh, 'inclination')!;
+    expect(r.values[0]).toBeCloseTo(90, 4);
+  });
+
+  it('folds up- and down-facing triangles to the same inclination', () => {
+    const up = makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]);
+    const down = makeMesh([0, 0, 0, 0, 1, 0, 1, 0, 0], [0, 1, 2]); // reversed winding
+    const a = computeMeshTriangleScalars(up, 'inclination')!.values[0];
+    const b = computeMeshTriangleScalars(down, 'inclination')!.values[0];
+    expect(a).toBeCloseTo(b, 5);
+  });
+
+  it('computes triangle area from the cross product', () => {
+    // Right triangle with legs 3 and 4 → area 6.
+    const mesh = makeMesh([0, 0, 0, 3, 0, 0, 0, 4, 0], [0, 1, 2]);
+    const r = computeMeshTriangleScalars(mesh, 'area')!;
+    expect(r.values[0]).toBeCloseTo(6, 5);
+    expect(r.min).toBeCloseTo(6, 5);
+    expect(r.max).toBeCloseTo(6, 5);
+  });
+
+  it('reports azimuth in [0,360) for a tilted face', () => {
+    // A face tilted so its normal has a +X horizontal component → azimuth ~0deg.
+    // Triangle slightly lifted along +x gives a normal leaning toward +X.
+    const mesh = makeMesh([0, 0, 0, 0, 1, 0, 1, 0, 1], [0, 1, 2]);
+    const r = computeMeshTriangleScalars(mesh, 'azimuth')!;
+    const az = r.values[0];
+    expect(Number.isFinite(az)).toBe(true);
+    expect(az).toBeGreaterThanOrEqual(0);
+    expect(az).toBeLessThan(360);
+  });
+
+  it('azimuth is independent of triangle winding (no random 180deg flip)', () => {
+    // Same tilted facet, opposite vertex order → opposite raw cross-product
+    // normal. Orienting normals to the upper hemisphere must yield the same
+    // azimuth, instead of one being 180deg off the other.
+    const verts = [0, 0, 0, 0, 1, 0, 1, 0, 1];
+    const cw = computeMeshTriangleScalars(makeMesh(verts, [0, 1, 2]), 'azimuth')!.values[0];
+    const ccw = computeMeshTriangleScalars(makeMesh(verts, [0, 2, 1]), 'azimuth')!.values[0];
+    expect(cw).toBeCloseTo(ccw, 4);
+  });
+
+  it('azimuth points along +X for a facet whose oriented normal leans east', () => {
+    // A facet whose upward normal has +X horizontal component → bearing 0deg
+    // (atan2(0, +x)). Reversing winding must not change it.
+    const verts = [0, 0, 0, 0, 1, 0, -1, 0, 1]; // normal leans toward +X when z>=0
+    const a = computeMeshTriangleScalars(makeMesh(verts, [0, 1, 2]), 'azimuth')!.values[0];
+    const b = computeMeshTriangleScalars(makeMesh(verts, [0, 2, 1]), 'azimuth')!.values[0];
+    expect(a).toBeCloseTo(b, 4);
+    expect(a).toBeCloseTo(0, 3);
+  });
+});
+
+describe('buildMeshTriangleColorBuffers', () => {
+  it('returns null for solid mode', () => {
+    const mesh = makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]);
+    expect(buildMeshTriangleColorBuffers(mesh, 'solid', 'viridis')).toBeNull();
+  });
+
+  it('expands to non-indexed buffers (9 floats per triangle) with one color per face', () => {
+    // Two triangles sharing an edge.
+    const mesh = makeMesh(
+      [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0],
+      [0, 1, 2, 1, 3, 2],
+    );
+    const out = buildMeshTriangleColorBuffers(mesh, 'area', 'viridis')!;
+    expect(out.positions).toHaveLength(2 * 9);
+    expect(out.colors).toHaveLength(2 * 9);
+    // All three vertices of triangle 0 share one color.
+    const c0 = out.colors.slice(0, 3);
+    const c1 = out.colors.slice(3, 6);
+    const c2 = out.colors.slice(6, 9);
+    expect(Array.from(c1)).toEqual(Array.from(c0));
+    expect(Array.from(c2)).toEqual(Array.from(c0));
+    // First expanded position matches the first vertex of the first triangle.
+    expect(out.positions[0]).toBe(0);
+    expect(out.positions[3]).toBe(1); // second vertex x
+  });
+
+  it('honors a range override for normalization', () => {
+    const mesh = makeMesh([0, 0, 0, 3, 0, 0, 0, 4, 0], [0, 1, 2]); // area 6
+    const out = buildMeshTriangleColorBuffers(mesh, 'area', 'viridis', { min: 0, max: 12 })!;
+    expect(out.min).toBe(0);
+    expect(out.max).toBe(12);
+  });
+});
+
+describe('meshColorModeLabel', () => {
+  it('labels each gradient mode and leaves solid blank', () => {
+    expect(meshColorModeLabel('inclination')).toMatch(/inclination/i);
+    expect(meshColorModeLabel('azimuth')).toMatch(/azimuth/i);
+    expect(meshColorModeLabel('area')).toMatch(/area/i);
+    expect(meshColorModeLabel('scan')).toMatch(/scan/i);
+    expect(meshColorModeLabel('solid')).toBe('');
+  });
+});
+
+describe('meshHasScanColors / buildMeshScanColorBuffers', () => {
+  // Two triangles: triangle 0 from scan 0 (red), triangle 1 from scan 1 (blue).
+  const twoScanMesh = () => makeMesh(
+    [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0],
+    [0, 1, 2, 1, 3, 2],
+    {
+      triangleScanIds: new Uint32Array([0, 1]),
+      scanColors: ['#ff0000', '#0000ff'],
+    },
+  );
+
+  it('detects scan provenance only when ids + colors are present and aligned', () => {
+    expect(meshHasScanColors(twoScanMesh())).toBe(true);
+    expect(meshHasScanColors(makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]))).toBe(false);
+    // ids present but mismatched length → not usable.
+    expect(meshHasScanColors(makeMesh(
+      [0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2],
+      { triangleScanIds: new Uint32Array([0, 1]), scanColors: ['#fff'] },
+    ))).toBe(false);
+  });
+
+  it('returns null when the mesh has no scan provenance', () => {
+    expect(buildMeshScanColorBuffers(makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]))).toBeNull();
+  });
+
+  it('colors each triangle with its scan color (non-indexed, 9 floats/triangle)', () => {
+    const out = buildMeshScanColorBuffers(twoScanMesh())!;
+    expect(out.positions).toHaveLength(2 * 9);
+    expect(out.colors).toHaveLength(2 * 9);
+    // Triangle 0 → red on all three vertices.
+    for (let k = 0; k < 3; k++) {
+      expect(out.colors[k * 3]).toBeCloseTo(1, 5);     // R
+      expect(out.colors[k * 3 + 1]).toBeCloseTo(0, 5); // G
+      expect(out.colors[k * 3 + 2]).toBeCloseTo(0, 5); // B
+    }
+    // Triangle 1 → blue on all three vertices.
+    for (let k = 3; k < 6; k++) {
+      expect(out.colors[k * 3]).toBeCloseTo(0, 5);
+      expect(out.colors[k * 3 + 1]).toBeCloseTo(0, 5);
+      expect(out.colors[k * 3 + 2]).toBeCloseTo(1, 5);
+    }
+  });
+});
+
+describe('voxelMeshToHeliosGrid', () => {
+  it('returns null when the mesh has no grid subdivisions (not a voxel box)', () => {
+    expect(voxelMeshToHeliosGrid({ x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 }, undefined)).toBeNull();
+  });
+
+  it('maps a unit-cube voxel box to center=position, size=scale, cells=subdivisions', () => {
+    const grid = voxelMeshToHeliosGrid(
+      { x: 2, y: -3, z: 0.5 },
+      { x: 4, y: 6, z: 1 },
+      { x: 2, y: 3, z: 1 },
+    );
+    expect(grid).toEqual({
+      center: [2, -3, 0.5],
+      size: [4, 6, 1],
+      nx: 2,
+      ny: 3,
+      nz: 1,
+    });
+  });
+
+  it('defaults missing position/scale to origin / unit size', () => {
+    const grid = voxelMeshToHeliosGrid(undefined, undefined, { x: 1, y: 1, z: 1 });
+    expect(grid).toEqual({ center: [0, 0, 0], size: [1, 1, 1], nx: 1, ny: 1, nz: 1 });
+  });
+
+  it('rounds and clamps subdivisions to at least one cell per axis', () => {
+    const grid = voxelMeshToHeliosGrid(
+      { x: 0, y: 0, z: 0 },
+      { x: 1, y: 1, z: 1 },
+      { x: 0, y: 2.6, z: -5 },
+    );
+    expect(grid).not.toBeNull();
+    expect(grid!.nx).toBe(1); // clamped up from 0
+    expect(grid!.ny).toBe(3); // rounded from 2.6
+    expect(grid!.nz).toBe(1); // clamped up from -5
+  });
+});
 
 describe('formatColorbarTick', () => {
   it('renders an em-dash for non-finite values', () => {

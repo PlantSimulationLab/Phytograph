@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+
+<!--
+  Mirror of pyhelios/helios-core/plugins/lidar/xml/sphere.xml, but with the
+  <filename> paths made relative to this XML so Phytograph's importer resolves
+  them alongside the XML (the four sphere_scan*.xyz files are copied here from
+  the lidar plugin's data directory). Four discrete-return scans of a unit
+  sphere from four origins; each is a 100x200 angular grid. The C++ lidar
+  self-test ("LiDAR Single Voxel Sphere Test") triangulates this exact data and
+  expects ~383 triangles; the Phytograph E2E test reproduces it through the UI.
+-->
+
+<helios>
+
+<scan>
+  <filename> sphere_scan0.xyz </filename>
+  <ASCII_format> row column x y z r g b reflectance </ASCII_format>
+  <origin> -2.000000 0.000000 0.500000 </origin>
+  <size> 100 200 </size>
+</scan>
+
+<scan>
+  <filename> sphere_scan1.xyz </filename>
+  <ASCII_format> row column x y z r g b reflectance </ASCII_format>
+  <origin> 0.000000 -2.000000 0.500000 </origin>
+  <size> 100 200 </size>
+</scan>
+
+<scan>
+  <filename> sphere_scan2.xyz </filename>
+  <ASCII_format> row column x y z r g b reflectance </ASCII_format>
+  <origin> 2.000000 0.000000 0.500000 </origin>
+  <size> 100 200 </size>
+</scan>
+
+<scan>
+  <filename> sphere_scan3.xyz </filename>
+  <ASCII_format> row column x y z r g b reflectance </ASCII_format>
+  <origin> 0.000000 2.000000 0.500000 </origin>
+  <size> 100 200 </size>
+</scan>
+
+</helios>

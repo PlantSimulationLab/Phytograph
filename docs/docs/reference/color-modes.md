@@ -67,6 +67,17 @@ and the legend lists Tree 1, Tree 2, …, with unassigned points in grey.
 | **Distance** | Color by per-vertex distance (set automatically after C2M / M2M) | Reading registration heatmaps. |
 | **Vertex Color** | Per-vertex colors from the file | If the mesh has them. |
 | **Branch Order** | Color by branch order (Helios-generated plants) | Comparing trunk vs. side branches in procedural plants. |
+| **Inclination** | Per-triangle zenith of the face normal, folded to 0–90° | Reading surface tilt — flat vs. steep facets on a reconstruction. |
+| **Azimuth** | Per-triangle compass bearing of the face normal, 0–360° | Seeing which way facets face. |
+| **Triangle Area** | Per-triangle surface area | Spotting over-large bridging triangles or uneven tessellation. |
+| **Source Scan** | Each triangle in the color of the scan it came from (Helios multi-scan meshes) | Seeing scan coverage / overlap on a Helios reconstruction. |
+
+Inclination / Azimuth / Triangle Area are set from the **Color by**
+control that expands from a triangulation-generated mesh's row in the
+**Meshes** panel (click the row's chevron). They share the scalar
+colormap selector and bottom-right colorbar. **Source Scan** is offered
+there too for Helios meshes built from more than one scan; it uses each
+scan's swatch color and shows a per-scan legend instead of a colorbar.
 
 ## Per-skeleton color modes
 

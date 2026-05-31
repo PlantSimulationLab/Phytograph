@@ -127,7 +127,23 @@ export interface MeshData {
   vertexCount: number;
   triangleCount: number;
   surfaceArea?: number;
+  // Helios-only provenance: source scan index per triangle (aligned 1:1 with
+  // `indices`/3), plus the display color of each scan as a hex string keyed by
+  // that index. Present when a multi-scan Helios mesh was built; drives the
+  // 'scan' pseudocolor mode. Absent for cloud-only / plant / shape meshes.
+  triangleScanIds?: Uint32Array;
+  scanColors?: string[];
 }
+
+// Per-triangle pseudocolor modes for a triangulated mesh. 'solid' uses the
+// mesh's label color (or its baked vertex colors); the others color each
+// triangle by a geometric scalar derived from its face normal / area.
+//   inclination — zenith of the face normal (0deg = horizontal, 90deg = vertical)
+//   azimuth     — compass direction the face normal points (0..360deg)
+//   area        — triangle surface area
+//   scan        — the source scan each triangle came from, in that scan's color
+//                 (Helios multi-scan meshes only)
+export type MeshColorMode = 'solid' | 'inclination' | 'azimuth' | 'area' | 'scan';
 
 // Material definition for textured meshes
 export interface PlantMaterialDef {

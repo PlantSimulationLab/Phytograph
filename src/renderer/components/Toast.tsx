@@ -16,7 +16,12 @@ interface ToastProps {
 
 function Toast({ toast, onClose }: ToastProps) {
   useEffect(() => {
-    if (toast.duration !== 0) {
+    // Error toasts persist until the user dismisses them — a failure the user
+    // misses is worse than a stale toast. They can still set an explicit
+    // duration to override. Non-errors auto-dismiss after `duration` (3s
+    // default). `duration: 0` forces persistence for any type.
+    const persist = toast.duration === 0 || (toast.type === 'error' && toast.duration === undefined);
+    if (!persist) {
       const timer = setTimeout(() => {
         onClose(toast.id);
       }, toast.duration || 3000);
@@ -39,12 +44,15 @@ function Toast({ toast, onClose }: ToastProps) {
   };
 
   return (
-    <div className={`flex items-start gap-3 p-4 rounded-lg border backdrop-blur-md ${backgrounds[toast.type]} animate-slide-in`}>
+    <div
+      data-testid={`toast-${toast.type}`}
+      className={`flex items-start gap-3 p-4 rounded-lg border backdrop-blur-md ${backgrounds[toast.type]} animate-slide-in`}
+    >
       {icons[toast.type]}
       <div className="flex-1">
-        <p className="font-medium text-white">{toast.title}</p>
+        <p data-testid="toast-title" className="font-medium text-white">{toast.title}</p>
         {toast.message && (
-          <p className="text-sm text-white/70 mt-1">{toast.message}</p>
+          <p data-testid="toast-message" className="text-sm text-white/70 mt-1">{toast.message}</p>
         )}
       </div>
       <button

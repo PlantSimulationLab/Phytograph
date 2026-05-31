@@ -1,7 +1,9 @@
 // Pure, stateless helpers extracted from PointCloudViewer.tsx. No React, no
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
-import type { MeshData, ShapeType } from './pointCloudTypes';
+import type { MeshData, ShapeType, MeshColorMode } from './pointCloudTypes';
+import type { HeliosGrid } from '../utils/backendApi';
+import { sampleColormap, type ColormapName } from './colormaps';
 
 // Format a numeric range tick so the colorbar labels stay readable across
 // many orders of magnitude.
@@ -30,6 +32,219 @@ export function computeBoundsFromPositions(positions: Float32Array, count: numbe
   const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
   const size = new THREE.Vector3().subVectors(max, min);
   return { center, size };
+}
+
+// Convert a voxel-box mesh into the explicit Helios triangulation grid the
+// backend expects. A voxel shape's base geometry is a unit cube spanning
+// ±0.5, so its world center is the mesh position and its world size equals the
+// mesh scale directly. `subdivisions` becomes the grid's per-axis cell count
+// (defaulting to a single cell when unset). Returns null when the mesh carries
+// no grid subdivisions (i.e. it isn't a voxel box).
+export function voxelMeshToHeliosGrid(
+  position: { x: number; y: number; z: number } | undefined,
+  scale: { x: number; y: number; z: number } | undefined,
+  subdivisions: { x: number; y: number; z: number } | undefined,
+): HeliosGrid | null {
+  if (!subdivisions) return null;
+  const p = position ?? { x: 0, y: 0, z: 0 };
+  const s = scale ?? { x: 1, y: 1, z: 1 };
+  return {
+    center: [p.x, p.y, p.z],
+    size: [s.x, s.y, s.z],
+    nx: Math.max(1, Math.round(subdivisions.x)),
+    ny: Math.max(1, Math.round(subdivisions.y)),
+    nz: Math.max(1, Math.round(subdivisions.z)),
+  };
+}
+
+// Compute one scalar per triangle of a mesh for a given pseudocolor mode.
+// Returns the per-triangle values plus their finite min/max (for the colorbar).
+// 'solid' returns null — there's nothing to scale.
+//   inclination: angle between the face normal and the +Z axis, in degrees,
+//                folded to [0,90] so up- and down-facing faces read the same
+//                (a horizontal face is 0deg, a vertical one 90deg).
+//   azimuth:     compass bearing of the normal's horizontal projection, in
+//                [0,360) degrees; near-horizontal faces (no azimuth) are NaN.
+//   area:        triangle area in the mesh's units squared.
+//
+// IMPORTANT (azimuth/normal orientation): a triangulated point cloud has no
+// consistent face winding, so the raw cross-product normal points to an
+// arbitrary side per triangle — adjacent coplanar faces can disagree by 180deg,
+// which made azimuth flip randomly. Helios's Triangulation stores no normal to
+// follow, so there is no upstream convention. We adopt the standard leaf-angle
+// convention: orient every normal into the upper hemisphere (force n.z >= 0)
+// before deriving angles. This is deterministic and matches how leaf
+// inclination/azimuth distributions are defined for plant LiDAR. (Inclination
+// already used |n.z| so it was unaffected; azimuth now uses the oriented n.)
+export function computeMeshTriangleScalars(
+  data: MeshData,
+  mode: MeshColorMode,
+): { values: Float32Array; min: number; max: number } | null {
+  if (mode === 'solid') return null;
+
+  const { vertices, indices, triangleCount } = data;
+  const values = new Float32Array(triangleCount);
+  let min = Infinity;
+  let max = -Infinity;
+
+  const ax = new THREE.Vector3();
+  const bx = new THREE.Vector3();
+  const cx = new THREE.Vector3();
+  const e1 = new THREE.Vector3();
+  const e2 = new THREE.Vector3();
+  const n = new THREE.Vector3();
+
+  for (let t = 0; t < triangleCount; t++) {
+    const i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
+    ax.set(vertices[i0 * 3], vertices[i0 * 3 + 1], vertices[i0 * 3 + 2]);
+    bx.set(vertices[i1 * 3], vertices[i1 * 3 + 1], vertices[i1 * 3 + 2]);
+    cx.set(vertices[i2 * 3], vertices[i2 * 3 + 1], vertices[i2 * 3 + 2]);
+    e1.subVectors(bx, ax);
+    e2.subVectors(cx, ax);
+    n.crossVectors(e1, e2); // length = 2 * area; direction = face normal
+
+    let v: number;
+    if (mode === 'area') {
+      v = 0.5 * n.length();
+    } else {
+      const len = n.length();
+      if (len < 1e-20) {
+        v = NaN; // degenerate triangle — no meaningful normal
+      } else if (mode === 'inclination') {
+        // Fold to [0,90]: a face and its back read the same inclination.
+        const cosz = Math.abs(n.z / len);
+        v = Math.acos(Math.min(1, cosz)) * (180 / Math.PI);
+      } else {
+        // azimuth: bearing of the normal's horizontal projection. Orient the
+        // normal into the upper hemisphere first (flip when n.z < 0) so the
+        // arbitrary triangle winding can't flip the bearing by 180deg.
+        let nx = n.x, ny = n.y;
+        if (n.z < 0) { nx = -nx; ny = -ny; }
+        const h = Math.hypot(nx, ny);
+        if (h < 1e-12) {
+          v = NaN; // (near-)horizontal face has no meaningful azimuth
+        } else {
+          let deg = Math.atan2(ny, nx) * (180 / Math.PI);
+          if (deg < 0) deg += 360;
+          v = deg;
+        }
+      }
+    }
+
+    values[t] = v;
+    if (Number.isFinite(v)) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return { values, min: 0, max: 1 };
+  }
+  return { values, min, max };
+}
+
+// Build non-indexed geometry buffers that color each triangle by a per-triangle
+// scalar. Per-triangle coloring can't use shared (indexed) vertices, so we
+// expand to 3 unique vertices per triangle and give all three the triangle's
+// color. Returns flat position + color arrays (9 floats per triangle each) plus
+// the scalar range used, or null for 'solid'. `rangeOverride` pins the colorbar
+// scale; otherwise the data's own min/max is used.
+export function buildMeshTriangleColorBuffers(
+  data: MeshData,
+  mode: MeshColorMode,
+  colormap: ColormapName,
+  rangeOverride?: { min: number; max: number },
+): { positions: Float32Array; colors: Float32Array; min: number; max: number } | null {
+  const scalars = computeMeshTriangleScalars(data, mode);
+  if (!scalars) return null;
+
+  const { vertices, indices, triangleCount } = data;
+  const positions = new Float32Array(triangleCount * 9);
+  const colors = new Float32Array(triangleCount * 9);
+
+  const min = rangeOverride?.min ?? scalars.min;
+  const max = rangeOverride?.max ?? scalars.max;
+  const span = (max - min) || 1;
+
+  for (let t = 0; t < triangleCount; t++) {
+    const value = scalars.values[t];
+    const tNorm = Number.isFinite(value) ? (value - min) / span : 0;
+    const [r, g, b] = sampleColormap(colormap, tNorm);
+    for (let k = 0; k < 3; k++) {
+      const src = indices[t * 3 + k] * 3;
+      const dst = (t * 3 + k) * 3;
+      positions[dst] = vertices[src];
+      positions[dst + 1] = vertices[src + 1];
+      positions[dst + 2] = vertices[src + 2];
+      colors[dst] = r;
+      colors[dst + 1] = g;
+      colors[dst + 2] = b;
+    }
+  }
+
+  return { positions, colors, min, max };
+}
+
+// Human-readable colorbar label for a mesh pseudocolor mode.
+export function meshColorModeLabel(mode: MeshColorMode): string {
+  switch (mode) {
+    case 'inclination': return 'Inclination (°)';
+    case 'azimuth': return 'Azimuth (°)';
+    case 'area': return 'Triangle area';
+    case 'scan': return 'Source scan';
+    default: return '';
+  }
+}
+
+// Whether a mesh carries the per-triangle scan provenance needed for the
+// 'scan' color mode (a Helios multi-scan mesh).
+export function meshHasScanColors(data: MeshData): boolean {
+  return !!data.triangleScanIds
+    && data.triangleScanIds.length === data.triangleCount
+    && !!data.scanColors
+    && data.scanColors.length > 0;
+}
+
+// Build non-indexed buffers that color each triangle by its source scan's
+// color. Categorical (no colormap/normalization): each triangle's scan index
+// looks up a hex color in `data.scanColors`. Returns null when the mesh has no
+// scan provenance. Like the scalar builder, expands to 3 unique vertices per
+// triangle (9 floats per triangle).
+export function buildMeshScanColorBuffers(
+  data: MeshData,
+): { positions: Float32Array; colors: Float32Array } | null {
+  if (!meshHasScanColors(data)) return null;
+
+  const { vertices, indices, triangleCount, triangleScanIds, scanColors } = data;
+  const ids = triangleScanIds!;
+  const palette = scanColors!;
+  const positions = new Float32Array(triangleCount * 9);
+  const colors = new Float32Array(triangleCount * 9);
+
+  // Pre-parse each scan's hex color to linear-ish RGB once.
+  const rgb = palette.map(hex => {
+    const c = new THREE.Color(hex);
+    return [c.r, c.g, c.b] as const;
+  });
+  const fallback = [0.6, 0.6, 0.6] as const; // out-of-range scan id
+
+  for (let t = 0; t < triangleCount; t++) {
+    const sid = ids[t];
+    const [r, g, b] = (sid >= 0 && sid < rgb.length) ? rgb[sid] : fallback;
+    for (let k = 0; k < 3; k++) {
+      const src = indices[t * 3 + k] * 3;
+      const dst = (t * 3 + k) * 3;
+      positions[dst] = vertices[src];
+      positions[dst + 1] = vertices[src + 1];
+      positions[dst + 2] = vertices[src + 2];
+      colors[dst] = r;
+      colors[dst + 1] = g;
+      colors[dst + 2] = b;
+    }
+  }
+
+  return { positions, colors };
 }
 
 // Fuzzy search helper. Returns 2 for an exact substring match, 1 for an

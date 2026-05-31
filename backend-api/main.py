@@ -93,7 +93,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.11"
+BACKEND_VERSION = "0.3.13"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1894,16 +1894,45 @@ class HeliosScanEntry(BaseModel):
     points: Optional[List[List[float]]] = None  # [[x, y, z], ...] fallback when no file_path
     colors: Optional[List[List[float]]] = None  # [[r, g, b], ...] (0-1 range)
     origin: List[float]                 # [x, y, z] scanner position
+    # Per-scan acquisition geometry, carried from the scan's own ScanParameters.
+    # Helios triangulates each scan in its scanner-angular (theta, phi) grid, so
+    # these describe how that scan was actually sampled. When omitted, the
+    # backend falls back to the request-level theta/phi and a count-based
+    # estimate of the grid resolution (see _do_helios_computation).
+    n_theta: Optional[int] = None       # Zenith samples (Ntheta)
+    n_phi: Optional[int] = None         # Azimuth samples (Nphi)
+    theta_min: Optional[float] = None   # Zenith angle min (degrees)
+    theta_max: Optional[float] = None   # Zenith angle max (degrees)
+    phi_min: Optional[float] = None     # Azimuth angle min (degrees)
+    phi_max: Optional[float] = None     # Azimuth angle max (degrees)
+
+class HeliosGrid(BaseModel):
+    """An explicit triangulation grid, derived from a voxel box in the UI.
+
+    Helios's XML loader requires a <grid> block; it bounds the triangulation
+    region. center/size are in world coordinates (the voxel box's transform);
+    nx/ny/nz are its per-axis cell subdivisions."""
+    center: List[float]  # [x, y, z]
+    size: List[float]    # [x, y, z] full extents
+    nx: int = 1
+    ny: int = 1
+    nz: int = 1
 
 class HeliosTriangulationRequest(BaseModel):
     """Request model for Helios triangulation"""
     scans: List[HeliosScanEntry]
     lmax: float = 0.5
     max_aspect_ratio: float = 4.0
+    # Request-level angular fallbacks, used only for scans that don't carry
+    # their own theta/phi (see HeliosScanEntry). Kept for backward compatibility.
     theta_min: float = 30.0   # Zenith angle min (degrees)
     theta_max: float = 130.0  # Zenith angle max (degrees)
     phi_min: float = 0.0      # Azimuth angle min (degrees)
     phi_max: float = 360.0    # Azimuth angle max (degrees)
+    # Explicit grid from a user-created voxel box. When absent the backend
+    # auto-creates a single-cell grid encompassing all scan points and flags
+    # grid_warning on the response.
+    grid: Optional[HeliosGrid] = None
 
 class HeliosTriangulationResponse(BaseModel):
     """Response model for Helios triangulation"""
@@ -1917,6 +1946,16 @@ class HeliosTriangulationResponse(BaseModel):
     num_vertices: int = 0
     method_used: str = "helios"
     error: Optional[str] = None
+    # Source scan index (0-based, into request.scans) for each triangle, aligned
+    # 1:1 with `triangles`. Helios triangulates each scan independently, so every
+    # triangle belongs to exactly one scan; this lets the UI color triangles by
+    # their originating scan.
+    triangle_scan_ids: List[int] = []
+    # True when no explicit grid was supplied and the backend triangulated all
+    # points within their auto-computed bounding box (assumes ground/trunk were
+    # already segmented or cropped). Carries a human-readable companion message.
+    grid_warning: bool = False
+    grid_message: Optional[str] = None
 
 
 def _detect_ascii_format(file_path: str) -> str:
@@ -1948,10 +1987,74 @@ def _count_file_lines(file_path: str) -> int:
     return count
 
 
+def _xyz_column_indices(ascii_format: Optional[str]) -> tuple:
+    """Return the (x, y, z) column indices for a Helios ASCII_format string.
+
+    Helios scan files don't always lead with x y z — e.g. the lidar plugin's
+    sphere fixture uses 'row column x y z r g b reflectance', putting the
+    coordinates in columns 2-4. Tokenize the format to find them; fall back to
+    columns 0-2 when no format is given (the common bare-XYZ case).
+    """
+    if ascii_format:
+        tokens = _tokenize_ascii_format(ascii_format)
+        try:
+            return tokens.index('x'), tokens.index('y'), tokens.index('z')
+        except ValueError:
+            pass
+    return 0, 1, 2
+
+
+def _file_xyz_bounds(file_path: str, ascii_format: Optional[str] = None):
+    """Stream an ASCII point file once and return (n_points, min_xyz, max_xyz).
+
+    Used to build the auto-grid bounding box when no explicit grid is supplied.
+    The x/y/z columns are located via the scan's ASCII_format (see
+    _xyz_column_indices), so formats that don't lead with the coordinates are
+    handled correctly. Non-numeric / comment lines are skipped. Returns
+    (count, None, None) if no coordinates were found.
+    """
+    import math
+    xi, yi, zi = _xyz_column_indices(ascii_format)
+    need = max(xi, yi, zi) + 1
+    n = 0
+    lo = [math.inf, math.inf, math.inf]
+    hi = [-math.inf, -math.inf, -math.inf]
+    with open(file_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line[0] in '#/':
+                continue
+            cols = line.split()
+            if len(cols) < need:
+                continue
+            try:
+                x, y, z = float(cols[xi]), float(cols[yi]), float(cols[zi])
+            except ValueError:
+                continue
+            if x < lo[0]: lo[0] = x
+            if y < lo[1]: lo[1] = y
+            if z < lo[2]: lo[2] = z
+            if x > hi[0]: hi[0] = x
+            if y > hi[1]: hi[1] = y
+            if z > hi[2]: hi[2] = z
+            n += 1
+    if n == 0:
+        return 0, None, None
+    return n, lo, hi
+
+
 def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
-                         grid_size: list, theta_min: float, theta_max: float,
-                         phi_min: float, phi_max: float) -> str:
-    """Generate a pyhelios XML config file for scan triangulation."""
+                         grid_size: list, grid_nx: int = 1, grid_ny: int = 1,
+                         grid_nz: int = 1, xml_name: str = "helios_config.xml") -> str:
+    """Generate a pyhelios XML config file for scan triangulation.
+
+    Each entry in ``scans_info`` carries its own per-scan acquisition geometry
+    (``n_theta``/``n_phi`` and ``theta_min``/``theta_max``/``phi_min``/
+    ``phi_max``), since Helios triangulates each scan in its own scanner-angular
+    grid. ``grid_nx``/``grid_ny``/``grid_nz`` set the grid cell subdivisions
+    (1×1×1 single cell by default). ``xml_name`` lets callers write one config
+    per scan into the same temp dir without clobbering.
+    """
     import os
 
     xml_lines = ['<?xml version="1.0"?>', '<helios>', '']
@@ -1962,10 +2065,10 @@ def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
         xml_lines.append(f'    <ASCII_format>{scan["ascii_format"]}</ASCII_format>')
         xml_lines.append(f'    <origin>{scan["origin"][0]} {scan["origin"][1]} {scan["origin"][2]}</origin>')
         xml_lines.append(f'    <size>{scan["n_theta"]} {scan["n_phi"]}</size>')
-        xml_lines.append(f'    <thetaMin>{theta_min}</thetaMin>')
-        xml_lines.append(f'    <thetaMax>{theta_max}</thetaMax>')
-        xml_lines.append(f'    <phiMin>{phi_min}</phiMin>')
-        xml_lines.append(f'    <phiMax>{phi_max}</phiMax>')
+        xml_lines.append(f'    <thetaMin>{scan["theta_min"]}</thetaMin>')
+        xml_lines.append(f'    <thetaMax>{scan["theta_max"]}</thetaMax>')
+        xml_lines.append(f'    <phiMin>{scan["phi_min"]}</phiMin>')
+        xml_lines.append(f'    <phiMax>{scan["phi_max"]}</phiMax>')
         xml_lines.append('</scan>')
         xml_lines.append('')
 
@@ -1973,14 +2076,14 @@ def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
     xml_lines.append('<grid>')
     xml_lines.append(f'    <center>{grid_center[0]} {grid_center[1]} {grid_center[2]}</center>')
     xml_lines.append(f'    <size>{grid_size[0]} {grid_size[1]} {grid_size[2]}</size>')
-    xml_lines.append(f'    <Nx>2</Nx>')
-    xml_lines.append(f'    <Ny>2</Ny>')
-    xml_lines.append(f'    <Nz>2</Nz>')
+    xml_lines.append(f'    <Nx>{grid_nx}</Nx>')
+    xml_lines.append(f'    <Ny>{grid_ny}</Ny>')
+    xml_lines.append(f'    <Nz>{grid_nz}</Nz>')
     xml_lines.append('</grid>')
     xml_lines.append('')
     xml_lines.append('</helios>')
 
-    xml_path = os.path.join(tmpdir, "helios_config.xml")
+    xml_path = os.path.join(tmpdir, xml_name)
     with open(xml_path, "w") as f:
         f.write('\n'.join(xml_lines))
 
@@ -2013,9 +2116,36 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
         scans_info = []
         use_file_paths = any(s.file_path for s in request.scans)
 
+        # Per-scan angular geometry comes from the scan's own ScanParameters when
+        # present; the request-level values are only a fallback for scans that
+        # don't carry their own. Likewise the grid resolution (n_theta/n_phi) is
+        # used as sent and only estimated from point count when absent.
+        def _angles(scan_entry):
+            return (
+                scan_entry.theta_min if scan_entry.theta_min is not None else request.theta_min,
+                scan_entry.theta_max if scan_entry.theta_max is not None else request.theta_max,
+                scan_entry.phi_min if scan_entry.phi_min is not None else request.phi_min,
+                scan_entry.phi_max if scan_entry.phi_max is not None else request.phi_max,
+            )
+
+        def _resolution(scan_entry, n_points, theta_span, phi_span):
+            """Per-scan Ntheta/Nphi, preferring the values the scan carries."""
+            if scan_entry.n_theta and scan_entry.n_phi:
+                return int(scan_entry.n_theta), int(scan_entry.n_phi)
+            # Fallback: back out a plausible grid from the point count and aspect.
+            aspect = theta_span / max(phi_span, 1e-10)
+            n_phi = max(int(math.sqrt(n_points / max(aspect, 0.01))), 10)
+            n_theta = max(int(n_points / n_phi), 10)
+            return n_theta, n_phi
+
+        # Bounding box over all scan points, accumulated as scans are processed,
+        # so the auto-grid (when no explicit grid is supplied) tightly encloses
+        # every point regardless of which mode produced them.
+        bb_lo = np.array([np.inf, np.inf, np.inf])
+        bb_hi = np.array([-np.inf, -np.inf, -np.inf])
+
         if use_file_paths:
             # File-path mode: pyhelios reads scan files directly from disk
-            origins = []
             for idx, scan_entry in enumerate(request.scans):
                 origin = scan_entry.origin
                 if len(origin) != 3:
@@ -2028,13 +2158,17 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
                 # Auto-detect ASCII format if not specified
                 fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
 
-                # Count lines to estimate grid size
-                n_points = _count_file_lines(fp)
-                theta_span = request.theta_max - request.theta_min
-                phi_span = request.phi_max - request.phi_min
-                aspect = theta_span / max(phi_span, 1e-10)
-                n_phi = max(int(math.sqrt(n_points / max(aspect, 0.01))), 10)
-                n_theta = max(int(n_points / n_phi), 10)
+                theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
+
+                # One pass per file gives both the point count (resolution
+                # fallback) and the bounds (auto-grid). Cheap relative to the
+                # triangulation itself.
+                n_points, lo, hi = _file_xyz_bounds(fp, fmt)
+                if lo is not None:
+                    bb_lo = np.minimum(bb_lo, lo)
+                    bb_hi = np.maximum(bb_hi, hi)
+                n_theta, n_phi = _resolution(
+                    scan_entry, n_points, theta_max - theta_min, phi_max - phi_min)
 
                 scans_info.append({
                     "filepath": fp,
@@ -2042,16 +2176,13 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
                     "origin": origin,
                     "n_theta": n_theta,
                     "n_phi": n_phi,
+                    "theta_min": theta_min,
+                    "theta_max": theta_max,
+                    "phi_min": phi_min,
+                    "phi_max": phi_max,
                 })
-                origins.append(origin)
-
-            # Use scan origins centroid + generous grid size (no need to read files)
-            origin_arr = np.array(origins)
-            grid_center = origin_arr.mean(axis=0).tolist()
-            grid_size = [500.0, 500.0, 500.0]
         else:
             # Points mode (fallback): write points to temp files
-            all_points = []
             for idx, scan_entry in enumerate(request.scans):
                 origin = scan_entry.origin
                 if len(origin) != 3:
@@ -2061,19 +2192,18 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
                 if not points:
                     raise ValueError("Scan entry has no points and no file_path")
 
-                all_points.extend(points)
+                pts_arr_scan = np.asarray(points, dtype=float)
+                bb_lo = np.minimum(bb_lo, pts_arr_scan[:, :3].min(axis=0))
+                bb_hi = np.maximum(bb_hi, pts_arr_scan[:, :3].max(axis=0))
 
                 pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
                 with open(pts_path, "w") as f:
                     for pt in points:
                         f.write(f"{pt[0]} {pt[1]} {pt[2]}\n")
 
-                n_points = len(points)
-                theta_span = request.theta_max - request.theta_min
-                phi_span = request.phi_max - request.phi_min
-                aspect = theta_span / max(phi_span, 1e-10)
-                n_phi = max(int(math.sqrt(n_points / max(aspect, 0.01))), 10)
-                n_theta = max(int(n_points / n_phi), 10)
+                theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
+                n_theta, n_phi = _resolution(
+                    scan_entry, len(points), theta_max - theta_min, phi_max - phi_min)
 
                 scans_info.append({
                     "filepath": pts_path,
@@ -2081,30 +2211,78 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
                     "origin": origin,
                     "n_theta": n_theta,
                     "n_phi": n_phi,
+                    "theta_min": theta_min,
+                    "theta_max": theta_max,
+                    "phi_min": phi_min,
+                    "phi_max": phi_max,
                 })
 
-            pts_arr = np.array(all_points)
-            bb_min = pts_arr.min(axis=0)
-            bb_max = pts_arr.max(axis=0)
-            grid_center = ((bb_min + bb_max) / 2).tolist()
-            bb_size = np.maximum(bb_max - bb_min, 0.01) * 1.1
-            grid_size = bb_size.tolist()
+        # Resolve the grid. An explicit grid (from a voxel box in the UI) is used
+        # verbatim. Otherwise auto-create a single cell tightly enclosing all
+        # points and flag the response so the UI can warn that every point is
+        # being triangulated (assumes ground/trunk already segmented/cropped).
+        grid_warning = False
+        grid_message = None
+        if request.grid is not None:
+            grid_center = list(request.grid.center)
+            grid_size = list(request.grid.size)
+            grid_nx, grid_ny, grid_nz = request.grid.nx, request.grid.ny, request.grid.nz
+        else:
+            if not np.all(np.isfinite(bb_lo)) or not np.all(np.isfinite(bb_hi)):
+                raise ValueError("Could not determine point bounds for auto-grid")
+            grid_center = ((bb_lo + bb_hi) / 2).tolist()
+            grid_size = (np.maximum(bb_hi - bb_lo, 0.01) * 1.1).tolist()
+            grid_nx = grid_ny = grid_nz = 1
+            grid_warning = True
+            grid_message = (
+                "No grid box was specified — triangulating all points within "
+                "their bounding box. This assumes ground and trunk have already "
+                "been segmented or cropped."
+            )
 
-        # Generate XML config
-        xml_path = _generate_helios_xml(
-            tmpdir, scans_info, grid_center, grid_size,
-            request.theta_min, request.theta_max,
-            request.phi_min, request.phi_max
-        )
+        # Triangulate each scan independently and tag every output triangle with
+        # its source scan index. Helios already triangulates per scan internally
+        # (it groups hit points by scanID before the Delaunay pass), so running
+        # one LiDARCloud per scan yields the same triangles as a single merged
+        # cloud — it just makes the provenance explicit, which a merged run
+        # discards at the Context boundary. Vertices are deduplicated globally
+        # so shared geometry between scans still collapses.
+        vertex_map = {}       # (rx, ry, rz) -> index
+        unique_vertices = []  # deduplicated vertex list
+        triangles_list = []
+        triangle_scan_ids = []
 
-        # Load XML and triangulate
-        cloud = LiDARCloud()
-        cloud.disableMessages()
-        cloud.loadXML(xml_path)
-        cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
-        tri_count = cloud.getTriangleCount()
+        for scan_idx, scan_info in enumerate(scans_info):
+            xml_path = _generate_helios_xml(
+                tmpdir, [scan_info], grid_center, grid_size,
+                grid_nx, grid_ny, grid_nz,
+                xml_name=f"helios_config_{scan_idx}.xml",
+            )
 
-        if tri_count == 0:
+            cloud = LiDARCloud()
+            cloud.disableMessages()
+            cloud.loadXML(xml_path)
+            cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
+            if cloud.getTriangleCount() == 0:
+                continue
+
+            with Context() as ctx:
+                cloud.addTrianglesToContext(ctx)
+                for uuid in ctx.getAllUUIDs():
+                    tri_verts = ctx.getPrimitiveVertices(uuid)
+                    if len(tri_verts) != 3:
+                        continue
+                    tri_indices = []
+                    for v in tri_verts:
+                        key = (round(v.x, 5), round(v.y, 5), round(v.z, 5))
+                        if key not in vertex_map:
+                            vertex_map[key] = len(unique_vertices)
+                            unique_vertices.append([key[0], key[1], key[2]])
+                        tri_indices.append(vertex_map[key])
+                    triangles_list.append(tri_indices)
+                    triangle_scan_ids.append(scan_idx)
+
+        if not triangles_list:
             return {
                 "success": True,
                 "vertices": [],
@@ -2112,32 +2290,10 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
                 "num_triangles": 0,
                 "num_vertices": 0,
                 "method_used": "helios",
-                "error": "No triangles generated. Try increasing Lmax or adjusting max_aspect_ratio."
+                "error": "No triangles generated. Try increasing Lmax or adjusting max_aspect_ratio.",
+                "grid_warning": grid_warning,
+                "grid_message": grid_message,
             }
-
-        # Extract triangles via Context with vertex deduplication
-        with Context() as ctx:
-            cloud.addTrianglesToContext(ctx)
-            uuids = ctx.getAllUUIDs()
-
-            vertex_map = {}      # (rx, ry, rz) -> index
-            unique_vertices = [] # deduplicated vertex list
-            triangles_list = []
-
-            for uuid in uuids:
-                tri_verts = ctx.getPrimitiveVertices(uuid)
-                if len(tri_verts) != 3:
-                    continue
-
-                tri_indices = []
-                for v in tri_verts:
-                    key = (round(v.x, 5), round(v.y, 5), round(v.z, 5))
-                    if key not in vertex_map:
-                        vertex_map[key] = len(unique_vertices)
-                        unique_vertices.append([key[0], key[1], key[2]])
-                    tri_indices.append(vertex_map[key])
-
-                triangles_list.append(tri_indices)
 
         # Calculate surface area from deduplicated data
         verts_arr = np.array(unique_vertices)
@@ -2154,7 +2310,10 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
             "surface_area": total_area,
             "num_triangles": len(triangles_list),
             "num_vertices": len(unique_vertices),
-            "method_used": "helios"
+            "method_used": "helios",
+            "triangle_scan_ids": triangle_scan_ids,
+            "grid_warning": grid_warning,
+            "grid_message": grid_message,
         }
 
     except ImportError as e:

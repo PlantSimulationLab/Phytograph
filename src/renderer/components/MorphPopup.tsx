@@ -294,7 +294,7 @@ function DistributionParamRow({
           min={rangeMin}
           max={rangeMax}
           step={step}
-          className="w-full h-1 bg-neutral-600 rounded-lg appearance-none cursor-pointer accent-amber-500"
+          className="w-full h-1 bg-neutral-600 rounded-lg appearance-none cursor-pointer slider-amber"
         />
       )}
     </div>
@@ -350,7 +350,7 @@ function GeometryScaleRow({
         min={0.1}
         max={3.0}
         step={0.01}
-        className="w-full h-1 bg-neutral-600 rounded-lg appearance-none cursor-pointer accent-amber-500"
+        className="w-full h-1 bg-neutral-600 rounded-lg appearance-none cursor-pointer slider-amber"
       />
     </div>
   );

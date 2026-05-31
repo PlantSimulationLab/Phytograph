@@ -318,16 +318,40 @@ export interface HeliosScanEntry {
   points?: number[][];      // [[x, y, z], ...] fallback when no file_path
   colors?: number[][];      // [[r, g, b], ...] point colors (0-1 range)
   origin: number[];         // [x, y, z] scanner position
+  // Per-scan acquisition geometry from the scan's own ScanParameters. Helios
+  // triangulates each scan in its scanner-angular (theta, phi) grid, so these
+  // describe how it was actually sampled. Omit to let the backend fall back to
+  // request-level angles and a count-based grid estimate.
+  n_theta?: number;         // Zenith samples (Ntheta)
+  n_phi?: number;           // Azimuth samples (Nphi)
+  theta_min?: number;       // Zenith angle min (degrees)
+  theta_max?: number;       // Zenith angle max (degrees)
+  phi_min?: number;         // Azimuth angle min (degrees)
+  phi_max?: number;         // Azimuth angle max (degrees)
+}
+
+// An explicit triangulation grid derived from a voxel box in the viewer:
+// center/size are the box's world transform; nx/ny/nz its cell subdivisions.
+export interface HeliosGrid {
+  center: [number, number, number];
+  size: [number, number, number];
+  nx: number;
+  ny: number;
+  nz: number;
 }
 
 export interface HeliosTriangulationRequest {
   scans: HeliosScanEntry[];
   lmax: number;              // Maximum triangle edge length
   max_aspect_ratio: number;  // Maximum triangle aspect ratio (default 4.0)
+  // Request-level angular fallbacks for scans that don't carry their own.
   theta_min: number;         // Zenith angle min (degrees, default 30)
   theta_max: number;         // Zenith angle max (degrees, default 130)
   phi_min: number;           // Azimuth angle min (degrees, default 0)
   phi_max: number;           // Azimuth angle max (degrees, default 360)
+  // Explicit grid from a voxel box. When omitted, the backend auto-creates a
+  // single-cell grid over all points and sets grid_warning on the response.
+  grid?: HeliosGrid;
 }
 
 export interface HeliosTriangulationResponse {
@@ -341,6 +365,13 @@ export interface HeliosTriangulationResponse {
   num_vertices: number;
   method_used: string;
   error?: string;
+  // Source scan index for each triangle (aligned 1:1 with `triangles`), so the
+  // viewer can color triangles by the scan they came from.
+  triangle_scan_ids?: number[];
+  // Set when no grid box was supplied and all points were triangulated within
+  // their bounding box; grid_message is the human-readable warning to surface.
+  grid_warning?: boolean;
+  grid_message?: string | null;
 }
 
 /**

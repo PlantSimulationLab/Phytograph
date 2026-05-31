@@ -1,16 +1,29 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, Triangle } from 'lucide-react';
-import { HeliosTriangulationRequest } from '../utils/backendApi';
+import { HeliosTriangulationRequest, HeliosGrid } from '../utils/backendApi';
 import type { Scan } from '../lib/scan';
 import { hasData, hasParams } from '../lib/scan';
+
+// A voxel box the user can pick as the triangulation grid. The caller derives
+// `grid` from the box's transform + subdivisions (see voxelMeshToHeliosGrid).
+export interface GridOption {
+  id: string;
+  label: string;
+  grid: HeliosGrid;
+}
 
 interface HeliosTriangulationPopupProps {
   isOpen: boolean;
   onClose: () => void;
-  onStartTriangulate: (request: HeliosTriangulationRequest) => void;
+  // `scanColors` is aligned 1:1 with `request.scans` (same order), so the
+  // caller can map each triangle's scan index back to a display color.
+  onStartTriangulate: (request: HeliosTriangulationRequest, scanColors: string[]) => void;
   scans: Scan[];
   initialSelectedIds?: Set<string>;
   onOpenScanParams?: (scanId: string) => void;
+  // Voxel boxes available to use as the triangulation grid. Empty → the
+  // backend auto-creates a single-cell grid over all points (with a warning).
+  gridOptions?: GridOption[];
 }
 
 // Every scan listed here must have both point data (positions to triangulate)
@@ -24,9 +37,25 @@ export function HeliosTriangulationPopup({
   scans,
   initialSelectedIds,
   onOpenScanParams,
+  gridOptions = [],
 }: HeliosTriangulationPopupProps) {
   const eligible = useMemo(() => scans.filter(s => hasData(s) && hasParams(s)), [scans]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
+
+  // Which voxel box (if any) drives the grid. Empty string = auto-grid (all
+  // points). Default to the first available box so a created box is used.
+  const [selectedGridId, setSelectedGridId] = useState<string>('');
+  useEffect(() => {
+    if (!isOpen) return;
+    setSelectedGridId(prev =>
+      gridOptions.some(g => g.id === prev) ? prev : (gridOptions[0]?.id ?? ''),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, gridOptions]);
+  const selectedGrid = useMemo(
+    () => gridOptions.find(g => g.id === selectedGridId) ?? null,
+    [gridOptions, selectedGridId],
+  );
 
   useEffect(() => {
     if (isOpen) {
@@ -46,10 +75,6 @@ export function HeliosTriangulationPopup({
 
   const [lmaxStr, setLmaxStr] = useState('0.1');
   const [maxAspectRatioStr, setMaxAspectRatioStr] = useState('4.0');
-  const [thetaMinStr, setThetaMinStr] = useState('30');
-  const [thetaMaxStr, setThetaMaxStr] = useState('130');
-  const [phiMinStr, setPhiMinStr] = useState('0');
-  const [phiMaxStr, setPhiMaxStr] = useState('360');
   const [error, setError] = useState<string | null>(null);
 
   const toggleScan = useCallback((scanId: string) => {
@@ -84,13 +109,24 @@ export function HeliosTriangulationPopup({
     // Assemble HeliosScanEntry[] directly from each scan's data + params.
     // Prefer sending the source file path so the backend reads bytes from
     // disk; fall back to serialising every point if the path wasn't tracked.
+    // Each scan carries its own acquisition geometry (Ntheta/Nphi + angular
+    // bounds) so Helios triangulates it in the grid it was actually sampled in.
     const requestScans = selectedScans.map(scan => {
-      const origin = [scan.params.origin.x, scan.params.origin.y, scan.params.origin.z];
+      const p = scan.params;
+      const angular = {
+        origin: [p.origin.x, p.origin.y, p.origin.z],
+        n_theta: p.zenithPoints,
+        n_phi: p.azimuthPoints,
+        theta_min: p.zenithMinDeg,
+        theta_max: p.zenithMaxDeg,
+        phi_min: p.azimuthMinDeg,
+        phi_max: p.azimuthMaxDeg,
+      };
       if (scan.sourcePath) {
         // Pass the known column format so the backend uses it instead of the
         // column-count heuristic, which can mis-map e.g. reflectance vs
         // intensity or RGB ordering. Octree scans always have a sourcePath.
-        return { file_path: scan.sourcePath, ascii_format: scan.asciiFormat ?? null, origin };
+        return { file_path: scan.sourcePath, ascii_format: scan.asciiFormat ?? null, ...angular };
       }
       const points: number[][] = [];
       for (let i = 0; i < scan.data.pointCount; i++) {
@@ -101,29 +137,32 @@ export function HeliosTriangulationPopup({
           scan.data.positions[idx + 2],
         ]);
       }
-      return { points, origin };
+      return { points, ...angular };
     });
 
     const lmax = parseFloat(lmaxStr) || 0.1;
     const maxAspectRatio = parseFloat(maxAspectRatioStr) || 4.0;
-    const thetaMin = parseFloat(thetaMinStr) || 0;
-    const thetaMax = parseFloat(thetaMaxStr) || 130;
-    const phiMin = parseFloat(phiMinStr) || 0;
-    const phiMax = parseFloat(phiMaxStr) || 360;
 
     const request: HeliosTriangulationRequest = {
       scans: requestScans,
       lmax,
       max_aspect_ratio: maxAspectRatio,
-      theta_min: thetaMin,
-      theta_max: thetaMax,
-      phi_min: phiMin,
-      phi_max: phiMax,
+      // Request-level angles are backend-only fallbacks now; per-scan values
+      // above take precedence. Keep sensible defaults for any scan that
+      // somehow lacks its own.
+      theta_min: 30,
+      theta_max: 130,
+      phi_min: 0,
+      phi_max: 360,
+      ...(selectedGrid ? { grid: selectedGrid.grid } : {}),
     };
 
-    onStartTriangulate(request);
+    // Scan colors in the same order as request.scans, so triangle_scan_ids
+    // (which index into request.scans) map straight to a display color.
+    const scanColors = selectedScans.map(s => s.color);
+    onStartTriangulate(request, scanColors);
     onClose();
-  }, [selectedScans, lmaxStr, maxAspectRatioStr, thetaMinStr, thetaMaxStr, phiMinStr, phiMaxStr, onStartTriangulate, onClose]);
+  }, [selectedScans, lmaxStr, maxAspectRatioStr, selectedGrid, onStartTriangulate, onClose]);
 
   if (!isOpen) return null;
 
@@ -289,62 +328,40 @@ export function HeliosTriangulationPopup({
               </div>
             </div>
 
-            <label className="text-xs font-medium text-neutral-300 block mt-4 mb-3">Scan Angular Bounds</label>
+            {/* Per-scan angular bounds (Ntheta/Nphi, theta/phi) come from each
+                scan's own parameters — edit them per scan via the Scans panel,
+                not here. */}
 
-            <div className="grid grid-cols-4 gap-3">
-              <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">Theta Min</label>
-                <input
-                  type="number"
-                  value={thetaMinStr}
-                  onChange={(e) => setThetaMinStr(e.target.value)}
-                  step="1"
-                  min="0"
-                  max="180"
-                  className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
-                />
-                <p className="text-[9px] text-neutral-500 mt-0.5">Zenith min (deg)</p>
+            <label className="text-xs font-medium text-neutral-300 block mt-4 mb-1">Grid</label>
+            <p className="text-[9px] text-neutral-500 mb-2">
+              The triangulation grid bounds the region. Use a voxel box from the
+              viewer, or let Phytograph fit one to all points.
+            </p>
+            <select
+              data-testid="helios-grid-select"
+              value={selectedGridId}
+              onChange={(e) => setSelectedGridId(e.target.value)}
+              className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+            >
+              <option value="">Auto — fit to all points (1×1×1)</option>
+              {gridOptions.map(g => (
+                <option key={g.id} value={g.id}>{g.label}</option>
+              ))}
+            </select>
+            {selectedGrid ? (
+              <p className="text-[9px] text-neutral-500 mt-1" data-testid="helios-grid-summary">
+                Grid: {selectedGrid.label} ({selectedGrid.grid.nx}×{selectedGrid.grid.ny}×{selectedGrid.grid.nz} cells)
+              </p>
+            ) : (
+              <div
+                className="text-[10px] text-amber-300 bg-amber-500/5 border border-amber-500/30 rounded px-2 py-1.5 mt-2"
+                data-testid="helios-grid-allpoints-warning"
+              >
+                No grid box selected — all points will be triangulated within their
+                bounding box. This assumes ground and trunk are already segmented
+                or cropped.
               </div>
-              <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">Theta Max</label>
-                <input
-                  type="number"
-                  value={thetaMaxStr}
-                  onChange={(e) => setThetaMaxStr(e.target.value)}
-                  step="1"
-                  min="0"
-                  max="180"
-                  className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
-                />
-                <p className="text-[9px] text-neutral-500 mt-0.5">Zenith max (deg)</p>
-              </div>
-              <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">Phi Min</label>
-                <input
-                  type="number"
-                  value={phiMinStr}
-                  onChange={(e) => setPhiMinStr(e.target.value)}
-                  step="1"
-                  min="0"
-                  max="360"
-                  className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
-                />
-                <p className="text-[9px] text-neutral-500 mt-0.5">Azimuth min (deg)</p>
-              </div>
-              <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">Phi Max</label>
-                <input
-                  type="number"
-                  value={phiMaxStr}
-                  onChange={(e) => setPhiMaxStr(e.target.value)}
-                  step="1"
-                  min="0"
-                  max="360"
-                  className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
-                />
-                <p className="text-[9px] text-neutral-500 mt-0.5">Azimuth max (deg)</p>
-              </div>
-            </div>
+            )}
           </div>
 
           {error && (

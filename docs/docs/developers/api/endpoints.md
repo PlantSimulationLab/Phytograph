@@ -35,7 +35,7 @@ is defined.
 | Method | Path | Source | Purpose |
 |---|---|---|---|
 | POST | `/api/triangulate` | `main.py:1291` | Triangulate a point cloud |
-| POST | `/api/triangulate/helios` | `main.py:1773` | Helios-style triangulation |
+| POST | `/api/triangulate/helios` | `main.py:2334` | Helios-style triangulation. Each `scans[]` entry carries its own acquisition geometry (`origin`, `n_theta`/`n_phi`, `theta_min`/`max`, `phi_min`/`max`); an optional `grid` (center/size + `nx`/`ny`/`nz`) comes from a voxel box. With no `grid` the backend auto-fits a single cell over all points and sets `grid_warning` on the response. Each scan is triangulated independently, so the response includes `triangle_scan_ids` — the source scan index per triangle — for coloring by scan |
 | POST | `/api/mesh/sample` | `main.py:1910` | Sample points on a mesh |
 | POST | `/api/mesh/import` | `main.py` | Parse a textured `.obj` (+ sibling `.mtl` + images) from a disk `path` into geometry, V-flipped per-vertex UVs, per-material triangle groups, and base64-encoded textures — the same response shape the textured renderer consumes for plant models |
 

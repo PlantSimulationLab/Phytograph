@@ -339,25 +339,54 @@
     );
   }
 
-  /* Custom slider styles */
+  /* Custom slider styles.
+     The base rule gives EVERY range input a visible knob, even when no
+     theme class (.slider-chloro/.slider-plain/.slider-cyan) is present.
+     Without a default background the thumb is invisible, because the inputs
+     set appearance:none (via Tailwind's appearance-none) which strips the
+     native thumb. Theme classes below override the color where applied. */
   input[type="range"]::-webkit-slider-thumb {
     appearance: none;
-    width: 20px;
-    height: 20px;
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
     cursor: pointer;
-    transition: all 0.3s ease;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    background: linear-gradient(135deg, #a3e635, #65a30d);
+    border: 2px solid rgba(0, 0, 0, 0.25);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    /* Center the 16px thumb on the 4px (h-1) track */
+    margin-top: -6px;
   }
 
   input[type="range"]::-moz-range-thumb {
-    width: 20px;
-    height: 20px;
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
     cursor: pointer;
-    transition: all 0.3s ease;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-    border: none;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    background: linear-gradient(135deg, #a3e635, #65a30d);
+    border: 2px solid rgba(0, 0, 0, 0.25);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  }
+
+  input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+  }
+
+  input[type="range"]::-moz-range-thumb:hover {
+    transform: scale(1.15);
+  }
+
+  /* WebKit needs an explicit track height for margin-based thumb centering. */
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 9999px;
+  }
+
+  input[type="range"]::-moz-range-track {
+    height: 4px;
+    border-radius: 9999px;
   }
 
   /* Chloroplastic mode slider */
@@ -390,6 +419,22 @@
   .slider-plain::-webkit-slider-thumb:hover {
     transform: scale(1.2);
     box-shadow: 0 0 20px rgba(255, 255, 255, 0.3);
+  }
+
+  /* Amber slider (morph parameter / geometry-scale controls) */
+  .slider-amber::-webkit-slider-thumb {
+    background: linear-gradient(135deg, #fbbf24, #d97706) !important;
+    border: 2px solid rgba(217, 119, 6, 0.4) !important;
+  }
+
+  .slider-amber::-moz-range-thumb {
+    background: linear-gradient(135deg, #fbbf24, #d97706) !important;
+    border: 2px solid rgba(217, 119, 6, 0.4) !important;
+  }
+
+  .slider-amber::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+    box-shadow: 0 0 16px rgba(217, 119, 6, 0.5);
   }
 
   /* Cyan mode slider */
