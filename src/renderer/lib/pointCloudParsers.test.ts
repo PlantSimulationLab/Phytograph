@@ -590,58 +590,11 @@ describe('parsePointCloud (auto-detect)', () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────
-// parsePointCloudFromPath — XYZ-family, PLY and PCD files go to the
-// backend; LAS and other formats round-trip through fs.readBinary into
-// the in-renderer parsers.
+// parsePointCloudFromPath — every supported point-cloud format (XYZ-family,
+// PLY, PCD, LAS, LAZ) routes to the backend's convert_to_octree. Only inputs
+// with no on-disk path fall back to the in-renderer parsers via fs.readBinary.
 // ────────────────────────────────────────────────────────────────────────
 
-// 32-byte header: 4s magic, I count, B has_colors, B has_intensity, 22x pad.
-// Matches the layout documented on /api/pointcloud/import_xyz_by_path and
-// decoded by importXyzByPath in backendApi.ts.
-function makeXyzBinary(
-  points: number[][],
-  opts: { colors?: number[][]; intensity?: number[] } = {},
-): ArrayBuffer {
-  const n = points.length;
-  const colors = opts.colors ?? null;
-  const intensity = opts.intensity ?? null;
-  const hasColors = colors !== null;
-  const hasIntensity = intensity !== null;
-
-  const HEADER = 32;
-  const posBytes = n * 3 * 4;
-  const colBytes = hasColors ? n * 3 * 4 : 0;
-  const intBytes = hasIntensity ? n * 4 : 0;
-  const buf = new ArrayBuffer(HEADER + posBytes + colBytes + intBytes);
-  const u8 = new Uint8Array(buf);
-  u8[0] = 'P'.charCodeAt(0);
-  u8[1] = 'H'.charCodeAt(0);
-  u8[2] = 'X'.charCodeAt(0);
-  u8[3] = '1'.charCodeAt(0);
-  new DataView(buf).setUint32(4, n, true);
-  u8[8] = hasColors ? 1 : 0;
-  u8[9] = hasIntensity ? 1 : 0;
-
-  const positions = new Float32Array(buf, HEADER, n * 3);
-  for (let i = 0; i < n; i++) {
-    positions[i * 3] = points[i][0];
-    positions[i * 3 + 1] = points[i][1];
-    positions[i * 3 + 2] = points[i][2];
-  }
-  if (hasColors) {
-    const c = new Float32Array(buf, HEADER + posBytes, n * 3);
-    for (let i = 0; i < n; i++) {
-      c[i * 3] = colors![i][0];
-      c[i * 3 + 1] = colors![i][1];
-      c[i * 3 + 2] = colors![i][2];
-    }
-  }
-  if (hasIntensity) {
-    const arr = new Float32Array(buf, HEADER + posBytes + colBytes, n);
-    for (let i = 0; i < n; i++) arr[i] = intensity![i];
-  }
-  return buf;
-}
 
 describe('parsePointCloudFromPath', () => {
   // Helper: build an OctreeMetadata-shaped JSON response, matching the
@@ -708,42 +661,22 @@ describe('parsePointCloudFromPath', () => {
     await expect(parsePointCloudFromPath('/missing.xyz')).rejects.toThrow(/Source file not found/);
   });
 
-  it('routes .ply through the backend importer', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
-      new Response(makeXyzBinary([[1, 2, 3]], { colors: [[0.5, 0.5, 0.5]] }), { status: 200 }),
-    );
-    const data = await parsePointCloudFromPath('/p/cloud.ply');
-    expect(data.pointCount).toBe(1);
-    expect(Array.from(data.positions)).toEqual([1, 2, 3]);
-    expect(Array.from(data.colors!)).toEqual([0.5, 0.5, 0.5]);
-    const [url] = fetchSpy.mock.calls[0];
-    expect(url).toContain('/api/pointcloud/import_by_path');
-  });
-
-  it('routes .pcd through the backend importer', async () => {
-    const fetchSpy = vi
-      .spyOn(global, 'fetch')
-      .mockResolvedValue(new Response(makeXyzBinary([[0, 0, 0]]), { status: 200 }));
-    const data = await parsePointCloudFromPath('/p/cloud.pcd');
-    expect(data.pointCount).toBe(1);
-    expect(fetchSpy).toHaveBeenCalled();
-  });
-
-  it('falls back to fs.readBinary for non-routed extensions (.las)', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch');
-    // Hand-crafted LAS bytes match parseLAS's own minimal-file test helper;
-    // we don't need to replicate the full geometry — just enough that
-    // parsePointCloud auto-dispatches and we can see fetch wasn't called.
-    const lasBuf = makeMinimalLasBuffer();
-    (globalThis as any).window = (globalThis as any).window ?? {};
-    (window as any).electronAPI = {
-      fs: { readBinary: vi.fn().mockResolvedValue(lasBuf) },
-    };
-    const data = await parsePointCloudFromPath('/p/cloud.las');
-    expect(data.pointCount).toBeGreaterThan(0);
-    expect(fetchSpy).not.toHaveBeenCalled();
-    expect((window as any).electronAPI.fs.readBinary).toHaveBeenCalledWith('/p/cloud.las');
-  });
+  // PLY / PCD / LAS / LAZ now route to convert_to_octree like the XYZ family —
+  // every path-backed format produces a streaming octree, not a flat cloud.
+  it.each(['/p/cloud.ply', '/p/cloud.pcd', '/p/cloud.las', '/p/cloud.laz'])(
+    'routes %s to convert_to_octree',
+    async (path) => {
+      const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
+      const data = await parsePointCloudFromPath(path);
+      expect(data.pointCount).toBe(2);
+      // Octree-backed: positions stay empty, the octree handle drives rendering.
+      expect(data.positions.length).toBe(0);
+      expect(data.octree?.cacheId).toBe('a'.repeat(40));
+      expect(data.octree?.sourceXyzPath).toBe(path);
+      const [url] = fetchSpy.mock.calls[0];
+      expect(url).toContain('/api/pointcloud/convert_to_octree');
+    },
+  );
 });
 
 describe('format predicates and lists', () => {

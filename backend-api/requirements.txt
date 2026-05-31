@@ -21,7 +21,22 @@ pytexit>=0.3.4
 pyyaml>=5.0.0
 open3d>=0.18.0
 laspy[lazrs]>=2.5.0
+# Direct PLY parsing (ASCII + binary, all endianness) that preserves arbitrary
+# scalar vertex properties — open3d drops everything but position + RGB on read.
+# Used by _ply_to_las to carry intensity/reflectance/custom scalars into the
+# octree as LAS extra dimensions. Bundled via `collectAll` in build-backend.mjs.
+plyfile>=1.0
 # Cloth Simulation Filter — ground/non-ground segmentation. SWIG C-extension
 # (imports as `import CSF`); prebuilt wheels for CPython 3.9-3.12 on
 # macOS/Linux/Windows. Bundled via `collectAll` in scripts/build-backend.mjs.
 cloth-simulation-filter>=1.1.7
+# TreeIso individual-tree segmentation deps. The TreeIso algorithm itself is
+# vendored (MIT) under backend-api/vendor/treeiso/; these are its runtime deps.
+# cut_pursuit_py is a pybind11 C-extension (imports as `import cut_pursuit_py`)
+# with prebuilt wheels for CPython 3.10-3.13 on macOS arm64 / Linux / Windows;
+# bundled via `collectAll` in scripts/build-backend.mjs. The others are pure/
+# wheeled scientific deps. No PyTorch/CUDA — TreeIso is CPU-only.
+cut_pursuit_py>=1.0.12
+numpy-indexed>=0.3.7
+scikit-image>=0.22.0
+PyMaxflow>=1.3.0

@@ -13,9 +13,10 @@ import { importTexturedMesh, type MeshImportResponse } from "./utils/backendApi"
 import { plantResponseToMeshData } from "./lib/plantMeshData";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
-// we have a disk path. Anything outside this set (PLY/PCD/LAS/LAZ/OBJ) stays
-// on the in-renderer flat-array path for now.
-const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc']);
+// we have a disk path. Every supported point-cloud format is here; only inputs
+// without an on-disk path (Blob/test fixtures) fall back to the in-renderer
+// flat-array parsers.
+const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz']);
 import logoImage from "./assets/logo.png";
 
 type NavItem = 'viewer' | 'options';
@@ -231,12 +232,13 @@ function App() {
           sourcePath = undefined;
         }
 
-        // Octree path: when we have a real on-disk path and the file is an
-        // XYZ-family extension, route through the backend converter so the
-        // renderer streams tiles instead of holding the full cloud in V8.
-        // Falls back to the in-renderer parser when no path is available
-        // (e.g. fixtures-as-Blob in tests) or the format isn't supported by
-        // PotreeConverter (PLY / PCD / LAS / LAZ).
+        // Octree path: when we have a real on-disk path, route through the
+        // backend converter so the renderer streams tiles instead of holding
+        // the full cloud in V8. The backend converts each format to LAS before
+        // PotreeConverter (XYZ via pandas, PLY via plyfile with scalar fields,
+        // PCD via open3d, LAS/LAZ straight through). Falls back to the
+        // in-renderer parser only when no path is available (e.g.
+        // fixtures-as-Blob in tests).
         const ext = file.name.toLowerCase().split('.').pop() ?? '';
         const useOctree = !!sourcePath && OCTREE_DROP_EXTENSIONS.has(ext);
         const data = useOctree
@@ -366,7 +368,11 @@ function App() {
           }
           const ext = file.name.toLowerCase().split('.').pop() ?? '';
           const useOctree = !!sourcePath && OCTREE_DROP_EXTENSIONS.has(ext);
-          const data = useOctree
+          // PLY/PCD: read via the backend (open3d) when a path is available so
+          // large binary PLYs don't hit the in-renderer string-decode limit
+          // ("no end_header found"). Mirrors the single-file import site.
+          const usePathFlat = !!sourcePath && (ext === 'ply' || ext === 'pcd');
+          const data = useOctree || usePathFlat
             ? await parsePointCloudFromPath(sourcePath!)
             : await parsePointCloud(file);
           newScans.push({

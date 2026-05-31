@@ -165,7 +165,7 @@ export async function segmentGround(
 
 export async function segmentGroundApply(
   request: GroundSegmentationApplyRequest
-): Promise<OctreeMetadata> {
+): Promise<SegmentApplyMetadata> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes (CSF + re-convert)
@@ -182,10 +182,130 @@ export async function segmentGroundApply(
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
-    return (await response.json()) as OctreeMetadata;
+    return (await response.json()) as SegmentApplyMetadata;
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Ground segmentation apply failed:', error);
+    throw error;
+  }
+}
+
+// ==================== TREE INSTANCE SEGMENTATION API ====================
+
+/**
+ * Segment a multi-tree point cloud into per-point tree instance ids via TreeIso
+ * (cut-pursuit graph method, CPU-only). Send inline `points` for flat clouds or
+ * a `source` descriptor for octree-backed clouds (full resolution; labels align
+ * 1:1 with the resolved point order). Labels are 0 = unassigned, 1..N = trees.
+ * TreeIso expects ground-removed input — `ground_warning` flags a likely
+ * un-removed ground surface. Optional `seed_points` ([[x,y,z], ...]) are trunk
+ * seeds for human-in-the-loop: each seed yields exactly one tree.
+ */
+export interface TreeSegmentationRequest {
+  points?: number[][];          // [[x, y, z], ...] — omit when `source` is set
+  source?: BackendPointSource;  // octree-backed clouds read from disk
+  seed_points?: number[][];     // [[x, y, z], ...] trunk seeds (HITL)
+  // TreeIso parameters (defaults match the backend / Xi & Hopkinson 2022).
+  reg_strength1?: number;
+  min_nn1?: number;
+  decimate_res1?: number;
+  reg_strength2?: number;
+  min_nn2?: number;
+  decimate_res2?: number;
+  max_gap?: number;
+  rel_height_length_ratio?: number;
+  vertical_weight?: number;
+  min_nn3?: number;
+  score_candidate_thresh?: number;
+  init_stem_rel_length_thresh?: number;
+  max_outlier_gap?: number;
+}
+
+export interface TreeSegmentationResponse {
+  success: boolean;
+  labels: number[];        // 0 = unassigned, 1..N = tree ids; aligned to input
+  num_trees: number;
+  num_points: number;
+  ground_warning: boolean;
+  error?: string;
+}
+
+/**
+ * Apply tree segmentation and re-convert the source cloud into a new octree
+ * carrying a `tree_instance` scalar attribute (0 = unassigned, 1..N = trees) the
+ * renderer can colour by. Mirrors `segmentGroundApply`; `keep_instance` extracts
+ * a single tree as a sub-cloud.
+ */
+export interface TreeSegmentationApplyRequest {
+  source_path: string;
+  ascii_format?: string | null;
+  seed_points?: number[][];
+  reg_strength1?: number;
+  min_nn1?: number;
+  decimate_res1?: number;
+  reg_strength2?: number;
+  min_nn2?: number;
+  decimate_res2?: number;
+  max_gap?: number;
+  rel_height_length_ratio?: number;
+  vertical_weight?: number;
+  min_nn3?: number;
+  score_candidate_thresh?: number;
+  init_stem_rel_length_thresh?: number;
+  max_outlier_gap?: number;
+  keep_instance?: number;   // 1..N → keep only that tree (split sub-cloud)
+}
+
+export async function segmentTrees(
+  request: TreeSegmentationRequest
+): Promise<TreeSegmentationResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+
+  try {
+    const response = await fetch(`${baseUrl}/api/segment/trees`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Tree segmentation failed:', error);
+    throw error;
+  }
+}
+
+export async function segmentTreesApply(
+  request: TreeSegmentationApplyRequest
+): Promise<SegmentApplyMetadata> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes (TreeIso + re-convert)
+
+  try {
+    const response = await fetch(`${baseUrl}/api/segment/trees/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as SegmentApplyMetadata;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Tree segmentation apply failed:', error);
     throw error;
   }
 }
@@ -1560,6 +1680,17 @@ export interface OctreeMetadata {
 }
 
 /**
+ * `OctreeMetadata` extended with the on-disk path of the segmented LAS the
+ * apply baked the label into (ground_class / tree_instance). The renderer uses
+ * it as the new cloud's `sourceXyzPath` so a later Filter/Crop re-reads a source
+ * that carries the label — the original XYZ source does not. See
+ * `segment_ground_apply` / `segment_trees_apply` in the backend.
+ */
+export interface SegmentApplyMetadata extends OctreeMetadata {
+  segmented_source_path: string;
+}
+
+/**
  * Triggers a Potree 2.0 octree build on the backend for an XYZ-family source
  * file. The backend caches by sha1(sourcePath + mtime + asciiFormat) — repeat
  * calls hit the cache and return immediately. The renderer streams tiles via
@@ -1620,15 +1751,20 @@ export type CropOctreeRegion =
     };
 
 /**
- * Keep only points whose imported scalar attribute `slug` falls within the
- * inclusive range [min, max]. `slug` is the on-disk extra-dimension name —
- * the same key used in `OctreeRef.attributeRanges` and the value (after the
- * `scalar:` prefix) the filter panel's field dropdown emits for octrees.
+ * Keep only points whose imported scalar attribute `slug` matches. Continuous
+ * fields use the inclusive range [min, max]; categorical fields (ground_class /
+ * tree_instance) set `values` to keep points whose value rounds to one of the
+ * listed class ids (an OR within the field — `min`/`max` are ignored). `slug` is
+ * the on-disk extra-dimension name — the same key used in
+ * `OctreeRef.attributeRanges` and the value (after the `scalar:` prefix) the
+ * filter panel's field dropdown emits for octrees.
  */
 export interface ScalarFilter {
   slug: string;
   min: number;
   max: number;
+  // Categorical membership: when set, keep iff round(value) is in this set.
+  values?: number[];
 }
 
 /**
@@ -1642,6 +1778,11 @@ export interface CropOctreeResult {
   cache_id: string | null;
   cache_dir: string | null;
   cached: boolean;
+  // On-disk path of the persisted filtered LAS (carrying the kept points with
+  // any scalar attributes). The renderer uses it as the resulting cloud's
+  // `sourceXyzPath` so the NEXT crop/filter/segment composes on the current
+  // point set, not the original source. `null` when the crop kept zero points.
+  filtered_source_path: string | null;
   version: string;
   point_count: number;
   spacing: number;

@@ -230,6 +230,115 @@ def test_segment_ground_apply_rejects_bad_keep_class(client, cache_root):
 
 @requires_csf
 @requires_converter
+def test_segment_ground_apply_returns_persisted_segmented_source(client, cache_root):
+    """The apply persists a segmented LAS (carrying ground_class) and returns
+    its path. This is what a later Filter re-reads — without it, crop_octree
+    would re-read the original XYZ (no ground_class column) and 400."""
+    body = client.post(
+        "/api/segment/ground/apply",
+        json={"source_path": str(FIXTURE), "ascii_format": ASCII_FORMAT, "class_threshold": 0.05},
+    ).json()
+    seg_path = Path(body["segmented_source_path"])
+    assert seg_path.is_file(), f"segmented source not persisted at {seg_path}"
+    assert seg_path.suffix == ".las"
+    # It lives inside the apply's cache dir (so cache eviction reclaims it).
+    assert seg_path.parent == Path(body["cache_dir"])
+
+    # The LAS carries the ground_class extra dimension.
+    import laspy
+    with laspy.open(str(seg_path)) as f:
+        extra = [d.name for d in f.header.point_format.extra_dimensions]
+    assert main.GROUND_CLASS_SLUG in extra
+
+
+@requires_csf
+@requires_converter
+def test_segment_ground_apply_then_filter_by_class(client, cache_root):
+    """End-to-end regression for the reported bug: after an in-place classify,
+    filtering the cloud on `ground_class` via crop_octree must succeed (not 400)
+    and keep only the requested class."""
+    apply_body = client.post(
+        "/api/segment/ground/apply",
+        json={"source_path": str(FIXTURE), "ascii_format": ASCII_FORMAT, "class_threshold": 0.05},
+    ).json()
+    seg_path = apply_body["segmented_source_path"]
+    full_count = apply_body["point_count"]
+
+    # Filter to plant-only (ground_class == 2) the way the renderer does:
+    # crop_octree on the persisted segmented LAS (ascii_format=None for LAS).
+    plant = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": seg_path,
+            "scalar_filters": [{"slug": main.GROUND_CLASS_SLUG, "min": 2, "max": 2}],
+        },
+    )
+    assert plant.status_code == 200, plant.text  # <-- the bug surfaced as 400 here
+    plant_count = plant.json()["point_count"]
+
+    ground = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": seg_path,
+            "scalar_filters": [{"slug": main.GROUND_CLASS_SLUG, "min": 1, "max": 1}],
+        },
+    )
+    assert ground.status_code == 200, ground.text
+    ground_count = ground.json()["point_count"]
+
+    assert 0 < plant_count < full_count
+    assert 0 < ground_count < full_count
+    assert plant_count + ground_count == full_count
+
+
+@requires_csf
+@requires_converter
+def test_segment_then_filter_then_crop_keeps_ground_removed(client, cache_root):
+    """The user's exact bug: segment ground → filter OUT ground → crop the
+    remainder. The cropped result must NOT contain ground points — i.e. the
+    crop composes on the filtered LAS, not the original segmented source."""
+    apply_body = client.post(
+        "/api/segment/ground/apply",
+        json={"source_path": str(FIXTURE), "ascii_format": ASCII_FORMAT, "class_threshold": 0.05},
+    ).json()
+
+    # Filter to non-ground only (ground_class == 2), the way the renderer does:
+    # crop_octree on the persisted segmented LAS.
+    filtered = client.post(
+        "/api/pointcloud/crop_octree",
+        json={"source_path": apply_body["segmented_source_path"],
+              "scalar_filters": [{"slug": main.GROUND_CLASS_SLUG, "values": [2]}]},
+    ).json()
+    plant_count = filtered["point_count"]
+    assert 0 < plant_count < apply_body["point_count"]
+    chained_source = filtered["filtered_source_path"]
+    assert chained_source and Path(chained_source).is_file()
+
+    # Sanity: the filtered LAS contains ZERO ground points.
+    import laspy
+    gc = np.asarray(laspy.read(chained_source)[main.GROUND_CLASS_SLUG])
+    assert gc.size == plant_count
+    assert int((np.rint(gc) == 1).sum()) == 0, "filtered LAS still has ground points"
+
+    # Now crop a spatial sub-region of the filtered cloud. The result must be a
+    # subset of the plant points — ground must stay gone (the bug made it return).
+    pts = np.asarray(laspy.read(chained_source).xyz, dtype=np.float64)
+    mid = np.median(pts, axis=0)
+    cropped = client.post(
+        "/api/pointcloud/crop_octree",
+        json={"source_path": chained_source,
+              "region": {"kind": "box",
+                         "min": [float(pts[:, 0].min()), float(pts[:, 1].min()), float(pts[:, 2].min())],
+                         "max": [float(mid[0]), float(pts[:, 1].max()), float(pts[:, 2].max())],
+                         "invert": False}},
+    ).json()
+    assert 0 < cropped["point_count"] <= plant_count
+    cropped_gc = np.asarray(laspy.read(cropped["filtered_source_path"])[main.GROUND_CLASS_SLUG])
+    assert int((np.rint(cropped_gc) == 1).sum()) == 0, "ground reappeared after crop"
+
+
+@requires_csf
+@requires_converter
 def test_segment_ground_apply_is_cached(client, cache_root):
     payload = {
         "source_path": str(FIXTURE),

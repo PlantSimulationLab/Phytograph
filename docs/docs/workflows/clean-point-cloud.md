@@ -171,7 +171,17 @@ X, Y, and Z.
 To set a filter:
 
 1. Pick a **field** from the dropdown (X, Y, Z, intensity, or any scalar).
-2. Enter a **min** and **max**. The range takes effect immediately.
+2. Set the criterion:
+    - **Continuous fields** (intensity, height, deviation, …) show **min**
+      and **max** inputs — points in the inclusive range are "in range".
+      The range takes effect immediately.
+    - **Class fields** — `ground_class` (from
+      [Segment ground](segment-ground.md)) and `tree_instance` (from
+      [Segment trees](segment-trees.md)) — are categorical, so instead of
+      a range you get a **checkbox per class** (Ground, Non-ground, or
+      Tree 1…N). Tick the classes to **keep**; use **All** / **None** to
+      toggle the whole set. This is the natural way to isolate, say, just
+      the non-ground points after a ground classification.
 3. Repeat for other fields to stack filters — they compose with **AND**,
    so only points passing every active filter are "in range".
 

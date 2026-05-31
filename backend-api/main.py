@@ -85,8 +85,15 @@ def unicode_to_ascii(s: str) -> str:
         result = result.replace(subscript, ascii_char)
     return result
 
+# Vendored libraries live under backend-api/vendor/. Put it on sys.path so
+# `from treeiso.treeiso_core import ...` resolves in dev and in the PyInstaller
+# bundle (where vendor/ travels with main.py via build-backend.mjs).
+_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+if str(_VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR_DIR))
+
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.8"
+BACKEND_VERSION = "0.3.11"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1656,6 +1663,221 @@ async def segment_ground_points(request: GroundSegmentationRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Ground segmentation failed: {str(e)}")
+
+
+# ==================== TREE INSTANCE SEGMENTATION (TreeIso) ====================
+# `tree_instance` is the per-point scalar field this writes: 0 = unassigned,
+# 1..N = tree ids. Categorical coloring + legend live in the renderer's
+# classification.ts. TreeIso isolates above-ground tree structure, so callers
+# should remove ground first (see `ground_warning`). Mirrors the ground-segment
+# endpoints above (inline `points` or `source`; full-resolution; per-point labels).
+TREE_INSTANCE_SLUG = "tree_instance"
+TREE_INSTANCE_LABEL = "Tree instance"
+
+# TreeIso is CPU-only and O(n log n)+ with heavy constants; beyond a few million
+# points it crawls. Cap so the endpoints fail fast with an actionable message
+# instead of appearing to hang (the dense TLS benchmark plots are ~30M points).
+# Override via env for power users with patience / a big machine.
+try:
+    _TREEISO_MAX_POINTS = int(os.environ.get("PHYTOGRAPH_TREEISO_MAX_POINTS", "5000000"))
+except (ValueError, TypeError):
+    _TREEISO_MAX_POINTS = 5_000_000
+
+
+class TreeSegmentationRequest(BaseModel):
+    """Request model for individual-tree segmentation via TreeIso.
+
+    Like ground segmentation, provide inline `points` or a `source` descriptor;
+    the result must NOT be downsampled so per-point `labels` align 1:1. Optional
+    `seed_points` ([[x,y,z], ...]) anchor trees for human-in-the-loop seeding —
+    each seed yields exactly one tree id. The remaining fields are TreeIso
+    parameters (defaults match Xi & Hopkinson 2022)."""
+    points: Optional[List[List[float]]] = None
+    source: Optional[PointSource] = None
+    seed_points: Optional[List[List[float]]] = None
+    reg_strength1: float = 1.0
+    min_nn1: int = 5
+    decimate_res1: float = 0.05
+    reg_strength2: float = 15.0
+    min_nn2: int = 20
+    decimate_res2: float = 0.1
+    max_gap: float = 2.0
+    rel_height_length_ratio: float = 0.5
+    vertical_weight: float = 0.5
+    min_nn3: int = 20
+    score_candidate_thresh: float = 0.7
+    init_stem_rel_length_thresh: float = 1.5
+    max_outlier_gap: float = 3.0
+
+
+class TreeSegmentationResponse(BaseModel):
+    """Per-point tree instance ids aligned to the resolved point order."""
+    success: bool
+    labels: List[int] = []          # 0 = unassigned, 1..N = tree ids
+    num_trees: int = 0
+    num_points: int = 0
+    ground_warning: bool = False
+    error: Optional[str] = None
+
+
+def _treeiso_params(request: "TreeSegmentationRequest"):
+    """Build a vendored TreeIsoParams from the request's tuning fields."""
+    from treeiso.treeiso_core import TreeIsoParams
+
+    return TreeIsoParams(
+        reg_strength1=request.reg_strength1,
+        min_nn1=request.min_nn1,
+        decimate_res1=request.decimate_res1,
+        reg_strength2=request.reg_strength2,
+        min_nn2=request.min_nn2,
+        decimate_res2=request.decimate_res2,
+        max_gap=request.max_gap,
+        rel_height_length_ratio=request.rel_height_length_ratio,
+        vertical_weight=request.vertical_weight,
+        min_nn3=request.min_nn3,
+        score_candidate_thresh=request.score_candidate_thresh,
+        init_stem_rel_length_thresh=request.init_stem_rel_length_thresh,
+        max_outlier_gap=request.max_outlier_gap,
+    )
+
+
+def _looks_like_ground_present(points: np.ndarray) -> bool:
+    """Cheap advisory heuristic: is there a broad, flat, dense layer at the bottom?
+
+    TreeIso expects ground-removed input. We flag (never block) when the lowest
+    vertical slab holds a large share of points spread across the full XY extent
+    — the signature of an un-removed ground surface."""
+    if len(points) < 100:
+        return False
+    z = points[:, 2]
+    z0, z1 = float(np.min(z)), float(np.max(z))
+    span = z1 - z0
+    if span <= 1e-6:
+        return False
+    slab = points[z <= z0 + 0.05 * span]
+    if len(slab) < 50:
+        return False
+    frac = len(slab) / len(points)
+    xy_extent = np.ptp(points[:, :2], axis=0)
+    slab_extent = np.ptp(slab[:, :2], axis=0)
+    wide = bool(np.all(slab_extent > 0.6 * np.maximum(xy_extent, 1e-6)))
+    return bool(frac > 0.12 and wide)
+
+
+def segment_trees(
+    points: np.ndarray,
+    params=None,
+    seeds: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Assign each point a tree id (0 = unassigned, 1..N) via TreeIso.
+
+    With `seeds`, every TreeIso segment is reassigned to the id of its nearest
+    seed (each seed -> exactly one tree); otherwise TreeIso's own 1..N labels
+    are returned, aligned 1:1 to the input order."""
+    from treeiso.treeiso_core import segment_trees as _ti_segment
+
+    labels = _ti_segment(points, params)
+    if seeds is None or len(seeds) == 0:
+        return labels.astype(np.int64)
+
+    # Reconcile TreeIso's segments with user trunk seeds so each seed yields one
+    # tree. Greedily give every seed its nearest still-unclaimed segment (so no
+    # seed is dropped when there are at least as many segments as seeds), then
+    # assign any leftover segments to their nearest seed.
+    seeds = np.asarray(seeds, dtype=np.float64)[:, :3]
+    seg_ids = np.unique(labels)
+    centroids = np.array([points[labels == s, :3].mean(axis=0) for s in seg_ids])
+    cost = np.linalg.norm(centroids[:, None, :] - seeds[None, :, :], axis=2)  # (segs, seeds)
+
+    seg_to_seed: dict[int, int] = {}
+    unclaimed = set(range(len(seg_ids)))
+    # Seeds whose closest segment is nearest get first pick of that segment.
+    for j in np.argsort(cost.min(axis=0)):
+        if not unclaimed:
+            break
+        cand = min(unclaimed, key=lambda i, jj=int(j): cost[i, jj])
+        seg_to_seed[int(seg_ids[cand])] = int(j) + 1
+        unclaimed.discard(cand)
+    for i in unclaimed:
+        seg_to_seed[int(seg_ids[i])] = int(np.argmin(cost[i])) + 1
+
+    return np.array([seg_to_seed[int(s)] for s in labels], dtype=np.int64)
+
+
+@app.post("/api/segment/trees", response_model=TreeSegmentationResponse)
+async def segment_trees_points(request: TreeSegmentationRequest):
+    """Segment a multi-tree cloud into per-point tree instance ids via TreeIso.
+
+    Mirrors `/api/segment/ground`: inline `points` or a `source` descriptor in,
+    per-point integer labels out (0 = unassigned, 1..N = trees), full resolution
+    so labels align 1:1. Persisting onto an octree-backed cloud is done by
+    `/api/segment/trees/apply`.
+
+    Labels-only by design: this interactive path returns predicted instance ids
+    and nothing else. If the source carries ground-truth fields (e.g. a
+    benchmark PLY's `instance`/`semantic`), they are NOT echoed back here — only
+    `/apply` carries source scalars through into the octree, and the eval
+    harness (`scripts/eval_tree_segmentation.py`) reads GT straight from the
+    file. There is no GT consumer on this endpoint."""
+    try:
+        points = _resolve_segmentation_points(
+            GroundSegmentationRequest(points=request.points, source=request.source)
+        )
+
+        if len(points) < 10:
+            return TreeSegmentationResponse(
+                success=False, num_points=len(points),
+                error="Need at least 10 points to segment trees",
+            )
+
+        # Drop non-finite points before TreeIso (cKDTree chokes on NaN/inf).
+        finite = np.isfinite(points).all(axis=1)
+        if not finite.all():
+            points = points[finite]
+            if len(points) < 10:
+                return TreeSegmentationResponse(
+                    success=False, num_points=len(points),
+                    error="Fewer than 10 finite points after dropping NaN/inf coordinates.",
+                )
+
+        if len(points) > _TREEISO_MAX_POINTS:
+            return TreeSegmentationResponse(
+                success=False, num_points=len(points),
+                error=(f"{len(points):,} points exceeds the {_TREEISO_MAX_POINTS:,}-point "
+                       "limit for tree segmentation. Downsample or crop first."),
+            )
+
+        ground_warning = _looks_like_ground_present(points)
+        seeds = (
+            np.asarray(request.seed_points, dtype=np.float64)
+            if request.seed_points else None
+        )
+        try:
+            labels = segment_trees(points, _treeiso_params(request), seeds)
+        except ImportError as e:
+            return TreeSegmentationResponse(
+                success=False, num_points=len(points),
+                error=f"TreeIso dependencies not installed ({e}). "
+                      "Run: pip install -r backend-api/requirements.txt",
+            )
+
+        labels = np.asarray(labels)
+        num_trees = int(len(np.unique(labels[labels > 0]))) if len(labels) else 0
+        return TreeSegmentationResponse(
+            success=True,
+            labels=[int(x) for x in labels],
+            num_trees=num_trees,
+            num_points=len(points),
+            ground_warning=ground_warning,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return TreeSegmentationResponse(
+            success=False, num_points=0, error=str(e),
+        )
 
 
 # ==================== HELIOS TRIANGULATION ====================
@@ -6774,6 +6996,12 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path)
             engine="c",
         )
         for chunk in reader:
+            # Drop rows with non-numeric / missing x/y/z. A .pts file leads
+            # with a bare point-count line ('12345') that pandas pads to a
+            # 1-field row (xyz NaN); without this it would otherwise be cast
+            # to a garbage (0,0,0)-ish point in the octree. Mirrors the flat
+            # loader's `df.dropna(subset=['x','y','z'])`.
+            chunk = chunk.dropna(subset=["x", "y", "z"])
             n = len(chunk)
             if n == 0:
                 continue
@@ -6802,19 +7030,183 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path)
     return total_points, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
 
 
+def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
+    """Convert a PLY to LAS via plyfile so it can feed the PotreeConverter
+    octree pipeline, preserving scalar fields as LAS extra dimensions.
+
+    open3d (used on the flat path) drops every vertex property except position
+    and RGB, so we parse the PLY directly. Recognised roles: x/y/z (required),
+    red/green/blue or r/g/b (RGB), and the first of intensity/scalar_intensity/
+    reflectance (mapped to LAS intensity). Every remaining numeric vertex
+    property is carried as a float32 extra dimension so the renderer can colour
+    by it — the same mechanism `_xyz_to_las` uses for unmapped ASCII columns.
+
+    Returns (total_points, extra_dims), where extra_dims is the
+    [{slug, label}, ...] list for the slug→label sidecar.
+    """
+    import laspy  # local: only when this code path runs
+    from plyfile import PlyData
+
+    ply = PlyData.read(str(source_path))
+    try:
+        vertex = ply["vertex"].data
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail="PLY has no 'vertex' element; cannot import as a point cloud.",
+        )
+    names = list(vertex.dtype.names or ())
+
+    if not all(role in names for role in ("x", "y", "z")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"PLY missing x/y/z vertex properties. Got: {names}",
+        )
+
+    # RGB: PLY conventionally uses red/green/blue; accept short r/g/b too.
+    if all(c in names for c in ("red", "green", "blue")):
+        rgb_cols = ("red", "green", "blue")
+    elif all(c in names for c in ("r", "g", "b")):
+        rgb_cols = ("r", "g", "b")
+    else:
+        rgb_cols = None
+
+    intensity_col = next(
+        (c for c in ("intensity", "scalar_intensity", "reflectance") if c in names),
+        None,
+    )
+
+    reserved = {"x", "y", "z"}
+    if rgb_cols:
+        reserved.update(rgb_cols)
+    if intensity_col:
+        reserved.add(intensity_col)
+
+    # Carry every other numeric property as a float32 extra dim. Dedupe slugs
+    # the same way the ASCII path does, since two headers can sanitise alike.
+    extra_dims: List[dict] = []
+    used_slugs: set[str] = set()
+    for col in names:
+        if col in reserved or not np.issubdtype(vertex[col].dtype, np.number):
+            continue
+        slug = _sanitize_extra_dim_name(col)
+        base, i = slug, 1
+        while slug in used_slugs:
+            slug = f"{base[:29]}_{i}"
+            i += 1
+        used_slugs.add(slug)
+        extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col)})
+
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    for ed in extra_dims:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+
+    n = len(vertex)
+    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+    record.x = vertex["x"].astype(np.float64)
+    record.y = vertex["y"].astype(np.float64)
+    record.z = vertex["z"].astype(np.float64)
+    if rgb_cols:
+        # PLY RGB is 0-255 (uint8); LAS RGB is uint16. *256 keeps perceptual
+        # brightness and lets the renderer right-shift to recover 8-bit, the
+        # same convention as `_xyz_to_las`.
+        record.red = vertex[rgb_cols[0]].astype(np.uint16) * 256
+        record.green = vertex[rgb_cols[1]].astype(np.uint16) * 256
+        record.blue = vertex[rgb_cols[2]].astype(np.uint16) * 256
+    if intensity_col is not None:
+        refl = vertex[intensity_col].astype(np.float32)
+        record.intensity = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
+    for ed in extra_dims:
+        record[ed["slug"]] = vertex[ed["col"]].astype(np.float32)
+
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        writer.write_points(record)
+
+    return n, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
+
+
+def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
+    """Convert a PCD to LAS so it can feed the PotreeConverter octree pipeline.
+
+    PCD goes through open3d (`_load_ply_pcd_arrays`), which carries position and
+    RGB only — PCD's ascii/binary/binary_compressed variants make robust scalar
+    parsing more than this is worth for now, so scalar fields are not preserved.
+    Returns (total_points, []).
+    """
+    import laspy  # local: only when this code path runs
+
+    positions, colors, _ = _load_ply_pcd_arrays(str(source_path))
+
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+    n = len(positions)
+    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+    record.x = positions[:, 0].astype(np.float64)
+    record.y = positions[:, 1].astype(np.float64)
+    record.z = positions[:, 2].astype(np.float64)
+    if colors is not None:
+        # open3d colors are 0-1 floats; LAS RGB is uint16. Scale to 8-bit then
+        # *256 to match the `_xyz_to_las` / `_ply_to_las` convention.
+        rgb8 = np.clip(colors * 255.0, 0, 255).astype(np.uint16)
+        record.red = rgb8[:, 0] * 256
+        record.green = rgb8[:, 1] * 256
+        record.blue = rgb8[:, 2] * 256
+
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        writer.write_points(record)
+
+    return n, []
+
+
+def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
+    """Read a LAS/LAZ file's extra-dimension names (header only) so a passed-
+    through octree still gets a slug→label sidecar.
+
+    LAS/LAZ feed PotreeConverter unchanged, so their native extra dimensions
+    already survive into the octree — but without a sidecar the renderer shows
+    raw slugs. The LAS field name is already canonical, so slug == label.
+    Reading just the header is cheap (no point data is decoded).
+    """
+    import laspy  # local: only when this code path runs
+
+    try:
+        with laspy.open(str(source_path)) as reader:
+            dims = [d.name for d in reader.header.point_format.extra_dimensions]
+    except Exception:
+        # A malformed/unreadable header shouldn't block conversion; the file
+        # is handed to PotreeConverter regardless, and the renderer falls back
+        # to raw slugs when the sidecar is absent.
+        return []
+    return [{"slug": d, "label": d} for d in dims]
+
+
 def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path) -> tuple[_Path, bool, List[dict]]:
-    """Get a LAS file path for `source_path`, converting from XYZ if needed.
+    """Get a LAS file path for `source_path`, converting from another format
+    if needed.
 
     Returns (las_path, is_temp, extra_dims) — caller deletes the file if
     is_temp. `extra_dims` is the [{slug, label}, ...] list of carried scalar
-    attributes (empty for LAS/LAZ sources, which we don't re-derive names for).
+    attributes (read from the header for LAS/LAZ; derived during conversion for
+    XYZ/PLY; empty for PCD, which carries position + RGB only).
     """
     ext = source_path.suffix.lower().lstrip(".")
     if ext in ("las", "laz"):
-        return source_path, False, []
+        return source_path, False, _las_extra_dim_labels(source_path)
     if ext in _PANDAS_EXTENSIONS:
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims = _xyz_to_las(source_path, ascii_format, out)
+        return out, True, extra_dims
+    if ext == "ply":
+        out = work_dir / (source_path.stem + ".las")
+        _, extra_dims = _ply_to_las(source_path, out)
+        return out, True, extra_dims
+    if ext == "pcd":
+        out = work_dir / (source_path.stem + ".las")
+        _, extra_dims = _pcd_to_las(source_path, out)
         return out, True, extra_dims
     raise HTTPException(
         status_code=400,
@@ -7222,11 +7614,45 @@ def _canonical_scalar_filters(filters: Optional[List[dict]]) -> str:
     scalar-free crop keeps its prior cache identity."""
     if not filters:
         return ""
-    parts = sorted(
-        "{}:{:.9g}:{:.9g}".format(f["slug"], float(f["min"]), float(f["max"]))
-        for f in filters
-    )
+
+    def _one(f: dict) -> str:
+        vals = f.get("values")
+        if vals:
+            # Categorical: sorted unique class ids; independent of min/max.
+            ids = sorted({int(round(float(v))) for v in vals})
+            return "{}:set:{}".format(f["slug"], ",".join(str(i) for i in ids))
+        return "{}:{:.9g}:{:.9g}".format(
+            f["slug"], float(f["min"]), float(f["max"]),
+        )
+
+    parts = sorted(_one(f) for f in filters)
     return "scalar|" + ";".join(parts)
+
+
+def _resolve_scalar_filter(f: dict) -> tuple:
+    """Normalise one scalar-filter spec into `(lo, hi, value_set)`.
+
+    `value_set` is a Python set of int class ids for a categorical filter, or
+    None for a continuous [lo, hi] range. Continuous fields keep their float
+    bounds; categorical fields ignore them. Shared by both filter functions so
+    the membership semantics stay identical across ASCII and LAS sources."""
+    vals = f.get("values")
+    if vals:
+        return float("-inf"), float("inf"), {int(round(float(v))) for v in vals}
+    return float(f.get("min", float("-inf"))), float(f.get("max", float("inf"))), None
+
+
+def _scalar_filter_mask(vals: "np.ndarray", lo: float, hi: float,
+                        value_set: Optional[set]) -> "np.ndarray":
+    """Boolean keep-mask for one resolved scalar filter over a value array.
+
+    Categorical (value_set given): keep iff round(value) ∈ value_set. Continuous:
+    keep iff lo <= value <= hi. Extra dims are float32 on disk, so rounding makes
+    integer class labels robust to the float round-trip."""
+    if value_set is not None:
+        rounded = np.rint(vals).astype(np.int64)
+        return np.isin(rounded, list(value_set))
+    return (vals >= lo) & (vals <= hi)
 
 
 def _crop_octree_cache_key(
@@ -7360,13 +7786,29 @@ class CropOctreeRegion(BaseModel):
 
 
 class ScalarFilter(BaseModel):
-    """Keep only points whose imported scalar attribute `slug` falls in the
-    inclusive range [min, max]. `slug` is the on-disk extra-dimension name
-    (matches a key in the octree's `attributeRanges` / the `extra_dims` slugs
-    produced by `_xyz_column_plan`)."""
+    """Keep only points whose imported scalar attribute `slug` matches.
+
+    Two modes:
+      - Continuous (default): keep points in the inclusive range [min, max].
+      - Categorical: when `values` is set, keep points whose value rounds to one
+        of the listed class ids (an OR within the field — `min`/`max` ignored).
+        Used by the filter UI's class-checkbox path for integer-valued labels
+        like `ground_class` / `tree_instance`, where a value such as `2` means a
+        discrete class, not a position on a continuum, and a multi-select keep
+        need not be contiguous.
+
+    `slug` is the on-disk extra-dimension name (matches a key in the octree's
+    `attributeRanges` / the `extra_dims` slugs produced by `_xyz_column_plan`).
+    """
     slug: str
-    min: float
-    max: float
+    # Optional so a categorical (`values`) filter can omit them. Defaulted to the
+    # widest range so a malformed continuous filter keeps everything rather than
+    # silently dropping points.
+    min: float = float("-inf")
+    max: float = float("inf")
+    # When non-empty, switches this filter to categorical membership: keep iff
+    # round(value) ∈ {round(v) for v in values}.
+    values: Optional[List[float]] = None
 
 
 class CropOctreeRequest(BaseModel):
@@ -7467,7 +7909,7 @@ def _filtered_xyz_to_las(
                     f"Available: {sorted(slug_to_col)}"
                 ),
             )
-        resolved_scalar_filters.append((col, float(f["min"]), float(f["max"])))
+        resolved_scalar_filters.append((col, *_resolve_scalar_filter(f)))
 
     # Precompute region inputs once. region is None → no spatial crop.
     kind = region["kind"] if region else None
@@ -7530,6 +7972,9 @@ def _filtered_xyz_to_las(
             engine="c",
         )
         for chunk in reader:
+            # Drop non-numeric/missing x/y/z rows (e.g. a .pts count-header
+            # line) before masking, mirroring `_xyz_to_las` and the flat loader.
+            chunk = chunk.dropna(subset=["x", "y", "z"])
             n = len(chunk)
             if n == 0:
                 continue
@@ -7561,9 +8006,9 @@ def _filtered_xyz_to_las(
             # never flips the scalar constraints. Source extra dims are float32
             # on disk (see add_extra_dim below), so filter on float32 values to
             # keep survivors consistent with what gets written.
-            for col, lo, hi in resolved_scalar_filters:
+            for col, lo, hi, value_set in resolved_scalar_filters:
                 vals = chunk[col].to_numpy(dtype=np.float32)
-                mask &= (vals >= lo) & (vals <= hi)
+                mask &= _scalar_filter_mask(vals, lo, hi, value_set)
 
             # Complement the entire combined mask last — the true leftover set.
             if invert_all:
@@ -7615,6 +8060,162 @@ def _filtered_xyz_to_las(
     return total_kept, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
 
 
+def _filtered_las_to_las(
+    source_las: _Path,
+    out_las: _Path,
+    region: Optional[dict],
+    translation: Optional[List[float]],
+    scalar_filters: Optional[List[dict]] = None,
+    invert_all: bool = False,
+) -> tuple[int, List[dict]]:
+    """LAS-source counterpart to `_filtered_xyz_to_las`: stream a LAS file in
+    chunks, apply the same combined mask, and write the survivors to a new LAS.
+
+    Used by `crop_octree` for any source that isn't XYZ-family ASCII — PLY/PCD
+    (first normalised to LAS by `_source_to_las`, which preserves PLY scalar
+    fields as extra dimensions) and native LAS/LAZ. The mask semantics match
+    `_filtered_xyz_to_las` exactly (spatial region AND scalar filters, with
+    `invert` flipping only the spatial part and `invert_all` complementing the
+    whole mask last) so crop/filter/segment behave identically across formats.
+
+    Scalar-filter slugs resolve against the source LAS's extra-dimension names.
+    Returns (total_kept, extra_dims) where extra_dims is the [{slug, label}]
+    list for the slug→label sidecar — slug == label for LAS dims.
+    """
+    import laspy
+
+    with laspy.open(str(source_las)) as probe:
+        src_header = probe.header
+        extra_names = [d.name for d in src_header.point_format.extra_dimensions]
+        has_rgb = {"red", "green", "blue"} <= set(src_header.point_format.dimension_names)
+    extra_dims = [{"slug": d, "label": d} for d in extra_names]
+
+    # Resolve scalar filters to source extra-dim names up-front (fail fast).
+    available = set(extra_names)
+    resolved_scalar_filters: List[tuple] = []
+    for f in (scalar_filters or []):
+        slug = f["slug"]
+        if slug not in available:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown scalar attribute: {slug!r}. "
+                    f"Available: {sorted(available)}"
+                ),
+            )
+        resolved_scalar_filters.append((slug, *_resolve_scalar_filter(f)))
+
+    kind = region["kind"] if region else None
+    invert = bool(region.get("invert", False)) if region else False
+    if kind == "box":
+        cmin = np.array(region["min"], dtype=np.float64)
+        cmax = np.array(region["max"], dtype=np.float64)
+    elif kind == "polygon":
+        proj = np.array(region["projection"], dtype=np.float64)
+        view = np.array(region["view"], dtype=np.float64)
+        canvas = region["canvas"]
+        canvas_w = int(canvas["width"])
+        canvas_h = int(canvas["height"])
+        polygon = np.array(region["points"], dtype=np.float64)
+        if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="region.points must be at least 3 [x, y] entries.",
+            )
+    elif kind is not None:
+        raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
+
+    tx = ty = tz = 0.0
+    if translation is not None:
+        tx, ty, tz = (float(translation[0]), float(translation[1]), float(translation[2]))
+
+    # Output header mirrors the XYZ path: point format 3, mm scale, extra dims
+    # re-declared so they survive into the cropped octree.
+    out_header = laspy.LasHeader(point_format=3, version="1.4")
+    out_header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    out_header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    for d in extra_names:
+        out_header.add_extra_dim(laspy.ExtraBytesParams(name=d, type=np.float32))
+
+    total_kept = 0
+    data_min = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+    data_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+
+    with laspy.open(str(source_las)) as reader, \
+            laspy.open(str(out_las), mode="w", header=out_header) as writer:
+        for points in reader.chunk_iterator(2_000_000):
+            n = len(points)
+            if n == 0:
+                continue
+            # laspy `.x/.y/.z` apply the source header's scale+offset, giving
+            # real-world coordinates — the same space the XYZ path filters in.
+            xs = np.asarray(points.x, dtype=np.float64) + tx
+            ys = np.asarray(points.y, dtype=np.float64) + ty
+            zs = np.asarray(points.z, dtype=np.float64) + tz
+
+            if kind == "box":
+                mask = (
+                    (xs >= cmin[0]) & (xs <= cmax[0]) &
+                    (ys >= cmin[1]) & (ys <= cmax[1]) &
+                    (zs >= cmin[2]) & (zs <= cmax[2])
+                )
+            elif kind == "polygon":
+                positions = np.stack([xs, ys, zs], axis=1)
+                pixels = _project_world_to_pixel(positions, proj, view, canvas_w, canvas_h)
+                mask = _points_in_polygon_mask(pixels, polygon)
+            else:
+                mask = np.ones(n, dtype=bool)
+
+            if invert:
+                mask = ~mask
+            for slug, lo, hi, value_set in resolved_scalar_filters:
+                vals = np.asarray(points[slug], dtype=np.float32)
+                mask &= _scalar_filter_mask(vals, lo, hi, value_set)
+            if invert_all:
+                mask = ~mask
+
+            kept = int(mask.sum())
+            if kept == 0:
+                continue
+
+            kept_xs, kept_ys, kept_zs = xs[mask], ys[mask], zs[mask]
+            data_min = np.minimum(data_min, [kept_xs.min(), kept_ys.min(), kept_zs.min()])
+            data_max = np.maximum(data_max, [kept_xs.max(), kept_ys.max(), kept_zs.max()])
+
+            record = laspy.ScaleAwarePointRecord.zeros(kept, header=out_header)
+            record.x, record.y, record.z = kept_xs, kept_ys, kept_zs
+            if has_rgb:
+                record.red = np.asarray(points.red, dtype=np.uint16)[mask]
+                record.green = np.asarray(points.green, dtype=np.uint16)[mask]
+                record.blue = np.asarray(points.blue, dtype=np.uint16)[mask]
+            # intensity is a standard LAS dim; carry it straight through.
+            record.intensity = np.asarray(points.intensity, dtype=np.uint16)[mask]
+            for d in extra_names:
+                record[d] = np.asarray(points[d], dtype=np.float32)[mask]
+            writer.write_points(record)
+            total_kept += kept
+
+        if total_kept > 0:
+            pad = 0.001  # one scale step, matching _filtered_xyz_to_las
+            writer.header.mins = (data_min - pad).tolist()
+            writer.header.maxs = (data_max + pad).tolist()
+
+    return total_kept, extra_dims
+
+
+# Stable filename for the filtered/cropped LAS kept inside a crop_octree cache
+# dir. Persisting it (rather than deleting after PotreeConverter) lets the
+# resulting cloud's source point at it, so the NEXT crop/filter/segment composes
+# on the current point set instead of re-reading the original source. Same idea
+# as `_SEGMENTED_SOURCE_LAS_NAME` for the segment-apply endpoints.
+_CROPPED_SOURCE_LAS_NAME = "cropped_source.las"
+
+
+def _cropped_source_las(cache_dir: _Path) -> _Path:
+    """Path to the persisted filtered LAS inside a crop_octree cache dir."""
+    return cache_dir / _CROPPED_SOURCE_LAS_NAME
+
+
 @app.post("/api/pointcloud/crop_octree")
 async def crop_octree(request: CropOctreeRequest):
     """Re-convert a source cloud into a new octree with a crop applied.
@@ -7662,6 +8263,7 @@ async def crop_octree(request: CropOctreeRequest):
             "cache_id": cache_key,
             "cache_dir": str(cache_dir),
             "cached": True,
+            "filtered_source_path": str(_cropped_source_las(cache_dir)),
             **meta,
         }
 
@@ -7673,27 +8275,41 @@ async def crop_octree(request: CropOctreeRequest):
 
     try:
         ext = source_path.suffix.lower().lstrip(".")
-        if ext in ("las", "laz"):
-            # Source is already LAS/LAZ. We still need to apply the mask,
-            # which means reading the LAS into NumPy and writing a filtered
-            # LAS. Defer support for this branch — the renderer routes
-            # LAS/LAZ through the flat path today; M3 only needs XYZ.
-            raise HTTPException(
-                status_code=400,
-                detail="crop_octree currently supports XYZ-family sources only.",
+        # Write the filtered LAS under a STABLE name and KEEP it in the cache dir
+        # (don't delete after PotreeConverter). It becomes the resulting cloud's
+        # source so the NEXT crop/filter/segment composes on the current point
+        # set, not the original — otherwise a second op re-reads the unfiltered
+        # source and dropped points reappear.
+        filtered_las = staging_dir / _CROPPED_SOURCE_LAS_NAME
+        if ext in _PANDAS_EXTENSIONS:
+            # ASCII source: stream-filter the text file directly via pandas.
+            kept, extra_dims = _filtered_xyz_to_las(
+                source_path, request.ascii_format, filtered_las,
+                region_dict, request.translation, scalar_filter_dicts,
+                request.invert_all,
             )
-        if ext not in _PANDAS_EXTENSIONS:
+        elif ext in ("las", "laz") or ext == "ply" or ext == "pcd":
+            # Non-ASCII source: normalise to LAS first (PLY via plyfile keeps
+            # scalar fields, PCD via open3d is position+RGB, LAS/LAZ pass
+            # through), then apply the same chunked mask to that LAS.
+            src_las, src_is_temp, _ = _source_to_las(source_path, request.ascii_format, staging_dir)
+            try:
+                kept, extra_dims = _filtered_las_to_las(
+                    src_las, filtered_las,
+                    region_dict, request.translation, scalar_filter_dicts,
+                    request.invert_all,
+                )
+            finally:
+                if src_is_temp:
+                    try:
+                        src_las.unlink()
+                    except FileNotFoundError:
+                        pass
+        else:
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported source extension for crop_octree: .{ext}",
             )
-
-        filtered_las = staging_dir / (source_path.stem + ".cropped.las")
-        kept, extra_dims = _filtered_xyz_to_las(
-            source_path, request.ascii_format, filtered_las,
-            region_dict, request.translation, scalar_filter_dicts,
-            request.invert_all,
-        )
 
         if kept == 0:
             # Empty crop — drop the staging dir and report 0 points without
@@ -7704,6 +8320,7 @@ async def crop_octree(request: CropOctreeRequest):
                 "cache_id": None,
                 "cache_dir": None,
                 "cached": False,
+                "filtered_source_path": None,
                 "version": "2.0",
                 "point_count": 0,
                 "spacing": 0.0,
@@ -7714,13 +8331,9 @@ async def crop_octree(request: CropOctreeRequest):
                 "attributes": [],
             }
 
-        try:
-            _run_potree_converter(filtered_las, staging_dir)
-        finally:
-            try:
-                filtered_las.unlink()
-            except FileNotFoundError:
-                pass
+        # Keep filtered_las in the staging/cache dir (see _CROPPED_SOURCE_LAS_NAME)
+        # so it can chain into the next operation.
+        _run_potree_converter(filtered_las, staging_dir)
 
         # Persist the slug→label sidecar so the cropped octree keeps clean
         # scalar picker labels (mirrors convert_to_octree).
@@ -7751,6 +8364,7 @@ async def crop_octree(request: CropOctreeRequest):
         "cache_id": cache_key,
         "cache_dir": str(cache_dir),
         "cached": False,
+        "filtered_source_path": str(_cropped_source_las(cache_dir)),
         **meta,
     }
 
@@ -7780,6 +8394,18 @@ class SegmentGroundApplyRequest(BaseModel):
 # The on-disk slug / human label for the ground-classification scalar attribute.
 GROUND_CLASS_SLUG = "ground_class"
 GROUND_CLASS_LABEL = "Ground Class"
+
+# Stable filename for the segmented LAS kept inside a segment-apply cache dir.
+# Ground and tree apply share the name — the cache dir is keyed per algorithm +
+# params, so they never collide. Persisting it lets a later Filter/Crop re-read a
+# source that carries the baked-in label (ground_class / tree_instance), which
+# the cloud's ORIGINAL sourceXyzPath does not.
+_SEGMENTED_SOURCE_LAS_NAME = "segmented_source.las"
+
+
+def _segmented_source_las(cache_dir: _Path) -> _Path:
+    """Path to the persisted segmented LAS inside a segment-apply cache dir."""
+    return cache_dir / _SEGMENTED_SOURCE_LAS_NAME
 
 
 def _segment_octree_cache_key(
@@ -7960,7 +8586,10 @@ async def segment_ground_apply(request: SegmentGroundApplyRequest):
     cached = cache_dir / "metadata.json"
     if cached.is_file():
         meta = _read_octree_metadata(cache_dir)
-        return {"cache_id": cache_key, "cache_dir": str(cache_dir), "cached": True, **meta}
+        return {
+            "cache_id": cache_key, "cache_dir": str(cache_dir), "cached": True,
+            "segmented_source_path": str(_segmented_source_las(cache_dir)), **meta,
+        }
 
     cache_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = cache_dir.parent / (cache_key + ".staging")
@@ -7969,18 +8598,16 @@ async def segment_ground_apply(request: SegmentGroundApplyRequest):
     staging_dir.mkdir(parents=True)
 
     try:
-        seg_las = staging_dir / (source_path.stem + ".segmented.las")
+        # The segmented LAS (source scalars + ground_class) is kept in the cache
+        # dir under a stable name so a later Filter/Crop can re-read a source that
+        # actually carries `ground_class` — crop_octree re-converts from the
+        # cloud's sourceXyzPath, and the ORIGINAL XYZ has no such column.
+        seg_las = staging_dir / _SEGMENTED_SOURCE_LAS_NAME
         # carried = source scalars + the appended ground_class entry.
         _, carried = _segmented_xyz_to_las(
             source_path, request.ascii_format, seg_las, csf_params, request.keep_class,
         )
-        try:
-            _run_potree_converter(seg_las, staging_dir)
-        finally:
-            try:
-                seg_las.unlink()
-            except FileNotFoundError:
-                pass
+        _run_potree_converter(seg_las, staging_dir)
 
         # Persist labels for ALL carried dims (source scalars + ground_class);
         # _write_octree_labels overwrites the sidecar, so pass the full set.
@@ -8007,7 +8634,370 @@ async def segment_ground_apply(request: SegmentGroundApplyRequest):
         max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
     _evict_octree_cache(max_bytes, keep=cache_dir)
 
-    return {"cache_id": cache_key, "cache_dir": str(cache_dir), "cached": False, **meta}
+    return {
+        "cache_id": cache_key, "cache_dir": str(cache_dir), "cached": False,
+        "segmented_source_path": str(_segmented_source_las(cache_dir)), **meta,
+    }
+
+
+# ---- Tree segmentation /apply (octree bake of tree_instance) ---------------
+# Mirrors the ground-segment apply trio above, swapping CSF for TreeIso and
+# `ground_class` for `tree_instance`. Supports `keep_instance` to extract a
+# single tree as a split sub-cloud, and `seed_points` for human-in-the-loop.
+
+class TreeSegmentationApplyRequest(BaseModel):
+    """Re-convert a source cloud into a new octree carrying a `tree_instance`
+    scalar attribute (0=unassigned, 1..N=trees) computed by TreeIso."""
+    source_path: str
+    ascii_format: Optional[str] = None
+    seed_points: Optional[List[List[float]]] = None
+    reg_strength1: float = 1.0
+    min_nn1: int = 5
+    decimate_res1: float = 0.05
+    reg_strength2: float = 15.0
+    min_nn2: int = 20
+    decimate_res2: float = 0.1
+    max_gap: float = 2.0
+    rel_height_length_ratio: float = 0.5
+    vertical_weight: float = 0.5
+    min_nn3: int = 20
+    score_candidate_thresh: float = 0.7
+    init_stem_rel_length_thresh: float = 1.5
+    max_outlier_gap: float = 3.0
+    # When set (1..N), keep ONLY points of that tree — a split sub-cloud octree.
+    keep_instance: Optional[int] = None
+
+
+def _segment_trees_octree_cache_key(
+    source_path: str, ascii_format: Optional[str], ti_params: dict,
+    seeds: Optional[list], keep_instance: Optional[int],
+) -> str:
+    """Cache key for a tree-segment-apply result (source key + TreeIso params +
+    seeds + the optional instance filter)."""
+    base = _octree_cache_key(source_path, ascii_format)
+    h = _hashlib.sha1()
+    h.update(b"segment_trees|")
+    h.update(base.encode())
+    h.update(b"\x00")
+    for k in sorted(ti_params):
+        h.update(f"{k}={ti_params[k]}".encode())
+        h.update(b"\x00")
+    if seeds:
+        for s in seeds:
+            h.update(("%.4f,%.4f,%.4f" % (s[0], s[1], s[2])).encode())
+            h.update(b"\x00")
+    h.update(f"keep={keep_instance}".encode())
+    return h.hexdigest()
+
+
+def _load_cloud_for_segmentation(
+    source_path: _Path, ascii_format: Optional[str],
+) -> tuple[np.ndarray, dict, List[dict]]:
+    """Load a cloud for tree segmentation, format-agnostically. Returns
+    (xyz[N,3] float64, scalars, extra_dims) where:
+      - `scalars` maps each carried extra-dim slug -> float32 array aligned to xyz
+        (RGB/intensity are folded in as ordinary scalars here; the LAS writer
+        re-maps r255/g255/b255 to RGB and intensity to the LAS intensity field).
+      - `extra_dims` is the [{slug,label}, ...] list for the slug->label sidecar
+        (matches the shape `_xyz_column_plan` / `_ply_to_las` produce).
+
+    XYZ-family is read via pandas (honouring the Helios ascii_format); PLY via
+    plyfile (carries every numeric vertex property — incl. benchmark `instance`/
+    `semantic` labels); PCD via open3d (points/RGB only). Keeping this in one
+    place lets segment_trees/apply accept the same formats the importer does.
+    """
+    ext = source_path.suffix.lower().lstrip(".")
+
+    if ext in _PANDAS_EXTENSIONS:
+        names, extra_dims = _xyz_column_plan(source_path, ascii_format)
+        if not all(role in names for role in ("x", "y", "z")):
+            raise HTTPException(
+                status_code=400,
+                detail=f"ASCII format must include x/y/z. Got columns: {names}",
+            )
+        skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
+        df = pd.read_csv(
+            source_path, sep=r"\s+", header=None, names=names,
+            usecols=[i for i, c in enumerate(names) if c != "skip"],
+            comment="#", skiprows=skiprows, engine="c",
+        )
+        xyz = np.column_stack([
+            df["x"].to_numpy(dtype=np.float64),
+            df["y"].to_numpy(dtype=np.float64),
+            df["z"].to_numpy(dtype=np.float64),
+        ])
+        scalars: dict = {}
+        if all(c in names for c in ("r255", "g255", "b255")):
+            for c in ("r255", "g255", "b255"):
+                scalars[c] = df[c].to_numpy(dtype=np.float32)
+        ir = next((r for r in ("intensity", "reflectance") if r in names), None)
+        if ir is not None:
+            scalars["intensity"] = df[ir].to_numpy(dtype=np.float32)
+        for ed in extra_dims:
+            scalars[ed["slug"]] = df[ed["col"]].to_numpy(dtype=np.float32)
+        return xyz, scalars, extra_dims
+
+    if ext == "ply":
+        from plyfile import PlyData
+        try:
+            vertex = PlyData.read(str(source_path))["vertex"].data
+        except KeyError:
+            raise HTTPException(
+                status_code=400,
+                detail="PLY has no 'vertex' element; cannot import as a point cloud.",
+            )
+        names = list(vertex.dtype.names or ())
+        if not all(c in names for c in ("x", "y", "z")):
+            raise HTTPException(
+                status_code=400, detail=f"PLY missing x/y/z vertex properties. Got: {names}",
+            )
+        xyz = np.column_stack([
+            vertex["x"].astype(np.float64),
+            vertex["y"].astype(np.float64),
+            vertex["z"].astype(np.float64),
+        ])
+        rgb = (("red", "green", "blue") if all(c in names for c in ("red", "green", "blue"))
+               else ("r", "g", "b") if all(c in names for c in ("r", "g", "b")) else None)
+        intensity_col = next(
+            (c for c in ("intensity", "scalar_intensity", "reflectance") if c in names), None)
+        reserved = {"x", "y", "z"}
+        if rgb:
+            reserved.update(rgb)
+        if intensity_col:
+            reserved.add(intensity_col)
+        scalars = {}
+        extra_dims = []
+        used_slugs: set[str] = set()
+        if rgb:
+            scalars["r255"] = vertex[rgb[0]].astype(np.float32)
+            scalars["g255"] = vertex[rgb[1]].astype(np.float32)
+            scalars["b255"] = vertex[rgb[2]].astype(np.float32)
+        if intensity_col is not None:
+            scalars["intensity"] = vertex[intensity_col].astype(np.float32)
+        for col in names:
+            if col in reserved or not np.issubdtype(vertex[col].dtype, np.number):
+                continue
+            slug = _sanitize_extra_dim_name(col)
+            base, i = slug, 1
+            while slug in used_slugs:
+                slug = f"{base[:29]}_{i}"; i += 1
+            used_slugs.add(slug)
+            extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col)})
+            scalars[slug] = vertex[col].astype(np.float32)
+        return xyz, scalars, extra_dims
+
+    if ext == "pcd":
+        positions, colors, _ = _load_ply_pcd_arrays(str(source_path))
+        xyz = positions.astype(np.float64, copy=False)
+        scalars = {}
+        if colors is not None:
+            # open3d colors are 0-1; store as 0-255 to match the r255 convention.
+            scalars["r255"] = (colors[:, 0] * 255.0).astype(np.float32)
+            scalars["g255"] = (colors[:, 1] * 255.0).astype(np.float32)
+            scalars["b255"] = (colors[:, 2] * 255.0).astype(np.float32)
+        return xyz, scalars, []
+
+    raise HTTPException(
+        status_code=400,
+        detail=(f"segment_trees/apply: unsupported source extension .{ext}. "
+                f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS)}"),
+    )
+
+
+def _tree_segmented_xyz_to_las(
+    source_path: _Path,
+    ascii_format: Optional[str],
+    out_las: _Path,
+    ti_params: dict,
+    seeds: Optional[np.ndarray],
+    keep_instance: Optional[int] = None,
+) -> tuple[int, List[dict], bool]:
+    """Load a full cloud (XYZ/PLY/PCD), run TreeIso, and write a LAS carrying
+    every source scalar (incl. benchmark `instance`/`semantic` from PLY) PLUS a
+    `tree_instance` extra dimension. Returns (total_points, extra_dims,
+    ground_warning) — extra_dims includes the appended tree_instance entry, and
+    ground_warning flags a likely un-removed ground surface."""
+    import laspy
+
+    xyz, scalars, extra_dims = _load_cloud_for_segmentation(source_path, ascii_format)
+
+    if len(xyz) < 10:
+        raise HTTPException(status_code=400, detail="Need at least 10 points to segment trees.")
+
+    # Drop non-finite points rather than letting NaN/inf reach TreeIso (cKDTree
+    # raises a cryptic error on them). Keep scalars aligned.
+    finite = np.isfinite(xyz).all(axis=1)
+    if not finite.all():
+        xyz = xyz[finite]
+        scalars = {k: v[finite] for k, v in scalars.items()}
+        if len(xyz) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Fewer than 10 finite points after dropping NaN/inf coordinates.",
+            )
+
+    # TreeIso is a single-machine classical method; past a few million points it
+    # is very slow and memory-heavy. Refuse clearly rather than appear to hang.
+    if len(xyz) > _TREEISO_MAX_POINTS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"{len(xyz):,} points exceeds the {_TREEISO_MAX_POINTS:,}-point limit "
+                f"for tree segmentation. Downsample or crop a sub-region first "
+                f"(TreeIso runs per-cloud on the CPU and is not built for this scale)."
+            ),
+        )
+
+    # Advisory: TreeIso assumes ground is already removed. Flag (don't block) a
+    # likely-un-removed ground surface so the apply path can warn like the inline
+    # endpoint does. Computed on the full cloud before TreeIso runs.
+    ground_warning = _looks_like_ground_present(xyz)
+
+    from treeiso.treeiso_core import TreeIsoParams
+    try:
+        labels = segment_trees(xyz, TreeIsoParams(**ti_params), seeds)
+    except ImportError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"TreeIso dependencies not installed ({e}). "
+                   "Run: pip install -r backend-api/requirements.txt",
+        )
+
+    if keep_instance is not None:
+        mask = labels == keep_instance
+        if not mask.any():
+            raise HTTPException(
+                status_code=400, detail=f"No points assigned to tree {keep_instance}.",
+            )
+        xyz = xyz[mask]
+        labels = labels[mask]
+        scalars = {k: v[mask] for k, v in scalars.items()}
+
+    has_rgb = all(c in scalars for c in ("r255", "g255", "b255"))
+    has_intensity = "intensity" in scalars
+
+    n_out = len(xyz)
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    for ed in extra_dims:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+    header.add_extra_dim(laspy.ExtraBytesParams(name=TREE_INSTANCE_SLUG, type=np.float32))
+
+    record = laspy.ScaleAwarePointRecord.zeros(n_out, header=header)
+    record.x = xyz[:, 0]
+    record.y = xyz[:, 1]
+    record.z = xyz[:, 2]
+    if has_rgb:
+        record.red = scalars["r255"].astype(np.uint16) * 256
+        record.green = scalars["g255"].astype(np.uint16) * 256
+        record.blue = scalars["b255"].astype(np.uint16) * 256
+    if has_intensity:
+        record.intensity = np.clip(scalars["intensity"] * 256.0, 0, 65535).astype(np.uint16)
+    for ed in extra_dims:
+        record[ed["slug"]] = scalars[ed["slug"]].astype(np.float32)
+    record[TREE_INSTANCE_SLUG] = labels.astype(np.float32)
+
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        writer.write_points(record)
+        pad = 0.001
+        writer.header.mins = (xyz.min(axis=0) - pad).tolist()
+        writer.header.maxs = (xyz.max(axis=0) + pad).tolist()
+
+    carried = [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
+    carried.append({"slug": TREE_INSTANCE_SLUG, "label": TREE_INSTANCE_LABEL})
+    return n_out, carried, ground_warning
+
+
+@app.post("/api/segment/trees/apply")
+async def segment_trees_apply(request: TreeSegmentationApplyRequest):
+    """Segment trees and re-convert the source cloud into a new octree carrying a
+    `tree_instance` scalar attribute. Same octree-ref response shape as
+    convert_to_octree / segment_ground_apply."""
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    ext = source_path.suffix.lower().lstrip(".")
+    if ext not in (_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"segment_trees/apply: unsupported source .{ext}. "
+                    f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS)}"),
+        )
+
+    ti_params = {
+        "reg_strength1": request.reg_strength1,
+        "min_nn1": request.min_nn1,
+        "decimate_res1": request.decimate_res1,
+        "reg_strength2": request.reg_strength2,
+        "min_nn2": request.min_nn2,
+        "decimate_res2": request.decimate_res2,
+        "max_gap": request.max_gap,
+        "rel_height_length_ratio": request.rel_height_length_ratio,
+        "vertical_weight": request.vertical_weight,
+        "min_nn3": request.min_nn3,
+        "score_candidate_thresh": request.score_candidate_thresh,
+        "init_stem_rel_length_thresh": request.init_stem_rel_length_thresh,
+        "max_outlier_gap": request.max_outlier_gap,
+    }
+    seeds_list = request.seed_points if request.seed_points else None
+    seeds_arr = np.asarray(seeds_list, dtype=np.float64) if seeds_list else None
+
+    cache_key = _segment_trees_octree_cache_key(
+        str(source_path), request.ascii_format, ti_params, seeds_list, request.keep_instance,
+    )
+    cache_dir = _octree_cache_root() / cache_key
+
+    if (cache_dir / "metadata.json").is_file():
+        meta = _read_octree_metadata(cache_dir)
+        return {
+            "cache_id": cache_key, "cache_dir": str(cache_dir), "cached": True,
+            "segmented_source_path": str(_segmented_source_las(cache_dir)),
+            # Advisory only; not recomputed on cache hit (user saw it on first run).
+            "ground_warning": False, **meta,
+        }
+
+    cache_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = cache_dir.parent / (cache_key + ".staging")
+    if staging_dir.exists():
+        _shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+    try:
+        # Kept in the cache dir so a later Filter/Crop on `tree_instance` re-reads
+        # this LAS (which carries the label) instead of the original source. See
+        # segment_ground_apply for the same rationale.
+        seg_las = staging_dir / _SEGMENTED_SOURCE_LAS_NAME
+        _, carried, ground_warning = _tree_segmented_xyz_to_las(
+            source_path, request.ascii_format, seg_las, ti_params, seeds_arr, request.keep_instance,
+        )
+        _run_potree_converter(seg_las, staging_dir)
+        _write_octree_labels(staging_dir, carried)
+        if cache_dir.exists():
+            _shutil.rmtree(cache_dir)
+        staging_dir.rename(cache_dir)
+    except Exception:
+        try:
+            _shutil.rmtree(staging_dir)
+        except (FileNotFoundError, OSError):
+            pass
+        raise
+
+    meta = _read_octree_metadata(cache_dir)
+    try:
+        max_bytes = int(_os.environ.get(
+            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES", _DEFAULT_OCTREE_CACHE_MAX_BYTES,
+        ))
+    except ValueError:
+        max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
+    _evict_octree_cache(max_bytes, keep=cache_dir)
+
+    return {
+        "cache_id": cache_key, "cache_dir": str(cache_dir), "cached": False,
+        "segmented_source_path": str(_segmented_source_las(cache_dir)),
+        "ground_warning": ground_warning, **meta,
+    }
 
 
 @app.get("/api/pointcloud/octree_metadata")

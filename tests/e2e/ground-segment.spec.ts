@@ -71,6 +71,61 @@ test('segments ground vs plant and colours by the ground_class attribute', async
   }
 });
 
+// Regression: after an in-place ground classify, the cloud must be filterable by
+// the baked `ground_class` attribute. This used to 400 — the filter re-read the
+// original XYZ source (no ground_class column) instead of the segmented one. Also
+// exercises the categorical class-checkbox filter UI (keep Non-ground only).
+test('filters a segmented cloud by ground_class via class checkboxes', async () => {
+  const { page, close } = await launchApp();
+
+  try {
+    await page.getByTestId('import-menu-button').click();
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      page.getByTestId('import-menu-pointcloud').click(),
+    ]);
+    await chooser.setFiles(FIXTURE);
+
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+    await cloudRow.click();
+
+    // Segment in place (no split) so the single cloud carries ground_class.
+    await page.getByTestId('tool-ground-segment').click();
+    await page.getByTestId('ground-cloth-resolution').fill('0.1');
+    await page.getByTestId('ground-class-threshold').fill('0.05');
+    await page.getByTestId('ground-segment-run-button').click();
+    await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+
+    // Open Filter; ground_class is offered as a categorical scalar field.
+    await page.getByTestId('tool-filter').click();
+    const fieldSelect = page.getByTestId('filter-field-select');
+    await expect(fieldSelect).toBeVisible();
+    const optionValues = await fieldSelect
+      .locator('option')
+      .evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).value));
+    expect(optionValues).toContain('scalar:ground_class');
+
+    // Selecting a categorical field shows class checkboxes (not min/max inputs),
+    // seeded with all classes checked. Uncheck Ground (class 1) → keep only
+    // Non-ground (class 2).
+    await fieldSelect.selectOption('scalar:ground_class');
+    await expect(page.getByTestId('filter-class-1')).toBeVisible();
+    await expect(page.getByTestId('filter-min-input')).toHaveCount(0);
+    await page.getByTestId('filter-class-1').uncheck();
+
+    // Filter (remove points): the segment→filter flow must succeed (not 400) and
+    // keep only the ~600 plant points (CSF matches the fixture's ground truth).
+    await page.getByTestId('filter-remove').click();
+    await expect(async () => {
+      const n = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
+      expect(n).toBe(600);
+    }).toPass({ timeout: 60_000 });
+  } finally {
+    await close();
+  }
+});
+
 // Regression: the Ground Class legend must disappear when the segmented scan is
 // removed — it used to linger because its visibility wasn't tied to any cloud
 // actually carrying the attribute.
