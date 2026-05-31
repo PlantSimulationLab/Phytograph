@@ -58,6 +58,240 @@ def tiny_xyz(tmp_path) -> Path:
     return f
 
 
+@pytest.fixture
+def tiny_ply(tmp_path) -> Path:
+    """20 ASCII-PLY points with RGB plus a custom scalar `deviation` (not an
+    intensity alias, so it lands as a LAS extra dimension) and `intensity`
+    (mapped to LAS intensity)."""
+    f = tmp_path / "tiny.ply"
+    n = 20
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {n}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "property float intensity",
+        "property float deviation",
+        "end_header",
+    ]
+    for i in range(n):
+        x = (i % 5) * 0.5
+        y = (i // 5) * 0.5
+        z = i * 0.1
+        r = (i * 13) % 256
+        g = (i * 29) % 256
+        b = (i * 47) % 256
+        intensity = (i * 0.05) % 1.0
+        deviation = i * 1.5
+        lines.append(f"{x:.4f} {y:.4f} {z:.4f} {r} {g} {b} {intensity:.4f} {deviation:.4f}")
+    f.write_text("\n".join(lines) + "\n")
+    return f
+
+
+@pytest.fixture
+def tiny_pcd(tmp_path) -> Path:
+    """20 ASCII-PCD points with x/y/z + packed rgb."""
+    import struct
+
+    f = tmp_path / "tiny.pcd"
+    n = 20
+    header = [
+        "# .PCD v0.7 - Point Cloud Data file format",
+        "VERSION 0.7",
+        "FIELDS x y z rgb",
+        "SIZE 4 4 4 4",
+        "TYPE F F F F",
+        "COUNT 1 1 1 1",
+        f"WIDTH {n}",
+        "HEIGHT 1",
+        "VIEWPOINT 0 0 0 1 0 0 0",
+        f"POINTS {n}",
+        "DATA ascii",
+    ]
+    rows = []
+    for i in range(n):
+        x = (i % 5) * 0.5
+        y = (i // 5) * 0.5
+        z = i * 0.1
+        r, g, b = (i * 13) % 256, (i * 29) % 256, (i * 47) % 256
+        # PCD packs RGB into a single float-reinterpreted uint32.
+        packed = (r << 16) | (g << 8) | b
+        rgb_f = struct.unpack("f", struct.pack("I", packed))[0]
+        rows.append(f"{x:.4f} {y:.4f} {z:.4f} {rgb_f:.9g}")
+    f.write_text("\n".join(header + rows) + "\n")
+    return f
+
+
+@pytest.fixture
+def tiny_las(tmp_path) -> Path:
+    """20 LAS points carrying a native extra dimension `reflectance_db`."""
+    import laspy
+    import numpy as np
+
+    f = tmp_path / "tiny.las"
+    n = 20
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    header.add_extra_dim(laspy.ExtraBytesParams(name="reflectance_db", type=np.float32))
+    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+    record.x = np.array([(i % 5) * 0.5 for i in range(n)], dtype=np.float64)
+    record.y = np.array([(i // 5) * 0.5 for i in range(n)], dtype=np.float64)
+    record.z = np.array([i * 0.1 for i in range(n)], dtype=np.float64)
+    record["reflectance_db"] = np.arange(n, dtype=np.float32)
+    with laspy.open(str(f), mode="w", header=header) as w:
+        w.write_points(record)
+    return f
+
+
+def test_convert_ply_to_octree_preserves_rgb_intensity_and_scalar(client, cache_root, tiny_ply):
+    """PLY imports as octree: RGB + intensity survive, and a custom numeric
+    vertex property is carried as a labelled extra dimension."""
+    res = client.post(
+        "/api/pointcloud/convert_to_octree",
+        json={"source_path": str(tiny_ply)},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == 20
+    assert body["cached"] is False
+
+    cache_dir = Path(body["cache_dir"])
+    assert (cache_dir / "metadata.json").is_file()
+    assert (cache_dir / "hierarchy.bin").is_file()
+    assert (cache_dir / "octree.bin").is_file()
+
+    attrs = {a["name"] for a in body["attributes"]}
+    assert {"position", "rgb", "intensity"} <= attrs
+    # The custom 'deviation' scalar rode through as an extra dimension.
+    assert "deviation" in attrs
+    # And its slug→label sidecar was written.
+    import json as _json
+    labels = _json.loads((cache_dir / "attribute_labels.json").read_text())
+    assert labels.get("deviation") == "deviation"
+
+
+def test_convert_pcd_to_octree_position_and_rgb(client, cache_root, tiny_pcd):
+    """PCD imports as octree with position + RGB (scalars not preserved)."""
+    res = client.post(
+        "/api/pointcloud/convert_to_octree",
+        json={"source_path": str(tiny_pcd)},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == 20
+    cache_dir = Path(body["cache_dir"])
+    assert (cache_dir / "octree.bin").is_file()
+    attrs = {a["name"] for a in body["attributes"]}
+    assert {"position", "rgb"} <= attrs
+    # No extra-dim sidecar for PCD (open3d carries position + RGB only).
+    assert not (cache_dir / "attribute_labels.json").is_file()
+
+
+def test_convert_las_to_octree_carries_native_extra_dim_label(client, cache_root, tiny_las):
+    """LAS passes straight through to PotreeConverter; its native extra
+    dimension survives and gets a slug→label sidecar."""
+    res = client.post(
+        "/api/pointcloud/convert_to_octree",
+        json={"source_path": str(tiny_las)},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == 20
+    cache_dir = Path(body["cache_dir"])
+    assert (cache_dir / "octree.bin").is_file()
+    attrs = {a["name"] for a in body["attributes"]}
+    assert "position" in attrs
+    assert "reflectance_db" in attrs
+    import json as _json
+    labels = _json.loads((cache_dir / "attribute_labels.json").read_text())
+    assert labels.get("reflectance_db") == "reflectance_db"
+
+
+@pytest.fixture
+def tiny_pts(tmp_path) -> Path:
+    """20 points in a `.pts` file with the conventional leading point-count
+    line — the line that, before the dropna fix, leaked into the octree as a
+    21st garbage point."""
+    f = tmp_path / "tiny.pts"
+    n = 20
+    lines = [str(n)]
+    for i in range(n):
+        lines.append(f"{10 + i * 0.1:.4f} {20 + i * 0.1:.4f} {30 + i * 0.1:.4f}")
+    f.write_text("\n".join(lines) + "\n")
+    return f
+
+
+@pytest.fixture
+def tiny_asc(tmp_path) -> Path:
+    """20 points in a headerless whitespace `.asc` file."""
+    f = tmp_path / "tiny.asc"
+    lines = [f"{i * 0.5:.4f} {i * 0.25:.4f} {i * 0.1:.4f}" for i in range(20)]
+    f.write_text("\n".join(lines) + "\n")
+    return f
+
+
+@pytest.fixture
+def tiny_laz(tmp_path) -> Path:
+    """20 LAZ-compressed points (laspy[lazrs])."""
+    import laspy
+    import numpy as np
+
+    f = tmp_path / "tiny.laz"
+    n = 20
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+    coords = np.arange(n) * 0.1
+    record.x, record.y, record.z = coords, coords, coords
+    with laspy.open(str(f), mode="w", header=header) as w:
+        w.write_points(record)
+    return f
+
+
+def test_convert_pts_drops_count_header_line(client, cache_root, tiny_pts):
+    """A `.pts` file's leading point-count line must not become a point in the
+    octree. Regression for the dropna fix in `_xyz_to_las`."""
+    res = client.post(
+        "/api/pointcloud/convert_to_octree",
+        json={"source_path": str(tiny_pts)},
+    )
+    assert res.status_code == 200, res.text
+    # 20 data points — NOT 21 (the count-header line is dropped).
+    assert res.json()["point_count"] == 20
+
+
+def test_convert_asc_to_octree(client, cache_root, tiny_asc):
+    """`.asc` is an ASCII-family extension and imports as an octree."""
+    res = client.post(
+        "/api/pointcloud/convert_to_octree",
+        json={"source_path": str(tiny_asc)},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == 20
+    assert (Path(body["cache_dir"]) / "octree.bin").is_file()
+
+
+def test_convert_laz_to_octree(client, cache_root, tiny_laz):
+    """LAZ is decompressed and passed through to PotreeConverter unchanged."""
+    res = client.post(
+        "/api/pointcloud/convert_to_octree",
+        json={"source_path": str(tiny_laz)},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == 20
+    assert (Path(body["cache_dir"]) / "octree.bin").is_file()
+    assert "position" in {a["name"] for a in body["attributes"]}
+
+
 def test_convert_to_octree_produces_three_files(client, cache_root, tiny_xyz):
     res = client.post(
         "/api/pointcloud/convert_to_octree",

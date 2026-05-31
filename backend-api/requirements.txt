@@ -21,6 +21,11 @@ pytexit>=0.3.4
 pyyaml>=5.0.0
 open3d>=0.18.0
 laspy[lazrs]>=2.5.0
+# Direct PLY parsing (ASCII + binary, all endianness) that preserves arbitrary
+# scalar vertex properties — open3d drops everything but position + RGB on read.
+# Used by _ply_to_las to carry intensity/reflectance/custom scalars into the
+# octree as LAS extra dimensions. Bundled via `collectAll` in build-backend.mjs.
+plyfile>=1.0
 # Cloth Simulation Filter — ground/non-ground segmentation. SWIG C-extension
 # (imports as `import CSF`); prebuilt wheels for CPython 3.9-3.12 on
 # macOS/Linux/Windows. Bundled via `collectAll` in scripts/build-backend.mjs.

@@ -135,6 +135,61 @@ def test_box_crop_count_matches_numpy_reference(
     assert (Path(body["cache_dir"]) / "octree.bin").is_file()
 
 
+def test_crop_returns_filtered_source_that_chains(
+    client, cache_root, grid_xyz, grid_points,
+):
+    """A crop persists its kept points as `filtered_source_path`, and a SECOND
+    crop on that path composes on the kept set — not the original. Regression for
+    the bug where a second octree op re-read the original source and made
+    previously-removed points reappear."""
+    def box_count(pts, lo, hi):
+        return int(np.sum(
+            (pts[:, 0] >= lo[0]) & (pts[:, 0] <= hi[0]) &
+            (pts[:, 1] >= lo[1]) & (pts[:, 1] <= hi[1]) &
+            (pts[:, 2] >= lo[2]) & (pts[:, 2] <= hi[2])
+        ))
+
+    aMin, aMax = [0.0, 0.0, 0.0], [0.45, 0.9, 0.9]   # keep low-x half
+    bMin, bMax = [0.0, 0.0, 0.0], [0.9, 0.45, 0.9]   # keep low-y half
+    a_mask = (
+        (grid_points[:, 0] >= aMin[0]) & (grid_points[:, 0] <= aMax[0]) &
+        (grid_points[:, 1] >= aMin[1]) & (grid_points[:, 1] <= aMax[1]) &
+        (grid_points[:, 2] >= aMin[2]) & (grid_points[:, 2] <= aMax[2])
+    )
+    intersection = (
+        a_mask &
+        (grid_points[:, 0] >= bMin[0]) & (grid_points[:, 0] <= bMax[0]) &
+        (grid_points[:, 1] >= bMin[1]) & (grid_points[:, 1] <= bMax[1]) &
+        (grid_points[:, 2] >= bMin[2]) & (grid_points[:, 2] <= bMax[2])
+    )
+    expected_a = int(a_mask.sum())
+    expected_ab = int(intersection.sum())
+    assert 0 < expected_ab < expected_a  # B genuinely narrows A
+
+    first = client.post(
+        "/api/pointcloud/crop_octree",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT,
+              "region": {"kind": "box", "min": aMin, "max": aMax, "invert": False}},
+    ).json()
+    assert first["point_count"] == expected_a
+    seg_path = first["filtered_source_path"]
+    assert seg_path and Path(seg_path).is_file()
+    assert Path(seg_path).suffix == ".las"
+
+    # Second crop reads the FILTERED LAS (no ascii_format — it's a LAS). The kept
+    # count must be A∩B. If chaining were broken (re-reading the original), B over
+    # the full grid would keep more than A∩B.
+    second = client.post(
+        "/api/pointcloud/crop_octree",
+        json={"source_path": seg_path,
+              "region": {"kind": "box", "min": bMin, "max": bMax, "invert": False}},
+    ).json()
+    assert second["point_count"] == expected_ab, (
+        f"expected A∩B={expected_ab}, got {second['point_count']} "
+        f"(B over full grid would be {box_count(grid_points, bMin, bMax)})"
+    )
+
+
 def test_box_crop_invert_keeps_complement(
     client, cache_root, grid_xyz, grid_points,
 ):
@@ -509,6 +564,61 @@ def test_scalar_only_filter_matches_numpy_reference(
     assert body["cache_id"] is not None
 
 
+def test_scalar_categorical_values_filter_matches_reference(
+    client, cache_root, scalars_df,
+):
+    """A categorical `values` filter keeps exactly the points whose (rounded)
+    Deviation equals one of the listed class ids — an OR within the field, not a
+    contiguous range. This is the class-checkbox path used for ground_class /
+    tree_instance."""
+    classes = sorted({int(round(v)) for v in scalars_df["dev"].tolist()})
+    assert len(classes) >= 2, "fixture needs >=2 distinct integer-ish dev values"
+    # Pick a non-contiguous pair when possible so we prove it's set membership,
+    # not a min/max range (which couldn't express a gap).
+    pick = [classes[0], classes[-1]]
+    rounded = np.rint(scalars_df["dev"].to_numpy()).astype(int)
+    expected = int(np.isin(rounded, pick).sum())
+    assert expected > 0
+
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(SCALARS_FIXTURE),
+            "ascii_format": SCALARS_FORMAT,
+            "scalar_filters": [{"slug": "Deviation", "values": pick}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["point_count"] == expected
+
+
+def test_scalar_categorical_and_continuous_cache_keys_differ(
+    client, cache_root, scalars_df,
+):
+    """A categorical `values` filter and a continuous min/max filter over the
+    same slug must not collide in the cache (they select different points)."""
+    classes = sorted({int(round(v)) for v in scalars_df["dev"].tolist()})
+    cat = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(SCALARS_FIXTURE),
+            "ascii_format": SCALARS_FORMAT,
+            "scalar_filters": [{"slug": "Deviation", "values": [classes[0]]}],
+        },
+    ).json()
+    cont = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(SCALARS_FIXTURE),
+            "ascii_format": SCALARS_FORMAT,
+            "scalar_filters": [{"slug": "Deviation", "min": classes[0], "max": classes[0]}],
+        },
+    ).json()
+    # Distinct cache ids (the canonical form encodes set-vs-range differently).
+    if cat["cache_id"] and cont["cache_id"]:
+        assert cat["cache_id"] != cont["cache_id"]
+
+
 def test_scalar_and_box_intersection(client, cache_root, scalars_df):
     """A scalar filter AND a box region keep only the intersection. The box
     excludes the high-x points (cloud x spans {0..2}), so the intersection is a
@@ -714,3 +824,117 @@ def test_invert_all_changes_cache_id(client, cache_root):
         json={**base, "invert_all": True},
     ).json()
     assert a["cache_id"] != b["cache_id"]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Non-ASCII sources — PLY/PCD/LAS now import as octrees, so crop/filter must
+# work for them too (they route through _source_to_las → _filtered_las_to_las).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def line_ply(tmp_path) -> Path:
+    """30 collinear points, x=y=z=i*0.1, carrying a custom scalar `deviation`
+    equal to the index. Predictable for box + scalar crop counts."""
+    f = tmp_path / "line.ply"
+    n = 30
+    lines = [
+        "ply", "format ascii 1.0", f"element vertex {n}",
+        "property float x", "property float y", "property float z",
+        "property float deviation", "end_header",
+    ]
+    for i in range(n):
+        lines.append(f"{i * 0.1:.4f} {i * 0.1:.4f} {i * 0.1:.4f} {float(i):.4f}")
+    f.write_text("\n".join(lines) + "\n")
+    return f
+
+
+@pytest.fixture
+def line_las(tmp_path) -> Path:
+    """30 collinear LAS points with a native extra dimension `refl` = index."""
+    import laspy
+
+    f = tmp_path / "line.las"
+    n = 30
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    header.add_extra_dim(laspy.ExtraBytesParams(name="refl", type=np.float32))
+    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+    coords = np.arange(n) * 0.1
+    record.x, record.y, record.z = coords, coords, coords
+    record["refl"] = np.arange(n, dtype=np.float32)
+    with laspy.open(str(f), mode="w", header=header) as w:
+        w.write_points(record)
+    return f
+
+
+def test_crop_ply_box_region(client, cache_root, line_ply):
+    """Box crop on a PLY source keeps the points inside the box. i*0.1 in
+    [0.5, 1.5] → i in 5..15 inclusive → 11 points."""
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={"source_path": str(line_ply),
+              "region": {"kind": "box", "min": [0.5, 0.5, 0.5], "max": [1.5, 1.5, 1.5]}},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["point_count"] == 11
+
+
+def test_crop_ply_scalar_filter_preserves_attribute(client, cache_root, line_ply):
+    """Scalar filter on a PLY's custom `deviation` field works and the cropped
+    octree still exposes that attribute — proves PLY scalars survive the
+    _source_to_las → _filtered_las_to_las round-trip."""
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={"source_path": str(line_ply),
+              "scalar_filters": [{"slug": "deviation", "min": 10, "max": 20}]},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == 11  # deviation 10..20 inclusive
+    assert "deviation" in {a["name"] for a in body["attributes"]}
+
+
+@pytest.fixture
+def line_laz(tmp_path) -> Path:
+    """30 collinear LAZ-compressed points, x=y=z=i*0.1."""
+    import laspy
+
+    f = tmp_path / "line.laz"
+    n = 30
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+    coords = np.arange(n) * 0.1
+    record.x, record.y, record.z = coords, coords, coords
+    with laspy.open(str(f), mode="w", header=header) as w:
+        w.write_points(record)
+    return f
+
+
+def test_crop_laz_box_region(client, cache_root, line_laz):
+    """Box crop on a LAZ source: i*0.1 in [0.5, 1.5] → i in 5..15 → 11 points.
+    Proves LAZ decompresses and chunk-filters through _filtered_las_to_las."""
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={"source_path": str(line_laz),
+              "region": {"kind": "box", "min": [0.5, 0.5, 0.5], "max": [1.5, 1.5, 1.5]}},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["point_count"] == 11
+
+
+def test_crop_las_scalar_filter(client, cache_root, line_las):
+    """Scalar filter on a native LAS extra dimension produces a cropped octree
+    — LAS sources are no longer rejected by crop_octree."""
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={"source_path": str(line_las),
+              "scalar_filters": [{"slug": "refl", "min": 10, "max": 20}]},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == 11
+    assert "refl" in {a["name"] for a in body["attributes"]}

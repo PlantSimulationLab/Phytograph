@@ -194,11 +194,16 @@ export type ColorMode = 'x' | 'y' | 'height' | 'intensity' | 'rgb' | 'single' | 
 // Shape types for shape creator
 export type ShapeType = 'voxel' | 'cylinder' | 'sphere' | 'cone';
 
-// Filter range for a single field
+// Filter range for a single field. Continuous fields use [min, max]; a
+// categorical field (e.g. ground_class / tree_instance) instead sets
+// `selectedClasses` — the integer class ids to KEEP — and the backend filters by
+// set membership rather than a range. min/max still carry the field's full
+// extent so a disabled/cleared filter has sensible bounds.
 export interface FilterRange {
   min: number;
   max: number;
   enabled: boolean;
+  selectedClasses?: number[];
 }
 
 // All filters for a point cloud

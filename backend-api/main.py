@@ -93,7 +93,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.10"
+BACKEND_VERSION = "0.3.11"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -7629,6 +7629,32 @@ def _canonical_scalar_filters(filters: Optional[List[dict]]) -> str:
     return "scalar|" + ";".join(parts)
 
 
+def _resolve_scalar_filter(f: dict) -> tuple:
+    """Normalise one scalar-filter spec into `(lo, hi, value_set)`.
+
+    `value_set` is a Python set of int class ids for a categorical filter, or
+    None for a continuous [lo, hi] range. Continuous fields keep their float
+    bounds; categorical fields ignore them. Shared by both filter functions so
+    the membership semantics stay identical across ASCII and LAS sources."""
+    vals = f.get("values")
+    if vals:
+        return float("-inf"), float("inf"), {int(round(float(v))) for v in vals}
+    return float(f.get("min", float("-inf"))), float(f.get("max", float("inf"))), None
+
+
+def _scalar_filter_mask(vals: "np.ndarray", lo: float, hi: float,
+                        value_set: Optional[set]) -> "np.ndarray":
+    """Boolean keep-mask for one resolved scalar filter over a value array.
+
+    Categorical (value_set given): keep iff round(value) ∈ value_set. Continuous:
+    keep iff lo <= value <= hi. Extra dims are float32 on disk, so rounding makes
+    integer class labels robust to the float round-trip."""
+    if value_set is not None:
+        rounded = np.rint(vals).astype(np.int64)
+        return np.isin(rounded, list(value_set))
+    return (vals >= lo) & (vals <= hi)
+
+
 def _crop_octree_cache_key(
     source_path: str,
     ascii_format: Optional[str],
@@ -7883,7 +7909,7 @@ def _filtered_xyz_to_las(
                     f"Available: {sorted(slug_to_col)}"
                 ),
             )
-        resolved_scalar_filters.append((col, float(f["min"]), float(f["max"])))
+        resolved_scalar_filters.append((col, *_resolve_scalar_filter(f)))
 
     # Precompute region inputs once. region is None → no spatial crop.
     kind = region["kind"] if region else None
@@ -7980,9 +8006,9 @@ def _filtered_xyz_to_las(
             # never flips the scalar constraints. Source extra dims are float32
             # on disk (see add_extra_dim below), so filter on float32 values to
             # keep survivors consistent with what gets written.
-            for col, lo, hi in resolved_scalar_filters:
+            for col, lo, hi, value_set in resolved_scalar_filters:
                 vals = chunk[col].to_numpy(dtype=np.float32)
-                mask &= (vals >= lo) & (vals <= hi)
+                mask &= _scalar_filter_mask(vals, lo, hi, value_set)
 
             # Complement the entire combined mask last — the true leftover set.
             if invert_all:
@@ -8077,7 +8103,7 @@ def _filtered_las_to_las(
                     f"Available: {sorted(available)}"
                 ),
             )
-        resolved_scalar_filters.append((slug, float(f["min"]), float(f["max"])))
+        resolved_scalar_filters.append((slug, *_resolve_scalar_filter(f)))
 
     kind = region["kind"] if region else None
     invert = bool(region.get("invert", False)) if region else False
@@ -8142,9 +8168,9 @@ def _filtered_las_to_las(
 
             if invert:
                 mask = ~mask
-            for slug, lo, hi in resolved_scalar_filters:
+            for slug, lo, hi, value_set in resolved_scalar_filters:
                 vals = np.asarray(points[slug], dtype=np.float32)
-                mask &= (vals >= lo) & (vals <= hi)
+                mask &= _scalar_filter_mask(vals, lo, hi, value_set)
             if invert_all:
                 mask = ~mask
 
@@ -8175,6 +8201,19 @@ def _filtered_las_to_las(
             writer.header.maxs = (data_max + pad).tolist()
 
     return total_kept, extra_dims
+
+
+# Stable filename for the filtered/cropped LAS kept inside a crop_octree cache
+# dir. Persisting it (rather than deleting after PotreeConverter) lets the
+# resulting cloud's source point at it, so the NEXT crop/filter/segment composes
+# on the current point set instead of re-reading the original source. Same idea
+# as `_SEGMENTED_SOURCE_LAS_NAME` for the segment-apply endpoints.
+_CROPPED_SOURCE_LAS_NAME = "cropped_source.las"
+
+
+def _cropped_source_las(cache_dir: _Path) -> _Path:
+    """Path to the persisted filtered LAS inside a crop_octree cache dir."""
+    return cache_dir / _CROPPED_SOURCE_LAS_NAME
 
 
 @app.post("/api/pointcloud/crop_octree")
@@ -8224,6 +8263,7 @@ async def crop_octree(request: CropOctreeRequest):
             "cache_id": cache_key,
             "cache_dir": str(cache_dir),
             "cached": True,
+            "filtered_source_path": str(_cropped_source_las(cache_dir)),
             **meta,
         }
 
@@ -8235,7 +8275,12 @@ async def crop_octree(request: CropOctreeRequest):
 
     try:
         ext = source_path.suffix.lower().lstrip(".")
-        filtered_las = staging_dir / (source_path.stem + ".cropped.las")
+        # Write the filtered LAS under a STABLE name and KEEP it in the cache dir
+        # (don't delete after PotreeConverter). It becomes the resulting cloud's
+        # source so the NEXT crop/filter/segment composes on the current point
+        # set, not the original — otherwise a second op re-reads the unfiltered
+        # source and dropped points reappear.
+        filtered_las = staging_dir / _CROPPED_SOURCE_LAS_NAME
         if ext in _PANDAS_EXTENSIONS:
             # ASCII source: stream-filter the text file directly via pandas.
             kept, extra_dims = _filtered_xyz_to_las(
@@ -8275,6 +8320,7 @@ async def crop_octree(request: CropOctreeRequest):
                 "cache_id": None,
                 "cache_dir": None,
                 "cached": False,
+                "filtered_source_path": None,
                 "version": "2.0",
                 "point_count": 0,
                 "spacing": 0.0,
@@ -8285,13 +8331,9 @@ async def crop_octree(request: CropOctreeRequest):
                 "attributes": [],
             }
 
-        try:
-            _run_potree_converter(filtered_las, staging_dir)
-        finally:
-            try:
-                filtered_las.unlink()
-            except FileNotFoundError:
-                pass
+        # Keep filtered_las in the staging/cache dir (see _CROPPED_SOURCE_LAS_NAME)
+        # so it can chain into the next operation.
+        _run_potree_converter(filtered_las, staging_dir)
 
         # Persist the slug→label sidecar so the cropped octree keeps clean
         # scalar picker labels (mirrors convert_to_octree).
@@ -8322,6 +8364,7 @@ async def crop_octree(request: CropOctreeRequest):
         "cache_id": cache_key,
         "cache_dir": str(cache_dir),
         "cached": False,
+        "filtered_source_path": str(_cropped_source_las(cache_dir)),
         **meta,
     }
 

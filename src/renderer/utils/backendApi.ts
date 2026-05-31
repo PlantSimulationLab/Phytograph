@@ -165,7 +165,7 @@ export async function segmentGround(
 
 export async function segmentGroundApply(
   request: GroundSegmentationApplyRequest
-): Promise<OctreeMetadata> {
+): Promise<SegmentApplyMetadata> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes (CSF + re-convert)
@@ -182,7 +182,7 @@ export async function segmentGroundApply(
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
-    return (await response.json()) as OctreeMetadata;
+    return (await response.json()) as SegmentApplyMetadata;
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Ground segmentation apply failed:', error);
@@ -285,7 +285,7 @@ export async function segmentTrees(
 
 export async function segmentTreesApply(
   request: TreeSegmentationApplyRequest
-): Promise<OctreeMetadata> {
+): Promise<SegmentApplyMetadata> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes (TreeIso + re-convert)
@@ -302,7 +302,7 @@ export async function segmentTreesApply(
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
-    return (await response.json()) as OctreeMetadata;
+    return (await response.json()) as SegmentApplyMetadata;
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Tree segmentation apply failed:', error);
@@ -1680,6 +1680,17 @@ export interface OctreeMetadata {
 }
 
 /**
+ * `OctreeMetadata` extended with the on-disk path of the segmented LAS the
+ * apply baked the label into (ground_class / tree_instance). The renderer uses
+ * it as the new cloud's `sourceXyzPath` so a later Filter/Crop re-reads a source
+ * that carries the label — the original XYZ source does not. See
+ * `segment_ground_apply` / `segment_trees_apply` in the backend.
+ */
+export interface SegmentApplyMetadata extends OctreeMetadata {
+  segmented_source_path: string;
+}
+
+/**
  * Triggers a Potree 2.0 octree build on the backend for an XYZ-family source
  * file. The backend caches by sha1(sourcePath + mtime + asciiFormat) — repeat
  * calls hit the cache and return immediately. The renderer streams tiles via
@@ -1740,15 +1751,20 @@ export type CropOctreeRegion =
     };
 
 /**
- * Keep only points whose imported scalar attribute `slug` falls within the
- * inclusive range [min, max]. `slug` is the on-disk extra-dimension name —
- * the same key used in `OctreeRef.attributeRanges` and the value (after the
- * `scalar:` prefix) the filter panel's field dropdown emits for octrees.
+ * Keep only points whose imported scalar attribute `slug` matches. Continuous
+ * fields use the inclusive range [min, max]; categorical fields (ground_class /
+ * tree_instance) set `values` to keep points whose value rounds to one of the
+ * listed class ids (an OR within the field — `min`/`max` are ignored). `slug` is
+ * the on-disk extra-dimension name — the same key used in
+ * `OctreeRef.attributeRanges` and the value (after the `scalar:` prefix) the
+ * filter panel's field dropdown emits for octrees.
  */
 export interface ScalarFilter {
   slug: string;
   min: number;
   max: number;
+  // Categorical membership: when set, keep iff round(value) is in this set.
+  values?: number[];
 }
 
 /**
@@ -1762,6 +1778,11 @@ export interface CropOctreeResult {
   cache_id: string | null;
   cache_dir: string | null;
   cached: boolean;
+  // On-disk path of the persisted filtered LAS (carrying the kept points with
+  // any scalar attributes). The renderer uses it as the resulting cloud's
+  // `sourceXyzPath` so the NEXT crop/filter/segment composes on the current
+  // point set, not the original source. `null` when the crop kept zero points.
+  filtered_source_path: string | null;
   version: string;
   point_count: number;
   spacing: number;

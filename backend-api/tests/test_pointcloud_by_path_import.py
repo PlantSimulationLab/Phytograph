@@ -61,6 +61,28 @@ def test_xyz_only_file_returns_positions(client, tmp_path: Path):
     assert len(body) == HEADER_SIZE + 3 * 3 * 4
 
 
+def test_pts_count_header_line_is_dropped(client, tmp_path: Path):
+    """A `.pts` file leads with a bare point-count line; it must not be parsed
+    as a data point on the flat import path."""
+    f = tmp_path / "scan.pts"
+    f.write_text("3\n10 20 30\n11 21 31\n12 22 32\n")
+    res = client.post("/api/pointcloud/import_by_path", json={"file_path": str(f)})
+    assert res.status_code == 200, res.text
+    header = _unpack_header(res.content)
+    assert header["count"] == 3  # not 4
+    pts = _positions(res.content, 3)
+    assert pts.tolist() == [[10.0, 20.0, 30.0], [11.0, 21.0, 31.0], [12.0, 22.0, 32.0]]
+
+
+def test_asc_headerless_file_returns_positions(client, tmp_path: Path):
+    """`.asc` is treated like `.xyz` — headerless whitespace ASCII."""
+    f = tmp_path / "scan.asc"
+    f.write_text("0 0 0\n1 2 3\n")
+    res = client.post("/api/pointcloud/import_by_path", json={"file_path": str(f)})
+    assert res.status_code == 200, res.text
+    assert _unpack_header(res.content)["count"] == 2
+
+
 def test_helios_ascii_format_normalises_rgb_and_keeps_reflectance(client, tmp_path: Path):
     """Matches the BPPtree fixture format: 'x y z r255 g255 b255 reflectance'.
 

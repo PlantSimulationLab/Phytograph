@@ -766,12 +766,14 @@ const BACKEND_PATH_EXTENSIONS = new Set([
 // else (LAS, OBJ-points, …) falls back to the in-renderer parsers via
 // `parsePointCloud`. `asciiFormat` is forwarded to the backend when known
 // (Helios <ASCII_format>) and ignored on the PLY/PCD route.
-// XYZ-family extensions go through the Potree 2.0 octree pipeline as of
-// 0.3.0 — the flat-Float32Array path can't fit clouds large enough to
-// matter on a real workload. PLY / PCD still use the flat path; they
-// aren't in PotreeConverter's supported input list and are typically
-// small enough that the OOM ceiling isn't an issue.
-const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc']);
+// Every path-backed point cloud goes through the Potree 2.0 octree pipeline —
+// the flat-Float32Array path can't fit clouds large enough to matter on a real
+// workload. The backend's `_source_to_las` converts each format to LAS before
+// PotreeConverter: XYZ-family via pandas, PLY via plyfile (scalar fields
+// preserved as LAS extra dims), PCD via open3d (position + RGB only), and
+// LAS/LAZ pass straight through. PLY/PCD stay in BACKEND_PATH_EXTENSIONS as the
+// flat fallback for Blob/no-path inputs that can't be octree'd.
+const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz']);
 
 export async function parsePointCloudFromPath(
   path: string,

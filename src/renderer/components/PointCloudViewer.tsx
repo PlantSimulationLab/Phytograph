@@ -39,7 +39,7 @@ import {
 } from '../lib/pointCloudHelpers';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
-import { categoricalSchemeForRange, GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForRange, isCategoricalAttribute, GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { PointCloud } from './viewer/renderers/PointCloud';
@@ -1213,6 +1213,10 @@ export default function PointCloudViewer({
             // (empty positions, tight_bounds for the new extent, new
             // cacheId). React passes it to OctreePointCloud which
             // observes the cacheId change and re-loads the streamed tiles.
+            // Chain `sourceXyzPath` to the persisted filtered LAS so a
+            // subsequent crop/filter composes on the cropped points, not the
+            // original source (else removed points reappear). It's a LAS, so
+            // asciiFormat is null.
             const newData = buildPointCloudFromOctree(
               {
                 cache_id: result.cache_id,
@@ -1227,9 +1231,9 @@ export default function PointCloudViewer({
                 tight_bounds: result.tight_bounds,
                 attributes: result.attributes,
               },
-              octreeInfo.sourceXyzPath,
+              result.filtered_source_path ?? octreeInfo.sourceXyzPath,
               src.fileName ?? cloud.id,
-              octreeInfo.asciiFormat ?? null,
+              result.filtered_source_path ? null : (octreeInfo.asciiFormat ?? null),
             );
             onUpdateCloud(cloud.id, newData);
             touchedCloudIds.push(cloud.id);
@@ -1265,9 +1269,9 @@ export default function PointCloudViewer({
                         tight_bounds: invResult.tight_bounds,
                         attributes: invResult.attributes,
                       },
-                      octreeInfo.sourceXyzPath,
+                      invResult.filtered_source_path ?? octreeInfo.sourceXyzPath,
                       `${src.fileName ?? cloud.id} (segment)`,
-                      octreeInfo.asciiFormat ?? null,
+                      invResult.filtered_source_path ? null : (octreeInfo.asciiFormat ?? null),
                     ),
                     visible: true,
                     color: SEGMENT_COLOR,
@@ -1654,9 +1658,16 @@ export default function PointCloudViewer({
     const oty = editState?.translation.y ?? 0;
     const otz = editState?.translation.z ?? 0;
 
+    // Categorical fields (ground_class / tree_instance) emit `values` (the
+    // selected class ids to keep) instead of a min/max range; continuous fields
+    // emit the range. A categorical field with no class selected keeps nothing,
+    // so it's a valid (if empty) filter — still sent.
     const scalarFilters = Object.entries(filters.scalarFields)
       .filter(([, f]) => f.enabled)
-      .map(([slug, f]) => ({ slug, min: f.min, max: f.max }));
+      .map(([slug, f]) =>
+        f.selectedClasses
+          ? { slug, min: f.min, max: f.max, values: f.selectedClasses }
+          : { slug, min: f.min, max: f.max });
 
     let region: CropOctreeRegion | null = null;
     if (filters.x.enabled || filters.y.enabled || filters.z.enabled) {
@@ -1687,13 +1698,22 @@ export default function PointCloudViewer({
   }, [editStates]);
 
   // Convert a crop_octree result into PointCloudData (or null when empty).
+  //
+  // The resulting cloud's `sourceXyzPath` is the backend-persisted filtered LAS
+  // (`filtered_source_path`), NOT the original source — so the next crop/filter/
+  // segment composes on the CURRENT point set. Re-reading the original would make
+  // previously-removed points reappear. The persisted source is a LAS, so its
+  // asciiFormat is null. (`fallbackSource`/`fallbackAscii` are only used if the
+  // backend omitted the path — older cache entries pre-this-field.)
   const octreeResultToData = useCallback((
     result: CropOctreeResult,
-    sourceXyzPath: string,
+    fallbackSource: string,
     fileName: string,
-    asciiFormat: string | null,
+    fallbackAscii: string | null,
   ): PointCloudData | null => {
     if (result.point_count === 0 || !result.cache_id) return null;
+    const chainedSource = result.filtered_source_path ?? fallbackSource;
+    const chainedAscii = result.filtered_source_path ? null : fallbackAscii;
     return buildPointCloudFromOctree(
       {
         cache_id: result.cache_id,
@@ -1708,9 +1728,9 @@ export default function PointCloudViewer({
         tight_bounds: result.tight_bounds,
         attributes: result.attributes,
       },
-      sourceXyzPath,
+      chainedSource,
       fileName,
-      asciiFormat,
+      chainedAscii,
     );
   }, []);
 
@@ -1832,7 +1852,13 @@ export default function PointCloudViewer({
         const sf = filters.scalarFields[name];
         if (sf.enabled && src.scalarFields?.[name]) {
           const v = src.scalarFields[name].values[i];
-          if (v < sf.min || v > sf.max) return false;
+          // Categorical: keep iff the rounded value is a selected class.
+          // Continuous: keep iff within [min, max].
+          if (sf.selectedClasses) {
+            if (!sf.selectedClasses.includes(Math.round(v))) return false;
+          } else if (v < sf.min || v > sf.max) {
+            return false;
+          }
         }
       }
       return true;
@@ -3908,12 +3934,17 @@ export default function PointCloudViewer({
         const baseName = cloud.data.fileName ?? id;
 
         // Classify in place: re-convert with ground_class baked in, swap the ref.
+        // The new cloud's source is the backend-persisted segmented LAS (it
+        // carries ground_class), NOT the original XYZ — so a later Filter on
+        // ground_class re-reads a source that actually has the column.
         const meta = await segmentGroundApply({
           source_path: srcPath,
           ascii_format: af,
           ...csfParams,
         });
-        const newData = buildPointCloudFromOctree(meta, srcPath, baseName, af);
+        const newData = buildPointCloudFromOctree(
+          meta, meta.segmented_source_path, baseName, null,
+        );
         onUpdateCloud(id, newData);
         setColorMode('scalar');
         setSelectedScalarField(GROUND_CLASS_ATTRIBUTE);
@@ -3930,7 +3961,9 @@ export default function PointCloudViewer({
             });
             onAddCloud({
               id: crypto.randomUUID(),
-              data: buildPointCloudFromOctree(sm, srcPath, `${baseName} (${suffix})`, af),
+              data: buildPointCloudFromOctree(
+                sm, sm.segmented_source_path, `${baseName} (${suffix})`, null,
+              ),
               visible: true,
               color,
             });
@@ -4079,7 +4112,11 @@ export default function PointCloudViewer({
           seed_points: seeds,
           ...tiParams,
         });
-        const newData = buildPointCloudFromOctree(meta, srcPath, baseName, af);
+        // Source becomes the persisted segmented LAS (carries tree_instance) so
+        // a later Filter on tree_instance re-reads a source that has the column.
+        const newData = buildPointCloudFromOctree(
+          meta, meta.segmented_source_path, baseName, null,
+        );
         onUpdateCloud(id, newData);
         setColorMode('scalar');
         setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
@@ -8984,6 +9021,26 @@ export default function PointCloudViewer({
           setCloudFilters(new Map(cloudFilters).set(cloud.id, newFilters));
         };
 
+        // Commit a categorical scalar filter's selected class set. Only valid for
+        // `scalar:<slug>` fields. An empty set leaves the filter enabled (it keeps
+        // nothing) — the commit buttons surface that as a 0-point result.
+        const commitClasses = (classes: number[]) => {
+          if (!selectedFilterField || !selectedFilterField.startsWith('scalar:')) return;
+          const name = selectedFilterField.substring(7);
+          const existing = filters.scalarFields[name];
+          const newFilters = { ...filters };
+          newFilters.scalarFields = {
+            ...newFilters.scalarFields,
+            [name]: {
+              min: existing?.min ?? 0,
+              max: existing?.max ?? 0,
+              enabled: true,
+              selectedClasses: classes,
+            },
+          };
+          setCloudFilters(new Map(cloudFilters).set(cloud.id, newFilters));
+        };
+
         // Remove filter for the selected field
         const removeFilter = () => {
           if (!selectedFilterField) return;
@@ -9038,6 +9095,27 @@ export default function PointCloudViewer({
             setPendingFilterMin(field.bounds.min.toFixed(4));
             setPendingFilterMax(field.bounds.max.toFixed(4));
           }
+          // For a categorical field with no committed filter yet, seed the filter
+          // with all classes selected (a visible no-op) so unchecking a class
+          // immediately narrows the kept set — no "nothing happens" first toggle.
+          const slug = fieldValue.startsWith('scalar:') ? fieldValue.substring(7) : null;
+          if (slug && field && isCategoricalAttribute(slug) && !currentFilter?.selectedClasses) {
+            const scheme = categoricalSchemeForRange(slug, [field.bounds.min, field.bounds.max]);
+            if (scheme) {
+              const existing = filters.scalarFields[slug];
+              const newFilters = { ...filters };
+              newFilters.scalarFields = {
+                ...newFilters.scalarFields,
+                [slug]: {
+                  min: existing?.min ?? field.bounds.min,
+                  max: existing?.max ?? field.bounds.max,
+                  enabled: true,
+                  selectedClasses: scheme.classes.map(c => c.value),
+                },
+              };
+              setCloudFilters(new Map(cloudFilters).set(cloud.id, newFilters));
+            }
+          }
         };
 
         // Get active filters list
@@ -9049,6 +9127,21 @@ export default function PointCloudViewer({
         // Get bounds for selected field
         const selectedField = availableFields.find(f => f.value === selectedFilterField);
         const currentFilter = selectedFilterField ? getFieldFilter(selectedFilterField) : undefined;
+
+        // Categorical fields (ground_class / tree_instance) get a class-checkbox
+        // UI instead of min/max inputs. The slug is the dropdown value minus the
+        // `scalar:` prefix; the class list comes from the registered scheme
+        // (ground_class) or is generated from the field's [min,max] (tree_instance).
+        const selectedSlug = selectedFilterField?.startsWith('scalar:')
+          ? selectedFilterField.substring(7)
+          : null;
+        const categoricalScheme = selectedSlug && selectedField && isCategoricalAttribute(selectedSlug)
+          ? categoricalSchemeForRange(selectedSlug, [selectedField.bounds.min, selectedField.bounds.max])
+          : null;
+        // Default selection when first opening a categorical field: all classes.
+        const selectedClasses = currentFilter?.selectedClasses
+          ?? categoricalScheme?.classes.map(c => c.value)
+          ?? [];
 
         return (
           <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
@@ -9083,8 +9176,71 @@ export default function PointCloudViewer({
               </select>
             </div>
 
-            {/* Min/Max Inputs - only show when field is selected */}
-            {selectedFilterField && selectedField && (
+            {/* Categorical field: class checkboxes (keep the checked classes). */}
+            {selectedFilterField && selectedField && categoricalScheme && (
+              <div className="mb-3">
+                <div className="text-[10px] text-neutral-500 mb-1">
+                  Keep classes ({selectedClasses.length}/{categoricalScheme.classes.length})
+                </div>
+                <div className="max-h-40 overflow-y-auto space-y-1 mb-2 pr-1">
+                  {categoricalScheme.classes.map(c => {
+                    const checked = selectedClasses.includes(c.value);
+                    return (
+                      <label
+                        key={c.value}
+                        className="flex items-center gap-2 text-xs text-neutral-200 cursor-pointer hover:bg-neutral-700/40 rounded px-1 py-0.5"
+                      >
+                        <input
+                          data-testid={`filter-class-${c.value}`}
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            const next = checked
+                              ? selectedClasses.filter(v => v !== c.value)
+                              : [...selectedClasses, c.value].sort((a, b) => a - b);
+                            commitClasses(next);
+                          }}
+                        />
+                        <span
+                          className="inline-block w-3 h-3 rounded-sm border border-neutral-600 shrink-0"
+                          style={{ backgroundColor: `rgb(${c.color.map(ch => Math.round(ch * 255)).join(',')})` }}
+                        />
+                        <span className="truncate">{c.label}</span>
+                        <span className="text-neutral-500 ml-auto">{c.value}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div className="flex gap-2 mb-2">
+                  <button
+                    data-testid="filter-class-all"
+                    onClick={() => commitClasses(categoricalScheme.classes.map(c => c.value))}
+                    className="flex-1 px-2 py-1 text-[10px] bg-neutral-700 hover:bg-neutral-600 rounded"
+                  >
+                    All
+                  </button>
+                  <button
+                    data-testid="filter-class-none"
+                    onClick={() => commitClasses([])}
+                    className="flex-1 px-2 py-1 text-[10px] bg-neutral-700 hover:bg-neutral-600 rounded"
+                  >
+                    None
+                  </button>
+                </div>
+                {currentFilter?.enabled && (
+                  <button
+                    onClick={removeFilter}
+                    className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
+                  >
+                    Remove this filter
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Min/Max Inputs - continuous fields only (categorical uses the
+                class checkboxes above). */}
+            {selectedFilterField && selectedField && !categoricalScheme && (
               <div className="mb-3">
                 <div className="text-[10px] text-neutral-500 mb-1">
                   Range: {selectedField.bounds.min.toFixed(2)} to {selectedField.bounds.max.toFixed(2)}
@@ -9131,9 +9287,12 @@ export default function PointCloudViewer({
                 <div className="space-y-1">
                   {activeFilters.map(f => {
                     const filter = getFieldFilter(f.value);
+                    const summary = filter?.selectedClasses
+                      ? `classes ${filter.selectedClasses.join(', ') || '(none)'}`
+                      : `${filter?.min.toFixed(2)} - ${filter?.max.toFixed(2)}`;
                     return (
                       <div key={f.value} className="text-[10px] text-neutral-300 bg-neutral-900/50 rounded px-2 py-1 flex justify-between items-center">
-                        <span>{f.label}: {filter?.min.toFixed(2)} - {filter?.max.toFixed(2)}</span>
+                        <span>{f.label}: {summary}</span>
                       </div>
                     );
                   })}

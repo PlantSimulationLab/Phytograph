@@ -23,11 +23,14 @@
 - Separator is auto-detected: comma for `.csv`, whitespace otherwise.
 - Lines starting with `#` are treated as comments.
 
-When a point cloud is loaded by path (from Helios XML bulk import or any
-auto-attach), parsing happens in the Python backend so files larger than
-the browser's ~512 MB string limit still load. This applies to all ASCII
-formats above and to `.ply` / `.pcd` (open3d reads ASCII and binary
-variants of both). If the source XML provides an `<ASCII_format>` tag
+When a point cloud is loaded by path (dragged into the viewer, or attached
+via Helios XML bulk import), it is converted to a streaming **octree** in the
+Python backend and rendered tile-by-tile, so files far larger than the
+browser's ~512 MB string limit load without exhausting memory. This applies
+to every supported point-cloud format: ASCII (`.xyz`/`.txt`/`.csv`/`.pts`/`.asc`)
+via pandas, `.ply` (parsed directly, scalar fields preserved — see below),
+`.pcd` (via open3d, position + color only), and `.las`/`.laz` (passed straight
+through). If the source XML provides an `<ASCII_format>` tag
 for an XYZ-family file, Phytograph forwards it to the parser; recognised
 column tokens are `x`, `y`, `z`, `r`/`g`/`b` (0–1 range),
 `r255`/`g255`/`b255` (0–255 range, normalised to 0–1 on read),
@@ -46,11 +49,18 @@ recognised (so `XYZ[0][m]`/`XYZ[1][m]`/`XYZ[2][m]` map to x/y/z and the
 rest become scalar fields), otherwise it falls back to a positional
 guess (xyz, then RGB at six columns, then intensity at seven).
 
-Open3D doesn't preserve PLY/PCD scalar fields (intensity, reflectance,
-etc.) when loading by path. If you need those fields for a `.ply` /
-`.pcd` cloud, drop it into the viewer directly so it goes through the
-in-renderer parser, or convert it to `.xyz` with the columns named in
-an `<ASCII_format>` tag.
+`.ply` clouds are parsed directly (not via open3d), so arbitrary per-vertex
+scalar properties — intensity, reflectance, and any custom numeric field —
+are preserved and carried into the octree as color-mappable scalar fields.
+`red`/`green`/`blue` become color, the first of `intensity`/`reflectance`
+becomes intensity, and every other numeric property is kept under its own
+name.
+
+`.pcd` clouds are read via open3d, which carries position and color only —
+PCD scalar fields are **not** preserved. If you need scalar fields from a
+`.pcd`, convert it to `.ply` or to `.xyz` with the columns named in an
+`<ASCII_format>` tag. `.las`/`.laz` clouds retain their native extra
+dimensions.
 
 ## Meshes
 

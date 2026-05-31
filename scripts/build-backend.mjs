@@ -111,6 +111,10 @@ const hiddenImports = [
   'open3d',
   'laspy',
   'lazrs',
+  // plyfile: pure-Python PLY parser, imported lazily inside _ply_to_las.
+  // Declared explicitly so PyInstaller bundles it even though the import is
+  // function-local rather than module-top-level.
+  'plyfile',
   'openpyxl',
   'pydantic',
   'pydantic.deprecated.decorator',
