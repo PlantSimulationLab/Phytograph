@@ -14,6 +14,10 @@ import pytest
 import main
 
 FIXTURE = Path(__file__).parent / "fixtures" / "multi_tree_small.xyz"
+# Same cloud as a binary PLY carrying ground-truth `instance` + `semantic`
+# vertex fields — mirrors the Cherlet TLS benchmark format, which is the data
+# the eval harness actually runs on. Committed alongside the .xyz.
+PLY_FIXTURE = Path(__file__).parent / "fixtures" / "multi_tree_small.ply"
 
 
 def _treeiso_available() -> bool:
@@ -25,9 +29,21 @@ def _treeiso_available() -> bool:
         return False
 
 
+def _plyfile_available() -> bool:
+    try:
+        import plyfile  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 requires_treeiso = pytest.mark.skipif(
     not _treeiso_available(),
     reason="TreeIso deps not installed (cut_pursuit_py / vendored treeiso)",
+)
+
+requires_plyfile = pytest.mark.skipif(
+    not _plyfile_available(), reason="plyfile not installed",
 )
 
 
@@ -147,3 +163,164 @@ def test_requires_input(client):
     res = client.post("/api/segment/trees", json={})
     # _resolve_segmentation_points raises HTTPException(400) when neither given
     assert res.status_code == 400
+
+
+@requires_treeiso
+def test_drops_non_finite_points(tmp_path):
+    """NaN/inf coords (which arrive via a file, not JSON) are dropped before
+    TreeIso's cKDTree, which would otherwise raise. Exercised through the
+    file/loader path used by /apply, where bad coordinates can realistically
+    occur (JSON can't even carry NaN)."""
+    import laspy
+    points, _ = _load_fixture()
+    bad = points.copy()
+    bad[0] = [np.nan, 0.0, 0.0]
+    bad[1] = [np.inf, 0.0, 0.0]
+    src = tmp_path / "withnan.xyz"
+    np.savetxt(src, bad, fmt="%.4f")  # NaN/inf serialise as text fine
+
+    fields = main.TreeSegmentationApplyRequest.model_fields
+    ti = {k: fields[k].default for k in (
+        "reg_strength1", "min_nn1", "decimate_res1", "reg_strength2", "min_nn2",
+        "decimate_res2", "max_gap", "rel_height_length_ratio", "vertical_weight",
+        "min_nn3", "score_candidate_thresh", "init_stem_rel_length_thresh",
+        "max_outlier_gap")}
+    out = tmp_path / "out.las"
+    n, _carried, _gw = main._tree_segmented_xyz_to_las(src, None, out, ti, None, None)
+    # The two non-finite rows are dropped; the rest segment normally.
+    assert n == len(points) - 2
+    las = laspy.read(str(out))
+    assert len(np.asarray(las.x)) == len(points) - 2
+
+
+def test_oversize_cloud_rejected_with_actionable_error(client, monkeypatch):
+    """A cloud above the TreeIso point cap fails fast with a clear message,
+    not an apparent hang. Lower the cap so the test stays tiny."""
+    monkeypatch.setattr(main, "_TREEISO_MAX_POINTS", 50)
+    points, _ = _load_fixture()
+    res = client.post("/api/segment/trees", json={"points": points[:200].tolist()})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is False
+    assert "exceeds" in body["error"] and "limit" in body["error"]
+
+
+# --- PLY support (the benchmark format) -------------------------------------
+# The Cherlet TLS benchmark ships as PLY with `instance` / `semantic` fields.
+# These tests cover that the segmentation path reads PLY and CARRIES the GT
+# fields through, so the earlier XYZ-only gap can't silently regress.
+
+@requires_plyfile
+def test_ply_fixture_exists_with_gt_fields():
+    """The committed PLY fixture must carry instance + semantic vertex fields."""
+    from plyfile import PlyData
+    assert PLY_FIXTURE.is_file(), f"missing {PLY_FIXTURE} (regenerate from the .xyz)"
+    names = PlyData.read(str(PLY_FIXTURE))["vertex"].data.dtype.names
+    assert {"x", "y", "z", "instance", "semantic"}.issubset(set(names)), names
+
+
+@requires_plyfile
+def test_loader_carries_ply_scalar_fields():
+    """_load_cloud_for_segmentation reads PLY xyz and carries instance/semantic."""
+    xyz, scalars, extra = main._load_cloud_for_segmentation(PLY_FIXTURE, None)
+    points, _ = _load_fixture()
+    assert xyz.shape == (len(points), 3)
+    slugs = {e["slug"] for e in extra}
+    assert "instance" in slugs and "semantic" in slugs
+    assert "instance" in scalars and "semantic" in scalars
+
+
+@requires_treeiso
+@requires_plyfile
+def test_apply_las_from_ply_carries_tree_instance_and_gt(tmp_path):
+    """_tree_segmented_xyz_to_las on a PLY runs TreeIso and writes a LAS with the
+    new tree_instance dim PLUS the source instance/semantic GT dims."""
+    import laspy
+    # Harvest TreeIso param defaults from the model's field defaults (the model
+    # requires source_path, so don't instantiate it bare).
+    fields = main.TreeSegmentationApplyRequest.model_fields
+    ti = {k: fields[k].default for k in (
+        "reg_strength1", "min_nn1", "decimate_res1", "reg_strength2", "min_nn2",
+        "decimate_res2", "max_gap", "rel_height_length_ratio", "vertical_weight",
+        "min_nn3", "score_candidate_thresh", "init_stem_rel_length_thresh",
+        "max_outlier_gap")}
+    out = tmp_path / "trees.las"
+    n, carried, ground_warning = main._tree_segmented_xyz_to_las(
+        PLY_FIXTURE, None, out, ti, None, None)
+    assert n > 0
+    assert ground_warning is False  # fixture is ground-removed
+    slugs = {c["slug"] for c in carried}
+    assert {"tree_instance", "instance", "semantic"}.issubset(slugs), slugs
+
+    las = laspy.read(str(out))
+    dims = set(las.point_format.dimension_names)
+    assert {"tree_instance", "instance", "semantic"}.issubset(dims), dims
+    tree_ids = np.asarray(las["tree_instance"])
+    assert len(np.unique(tree_ids[tree_ids > 0])) >= 2  # multiple trees found
+
+
+@requires_treeiso
+@requires_plyfile
+def test_endpoint_inline_from_ply_source(client):
+    """/api/segment/trees with a PLY `source` returns per-point labels."""
+    res = client.post(
+        "/api/segment/trees",
+        json={"source": {"source_path": str(PLY_FIXTURE)}},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is True
+    points, _ = _load_fixture()
+    assert body["num_points"] == len(points)
+    assert body["num_trees"] >= 2
+
+
+# --- End-to-end apply + filter (needs PotreeConverter) ----------------------
+
+def _converter_available() -> bool:
+    try:
+        main._resolve_potree_converter_path()
+        return True
+    except Exception:
+        return False
+
+
+requires_converter = pytest.mark.skipif(
+    not _converter_available(),
+    reason="PotreeConverter binary not found; build it via npm run build:potree-converter",
+)
+
+
+@pytest.fixture
+def cache_root(tmp_path, monkeypatch) -> Path:
+    root = tmp_path / "octree_cache"
+    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(root))
+    return root
+
+
+@requires_treeiso
+@requires_converter
+def test_segment_trees_apply_then_filter_by_instance(client, cache_root):
+    """Regression: after tree segmentation bakes `tree_instance`, the apply
+    persists a segmented LAS carrying that dim, and filtering it on
+    `tree_instance` via crop_octree succeeds (it used to 400 because the filter
+    re-read the original source, which has no tree_instance column)."""
+    apply_body = client.post(
+        "/api/segment/trees/apply",
+        json={"source_path": str(FIXTURE), "ascii_format": "x y z treeiso_label"},
+    ).json()
+    seg_path = apply_body["segmented_source_path"]
+    assert Path(seg_path).is_file(), f"segmented source not persisted at {seg_path}"
+
+    # Keep only tree instance 1 — the renderer routes this through crop_octree
+    # on the persisted LAS (ascii_format=None for LAS).
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": seg_path,
+            "scalar_filters": [{"slug": main.TREE_INSTANCE_SLUG, "min": 1, "max": 1}],
+        },
+    )
+    assert res.status_code == 200, res.text  # <-- the bug surfaced as 400 here
+    kept = res.json()["point_count"]
+    assert 0 < kept < apply_body["point_count"]
