@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 
@@ -23,6 +24,7 @@ test('extracts a skeleton from a Y-shaped plant cloud via the UI', async () => {
       page.getByTestId('import-menu-pointcloud').click(),
     ]);
     await chooser.setFiles(FIXTURE);
+    await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });

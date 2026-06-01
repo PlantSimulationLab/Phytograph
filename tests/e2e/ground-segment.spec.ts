@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants.xyz');
 
@@ -24,6 +25,7 @@ test('segments ground vs plant and colours by the ground_class attribute', async
       page.getByTestId('import-menu-pointcloud').click(),
     ]);
     await chooser.setFiles(FIXTURE);
+    await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
@@ -85,6 +87,7 @@ test('filters a segmented cloud by ground_class via class checkboxes', async () 
       page.getByTestId('import-menu-pointcloud').click(),
     ]);
     await chooser.setFiles(FIXTURE);
+    await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
@@ -139,6 +142,7 @@ test('hides the class legend after the segmented cloud is deleted', async () => 
       page.getByTestId('import-menu-pointcloud').click(),
     ]);
     await chooser.setFiles(FIXTURE);
+    await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });

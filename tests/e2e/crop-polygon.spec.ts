@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -38,6 +39,7 @@ test('polygon lasso crop: clicks add vertices, Enter closes, Apply keeps enclose
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(TINY);
+    await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
@@ -129,6 +131,7 @@ test('polygon lasso crop: Keep Outside enclosing all points empties the cloud (d
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(TINY);
+    await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
@@ -201,6 +204,7 @@ test('polygon lasso crop: half-viewport lasso keeps a strict subset of points', 
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(TINY);
+    await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });

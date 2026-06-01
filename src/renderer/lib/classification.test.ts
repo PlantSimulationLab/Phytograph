@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   GROUND_CLASS_ATTRIBUTE,
   buildCategoricalGradientStops,
+  buildGenericCategoricalScheme,
   categoricalSchemeFor,
+  categoricalSchemeForRange,
   colorForClassValue,
   isCategoricalAttribute,
+  registerCategoricalSlug,
+  unregisterCategoricalSlug,
 } from './classification';
 
 describe('categoricalSchemeFor', () => {
@@ -95,5 +99,47 @@ describe('buildCategoricalGradientStops', () => {
         expect(t).toBeLessThanOrEqual(1);
       }
     }
+  });
+});
+
+describe('wizard-marked categorical fields (dynamic registry)', () => {
+  it('treats a registered slug as categorical and builds a Class-N scheme', () => {
+    const slug = 'my_label_field';
+    expect(isCategoricalAttribute(slug)).toBe(false);
+    registerCategoricalSlug(slug);
+    try {
+      expect(isCategoricalAttribute(slug)).toBe(true);
+      const scheme = categoricalSchemeForRange(slug, [0, 3]);
+      expect(scheme).not.toBeNull();
+      expect(scheme!.classes.map((c) => c.value)).toEqual([0, 1, 2, 3]);
+      expect(scheme!.classes.map((c) => c.label)).toEqual(['Class 0', 'Class 1', 'Class 2', 'Class 3']);
+      // Distinct colors per class (golden-angle palette).
+      const colors = scheme!.classes.map((c) => JSON.stringify(c.color));
+      expect(new Set(colors).size).toBe(colors.length);
+    } finally {
+      unregisterCategoricalSlug(slug);
+    }
+    expect(isCategoricalAttribute(slug)).toBe(false);
+  });
+
+  it('registration is case-insensitive', () => {
+    registerCategoricalSlug('MixedCaseSlug');
+    try {
+      expect(isCategoricalAttribute('mixedcaseslug')).toBe(true);
+    } finally {
+      unregisterCategoricalSlug('MixedCaseSlug');
+    }
+  });
+
+  it('caps the generated class list for a pathological range', () => {
+    const scheme = buildGenericCategoricalScheme('huge', [0, 100000]);
+    expect(scheme.classes.length).toBeLessThanOrEqual(256);
+  });
+
+  it('ignores empty/nullish slugs', () => {
+    registerCategoricalSlug('');
+    registerCategoricalSlug(null);
+    registerCategoricalSlug(undefined);
+    expect(isCategoricalAttribute('')).toBe(false);
   });
 });

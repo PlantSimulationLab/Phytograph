@@ -5,6 +5,7 @@ import {
   importPointCloudLasLaz,
   convertToOctree,
   type OctreeMetadata,
+  type ColumnPlan,
 } from '../utils/backendApi';
 
 // Calculate bounds from position array
@@ -778,18 +779,20 @@ const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply'
 export async function parsePointCloudFromPath(
   path: string,
   asciiFormat?: string | null,
+  columnPlan?: ColumnPlan | null,
+  categoricalAttributes?: string[],
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
   const ext = name.toLowerCase().split('.').pop() ?? '';
 
   if (OCTREE_PATH_EXTENSIONS.has(ext)) {
-    const meta = await convertToOctree(path, asciiFormat ?? null);
-    return buildPointCloudFromOctree(meta, path, name, asciiFormat);
+    const meta = await convertToOctree(path, asciiFormat ?? null, columnPlan ?? null);
+    return buildPointCloudFromOctree(meta, path, name, asciiFormat, columnPlan, categoricalAttributes);
   }
 
   if (BACKEND_PATH_EXTENSIONS.has(ext)) {
-    const result = await importPointCloudByPath(path, asciiFormat ?? null);
+    const result = await importPointCloudByPath(path, asciiFormat ?? null, columnPlan ?? null);
     return buildPointCloudFromBackend(result, name);
   }
 
@@ -813,6 +816,8 @@ export function buildPointCloudFromOctree(
   sourceXyzPath: string,
   fileName: string,
   asciiFormat?: string | null,
+  columnPlan?: ColumnPlan | null,
+  categoricalAttributes?: string[],
 ): PointCloudData {
   // Prefer the tight data extent over the cube-padded octree bounds.
   // Crop-box init, fit-to-bounds camera framing, and the bounds shown in
@@ -853,6 +858,10 @@ export function buildPointCloudFromOctree(
       asciiFormat: asciiFormat ?? null,
       attributeRanges,
       attributeLabels,
+      columnPlan: columnPlan ?? null,
+      categoricalAttributes: categoricalAttributes && categoricalAttributes.length
+        ? categoricalAttributes
+        : undefined,
     },
   };
 }

@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { stubOpenDialog, getOpenDialogCalls } from './helpers/stubOpenDialog';
+import { completeImportWizard } from './helpers/importWizard';
 
 // Exercises the scan creation/edit/delete flow end-to-end via the unified
 // Scans panel. A "scan" can be created with no point data attached; the
@@ -89,21 +90,18 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
   }
 });
 
-// Bulk-import from Helios XML. With sphere.xml the <filename> tags point to
-// `../data/sphere_scanN.xyz` which we don't ship, so each scan should land
-// as params-only and a confirm dialog asking for each missing file would
-// stall the test. We stub the open dialog so the first picker call returns
-// the XML and subsequent calls (the "locate scan file" prompts) return null
-// to simulate the user cancelling each one — confirming params still arrive.
-test('bulk-import scans from a Helios XML file (filenames unresolved)', async () => {
+// Bulk-import from Helios XML, then round-trip a scan's parsed parameters
+// through the edit form. Uses sphere-scan/sphere.xml, whose four <scan>
+// entries reference sibling .xyz files that DO exist — so each scan resolves,
+// runs through the import wizard, and lands with both params and point data.
+// (The companion import-failure-aborts.spec.ts covers the all-or-nothing abort
+// when referenced files can't be located.)
+test('bulk-import scans from a Helios XML file and round-trips angular bounds', async () => {
   const { app, page, close } = await launchApp();
 
   try {
-    const fixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere.xml');
-    // Stub returns the XML for the first call; everything after is null
-    // (user cancelled the locate-file prompts).
-    await stubOpenDialog(app, [fixture, null, null, null, null]);
-
+    const fixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere.xml');
+    await stubOpenDialog(app, fixture);
 
     const panel = page.getByTestId('scans-panel');
     await expect(panel).toBeVisible();
@@ -115,40 +113,37 @@ test('bulk-import scans from a Helios XML file (filenames unresolved)', async ()
     await expect(popup).toBeVisible();
 
     await page.getByTestId('scan-import-xml').click();
-
-    // Popup closes after a successful bulk import (parse + per-scan attach).
+    // Popup closes once the XML is parsed and files are resolved; the four
+    // resolved scans then run through the import wizard.
     await expect(popup).not.toBeVisible({ timeout: 15_000 });
+    await completeImportWizard(page);
     await expect(page.getByTestId('scan-import-error')).toHaveCount(0);
 
     const calls = await getOpenDialogCalls(app);
     expect(calls.length).toBeGreaterThanOrEqual(1);
 
-    // Four scans, one per <scan> in sphere.xml. Origins are (-2,0,0.5),
-    // (0,-2,0.5), (2,0,0.5), (0,2,0.5). All params-only because <filename>
-    // resolution was declined by our stub.
+    // Four scans, one per <scan>. Origins are (-2,0,0.5), (0,-2,0.5),
+    // (2,0,0.5), (0,2,0.5). Each resolved its sibling .xyz → has data + params.
     await expect(rows).toHaveCount(4);
     await expect(rows.nth(0)).toContainText('(-2.00, 0.00, 0.50)');
     await expect(rows.nth(1)).toContainText('(0.00, -2.00, 0.50)');
     await expect(rows.nth(2)).toContainText('(2.00, 0.00, 0.50)');
     await expect(rows.nth(3)).toContainText('(0.00, 2.00, 0.50)');
-
-    // Every row should show the paperclip "attach data" affordance because
-    // none of them ended up with point data.
     for (let i = 0; i < 4; i++) {
-      const row = rows.nth(i);
-      await expect(row.locator('[data-testid^="scan-attach-data-"]')).toBeVisible();
+      await expect(rows.nth(i)).toHaveAttribute('data-has-data', 'true');
+      await expect(rows.nth(i)).toHaveAttribute('data-has-params', 'true');
     }
 
-    // Open one of the imported scans for edit and verify that the parsed
-    // angular bounds round-trip into the form. Scan 0 has thetaMax=150°
-    // (thetaMin defaults to 0) and no phi bounds → 0–360° azimuth sweep.
+    // Open scan 0 for edit and verify its angular bounds round-trip into the
+    // form. sphere-scan/sphere.xml sets no theta/phi bounds, so the scan
+    // covers the full sweep: zenith 0–180°, azimuth 0–360°.
     const firstId = await rows.nth(0).getAttribute('data-scan-id');
     await page.getByTestId(`scan-edit-${firstId}`).click();
     await expect(popup).toBeVisible();
     const zenithMin = await page.getByTestId('scan-zenith-min').inputValue();
     expect(Math.round(parseFloat(zenithMin))).toBe(0);
     const zenithMax = await page.getByTestId('scan-zenith-max').inputValue();
-    expect(Math.round(parseFloat(zenithMax))).toBe(150);
+    expect(Math.round(parseFloat(zenithMax))).toBe(180);
     const azimuthMin = await page.getByTestId('scan-azimuth-min').inputValue();
     expect(Math.round(parseFloat(azimuthMin))).toBe(0);
     const azimuthMax = await page.getByTestId('scan-azimuth-max').inputValue();

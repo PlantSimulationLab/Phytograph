@@ -61,6 +61,33 @@ export function getBackendUrl(): string {
 }
 
 /**
+ * Turn a raw fetch rejection into an actionable message. `fetch` rejects with a
+ * bare `TypeError: Failed to fetch` when the connection never completes — the
+ * backend is down, still starting, or crashed mid-response (a 500 that resets
+ * the socket before the body is sent). That message tells the user nothing, so
+ * we rewrite it; genuine HTTP-status errors (which we throw ourselves with the
+ * backend's `detail`) pass through untouched.
+ */
+export function describeBackendError(error: unknown, action: string): Error {
+  if (error instanceof Error) {
+    const isConnectionFailure =
+      error.name === 'TypeError' ||
+      /failed to fetch|networkerror|load failed|connection/i.test(error.message);
+    if (isConnectionFailure) {
+      return new Error(
+        `${action} failed: could not reach the backend (it may still be starting, ` +
+          `or it crashed processing this file). Check the backend status and try again.`,
+      );
+    }
+    if (error.name === 'AbortError') {
+      return new Error(`${action} timed out. The file may be too large, or the backend is stuck.`);
+    }
+    return error;
+  }
+  return new Error(`${action} failed: ${String(error)}`);
+}
+
+/**
  * Send triangulation request to backend API
  */
 export async function triangulatePointCloud(
@@ -1204,6 +1231,102 @@ export interface ImportPointCloudByPathResult {
   intensity: Float32Array | null; // length = pointCount when present
 }
 
+// ==================== IMPORT WIZARD (preview + column plan) ====================
+
+// One column's explicit import mapping, produced by the import wizard.
+// `role` is a Helios token (x/y/z/r255/g255/b255/r/g/b/intensity/reflectance/
+// skip) or the literal 'extra' for a carried scalar field. For 'extra' columns,
+// `slug`/`label` set the on-disk attribute name + picker label (rename) and
+// `categorical` marks it for discrete colouring. `index` is the 0-based source
+// column position.
+export interface ColumnPlanEntry {
+  index: number;
+  role: string;
+  slug?: string | null;
+  label?: string | null;
+  categorical?: boolean;
+}
+
+// Explicit column layout for an XYZ-family file. When attached to an import,
+// it fully overrides backend auto-detection. `rgbIs255` records whether r/g/b
+// are 0-255 ints (true) or 0-1 floats (false). ASCII formats only.
+export interface ColumnPlan {
+  columns: ColumnPlanEntry[];
+  rgbIs255: boolean;
+}
+
+// Serialise a ColumnPlan to the backend's snake_case request shape.
+export function columnPlanToPayload(plan: ColumnPlan): {
+  columns: Array<{ index: number; role: string; slug: string | null; label: string | null; categorical: boolean }>;
+  rgb_is_255: boolean;
+} {
+  return {
+    columns: plan.columns.map((c) => ({
+      index: c.index,
+      role: c.role,
+      slug: c.slug ?? null,
+      label: c.label ?? null,
+      categorical: !!c.categorical,
+    })),
+    rgb_is_255: plan.rgbIs255,
+  };
+}
+
+export interface PreviewColumn {
+  index: number;
+  header_name: string | null;
+  detected_role: string;          // x/y/z/r255/g255/b255/intensity/reflectance/extra/skip
+  suggested_label: string;
+  suggested_slug: string;
+  type_hint: string;              // integer | float | categorical | empty
+  remappable: boolean;            // true for ASCII; false for PLY/PCD/LAS
+}
+
+export interface PointCloudPreviewResponse {
+  kind: string;                   // ascii | ply | pcd | las
+  delimiter: string | null;       // comma | whitespace | tab | semicolon | null
+  has_header: boolean;
+  columns: PreviewColumn[];
+  sample_rows: string[][];
+  warning?: string | null;
+}
+
+// Cheaply inspect a point-cloud file for the import wizard. The backend reads
+// only the header + a handful of rows and never 500s on a parse problem (it
+// returns a 200 with `warning` and empty columns), so the wizard can always
+// fall back to auto-detect.
+export async function previewPointCloud(
+  filePath: string,
+  asciiFormat?: string | null,
+  maxRows = 20,
+): Promise<PointCloudPreviewResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  try {
+    const response = await fetch(`${baseUrl}/api/pointcloud/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file_path: filePath,
+        ascii_format: asciiFormat ?? null,
+        max_rows: maxRows,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as PointCloudPreviewResponse;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('pointcloud preview failed:', error);
+    throw describeBackendError(error, 'Preview');
+  }
+}
+
 // Pulls a point-cloud file from disk via the backend rather than reading it
 // into a string in the renderer (V8 caps strings at ~512 MB, which trips on
 // multi-hundred-MB TLS scans). Backend dispatches by extension: XYZ-family
@@ -1212,6 +1335,7 @@ export interface ImportPointCloudByPathResult {
 export async function importPointCloudByPath(
   filePath: string,
   asciiFormat?: string | null,
+  columnPlan?: ColumnPlan | null,
 ): Promise<ImportPointCloudByPathResult> {
   const baseUrl = getBackendUrl();
   // 10 minute timeout: a multi-GB scan takes tens of seconds to parse and
@@ -1225,6 +1349,7 @@ export async function importPointCloudByPath(
       body: JSON.stringify({
         file_path: filePath,
         ascii_format: asciiFormat ?? null,
+        column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
       }),
       signal: controller.signal,
     });
@@ -1240,7 +1365,7 @@ export async function importPointCloudByPath(
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Point-cloud by-path import failed:', error);
-    throw error;
+    throw describeBackendError(error, 'Import');
   }
 }
 
@@ -1733,6 +1858,7 @@ export interface SegmentApplyMetadata extends OctreeMetadata {
 export async function convertToOctree(
   filePath: string,
   asciiFormat?: string | null,
+  columnPlan?: ColumnPlan | null,
 ): Promise<OctreeMetadata> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
@@ -1744,6 +1870,7 @@ export async function convertToOctree(
       body: JSON.stringify({
         source_path: filePath,
         ascii_format: asciiFormat ?? null,
+        column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
       }),
       signal: controller.signal,
     });
@@ -1756,7 +1883,7 @@ export async function convertToOctree(
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('convert_to_octree failed:', error);
-    throw error;
+    throw describeBackendError(error, 'Import');
   }
 }
 

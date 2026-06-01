@@ -24,6 +24,7 @@ import { type ScanParameters } from '../lib/scanParameters';
 import { type Scan, hasData, hasParams, scanDisplayName } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromBackend, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
+import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
 import { dirname } from '../lib/pathUtils';
 import {
   pointInPolygon,
@@ -45,7 +46,7 @@ import {
 } from '../lib/pointCloudHelpers';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
-import { categoricalSchemeForRange, isCategoricalAttribute, GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { PointCloud } from './viewer/renderers/PointCloud';
@@ -138,6 +139,11 @@ interface PointCloudViewerProps {
   // when content arrives that isn't a scan — e.g. a generated Helios plant,
   // which is a mesh, not a scan.
   onViewerContentChange?: (hasContent: boolean) => void;
+  // Opens App's import wizard for the given scans and resolves with the user's
+  // per-scan choices (or null on cancel). Used by the Helios XML bulk import so
+  // multi-scan XML imports get the same preview/column-mapping flow as a
+  // drag-drop. App owns the single wizard mount.
+  onRequestImportWizard?: (inputs: WizardScanInput[]) => Promise<WizardResult[] | null>;
 }
 
 export default function PointCloudViewer({
@@ -159,7 +165,8 @@ export default function PointCloudViewer({
   canUndoStitch,
   className = '',
   importRefsCallback,
-  onViewerContentChange
+  onViewerContentChange,
+  onRequestImportWizard,
 }: PointCloudViewerProps) {
   // Legacy internal aliases. The bulk of this file was written against
   // `clouds` / `selectedIds` / `onUpdateCloud` etc., and assumes every entry
@@ -177,6 +184,20 @@ export default function PointCloudViewer({
     })),
     [scans],
   );
+
+  // Rehydrate the categorical-attribute registry from each octree cloud. The
+  // import wizard marks scalar fields categorical and stores their slugs on the
+  // OctreeRef; the classification predicates are module-level (consulted by slug
+  // from the renderers), so we re-register here whenever the cloud set changes
+  // — covering both fresh imports and a future session restore. Additive only:
+  // we never unregister, since two clouds could legitimately share a slug.
+  useEffect(() => {
+    for (const cloud of clouds) {
+      for (const slug of cloud.data.octree?.categoricalAttributes ?? []) {
+        registerCategoricalSlug(slug);
+      }
+    }
+  }, [clouds]);
   // Selection set is shared between data-bearing and params-only scans — the
   // existing tool-panel logic only ever asks "is this cloud id selected", and
   // those ids never collide with params-only scan ids.
@@ -12314,14 +12335,11 @@ export default function PointCloudViewer({
           // Renumber labels off the current count so an import after manual
           // adds doesn't collide with existing "Scan N" names.
           const offset = scans.length;
-          const newScans: Scan[] = [];
-          let attachedCount = 0;
           // Failures attaching point data are fatal to the whole import:
           // committing scans without points leaves the user with empty,
           // useless entries (e.g. when the backend is down). We collect
           // failures here and, if any occurred, abort without adding any
-          // scans so the user can fix the cause and re-import. See the
-          // throw-on-failure block after the loop.
+          // scans so the user can fix the cause and re-import.
           const failures: { label: string; reason: string }[] = [];
           // Show the progress modal immediately so the user knows the import
           // is in flight — backend parsing of a multi-GB scan can take 30s+
@@ -12332,55 +12350,105 @@ export default function PointCloudViewer({
             label: 'Preparing…',
           });
           try {
+            // Phase 1: resolve every referenced file FIRST (keeps the existing
+            // missing-file prompt), and split scans into those with data
+            // (→ wizard) and params-only scans. A scan whose file can't be
+            // located is a hard failure (all-or-nothing, as before).
+            type Pending = { label: string; color: string; params: typeof heliosScans[number]['params'];
+                             resolved: string | null; asciiFormat: string | null };
+            const pending: Pending[] = [];
             for (let i = 0; i < heliosScans.length; i++) {
               const h = heliosScans[i];
-              const scan: Scan = {
-                id: crypto.randomUUID(),
-                label: `Scan ${offset + i + 1}`,
-                visible: true,
-                color: allocateColor(),
-                params: h.params,
-              };
+              const label = `Scan ${offset + i + 1}`;
               setBulkImportProgress({
                 current: i + 1,
                 total: heliosScans.length,
-                label: h.filename
-                  ? `Loading ${h.filename.split(/[\\/]/).pop()}`
-                  : `Loading ${scan.label}`,
+                label: h.filename ? `Locating ${h.filename.split(/[\\/]/).pop()}` : `Preparing ${label}`,
               });
+              let resolved: string | null = null;
               if (h.filename) {
                 try {
-                  const resolved = await resolveAttachedScanFile(h.filename, xmlDir);
-                  if (!resolved) {
-                    throw new Error(`could not locate file "${h.filename}"`);
-                  }
-                  const data = await parsePointCloudFromPath(resolved, h.asciiFormat);
-                  scan.data = data;
-                  scan.sourcePath = resolved;
-                  scan.asciiFormat = h.asciiFormat;
-                  attachedCount += 1;
+                  resolved = await resolveAttachedScanFile(h.filename, xmlDir);
+                  if (!resolved) throw new Error(`could not locate file "${h.filename}"`);
                 } catch (err) {
-                  const reason = err instanceof Error ? err.message : String(err);
-                  failures.push({ label: scan.label, reason });
-                  console.warn(`Could not attach point cloud for ${scan.label}:`, err);
+                  failures.push({ label, reason: err instanceof Error ? err.message : String(err) });
                 }
               }
-              newScans.push(scan);
+              pending.push({ label, color: allocateColor(), params: h.params, resolved, asciiFormat: h.asciiFormat });
             }
-            // All-or-nothing: if any scan's point data failed to load, commit
-            // nothing and tell the user to fix it and re-import. Half-imported
-            // scans with no points can't happen for a real user.
             if (failures.length > 0) {
-              const detail = failures
-                .slice(0, 3)
-                .map(f => `${f.label}: ${f.reason}`)
-                .join('; ');
+              const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
               const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
               throw new Error(
                 `${failures.length} of ${heliosScans.length} scan(s) could not load point data — ${detail}${more}. ` +
                   `No scans were imported; fix the issue and re-import.`,
               );
             }
+
+            // Phase 2: walk the scans that carry a file through the import
+            // wizard (one stepper for all of them), carrying their Helios
+            // params + ASCII_format hint. Params-only scans skip the wizard.
+            const wizardPending = pending.filter(p => p.resolved);
+            const inputs: WizardScanInput[] = wizardPending.map(p => ({
+              path: p.resolved!,
+              fileName: p.resolved!.split(/[\\/]/).pop() ?? p.label,
+              asciiFormatHint: p.asciiFormat,
+              params: p.params,
+              label: p.label,
+              color: p.color,
+            }));
+
+            let results: WizardResult[] | null = inputs.length === 0 ? [] : null;
+            if (inputs.length > 0) {
+              // Hide the progress modal while the wizard is up.
+              setBulkImportProgress(null);
+              results = onRequestImportWizard
+                ? await onRequestImportWizard(inputs)
+                : // No wizard host (defensive): import with auto-detect.
+                  inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [] }));
+              if (!results) return; // user cancelled the wizard
+            }
+
+            // Phase 3: build the Scans. Wizard results carry data; params-only
+            // scans are added as-is.
+            const newScans: Scan[] = [];
+            let attachedCount = 0;
+            const byPath = new Map(results!.map(r => [r.input.path, r]));
+            for (const p of pending) {
+              const scan: Scan = {
+                id: crypto.randomUUID(),
+                label: p.label,
+                visible: true,
+                color: p.color,
+                params: p.params,
+              };
+              if (p.resolved) {
+                const r = byPath.get(p.resolved);
+                if (r) {
+                  setBulkImportProgress({ current: attachedCount + 1, total: wizardPending.length, label: `Loading ${r.input.fileName}` });
+                  try {
+                    const data = await parsePointCloudFromPath(p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs);
+                    for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
+                    scan.data = data;
+                    scan.sourcePath = p.resolved;
+                    scan.asciiFormat = r.asciiFormat;
+                    attachedCount += 1;
+                  } catch (err) {
+                    failures.push({ label: p.label, reason: err instanceof Error ? err.message : String(err) });
+                  }
+                }
+              }
+              newScans.push(scan);
+            }
+            if (failures.length > 0) {
+              const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
+              const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
+              throw new Error(
+                `${failures.length} of ${heliosScans.length} scan(s) could not load point data — ${detail}${more}. ` +
+                  `No scans were imported; fix the issue and re-import.`,
+              );
+            }
+
             onAddScans?.(newScans);
             if (newScans.length > 0) {
               setSelectedMarkerScanId(newScans[newScans.length - 1].id);

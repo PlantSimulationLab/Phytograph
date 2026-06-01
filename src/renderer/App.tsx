@@ -11,6 +11,8 @@ import type { ScanParameters } from "./lib/scanParameters";
 import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
 import { importTexturedMesh, type MeshImportResponse } from "./utils/backendApi";
 import { plantResponseToMeshData } from "./lib/plantMeshData";
+import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
+import { registerCategoricalSlug } from "./lib/classification";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
 // we have a disk path. Every supported point-cloud format is here; only inputs
@@ -110,6 +112,50 @@ function App() {
     const usedColors = new Set(scans.map(s => s.color));
     return SCAN_COLORS.find(c => !usedColors.has(c)) || SCAN_COLORS[scans.length % SCAN_COLORS.length];
   }, [scans]);
+
+  // Import wizard: shown for every point-cloud import that has an on-disk path.
+  // We model it imperatively — openImportWizard returns a promise that resolves
+  // with the user's per-scan choices (WizardResult[]) on Import, or null on
+  // Cancel. The resolver is stashed in a ref so the modal's callbacks can settle
+  // the promise. Meshes/skeletons never go through here.
+  const [wizardInputs, setWizardInputs] = useState<WizardScanInput[] | null>(null);
+  const wizardResolveRef = useRef<((r: WizardResult[] | null) => void) | null>(null);
+  const openImportWizard = useCallback((inputs: WizardScanInput[]): Promise<WizardResult[] | null> => {
+    return new Promise((resolve) => {
+      wizardResolveRef.current = resolve;
+      setWizardInputs(inputs);
+    });
+  }, []);
+  const settleWizard = useCallback((results: WizardResult[] | null) => {
+    setWizardInputs(null);
+    const resolve = wizardResolveRef.current;
+    wizardResolveRef.current = null;
+    resolve?.(results);
+  }, []);
+
+  // Build a Scan from a finished wizard result: run the real import with the
+  // chosen column plan, register any categorical slugs, and return the Scan.
+  // Shared by the single-file, multi-file, and XML import paths.
+  const buildScanFromWizardResult = useCallback(async (
+    result: WizardResult,
+    color: string,
+  ): Promise<Scan> => {
+    const { input, asciiFormat, columnPlan, categoricalSlugs } = result;
+    const data = await parsePointCloudFromPath(
+      input.path, asciiFormat, columnPlan, categoricalSlugs,
+    );
+    for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
+    return {
+      id: crypto.randomUUID(),
+      label: input.label ?? data.fileName ?? 'Scan',
+      visible: true,
+      color: input.color ?? color,
+      data,
+      params: input.params,
+      sourcePath: input.path,
+      asciiFormat,
+    };
+  }, []);
 
   const handleFileUpload = useCallback(async (file: File) => {
     setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
@@ -220,11 +266,9 @@ function App() {
           showToast({ title: 'Viewer not ready for skeleton import', type: 'error' });
         }
       } else {
-        // Parse as point cloud (default) → produces a Scan with data only.
-        // Params can be attached later via the row's "Add scan parameters"
-        // button. We try to record the on-disk source path when the file
-        // came from a native dialog/dropzone so the backend can read it
-        // directly instead of receiving the full point payload over HTTP.
+        // Parse as point cloud (default). We record the on-disk source path
+        // when the file came from a native dialog/dropzone so the backend can
+        // read it directly (and so the import wizard can preview it).
         let sourcePath: string | undefined;
         try {
           sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
@@ -232,31 +276,37 @@ function App() {
           sourcePath = undefined;
         }
 
-        // Octree path: when we have a real on-disk path, route through the
-        // backend converter so the renderer streams tiles instead of holding
-        // the full cloud in V8. The backend converts each format to LAS before
-        // PotreeConverter (XYZ via pandas, PLY via plyfile with scalar fields,
-        // PCD via open3d, LAS/LAZ straight through). Falls back to the
-        // in-renderer parser only when no path is available (e.g.
-        // fixtures-as-Blob in tests).
         const ext = file.name.toLowerCase().split('.').pop() ?? '';
-        const useOctree = !!sourcePath && OCTREE_DROP_EXTENSIONS.has(ext);
-        const data = useOctree
-          ? await parsePointCloudFromPath(sourcePath!)
-          : await parsePointCloud(file);
-        const newScan: Scan = {
-          id: crypto.randomUUID(),
-          label: data.fileName ?? 'Scan',
-          visible: true,
-          color: getNextColor(),
-          data,
-          sourcePath,
-        };
-
-        setScans(prev => [...prev, newScan]);
-        setSelectedScanIds(new Set([newScan.id])); // Select the newly added scan
-        setActiveNav('viewer');
-        showToast({ title: `Loaded ${data.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
+        if (sourcePath && OCTREE_DROP_EXTENSIONS.has(ext)) {
+          // Path-backed: walk the user through the import wizard (preview +
+          // column mapping), then run the real import with their choices. Clear
+          // the progress modal first so it doesn't sit behind the wizard.
+          setImportProgress(null);
+          const results = await openImportWizard([{ path: sourcePath, fileName: file.name }]);
+          if (!results || results.length === 0) return; // user cancelled
+          setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
+          const newScan = await buildScanFromWizardResult(results[0], getNextColor());
+          setScans(prev => [...prev, newScan]);
+          setSelectedScanIds(new Set([newScan.id]));
+          setActiveNav('viewer');
+          showToast({ title: `Loaded ${newScan.data!.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
+        } else {
+          // No on-disk path (Blob/test fixture): the wizard can't preview, so
+          // fall back to the in-renderer flat parser with auto-detection.
+          const data = await parsePointCloud(file);
+          const newScan: Scan = {
+            id: crypto.randomUUID(),
+            label: data.fileName ?? 'Scan',
+            visible: true,
+            color: getNextColor(),
+            data,
+            sourcePath,
+          };
+          setScans(prev => [...prev, newScan]);
+          setSelectedScanIds(new Set([newScan.id]));
+          setActiveNav('viewer');
+          showToast({ title: `Loaded ${data.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to parse file';
@@ -266,7 +316,7 @@ function App() {
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
     }
-  }, [getNextColor]);
+  }, [getNextColor, openImportWizard, buildScanFromWizardResult]);
 
   // Handle multiple files
   const handleMultipleFiles = useCallback(async (files: File[]) => {
@@ -289,6 +339,10 @@ function App() {
       colorIndex++;
       return color;
     };
+
+    // Point-cloud files with an on-disk path are collected and run through the
+    // wizard together (one stepper) AFTER mesh/skeleton files import inline.
+    const wizardFiles: WizardScanInput[] = [];
 
     for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
       const file = files[fileIdx];
@@ -353,13 +407,9 @@ function App() {
             skeletonCount++;
           }
         } else {
-          // Parse as point cloud (default) → produces a data-only Scan.
-          // Resolve the on-disk path FIRST so XYZ-family files route through
-          // the backend octree converter (streams tiles) instead of the
-          // in-renderer parser, which holds the whole cloud in V8 and throws
-          // on 100MB+ files. This mirrors the single-file path in
-          // handleFileUpload — without it, multi-select fails on large scans
-          // that import fine one at a time.
+          // Point cloud. Resolve the on-disk path; path-backed files go to the
+          // wizard (collected below), path-less Blobs/fixtures fall back to the
+          // in-renderer flat parser (the wizard can't preview without a path).
           let sourcePath: string | undefined;
           try {
             sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
@@ -367,25 +417,40 @@ function App() {
             sourcePath = undefined;
           }
           const ext = file.name.toLowerCase().split('.').pop() ?? '';
-          const useOctree = !!sourcePath && OCTREE_DROP_EXTENSIONS.has(ext);
-          // PLY/PCD: read via the backend (open3d) when a path is available so
-          // large binary PLYs don't hit the in-renderer string-decode limit
-          // ("no end_header found"). Mirrors the single-file import site.
-          const usePathFlat = !!sourcePath && (ext === 'ply' || ext === 'pcd');
-          const data = useOctree || usePathFlat
-            ? await parsePointCloudFromPath(sourcePath!)
-            : await parsePointCloud(file);
-          newScans.push({
-            id: crypto.randomUUID(),
-            label: data.fileName ?? 'Scan',
-            visible: true,
-            color: getColorForFile(),
-            data,
-            sourcePath,
-          });
+          if (sourcePath && OCTREE_DROP_EXTENSIONS.has(ext)) {
+            wizardFiles.push({ path: sourcePath, fileName: file.name });
+          } else {
+            const data = await parsePointCloud(file);
+            newScans.push({
+              id: crypto.randomUUID(),
+              label: data.fileName ?? 'Scan',
+              visible: true,
+              color: getColorForFile(),
+              data,
+              sourcePath,
+            });
+          }
         }
       } catch (err) {
         errors.push(`${file.name}: ${err instanceof Error ? err.message : 'Failed to parse'}`);
+      }
+    }
+
+    // Walk path-backed point clouds through the wizard, then import each with
+    // the user's choices. Clear the progress modal so it doesn't sit behind the
+    // wizard; re-show per-scan during the actual import.
+    if (wizardFiles.length > 0) {
+      setImportProgress(null);
+      const results = await openImportWizard(wizardFiles);
+      if (results) {
+        for (let i = 0; i < results.length; i++) {
+          setImportProgress({ current: i + 1, total: results.length, label: `Loading ${results[i].input.fileName}` });
+          try {
+            newScans.push(await buildScanFromWizardResult(results[i], getColorForFile()));
+          } catch (err) {
+            errors.push(`${results[i].input.fileName}: ${err instanceof Error ? err.message : 'Failed to import'}`);
+          }
+        }
       }
     }
 
@@ -411,7 +476,7 @@ function App() {
     setImportProgress(null);
     // Reset import type to auto after import
     pendingImportTypeRef.current = 'auto';
-  }, [scans]);
+  }, [scans, openImportWizard, buildScanFromWizardResult]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setIsDragOver(false);
@@ -854,6 +919,7 @@ function App() {
           canUndoStitch={canUndoStitch}
           importRefsCallback={handleImportRefsCallback}
           onViewerContentChange={setViewerHasContent}
+          onRequestImportWizard={openImportWizard}
           className="flex-1"
         />
         {scans.length === 0 && !viewerHasContent && renderEmptyHint()}
@@ -963,6 +1029,17 @@ function App() {
             <p className="text-xl font-medium text-slate-800">Drop to load scans</p>
           </div>
         </div>
+      )}
+
+      {/* Import wizard — shown for every path-backed point-cloud import
+          (drag-drop, file picker, and Helios XML). Settles the pending
+          openImportWizard promise on Import (results) or Cancel (null). */}
+      {wizardInputs && (
+        <PointCloudImportWizard
+          inputs={wizardInputs}
+          onCancel={() => settleWizard(null)}
+          onComplete={(results) => settleWizard(results)}
+        />
       )}
 
       <ToastContainer />

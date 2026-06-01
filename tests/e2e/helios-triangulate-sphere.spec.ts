@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
+import { completeImportWizard } from './helpers/importWizard';
 
 // Reproduces the PyHelios C++ lidar self-test ("LiDAR Single Voxel Sphere
 // Test") through the Phytograph UI against the live backend. The C++ test loads
@@ -30,6 +31,10 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
     await expect(popup).toBeVisible();
     await page.getByTestId('scan-import-xml').click();
     await expect(popup).not.toBeVisible({ timeout: 20_000 });
+
+    // The four resolved scans run through the import wizard (one stepper);
+    // complete it with auto-detected columns.
+    await completeImportWizard(page);
 
     const scansPanel = page.getByTestId('scans-panel');
     const rows = scansPanel.locator('[data-testid="scan-row"]');

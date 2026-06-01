@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 // Every supported point-cloud format imports through the UI as a streaming
 // octree (not a flat in-renderer cloud). Before this, only the XYZ family
@@ -31,6 +32,7 @@ for (const { file, name } of CASES) {
         page.getByTestId('import-menu-pointcloud').click(),
       ]);
       await chooser.setFiles([join(FIXTURES, file)]);
+      await completeImportWizard(page);
 
       const row = page.locator(`[data-testid="scan-row"][data-scan-name="${name}"]`);
       await expect(row).toBeVisible({ timeout: 20_000 });

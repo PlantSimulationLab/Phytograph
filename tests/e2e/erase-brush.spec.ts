@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -35,6 +36,7 @@ test('erase brush: painting square stamps and applying removes points (octree)',
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(TINY);
+    await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
@@ -132,6 +134,7 @@ test('erase brush: Clear Strokes discards the preview without erasing', async ()
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(TINY);
+    await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
@@ -181,6 +184,7 @@ test('erase brush: E toggles erase mode within the open tool', async () => {
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(TINY);
+    await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
@@ -236,6 +240,7 @@ test('erase brush: toggling mode off and on accumulates stamps (no reset)', asyn
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(TINY);
+    await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });

@@ -4,7 +4,7 @@
 // import them without a components → lib cycle. Pure types only — no runtime
 // code, so importing this module has zero side effects.
 import * as THREE from 'three';
-import type { BackendPointSource, TriangulationMethod } from '../utils/backendApi';
+import type { BackendPointSource, ColumnPlan, TriangulationMethod } from '../utils/backendApi';
 
 // potree-core's RequestManager interface isn't re-exported from the package
 // root in v2.0.15. The shape is small and stable, so mirror it locally
@@ -41,6 +41,18 @@ export interface OctreeRef {
   // Drives the scalar picker's option labels; slugs without an entry fall
   // back to showing the slug verbatim.
   attributeLabels?: Record<string, string>;
+  // Explicit column layout chosen in the import wizard (ASCII sources only),
+  // kept as provenance of how this cloud was imported. NOTE: as of 0.3.15 the
+  // crop / ground-segment / tree-segment endpoints do NOT yet accept a column
+  // plan, so a re-crop of a custom-column import rebuilds with auto-detect.
+  // For auto-detected imports (the common case) that's identical; a
+  // renamed/remapped column could revert on re-crop. Threading the plan through
+  // those endpoints is a planned follow-up. Absent for auto-detected imports.
+  columnPlan?: ColumnPlan | null;
+  // On-disk attribute slugs the user marked categorical in the wizard. The
+  // renderer registers these so they colour as discrete classes rather than a
+  // continuous gradient. See classification.ts registerCategoricalSlug.
+  categoricalAttributes?: string[];
 }
 
 // Result of buildPointSource: either an in-memory cloud (flat path) or a

@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -50,6 +51,7 @@ test('exports an octree-backed cloud to XYZ via the backend', async () => {
       page.getByTestId('import-menu-pointcloud').click(),
     ]);
     await chooser.setFiles(FIXTURE);
+    await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });

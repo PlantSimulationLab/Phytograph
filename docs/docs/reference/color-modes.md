@@ -58,6 +58,13 @@ The **`tree_instance`** attribute produced by
 each tree's colour is generated on the fly (a perceptually-spaced hue rotation)
 and the legend lists Tree 1, Tree 2, …, with unassigned points in grey.
 
+You can also **mark a column as categorical yourself** in the
+[import wizard](../workflows/import-export.md#the-import-wizard) — set its role
+to **Label** (rather than **Scalar**) for a column that holds class labels (a
+custom classification, a region id, …). It then colours with the same discrete
+per-class scheme (Class 0, Class 1, …) and legend instead of a continuous
+gradient.
+
 ## Per-mesh color modes
 
 | Mode | What it shows | When to use |

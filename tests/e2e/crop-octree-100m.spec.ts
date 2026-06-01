@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 // M3 success-metric test.
 //
@@ -106,6 +107,7 @@ test(`crop on ${FIXTURE_N.toLocaleString()}-point octree keeps heap under ${HEAP
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(FIXTURE_PATH);
+    await completeImportWizard(page);
 
     // Wait for the cloud to land in app state. Conversion on N points
     // takes ~N/3M seconds on M-series; 100M can be up to ~35s.

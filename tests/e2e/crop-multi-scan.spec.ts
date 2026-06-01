@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 const TINY_OFFSET = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-offset.xyz');
@@ -38,6 +39,7 @@ test('multi-scan crop applies one world-space box across two selected scans', as
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser1.setFiles(TINY);
+    await completeImportWizard(page);
 
     const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(tinyRow).toBeVisible({ timeout: 20_000 });
@@ -50,6 +52,7 @@ test('multi-scan crop applies one world-space box across two selected scans', as
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser2.setFiles(TINY_OFFSET);
+    await completeImportWizard(page);
 
     const offsetRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset.xyz"]');
     await expect(offsetRow).toBeVisible({ timeout: 20_000 });
@@ -153,6 +156,7 @@ test('Enter inside a dim input commits the value without applying the crop', asy
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(TINY);
+    await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
@@ -198,6 +202,7 @@ test('crop panel × button dismisses without applying', async () => {
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(TINY);
+    await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });

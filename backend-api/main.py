@@ -93,7 +93,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.14"
+BACKEND_VERSION = "0.3.15"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -6418,6 +6418,35 @@ _PANDAS_EXTENSIONS = {'xyz', 'txt', 'csv', 'pts', 'asc'}
 _OPEN3D_EXTENSIONS = {'ply', 'pcd'}
 
 
+class ColumnPlanEntry(BaseModel):
+    """One column's import mapping, produced by the import wizard.
+
+    `role` is a Helios-style token (x/y/z/r255/g255/b255/r/g/b/intensity/
+    reflectance/skip) or the literal 'extra' for a carried scalar field. For an
+    'extra' column, `slug`/`label` give the on-disk LAS extra-dim name and the
+    picker label (rename), and `categorical` marks it for discrete colouring in
+    the renderer. `index` is the 0-based source column position.
+    """
+    index: int
+    role: str
+    slug: Optional[str] = None
+    label: Optional[str] = None
+    categorical: bool = False
+
+
+class ColumnPlan(BaseModel):
+    """Explicit column layout for an XYZ-family file, from the import wizard.
+
+    When attached to an import/convert request it fully overrides header/format
+    auto-detection. `rgb_is_255` records whether the r/g/b columns are 0-255
+    integers (True) or already 0-1 floats (False) so the LAS writer scales them
+    correctly. Applies only to ASCII formats; PLY/PCD/LAS define their own
+    layout and ignore it.
+    """
+    columns: List[ColumnPlanEntry]
+    rgb_is_255: bool = True
+
+
 class ImportPointCloudByPathRequest(BaseModel):
     """Path-based point-cloud import.
 
@@ -6425,10 +6454,52 @@ class ImportPointCloudByPathRequest(BaseModel):
     'x y z r255 g255 b255 reflectance') and applies only to XYZ-family
     extensions; PLY/PCD ignore it because their column layout is in-file.
     If omitted for an XYZ-family file, columns are sniffed from the first
-    non-blank, non-comment row.
+    non-blank, non-comment row. `column_plan`, when present, fully overrides
+    both — it's the explicit layout chosen in the import wizard.
     """
     file_path: str
     ascii_format: Optional[str] = None
+    column_plan: Optional[ColumnPlan] = None
+
+
+class PointCloudPreviewRequest(BaseModel):
+    """Inspect a point-cloud file cheaply for the import wizard.
+
+    Reads only the header + first `max_rows` data rows (ASCII) or the header +
+    a few points (LAS/PLY/PCD) — never materialises the whole file. The optional
+    `ascii_format` hint biases role detection the same way the import path does.
+    """
+    file_path: str
+    ascii_format: Optional[str] = None
+    max_rows: int = 20
+
+
+class PreviewColumn(BaseModel):
+    """One source column as the wizard should present it.
+
+    `detected_role` is the auto-detected Helios role (or 'extra'/'skip');
+    `suggested_slug`/`suggested_label` mirror what import would name a carried
+    scalar (so the wizard's defaults match the eventual on-disk attribute).
+    `type_hint` is a sniffed value shape (integer/float/categorical/empty) used
+    to pre-tick the categorical checkbox. `remappable` is True only for ASCII
+    formats — PLY/PCD/LAS define their own layout, so roles can't be reassigned.
+    """
+    index: int
+    header_name: Optional[str] = None
+    detected_role: str
+    suggested_label: str
+    suggested_slug: str
+    type_hint: str
+    remappable: bool
+
+
+class PointCloudPreviewResponse(BaseModel):
+    kind: str                       # ascii | ply | pcd | las
+    delimiter: Optional[str] = None  # comma | whitespace | tab | semicolon | None
+    has_header: bool
+    columns: List[PreviewColumn]
+    sample_rows: List[List[str]]
+    warning: Optional[str] = None
 
 
 def _tokenize_ascii_format(fmt: str) -> List[str]:
@@ -6552,7 +6623,33 @@ def _sanitize_extra_dim_name(raw: str) -> str:
     slug = re.sub(r'[^A-Za-z0-9_]+', '_', raw).strip('_')
     if not slug:
         slug = 'field'
-    return slug[:32]
+    return _avoid_reserved_las_dim(slug[:32])
+
+
+# LAS point format 3 (and the standard dimensions every format carries) reserve
+# these names. An extra dimension may NOT reuse one — laspy's dtype build fails
+# with "field '<name>' occurs more than once". A user-renamed scalar, or a
+# source column literally named "Intensity"/"Classification", can sanitise onto
+# one of these, so we rename the collision. Matched case-insensitively because
+# laspy lower-cases extra-dim names internally.
+_LAS_RESERVED_DIM_NAMES = {
+    'x', 'y', 'z', 'intensity', 'bit_fields', 'raw_classification',
+    'classification', 'classification_flags', 'scan_angle_rank', 'scan_angle',
+    'user_data', 'point_source_id', 'gps_time', 'red', 'green', 'blue', 'nir',
+    'return_number', 'number_of_returns', 'scan_direction_flag',
+    'edge_of_flight_line', 'synthetic', 'key_point', 'withheld', 'overlap',
+    'scanner_channel',
+}
+
+
+def _avoid_reserved_las_dim(slug: str) -> str:
+    """Rename an extra-dimension slug that collides (case-insensitively) with a
+    built-in LAS dimension, so `header.add_extra_dim` can't crash the converter.
+    'Intensity' -> 'Intensity_field', 'classification' -> 'classification_field'."""
+    if slug.lower() in _LAS_RESERVED_DIM_NAMES:
+        suffixed = f"{slug}_field"
+        return suffixed[:32]
+    return slug
 
 
 def _humanize_extra_dim_label(raw: str) -> str:
@@ -6599,7 +6696,104 @@ def _read_ascii_header_names(file_path: str) -> Optional[List[str]]:
     return None
 
 
-def _xyz_column_plan(source_path: "_Path", ascii_format: Optional[str]):
+# A pandas `names=` list can't contain a repeated value, so a column plan that
+# skips more than one column can't use bare 'skip' for each. These helpers give
+# every skipped column a unique placeholder that the readers still recognise and
+# drop via `usecols`. Bare 'skip' (from the auto-detect path, which never repeats
+# it) is also treated as a skip for backwards compatibility.
+def _skip_name(pos: int) -> str:
+    return f"skip:{pos}"
+
+
+def _is_skip_name(name: str) -> bool:
+    return name == 'skip' or name.startswith('skip:')
+
+
+def _dedupe_slug(base: str, used_slugs: "set[str]") -> str:
+    """Return `base` (or a numbered variant) not yet in `used_slugs`, capped at
+    the 32-char LAS limit. Mutates `used_slugs` to reserve the result."""
+    slug = base
+    n = 2
+    while slug in used_slugs:
+        suffix = f"_{n}"
+        slug = base[:32 - len(suffix)] + suffix
+        n += 1
+    used_slugs.add(slug)
+    return slug
+
+
+def _plan_columns(roles: List[str], header_names: Optional[List[str]]):
+    """Turn a per-column role list into a pandas `names` list + extra_dims.
+
+    Shared by `_xyz_column_plan` (the import/convert path) and the preview
+    endpoint so the slugs/labels a user sees in the wizard are byte-identical to
+    what import produces. A column whose role is reserved (x/y/z/rgb/intensity/
+    reflectance) keeps its role token; anything else ('skip', timestamp,
+    deviation, …) becomes an 'extra:<slug>' carried into the octree, named from
+    the header row when present, else a positional 'Column N' fallback.
+
+    Returns (names, extra_dims) where each extra dim is
+    {col, slug, label, categorical} ('categorical' defaults False here; the
+    structured column-plan path can override it).
+    """
+    names: List[str] = []
+    extra_dims: List[dict] = []
+    used_slugs: "set[str]" = set()
+    for i, role in enumerate(roles):
+        if role in _XYZ_RESERVED_ROLES and role != 'skip':
+            names.append(role)
+            continue
+        if header_names is not None and i < len(header_names) and header_names[i]:
+            label = _humanize_extra_dim_label(header_names[i])
+            base = _sanitize_extra_dim_name(header_names[i])
+        else:
+            label = f"Column {i + 1}"
+            base = f"col_{i + 1}"
+        slug = _dedupe_slug(base, used_slugs)
+        col_id = f"extra:{slug}"
+        names.append(col_id)
+        extra_dims.append({"col": col_id, "slug": slug, "label": label,
+                           "categorical": False})
+    return names, extra_dims
+
+
+def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
+    """Build (names, extra_dims) directly from a wizard-supplied ColumnPlan.
+
+    Honours each entry's explicit role, and for role=='extra' the user's custom
+    slug/label/categorical. Falls back to a sane slug when the wizard omitted
+    one. Reserved roles keep their token; 'skip' (or an extra with no usable
+    name) is dropped. Slugs are de-duplicated so two custom names can't collide
+    on disk.
+    """
+    names: List[str] = []
+    extra_dims: List[dict] = []
+    used_slugs: "set[str]" = set()
+    for pos, entry in enumerate(sorted(column_plan.columns, key=lambda e: e.index)):
+        role = (entry.role or 'skip').lower()
+        if role in _XYZ_RESERVED_ROLES and role != 'skip':
+            names.append(role)
+            continue
+        if role == 'skip' or (role == 'extra' and not (entry.slug or entry.label)):
+            # A skipped column, or an 'extra' with no usable name, carries
+            # nothing. Use a UNIQUE placeholder (not bare 'skip') so pandas
+            # doesn't reject a names= list with repeated 'skip' entries; the
+            # readers drop these via _is_skip_name.
+            names.append(_skip_name(pos))
+            continue
+        # role == 'extra' (or any unreserved token) → carry as an extra dim.
+        base = _sanitize_extra_dim_name(entry.slug or entry.label or f"col_{entry.index + 1}")
+        slug = _dedupe_slug(base, used_slugs)
+        label = (entry.label or "").strip() or _humanize_extra_dim_label(slug)
+        col_id = f"extra:{slug}"
+        names.append(col_id)
+        extra_dims.append({"col": col_id, "slug": slug, "label": label,
+                           "categorical": bool(entry.categorical)})
+    return names, extra_dims
+
+
+def _xyz_column_plan(source_path: "_Path", ascii_format: Optional[str],
+                     column_plan: "Optional[ColumnPlan]" = None):
     """Resolve the column layout for an XYZ-family file, carrying unmapped
     numeric columns as octree extra dimensions.
 
@@ -6608,49 +6802,25 @@ def _xyz_column_plan(source_path: "_Path", ascii_format: Optional[str]):
         roles keep their role token (x/y/z/r255/intensity/...), extras get a
         unique 'extra:<slug>' identifier, and truly droppable columns (no
         header name, beyond the recognised layout) stay 'skip'.
-      - `extra_dims` is an ordered list of dicts {col, slug, label} for each
-        carried extra column, where `col` is the matching entry in `names`.
+      - `extra_dims` is an ordered list of dicts {col, slug, label, categorical}
+        for each carried extra column, where `col` is the matching entry in
+        `names`.
 
-    Role tokens come from `_tokenize_ascii_format` / `_autodetect_xyz_columns`.
-    A column whose role is not reserved (see `_XYZ_RESERVED_ROLES`) is promoted
-    to an extra dimension; its display name is taken from the file's header row
-    when available, else a positional 'Column N' fallback. Slugs are
-    sanitised and de-duplicated so two headers can't collide on disk.
+    When `column_plan` is supplied (the import wizard's explicit choices) it
+    fully determines the layout — roles, custom slugs/labels, and the
+    categorical flag — bypassing header/format sniffing. When it's None,
+    behaviour is exactly as before: role tokens come from
+    `_tokenize_ascii_format` / `_autodetect_xyz_columns`, and extras are named
+    from the header row (or a positional 'Column N' fallback).
     """
+    if column_plan is not None:
+        return _plan_columns_from_column_plan(column_plan)
+
     roles = (_tokenize_ascii_format(ascii_format)
              if ascii_format
              else _autodetect_xyz_columns(str(source_path)))
-
     header_names = _read_ascii_header_names(str(source_path))
-
-    names: List[str] = []
-    extra_dims: List[dict] = []
-    used_slugs: set[str] = set()
-    for i, role in enumerate(roles):
-        if role in _XYZ_RESERVED_ROLES and role != 'skip':
-            names.append(role)
-            continue
-        # 'skip' and any unreserved role (timestamp, deviation, ...) are
-        # candidate extra dimensions. Always carry them (user chose "all
-        # numeric extras"); name from header when we have one.
-        if header_names is not None and i < len(header_names) and header_names[i]:
-            label = _humanize_extra_dim_label(header_names[i])
-            base = _sanitize_extra_dim_name(header_names[i])
-        else:
-            label = f"Column {i + 1}"
-            base = f"col_{i + 1}"
-        slug = base
-        n = 2
-        while slug in used_slugs:
-            suffix = f"_{n}"
-            slug = base[:32 - len(suffix)] + suffix
-            n += 1
-        used_slugs.add(slug)
-        col_id = f"extra:{slug}"
-        names.append(col_id)
-        extra_dims.append({"col": col_id, "slug": slug, "label": label})
-
-    return names, extra_dims
+    return _plan_columns(roles, header_names)
 
 
 def _pack_pointcloud_response(positions: np.ndarray,
@@ -6690,7 +6860,8 @@ def _pack_pointcloud_response(positions: np.ndarray,
 
 
 def _load_xyz_arrays(
-    file_path: str, ascii_format: Optional[str]
+    file_path: str, ascii_format: Optional[str],
+    column_plan: "Optional[ColumnPlan]" = None,
 ) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
     """Parse an ASCII xyz-family file via pandas and return numpy arrays.
 
@@ -6698,10 +6869,20 @@ def _load_xyz_arrays(
     intensity[N] float32 | None). Separated from the response-packing step
     so the crop endpoint can reuse the loader and apply a boolean mask
     before responding.
+
+    When `column_plan` is supplied (import wizard) it determines the column
+    roles and whether r/g/b are 0-255 ints or 0-1 floats; otherwise roles come
+    from the Helios `ascii_format` hint or are auto-detected.
     """
-    columns = (_tokenize_ascii_format(ascii_format)
-               if ascii_format
-               else _autodetect_xyz_columns(file_path))
+    if column_plan is not None:
+        columns = [(e.role or 'skip').lower()
+                   for e in sorted(column_plan.columns, key=lambda e: e.index)]
+        rgb_is_255 = column_plan.rgb_is_255
+    else:
+        columns = (_tokenize_ascii_format(ascii_format)
+                   if ascii_format
+                   else _autodetect_xyz_columns(file_path))
+        rgb_is_255 = True
 
     # role -> column index. Keep first occurrence on duplicates so pandas
     # doesn't see a repeated column name.
@@ -6807,12 +6988,15 @@ def _load_ply_pcd_arrays(
 
 
 def _load_pointcloud_arrays(
-    file_path: str, ascii_format: Optional[str]
+    file_path: str, ascii_format: Optional[str],
+    column_plan: "Optional[ColumnPlan]" = None,
 ) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
     """Dispatch a path-based point-cloud load to the right backend by
     extension and return the raw numpy arrays. Shared entry point for the
     import and crop endpoints — keeps file-IO, format detection, and the
     PLY/PCD vs ASCII dispatch in one place.
+
+    `column_plan` (import wizard) applies only to the XYZ-family branch.
 
     Raises HTTPException on missing file or unsupported extension.
     """
@@ -6823,7 +7007,7 @@ def _load_pointcloud_arrays(
 
     ext = os.path.splitext(file_path)[1].lower().lstrip('.')
     if ext in _PANDAS_EXTENSIONS:
-        return _load_xyz_arrays(file_path, ascii_format)
+        return _load_xyz_arrays(file_path, ascii_format, column_plan)
     if ext in _OPEN3D_EXTENSIONS:
         return _load_ply_pcd_arrays(file_path)
 
@@ -6884,7 +7068,7 @@ async def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
     * `.ply` / `.pcd` → open3d (handles ASCII and binary).
     """
     positions, colors, intensity = _load_pointcloud_arrays(
-        request.file_path, request.ascii_format
+        request.file_path, request.ascii_format, request.column_plan
     )
     return _pack_pointcloud_response(positions, colors, intensity)
 
@@ -7017,9 +7201,29 @@ def _canonical_ascii_format(ascii_format: Optional[str]) -> str:
     return " ".join(ascii_format.split()).lower()
 
 
-def _octree_cache_key(source_path: str, ascii_format: Optional[str]) -> str:
-    """Stable cache key for (source file, format). Includes mtime so edits to the
-    source XYZ invalidate the cached octree."""
+def _canonical_column_plan(column_plan: "Optional[ColumnPlan]") -> str:
+    """Stable JSON form of a ColumnPlan for hashing. Empty string when None so a
+    plan-less import keeps the same cache identity it had before this field
+    existed (no cache churn for existing users)."""
+    if column_plan is None:
+        return ""
+    payload = {
+        "rgb_is_255": column_plan.rgb_is_255,
+        "columns": [
+            {"index": e.index, "role": (e.role or "").lower(),
+             "slug": e.slug or "", "label": e.label or "",
+             "categorical": bool(e.categorical)}
+            for e in sorted(column_plan.columns, key=lambda e: e.index)
+        ],
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _octree_cache_key(source_path: str, ascii_format: Optional[str],
+                      column_plan: "Optional[ColumnPlan]" = None) -> str:
+    """Stable cache key for (source file, format, column plan). Includes mtime
+    so edits to the source XYZ invalidate the cached octree. Two different
+    wizard column plans on the same file get distinct cache entries."""
     p = _Path(source_path).resolve()
     try:
         mtime_ns = p.stat().st_mtime_ns
@@ -7033,12 +7237,15 @@ def _octree_cache_key(source_path: str, ascii_format: Optional[str]) -> str:
     h.update(str(mtime_ns).encode())
     h.update(b"\x00")
     h.update(_canonical_ascii_format(ascii_format).encode())
+    h.update(b"\x00")
+    h.update(_canonical_column_plan(column_plan).encode())
     return h.hexdigest()
 
 
-def _octree_cache_dir(source_path: str, ascii_format: Optional[str]) -> _Path:
-    """Path where this (source, format) pair's octree lives. May not exist yet."""
-    return _octree_cache_root() / _octree_cache_key(source_path, ascii_format)
+def _octree_cache_dir(source_path: str, ascii_format: Optional[str],
+                      column_plan: "Optional[ColumnPlan]" = None) -> _Path:
+    """Path where this (source, format, plan) tuple's octree lives. May not exist yet."""
+    return _octree_cache_root() / _octree_cache_key(source_path, ascii_format, column_plan)
 
 
 def _resolve_potree_converter_path() -> _Path:
@@ -7096,7 +7303,8 @@ def _resolve_potree_converter_path() -> _Path:
     )
 
 
-def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path) -> tuple[int, List[dict]]:
+def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
+                column_plan: "Optional[ColumnPlan]" = None) -> tuple[int, List[dict]]:
     """Stream an XYZ-family ASCII file into a LAS file via laspy in chunks.
 
     PotreeConverter 2.x accepts only LAS/LAZ; XYZ goes through here first.
@@ -7115,7 +7323,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path)
     """
     import laspy  # local: only when this code path runs
 
-    names, extra_dims = _xyz_column_plan(source_path, ascii_format)
+    names, extra_dims = _xyz_column_plan(source_path, ascii_format, column_plan)
 
     has_xyz = all(role in names for role in ("x", "y", "z"))
     if not has_xyz:
@@ -7124,7 +7332,18 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path)
             detail=f"ASCII format must include x/y/z. Got columns: {names}",
         )
 
-    has_rgb = all(role in names for role in ("r255", "g255", "b255"))
+    # RGB may arrive as 0-255 ints (r255/g255/b255) or 0-1 floats (r/g/b). The
+    # wizard's rgb_is_255 flag, when a column_plan is present, is authoritative;
+    # otherwise infer from which role tokens the plan produced.
+    rgb255_cols = ("r255", "g255", "b255")
+    rgb01_cols = ("r", "g", "b")
+    has_rgb255 = all(role in names for role in rgb255_cols)
+    has_rgb01 = all(role in names for role in rgb01_cols)
+    if column_plan is not None and (has_rgb255 or has_rgb01):
+        rgb_is_255 = column_plan.rgb_is_255
+    else:
+        rgb_is_255 = has_rgb255
+    rgb_cols = rgb255_cols if has_rgb255 else (rgb01_cols if has_rgb01 else None)
     intensity_role = next((r for r in ("intensity", "reflectance") if r in names), None)
 
     # LAS point format 3 carries XYZ + intensity + RGB. Extra numeric columns
@@ -7148,7 +7367,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path)
             sep=r"\s+",
             header=None,
             names=names,
-            usecols=[i for i, c in enumerate(names) if c != "skip"],
+            usecols=[i for i, c in enumerate(names) if not _is_skip_name(c)],
             comment="#",
             skiprows=skiprows,
             chunksize=chunk_rows,
@@ -7168,13 +7387,20 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path)
             record.x = chunk["x"].to_numpy(dtype=np.float64)
             record.y = chunk["y"].to_numpy(dtype=np.float64)
             record.z = chunk["z"].to_numpy(dtype=np.float64)
-            if has_rgb:
-                # Source RGB is 0-255; LAS RGB is uint16 (16-bit per channel).
-                # Multiplying by 256 keeps perceptual brightness and lets the
-                # renderer right-shift to recover the 8-bit value.
-                record.red = chunk["r255"].to_numpy(dtype=np.uint16) * 256
-                record.green = chunk["g255"].to_numpy(dtype=np.uint16) * 256
-                record.blue = chunk["b255"].to_numpy(dtype=np.uint16) * 256
+            if rgb_cols is not None:
+                # LAS RGB is uint16 (16-bit per channel). 0-255 source scales by
+                # 256 (preserves perceptual brightness; renderer right-shifts to
+                # recover 8-bit). 0-1 float source scales straight to the full
+                # 16-bit range (×65535).
+                rc, gc, bc = rgb_cols
+                if rgb_is_255:
+                    record.red = chunk[rc].to_numpy(dtype=np.uint16) * 256
+                    record.green = chunk[gc].to_numpy(dtype=np.uint16) * 256
+                    record.blue = chunk[bc].to_numpy(dtype=np.uint16) * 256
+                else:
+                    record.red = np.clip(chunk[rc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
+                    record.green = np.clip(chunk[gc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
+                    record.blue = np.clip(chunk[bc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
             if intensity_role is not None:
                 # Both 'intensity' and 'reflectance' fields in Helios scans
                 # span 0-255. Map to LAS intensity's 0-65535 range.
@@ -7343,7 +7569,8 @@ def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
     return [{"slug": d, "label": d} for d in dims]
 
 
-def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path) -> tuple[_Path, bool, List[dict]]:
+def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path,
+                   column_plan: "Optional[ColumnPlan]" = None) -> tuple[_Path, bool, List[dict]]:
     """Get a LAS file path for `source_path`, converting from another format
     if needed.
 
@@ -7351,13 +7578,16 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
     is_temp. `extra_dims` is the [{slug, label}, ...] list of carried scalar
     attributes (read from the header for LAS/LAZ; derived during conversion for
     XYZ/PLY; empty for PCD, which carries position + RGB only).
+
+    `column_plan` (import wizard) applies only to the XYZ-family branch; PLY/PCD/
+    LAS define their own layout and ignore it.
     """
     ext = source_path.suffix.lower().lstrip(".")
     if ext in ("las", "laz"):
         return source_path, False, _las_extra_dim_labels(source_path)
     if ext in _PANDAS_EXTENSIONS:
         out = work_dir / (source_path.stem + ".las")
-        _, extra_dims = _xyz_to_las(source_path, ascii_format, out)
+        _, extra_dims = _xyz_to_las(source_path, ascii_format, out, column_plan)
         return out, True, extra_dims
     if ext == "ply":
         out = work_dir / (source_path.stem + ".las")
@@ -7612,10 +7842,13 @@ class ConvertToOctreeRequest(BaseModel):
 
     `source_path` may be an XYZ-family ASCII file (xyz/txt/csv/pts/asc) or
     a LAS/LAZ file. The result is cached at
-    `_octree_cache_dir(source_path, ascii_format)` and re-served on
-    subsequent calls without re-running the converter."""
+    `_octree_cache_dir(source_path, ascii_format, column_plan)` and re-served on
+    subsequent calls without re-running the converter. `column_plan`, when
+    present, is the import wizard's explicit column layout (ASCII only) and
+    participates in the cache key so distinct plans don't collide."""
     source_path: str
     ascii_format: Optional[str] = None
+    column_plan: Optional[ColumnPlan] = None
 
 
 @app.post("/api/pointcloud/convert_to_octree")
@@ -7624,7 +7857,7 @@ async def convert_to_octree(request: ConvertToOctreeRequest):
     if not source_path.is_file():
         raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
 
-    cache_key = _octree_cache_key(str(source_path), request.ascii_format)
+    cache_key = _octree_cache_key(str(source_path), request.ascii_format, request.column_plan)
     cache_dir = _octree_cache_root() / cache_key
 
     cached = cache_dir / "metadata.json"
@@ -7647,7 +7880,7 @@ async def convert_to_octree(request: ConvertToOctreeRequest):
     staging_dir.mkdir(parents=True)
 
     try:
-        las_path, las_is_temp, extra_dims = _source_to_las(source_path, request.ascii_format, staging_dir)
+        las_path, las_is_temp, extra_dims = _source_to_las(source_path, request.ascii_format, staging_dir, request.column_plan)
         try:
             _run_potree_converter(las_path, staging_dir)
         finally:
@@ -7692,6 +7925,341 @@ async def convert_to_octree(request: ConvertToOctreeRequest):
         "cached": False,
         **meta,
     }
+
+
+# ---------------------------------------------------------------------------
+# Import-wizard preview
+# ---------------------------------------------------------------------------
+
+# How a value column reads, used to pre-tick the wizard's "categorical" box.
+_CATEGORICAL_MAX_DISTINCT = 32
+
+
+def _detect_ascii_delimiter(file_path: str) -> Optional[str]:
+    """Sniff the delimiter of the first data row. Mirrors the renderer's
+    detectDelimiter precedence (comma → tab → semicolon → whitespace). Returns a
+    human label ('comma'/'tab'/'semicolon'/'whitespace') or None if no data."""
+    with open(file_path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#') or line.startswith('//'):
+                continue
+            # Skip a leading text header row — we want a data row's delimiter.
+            if any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
+                continue
+            if ',' in line:
+                return 'comma'
+            if '\t' in line:
+                return 'tab'
+            if ';' in line:
+                return 'semicolon'
+            return 'whitespace'
+    return None
+
+
+def _split_ascii_row(line: str, delimiter: Optional[str]) -> List[str]:
+    if delimiter == 'comma':
+        return [t.strip() for t in line.split(',')]
+    if delimiter == 'tab':
+        return [t.strip() for t in line.split('\t')]
+    if delimiter == 'semicolon':
+        return [t.strip() for t in line.split(';')]
+    return line.split()
+
+
+def _read_ascii_sample_rows(file_path: str, delimiter: Optional[str],
+                            skip_header: bool, max_rows: int) -> List[List[str]]:
+    """Return up to `max_rows` data rows as raw string tokens. Reads at most
+    that many lines — never the whole file."""
+    rows: List[List[str]] = []
+    header_skipped = not skip_header
+    with open(file_path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#') or line.startswith('//'):
+                continue
+            if not header_skipped:
+                header_skipped = True
+                continue
+            rows.append(_split_ascii_row(line, delimiter))
+            if len(rows) >= max_rows:
+                break
+    return rows
+
+
+def _column_type_hint(values: List[str]) -> str:
+    """Sniff a value shape from sampled string tokens. 'categorical' when the
+    column is small non-negative integers with few distinct values (a class /
+    label column); else integer/float/empty."""
+    nonblank = [v for v in values if v != '']
+    if not nonblank:
+        return 'empty'
+    all_int = all(re.fullmatch(r'-?\d+', v) is not None for v in nonblank)
+    if all_int:
+        ints = [int(v) for v in nonblank]
+        distinct = set(ints)
+        if all(i >= 0 for i in ints) and len(distinct) <= _CATEGORICAL_MAX_DISTINCT:
+            return 'categorical'
+        return 'integer'
+    all_float = True
+    for v in nonblank:
+        try:
+            float(v)
+        except ValueError:
+            all_float = False
+            break
+    return 'float' if all_float else 'categorical'
+
+
+def _preview_ascii(file_path: str, ascii_format: Optional[str],
+                   max_rows: int) -> PointCloudPreviewResponse:
+    header_names = _read_ascii_header_names(file_path)
+    has_header = header_names is not None
+    delimiter = _detect_ascii_delimiter(file_path)
+    sample_rows = _read_ascii_sample_rows(file_path, delimiter, has_header, max_rows)
+
+    roles = (_tokenize_ascii_format(ascii_format)
+             if ascii_format
+             else _autodetect_xyz_columns(file_path))
+    # Determine column count from the widest of (roles, header, first row).
+    ncols = len(roles)
+    if header_names:
+        ncols = max(ncols, len(header_names))
+    if sample_rows:
+        ncols = max(ncols, max(len(r) for r in sample_rows))
+
+    columns: List[PreviewColumn] = []
+    for i in range(ncols):
+        role = roles[i] if i < len(roles) else 'skip'
+        # Re-derive the same default slug/label _plan_columns would assign for
+        # THIS position, so the wizard's suggestion matches import before edits.
+        if role in _XYZ_RESERVED_ROLES and role != 'skip':
+            detected_role = role
+            suggested_slug = ''
+            suggested_label = (header_names[i] if header_names and i < len(header_names)
+                               and header_names[i] else role)
+        else:
+            detected_role = 'extra' if role != 'skip' else 'skip'
+            if header_names is not None and i < len(header_names) and header_names[i]:
+                suggested_label = _humanize_extra_dim_label(header_names[i])
+                suggested_slug = _sanitize_extra_dim_name(header_names[i])
+            else:
+                suggested_label = f"Column {i + 1}"
+                suggested_slug = f"col_{i + 1}"
+        col_values = [r[i] for r in sample_rows if i < len(r)]
+        columns.append(PreviewColumn(
+            index=i,
+            header_name=(header_names[i] if header_names and i < len(header_names) else None),
+            detected_role=detected_role,
+            suggested_label=suggested_label,
+            suggested_slug=suggested_slug,
+            type_hint=_column_type_hint(col_values),
+            remappable=True,
+        ))
+
+    return PointCloudPreviewResponse(
+        kind='ascii', delimiter=delimiter, has_header=has_header,
+        columns=columns, sample_rows=sample_rows,
+    )
+
+
+def _ply_header_properties(file_path: str) -> tuple[List[str], bool, List[List[str]], int]:
+    """Parse a PLY header without decoding the body. Returns
+    (vertex_property_names, is_ascii, sample_rows, vertex_count). sample_rows is
+    empty for binary PLY (we don't decode it for preview)."""
+    props: List[str] = []
+    fmt = 'ascii'
+    vertex_count = 0
+    in_vertex = False
+    header_lines = 0
+    with open(file_path, 'rb') as f:
+        for raw in f:
+            header_lines += 1
+            line = raw.decode('latin-1', errors='replace').strip()
+            low = line.lower()
+            if low.startswith('format'):
+                fmt = low.split()[1] if len(low.split()) > 1 else 'ascii'
+            elif low.startswith('element '):
+                parts = line.split()
+                in_vertex = len(parts) >= 2 and parts[1].lower() == 'vertex'
+                if in_vertex and len(parts) >= 3:
+                    try:
+                        vertex_count = int(parts[2])
+                    except ValueError:
+                        vertex_count = 0
+            elif low.startswith('property') and in_vertex:
+                props.append(line.split()[-1])
+            elif low == 'end_header':
+                break
+            if header_lines > 1000:  # malformed / not really a PLY
+                break
+
+    sample_rows: List[List[str]] = []
+    if fmt == 'ascii':
+        with open(file_path) as f:
+            past_header = False
+            taken = 0
+            for raw in f:
+                s = raw.strip()
+                if not past_header:
+                    if s.lower() == 'end_header':
+                        past_header = True
+                    continue
+                if not s:
+                    continue
+                sample_rows.append(s.split())
+                taken += 1
+                if taken >= 20:
+                    break
+    return props, fmt == 'ascii', sample_rows, vertex_count
+
+
+def _ply_role_for(name: str) -> str:
+    n = name.lower()
+    if n in ('x', 'y', 'z'):
+        return n
+    if n in ('red', 'green', 'blue', 'r', 'g', 'b'):
+        return {'red': 'r255', 'green': 'g255', 'blue': 'b255',
+                'r': 'r255', 'g': 'g255', 'b': 'b255'}[n]
+    if n in ('intensity', 'scalar_intensity', 'reflectance'):
+        return 'intensity'
+    return 'extra'
+
+
+def _preview_ply(file_path: str) -> PointCloudPreviewResponse:
+    props, is_ascii, sample_rows, _ = _ply_header_properties(file_path)
+    columns: List[PreviewColumn] = []
+    for i, name in enumerate(props):
+        role = _ply_role_for(name)
+        is_extra = role == 'extra'
+        col_values = [r[i] for r in sample_rows if i < len(r)]
+        columns.append(PreviewColumn(
+            index=i, header_name=name, detected_role=role,
+            suggested_label=_humanize_extra_dim_label(name) if is_extra else name,
+            suggested_slug=_sanitize_extra_dim_name(name) if is_extra else '',
+            type_hint=_column_type_hint(col_values) if sample_rows else ('float' if is_extra else 'float'),
+            remappable=False,
+        ))
+    warning = None if is_ascii else "Binary PLY: preview rows unavailable (fields shown from header)."
+    return PointCloudPreviewResponse(
+        kind='ply', delimiter=None, has_header=True,
+        columns=columns, sample_rows=sample_rows, warning=warning,
+    )
+
+
+def _preview_pcd(file_path: str) -> PointCloudPreviewResponse:
+    fields: List[str] = []
+    with open(file_path, 'rb') as f:
+        for raw in f:
+            line = raw.decode('latin-1', errors='replace').strip()
+            low = line.lower()
+            if low.startswith('fields'):
+                fields = line.split()[1:]
+            elif low.startswith('data'):
+                break
+    columns: List[PreviewColumn] = []
+    for i, name in enumerate(fields):
+        n = name.lower()
+        role = ('x' if n == 'x' else 'y' if n == 'y' else 'z' if n == 'z'
+                else 'r255' if n in ('r', 'red') else 'g255' if n in ('g', 'green')
+                else 'b255' if n in ('b', 'blue') else 'r255' if n == 'rgb' else 'extra')
+        columns.append(PreviewColumn(
+            index=i, header_name=name, detected_role=role,
+            suggested_label=name, suggested_slug='', type_hint='float',
+            remappable=False,
+        ))
+    return PointCloudPreviewResponse(
+        kind='pcd', delimiter=None, has_header=True, columns=columns,
+        sample_rows=[],
+        warning="PCD import preserves position and RGB only; other scalar fields are dropped.",
+    )
+
+
+def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
+    import laspy
+    columns: List[PreviewColumn] = []
+    sample_rows: List[List[str]] = []
+    with laspy.open(file_path) as reader:
+        header = reader.header
+        std = ['X', 'Y', 'Z']
+        pf = header.point_format
+        names = [d.name for d in pf.dimensions]
+        # Present standard + extra dims; mark x/y/z and rgb/intensity roles.
+        def role_for(n: str) -> str:
+            ln = n.lower()
+            if ln in ('x', 'y', 'z'):
+                return ln
+            if ln == 'red':
+                return 'r255'
+            if ln == 'green':
+                return 'g255'
+            if ln == 'blue':
+                return 'b255'
+            if ln == 'intensity':
+                return 'intensity'
+            return 'extra'
+        extra_names = {d.name for d in pf.extra_dimensions}
+        for i, n in enumerate(names):
+            role = role_for(n)
+            is_extra = n in extra_names or role == 'extra'
+            columns.append(PreviewColumn(
+                index=i, header_name=n, detected_role=role,
+                suggested_label=n, suggested_slug=n if is_extra else '',
+                type_hint='categorical' if n.lower() == 'classification' else 'float',
+                remappable=False,
+            ))
+        # Cheap value sample: read a small batch of points.
+        try:
+            pts = reader.read_points(min(max_rows, 20))
+            for k in range(len(pts)):
+                row = []
+                for n in names:
+                    try:
+                        row.append(str(pts[n][k]))
+                    except Exception:
+                        row.append('')
+                sample_rows.append(row)
+        except Exception:
+            sample_rows = []
+    return PointCloudPreviewResponse(
+        kind='las', delimiter=None, has_header=True, columns=columns,
+        sample_rows=sample_rows,
+    )
+
+
+@app.post("/api/pointcloud/preview")
+async def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewResponse:
+    """Cheaply inspect a point-cloud file for the import wizard.
+
+    Reads only enough of the file to show the wizard what was auto-detected and
+    a handful of sample rows. Never 500s on a parse problem — returns a 200 with
+    a `warning` and best-effort columns so the wizard can still offer
+    "import with auto-detect"."""
+    source = _Path(request.file_path).expanduser()
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+    max_rows = max(1, min(int(request.max_rows or 20), 100))
+    ext = source.suffix.lower().lstrip('.')
+    try:
+        if ext in _PANDAS_EXTENSIONS:
+            return _preview_ascii(str(source), request.ascii_format, max_rows)
+        if ext == 'ply':
+            return _preview_ply(str(source))
+        if ext == 'pcd':
+            return _preview_pcd(str(source))
+        if ext in ('las', 'laz'):
+            return _preview_las(str(source), max_rows)
+    except Exception as e:  # never block import on a preview failure
+        return PointCloudPreviewResponse(
+            kind=ext or 'ascii', delimiter=None, has_header=False,
+            columns=[], sample_rows=[],
+            warning=f"Could not preview this file ({e}). You can still import with auto-detect.",
+        )
+    return PointCloudPreviewResponse(
+        kind=ext or 'ascii', delimiter=None, has_header=False,
+        columns=[], sample_rows=[],
+        warning=f"Unsupported extension for preview: .{ext}.",
+    )
 
 
 def _canonical_translation(translation: Optional[List[float]]) -> str:
@@ -8221,7 +8789,7 @@ def _filtered_xyz_to_las(
             sep=r"\s+",
             header=None,
             names=names,
-            usecols=[i for i, c in enumerate(names) if c != "skip"],
+            usecols=[i for i, c in enumerate(names) if not _is_skip_name(c)],
             comment="#",
             skiprows=skiprows,
             chunksize=chunk_rows,
@@ -8736,7 +9304,7 @@ def _segmented_xyz_to_las(
         sep=r"\s+",
         header=None,
         names=names,
-        usecols=[i for i, c in enumerate(names) if c != "skip"],
+        usecols=[i for i, c in enumerate(names) if not _is_skip_name(c)],
         comment="#",
         skiprows=skiprows,
         engine="c",
@@ -8992,7 +9560,7 @@ def _load_cloud_for_segmentation(
         skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
         df = pd.read_csv(
             source_path, sep=r"\s+", header=None, names=names,
-            usecols=[i for i, c in enumerate(names) if c != "skip"],
+            usecols=[i for i, c in enumerate(names) if not _is_skip_name(c)],
             comment="#", skiprows=skiprows, engine="c",
         )
         xyz = np.column_stack([

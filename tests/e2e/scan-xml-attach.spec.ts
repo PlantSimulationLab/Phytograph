@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
+import { completeImportWizard } from './helpers/importWizard';
 
 // Helios XML carries an optional <filename> tag pointing to the recorded
 // point-data file. When the importer can resolve that file (here: same
@@ -27,6 +28,10 @@ test('Helios XML import auto-attaches referenced point data', async () => {
     await expect(popup).toBeVisible();
     await page.getByTestId('scan-import-xml').click();
     await expect(popup).not.toBeVisible({ timeout: 15_000 });
+
+    // The XML import runs through the same import wizard once its referenced
+    // file (tiny.xyz) is resolved. Complete it with auto-detected columns.
+    await completeImportWizard(page);
 
     // One row → params from XML, data attached from <filename>.
     await expect(rows).toHaveCount(1);

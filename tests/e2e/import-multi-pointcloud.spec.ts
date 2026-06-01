@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 const TREE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
@@ -28,6 +29,7 @@ test('imports multiple point clouds at once via Import → Point Cloud', async (
       page.getByTestId('import-menu-pointcloud').click(),
     ]);
     await chooser.setFiles([TINY, TREE]);
+    await completeImportWizard(page);
 
     // Both clouds must appear as scan rows with their exact point counts.
     // tiny.xyz = 60 pts, tree.xyz = 900 pts (comment/header lines skipped).

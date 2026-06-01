@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -32,6 +33,7 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(FIXTURE);
+    await completeImportWizard(page);
 
     // Confirm the cloud appeared in the cloud list with the right point
     // count. tiny.xyz has 60 data lines (2 comment lines skipped).

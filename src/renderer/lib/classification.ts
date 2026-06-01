@@ -95,6 +95,33 @@ export function buildTreeInstanceScheme(maxId: number): CategoricalScheme {
   return { attribute: TREE_INSTANCE_ATTRIBUTE, classes };
 }
 
+// Build a generic categorical scheme spanning the integer values in [min,max],
+// for a field the user marked categorical in the import wizard. Reuses the
+// tree-instance golden-angle palette so successive classes stay distinct, with
+// neutral "Class N" labels (we have no domain names for an arbitrary field).
+// Guards the span so a pathological range can't allocate a huge class list.
+const GENERIC_CATEGORICAL_MAX_CLASSES = 256;
+
+export function buildGenericCategoricalScheme(
+  attribute: string,
+  range: [number, number] | undefined | null,
+): CategoricalScheme {
+  const lo = range ? Math.floor(range[0]) : 0;
+  const hiRaw = range ? Math.ceil(range[1]) : 0;
+  const hi = Math.min(hiRaw, lo + GENERIC_CATEGORICAL_MAX_CLASSES - 1);
+  const classes: ClassDef[] = [];
+  for (let v = lo; v <= hi; v++) {
+    classes.push({
+      value: v,
+      // Offset by 1 so v and the tree palette's id line up (id 0 = gray);
+      // a value of 0 still reads as "Class 0" with the unassigned gray.
+      label: `Class ${v}`,
+      color: treeInstanceColor(v),
+    });
+  }
+  return { attribute, classes };
+}
+
 // Registry of known categorical schemes, keyed by attribute slug. Future
 // classifications (organ type, semantic labels, …) register here and get
 // discrete coloring + a legend for free.
@@ -102,25 +129,50 @@ const SCHEMES: Record<string, CategoricalScheme> = {
   [GROUND_CLASS_ATTRIBUTE]: GROUND_SCHEME,
 };
 
+// Slugs the user marked categorical in the import wizard. Lower-cased on insert
+// so lookups match the case-insensitive slug convention used elsewhere. Module-
+// level (process-wide) so the three pure predicate functions below — called by
+// slug from the renderers — can consult it without threading per-cloud context.
+// Rehydrated from each cloud's OctreeRef.categoricalAttributes at import/restore.
+const DYNAMIC_CATEGORICAL = new Set<string>();
+
+// Mark `slug` as categorical (import wizard). Idempotent.
+export function registerCategoricalSlug(slug: string | undefined | null): void {
+  if (!slug) return;
+  DYNAMIC_CATEGORICAL.add(slug.toLowerCase());
+}
+
+export function unregisterCategoricalSlug(slug: string | undefined | null): void {
+  if (!slug) return;
+  DYNAMIC_CATEGORICAL.delete(slug.toLowerCase());
+}
+
 // True for attributes whose categorical scheme is generated from the data range
-// (e.g. tree_instance) rather than registered with a fixed class list. Callers
-// build the scheme via buildTreeInstanceScheme(maxId) using the attribute's
-// observed [min,max].
+// rather than registered with a fixed class list: the built-in tree_instance,
+// plus any slug a user marked categorical in the import wizard. Callers build
+// the scheme from the attribute's observed [min,max] via categoricalSchemeForRange.
 export function isDynamicCategoricalAttribute(attribute: string | undefined | null): boolean {
   if (!attribute) return false;
-  return attribute.toLowerCase() === TREE_INSTANCE_ATTRIBUTE;
+  const key = attribute.toLowerCase();
+  return key === TREE_INSTANCE_ATTRIBUTE || DYNAMIC_CATEGORICAL.has(key);
 }
 
 // Resolve a categorical scheme for an attribute, generating it from `range`
-// (the attribute's [min,max]) when the attribute is dynamic (tree_instance),
-// otherwise falling back to the registered static schemes.
+// (the attribute's [min,max]) when the attribute is dynamic. tree_instance uses
+// its dedicated Tree-N scheme; a wizard-marked field uses the generic Class-N
+// scheme. Static registered schemes (ground_class) fall through unchanged.
 export function categoricalSchemeForRange(
   attribute: string | undefined | null,
   range: [number, number] | undefined | null,
 ): CategoricalScheme | null {
-  if (isDynamicCategoricalAttribute(attribute)) {
+  if (!attribute) return categoricalSchemeFor(attribute);
+  const key = attribute.toLowerCase();
+  if (key === TREE_INSTANCE_ATTRIBUTE) {
     const maxId = range ? range[1] : 0;
     return buildTreeInstanceScheme(maxId);
+  }
+  if (DYNAMIC_CATEGORICAL.has(key)) {
+    return buildGenericCategoricalScheme(attribute, range ?? null);
   }
   return categoricalSchemeFor(attribute);
 }

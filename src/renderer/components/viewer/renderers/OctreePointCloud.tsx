@@ -3,7 +3,7 @@ import { useThree, useFrame } from '@react-three/fiber';
 import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
 import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
-import { categoricalSchemeFor, buildCategoricalGradientStops } from '../../../lib/classification';
+import { categoricalSchemeForRange, buildCategoricalGradientStops } from '../../../lib/classification';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import { getPotreeManager, OctreeRequestManager } from '../potreeManager';
 
@@ -378,7 +378,9 @@ export function OctreePointCloud({
       // continuous ramp. Reuses the same INTENSITY_GRADIENT pipeline — only the
       // stop array differs — so no shader change. The intensityRange set above
       // (the attribute's [min,max]) is the value space the stops map against.
-      const categorical = scalarActive ? categoricalSchemeFor(selectedScalarField) : null;
+      const categorical = scalarActive && scalarRange
+        ? categoricalSchemeForRange(selectedScalarField, [scalarRange.min[0], scalarRange.max[0]])
+        : null;
       if (categorical && scalarRange) {
         const stops = buildCategoricalGradientStops(categorical, [
           scalarRange.min[0],

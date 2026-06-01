@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -27,6 +28,7 @@ test('viewport gizmo orients down a world axis with Z-up and no zoom change', as
       page.getByTestId('import-menu-auto').click(),
     ]);
     await chooser.setFiles(FIXTURE);
+    await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });

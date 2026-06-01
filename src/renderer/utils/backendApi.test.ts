@@ -649,6 +649,7 @@ describe('importPointCloudByPath (renamed from importXyzByPath; now also serves 
     expect(JSON.parse(init?.body as string)).toEqual({
       file_path: '/abs/scan.xyz',
       ascii_format: null,
+      column_plan: null,
     });
   });
 
