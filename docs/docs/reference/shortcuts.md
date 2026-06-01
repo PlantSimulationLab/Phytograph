@@ -60,6 +60,20 @@ typing a coordinate.
 | Left-click | Place a corner on the ground plane (two clicks) |
 | <kbd>Esc</kbd> | Cancel the draw |
 
+## Erase brush
+
+| Shortcut | Action |
+|---|---|
+| <kbd>E</kbd> | Toggle erase mode on/off (while the Erase tool is open) |
+
+Open the Erase tool with the toolbar button — the view stays interactive
+so you can frame your shot. <kbd>E</kbd> (or the panel's **Start Erasing**
+button) then toggles erase mode: ON freezes the viewport and **click** /
+**click-drag** stamps square erase regions (each cuts straight through the
+cloud); OFF unfreezes the view so you can reorient without closing the
+tool. Apply with the panel's **Apply Erase** button or discard with
+**Clear Strokes**. <kbd>E</kbd> only acts while the Erase tool is open.
+
 ## Transform mode (Blender-style)
 
 When the Translate tool is active:

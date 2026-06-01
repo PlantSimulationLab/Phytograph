@@ -65,6 +65,7 @@ import { BoxDrawRaycaster } from './viewer/gizmos/BoxDrawRaycaster';
 import { PolygonCameraSnapshotter } from './viewer/gizmos/PolygonCameraSnapshotter';
 import { OrthoProjectionOverride } from './viewer/gizmos/OrthoProjectionOverride';
 import { EraseBrush } from './viewer/gizmos/EraseBrush';
+import { EraseBrushOctree, type EraseSquareFrame } from './viewer/gizmos/EraseBrushOctree';
 
 // Shared viewer types now live in lib/pointCloudTypes.ts so the extracted leaf
 // components (components/viewer/**) and the lib parsers can import them without
@@ -548,10 +549,34 @@ export default function PointCloudViewer({
   const rectDragCurrentRef = useRef<{ x: number; y: number } | null>(null);
   const [rectDragTick, setRectDragTick] = useState(0);
 
-  // Erase brush state
-  const [eraseBrushSize, setEraseBrushSize] = useState(0.1);  // Default brush radius
+  // Erase brush state.
+  //
+  // Flat clouds keep the old per-point model (eraseBrushSize world radius +
+  // erasedIndices). Octree clouds use the screen-space SQUARE-STAMP model: the
+  // brush is a screen-pixel square, painted stamps accumulate into eraseFrame
+  // (centers + frozen camera) for the backend Apply, the live preview is a set
+  // of camera-aligned clip boxes, and the indicator is a camera-facing square.
+  const [eraseBrushSize, setEraseBrushSize] = useState(0.1);  // flat-cloud world radius
   const [eraseBrushPosition, setEraseBrushPosition] = useState<THREE.Vector3 | null>(null);
   const [isErasing, setIsErasing] = useState(false);
+  // Erase MODE within the open Erase tool. The tool (editMode === 'erase') can
+  // be open with the panel visible while the view stays interactive; toggling
+  // erase mode ON freezes the view and makes clicks stamp. Controlled by the
+  // panel's toggle button and the 'e' key (only when the tool is open). Always
+  // starts OFF so opening the tool lets the user frame their view first.
+  const [eraseActive, setEraseActive] = useState(false);
+  // Octree erase (screen-space squares): brush half-size in canvas pixels.
+  const [eraseBrushPx, setEraseBrushPx] = useState(24);
+  // Painted square stamps + frozen camera, sent to crop_octree on Apply.
+  const [eraseFrame, setEraseFrame] = useState<EraseSquareFrame | null>(null);
+  // Per-stamp camera-aligned clip-box transforms driving the live GPU preview.
+  const [erasePreviewBoxes, setErasePreviewBoxes] = useState<THREE.Matrix4[]>([]);
+  // Camera-facing square indicator transform that follows the cursor.
+  const [eraseBrushMatrix, setEraseBrushMatrix] = useState<THREE.Matrix4 | null>(null);
+  // Live PointCloudOctree of the selected cloud, handed up by OctreePointCloud
+  // so the octree erase brush can pick the hovered surface point. Typed loosely
+  // to avoid importing potree-core's class into this already-large module.
+  const eraseOctreeRef = useRef<{ pick: (...args: unknown[]) => unknown } | null>(null);
 
   // History for undo/redo
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -1515,29 +1540,91 @@ export default function PointCloudViewer({
   }, [editMode, selectedIds, isApplyingCrop, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon]);
 
   // Apply erased points permanently - removes erased points and bakes in translation
-  const handleApplyErase = useCallback(() => {
+  const handleApplyErase = useCallback(async () => {
     if (editMode !== 'erase' || selectedIds.size !== 1) return;
 
     const cloudId = Array.from(selectedIds)[0];
     const cloud = clouds.find(c => c.id === cloudId);
     const state = editStates.get(cloudId);
 
-    if (!cloud || !state || state.erasedIndices.size === 0) return;
+    if (!cloud || !state) return;
 
-    // Octree clouds: the free-form brush accumulates point indices into
-    // erasedIndices, but octree-backed data.positions is an empty
-    // Float32Array — those indices don't refer to anything. The M3 erase
-    // story for octrees is "use Crop with invert=true to remove a
-    // region", which handleApplyCrop already wires through crop_octree.
-    // Tell the user explicitly rather than silently doing nothing.
+    // Octree clouds: erase is a union of painted screen-space SQUARE stamps,
+    // removed on the backend via crop_octree's squares_union region (invert=true
+    // keeps the complement — every point outside all squares). Mirrors
+    // handleApplyCrop's octree branch: re-convert the filtered source to a fresh
+    // octree and hot-swap the cacheId.
     if (cloud.data.octree) {
-      showToast({
-        title: 'Brush erase is not available for octree clouds — use Crop with invert',
-        type: 'info',
+      const frame = eraseFrame;
+      if (!frame || frame.centers.length === 0) return;
+      const octreeInfo = cloud.data.octree;
+      if (!octreeInfo.sourceXyzPath) {
+        showToast({ title: 'Cannot erase: cloud has no source path to re-convert.', type: 'error' });
+        return;
+      }
+      const tx = state.translation.x, ty = state.translation.y, tz = state.translation.z;
+      try {
+        const result = await cropOctree(octreeInfo.sourceXyzPath, {
+          asciiFormat: octreeInfo.asciiFormat ?? null,
+          region: {
+            kind: 'squares_union',
+            centers: frame.centers.map(c => [c.cx, c.cy] as [number, number]),
+            half_sizes: frame.centers.map(() => eraseBrushPx),
+            projection: frame.projection,
+            view: frame.view,
+            canvas: frame.canvas,
+            invert: true, // keep points OUTSIDE the painted squares
+          },
+          translation: (tx !== 0 || ty !== 0 || tz !== 0) ? [tx, ty, tz] : null,
+        });
+        if (result.point_count === 0 || !result.cache_id) {
+          // Every point erased → offer to delete the cloud, like the flat path.
+          setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+          setEditMode('none');
+          return;
+        }
+        const newData = buildPointCloudFromOctree(
+          {
+            cache_id: result.cache_id,
+            cache_dir: result.cache_dir ?? '',
+            cached: result.cached,
+            version: result.version,
+            point_count: result.point_count,
+            spacing: result.spacing,
+            scale: result.scale,
+            offset: result.offset,
+            bounds: result.bounds,
+            tight_bounds: result.tight_bounds,
+            attributes: result.attributes,
+          },
+          result.filtered_source_path ?? octreeInfo.sourceXyzPath,
+          cloud.data.fileName ?? cloud.id,
+          result.filtered_source_path ? null : (octreeInfo.asciiFormat ?? null),
+        );
+        onUpdateCloud(cloud.id, newData);
+      } catch (err) {
+        showToast({
+          title: `Erase failed: ${err instanceof Error ? err.message : String(err)}`,
+          type: 'error',
+        });
+        return;
+      }
+      // Clear the painted squares / preview and reset edit state for this cloud.
+      setEraseFrame(null);
+      setErasePreviewBoxes([]);
+      setEraseBrushMatrix(null);
+      setEditStates(prev => {
+        const next = new Map(prev);
+        next.set(cloud.id, { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() });
+        return next;
       });
+      setHistory(prev => prev.filter(entry => entry.id !== cloud.id));
+      setHistoryIndex(prev => Math.max(-1, prev - 1));
       setEditMode('none');
       return;
     }
+
+    if (state.erasedIndices.size === 0) return;
 
     // Filter out erased points and apply translation. Two-pass over typed
     // arrays to avoid the multi-GB JS `number[]` intermediate that the
@@ -1659,7 +1746,7 @@ export default function PointCloudViewer({
     setHistoryIndex(prev => Math.max(-1, prev - 1));
 
     setEditMode('none');
-  }, [editMode, selectedIds, clouds, editStates, onUpdateCloud]);
+  }, [editMode, selectedIds, clouds, editStates, onUpdateCloud, eraseFrame, eraseBrushPx]);
 
   // Build the crop_octree args (region + scalarFilters + translation) for an
   // octree-backed cloud from its active filters. X/Y/Z range filters become a
@@ -2024,6 +2111,20 @@ export default function PointCloudViewer({
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
         e.preventDefault();
         handleRedo();
+      }
+      // E: toggle erase MODE while the Erase tool is open (the same as the
+      // panel's Erase-mode button). It does NOT open or close the tool — that's
+      // the toolbar Eraser button's job. Toggling mode ON freezes the view and
+      // makes clicks stamp; OFF lets the user orbit to reframe without leaving
+      // the tool. Ignored while typing or with a modifier held.
+      if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const el = document.activeElement as HTMLElement | null;
+        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+          || el.tagName === 'SELECT' || el.isContentEditable);
+        if (!typing && editMode === 'erase') {
+          e.preventDefault();
+          setEraseActive(a => !a);
+        }
       }
       // Enter: while mid-polygon, close the polygon. Otherwise (in crop
       // mode) Enter is a no-op — apply is bound exclusively to the
@@ -6763,6 +6864,40 @@ export default function PointCloudViewer({
     return clouds.find(c => c.id === id);
   }, [selectedIds, clouds]);
 
+  // Auto-size the erase brush to the selected cloud. The brush radius is a
+  // world-space value, so a fixed default (e.g. 0.1m) is invisible on a
+  // meter-to-tens-of-meters scan and far too big on a centimeter-scale one.
+  // When the erase tool is activated for a cloud, initialize the radius to a
+  // small fraction of that cloud's bounding-box diagonal (matching how the
+  // translation gizmo and grid scale to bounds.size.length()). We only seed
+  // it once per (cloud, activation) so user slider adjustments aren't clobbered.
+  const eraseBrushInitKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (editMode !== 'erase' || !firstSelectedCloud) {
+      eraseBrushInitKeyRef.current = null;
+      // Drop the live brush indicator + painted preview and turn erase mode off
+      // when the tool closes so nothing lingers into the next mode.
+      setEraseBrushPosition(null);
+      setEraseBrushMatrix(null);
+      setEraseFrame(null);
+      setErasePreviewBoxes([]);
+      setIsErasing(false);
+      setEraseActive(false);
+      return;
+    }
+    if (eraseBrushInitKeyRef.current === firstSelectedCloud.id) return;
+    eraseBrushInitKeyRef.current = firstSelectedCloud.id;
+    // Flat clouds use a world-space brush; seed it to a fraction of the cloud
+    // diagonal. Octree clouds use a screen-pixel brush (no cloud-scaling needed).
+    const diag = firstSelectedCloud.data.bounds.size.length();
+    if (diag > 0) setEraseBrushSize(diag / 50);
+    // Start each activation with a clean preview and erase mode OFF, so the user
+    // can frame the view before toggling erase on.
+    setEraseFrame(null);
+    setErasePreviewBoxes([]);
+    setEraseActive(false);
+  }, [editMode, firstSelectedCloud]);
+
   // Color modes that benefit from a colormap + colorbar (continuous scalars).
   const isScalarColorMode = (
     colorMode === 'x' ||
@@ -6942,6 +7077,22 @@ export default function PointCloudViewer({
                         }
                       : null
                   }
+                  // Live erase preview: the painted square stamps' camera-aligned
+                  // boxes clip out their points on the GPU while the erase tool is
+                  // active on this (selected) cloud. Apply removes the matching
+                  // screen-space squares for real on the backend.
+                  clipBoxes={
+                    isSelected && editMode === 'erase' && erasePreviewBoxes.length > 0
+                      ? erasePreviewBoxes.map(matrix => ({ matrix }))
+                      : null
+                  }
+                  // Hand the live octree up so the erase brush can pick the
+                  // hovered surface point. Only the selected cloud needs it.
+                  onOctreeReady={
+                    isSelected
+                      ? (oct) => { eraseOctreeRef.current = oct as any; }
+                      : undefined
+                  }
                 />
               ) : (
                 <PointCloud
@@ -7070,7 +7221,7 @@ export default function PointCloudViewer({
         <CameraController
           bounds={combinedBounds}
           hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0}
-          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect'}
+          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive}
         />
 
         {/* Snapshots the camera/size for the polygon- and rect-crop in/out
@@ -7243,10 +7394,9 @@ export default function PointCloudViewer({
           );
         })()}
 
-        {/* Erase Brush - for erasing points from point cloud. Skipped for
-            octree-backed clouds: the brush picks the closest point in
-            data.positions (an empty Float32Array for octrees) and would
-            never select anything. Use Crop with invert instead. */}
+        {/* Erase Brush (flat clouds) — iterates data.positions directly, so it
+            only applies to the rare non-octree (Blob/no-path) cloud. Octree
+            clouds use the sphere-paint brush below instead. */}
         {editMode === 'erase' && firstSelectedCloud && !firstSelectedCloud.data.octree && (() => {
           const editState = getEditState(firstSelectedCloud.id);
           return (
@@ -7303,6 +7453,72 @@ export default function PointCloudViewer({
             />
           );
         })()}
+
+        {/* Erase Brush (octree clouds) — paints screen-space square stamps that
+            extrude through the cloud along the view direction. Mounted only while
+            erase MODE is active (eraseActive): the tool can be open with the view
+            interactive, and the user toggles mode on to stamp. The live preview
+            clips the camera-aligned boxes (OctreePointCloud.clipBoxes); Apply
+            removes the screen-space squares on the backend (squares_union). The
+            square indicator is rendered below. */}
+        {/* While erase mode is active, flatten the projection to orthographic
+            (the trick the Rect crop uses). Under perspective a screen-space
+            square clips a frustum — its footprint is a center-biased trapezoid
+            that doesn't match the square outline. Ortho makes the square extrude
+            as a straight prism, so the cleared region matches the brush exactly.
+            EraseBrushOctree builds its pick ray from the (now ortho) projection
+            matrix directly, so surface picking keeps working under the override. */}
+        {editMode === 'erase' && eraseActive && firstSelectedCloud?.data.octree && (
+          <OrthoProjectionOverride />
+        )}
+
+        {editMode === 'erase' && eraseActive && firstSelectedCloud && firstSelectedCloud.data.octree && (() => {
+          const b = firstSelectedCloud.data.bounds;
+          return (
+            <EraseBrushOctree
+              octree={eraseOctreeRef.current as any}
+              brushHalfPx={eraseBrushPx}
+              cloudCenter={{ x: b.center.x, y: b.center.y, z: b.center.z }}
+              cloudDiagonal={b.size.length()}
+              initialFrame={eraseFrame}
+              onFrameChange={(frame, previewBoxes) => {
+                setEraseFrame(frame);
+                setErasePreviewBoxes(previewBoxes);
+              }}
+              onBrushTransformChange={setEraseBrushMatrix}
+              onErasingChange={setIsErasing}
+            />
+          );
+        })()}
+
+        {/* Erase brush indicator (octree path): a camera-facing square outline
+            at the cursor (the cross-section of the view-extruded erase volume),
+            red while actively erasing. Shown only while erase mode is active. */}
+        {editMode === 'erase' && eraseActive && firstSelectedCloud?.data.octree && eraseBrushMatrix && (
+          <group matrixAutoUpdate={false} matrix={eraseBrushMatrix}>
+            {/* Unit plane (the box matrix already scales X/Y to the square). A
+                thin box edge reads as a square ring facing the camera. */}
+            <lineSegments>
+              <edgesGeometry args={[new THREE.PlaneGeometry(1, 1)]} />
+              <lineBasicMaterial
+                color={isErasing ? '#ef4444' : '#f97316'}
+                transparent
+                opacity={0.9}
+                depthTest={false}
+              />
+            </lineSegments>
+            <mesh>
+              <planeGeometry args={[1, 1]} />
+              <meshBasicMaterial
+                color={isErasing ? '#ef4444' : '#f97316'}
+                transparent
+                opacity={isErasing ? 0.25 : 0.12}
+                depthWrite={false}
+                side={THREE.DoubleSide}
+              />
+            </mesh>
+          </group>
+        )}
 
         {/* Grid - uses staticBounds so it stays fixed when objects are moved */}
         {showGrid && (
@@ -8445,6 +8661,7 @@ export default function PointCloudViewer({
                   {/* 5. Erase (single cloud only) */}
                   {selectedIds.size === 1 && (
                     <button
+                      data-testid="tool-erase"
                       onClick={() => {
                         if (editMode === 'erase') {
                           setEditMode('none');
@@ -9079,56 +9296,144 @@ export default function PointCloudViewer({
       {/* Erase Brush Panel */}
       {editMode === 'erase' && firstSelectedCloud && (() => {
         const editState = getEditState(firstSelectedCloud.id);
+        const isOctree = !!firstSelectedCloud.data.octree;
         const erasedCount = editState.erasedIndices?.size || 0;
+        const stampCount = eraseFrame?.centers.length ?? 0;
+        // What the panel shows as "pending erase" and whether Apply is enabled:
+        // octree clouds count painted square stamps; flat clouds count erased
+        // indices.
+        const pendingCount = isOctree ? stampCount : erasedCount;
+
+        // Flat-cloud brush is world-space (scaled to the cloud diagonal); octree
+        // brush is screen-space pixels (constant on-screen, independent of scale).
+        const diag = firstSelectedCloud.data.bounds.size.length();
+        const flatMin = diag > 0 ? diag / 500 : 0.01;
+        const flatMax = diag > 0 ? diag / 5 : 1;
+        const flatStep = (flatMax - flatMin) / 100;
 
         return (
-          <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
+          <div
+            data-testid="erase-panel"
+            data-erased-count={erasedCount}
+            data-stamp-count={stampCount}
+            data-erase-active={eraseActive ? 'true' : 'false'}
+            // Projection kind of the painted frame. Erase runs under an
+            // orthographic override so the square cuts a straight prism whose
+            // footprint matches the brush outline (ortho ⇒ m[15]=1, m[11]=0).
+            // Asserted by the regression test guarding against the center-biased
+            // perspective trapezoid.
+            data-erase-projection-kind={
+              eraseFrame
+                ? (Math.abs(eraseFrame.projection[15] - 1) < 1e-6 &&
+                   Math.abs(eraseFrame.projection[11]) < 1e-6
+                    ? 'orthographic'
+                    : 'perspective')
+                : ''
+            }
+            className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
+          >
             <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center gap-2">
               <Eraser className="w-3 h-3" />
               Erase Brush
             </div>
+            {isOctree && (
+              // Erase-mode toggle: ON freezes the view and makes clicks stamp;
+              // OFF lets the user orbit to reframe without leaving the tool. The
+              // 'e' key toggles this same button.
+              <button
+                data-testid="erase-mode-toggle"
+                onClick={() => setEraseActive(a => !a)}
+                className={`w-full mb-3 px-2 py-1.5 text-xs font-medium rounded transition-colors ${
+                  eraseActive
+                    ? 'bg-red-600 hover:bg-red-500 text-white'
+                    : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
+                }`}
+              >
+                {eraseActive ? 'Erasing — view frozen (E)' : 'Start Erasing (E)'}
+              </button>
+            )}
             <div className="mb-3">
-              <label className="text-[10px] text-neutral-400 block mb-1">
-                Brush Size: {eraseBrushSize.toFixed(2)}
-              </label>
-              <input
-                type="range"
-                min="0.01"
-                max="1"
-                step="0.01"
-                value={eraseBrushSize}
-                onChange={(e) => setEraseBrushSize(parseFloat(e.target.value))}
-                className="w-full h-1 bg-neutral-600 rounded appearance-none cursor-pointer"
-              />
+              {isOctree ? (
+                <>
+                  <label className="text-[10px] text-neutral-400 block mb-1">
+                    Brush Size: {Math.round(eraseBrushPx * 2)} px
+                  </label>
+                  <input
+                    type="range"
+                    min={4}
+                    max={150}
+                    step={1}
+                    value={eraseBrushPx}
+                    onChange={(e) => setEraseBrushPx(parseFloat(e.target.value))}
+                    className="w-full h-1 bg-neutral-600 rounded appearance-none cursor-pointer"
+                  />
+                </>
+              ) : (
+                <>
+                  <label className="text-[10px] text-neutral-400 block mb-1">
+                    Brush Size: {eraseBrushSize < 1 ? eraseBrushSize.toFixed(3) : eraseBrushSize.toFixed(2)}
+                  </label>
+                  <input
+                    type="range"
+                    min={flatMin}
+                    max={flatMax}
+                    step={flatStep}
+                    value={eraseBrushSize}
+                    onChange={(e) => setEraseBrushSize(parseFloat(e.target.value))}
+                    className="w-full h-1 bg-neutral-600 rounded appearance-none cursor-pointer"
+                  />
+                </>
+              )}
               <div className="flex justify-between text-[9px] text-neutral-500 mt-1">
                 <span>Small</span>
                 <span>Large</span>
               </div>
             </div>
             <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-              {erasedCount > 0 ? (
-                <span>{erasedCount.toLocaleString()} points erased</span>
+              {isOctree ? (
+                pendingCount > 0 ? (
+                  <span>{pendingCount.toLocaleString()} stroke{pendingCount === 1 ? '' : 's'} painted — preview shown. Apply to remove.</span>
+                ) : eraseActive ? (
+                  <span>View frozen. Click or drag on the cloud to stamp a square erase region — it cuts straight through. Press 'E' to pause and reframe.</span>
+                ) : (
+                  <span>Orbit to frame your view, then press 'E' or the button above to start erasing.</span>
+                )
               ) : (
-                <span>Hold 'E' and move cursor to erase</span>
+                erasedCount > 0 ? (
+                  <span>{erasedCount.toLocaleString()} points erased</span>
+                ) : (
+                  <span>Move cursor over the cloud, then hold 'E' to erase</span>
+                )
               )}
             </div>
-            {erasedCount > 0 && (
+            {pendingCount > 0 && (
               <div className="flex flex-col gap-2">
                 <button
+                  data-testid="erase-apply"
                   onClick={handleApplyErase}
                   className="w-full px-2 py-1.5 text-xs bg-red-600 hover:bg-red-500 rounded text-white font-medium"
                 >
-                  Apply Erase ({erasedCount.toLocaleString()} points)
+                  {isOctree
+                    ? `Apply Erase (${pendingCount.toLocaleString()} stroke${pendingCount === 1 ? '' : 's'})`
+                    : `Apply Erase (${erasedCount.toLocaleString()} points)`}
                 </button>
                 <button
+                  data-testid="erase-restore"
                   onClick={() => {
-                    saveToHistory();
-                    updateSelectedEditStates(s => ({ ...s, erasedIndices: new Set<number>() }));
-                    setTimeout(saveToHistory, 0);
+                    if (isOctree) {
+                      // Discard painted squares without touching the cloud — the
+                      // preview clears with the frame.
+                      setEraseFrame(null);
+                      setErasePreviewBoxes([]);
+                    } else {
+                      saveToHistory();
+                      updateSelectedEditStates(s => ({ ...s, erasedIndices: new Set<number>() }));
+                      setTimeout(saveToHistory, 0);
+                    }
                   }}
                   className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
                 >
-                  Restore All Points
+                  {isOctree ? 'Clear Strokes' : 'Restore All Points'}
                 </button>
               </div>
             )}

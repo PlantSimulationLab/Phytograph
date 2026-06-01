@@ -92,7 +92,7 @@ export interface PointCloudEntry {
 // every selected scan (see CropRegion / cropRegion state below).
 export interface CloudEditState {
   translation: { x: number; y: number; z: number };
-  erasedIndices: Set<number>;  // Set of erased point indices
+  erasedIndices: Set<number>;  // Set of erased point indices (flat clouds only)
 }
 
 // State snapshot for mesh/skeleton

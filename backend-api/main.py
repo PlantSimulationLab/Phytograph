@@ -93,7 +93,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.13"
+BACKEND_VERSION = "0.3.14"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -7760,9 +7760,63 @@ def _canonical_region(region: dict) -> str:
             int(w), int(h),
             "1" if invert else "0",
         )
+    if kind == "squares_union":
+        centers = region.get("centers", [])
+        half_sizes = region.get("half_sizes", [])
+        proj = region.get("projection", [])
+        view = region.get("view", [])
+        canvas = region.get("canvas", {})
+        invert = bool(region.get("invert", False))
+        if not isinstance(centers, list) or not isinstance(half_sizes, list):
+            raise HTTPException(
+                status_code=400,
+                detail="region.centers and region.half_sizes must be arrays.",
+            )
+        if len(centers) == 0 or len(centers) != len(half_sizes):
+            raise HTTPException(
+                status_code=400,
+                detail="region.centers and region.half_sizes must be non-empty and the same length.",
+            )
+        for c in centers:
+            if len(c) != 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail="each region.centers entry must be a 2-element [px, py] array.",
+                )
+        if any(float(h) <= 0 for h in half_sizes):
+            raise HTTPException(
+                status_code=400,
+                detail="every region.half_sizes entry must be positive.",
+            )
+        if len(proj) != 16 or len(view) != 16:
+            raise HTTPException(
+                status_code=400,
+                detail="region.projection and region.view must each be 16-element matrices.",
+            )
+        w = canvas.get("width")
+        h = canvas.get("height")
+        if not isinstance(w, (int, float)) or not isinstance(h, (int, float)) or w <= 0 or h <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="region.canvas must have positive width and height.",
+            )
+        squares_s = ";".join(
+            "{},{}".format(
+                ",".join(f"{float(v):.6g}" for v in c),
+                f"{float(hs):.6g}",
+            )
+            for c, hs in zip(centers, half_sizes)
+        )
+        return "squares_union|{}|{}|{}|{}x{}|{}".format(
+            squares_s,
+            ",".join(f"{float(v):.6g}" for v in proj),
+            ",".join(f"{float(v):.6g}" for v in view),
+            int(w), int(h),
+            "1" if invert else "0",
+        )
     raise HTTPException(
         status_code=400,
-        detail=f"region.kind must be 'box' or 'polygon'. Got: {kind!r}",
+        detail=f"region.kind must be 'box', 'polygon', or 'squares_union'. Got: {kind!r}",
     )
 
 
@@ -7812,6 +7866,28 @@ def _scalar_filter_mask(vals: "np.ndarray", lo: float, hi: float,
         rounded = np.rint(vals).astype(np.int64)
         return np.isin(rounded, list(value_set))
     return (vals >= lo) & (vals <= hi)
+
+
+def _squares_union_mask(
+    pixels: "np.ndarray", centers: "np.ndarray", half_sizes: "np.ndarray",
+) -> "np.ndarray":
+    """Boolean mask: True for points whose canvas pixel falls inside ANY of the
+    screen-space square stamps (the union).
+
+    `pixels` is (n, 2) canvas pixels (from _project_world_to_pixel), `centers`
+    is (k, 2) pixel centers, `half_sizes` is (k,) pixel half-extents. The test
+    is axis-aligned in screen space: |px - cx| <= h AND |py - cy| <= h. Because
+    the membership is purely 2D, a square removes points at every depth behind
+    it — a stamp that extrudes through the whole cloud, like the polygon path.
+    The erase brush keeps the complement (region invert=True). Shared by both
+    filter functions so ASCII and LAS sources erase identically."""
+    px = pixels[:, 0]
+    py = pixels[:, 1]
+    mask = np.zeros(pixels.shape[0], dtype=bool)
+    for i in range(centers.shape[0]):
+        h = half_sizes[i]
+        mask |= (np.abs(px - centers[i, 0]) <= h) & (np.abs(py - centers[i, 1]) <= h)
+    return mask
 
 
 def _crop_octree_cache_key(
@@ -7930,8 +8006,9 @@ def _points_in_polygon_mask(pixels: np.ndarray, polygon: np.ndarray) -> np.ndarr
 
 
 class CropOctreeRegion(BaseModel):
-    """Box or polygon crop region for crop_octree. See _canonical_region for
-    validation rules — the request handler delegates to that helper."""
+    """Box, polygon, or sphere-union crop region for crop_octree. See
+    _canonical_region for validation rules — the request handler delegates to
+    that helper."""
     kind: str
     # Box fields
     min: Optional[List[float]] = None
@@ -7941,6 +8018,17 @@ class CropOctreeRegion(BaseModel):
     projection: Optional[List[float]] = None
     view: Optional[List[float]] = None
     canvas: Optional[dict] = None
+    # Squares-union fields (the erase brush). The brush paints a list of
+    # screen-space square stamps under one frozen camera; each point is
+    # projected to canvas pixels (via the same projection/view/canvas as the
+    # polygon path) and is "inside" the region if it falls within ANY square —
+    # a depth-independent stamp that extrudes through the whole cloud, exactly
+    # like the polygon crop. The erase tool sends invert=True to keep the
+    # complement (every point outside all painted squares). `centers` are
+    # [px, py] pixel positions and `half_sizes` are the squares' half-extents
+    # in pixels (axis-aligned in screen space).
+    centers: Optional[List[List[float]]] = None
+    half_sizes: Optional[List[float]] = None
     invert: bool = False
 
 
@@ -8088,6 +8176,15 @@ def _filtered_xyz_to_las(
                 status_code=400,
                 detail="region.points must be at least 3 [x, y] entries.",
             )
+    elif kind == "squares_union":
+        # Same frozen camera as polygon, plus the pixel-space square stamps.
+        proj = np.array(region["projection"], dtype=np.float64)
+        view = np.array(region["view"], dtype=np.float64)
+        canvas = region["canvas"]
+        canvas_w = int(canvas["width"])
+        canvas_h = int(canvas["height"])
+        square_centers = np.array(region["centers"], dtype=np.float64)
+        square_half_sizes = np.array(region["half_sizes"], dtype=np.float64)
     elif kind is not None:
         raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
 
@@ -8153,6 +8250,12 @@ def _filtered_xyz_to_las(
                     positions, proj, view, canvas_w, canvas_h,
                 )
                 mask = _points_in_polygon_mask(pixels, polygon)
+            elif kind == "squares_union":
+                positions = np.stack([xs, ys, zs], axis=1)
+                pixels = _project_world_to_pixel(
+                    positions, proj, view, canvas_w, canvas_h,
+                )
+                mask = _squares_union_mask(pixels, square_centers, square_half_sizes)
             else:
                 # No spatial region — keep all points spatially, then let the
                 # scalar filters below narrow the survivor set.
@@ -8281,6 +8384,14 @@ def _filtered_las_to_las(
                 status_code=400,
                 detail="region.points must be at least 3 [x, y] entries.",
             )
+    elif kind == "squares_union":
+        proj = np.array(region["projection"], dtype=np.float64)
+        view = np.array(region["view"], dtype=np.float64)
+        canvas = region["canvas"]
+        canvas_w = int(canvas["width"])
+        canvas_h = int(canvas["height"])
+        square_centers = np.array(region["centers"], dtype=np.float64)
+        square_half_sizes = np.array(region["half_sizes"], dtype=np.float64)
     elif kind is not None:
         raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
 
@@ -8322,6 +8433,10 @@ def _filtered_las_to_las(
                 positions = np.stack([xs, ys, zs], axis=1)
                 pixels = _project_world_to_pixel(positions, proj, view, canvas_w, canvas_h)
                 mask = _points_in_polygon_mask(pixels, polygon)
+            elif kind == "squares_union":
+                positions = np.stack([xs, ys, zs], axis=1)
+                pixels = _project_world_to_pixel(positions, proj, view, canvas_w, canvas_h)
+                mask = _squares_union_mask(pixels, square_centers, square_half_sizes)
             else:
                 mask = np.ones(n, dtype=bool)
 

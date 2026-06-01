@@ -51,11 +51,28 @@ export interface OctreePointCloudProps {
     max: THREE.Vector3;
     invert?: boolean;
   } | null;
+  // Optional clip-box volumes — the live erase-brush preview. Each entry is the
+  // world→box transform of an oriented box (camera-aligned, square cross-section,
+  // extruded deep along the view axis) so painting a square stamp removes the
+  // points behind it. potree-core's shader ORs all boxes together (a point is
+  // "inside" if it falls within ANY box); under CLIP_INSIDE it culls them on the
+  // GPU at frame rate, matching the screen-space squares the strokes commit on
+  // Apply (crop_octree squares_union region). Mutually exclusive with `clipBox`
+  // in practice — crop and erase are different edit modes — so they never fight
+  // over `clipMode`. We take the box transform matrix and derive the inverse the
+  // shader needs here, keeping potree-core's IClipBox detail out of the parent.
+  clipBoxes?: Array<{ matrix: THREE.Matrix4 }> | null;
   // Fired once, the first time LOD tiles have actually streamed in for this
   // mount. The parent uses it to force a single fresh-material remount so a
   // cloud that mounted directly into a gradient colour mode recompiles its
   // shader with geometry present (see octreePaintGen in PointCloudViewer).
   onFirstTilesReady?: () => void;
+  // Hands the live PointCloudOctree to the parent (and null on unmount) so the
+  // erase-brush gizmo can call octree.pick(...) to anchor the brush to the
+  // hovered surface point. The instance lives inside this component's load
+  // effect; this is the narrowest way to expose it without plumbing the potree
+  // manager's internals through React.
+  onOctreeReady?: (octree: PointCloudOctree | null) => void;
 }
 
 // Point a tile geometry's `intensity` attribute at the named scalar
@@ -97,7 +114,9 @@ export function OctreePointCloud({
   rangeMin,
   rangeMax,
   clipBox = null,
+  clipBoxes = null,
   onFirstTilesReady,
+  onOctreeReady,
 }: OctreePointCloudProps) {
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
   const firstTilesFiredRef = useRef(false);
@@ -108,6 +127,11 @@ export function OctreePointCloud({
   const [materialVersion, setMaterialVersion] = useState(0);
   const manager = getPotreeManager();
   const { gl, camera, scene } = useThree();
+
+  // Keep the latest onOctreeReady in a ref so the load effect (keyed on
+  // cacheId) doesn't re-run when the parent passes a new callback identity.
+  const onOctreeReadyRef = useRef(onOctreeReady);
+  onOctreeReadyRef.current = onOctreeReady;
 
   // Load on cacheId change, then attach the resulting PointCloudOctree
   // directly to the scene. `<primitive object={...}/>` works but is fiddly
@@ -129,12 +153,14 @@ export function OctreePointCloud({
         scene.add(pco);
         pcoForCleanup = pco;
         setOctree(pco);
+        onOctreeReadyRef.current?.(pco);
       })
       .catch((err) => {
         console.error(`Octree load failed for ${data.octree?.cacheId}:`, err);
       });
     return () => {
       cancelled = true;
+      onOctreeReadyRef.current?.(null);
       if (pcoForCleanup) {
         scene.remove(pcoForCleanup);
         pcoForCleanup.dispose();
@@ -437,6 +463,42 @@ export function OctreePointCloud({
     }
   }, [octree, materialVersion, clipBox?.min.x, clipBox?.min.y, clipBox?.min.z,
        clipBox?.max.x, clipBox?.max.y, clipBox?.max.z, clipBox?.invert]);
+
+  // Live erase-brush preview. The brush paints camera-aligned, view-extruded
+  // boxes (square cross-section); we hand their world→box transforms to the
+  // material as clip boxes and set CLIP_INSIDE so any point inside ANY box is
+  // culled on the GPU (the shader ORs them). The shader uses each box's inverse
+  // matrix to map a world point into the unit cube [-0.5, 0.5]^3, so we derive
+  // the inverse from the transform here. When the list is empty, clear and
+  // restore DISABLED, with the same "only clear if non-empty" guard the crop
+  // box effect uses to avoid thrashing the shader cache.
+  const clipBoxesKey = (clipBoxes ?? [])
+    .map(b => b.matrix.elements.map(e => e.toFixed(4)).join(','))
+    .join('|');
+  useEffect(() => {
+    if (!octree) return;
+    const m = octree.material;
+    if (clipBoxes && clipBoxes.length > 0) {
+      const boxes = clipBoxes.map(b => {
+        const matrix = b.matrix.clone();
+        const inverse = matrix.clone().invert();
+        const position = new THREE.Vector3().setFromMatrixPosition(matrix);
+        // Shape matches potree-core's IClipBox; only `inverse.elements` is read
+        // by setClipBoxes, the rest are bookkeeping.
+        return { box: new THREE.Box3(
+          new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5),
+        ), inverse, matrix, position };
+      });
+      (m as any).setClipBoxes(boxes);
+      (m as any).clipMode = ClipMode.CLIP_INSIDE;
+    } else if ((m as any).numClipBoxes > 0 && !clipBox) {
+      // Don't clobber an active crop clip box; only clear when erase owns the
+      // boxes (crop and erase never run together, but be defensive).
+      (m as any).setClipBoxes([]);
+      (m as any).clipMode = ClipMode.DISABLED;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [octree, materialVersion, clipBoxesKey]);
 
   // Per-frame LOD update. Potree decides which nodes to fetch / drop
   // based on the camera's view of the octree's bounding boxes. Also

@@ -826,6 +826,204 @@ def test_invert_all_changes_cache_id(client, cache_root):
     assert a["cache_id"] != b["cache_id"]
 
 
+# ---------------------------------------------------------------------------
+# squares_union region — the erase brush. The frontend paints screen-space
+# square stamps under one frozen camera and sends them as one region; erase
+# keeps the COMPLEMENT (invert=True), i.e. every point whose pixel falls outside
+# ALL squares. The test is purely 2D (project-to-pixel + |dx|,|dy| <= half), so a
+# square removes points at every depth behind it — a stamp that extrudes through
+# the cloud, like the polygon path. Overlapping squares must not double-count.
+# ---------------------------------------------------------------------------
+
+# Identity projection => NDC == world, and pixel = ((x+1)*w/2, (1-(y+1)/2)*h).
+# So world (x, y) maps linearly to canvas pixels, letting us place square
+# stamps at known pixel positions that bound known world rectangles.
+SQ_CANVAS_W, SQ_CANVAS_H = 100, 100
+
+
+def _squares_reference(pts, projection, view, canvas_w, canvas_h, squares):
+    """NumPy reference using the same projection helper the endpoint uses:
+    boolean mask of points whose pixel falls inside ANY square. `squares` is a
+    list of ((cx, cy), half)."""
+    pixels = main._project_world_to_pixel(
+        pts,
+        np.array(projection, dtype=np.float64),
+        np.array(view, dtype=np.float64),
+        canvas_w, canvas_h,
+    )
+    inside = np.zeros(len(pts), dtype=bool)
+    for (cx, cy), half in squares:
+        inside |= (np.abs(pixels[:, 0] - cx) <= half) & (np.abs(pixels[:, 1] - cy) <= half)
+    return inside
+
+
+def test_squares_union_erase_keeps_complement(client, cache_root, grid_xyz, grid_points):
+    """Erase = squares_union region with invert=True. The survivor count must
+    equal NumPy's count of points whose pixel is OUTSIDE the union of squares."""
+    projection, view = _identity_camera_matrices()
+    # world (0.2, 0.2) -> pixel (60, 40); world (0.7, 0.7) -> pixel (85, 15).
+    squares = [((60.0, 40.0), 10.0), ((85.0, 15.0), 8.0)]
+    inside = _squares_reference(grid_points, projection, view, SQ_CANVAS_W, SQ_CANVAS_H, squares)
+    expected = int(np.sum(~inside))
+    assert 0 < int(inside.sum()) < len(grid_points)  # non-trivial, non-total
+
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(grid_xyz),
+            "ascii_format": GRID_FORMAT,
+            "region": {
+                "kind": "squares_union",
+                "centers": [list(c) for c, _ in squares],
+                "half_sizes": [h for _, h in squares],
+                "projection": projection,
+                "view": view,
+                "canvas": {"width": SQ_CANVAS_W, "height": SQ_CANVAS_H},
+                "invert": True,
+            },
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["point_count"] == expected
+    assert (Path(body["cache_dir"]) / "octree.bin").is_file()
+
+
+def test_squares_union_extrudes_through_depth(client, cache_root, grid_xyz, grid_points):
+    """A single square must remove points at EVERY z (the infinite-extrusion
+    property). With identity projection the square at a fixed (px, py) selects a
+    column of the grid spanning all 10 z-layers; erasing it removes exactly that
+    column, so the survivor count drops by a multiple of 10."""
+    projection, view = _identity_camera_matrices()
+    squares = [((50.0, 50.0), 12.0)]  # centered on the grid in screen space
+    inside = _squares_reference(grid_points, projection, view, SQ_CANVAS_W, SQ_CANVAS_H, squares)
+    removed = int(inside.sum())
+    assert removed > 0 and removed % 10 == 0, (
+        f"a screen-space square should remove whole z-columns (×10); got {removed}"
+    )
+    expected = len(grid_points) - removed
+
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(grid_xyz),
+            "ascii_format": GRID_FORMAT,
+            "region": {
+                "kind": "squares_union",
+                "centers": [[50.0, 50.0]],
+                "half_sizes": [12.0],
+                "projection": projection,
+                "view": view,
+                "canvas": {"width": SQ_CANVAS_W, "height": SQ_CANVAS_H},
+                "invert": True,
+            },
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["point_count"] == expected
+
+
+def test_squares_union_overlapping_no_double_count(client, cache_root, grid_xyz, grid_points):
+    """Two overlapping squares remove their union, not the sum of their
+    individual point counts."""
+    projection, view = _identity_camera_matrices()
+    squares = [((48.0, 50.0), 10.0), ((54.0, 50.0), 10.0)]
+    union = _squares_reference(grid_points, projection, view, SQ_CANVAS_W, SQ_CANVAS_H, squares)
+    union_count = int(union.sum())
+    sum_individual = sum(
+        int(_squares_reference(grid_points, projection, view, SQ_CANVAS_W, SQ_CANVAS_H, [s]).sum())
+        for s in squares
+    )
+    assert union_count < sum_individual  # overlap → union < sum
+
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(grid_xyz),
+            "ascii_format": GRID_FORMAT,
+            "region": {
+                "kind": "squares_union",
+                "centers": [list(c) for c, _ in squares],
+                "half_sizes": [h for _, h in squares],
+                "projection": projection,
+                "view": view,
+                "canvas": {"width": SQ_CANVAS_W, "height": SQ_CANVAS_H},
+                "invert": True,
+            },
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert len(grid_points) - res.json()["point_count"] == union_count
+
+
+def test_squares_union_empty_list_returns_400(client, cache_root, grid_xyz):
+    projection, view = _identity_camera_matrices()
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(grid_xyz),
+            "ascii_format": GRID_FORMAT,
+            "region": {
+                "kind": "squares_union", "centers": [], "half_sizes": [],
+                "projection": projection, "view": view,
+                "canvas": {"width": SQ_CANVAS_W, "height": SQ_CANVAS_H},
+            },
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_squares_union_mismatched_lengths_returns_400(client, cache_root, grid_xyz):
+    projection, view = _identity_camera_matrices()
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(grid_xyz),
+            "ascii_format": GRID_FORMAT,
+            "region": {
+                "kind": "squares_union",
+                "centers": [[50.0, 50.0], [60.0, 60.0]],
+                "half_sizes": [10.0],
+                "projection": projection, "view": view,
+                "canvas": {"width": SQ_CANVAS_W, "height": SQ_CANVAS_H},
+            },
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_squares_union_negative_half_size_returns_400(client, cache_root, grid_xyz):
+    projection, view = _identity_camera_matrices()
+    res = client.post(
+        "/api/pointcloud/crop_octree",
+        json={
+            "source_path": str(grid_xyz),
+            "ascii_format": GRID_FORMAT,
+            "region": {
+                "kind": "squares_union",
+                "centers": [[50.0, 50.0]],
+                "half_sizes": [-10.0],
+                "projection": projection, "view": view,
+                "canvas": {"width": SQ_CANVAS_W, "height": SQ_CANVAS_H},
+            },
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_canonical_region_squares_union_is_stable():
+    proj, view = _identity_camera_matrices()
+    base = {
+        "kind": "squares_union", "centers": [[50.0, 50.0]], "half_sizes": [10.0],
+        "projection": proj, "view": view, "canvas": {"width": 100, "height": 100},
+        "invert": True,
+    }
+    assert main._canonical_region(dict(base)) == main._canonical_region(dict(base))
+    # A different half-size produces a different key (different survivor set).
+    other = {**base, "half_sizes": [12.0]}
+    assert main._canonical_region(base) != main._canonical_region(other)
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Non-ASCII sources — PLY/PCD/LAS now import as octrees, so crop/filter must
 # work for them too (they route through _source_to_las → _filtered_las_to_las).

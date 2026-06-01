@@ -34,10 +34,19 @@ export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, clo
       // Cast ray from camera
       raycaster.setFromCamera(mouse, camera);
 
-      // Find the closest point in the cloud to the ray
+      // Anchor the brush to the cloud point under the cursor: the one whose
+      // perpendicular distance to the ray is smallest. We accept it within an
+      // *angular* tolerance (perpendicular distance scaled by how far the point
+      // is from the camera) rather than a fixed world distance, so picking is
+      // resolution-independent and works at any cloud scale — what reads as
+      // "under the cursor" on screen is an angle, not a fixed number of meters.
+      // The brush radius also counts, so a large brush grabs points the way the
+      // visible sphere suggests it should.
+      const ANGULAR_TOLERANCE = 0.03; // ~radius of the pick cone, in radians
       let closestDistance = Infinity;
       let closestPoint: THREE.Vector3 | null = null;
 
+      const tmp = new THREE.Vector3();
       for (let i = 0; i < cloudData.pointCount; i++) {
         // Skip already-erased points
         if (alreadyErasedIndices.has(i)) continue;
@@ -48,42 +57,58 @@ export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, clo
           cloudData.positions[i * 3 + 2] + cloudTranslation.z
         );
 
-        // Find distance from point to ray
-        const closestOnRay = raycaster.ray.closestPointToPoint(point, new THREE.Vector3());
+        // Perpendicular distance from the point to the ray.
+        const closestOnRay = raycaster.ray.closestPointToPoint(point, tmp);
         const distance = point.distanceTo(closestOnRay);
 
-        // Check if this point is within a screen-space threshold
-        if (distance < brushSize * 2 && distance < closestDistance) {
+        // Screen-space pick tolerance: a cone around the ray. A point also
+        // counts if it falls inside the world-space brush radius.
+        const camDistance = point.distanceTo(camera.position);
+        const pickTolerance = Math.max(brushSize, camDistance * ANGULAR_TOLERANCE);
+
+        if (distance < pickTolerance && distance < closestDistance) {
           closestDistance = distance;
           closestPoint = point;
         }
       }
 
-      if (closestPoint) {
-        onBrushPositionChange(closestPoint);
+      // Where the brush indicator sits. When the cursor is over points, snap to
+      // the nearest one; otherwise keep the indicator following the cursor by
+      // projecting the ray out to the cloud's center distance, so the brush is
+      // always visible while the tool is open (not just while erasing).
+      let brushAnchor = closestPoint;
+      if (!brushAnchor) {
+        const center = new THREE.Vector3(
+          cloudData.bounds.center.x + cloudTranslation.x,
+          cloudData.bounds.center.y + cloudTranslation.y,
+          cloudData.bounds.center.z + cloudTranslation.z
+        );
+        const camToCenter = center.distanceTo(camera.position);
+        brushAnchor = raycaster.ray.at(camToCenter, new THREE.Vector3());
+      }
 
-        // If erasing, find all points within brush radius
-        if (isErasing) {
-          const indicesToErase = new Set<number>();
-          for (let i = 0; i < cloudData.pointCount; i++) {
-            // Skip already-erased points
-            if (alreadyErasedIndices.has(i)) continue;
+      onBrushPositionChange(brushAnchor);
 
-            const point = new THREE.Vector3(
-              cloudData.positions[i * 3] + cloudTranslation.x,
-              cloudData.positions[i * 3 + 1] + cloudTranslation.y,
-              cloudData.positions[i * 3 + 2] + cloudTranslation.z
-            );
-            if (point.distanceTo(closestPoint!) < brushSize) {
-              indicesToErase.add(i);
-            }
-          }
-          if (indicesToErase.size > 0) {
-            onErase(indicesToErase);
+      // Erase points within the brush radius, but only when a real point is
+      // under the cursor (anchored to closestPoint) and the user is holding E.
+      if (isErasing && closestPoint) {
+        const indicesToErase = new Set<number>();
+        for (let i = 0; i < cloudData.pointCount; i++) {
+          // Skip already-erased points
+          if (alreadyErasedIndices.has(i)) continue;
+
+          const point = new THREE.Vector3(
+            cloudData.positions[i * 3] + cloudTranslation.x,
+            cloudData.positions[i * 3 + 1] + cloudTranslation.y,
+            cloudData.positions[i * 3 + 2] + cloudTranslation.z
+          );
+          if (point.distanceTo(closestPoint) < brushSize) {
+            indicesToErase.add(i);
           }
         }
-      } else {
-        onBrushPositionChange(null);
+        if (indicesToErase.size > 0) {
+          onErase(indicesToErase);
+        }
       }
     };
 
@@ -118,15 +143,33 @@ export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, clo
 
   if (!brushPosition) return null;
 
+  const brushColor = isErasing ? '#ef4444' : '#f97316';
+
   return (
-    <mesh position={brushPosition}>
-      <sphereGeometry args={[brushSize, 32, 32]} />
-      <meshBasicMaterial
-        color={isErasing ? '#ef4444' : '#f97316'}
-        transparent
-        opacity={isErasing ? 0.4 : 0.25}
-        depthWrite={false}
-      />
-    </mesh>
+    <group position={brushPosition}>
+      {/* Translucent fill showing the erase volume */}
+      <mesh>
+        <sphereGeometry args={[brushSize, 32, 32]} />
+        <meshBasicMaterial
+          color={brushColor}
+          transparent
+          opacity={isErasing ? 0.4 : 0.25}
+          depthWrite={false}
+        />
+      </mesh>
+      {/* Bright wireframe outline so the brush boundary reads clearly even
+          against dense points (renders on top via depthTest=false) */}
+      <mesh>
+        <sphereGeometry args={[brushSize, 24, 16]} />
+        <meshBasicMaterial
+          color={brushColor}
+          wireframe
+          transparent
+          opacity={0.8}
+          depthTest={false}
+          depthWrite={false}
+        />
+      </mesh>
+    </group>
   );
 }

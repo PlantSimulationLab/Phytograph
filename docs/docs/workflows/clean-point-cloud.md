@@ -142,22 +142,49 @@ cloud.
 Use **Erase Brush** (eraser icon) for irregular regions a box can't
 capture — stray points, noise behind the plant, isolated outliers.
 
-1. Click **Erase Brush**.
-2. A red circular brush follows your cursor over the cloud.
-3. Adjust brush size with the slider in the side panel (or `[` and `]`).
-4. Hold left-click and paint over points to delete.
-5. Click **Done** when finished.
+The brush is a **square stamp** that cuts straight through the cloud along
+your view direction — like the rectangle/polygon crop, but a pre-shaped
+square you paint freely. It shows a live preview of what it removes;
+nothing is deleted until you apply.
 
-The brush deletes points that fall within its 3D radius from the
-camera, so painting around the plant from different angles is sometimes
-necessary to clear everything you wanted to.
+1. Click **Erase Brush** to open the tool. The panel opens but the view
+   stays interactive — orbit/pan/zoom to frame the angle you want to erase
+   from.
+2. Click **Start Erasing** in the panel (or press **`E`**) to turn erase
+   mode on. This **freezes the viewport** so every stamp shares the same
+   view, and a square brush follows your cursor (orange → red).
+3. **Click** on the cloud to stamp a square, or **click-drag** to paint a
+   strip of squares. The points behind each square disappear in the live
+   preview — and because the square extrudes through the whole cloud, it
+   removes points at every depth behind it, not just the near surface.
+4. Press **`E`** (or the button) again to turn erase mode off **without
+   closing the tool** — the view unfreezes so you can reorient, then turn
+   erase back on and keep stamping. Painted strokes are kept across toggles.
+5. Click **Apply Erase** to remove the painted points for real, or
+   **Clear Strokes** to discard the preview.
 
-!!! info "Erase Brush vs XYZ scans"
-    The free-form brush works only on LAS/LAZ and PLY/PCD scans, which
-    keep all points in memory. For XYZ-imported scans (which stream from
-    an on-disk octree), use **Crop** with **Keep Outside** to remove a
-    box, rect, or polygon region instead — it goes through the same backend
-    re-conversion path and gives the same full-resolution result.
+Adjust brush size (in screen pixels) with the slider; because the brush is
+screen-space, its size stays constant on screen regardless of the cloud's
+distance.
+
+Erase composes like crop: each apply removes the painted union from the
+current point set, so you can apply, reorient, and stamp again to clear
+points hidden behind a surface.
+
+!!! info "How erase works on large scans"
+    Imported scans stream from an on-disk octree, so the preview is done on
+    the GPU (each square's view-aligned volume clips its points live) and
+    **Apply** re-converts the cloud on the backend at full resolution — the
+    same path **Crop** uses, testing each point's screen position against
+    the painted squares. While erase mode is on, the view is projected
+    orthographically (as the Rect crop does) so the square extrudes as a
+    straight prism and the cleared region matches the brush outline exactly
+    rather than flaring into a perspective trapezoid. Since the test is in
+    screen space the stamp is depth-independent: it removes every point
+    behind the square, not just the near surface — reorient and paint again
+    to clear points it was shielding. You can still use **Crop** with
+    **Keep Outside** for a box, rect, or polygon region when a regular shape
+    fits better.
 
 ## Filter
 

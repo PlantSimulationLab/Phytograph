@@ -1779,6 +1779,23 @@ export type CropOctreeRegion =
       view: number[];                        // 16-element column-major matrix
       canvas: { width: number; height: number };
       invert?: boolean;
+    }
+  | {
+      // Erase brush: the union of screen-space square stamps under one frozen
+      // camera (same projection/view/canvas as a polygon crop). A point is
+      // "inside" the region if its pixel falls within ANY square; erase sends
+      // invert=true to keep the complement. Because the test is purely 2D, a
+      // square removes points at every depth behind it — an infinite extrusion
+      // through the cloud. `centers` are [px, py] pixel positions, `halfSizes`
+      // are the squares' half-extents in pixels.
+      kind: 'squares_union';
+      centers: Array<[number, number]>;
+      // snake_case to match the backend field forwarded verbatim by cropOctree.
+      half_sizes: number[];
+      projection: number[];                  // 16-element column-major matrix
+      view: number[];                        // 16-element column-major matrix
+      canvas: { width: number; height: number };
+      invert?: boolean;
     };
 
 /**
@@ -1830,8 +1847,8 @@ export interface CropOctreeResult {
  * `cache_id` is the renderer's hot-swap target — the old octree's `app://`
  * resources are released once nothing references the prior cache id.
  *
- * Box and polygon regions are both backend-side: the renderer never sees
- * the filtered point set. The 5-minute timeout matches `convertToOctree`
+ * Box, polygon, and sphere-union regions are all backend-side: the renderer
+ * never sees the filtered point set. The 5-minute timeout matches `convertToOctree`
  * (a 100M-point cloud's worst-case re-conversion still fits comfortably).
  *
  * Empty crops resolve with `cache_id === null` and `point_count === 0`;
