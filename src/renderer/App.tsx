@@ -9,7 +9,7 @@ import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./compon
 import type { Scan } from "./lib/scan";
 import type { ScanParameters } from "./lib/scanParameters";
 import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
-import { importTexturedMesh, type MeshImportResponse } from "./utils/backendApi";
+import { importTexturedMesh, deleteCloudSession, type MeshImportResponse } from "./utils/backendApi";
 import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
 import { registerCategoricalSlug } from "./lib/classification";
@@ -58,6 +58,30 @@ function App() {
   // Whether the viewer holds non-scan content (meshes/skeletons). Generated
   // plants are meshes, so this — not just scans — must gate the empty-state hint.
   const [viewerHasContent, setViewerHasContent] = useState(false);
+
+  // Count of clouds with unbaked deletions (session in-RAM mask not yet baked).
+  // Held in a ref so the beforeunload handler reads the latest value without
+  // re-binding the listener on every change.
+  const pendingDeletesRef = useRef(0);
+  const handlePendingDeletesChange = useCallback((count: number) => {
+    pendingDeletesRef.current = count;
+  }, []);
+
+  // Warn before quit when deletions are unbaked — closing discards them (they
+  // live only in the backend session's in-RAM mask until "Permanently apply").
+  // Suppressed under automation (navigator.webdriver) so the E2E harness's
+  // app.close() isn't blocked by a native dialog it can't dismiss.
+  useEffect(() => {
+    if (navigator.webdriver) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (pendingDeletesRef.current > 0) {
+        e.preventDefault();
+        e.returnValue = '';  // triggers the native confirm
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
 
   // Stitch history for undo. We snapshot the full Scan objects (including any
   // params) so undo restores the original scans exactly as they were.
@@ -502,7 +526,14 @@ function App() {
   };
 
   const handleRemoveScan = useCallback((id: string) => {
-    setScans(prev => prev.filter(s => s.id !== id));
+    setScans(prev => {
+      // Free the cloud's backend session (release its in-RAM array) when it's
+      // removed from the scene. Best-effort — deleteCloudSession never throws.
+      const removed = prev.find(s => s.id === id);
+      const sessionId = removed?.data?.octree?.sessionId;
+      if (sessionId) void deleteCloudSession(sessionId);
+      return prev.filter(s => s.id !== id);
+    });
     setSelectedScanIds(prev => {
       const next = new Set(prev);
       next.delete(id);
@@ -918,6 +949,7 @@ function App() {
           onUndoStitch={handleUndoStitch}
           canUndoStitch={canUndoStitch}
           importRefsCallback={handleImportRefsCallback}
+          onPendingDeletesChange={handlePendingDeletesChange}
           onViewerContentChange={setViewerHasContent}
           onRequestImportWizard={openImportWizard}
           className="flex-1"

@@ -93,7 +93,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.15"
+BACKEND_VERSION = "0.3.16"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1344,9 +1344,18 @@ class PointSource(BaseModel):
     # preserves spatial uniformity, which skeleton/triangulation depend on.
     max_points: Optional[int] = None
     # [tx, ty, tz] ADDED to every point — matches the renderer's getDisplayData
-    # (`positions[i*3] + tx`) and `_filtered_xyz_to_las` (`xs + tx`).
+    # (`positions[i*3] + tx`) and the in-RAM `_region_mask` translation path.
     translation: Optional[List[float]] = None
     want_colors: bool = False
+    # When set, points come from a live cloud session's in-RAM array (the
+    # Family-1 source of truth) with its per-point deletions already applied —
+    # NOT from `source_path` on disk. This is how downstream ops honor unbaked
+    # deletions without a rebuild. `source_path` stays populated for provenance
+    # but is not re-read when `session_id` is present. The compute consumers of
+    # this path want positions only, so the session-source branch returns
+    # positions and leaves colours/intensity as None (the session DOES hold them;
+    # they're simply not surfaced here).
+    session_id: Optional[str] = None
 
 
 class TriangulationRequest(BaseModel):
@@ -1621,7 +1630,7 @@ async def segment_ground_points(request: GroundSegmentationRequest):
     """Classify a point cloud into ground (1) and plant (2) points using the
     Cloth Simulation Filter. Returns per-point labels aligned to input order;
     persisting the result onto an octree-backed cloud is done by
-    `/api/segment/ground/apply`."""
+    `/api/cloud/session/{session_id}/segment_ground`."""
     try:
         points = _resolve_segmentation_points(request)
 
@@ -1811,7 +1820,7 @@ async def segment_trees_points(request: TreeSegmentationRequest):
     Mirrors `/api/segment/ground`: inline `points` or a `source` descriptor in,
     per-point integer labels out (0 = unassigned, 1..N = trees), full resolution
     so labels align 1:1. Persisting onto an octree-backed cloud is done by
-    `/api/segment/trees/apply`.
+    `/api/cloud/session/{session_id}/segment_trees`.
 
     Labels-only by design: this interactive path returns predicted instance ids
     and nothing else. If the source carries ground-truth fields (e.g. a
@@ -7031,10 +7040,24 @@ def _read_points_from_source(
     stride-downsample and translation. Positions come back as float64 because
     every consumer (open3d KD-trees, skeleton BFS, raycasting) wants double
     precision; colors/intensity keep their loader dtype.
+
+    When `src.session_id` is set, points come from the live cloud session's
+    in-RAM array with its per-point deletions already applied (the Family-1
+    source of truth), so downstream ops honor unbaked deletions without a
+    rebuild. The compute consumers of this path want positions only, so colours
+    and intensity resolve to None here (the session DOES hold them — see
+    `_read_las_into_arrays` — they're simply not surfaced for these ops).
     """
-    positions, colors, intensity = _load_pointcloud_arrays(
-        src.source_path, src.ascii_format
-    )
+    if src.session_id is not None:
+        sess = _get_cloud_session(src.session_id)
+        with _cloud_session_lock:
+            positions = sess.positions[~sess.deleted].copy()
+        colors = None
+        intensity = None
+    else:
+        positions, colors, intensity = _load_pointcloud_arrays(
+            src.source_path, src.ascii_format
+        )
 
     if src.max_points is not None and src.max_points > 0 and len(positions) > src.max_points:
         stride = int(math.ceil(len(positions) / src.max_points))
@@ -7070,82 +7093,6 @@ async def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
     positions, colors, intensity = _load_pointcloud_arrays(
         request.file_path, request.ascii_format, request.column_plan
     )
-    return _pack_pointcloud_response(positions, colors, intensity)
-
-
-class CropPointCloudByPathRequest(BaseModel):
-    """Path-based AABB crop. Re-reads the cloud from disk (the renderer's
-    `sourcePath`) via `_load_pointcloud_arrays`, applies an axis-aligned
-    box filter with NumPy boolean indexing, and returns the surviving
-    points in the same PHX1 binary format as `import_by_path`.
-
-    Moving this work into the backend keeps multi-GB renderer-side typed
-    arrays out of V8's 4 GB old-space — on a ~28 M-point scan with RGB
-    and intensity, the renderer's in-JS apply path OOM'd at peak; numpy
-    handles the same filter without that constraint.
-
-    `translation` is baked into the loaded positions BEFORE the AABB test
-    so `crop_min`/`crop_max` are always in the same world-space frame as
-    the renderer's gizmo box. The renderer resets its editState
-    translation after apply, matching the existing semantics.
-    """
-    file_path: str
-    ascii_format: Optional[str] = None
-    crop_min: List[float]
-    crop_max: List[float]
-    crop_invert: bool = False
-    translation: Optional[List[float]] = None
-
-
-@app.post("/api/pointcloud/crop_by_path")
-async def crop_pointcloud_by_path(request: CropPointCloudByPathRequest):
-    """Crop a point cloud via an axis-aligned box, returning the kept
-    points in the standard PHX1 binary format.
-
-    Box semantics match the renderer's in-JS implementation: a point at
-    `(x + tx, y + ty, z + tz)` (after applying the optional translation)
-    is kept when every component lies in `[crop_min, crop_max]`, or the
-    complement of that when `crop_invert` is true.
-
-    An empty result is a valid response (HTTP 200 with `point_count = 0`).
-    The renderer raises a delete-confirmation in that case rather than
-    erroring out.
-    """
-    if len(request.crop_min) != 3 or len(request.crop_max) != 3:
-        raise HTTPException(
-            status_code=400,
-            detail="crop_min and crop_max must each be 3-element [x, y, z] arrays.",
-        )
-    if request.translation is not None and len(request.translation) != 3:
-        raise HTTPException(
-            status_code=400,
-            detail="translation, if provided, must be a 3-element [x, y, z] array.",
-        )
-
-    positions, colors, intensity = _load_pointcloud_arrays(
-        request.file_path, request.ascii_format
-    )
-
-    if request.translation is not None:
-        offset = np.array(request.translation, dtype=np.float32)
-        # Use out= to avoid materialising an intermediate copy on top of
-        # `positions` (which can be hundreds of MB on big scans).
-        positions = positions + offset
-
-    cmin = np.array(request.crop_min, dtype=np.float32)
-    cmax = np.array(request.crop_max, dtype=np.float32)
-    # Vectorized AABB test. `all(axis=1)` collapses the per-component
-    # inside/outside flags into one bool per point.
-    inside = np.all((positions >= cmin) & (positions <= cmax), axis=1)
-    if request.crop_invert:
-        inside = ~inside
-
-    positions = positions[inside]
-    if colors is not None:
-        colors = colors[inside]
-    if intensity is not None:
-        intensity = intensity[inside]
-
     return _pack_pointcloud_response(positions, colors, intensity)
 
 
@@ -7837,96 +7784,6 @@ def _evict_octree_cache(max_bytes: int, keep: Optional[_Path] = None) -> List[st
     return evicted
 
 
-class ConvertToOctreeRequest(BaseModel):
-    """Request a Potree 2.0 octree build for a source point cloud.
-
-    `source_path` may be an XYZ-family ASCII file (xyz/txt/csv/pts/asc) or
-    a LAS/LAZ file. The result is cached at
-    `_octree_cache_dir(source_path, ascii_format, column_plan)` and re-served on
-    subsequent calls without re-running the converter. `column_plan`, when
-    present, is the import wizard's explicit column layout (ASCII only) and
-    participates in the cache key so distinct plans don't collide."""
-    source_path: str
-    ascii_format: Optional[str] = None
-    column_plan: Optional[ColumnPlan] = None
-
-
-@app.post("/api/pointcloud/convert_to_octree")
-async def convert_to_octree(request: ConvertToOctreeRequest):
-    source_path = _Path(request.source_path).expanduser()
-    if not source_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
-
-    cache_key = _octree_cache_key(str(source_path), request.ascii_format, request.column_plan)
-    cache_dir = _octree_cache_root() / cache_key
-
-    cached = cache_dir / "metadata.json"
-    if cached.is_file():
-        meta = _read_octree_metadata(cache_dir)
-        return {
-            "cache_id": cache_key,
-            "cache_dir": str(cache_dir),
-            "cached": True,
-            **meta,
-        }
-
-    # Build into a sibling temp dir, then atomically rename. Prevents a
-    # partial directory from satisfying the cache check if the process
-    # crashes mid-conversion.
-    cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = cache_dir.parent / (cache_key + ".staging")
-    if staging_dir.exists():
-        _shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True)
-
-    try:
-        las_path, las_is_temp, extra_dims = _source_to_las(source_path, request.ascii_format, staging_dir, request.column_plan)
-        try:
-            _run_potree_converter(las_path, staging_dir)
-        finally:
-            if las_is_temp:
-                try:
-                    las_path.unlink()
-                except FileNotFoundError:
-                    pass
-
-        # Persist the slug→label sidecar into staging so it travels with the
-        # atomic rename and survives subsequent cache hits.
-        _write_octree_labels(staging_dir, extra_dims)
-
-        if cache_dir.exists():
-            _shutil.rmtree(cache_dir)
-        staging_dir.rename(cache_dir)
-    except Exception:
-        # Best-effort cleanup; let the original exception propagate.
-        try:
-            _shutil.rmtree(staging_dir)
-        except (FileNotFoundError, OSError):
-            pass
-        raise
-
-    meta = _read_octree_metadata(cache_dir)
-
-    # Trim oldest-accessed cache entries if we're over the cap. Never evicts
-    # the entry we just created (it's the freshest by definition, but pass
-    # it explicitly so an under-cap-but-near-cap state can't drop it).
-    try:
-        max_bytes = int(_os.environ.get(
-            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES",
-            _DEFAULT_OCTREE_CACHE_MAX_BYTES,
-        ))
-    except ValueError:
-        max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
-    _evict_octree_cache(max_bytes, keep=cache_dir)
-
-    return {
-        "cache_id": cache_key,
-        "cache_dir": str(cache_dir),
-        "cached": False,
-        **meta,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Import-wizard preview
 # ---------------------------------------------------------------------------
@@ -8458,37 +8315,65 @@ def _squares_union_mask(
     return mask
 
 
-def _crop_octree_cache_key(
-    source_path: str,
-    ascii_format: Optional[str],
-    region: Optional[dict],
-    scalar_filters: Optional[List[dict]],
-    translation: Optional[List[float]],
-    invert_all: bool = False,
-) -> str:
-    """Cache key for a crop_octree result.
+def _region_mask(positions: "np.ndarray", region: Optional[dict]) -> "np.ndarray":
+    """Spatial keep-mask for already-materialised Nx3 world positions.
 
-    Folds the source-octree cache key (so source-file edits invalidate) with
-    a canonical region + scalar filters + invert_all + translation. A second
-    crop with identical params returns the same cache_id and reuses the prior
-    octree byte-for-byte. A missing region hashes to "" — identical to the
-    prior region-only keying for region-only requests. invert_all is folded in
-    so the "kept" and "leftover" (segment) calls — identical except for that
-    flag — don't collide on one cache dir.
+    Supports box / polygon / squares_union regions over a whole positions
+    array at once, so the cloud session can mask its in-memory points.
+    `region["invert"]` flips the spatial mask. `region` is None → keep all
+    (all-True).
+
+    Positions are world-space (translation already applied by the caller). For
+    polygon/squares_union the camera matrices and canvas come from `region`,
+    matching the renderer's frozen-camera preview. Returns a bool ndarray of
+    length N.
     """
-    base = _octree_cache_key(source_path, ascii_format)
-    h = _hashlib.sha1()
-    h.update(b"crop|")
-    h.update(base.encode())
-    h.update(b"\x00")
-    h.update((_canonical_region(region) if region else "").encode())
-    h.update(b"\x00")
-    h.update(_canonical_scalar_filters(scalar_filters).encode())
-    h.update(b"\x00")
-    h.update(b"1" if invert_all else b"0")
-    h.update(b"\x00")
-    h.update(_canonical_translation(translation).encode())
-    return h.hexdigest()
+    n = positions.shape[0]
+    if region is None:
+        return np.ones(n, dtype=bool)
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+
+    kind = region.get("kind")
+    if kind == "box":
+        cmin = np.asarray(region["min"], dtype=np.float64)
+        cmax = np.asarray(region["max"], dtype=np.float64)
+        xs, ys, zs = positions[:, 0], positions[:, 1], positions[:, 2]
+        mask = (
+            (xs >= cmin[0]) & (xs <= cmax[0]) &
+            (ys >= cmin[1]) & (ys <= cmax[1]) &
+            (zs >= cmin[2]) & (zs <= cmax[2])
+        )
+    elif kind == "polygon":
+        proj = np.asarray(region["projection"], dtype=np.float64)
+        view = np.asarray(region["view"], dtype=np.float64)
+        canvas = region["canvas"]
+        polygon = np.asarray(region["points"], dtype=np.float64)
+        if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="region.points must be at least 3 [x, y] entries.",
+            )
+        pixels = _project_world_to_pixel(
+            positions, proj, view, int(canvas["width"]), int(canvas["height"]),
+        )
+        mask = _points_in_polygon_mask(pixels, polygon)
+    elif kind == "squares_union":
+        proj = np.asarray(region["projection"], dtype=np.float64)
+        view = np.asarray(region["view"], dtype=np.float64)
+        canvas = region["canvas"]
+        centers = np.asarray(region["centers"], dtype=np.float64)
+        half_sizes = np.asarray(region["half_sizes"], dtype=np.float64)
+        pixels = _project_world_to_pixel(
+            positions, proj, view, int(canvas["width"]), int(canvas["height"]),
+        )
+        mask = _squares_union_mask(pixels, centers, half_sizes)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
+
+    if bool(region.get("invert", False)):
+        mask = ~mask
+    return mask
 
 
 def _project_world_to_pixel(
@@ -8574,9 +8459,9 @@ def _points_in_polygon_mask(pixels: np.ndarray, polygon: np.ndarray) -> np.ndarr
 
 
 class CropOctreeRegion(BaseModel):
-    """Box, polygon, or sphere-union crop region for crop_octree. See
-    _canonical_region for validation rules — the request handler delegates to
-    that helper."""
+    """Box, polygon, or sphere-union spatial region for the cloud-session edit
+    endpoints (delete_region / filter / split / extract). See _canonical_region
+    for validation rules — the handlers delegate to that helper."""
     kind: str
     # Box fields
     min: Optional[List[float]] = None
@@ -8626,911 +8511,699 @@ class ScalarFilter(BaseModel):
     values: Optional[List[float]] = None
 
 
-class CropOctreeRequest(BaseModel):
-    """Re-convert a source point cloud into a Potree 2.0 octree after
-    applying a crop region and/or scalar-attribute filters (and optional
-    translation).
+# ===================== MUTABLE CLOUD SESSIONS (Family-1) =====================
+#
+# A cloud session holds an imported point cloud's positions in RAM as the
+# mutable source of truth (the "Family-1" in-core model). Deletions accumulate
+# as an exact per-point boolean mask plus the ordered list of delete regions
+# that produced it. The Potree octree becomes a *derived* on-disk cache: the
+# first one is built at session create, and a fresh one is rebuilt only on an
+# explicit "bake" (the one deliberately-slow step). Downstream compute ops read
+# `positions[~deleted]` straight from the session array instead of re-reading
+# the source file — see `_read_points_from_source`.
+#
+# Why store regions (not just the mask) for bake: the regions are the auditable
+# record of what was removed. The survivor LAS is written straight from the
+# in-RAM arrays by `_session_to_las` (colours + scalar extra-dims intact, no
+# second full copy held in RAM). The in-RAM `deleted` mask and the region replay
+# are kept in lock-step (both go through the shared `_region_mask`) so the array
+# the compute ops see and the baked octree always agree.
 
-    Behavior contract:
-      - Always operates on `source_path` (the immutable XYZ/LAS source),
-        never on a previously-cached octree. Crops compose by stacking
-        successive backend calls.
-      - `region` is optional. When omitted, no spatial crop is applied and
-        only `scalar_filters` (if any) constrain the survivors. The filter
-        tool sends scalar-only requests this way.
-      - `scalar_filters` are AND-combined with each other and with the
-        spatial region. The spatial `invert` flips only the spatial mask;
-        scalar filters are never inverted.
-      - `invert_all` inverts the ENTIRE combined mask (spatial AND scalars)
-        as the final step — the true complement of the kept set. The filter
-        tool's "Segment" action uses this to produce the leftover (out-of-
-        range) cloud: kept + leftover == the original, with nothing lost or
-        duplicated, regardless of how many filters are active. (The complement
-        of an AND is an OR, which per-filter inversion cannot express — hence a
-        single top-level flag.)
-      - `translation` is baked into positions BEFORE the region test,
-        matching the renderer's gizmo semantics.
-      - Cache key folds (source mtime, ascii_format, region, scalar_filters,
-        invert_all, translation). Identical requests return the same cache_id
-        byte-for-byte.
-      - Empty result (no points survive the filter) → HTTP 200 with
-        `point_count = 0` and `cached = False`. The renderer raises a
-        delete-confirmation rather than 4xx-ing on this.
+_cloud_sessions: Dict[str, "CloudSession"] = {}
+_cloud_session_lock = threading.Lock()
+
+
+@dataclass
+class CloudSession:
+    """An imported point cloud held in RAM as the COMPLETE source of truth.
+
+    The full attribute set — positions, colours, intensity, and every scalar
+    extra-dimension — lives in these arrays. The source FILE is read exactly
+    once (at create); after that every operation (delete/crop/erase, filter,
+    ground/tree segment, bake, downstream compute) reads or mutates these arrays
+    and never touches the file again. The Potree octree is a derived cache
+    rebuilt from the arrays on bake.
     """
-    source_path: str
-    ascii_format: Optional[str] = None
-    region: Optional[CropOctreeRegion] = None
-    scalar_filters: Optional[List[ScalarFilter]] = None
-    invert_all: bool = False
-    translation: Optional[List[float]] = None
+    session_id: str
+    source_path: str                 # provenance only — never re-read after create
+    ascii_format: Optional[str]
+    column_plan: Optional[Any]       # ColumnPlan | None (wizard layout, honored once)
+    positions: np.ndarray            # (N,3) float64 — full resolution
+    colors: Optional[np.ndarray]     # (N,3) uint16 (0-65535 LAS scale) | None
+    intensity: Optional[np.ndarray]  # (N,) uint16 | None
+    extras: Dict[str, np.ndarray]    # slug -> (N,) float32 scalar extra-dim columns
+    extra_dims_meta: List[dict]      # ordered [{slug, label}] for the octree sidecar
+    deleted: np.ndarray              # (N,) bool — True == deleted (hidden)
+    deleted_history: List[np.ndarray]  # mask snapshots, one per committed delete (undo)
+    octree_cache_id: Optional[str]   # currently-built derived octree, or None if stale
+    created_at: float
 
 
-def _filtered_xyz_to_las(
-    source_path: _Path,
-    ascii_format: Optional[str],
-    out_las: _Path,
-    region: Optional[dict],
-    translation: Optional[List[float]],
-    scalar_filters: Optional[List[dict]] = None,
-    invert_all: bool = False,
-) -> tuple[int, List[dict]]:
-    """Streaming variant of `_xyz_to_las` that applies a per-chunk filter mask
-    before writing each chunk to LAS. Same chunk-size memory bound; total
-    points written = sum of survivors across chunks.
+def _get_cloud_session(session_id: str) -> "CloudSession":
+    with _cloud_session_lock:
+        sess = _cloud_sessions.get(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"Cloud session not found: {session_id}")
+    return sess
 
-    The mask is the AND of:
-      - the spatial region (box or polygon), or all-True when `region` is
-        None. The region's `invert` flips only this spatial portion.
-      - each scalar filter: `min <= attribute <= max`, resolved from the
-        source column carrying that extra-dimension slug.
 
-    When `invert_all` is set, the final combined mask is complemented as the
-    last step — yielding exactly the points the un-inverted call would drop.
-    Used by the filter tool's "Segment" action for the leftover cloud.
+def _read_las_into_arrays(
+    las_path: _Path,
+) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, np.ndarray], List[dict]]:
+    """Read a LAS file fully into RAM as the session's source-of-truth arrays.
 
-    For polygon regions, projects each chunk's (x,y,z) through the frozen
-    camera matrices once per chunk; the mask is computed in NumPy so the
-    cost is bounded by chunk_rows × num_polygon_vertices.
-
-    Carries unmapped numeric columns as LAS extra dimensions exactly like
-    `_xyz_to_las`, so a cropped octree keeps its scalar attributes. Returns
-    (total_kept, extra_dims).
+    Returns (positions[N,3] float64, colors[N,3] uint16 | None,
+    intensity[N] uint16 | None, extras{slug: (N,) float32}, extra_dims_meta).
+    RGB/intensity are kept in LAS uint16 scale so the bake writer can round-trip
+    them byte-for-byte; extras are the float32 extra-dimension columns. This is
+    the ONE point where a normalised LAS is materialised into the session — used
+    by create after `_source_to_las` converts whatever the source format was.
     """
     import laspy
+    with laspy.open(str(las_path)) as reader:
+        las = reader.read()
+    positions = np.stack([np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)], axis=1).astype(np.float64)
+    dim_names = set(las.point_format.dimension_names)
+    colors = None
+    if {"red", "green", "blue"} <= dim_names:
+        colors = np.stack([
+            np.asarray(las.red, dtype=np.uint16),
+            np.asarray(las.green, dtype=np.uint16),
+            np.asarray(las.blue, dtype=np.uint16),
+        ], axis=1)
+    intensity = None
+    if "intensity" in dim_names and np.any(np.asarray(las.intensity)):
+        intensity = np.asarray(las.intensity, dtype=np.uint16)
+    extras: Dict[str, np.ndarray] = {}
+    extra_dims_meta: List[dict] = []
+    for d in las.point_format.extra_dimensions:
+        name = d.name
+        extras[name] = np.asarray(las[name], dtype=np.float32)
+        extra_dims_meta.append({"slug": name, "label": name})
+    return positions, colors, intensity, extras, extra_dims_meta
 
-    names, extra_dims = _xyz_column_plan(source_path, ascii_format)
 
-    has_xyz = all(role in names for role in ("x", "y", "z"))
-    if not has_xyz:
-        raise HTTPException(
-            status_code=400,
-            detail=f"ASCII format must include x/y/z. Got columns: {names}",
-        )
-    has_rgb = all(role in names for role in ("r255", "g255", "b255"))
-    intensity_role = next((r for r in ("intensity", "reflectance") if r in names), None)
-
-    # Resolve scalar filters to source columns up-front so a bad slug fails
-    # fast (rather than silently keeping all points). The slug is the
-    # extra-dimension name surfaced to the renderer as an octree attribute.
-    slug_to_col = {ed["slug"]: ed["col"] for ed in extra_dims}
-    resolved_scalar_filters: List[tuple] = []
-    for f in (scalar_filters or []):
-        col = slug_to_col.get(f["slug"])
-        if col is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Unknown scalar attribute: {f['slug']!r}. "
-                    f"Available: {sorted(slug_to_col)}"
-                ),
-            )
-        resolved_scalar_filters.append((col, *_resolve_scalar_filter(f)))
-
-    # Precompute region inputs once. region is None → no spatial crop.
-    kind = region["kind"] if region else None
-    invert = bool(region.get("invert", False)) if region else False
-    if kind == "box":
-        cmin = np.array(region["min"], dtype=np.float64)
-        cmax = np.array(region["max"], dtype=np.float64)
-    elif kind == "polygon":
-        proj = np.array(region["projection"], dtype=np.float64)
-        view = np.array(region["view"], dtype=np.float64)
-        canvas = region["canvas"]
-        canvas_w = int(canvas["width"])
-        canvas_h = int(canvas["height"])
-        polygon = np.array(region["points"], dtype=np.float64)
-        if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
-            raise HTTPException(
-                status_code=400,
-                detail="region.points must be at least 3 [x, y] entries.",
-            )
-    elif kind == "squares_union":
-        # Same frozen camera as polygon, plus the pixel-space square stamps.
-        proj = np.array(region["projection"], dtype=np.float64)
-        view = np.array(region["view"], dtype=np.float64)
-        canvas = region["canvas"]
-        canvas_w = int(canvas["width"])
-        canvas_h = int(canvas["height"])
-        square_centers = np.array(region["centers"], dtype=np.float64)
-        square_half_sizes = np.array(region["half_sizes"], dtype=np.float64)
-    elif kind is not None:
-        raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
-
-    tx, ty, tz = 0.0, 0.0, 0.0
-    if translation is not None:
-        tx = float(translation[0])
-        ty = float(translation[1])
-        tz = float(translation[2])
+def _session_to_las(sess: "CloudSession", out_las: _Path) -> int:
+    """Write the session's SURVIVING points (positions[~deleted] + all
+    attributes) to a LAS, entirely from the in-RAM arrays — no source file read.
+    Mirrors `_xyz_to_las`'s header/record layout so PotreeConverter ingests it
+    identically. Returns the survivor count.
+    """
+    import laspy
+    keep = ~sess.deleted
+    n = int(keep.sum())
 
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
     header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    for ed in extra_dims:
+    for ed in sess.extra_dims_meta:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
-    skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
-
-    chunk_rows = 2_000_000
-    total_kept = 0
-    # Track the actual extent of the kept points so we can write a header
-    # bounding box that PotreeConverter will accept. laspy's auto-computed
-    # header bbox can be one quantisation step too tight: at scale=0.001,
-    # a point landing exactly on the crop boundary (e.g. z=0.7) round-trips
-    # through the LAS reader as z=0.7000000000000001, which then sits one ULP
-    # outside the header's stated max. PotreeConverter refuses to ingest
-    # files where any point falls outside the declared bbox, so we pad the
-    # bbox we write by one full scale step (1 mm) on every axis.
-    data_min = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
-    data_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+    pos = sess.positions[keep]
+    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+    record.x = pos[:, 0]
+    record.y = pos[:, 1]
+    record.z = pos[:, 2]
+    if sess.colors is not None:
+        c = sess.colors[keep]
+        record.red, record.green, record.blue = c[:, 0], c[:, 1], c[:, 2]
+    if sess.intensity is not None:
+        record.intensity = sess.intensity[keep]
+    for ed in sess.extra_dims_meta:
+        record[ed["slug"]] = sess.extras[ed["slug"]][keep]
 
     with laspy.open(str(out_las), mode="w", header=header) as writer:
-        reader = pd.read_csv(
-            source_path,
-            sep=r"\s+",
-            header=None,
-            names=names,
-            usecols=[i for i, c in enumerate(names) if not _is_skip_name(c)],
-            comment="#",
-            skiprows=skiprows,
-            chunksize=chunk_rows,
-            engine="c",
-        )
-        for chunk in reader:
-            # Drop non-numeric/missing x/y/z rows (e.g. a .pts count-header
-            # line) before masking, mirroring `_xyz_to_las` and the flat loader.
-            chunk = chunk.dropna(subset=["x", "y", "z"])
-            n = len(chunk)
-            if n == 0:
-                continue
-            xs = chunk["x"].to_numpy(dtype=np.float64) + tx
-            ys = chunk["y"].to_numpy(dtype=np.float64) + ty
-            zs = chunk["z"].to_numpy(dtype=np.float64) + tz
-
-            if kind == "box":
-                mask = (
-                    (xs >= cmin[0]) & (xs <= cmax[0]) &
-                    (ys >= cmin[1]) & (ys <= cmax[1]) &
-                    (zs >= cmin[2]) & (zs <= cmax[2])
-                )
-            elif kind == "polygon":
-                positions = np.stack([xs, ys, zs], axis=1)
-                pixels = _project_world_to_pixel(
-                    positions, proj, view, canvas_w, canvas_h,
-                )
-                mask = _points_in_polygon_mask(pixels, polygon)
-            elif kind == "squares_union":
-                positions = np.stack([xs, ys, zs], axis=1)
-                pixels = _project_world_to_pixel(
-                    positions, proj, view, canvas_w, canvas_h,
-                )
-                mask = _squares_union_mask(pixels, square_centers, square_half_sizes)
-            else:
-                # No spatial region — keep all points spatially, then let the
-                # scalar filters below narrow the survivor set.
-                mask = np.ones(n, dtype=bool)
-
-            if invert:
-                mask = ~mask
-
-            # AND in each scalar filter after the spatial invert, so invert
-            # never flips the scalar constraints. Source extra dims are float32
-            # on disk (see add_extra_dim below), so filter on float32 values to
-            # keep survivors consistent with what gets written.
-            for col, lo, hi, value_set in resolved_scalar_filters:
-                vals = chunk[col].to_numpy(dtype=np.float32)
-                mask &= _scalar_filter_mask(vals, lo, hi, value_set)
-
-            # Complement the entire combined mask last — the true leftover set.
-            if invert_all:
-                mask = ~mask
-
-            kept = int(mask.sum())
-            if kept == 0:
-                continue
-
-            kept_xs = xs[mask]
-            kept_ys = ys[mask]
-            kept_zs = zs[mask]
-
-            data_min[0] = min(data_min[0], float(kept_xs.min()))
-            data_min[1] = min(data_min[1], float(kept_ys.min()))
-            data_min[2] = min(data_min[2], float(kept_zs.min()))
-            data_max[0] = max(data_max[0], float(kept_xs.max()))
-            data_max[1] = max(data_max[1], float(kept_ys.max()))
-            data_max[2] = max(data_max[2], float(kept_zs.max()))
-
-            record = laspy.ScaleAwarePointRecord.zeros(kept, header=header)
-            record.x = kept_xs
-            record.y = kept_ys
-            record.z = kept_zs
-            if has_rgb:
-                r = chunk["r255"].to_numpy(dtype=np.uint16)[mask] * 256
-                g = chunk["g255"].to_numpy(dtype=np.uint16)[mask] * 256
-                b = chunk["b255"].to_numpy(dtype=np.uint16)[mask] * 256
-                record.red = r
-                record.green = g
-                record.blue = b
-            if intensity_role is not None:
-                refl = chunk[intensity_role].to_numpy(dtype=np.float32)[mask]
-                record.intensity = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
-            for ed in extra_dims:
-                record[ed["slug"]] = chunk[ed["col"]].to_numpy(dtype=np.float32)[mask]
-            writer.write_points(record)
-            total_kept += kept
-
-        # Explicitly set the header bbox before the writer closes. Pad by
-        # one scale step on every axis so points sitting exactly on the
-        # crop boundary survive PotreeConverter's strict bbox check (see
-        # comment above).
-        if total_kept > 0:
-            pad = 0.001  # matches header.scales above
-            writer.header.mins = (data_min - pad).tolist()
-            writer.header.maxs = (data_max + pad).tolist()
-
-    return total_kept, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
+        writer.write_points(record)
+        if n > 0:
+            pad = 0.001  # matches header.scales — keeps boundary points in-bbox
+            writer.header.mins = (pos.min(axis=0) - pad).tolist()
+            writer.header.maxs = (pos.max(axis=0) + pad).tolist()
+    return n
 
 
-def _filtered_las_to_las(
-    source_las: _Path,
-    out_las: _Path,
-    region: Optional[dict],
-    translation: Optional[List[float]],
-    scalar_filters: Optional[List[dict]] = None,
-    invert_all: bool = False,
-) -> tuple[int, List[dict]]:
-    """LAS-source counterpart to `_filtered_xyz_to_las`: stream a LAS file in
-    chunks, apply the same combined mask, and write the survivors to a new LAS.
-
-    Used by `crop_octree` for any source that isn't XYZ-family ASCII — PLY/PCD
-    (first normalised to LAS by `_source_to_las`, which preserves PLY scalar
-    fields as extra dimensions) and native LAS/LAZ. The mask semantics match
-    `_filtered_xyz_to_las` exactly (spatial region AND scalar filters, with
-    `invert` flipping only the spatial part and `invert_all` complementing the
-    whole mask last) so crop/filter/segment behave identically across formats.
-
-    Scalar-filter slugs resolve against the source LAS's extra-dimension names.
-    Returns (total_kept, extra_dims) where extra_dims is the [{slug, label}]
-    list for the slug→label sidecar — slug == label for LAS dims.
-    """
-    import laspy
-
-    with laspy.open(str(source_las)) as probe:
-        src_header = probe.header
-        extra_names = [d.name for d in src_header.point_format.extra_dimensions]
-        has_rgb = {"red", "green", "blue"} <= set(src_header.point_format.dimension_names)
-    extra_dims = [{"slug": d, "label": d} for d in extra_names]
-
-    # Resolve scalar filters to source extra-dim names up-front (fail fast).
-    available = set(extra_names)
-    resolved_scalar_filters: List[tuple] = []
-    for f in (scalar_filters or []):
-        slug = f["slug"]
-        if slug not in available:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Unknown scalar attribute: {slug!r}. "
-                    f"Available: {sorted(available)}"
-                ),
-            )
-        resolved_scalar_filters.append((slug, *_resolve_scalar_filter(f)))
-
-    kind = region["kind"] if region else None
-    invert = bool(region.get("invert", False)) if region else False
-    if kind == "box":
-        cmin = np.array(region["min"], dtype=np.float64)
-        cmax = np.array(region["max"], dtype=np.float64)
-    elif kind == "polygon":
-        proj = np.array(region["projection"], dtype=np.float64)
-        view = np.array(region["view"], dtype=np.float64)
-        canvas = region["canvas"]
-        canvas_w = int(canvas["width"])
-        canvas_h = int(canvas["height"])
-        polygon = np.array(region["points"], dtype=np.float64)
-        if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
-            raise HTTPException(
-                status_code=400,
-                detail="region.points must be at least 3 [x, y] entries.",
-            )
-    elif kind == "squares_union":
-        proj = np.array(region["projection"], dtype=np.float64)
-        view = np.array(region["view"], dtype=np.float64)
-        canvas = region["canvas"]
-        canvas_w = int(canvas["width"])
-        canvas_h = int(canvas["height"])
-        square_centers = np.array(region["centers"], dtype=np.float64)
-        square_half_sizes = np.array(region["half_sizes"], dtype=np.float64)
-    elif kind is not None:
-        raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
-
-    tx = ty = tz = 0.0
-    if translation is not None:
-        tx, ty, tz = (float(translation[0]), float(translation[1]), float(translation[2]))
-
-    # Output header mirrors the XYZ path: point format 3, mm scale, extra dims
-    # re-declared so they survive into the cropped octree.
-    out_header = laspy.LasHeader(point_format=3, version="1.4")
-    out_header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    out_header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    for d in extra_names:
-        out_header.add_extra_dim(laspy.ExtraBytesParams(name=d, type=np.float32))
-
-    total_kept = 0
-    data_min = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
-    data_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
-
-    with laspy.open(str(source_las)) as reader, \
-            laspy.open(str(out_las), mode="w", header=out_header) as writer:
-        for points in reader.chunk_iterator(2_000_000):
-            n = len(points)
-            if n == 0:
-                continue
-            # laspy `.x/.y/.z` apply the source header's scale+offset, giving
-            # real-world coordinates — the same space the XYZ path filters in.
-            xs = np.asarray(points.x, dtype=np.float64) + tx
-            ys = np.asarray(points.y, dtype=np.float64) + ty
-            zs = np.asarray(points.z, dtype=np.float64) + tz
-
-            if kind == "box":
-                mask = (
-                    (xs >= cmin[0]) & (xs <= cmax[0]) &
-                    (ys >= cmin[1]) & (ys <= cmax[1]) &
-                    (zs >= cmin[2]) & (zs <= cmax[2])
-                )
-            elif kind == "polygon":
-                positions = np.stack([xs, ys, zs], axis=1)
-                pixels = _project_world_to_pixel(positions, proj, view, canvas_w, canvas_h)
-                mask = _points_in_polygon_mask(pixels, polygon)
-            elif kind == "squares_union":
-                positions = np.stack([xs, ys, zs], axis=1)
-                pixels = _project_world_to_pixel(positions, proj, view, canvas_w, canvas_h)
-                mask = _squares_union_mask(pixels, square_centers, square_half_sizes)
-            else:
-                mask = np.ones(n, dtype=bool)
-
-            if invert:
-                mask = ~mask
-            for slug, lo, hi, value_set in resolved_scalar_filters:
-                vals = np.asarray(points[slug], dtype=np.float32)
-                mask &= _scalar_filter_mask(vals, lo, hi, value_set)
-            if invert_all:
-                mask = ~mask
-
-            kept = int(mask.sum())
-            if kept == 0:
-                continue
-
-            kept_xs, kept_ys, kept_zs = xs[mask], ys[mask], zs[mask]
-            data_min = np.minimum(data_min, [kept_xs.min(), kept_ys.min(), kept_zs.min()])
-            data_max = np.maximum(data_max, [kept_xs.max(), kept_ys.max(), kept_zs.max()])
-
-            record = laspy.ScaleAwarePointRecord.zeros(kept, header=out_header)
-            record.x, record.y, record.z = kept_xs, kept_ys, kept_zs
-            if has_rgb:
-                record.red = np.asarray(points.red, dtype=np.uint16)[mask]
-                record.green = np.asarray(points.green, dtype=np.uint16)[mask]
-                record.blue = np.asarray(points.blue, dtype=np.uint16)[mask]
-            # intensity is a standard LAS dim; carry it straight through.
-            record.intensity = np.asarray(points.intensity, dtype=np.uint16)[mask]
-            for d in extra_names:
-                record[d] = np.asarray(points[d], dtype=np.float32)[mask]
-            writer.write_points(record)
-            total_kept += kept
-
-        if total_kept > 0:
-            pad = 0.001  # one scale step, matching _filtered_xyz_to_las
-            writer.header.mins = (data_min - pad).tolist()
-            writer.header.maxs = (data_max + pad).tolist()
-
-    return total_kept, extra_dims
-
-
-# Stable filename for the filtered/cropped LAS kept inside a crop_octree cache
-# dir. Persisting it (rather than deleting after PotreeConverter) lets the
-# resulting cloud's source point at it, so the NEXT crop/filter/segment composes
-# on the current point set instead of re-reading the original source. Same idea
-# as `_SEGMENTED_SOURCE_LAS_NAME` for the segment-apply endpoints.
-_CROPPED_SOURCE_LAS_NAME = "cropped_source.las"
-
-
-def _cropped_source_las(cache_dir: _Path) -> _Path:
-    """Path to the persisted filtered LAS inside a crop_octree cache dir."""
-    return cache_dir / _CROPPED_SOURCE_LAS_NAME
-
-
-@app.post("/api/pointcloud/crop_octree")
-async def crop_octree(request: CropOctreeRequest):
-    """Re-convert a source cloud into a new octree with a crop applied.
-
-    Why a fresh re-conversion rather than masking the streamed LOD nodes:
-    Potree 2.0 nodes are poisson-disk-sampled per level, so a render-time
-    mask only hides points — it cannot produce a correct full-resolution
-    cropped octree. Re-running PotreeConverter on the filtered source XYZ
-    is the only correct full-res apply, and the chunked filter keeps peak
-    backend memory bounded regardless of source size.
-    """
-    source_path = _Path(request.source_path).expanduser()
-    if not source_path.is_file():
-        raise HTTPException(
-            status_code=404, detail=f"Source file not found: {request.source_path}",
-        )
-
-    # Validate region shape up-front (the helper raises on malformed input);
-    # also produces the canonical string for cache keying. region is optional
-    # — a scalar-only filter request omits it.
-    region_dict = request.region.model_dump() if request.region else None
-    if region_dict is not None:
-        _canonical_region(region_dict)  # raises 400 on bad shape
-    scalar_filter_dicts = (
-        [f.model_dump() for f in request.scalar_filters]
-        if request.scalar_filters else None
-    )
-    if region_dict is None and not scalar_filter_dicts:
-        raise HTTPException(
-            status_code=400,
-            detail="crop_octree requires at least one of `region` or `scalar_filters`.",
-        )
-    _canonical_translation(request.translation)  # raises 400 on bad length
-
-    cache_key = _crop_octree_cache_key(
-        str(source_path), request.ascii_format, region_dict,
-        scalar_filter_dicts, request.translation, request.invert_all,
-    )
+def _build_octree_from_las(las_path: _Path, extra_dims_meta: List[dict]) -> tuple[str, _Path, dict]:
+    """Run PotreeConverter on a LAS and atomically install it into the octree
+    cache keyed by the LAS bytes' hash. Returns (cache_key, cache_dir, meta).
+    Shared by create (initial) and bake (post-edit) — both now feed a LAS that
+    was produced WITHOUT re-reading the source file at edit time."""
+    h = _hashlib.sha1()
+    with open(las_path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    cache_key = h.hexdigest()
     cache_dir = _octree_cache_root() / cache_key
 
-    cached = cache_dir / "metadata.json"
-    if cached.is_file():
-        meta = _read_octree_metadata(cache_dir)
-        return {
-            "cache_id": cache_key,
-            "cache_dir": str(cache_dir),
-            "cached": True,
-            "filtered_source_path": str(_cropped_source_las(cache_dir)),
-            **meta,
-        }
-
-    cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = cache_dir.parent / (cache_key + ".staging")
-    if staging_dir.exists():
-        _shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True)
-
-    try:
-        ext = source_path.suffix.lower().lstrip(".")
-        # Write the filtered LAS under a STABLE name and KEEP it in the cache dir
-        # (don't delete after PotreeConverter). It becomes the resulting cloud's
-        # source so the NEXT crop/filter/segment composes on the current point
-        # set, not the original — otherwise a second op re-reads the unfiltered
-        # source and dropped points reappear.
-        filtered_las = staging_dir / _CROPPED_SOURCE_LAS_NAME
-        if ext in _PANDAS_EXTENSIONS:
-            # ASCII source: stream-filter the text file directly via pandas.
-            kept, extra_dims = _filtered_xyz_to_las(
-                source_path, request.ascii_format, filtered_las,
-                region_dict, request.translation, scalar_filter_dicts,
-                request.invert_all,
-            )
-        elif ext in ("las", "laz") or ext == "ply" or ext == "pcd":
-            # Non-ASCII source: normalise to LAS first (PLY via plyfile keeps
-            # scalar fields, PCD via open3d is position+RGB, LAS/LAZ pass
-            # through), then apply the same chunked mask to that LAS.
-            src_las, src_is_temp, _ = _source_to_las(source_path, request.ascii_format, staging_dir)
-            try:
-                kept, extra_dims = _filtered_las_to_las(
-                    src_las, filtered_las,
-                    region_dict, request.translation, scalar_filter_dicts,
-                    request.invert_all,
-                )
-            finally:
-                if src_is_temp:
-                    try:
-                        src_las.unlink()
-                    except FileNotFoundError:
-                        pass
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported source extension for crop_octree: .{ext}",
-            )
-
-        if kept == 0:
-            # Empty crop — drop the staging dir and report 0 points without
-            # creating a cache entry (it would be a directory with just an
-            # empty LAS file and no metadata.json).
+    if not (cache_dir / "metadata.json").is_file():
+        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = cache_dir.parent / (cache_key + ".staging")
+        if staging_dir.exists():
             _shutil.rmtree(staging_dir)
-            return {
-                "cache_id": None,
-                "cache_dir": None,
-                "cached": False,
-                "filtered_source_path": None,
-                "version": "2.0",
-                "point_count": 0,
-                "spacing": 0.0,
-                "scale": [1.0, 1.0, 1.0],
-                "offset": [0.0, 0.0, 0.0],
-                "bounds": {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]},
-                "tight_bounds": {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]},
-                "attributes": [],
-            }
-
-        # Keep filtered_las in the staging/cache dir (see _CROPPED_SOURCE_LAS_NAME)
-        # so it can chain into the next operation.
-        _run_potree_converter(filtered_las, staging_dir)
-
-        # Persist the slug→label sidecar so the cropped octree keeps clean
-        # scalar picker labels (mirrors convert_to_octree).
-        _write_octree_labels(staging_dir, extra_dims)
-
-        if cache_dir.exists():
-            _shutil.rmtree(cache_dir)
-        staging_dir.rename(cache_dir)
-    except Exception:
+        staging_dir.mkdir(parents=True)
         try:
-            _shutil.rmtree(staging_dir)
-        except (FileNotFoundError, OSError):
-            pass
-        raise
+            _run_potree_converter(las_path, staging_dir)
+            _write_octree_labels(staging_dir, extra_dims_meta)
+            if cache_dir.exists():
+                _shutil.rmtree(cache_dir)
+            staging_dir.rename(cache_dir)
+        except Exception:
+            try:
+                _shutil.rmtree(staging_dir)
+            except (FileNotFoundError, OSError):
+                pass
+            raise
 
     meta = _read_octree_metadata(cache_dir)
+    return cache_key, cache_dir, meta
+
+
+class CloudSessionCreateRequest(BaseModel):
+    """Create a mutable cloud session from a source file and build its first
+    (derived) octree. `column_plan` is the import wizard's explicit layout and
+    is honored ONCE here, then carried for the life of the session so edits
+    never re-auto-detect columns (the import-wizard option-loss fix)."""
+    source_path: str
+    ascii_format: Optional[str] = None
+    column_plan: Optional[ColumnPlan] = None
+
+
+class DeleteRegionRequest(BaseModel):
+    """Mark points inside `region` as deleted on a cloud session. Instant: sets
+    the in-RAM mask; does NOT rebuild the octree. The renderer mirrors the
+    deletion on the GPU via its clip-volume stack, so the viewport updates
+    immediately."""
+    region: CropOctreeRegion
+
+
+@app.post("/api/cloud/session/create")
+async def create_cloud_session(request: CloudSessionCreateRequest):
+    """Load a source cloud FULLY into an in-RAM session (the complete source of
+    truth — positions + colours + intensity + every scalar extra-dim), build its
+    first octree, and return `{session_id, ...octree metadata}`. This is the ONLY
+    point the source FILE is read; every later edit/bake/op works on the arrays.
+
+    The source is normalised to a LAS once via `_source_to_las` (handling
+    XYZ/PLY/PCD/LAS/LAZ + the wizard column_plan uniformly), that LAS is read
+    into the session arrays AND fed to PotreeConverter for the first octree."""
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    import time
+    session_id = uuid.uuid4().hex[:8]
+
+    # Normalise to a LAS in a temp dir, read it fully into RAM, then build the
+    # octree from that same LAS. After this the file is never touched again.
+    import tempfile
+    with tempfile.TemporaryDirectory() as _tmp:
+        tmp_dir = _Path(_tmp)
+        las_path, las_is_temp, source_extra_dims = _source_to_las(
+            source_path, request.ascii_format, tmp_dir, request.column_plan,
+        )
+        positions, colors, intensity, extras, extra_dims_meta = _read_las_into_arrays(las_path)
+        # `_read_las_into_arrays` sets label==slug from the LAS header, which
+        # loses the wizard's custom labels. `_source_to_las` returns the proper
+        # [{slug, label}] (honoring the column_plan), so overlay those labels.
+        _label_by_slug = {ed["slug"]: ed.get("label", ed["slug"]) for ed in (source_extra_dims or [])}
+        for ed in extra_dims_meta:
+            ed["label"] = _label_by_slug.get(ed["slug"], ed["label"])
+        cache_key, cache_dir, meta = _build_octree_from_las(las_path, extra_dims_meta)
+        if las_is_temp:
+            try:
+                las_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    n = int(len(positions))
+    sess = CloudSession(
+        session_id=session_id,
+        source_path=str(source_path),
+        ascii_format=request.ascii_format,
+        column_plan=request.column_plan,
+        positions=positions,
+        colors=colors,
+        intensity=intensity,
+        extras=extras,
+        extra_dims_meta=extra_dims_meta,
+        deleted=np.zeros(n, dtype=bool),
+        deleted_history=[],
+        octree_cache_id=cache_key,
+        created_at=time.time(),
+    )
+    with _cloud_session_lock:
+        _cloud_sessions[session_id] = sess
+    meta = {"cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+
+    return {"session_id": session_id, "point_count": n, **meta}
+
+
+@app.post("/api/cloud/session/{session_id}/delete_region")
+async def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
+    """Set the per-point deleted mask for points inside `region`. No rebuild."""
+    sess = _get_cloud_session(session_id)
+    region_dict = request.region.model_dump()
+    _canonical_region(region_dict)  # validate shape (raises 400)
+
+    # `_region_mask` returns the spatial keep-mask (region invert already
+    # applied). The points to DELETE are exactly those the region selects —
+    # i.e. the True entries of the (un-inverted) selection. We OR them into the
+    # session's deleted mask so deletions accumulate.
+    with _cloud_session_lock:
+        select = _region_mask(sess.positions, region_dict)
+        sess.deleted |= select
+        # Record the post-delete mask snapshot so undo can pop back to it. We
+        # store the boolean mask per applied delete (cheap: 1 bit/point) rather
+        # than replaying regions, so undo is exact regardless of edit kind.
+        sess.deleted_history.append(sess.deleted.copy())
+        sess.octree_cache_id = None  # derived octree is now stale until bake
+        deleted_count = int(sess.deleted.sum())
+        total = int(len(sess.positions))
+
+    return {
+        "session_id": session_id,
+        "deleted_count": deleted_count,
+        "remaining_count": total - deleted_count,
+        "total_count": total,
+    }
+
+
+class ResetCloudEditsRequest(BaseModel):
+    """Undo. `edit_count` = how many committed deletes to KEEP; the mask is
+    restored to that snapshot in the history and later ones are discarded.
+    Omit to clear all deletions (edit_count = 0)."""
+    edit_count: Optional[int] = None
+
+
+@app.post("/api/cloud/session/{session_id}/reset_edits")
+async def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
+    """Restore the deleted mask to an earlier snapshot (undo)."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        k = 0 if request.edit_count is None else max(0, int(request.edit_count))
+        k = min(k, len(sess.deleted_history))
+        sess.deleted_history = sess.deleted_history[:k]
+        sess.deleted = (
+            sess.deleted_history[-1].copy() if k > 0
+            else np.zeros(len(sess.positions), dtype=bool)
+        )
+        sess.octree_cache_id = None
+        deleted_count = int(sess.deleted.sum())
+        total = int(len(sess.positions))
+    return {
+        "session_id": session_id,
+        "deleted_count": deleted_count,
+        "remaining_count": total - deleted_count,
+        "total_count": total,
+    }
+
+
+@app.post("/api/cloud/session/{session_id}/bake")
+async def bake_cloud_session(session_id: str):
+    """Permanently apply deletions by rebuilding the octree FROM THE IN-RAM
+    ARRAYS — the survivors (positions[~deleted] + colours + intensity + every
+    scalar extra-dim) are written to a LAS via `_session_to_las` and fed to
+    PotreeConverter. The source file is NOT read. Then the in-RAM arrays are
+    compacted to the survivors and the mask cleared. Returns the new octree
+    metadata. The deliberately-slow step (the PotreeConverter run).
+
+    No deletions → returns the current octree without rebuilding.
+    """
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        has_deletions = bool(sess.deleted.any())
+        survivors = int((~sess.deleted).sum())
+
+    # Everything deleted → nothing to bake. Don't feed a 0-point LAS to
+    # PotreeConverter (it exits non-zero). Report empty; the renderer raises a
+    # delete-confirmation. The mask is left intact (the cloud is still "all
+    # deleted" until the user removes it).
+    if survivors == 0:
+        return {"session_id": session_id, "point_count": 0, "baked": False}
+
+    if not has_deletions:
+        cache_dir = _octree_cache_root() / (sess.octree_cache_id or "")
+        if sess.octree_cache_id and (cache_dir / "metadata.json").is_file():
+            meta = _read_octree_metadata(cache_dir)
+            return {
+                "session_id": session_id, "point_count": int(len(sess.positions)),
+                "baked": False, "cache_id": sess.octree_cache_id,
+                "cache_dir": str(cache_dir), **meta,
+            }
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as _tmp:
+        las_path = _Path(_tmp) / "baked.las"
+        with _cloud_session_lock:
+            _session_to_las(sess, las_path)
+            extra_dims_meta = list(sess.extra_dims_meta)
+        cache_key, cache_dir, meta = _build_octree_from_las(las_path, extra_dims_meta)
+
+    # Compact the in-RAM arrays to the survivors and clear the mask + history, so
+    # the session's source of truth matches the baked octree and further edits
+    # start from the reduced set.
+    with _cloud_session_lock:
+        keep = ~sess.deleted
+        sess.positions = sess.positions[keep]
+        if sess.colors is not None:
+            sess.colors = sess.colors[keep]
+        if sess.intensity is not None:
+            sess.intensity = sess.intensity[keep]
+        for slug in list(sess.extras.keys()):
+            sess.extras[slug] = sess.extras[slug][keep]
+        sess.deleted = np.zeros(len(sess.positions), dtype=bool)
+        sess.deleted_history = []
+        sess.octree_cache_id = cache_key
+        remaining = int(len(sess.positions))
 
     try:
         max_bytes = int(_os.environ.get(
-            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES",
-            _DEFAULT_OCTREE_CACHE_MAX_BYTES,
+            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES", _DEFAULT_OCTREE_CACHE_MAX_BYTES,
         ))
     except ValueError:
         max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
     _evict_octree_cache(max_bytes, keep=cache_dir)
 
     return {
+        "session_id": session_id,
+        "point_count": remaining,
+        "baked": True,
         "cache_id": cache_key,
         "cache_dir": str(cache_dir),
-        "cached": False,
-        "filtered_source_path": str(_cropped_source_las(cache_dir)),
         **meta,
     }
 
 
-class SegmentGroundApplyRequest(BaseModel):
-    """Re-convert a source cloud into a new octree carrying a `ground_class`
-    scalar attribute (1=ground, 2=plant) computed by CSF.
+def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, values: np.ndarray) -> None:
+    """Append (or replace) a per-point scalar extra-dim column on the session
+    array. `values` is aligned to the SURVIVING points (positions[~deleted]);
+    it's scattered back to a full-length (N,) column with 0 for deleted rows so
+    every session array stays the same length. Caller holds the lock."""
+    full = np.zeros(len(sess.positions), dtype=np.float32)
+    full[~sess.deleted] = values.astype(np.float32)
+    sess.extras[slug] = full
+    if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
+        sess.extra_dims_meta.append({"slug": slug, "label": label})
 
-    Mirrors crop_octree's "derive points → write LAS with extra dims →
-    PotreeConverter → new octree ref" flow, but instead of masking points it
-    adds one extra dimension. CSF parameters are folded into the cache key so
-    re-running with the same params returns the cached octree byte-for-byte.
-    """
-    source_path: str
-    ascii_format: Optional[str] = None
+
+def _session_rebuild(sess: "CloudSession") -> tuple[str, _Path, dict]:
+    """Rebuild the session's derived octree FROM THE IN-RAM ARRAYS (survivors +
+    all attributes), update octree_cache_id, and return (cache_key, dir, meta).
+    No source file read. Caller must NOT hold the lock (PotreeConverter is slow);
+    this snapshots under the lock then converts outside it."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as _tmp:
+        las_path = _Path(_tmp) / "rebuilt.las"
+        with _cloud_session_lock:
+            _session_to_las(sess, las_path)
+            extra_dims_meta = list(sess.extra_dims_meta)
+        cache_key, cache_dir, meta = _build_octree_from_las(las_path, extra_dims_meta)
+    with _cloud_session_lock:
+        sess.octree_cache_id = cache_key
+    return cache_key, cache_dir, meta
+
+
+def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSession":
+    """Build a NEW session from the `keep` subset of `sess`'s SURVIVING points
+    (positions[~deleted][keep] + aligned attributes) and register it. The CALLER
+    MUST HOLD `_cloud_session_lock` — this reads `sess`'s arrays and inserts the
+    new session into the registry without taking the lock itself, so it can be
+    composed inside a larger locked critical section (e.g. split's commit). The
+    octree is NOT built here (caller rebuilds, outside the lock)."""
+    import time
+    surv = ~sess.deleted
+    new_id = uuid.uuid4().hex[:8]
+    new_sess = CloudSession(
+        session_id=new_id,
+        source_path=sess.source_path,  # provenance label only
+        ascii_format=sess.ascii_format,
+        column_plan=sess.column_plan,
+        positions=sess.positions[surv][keep].copy(),
+        colors=sess.colors[surv][keep].copy() if sess.colors is not None else None,
+        intensity=sess.intensity[surv][keep].copy() if sess.intensity is not None else None,
+        extras={k: v[surv][keep].copy() for k, v in sess.extras.items()},
+        extra_dims_meta=list(sess.extra_dims_meta),
+        deleted=np.zeros(int(keep.sum()), dtype=bool),
+        deleted_history=[],
+        octree_cache_id=None,
+        created_at=time.time(),
+    )
+    _cloud_sessions[new_id] = new_sess
+    return new_sess
+
+
+def _session_subset(sess: "CloudSession", keep: np.ndarray) -> "CloudSession":
+    """Lock-acquiring wrapper around `_session_subset_locked` for callers that do
+    NOT already hold the lock (e.g. `extract`)."""
+    with _cloud_session_lock:
+        return _session_subset_locked(sess, keep)
+
+
+class SessionSplitRequest(BaseModel):
+    """Split a session into the points a filter KEEPS (stay on this session) and
+    the points it EXCLUDES (a NEW leftover session). Operates entirely on the
+    in-RAM arrays — no source file read. Same predicate shape as the filter."""
+    region: Optional[CropOctreeRegion] = None
+    scalar_filters: Optional[List[ScalarFilter]] = None
+
+
+@app.post("/api/cloud/session/{session_id}/split")
+async def session_split(session_id: str, request: SessionSplitRequest):
+    """Keep the filter-passing points on this session; move the excluded points
+    to a NEW leftover session. Rebuilds both octrees from arrays. Returns
+    {kept: {...octree}, leftover: {session_id, ...octree}} (leftover null if
+    empty). No file read."""
+    sess = _get_cloud_session(session_id)
+    region_dict = request.region.model_dump() if request.region else None
+    if region_dict is not None:
+        _canonical_region(region_dict)
+    if region_dict is None and not request.scalar_filters:
+        raise HTTPException(status_code=400, detail="split requires `region` or `scalar_filters`.")
+
+    # Compute the keep-mask AND commit the leftover deletion under ONE lock, so
+    # the survivor snapshot used for the index scatter can't go stale against a
+    # concurrent edit on the same session (the leftover subset is built from the
+    # same snapshot before the lock is released for the slow rebuilds).
+    with _cloud_session_lock:
+        surv = ~sess.deleted
+        pos = sess.positions[surv]
+        keep = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
+        for f in (request.scalar_filters or []):
+            if f.slug not in sess.extras:
+                raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {f.slug!r}.")
+            lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
+            keep &= _scalar_filter_mask(sess.extras[f.slug][surv], lo, hi, value_set)
+
+        kept_count = int(keep.sum())
+        # Kept side empty → the filter would leave nothing on the parent. Don't
+        # commit or rebuild (0-point PotreeConverter would 500); report empty so
+        # the renderer raises a delete-confirmation. The session is untouched.
+        if kept_count == 0:
+            return {
+                "session_id": session_id,
+                "kept": {"point_count": 0, "cache_id": None, "cache_dir": None},
+                "leftover": None,
+            }
+
+        leftover_mask = ~keep
+        leftover = _session_subset_locked(sess, leftover_mask) if bool(leftover_mask.any()) else None
+        # Commit the leftover deletion on the parent using the SAME snapshot.
+        # Split is a non-undoable commit (renderer clears its erase undo stack),
+        # so reset the undo history to keep both sides in lock-step.
+        idx_surv = np.where(surv)[0]
+        sess.deleted[idx_surv[leftover_mask]] = True
+        sess.deleted_history = []
+        sess.octree_cache_id = None
+
+    leftover_meta = None
+    if leftover is not None:
+        lk, lcd, lmeta = _session_rebuild(leftover)
+        leftover_meta = {"session_id": leftover.session_id, "point_count": int(len(leftover.positions)),
+                         "cache_id": lk, "cache_dir": str(lcd), **lmeta}
+    kk, kcd, kmeta = _session_rebuild(sess)
+
+    return {
+        "session_id": session_id,
+        "kept": {"point_count": kept_count, "cache_id": kk, "cache_dir": str(kcd), **kmeta},
+        "leftover": leftover_meta,
+    }
+
+
+class SessionExtractRequest(BaseModel):
+    """Extract the points a spatial+scalar filter SELECTS into a NEW child
+    session, leaving the parent UNCHANGED. Operates on the in-RAM arrays — no
+    source file read. Used by 'split into clouds' workflows that keep the
+    classified parent and spin off per-class child clouds."""
+    region: Optional[CropOctreeRegion] = None
+    scalar_filters: Optional[List[ScalarFilter]] = None
+
+
+@app.post("/api/cloud/session/{session_id}/extract")
+async def session_extract(session_id: str, request: SessionExtractRequest):
+    """Create a NEW child session from the filter-selected points (parent
+    untouched). Returns {session_id, ...octree} or null if the selection is
+    empty. No source file read."""
+    sess = _get_cloud_session(session_id)
+    region_dict = request.region.model_dump() if request.region else None
+    if region_dict is not None:
+        _canonical_region(region_dict)
+    if region_dict is None and not request.scalar_filters:
+        raise HTTPException(status_code=400, detail="extract requires `region` or `scalar_filters`.")
+
+    with _cloud_session_lock:
+        surv = ~sess.deleted
+        pos = sess.positions[surv]
+        sel = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
+        for f in (request.scalar_filters or []):
+            if f.slug not in sess.extras:
+                raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {f.slug!r}.")
+            lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
+            sel &= _scalar_filter_mask(sess.extras[f.slug][surv], lo, hi, value_set)
+
+    if not bool(sel.any()):
+        return {"session_id": session_id, "extracted": None}
+    child = _session_subset(sess, sel)
+    ck, ccd, cmeta = _session_rebuild(child)
+    return {
+        "session_id": session_id,
+        "extracted": {"session_id": child.session_id, "point_count": int(len(child.positions)),
+                      "cache_id": ck, "cache_dir": str(ccd), **cmeta},
+    }
+
+
+class SessionGroundSegmentRequest(BaseModel):
+    """Run CSF ground segmentation on the session's in-RAM points and append a
+    `ground_class` scalar column (1=ground, 2=plant). No source file read."""
     cloth_resolution: float = 0.05
     rigidness: int = 3
     class_threshold: float = 0.02
     iterations: int = 500
     slope_smooth: bool = False
-    # When set (1=ground, 2=plant), keep ONLY points of that class — producing a
-    # split sub-cloud octree. None = classify in place (keep all points, add the
-    # ground_class attribute). Used by the "Split into ground + plant clouds" UI.
-    keep_class: Optional[int] = None
 
 
-# The on-disk slug / human label for the ground-classification scalar attribute.
+@app.post("/api/cloud/session/{session_id}/segment_ground")
+async def session_segment_ground(session_id: str, request: SessionGroundSegmentRequest):
+    """CSF on the in-RAM survivors → append `ground_class` → rebuild octree from
+    the arrays. No source file read."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        pts = sess.positions[~sess.deleted].copy()
+    if len(pts) < 10:
+        raise HTTPException(status_code=400, detail="Need at least 10 points for ground segmentation.")
+    try:
+        labels = segment_ground(
+            pts,
+            cloth_resolution=request.cloth_resolution,
+            rigidness=request.rigidness,
+            class_threshold=request.class_threshold,
+            iterations=request.iterations,
+            slope_smooth=request.slope_smooth,
+        )
+    except ImportError:
+        raise HTTPException(status_code=500, detail="CSF (cloth-simulation-filter) not installed.")
+    with _cloud_session_lock:
+        _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
+    cache_key, cache_dir, meta = _session_rebuild(sess)
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+
+
+class SessionTreeSegmentRequest(TreeSegmentationRequest):
+    """Run TreeIso on the session's in-RAM points and append a `tree_instance`
+    column. Inherits the TreeIso tuning fields; `points`/`source` are ignored."""
+    pass
+
+
+@app.post("/api/cloud/session/{session_id}/segment_trees")
+async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequest):
+    """TreeIso on the in-RAM survivors → append `tree_instance` → rebuild octree
+    from the arrays. No source file read."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        pts = sess.positions[~sess.deleted].copy()
+    if len(pts) > _TREEISO_MAX_POINTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tree segmentation is capped at {_TREEISO_MAX_POINTS:,} points; this cloud has {len(pts):,}. Crop or downsample first.",
+        )
+    seeds = (
+        np.asarray(request.seed_points, dtype=np.float64)
+        if request.seed_points else None
+    )
+    labels = segment_trees(pts, _treeiso_params(request), seeds=seeds)
+    with _cloud_session_lock:
+        _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, np.asarray(labels))
+    cache_key, cache_dir, meta = _session_rebuild(sess)
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+
+
+class SessionFilterRequest(BaseModel):
+    """Apply a spatial + scalar filter to the session by DELETING the points the
+    filter excludes (sets the deleted mask). Operates entirely on the in-RAM
+    arrays — no source file read. `region` keeps points inside it (invert to
+    flip); `scalar_filters` keep points whose attribute is in range/class. A
+    point survives iff it passes the region AND every scalar filter."""
+    region: Optional[CropOctreeRegion] = None
+    scalar_filters: Optional[List[ScalarFilter]] = None
+    # Rebuild the octree now (the filter is "applied permanently"). When False,
+    # only the mask is set (instant; bake later).
+    rebuild: bool = True
+
+
+@app.post("/api/cloud/session/{session_id}/filter")
+async def session_filter(session_id: str, request: SessionFilterRequest):
+    """Delete the points a spatial+scalar filter excludes, on the in-RAM arrays."""
+    sess = _get_cloud_session(session_id)
+    region_dict = request.region.model_dump() if request.region else None
+    if region_dict is not None:
+        _canonical_region(region_dict)
+    if region_dict is None and not request.scalar_filters:
+        raise HTTPException(status_code=400, detail="filter requires `region` or `scalar_filters`.")
+
+    with _cloud_session_lock:
+        # keep-mask over the SURVIVING points: region (defaults all-True) AND
+        # every scalar filter. Computed on survivors so a second filter composes
+        # on the current point set, not the original.
+        surv = ~sess.deleted
+        pos = sess.positions[surv]
+        keep = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
+        for f in (request.scalar_filters or []):
+            slug = f.slug
+            if slug not in sess.extras:
+                raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {slug!r}. Available: {sorted(sess.extras)}")
+            lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
+            keep &= _scalar_filter_mask(sess.extras[slug][surv], lo, hi, value_set)
+
+        kept_count = int(keep.sum())
+        total = int(len(sess.positions))
+        # Empty result: do NOT commit the deletion or rebuild (PotreeConverter
+        # can't ingest 0 points). The renderer raises a delete-confirmation.
+        if kept_count == 0:
+            return {"session_id": session_id, "point_count": 0, "rebuilt": False,
+                    "remaining_count": int(surv.sum()), "total_count": total}
+
+        # Commit: delete the filter-excluded survivors. Filter is presented as a
+        # non-undoable commit (the renderer clears its erase undo stack), so we
+        # reset the undo history to keep both sides in lock-step — a later
+        # erase-undo must not reach back across this filter.
+        idx_surv = np.where(surv)[0]
+        sess.deleted[idx_surv[~keep]] = True
+        sess.deleted_history = []
+        sess.octree_cache_id = None
+        remaining = int((~sess.deleted).sum())
+
+    if not request.rebuild:
+        return {"session_id": session_id, "remaining_count": remaining, "deleted_count": total - remaining, "total_count": total, "rebuilt": False}
+    cache_key, cache_dir, meta = _session_rebuild(sess)
+    return {"session_id": session_id, "point_count": remaining, "rebuilt": True, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+
+
+@app.delete("/api/cloud/session/{session_id}")
+async def delete_cloud_session(session_id: str):
+    """Free a cloud session's in-RAM arrays."""
+    with _cloud_session_lock:
+        existed = _cloud_sessions.pop(session_id, None) is not None
+    return {"session_id": session_id, "deleted": existed}
+
 GROUND_CLASS_SLUG = "ground_class"
 GROUND_CLASS_LABEL = "Ground Class"
-
-# Stable filename for the segmented LAS kept inside a segment-apply cache dir.
-# Ground and tree apply share the name — the cache dir is keyed per algorithm +
-# params, so they never collide. Persisting it lets a later Filter/Crop re-read a
-# source that carries the baked-in label (ground_class / tree_instance), which
-# the cloud's ORIGINAL sourceXyzPath does not.
-_SEGMENTED_SOURCE_LAS_NAME = "segmented_source.las"
-
-
-def _segmented_source_las(cache_dir: _Path) -> _Path:
-    """Path to the persisted segmented LAS inside a segment-apply cache dir."""
-    return cache_dir / _SEGMENTED_SOURCE_LAS_NAME
-
-
-def _segment_octree_cache_key(
-    source_path: str, ascii_format: Optional[str], csf_params: dict,
-    keep_class: Optional[int],
-) -> str:
-    """Cache key for a segment-apply result. Folds the source-octree key (so
-    source edits invalidate) with the canonical CSF parameter set and the
-    optional class filter."""
-    base = _octree_cache_key(source_path, ascii_format)
-    h = _hashlib.sha1()
-    h.update(b"segment_ground|")
-    h.update(base.encode())
-    h.update(b"\x00")
-    # Stable ordering of params for a deterministic key.
-    for k in sorted(csf_params):
-        h.update(f"{k}={csf_params[k]}".encode())
-        h.update(b"\x00")
-    h.update(f"keep={keep_class}".encode())
-    return h.hexdigest()
-
-
-def _segmented_xyz_to_las(
-    source_path: _Path,
-    ascii_format: Optional[str],
-    out_las: _Path,
-    csf_params: dict,
-    keep_class: Optional[int] = None,
-) -> tuple[int, List[dict]]:
-    """Load a full XYZ-family cloud, run CSF, and write a LAS carrying every
-    source scalar PLUS a `ground_class` extra dimension.
-
-    Unlike `_xyz_to_las` this is NOT chunked: CSF needs the whole cloud in
-    memory at once, and the per-point labels must align to the points written.
-    Returns (total_points, extra_dims) where extra_dims includes the carried
-    source scalars and the appended ground_class entry.
-    """
-    import laspy
-
-    names, extra_dims = _xyz_column_plan(source_path, ascii_format)
-
-    has_xyz = all(role in names for role in ("x", "y", "z"))
-    if not has_xyz:
-        raise HTTPException(
-            status_code=400,
-            detail=f"ASCII format must include x/y/z. Got columns: {names}",
-        )
-    has_rgb = all(role in names for role in ("r255", "g255", "b255"))
-    intensity_role = next((r for r in ("intensity", "reflectance") if r in names), None)
-
-    skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
-    df = pd.read_csv(
-        source_path,
-        sep=r"\s+",
-        header=None,
-        names=names,
-        usecols=[i for i, c in enumerate(names) if not _is_skip_name(c)],
-        comment="#",
-        skiprows=skiprows,
-        engine="c",
-    )
-
-    n = len(df)
-    if n < 10:
-        raise HTTPException(
-            status_code=400,
-            detail="Need at least 10 points for ground segmentation.",
-        )
-
-    xyz = np.column_stack([
-        df["x"].to_numpy(dtype=np.float64),
-        df["y"].to_numpy(dtype=np.float64),
-        df["z"].to_numpy(dtype=np.float64),
-    ])
-
-    try:
-        labels = segment_ground(xyz, **csf_params)
-    except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="CSF (cloth-simulation-filter) not installed. Run: pip install cloth-simulation-filter",
-        )
-
-    # Optional class filter for the split workflow: keep only points of one
-    # class. Mask everything (positions, scalars, labels) together so they stay
-    # aligned.
-    if keep_class is not None:
-        mask = labels == keep_class
-        if not mask.any():
-            raise HTTPException(
-                status_code=400,
-                detail=f"No points classified as class {keep_class}.",
-            )
-        df = df[mask].reset_index(drop=True)
-        xyz = xyz[mask]
-        labels = labels[mask]
-
-    n_out = len(xyz)
-    header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    for ed in extra_dims:
-        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
-    # Append the computed ground-classification dimension.
-    header.add_extra_dim(laspy.ExtraBytesParams(name=GROUND_CLASS_SLUG, type=np.float32))
-
-    record = laspy.ScaleAwarePointRecord.zeros(n_out, header=header)
-    record.x = xyz[:, 0]
-    record.y = xyz[:, 1]
-    record.z = xyz[:, 2]
-    if has_rgb:
-        record.red = df["r255"].to_numpy(dtype=np.uint16) * 256
-        record.green = df["g255"].to_numpy(dtype=np.uint16) * 256
-        record.blue = df["b255"].to_numpy(dtype=np.uint16) * 256
-    if intensity_role is not None:
-        refl = df[intensity_role].to_numpy(dtype=np.float32)
-        record.intensity = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
-    for ed in extra_dims:
-        record[ed["slug"]] = df[ed["col"]].to_numpy(dtype=np.float32)
-    record[GROUND_CLASS_SLUG] = labels.astype(np.float32)
-
-    with laspy.open(str(out_las), mode="w", header=header) as writer:
-        writer.write_points(record)
-        # Pad the bbox by one scale step so boundary points survive
-        # PotreeConverter's strict bbox check (see _filtered_xyz_to_las).
-        pad = 0.001
-        writer.header.mins = (xyz.min(axis=0) - pad).tolist()
-        writer.header.maxs = (xyz.max(axis=0) + pad).tolist()
-
-    carried = [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
-    carried.append({"slug": GROUND_CLASS_SLUG, "label": GROUND_CLASS_LABEL})
-    return n_out, carried
-
-
-@app.post("/api/segment/ground/apply")
-async def segment_ground_apply(request: SegmentGroundApplyRequest):
-    """Segment the source cloud and re-convert it to a new octree carrying a
-    `ground_class` scalar attribute the renderer can colour by.
-
-    Returns the same octree-ref shape as convert_to_octree / crop_octree
-    (cache_id + metadata + attributes), so the renderer swaps the cloud's
-    OctreeRef to the returned one.
-    """
-    source_path = _Path(request.source_path).expanduser()
-    if not source_path.is_file():
-        raise HTTPException(
-            status_code=404, detail=f"Source file not found: {request.source_path}",
-        )
-
-    ext = source_path.suffix.lower().lstrip(".")
-    if ext not in _PANDAS_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"segment_ground/apply currently supports XYZ-family sources only (got .{ext}).",
-        )
-
-    csf_params = {
-        "cloth_resolution": request.cloth_resolution,
-        "rigidness": request.rigidness,
-        "class_threshold": request.class_threshold,
-        "iterations": request.iterations,
-        "slope_smooth": request.slope_smooth,
-    }
-
-    if request.keep_class is not None and request.keep_class not in (
-        GROUND_CLASS_GROUND, GROUND_CLASS_PLANT,
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=f"keep_class must be {GROUND_CLASS_GROUND} (ground) or {GROUND_CLASS_PLANT} (plant).",
-        )
-
-    cache_key = _segment_octree_cache_key(
-        str(source_path), request.ascii_format, csf_params, request.keep_class,
-    )
-    cache_dir = _octree_cache_root() / cache_key
-
-    cached = cache_dir / "metadata.json"
-    if cached.is_file():
-        meta = _read_octree_metadata(cache_dir)
-        return {
-            "cache_id": cache_key, "cache_dir": str(cache_dir), "cached": True,
-            "segmented_source_path": str(_segmented_source_las(cache_dir)), **meta,
-        }
-
-    cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = cache_dir.parent / (cache_key + ".staging")
-    if staging_dir.exists():
-        _shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True)
-
-    try:
-        # The segmented LAS (source scalars + ground_class) is kept in the cache
-        # dir under a stable name so a later Filter/Crop can re-read a source that
-        # actually carries `ground_class` — crop_octree re-converts from the
-        # cloud's sourceXyzPath, and the ORIGINAL XYZ has no such column.
-        seg_las = staging_dir / _SEGMENTED_SOURCE_LAS_NAME
-        # carried = source scalars + the appended ground_class entry.
-        _, carried = _segmented_xyz_to_las(
-            source_path, request.ascii_format, seg_las, csf_params, request.keep_class,
-        )
-        _run_potree_converter(seg_las, staging_dir)
-
-        # Persist labels for ALL carried dims (source scalars + ground_class);
-        # _write_octree_labels overwrites the sidecar, so pass the full set.
-        _write_octree_labels(staging_dir, carried)
-
-        if cache_dir.exists():
-            _shutil.rmtree(cache_dir)
-        staging_dir.rename(cache_dir)
-    except Exception:
-        try:
-            _shutil.rmtree(staging_dir)
-        except (FileNotFoundError, OSError):
-            pass
-        raise
-
-    meta = _read_octree_metadata(cache_dir)
-
-    try:
-        max_bytes = int(_os.environ.get(
-            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES",
-            _DEFAULT_OCTREE_CACHE_MAX_BYTES,
-        ))
-    except ValueError:
-        max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
-    _evict_octree_cache(max_bytes, keep=cache_dir)
-
-    return {
-        "cache_id": cache_key, "cache_dir": str(cache_dir), "cached": False,
-        "segmented_source_path": str(_segmented_source_las(cache_dir)), **meta,
-    }
-
-
-# ---- Tree segmentation /apply (octree bake of tree_instance) ---------------
-# Mirrors the ground-segment apply trio above, swapping CSF for TreeIso and
-# `ground_class` for `tree_instance`. Supports `keep_instance` to extract a
-# single tree as a split sub-cloud, and `seed_points` for human-in-the-loop.
-
-class TreeSegmentationApplyRequest(BaseModel):
-    """Re-convert a source cloud into a new octree carrying a `tree_instance`
-    scalar attribute (0=unassigned, 1..N=trees) computed by TreeIso."""
-    source_path: str
-    ascii_format: Optional[str] = None
-    seed_points: Optional[List[List[float]]] = None
-    reg_strength1: float = 1.0
-    min_nn1: int = 5
-    decimate_res1: float = 0.05
-    reg_strength2: float = 15.0
-    min_nn2: int = 20
-    decimate_res2: float = 0.1
-    max_gap: float = 2.0
-    rel_height_length_ratio: float = 0.5
-    vertical_weight: float = 0.5
-    min_nn3: int = 20
-    score_candidate_thresh: float = 0.7
-    init_stem_rel_length_thresh: float = 1.5
-    max_outlier_gap: float = 3.0
-    # When set (1..N), keep ONLY points of that tree — a split sub-cloud octree.
-    keep_instance: Optional[int] = None
-
-
-def _segment_trees_octree_cache_key(
-    source_path: str, ascii_format: Optional[str], ti_params: dict,
-    seeds: Optional[list], keep_instance: Optional[int],
-) -> str:
-    """Cache key for a tree-segment-apply result (source key + TreeIso params +
-    seeds + the optional instance filter)."""
-    base = _octree_cache_key(source_path, ascii_format)
-    h = _hashlib.sha1()
-    h.update(b"segment_trees|")
-    h.update(base.encode())
-    h.update(b"\x00")
-    for k in sorted(ti_params):
-        h.update(f"{k}={ti_params[k]}".encode())
-        h.update(b"\x00")
-    if seeds:
-        for s in seeds:
-            h.update(("%.4f,%.4f,%.4f" % (s[0], s[1], s[2])).encode())
-            h.update(b"\x00")
-    h.update(f"keep={keep_instance}".encode())
-    return h.hexdigest()
-
 
 def _load_cloud_for_segmentation(
     source_path: _Path, ascii_format: Optional[str],
@@ -9644,228 +9317,6 @@ def _load_cloud_for_segmentation(
         detail=(f"segment_trees/apply: unsupported source extension .{ext}. "
                 f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS)}"),
     )
-
-
-def _tree_segmented_xyz_to_las(
-    source_path: _Path,
-    ascii_format: Optional[str],
-    out_las: _Path,
-    ti_params: dict,
-    seeds: Optional[np.ndarray],
-    keep_instance: Optional[int] = None,
-) -> tuple[int, List[dict], bool]:
-    """Load a full cloud (XYZ/PLY/PCD), run TreeIso, and write a LAS carrying
-    every source scalar (incl. benchmark `instance`/`semantic` from PLY) PLUS a
-    `tree_instance` extra dimension. Returns (total_points, extra_dims,
-    ground_warning) — extra_dims includes the appended tree_instance entry, and
-    ground_warning flags a likely un-removed ground surface."""
-    import laspy
-
-    xyz, scalars, extra_dims = _load_cloud_for_segmentation(source_path, ascii_format)
-
-    if len(xyz) < 10:
-        raise HTTPException(status_code=400, detail="Need at least 10 points to segment trees.")
-
-    # Drop non-finite points rather than letting NaN/inf reach TreeIso (cKDTree
-    # raises a cryptic error on them). Keep scalars aligned.
-    finite = np.isfinite(xyz).all(axis=1)
-    if not finite.all():
-        xyz = xyz[finite]
-        scalars = {k: v[finite] for k, v in scalars.items()}
-        if len(xyz) < 10:
-            raise HTTPException(
-                status_code=400,
-                detail="Fewer than 10 finite points after dropping NaN/inf coordinates.",
-            )
-
-    # TreeIso is a single-machine classical method; past a few million points it
-    # is very slow and memory-heavy. Refuse clearly rather than appear to hang.
-    if len(xyz) > _TREEISO_MAX_POINTS:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"{len(xyz):,} points exceeds the {_TREEISO_MAX_POINTS:,}-point limit "
-                f"for tree segmentation. Downsample or crop a sub-region first "
-                f"(TreeIso runs per-cloud on the CPU and is not built for this scale)."
-            ),
-        )
-
-    # Advisory: TreeIso assumes ground is already removed. Flag (don't block) a
-    # likely-un-removed ground surface so the apply path can warn like the inline
-    # endpoint does. Computed on the full cloud before TreeIso runs.
-    ground_warning = _looks_like_ground_present(xyz)
-
-    from treeiso.treeiso_core import TreeIsoParams
-    try:
-        labels = segment_trees(xyz, TreeIsoParams(**ti_params), seeds)
-    except ImportError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"TreeIso dependencies not installed ({e}). "
-                   "Run: pip install -r backend-api/requirements.txt",
-        )
-
-    if keep_instance is not None:
-        mask = labels == keep_instance
-        if not mask.any():
-            raise HTTPException(
-                status_code=400, detail=f"No points assigned to tree {keep_instance}.",
-            )
-        xyz = xyz[mask]
-        labels = labels[mask]
-        scalars = {k: v[mask] for k, v in scalars.items()}
-
-    has_rgb = all(c in scalars for c in ("r255", "g255", "b255"))
-    has_intensity = "intensity" in scalars
-
-    n_out = len(xyz)
-    header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    for ed in extra_dims:
-        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
-    header.add_extra_dim(laspy.ExtraBytesParams(name=TREE_INSTANCE_SLUG, type=np.float32))
-
-    record = laspy.ScaleAwarePointRecord.zeros(n_out, header=header)
-    record.x = xyz[:, 0]
-    record.y = xyz[:, 1]
-    record.z = xyz[:, 2]
-    if has_rgb:
-        record.red = scalars["r255"].astype(np.uint16) * 256
-        record.green = scalars["g255"].astype(np.uint16) * 256
-        record.blue = scalars["b255"].astype(np.uint16) * 256
-    if has_intensity:
-        record.intensity = np.clip(scalars["intensity"] * 256.0, 0, 65535).astype(np.uint16)
-    for ed in extra_dims:
-        record[ed["slug"]] = scalars[ed["slug"]].astype(np.float32)
-    record[TREE_INSTANCE_SLUG] = labels.astype(np.float32)
-
-    with laspy.open(str(out_las), mode="w", header=header) as writer:
-        writer.write_points(record)
-        pad = 0.001
-        writer.header.mins = (xyz.min(axis=0) - pad).tolist()
-        writer.header.maxs = (xyz.max(axis=0) + pad).tolist()
-
-    carried = [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
-    carried.append({"slug": TREE_INSTANCE_SLUG, "label": TREE_INSTANCE_LABEL})
-    return n_out, carried, ground_warning
-
-
-@app.post("/api/segment/trees/apply")
-async def segment_trees_apply(request: TreeSegmentationApplyRequest):
-    """Segment trees and re-convert the source cloud into a new octree carrying a
-    `tree_instance` scalar attribute. Same octree-ref response shape as
-    convert_to_octree / segment_ground_apply."""
-    source_path = _Path(request.source_path).expanduser()
-    if not source_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
-
-    ext = source_path.suffix.lower().lstrip(".")
-    if ext not in (_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS):
-        raise HTTPException(
-            status_code=400,
-            detail=(f"segment_trees/apply: unsupported source .{ext}. "
-                    f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS)}"),
-        )
-
-    ti_params = {
-        "reg_strength1": request.reg_strength1,
-        "min_nn1": request.min_nn1,
-        "decimate_res1": request.decimate_res1,
-        "reg_strength2": request.reg_strength2,
-        "min_nn2": request.min_nn2,
-        "decimate_res2": request.decimate_res2,
-        "max_gap": request.max_gap,
-        "rel_height_length_ratio": request.rel_height_length_ratio,
-        "vertical_weight": request.vertical_weight,
-        "min_nn3": request.min_nn3,
-        "score_candidate_thresh": request.score_candidate_thresh,
-        "init_stem_rel_length_thresh": request.init_stem_rel_length_thresh,
-        "max_outlier_gap": request.max_outlier_gap,
-    }
-    seeds_list = request.seed_points if request.seed_points else None
-    seeds_arr = np.asarray(seeds_list, dtype=np.float64) if seeds_list else None
-
-    cache_key = _segment_trees_octree_cache_key(
-        str(source_path), request.ascii_format, ti_params, seeds_list, request.keep_instance,
-    )
-    cache_dir = _octree_cache_root() / cache_key
-
-    if (cache_dir / "metadata.json").is_file():
-        meta = _read_octree_metadata(cache_dir)
-        return {
-            "cache_id": cache_key, "cache_dir": str(cache_dir), "cached": True,
-            "segmented_source_path": str(_segmented_source_las(cache_dir)),
-            # Advisory only; not recomputed on cache hit (user saw it on first run).
-            "ground_warning": False, **meta,
-        }
-
-    cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = cache_dir.parent / (cache_key + ".staging")
-    if staging_dir.exists():
-        _shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True)
-
-    try:
-        # Kept in the cache dir so a later Filter/Crop on `tree_instance` re-reads
-        # this LAS (which carries the label) instead of the original source. See
-        # segment_ground_apply for the same rationale.
-        seg_las = staging_dir / _SEGMENTED_SOURCE_LAS_NAME
-        _, carried, ground_warning = _tree_segmented_xyz_to_las(
-            source_path, request.ascii_format, seg_las, ti_params, seeds_arr, request.keep_instance,
-        )
-        _run_potree_converter(seg_las, staging_dir)
-        _write_octree_labels(staging_dir, carried)
-        if cache_dir.exists():
-            _shutil.rmtree(cache_dir)
-        staging_dir.rename(cache_dir)
-    except Exception:
-        try:
-            _shutil.rmtree(staging_dir)
-        except (FileNotFoundError, OSError):
-            pass
-        raise
-
-    meta = _read_octree_metadata(cache_dir)
-    try:
-        max_bytes = int(_os.environ.get(
-            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES", _DEFAULT_OCTREE_CACHE_MAX_BYTES,
-        ))
-    except ValueError:
-        max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
-    _evict_octree_cache(max_bytes, keep=cache_dir)
-
-    return {
-        "cache_id": cache_key, "cache_dir": str(cache_dir), "cached": False,
-        "segmented_source_path": str(_segmented_source_las(cache_dir)),
-        "ground_warning": ground_warning, **meta,
-    }
-
-
-@app.get("/api/pointcloud/octree_metadata")
-async def get_octree_metadata(cache_id: str):
-    """Read metadata for a previously-converted octree by cache id.
-
-    The renderer calls this once when constructing an OctreePointCloud
-    primitive to learn the bounds / point count / attribute layout. The
-    actual hierarchy.bin and octree.bin are streamed by the renderer
-    through the Electron main-process `app://octree/<cache_id>/...`
-    protocol, not through this server.
-    """
-    # Disallow path traversal; cache ids are sha1 hex.
-    if not all(c in "0123456789abcdef" for c in cache_id) or len(cache_id) != 40:
-        raise HTTPException(status_code=400, detail="cache_id must be a sha1 hex string")
-
-    cache_dir = _octree_cache_root() / cache_id
-    if not cache_dir.is_dir():
-        raise HTTPException(status_code=404, detail=f"Octree cache miss: {cache_id}")
-
-    meta = _read_octree_metadata(cache_dir)
-    return {
-        "cache_id": cache_id,
-        "cache_dir": str(cache_dir),
-        **meta,
-    }
 
 
 # ==================== Cloud-to-Mesh Distance Comparison ====================

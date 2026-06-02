@@ -3,7 +3,7 @@ import type { PointCloudData, ScalarField } from './pointCloudTypes';
 import {
   importPointCloudByPath,
   importPointCloudLasLaz,
-  convertToOctree,
+  createCloudSession,
   type OctreeMetadata,
   type ColumnPlan,
 } from '../utils/backendApi';
@@ -787,8 +787,13 @@ export async function parsePointCloudFromPath(
   const ext = name.toLowerCase().split('.').pop() ?? '';
 
   if (OCTREE_PATH_EXTENSIONS.has(ext)) {
-    const meta = await convertToOctree(path, asciiFormat ?? null, columnPlan ?? null);
-    return buildPointCloudFromOctree(meta, path, name, asciiFormat, columnPlan, categoricalAttributes);
+    // Editable octree flow: load into a mutable backend session (positions held
+    // in RAM as the source of truth) and stream its derived octree. Crop/erase
+    // then route through delete_region; downstream ops read the masked array.
+    const meta = await createCloudSession(path, asciiFormat ?? null, columnPlan ?? null);
+    return buildPointCloudFromOctree(
+      meta, path, name, asciiFormat, columnPlan, categoricalAttributes, meta.session_id,
+    );
   }
 
   if (BACKEND_PATH_EXTENSIONS.has(ext)) {
@@ -818,6 +823,7 @@ export function buildPointCloudFromOctree(
   asciiFormat?: string | null,
   columnPlan?: ColumnPlan | null,
   categoricalAttributes?: string[],
+  sessionId?: string | null,
 ): PointCloudData {
   // Prefer the tight data extent over the cube-padded octree bounds.
   // Crop-box init, fit-to-bounds camera framing, and the bounds shown in
@@ -855,6 +861,7 @@ export function buildPointCloudFromOctree(
     octree: {
       cacheId: meta.cache_id,
       sourceXyzPath,
+      sessionId: sessionId ?? null,
       asciiFormat: asciiFormat ?? null,
       attributeRanges,
       attributeLabels,

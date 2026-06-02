@@ -14,6 +14,11 @@ export interface BackendPointSource {
   max_points?: number | null;     // stride-downsample cap; omit/null = full res
   translation?: [number, number, number] | null;  // ADDED to every point
   want_colors?: boolean;
+  // When set, points come from a live cloud session's in-RAM array with its
+  // per-point deletions already applied — NOT from `source_path` on disk. This
+  // is how downstream ops honor unbaked deletions without a rebuild. The
+  // backend ignores `source_path` (kept for provenance) when this is present.
+  session_id?: string | null;
 }
 
 // ==================== TRIANGULATION API ====================
@@ -144,25 +149,6 @@ export interface GroundSegmentationResponse {
   error?: string;
 }
 
-/**
- * Apply ground segmentation and re-convert the source cloud into a new octree
- * carrying a `ground_class` scalar attribute (1=ground, 2=plant) the renderer
- * can colour by. Returns the same octree-ref shape as `convertToOctree` /
- * `cropOctree`; the caller swaps the cloud's OctreeRef to the returned one.
- */
-export interface GroundSegmentationApplyRequest {
-  source_path: string;
-  ascii_format?: string | null;
-  cloth_resolution?: number;
-  rigidness?: number;
-  class_threshold?: number;
-  iterations?: number;
-  slope_smooth?: boolean;
-  // 1=ground, 2=plant → keep only that class (split sub-cloud). Omit to
-  // classify in place (all points, with the ground_class attribute).
-  keep_class?: number;
-}
-
 export async function segmentGround(
   request: GroundSegmentationRequest
 ): Promise<GroundSegmentationResponse> {
@@ -186,33 +172,6 @@ export async function segmentGround(
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Ground segmentation failed:', error);
-    throw error;
-  }
-}
-
-export async function segmentGroundApply(
-  request: GroundSegmentationApplyRequest
-): Promise<SegmentApplyMetadata> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes (CSF + re-convert)
-
-  try {
-    const response = await fetch(`${baseUrl}/api/segment/ground/apply`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as SegmentApplyMetadata;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Ground segmentation apply failed:', error);
     throw error;
   }
 }
@@ -257,32 +216,6 @@ export interface TreeSegmentationResponse {
   error?: string;
 }
 
-/**
- * Apply tree segmentation and re-convert the source cloud into a new octree
- * carrying a `tree_instance` scalar attribute (0 = unassigned, 1..N = trees) the
- * renderer can colour by. Mirrors `segmentGroundApply`; `keep_instance` extracts
- * a single tree as a sub-cloud.
- */
-export interface TreeSegmentationApplyRequest {
-  source_path: string;
-  ascii_format?: string | null;
-  seed_points?: number[][];
-  reg_strength1?: number;
-  min_nn1?: number;
-  decimate_res1?: number;
-  reg_strength2?: number;
-  min_nn2?: number;
-  decimate_res2?: number;
-  max_gap?: number;
-  rel_height_length_ratio?: number;
-  vertical_weight?: number;
-  min_nn3?: number;
-  score_candidate_thresh?: number;
-  init_stem_rel_length_thresh?: number;
-  max_outlier_gap?: number;
-  keep_instance?: number;   // 1..N → keep only that tree (split sub-cloud)
-}
-
 export async function segmentTrees(
   request: TreeSegmentationRequest
 ): Promise<TreeSegmentationResponse> {
@@ -306,33 +239,6 @@ export async function segmentTrees(
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Tree segmentation failed:', error);
-    throw error;
-  }
-}
-
-export async function segmentTreesApply(
-  request: TreeSegmentationApplyRequest
-): Promise<SegmentApplyMetadata> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes (TreeIso + re-convert)
-
-  try {
-    const response = await fetch(`${baseUrl}/api/segment/trees/apply`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as SegmentApplyMetadata;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Tree segmentation apply failed:', error);
     throw error;
   }
 }
@@ -1418,67 +1324,6 @@ export async function importTexturedMesh(filePath: string): Promise<MeshImportRe
   }
 }
 
-// Crop a point cloud on the backend rather than in the renderer's JS heap.
-// Same on-disk path the importer uses (renderer keeps it in
-// `Scan.sourcePath`); same PHX1 binary response. The backend reads the
-// original file, applies an AABB filter with NumPy, and streams the
-// kept points back.
-//
-// Moving this off the renderer keeps a multi-million-point apply from
-// hitting V8's 4 GB old-space ceiling — the renderer used to allocate
-// peak ~3+ GB of throwaway typed arrays for a single apply on a
-// 28M-point scan with RGB + intensity, and OOM'd. Backend memory is
-// only bound by host RAM.
-//
-// `crop_min` / `crop_max` are world-space AABB bounds. If `translation`
-// is provided, the backend bakes it into the cloud's positions before
-// the AABB test — matching the in-renderer apply semantics where the
-// editState translation gets folded into the new cloud.data.
-export async function cropPointCloudByPath(
-  filePath: string,
-  opts: {
-    asciiFormat?: string | null;
-    cropMin: { x: number; y: number; z: number };
-    cropMax: { x: number; y: number; z: number };
-    cropInvert: boolean;
-    translation?: { x: number; y: number; z: number } | null;
-  },
-): Promise<ImportPointCloudByPathResult> {
-  const baseUrl = getBackendUrl();
-  // Generous timeout — NumPy on a 28M-point scan is fast (single seconds),
-  // but file IO can be slow on cold caches and we'd rather not bail.
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000);
-  try {
-    const response = await fetch(`${baseUrl}/api/pointcloud/crop_by_path`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        file_path: filePath,
-        ascii_format: opts.asciiFormat ?? null,
-        crop_min: [opts.cropMin.x, opts.cropMin.y, opts.cropMin.z],
-        crop_max: [opts.cropMax.x, opts.cropMax.y, opts.cropMax.z],
-        crop_invert: opts.cropInvert,
-        translation: opts.translation
-          ? [opts.translation.x, opts.translation.y, opts.translation.z]
-          : null,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    const buf = await response.arrayBuffer();
-    return decodePointCloudBinary(buf);
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Point-cloud crop-by-path failed:', error);
-    throw error;
-  }
-}
-
 // 32-byte header: 4s magic, I count, B has_colors, B has_intensity, 22x reserved.
 const POINTCLOUD_BIN_HEADER_SIZE = 32;
 const POINTCLOUD_BIN_MAGIC = 'PHX1';
@@ -1836,59 +1681,8 @@ export interface OctreeMetadata {
 }
 
 /**
- * `OctreeMetadata` extended with the on-disk path of the segmented LAS the
- * apply baked the label into (ground_class / tree_instance). The renderer uses
- * it as the new cloud's `sourceXyzPath` so a later Filter/Crop re-reads a source
- * that carries the label — the original XYZ source does not. See
- * `segment_ground_apply` / `segment_trees_apply` in the backend.
- */
-export interface SegmentApplyMetadata extends OctreeMetadata {
-  segmented_source_path: string;
-}
-
-/**
- * Triggers a Potree 2.0 octree build on the backend for an XYZ-family source
- * file. The backend caches by sha1(sourcePath + mtime + asciiFormat) — repeat
- * calls hit the cache and return immediately. The renderer streams tiles via
- * the custom `app://octree/<cache_id>/...` protocol after this returns.
- *
- * Timeout: 5 minutes. A typical 13M-point Helios scan converts in ~7s; a
- * 100M-point synthetic cloud would still finish comfortably under the cap.
- */
-export async function convertToOctree(
-  filePath: string,
-  asciiFormat?: string | null,
-  columnPlan?: ColumnPlan | null,
-): Promise<OctreeMetadata> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
-  try {
-    const response = await fetch(`${baseUrl}/api/pointcloud/convert_to_octree`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        source_path: filePath,
-        ascii_format: asciiFormat ?? null,
-        column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as OctreeMetadata;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('convert_to_octree failed:', error);
-    throw describeBackendError(error, 'Import');
-  }
-}
-
-/**
- * Crop region accepted by `cropOctree`. Either an axis-aligned box or a
+ * Crop region accepted by the cloud-session filter/split/extract ops. Either an
+ * axis-aligned box or a
  * screen-space polygon with frozen camera matrices (so the backend can
  * reproject the source points without needing a live camera).
  */
@@ -1917,7 +1711,7 @@ export type CropOctreeRegion =
       // are the squares' half-extents in pixels.
       kind: 'squares_union';
       centers: Array<[number, number]>;
-      // snake_case to match the backend field forwarded verbatim by cropOctree.
+      // snake_case to match the backend field forwarded verbatim to the session op.
       half_sizes: number[];
       projection: number[];                  // 16-element column-major matrix
       view: number[];                        // 16-element column-major matrix
@@ -1942,76 +1736,61 @@ export interface ScalarFilter {
   values?: number[];
 }
 
-/**
- * Response from `cropOctree`. Same shape as `OctreeMetadata` for non-empty
- * crops, except `cache_id` and `cache_dir` are `null` when the crop kept
- * zero points. Callers must check `point_count === 0` (renderer raises a
- * delete-confirmation in that case rather than 4xx-ing — the backend
- * returns HTTP 200 with the empty payload).
- */
-export interface CropOctreeResult {
-  cache_id: string | null;
-  cache_dir: string | null;
-  cached: boolean;
-  // On-disk path of the persisted filtered LAS (carrying the kept points with
-  // any scalar attributes). The renderer uses it as the resulting cloud's
-  // `sourceXyzPath` so the NEXT crop/filter/segment composes on the current
-  // point set, not the original source. `null` when the crop kept zero points.
-  filtered_source_path: string | null;
-  version: string;
+// ==================== MUTABLE CLOUD SESSIONS (Family-1) ====================
+//
+// A cloud session holds the imported cloud's positions in RAM on the backend
+// as the mutable source of truth. Deletions are an instant per-point mask
+// (delete_region) mirrored on the GPU by the renderer's clip-volume stack; the
+// Potree octree is a derived cache rebuilt only on bake. Downstream ops read
+// the masked array via PointSource.session_id (see buildPointSource).
+
+/** Metadata returned by the cloud-session endpoints — octree metadata plus the
+ * session id and current point count. `cache_id` is the derived octree the
+ * renderer streams; it changes on bake. */
+export interface CloudSessionMetadata extends OctreeMetadata {
+  session_id: string;
   point_count: number;
-  spacing: number;
-  scale: [number, number, number];
-  offset: [number, number, number];
-  bounds: { min: [number, number, number]; max: [number, number, number] };
-  tight_bounds: { min: [number, number, number]; max: [number, number, number] };
-  attributes: OctreeAttribute[];
+}
+
+/** Result of a delete_region / reset_edits call — counts only (no rebuild). */
+export interface CloudSessionEditResult {
+  session_id: string;
+  deleted_count: number;
+  remaining_count: number;
+  total_count: number;
+}
+
+/** Result of a bake — fresh octree metadata for the survivor set. `baked` is
+ * false when there were no pending deletions (the octree is unchanged). */
+export interface CloudSessionBakeResult extends OctreeMetadata {
+  session_id: string;
+  point_count: number;
+  baked: boolean;
 }
 
 /**
- * Re-convert an XYZ-family source into a new Potree 2.0 octree after
- * applying a crop region (and optional translation). The returned
- * `cache_id` is the renderer's hot-swap target — the old octree's `app://`
- * resources are released once nothing references the prior cache id.
- *
- * Box, polygon, and sphere-union regions are all backend-side: the renderer
- * never sees the filtered point set. The 5-minute timeout matches `convertToOctree`
- * (a 100M-point cloud's worst-case re-conversion still fits comfortably).
- *
- * Empty crops resolve with `cache_id === null` and `point_count === 0`;
- * the call does NOT throw.
+ * Load a source cloud into an in-RAM backend session and build its first
+ * (derived) octree for the editable octree flow:
+ * the returned `cache_id` streams to the GPU, but edits and
+ * downstream ops route through `session_id`. The wizard `columnPlan` is honored
+ * once here and carried for the life of the session (no re-auto-detect on edit).
  */
-export async function cropOctree(
-  sourcePath: string,
-  options: {
-    asciiFormat?: string | null;
-    // Spatial crop. Optional — omit for a scalar-only filter (at least one of
-    // `region` or `scalarFilters` must be present, enforced by the backend).
-    region?: CropOctreeRegion | null;
-    // Imported-scalar value filters, AND-combined with each other and with
-    // the region.
-    scalarFilters?: ScalarFilter[] | null;
-    // Invert the entire combined mask (spatial AND scalars) as the final step,
-    // yielding the complement/leftover set. Used by the filter tool's "Segment"
-    // action to produce the out-of-range cloud.
-    invertAll?: boolean;
-    translation?: [number, number, number] | null;
-  },
-): Promise<CropOctreeResult> {
+export async function createCloudSession(
+  filePath: string,
+  asciiFormat?: string | null,
+  columnPlan?: ColumnPlan | null,
+): Promise<CloudSessionMetadata> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 300000);
   try {
-    const response = await fetch(`${baseUrl}/api/pointcloud/crop_octree`, {
+    const response = await fetch(`${baseUrl}/api/cloud/session/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        source_path: sourcePath,
-        ascii_format: options.asciiFormat ?? null,
-        region: options.region ?? null,
-        scalar_filters: options.scalarFilters ?? null,
-        invert_all: options.invertAll ?? false,
-        translation: options.translation ?? null,
+        source_path: filePath,
+        ascii_format: asciiFormat ?? null,
+        column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
       }),
       signal: controller.signal,
     });
@@ -2020,27 +1799,283 @@ export async function cropOctree(
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
-    return (await response.json()) as CropOctreeResult;
+    return (await response.json()) as CloudSessionMetadata;
   } catch (error) {
     clearTimeout(timeoutId);
-    console.error('crop_octree failed:', error);
+    console.error('create_cloud_session failed:', error);
+    throw describeBackendError(error, 'Import');
+  }
+}
+
+/**
+ * Mark points inside `region` as deleted on a cloud session. Instant — sets the
+ * in-RAM mask and records the region for bake replay; does NOT rebuild the
+ * octree. The renderer mirrors the deletion on the GPU clip-volume stack so the
+ * viewport updates immediately. Returns counts only.
+ */
+export async function deleteCloudRegion(
+  sessionId: string,
+  region: CropOctreeRegion,
+): Promise<CloudSessionEditResult> {
+  const baseUrl = getBackendUrl();
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/delete_region`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ region }),
+      },
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionEditResult;
+  } catch (error) {
+    console.error('delete_cloud_region failed:', error);
     throw error;
   }
 }
 
 /**
- * Read metadata for a previously-converted octree. Used by the renderer when
- * it has only a cache id (e.g. after a project reload). For a fresh import,
- * `convertToOctree` already returns this same shape — no need to round-trip.
+ * Undo: restore the deleted mask to an earlier snapshot, keeping the first
+ * `editCount` committed deletes and discarding the rest. Omit `editCount` to
+ * clear all deletions. Returns counts only — no rebuild.
  */
-export async function getOctreeMetadata(cacheId: string): Promise<OctreeMetadata> {
+export async function resetCloudEdits(
+  sessionId: string,
+  editCount?: number,
+): Promise<CloudSessionEditResult> {
   const baseUrl = getBackendUrl();
-  const response = await fetch(
-    `${baseUrl}/api/pointcloud/octree_metadata?cache_id=${encodeURIComponent(cacheId)}`,
-  );
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/reset_edits`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ edit_count: editCount ?? null }),
+      },
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionEditResult;
+  } catch (error) {
+    console.error('reset_cloud_edits failed:', error);
+    throw error;
   }
-  return (await response.json()) as OctreeMetadata;
 }
+
+/**
+ * Permanently apply deletions: rebuild the octree from the survivors (one
+ * PotreeConverter run) and clear the mask. The deliberately-slow step. Returns
+ * the new octree metadata; `baked === false` when there were no deletions.
+ */
+export async function bakeCloudSession(
+  sessionId: string,
+): Promise<CloudSessionBakeResult> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/bake`,
+      { method: 'POST', signal: controller.signal },
+    );
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionBakeResult;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('bake_cloud_session failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Apply a spatial + scalar filter to a session by deleting the excluded points
+ * (operates on the in-RAM arrays; no source file read). `rebuild` true rebuilds
+ * the octree from the survivors and returns its metadata.
+ */
+export async function sessionFilter(
+  sessionId: string,
+  options: { region?: CropOctreeRegion | null; scalarFilters?: ScalarFilter[] | null; rebuild?: boolean },
+): Promise<CloudSessionBakeResult & { rebuilt: boolean }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/filter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        region: options.region ?? null,
+        scalar_filters: options.scalarFilters ?? null,
+        rebuild: options.rebuild ?? true,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionBakeResult & { rebuilt: boolean };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('session_filter failed:', error);
+    throw error;
+  }
+}
+
+/** Result of a session split: the kept side (this session) + an optional new
+ * leftover session, both with fresh octree metadata. Built entirely from the
+ * in-RAM arrays (no source file read). */
+export interface CloudSessionSplitResult {
+  session_id: string;
+  kept: OctreeMetadata & { point_count: number; cache_id: string };
+  leftover: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null;
+}
+
+/**
+ * Split a session by a spatial+scalar filter: keep the passing points on this
+ * session, move the excluded points to a NEW leftover session. Both octrees are
+ * rebuilt from the in-RAM arrays — no source file read.
+ */
+export async function sessionSplit(
+  sessionId: string,
+  options: { region?: CropOctreeRegion | null; scalarFilters?: ScalarFilter[] | null },
+): Promise<CloudSessionSplitResult> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/split`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        region: options.region ?? null,
+        scalar_filters: options.scalarFilters ?? null,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionSplitResult;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('session_split failed:', error);
+    throw error;
+  }
+}
+
+/** Extract the filter-selected points into a NEW child session, leaving the
+ * parent unchanged. Built from the in-RAM arrays — no source file read. Returns
+ * the child's octree metadata, or null `extracted` when the selection is empty. */
+export async function sessionExtract(
+  sessionId: string,
+  options: { region?: CropOctreeRegion | null; scalarFilters?: ScalarFilter[] | null },
+): Promise<{ session_id: string; extracted: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/extract`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ region: options.region ?? null, scalar_filters: options.scalarFilters ?? null }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('session_extract failed:', error);
+    throw error;
+  }
+}
+
+/** Run CSF ground segmentation on the session's in-RAM points, append a
+ * `ground_class` column, and rebuild the octree from the arrays (no file read). */
+export async function sessionSegmentGround(
+  sessionId: string,
+  params: { cloth_resolution?: number; rigidness?: number; class_threshold?: number; iterations?: number; slope_smooth?: boolean },
+): Promise<CloudSessionBakeResult> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/segment_ground`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionBakeResult;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('session_segment_ground failed:', error);
+    throw error;
+  }
+}
+
+/** Run TreeIso on the session's in-RAM points, append a `tree_instance` column,
+ * and rebuild the octree from the arrays (no file read). Pass TreeIso tuning. */
+export async function sessionSegmentTrees(
+  sessionId: string,
+  params: { [k: string]: number | number[][] | undefined; seed_points?: number[][] },
+): Promise<CloudSessionBakeResult> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 600000);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/segment_trees`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionBakeResult;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('session_segment_trees failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Free a cloud session's in-RAM arrays. Called when the user removes a cloud
+ * from the scene. Best-effort: never throws (a failed cleanup must not block
+ * the UI removal).
+ */
+export async function deleteCloudSession(sessionId: string): Promise<void> {
+  const baseUrl = getBackendUrl();
+  try {
+    await fetch(`${baseUrl}/api/cloud/session/${sessionId}`, { method: 'DELETE' });
+  } catch (error) {
+    console.warn('delete_cloud_session failed (ignored):', error);
+  }
+}
+

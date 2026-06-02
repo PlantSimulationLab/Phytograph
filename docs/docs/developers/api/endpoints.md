@@ -49,8 +49,7 @@ is defined.
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/segment/ground` | `main.py` | Classify points into ground (1) / plant (2) via the Cloth Simulation Filter. Takes inline `points` or a `source` descriptor (read at full resolution — no downsampling, so labels align 1:1). Returns per-point `labels` + counts |
-| POST | `/api/segment/ground/apply` | `main.py` | Run CSF and re-convert the source XYZ into a new Potree 2.0 octree carrying a `ground_class` extra-dimension attribute the renderer can colour by. With `keep_class` (1 or 2) it writes only that class's points — the "split into ground + plant clouds" path. Returns the octree-ref shape of `convert_to_octree` **plus** `segmented_source_path`: the persisted LAS (kept in the cache dir, carrying `ground_class`) the renderer uses as the new cloud's source, so a later Filter/Crop on `ground_class` re-reads a source that has the column rather than the original label-free XYZ |
+| POST | `/api/segment/ground` | `main.py` | Classify points into ground (1) / plant (2) via the Cloth Simulation Filter. Takes inline `points` or a `source` descriptor (read at full resolution — no downsampling, so labels align 1:1). Returns per-point `labels` + counts. Used for flat (in-memory) clouds; session clouds use `/api/cloud/session/{id}/segment_ground` instead |
 
 The classifier is the `cloth-simulation-filter` package (`import CSF`), a
 SWIG C-extension bundled via `collectAll` in `scripts/build-backend.mjs`.
@@ -59,8 +58,7 @@ SWIG C-extension bundled via `collectAll` in `scripts/build-backend.mjs`.
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/segment/trees` | `main.py` | Segment individual trees with **TreeIso** (cut-pursuit graph method, CPU-only). Takes inline `points` or a `source` descriptor (full resolution; labels align 1:1) and optional `seed_points` (trunk seeds for human-in-the-loop — each seed yields one tree). Returns per-point `labels` (`0` = unassigned, `1..N` = trees), `num_trees`, and a `ground_warning` flag. Labels-only: any ground-truth fields a source carries (e.g. a benchmark PLY's `instance`/`semantic`) are **not** echoed here — only `/apply` carries source scalars into the octree, and the eval harness reads GT straight from the file |
-| POST | `/api/segment/trees/apply` | `main.py` | Run TreeIso and re-convert the source XYZ into a new Potree 2.0 octree carrying a `tree_instance` extra-dimension attribute. With `keep_instance` (1..N) it writes only that tree's points — a split sub-cloud. Returns the octree-ref shape of `convert_to_octree` **plus** `segmented_source_path` (the persisted LAS carrying `tree_instance`, used as the new cloud's source — same rationale as `segment/ground/apply`, so filtering on `tree_instance` works) |
+| POST | `/api/segment/trees` | `main.py` | Segment individual trees with **TreeIso** (cut-pursuit graph method, CPU-only). Takes inline `points` or a `source` descriptor (full resolution; labels align 1:1) and optional `seed_points` (trunk seeds for human-in-the-loop — each seed yields one tree). Returns per-point `labels` (`0` = unassigned, `1..N` = trees), `num_trees`, and a `ground_warning` flag. Used for flat clouds; session clouds use `/api/cloud/session/{id}/segment_trees` instead |
 
 TreeIso is vendored (MIT) under `backend-api/vendor/treeiso/`; its graph-cut
 backend `cut_pursuit_py` is bundled via `collectAll` in
@@ -142,11 +140,43 @@ structure as a representative sample.
 | POST | `/api/pointcloud/import` | `main.py:4650` | Import a LAS/LAZ file (multipart upload) |
 | POST | `/api/pointcloud/preview` | `main.py` | Cheaply inspect a file for the import wizard: reads only the header + first ~20 rows (ASCII) or header + a few points (PLY/PCD/LAS) and returns the detected delimiter, per-column auto-detected role, a `type_hint` (integer/float/categorical/empty) used to pre-tick the categorical box, sample rows, and `remappable` (true for ASCII, false for in-file-layout formats). Never 500s on a parse problem — returns a 200 with a `warning` so the wizard can still offer auto-detect |
 | POST | `/api/pointcloud/import_by_path` | `main.py` | Parse a point cloud from a path on disk (dispatches `.xyz`/`.txt`/`.csv`/`.pts`/`.asc` to pandas, `.ply`/`.pcd` to open3d). Returns a packed binary stream so multi-GB scans aren't bottlenecked by JSON encoding. Accepts an optional `column_plan` (the import wizard's explicit per-column roles + custom scalar slug/label + `rgb_is_255` scale) that overrides auto-detection; absent → identical to the previous behaviour |
-| POST | `/api/pointcloud/crop_by_path` | `main.py` | Re-read a point cloud from its `sourcePath` and apply an AABB box crop (with optional `translation` baked in and `crop_invert` flag), returning the kept points in the same PHX1 binary format. Used by the viewer's "Apply crop" for flat-array (PLY/PCD) clouds so the renderer doesn't have to hold the filtered intermediate in V8's 4 GB old-space — NumPy handles the filter without that constraint |
-| POST | `/api/pointcloud/convert_to_octree` | `main.py` | Build a Potree 2.0 octree from any supported point-cloud source. `_source_to_las` normalises each format to LAS first — XYZ ASCII via laspy streaming, `.ply` via plyfile (preserving scalar fields as LAS extra dims), `.pcd` via open3d (position + color only), `.las`/`.laz` passed straight through — then runs the bundled PotreeConverter binary. Result is cached under `~/Library/Application Support/Phytograph/cache/octrees/<sha1>/`; repeat calls hit the cache. Accepts an optional `column_plan` (same shape as `import_by_path`) that participates in the cache key, so distinct wizard mappings of the same file get distinct cache entries. Returns `cache_id`, `tight_bounds`, attribute list. The renderer streams `metadata.json`/`hierarchy.bin`/`octree.bin` from that dir via the `app://octree/<cache_id>/...` Electron custom protocol. **Note:** as of 0.3.15 the crop/segment endpoints do **not** yet accept a `column_plan`, so a re-crop of a custom-column import rebuilds with auto-detect (identical for auto-detected imports; a follow-up will thread the plan through) |
-| GET | `/api/pointcloud/octree_metadata` | `main.py` | Look up metadata for a previously-converted octree by `cache_id`. Used when the renderer has only a cache id and needs the bounds/attribute schema (e.g. after a project reload) |
-| POST | `/api/pointcloud/crop_octree` | `main.py` | Re-convert a source cloud into a new Potree 2.0 octree with a crop region and/or scalar-attribute filters applied. Works for every importable format: ASCII sources stream-filter directly via pandas (`_filtered_xyz_to_las`); PLY/PCD/LAS/LAZ are normalised to LAS first (via `_source_to_las`, preserving PLY scalar fields) then chunk-filtered via `_filtered_las_to_las`. `region` (box, screen-space polygon, or `squares_union` — the erase brush's painted screen-space square stamps under one frozen camera, sent with `invert: true` to remove the union of everything behind them — with optional translation baked in) is **optional**; `scalar_filters` is an optional list of `{slug, min, max}` (continuous range) or `{slug, values: [...]}` (categorical membership — keep points whose rounded value is in the set, used for class fields like `ground_class` / `tree_instance`) that keeps only matching points. All filters AND together; the region's `invert` flips only the spatial mask (scalar filters are never inverted). `invert_all` (optional, default false) complements the ENTIRE combined mask as the final step — the true leftover/out-of-range set — which the filter tool's "Segment" action uses to build the second cloud (kept + leftover == the source). At least one of `region` / `scalar_filters` is required. Chunked streaming filter via laspy → PotreeConverter → atomic cache write. Returns the new `cache_id` **plus `filtered_source_path`**: the kept points are persisted as a LAS in the cache dir, and the renderer points the resulting cloud's source at it so the NEXT crop/filter/segment composes on the current point set (re-reading the original source would make previously-removed points reappear). `filtered_source_path` is `null` for an empty result. Powers the crop, scalar "Filter Points", and "Segment" paths for octree-backed clouds — keeps renderer JS heap bounded regardless of source size |
 | POST | `/api/pointcloud/export` | `main.py` | Export a point cloud to LAS/LAZ — or, for octree-backed clouds (via a `source` descriptor), to any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ. The backend streams from the source file and applies any pending translation |
+
+Octree building, cropping, and filtering for imported clouds go through the
+**cloud-session** endpoints (next section) — the in-RAM array is the source of
+truth and the octree is derived from it. There is no longer a standalone
+"convert/crop/segment a file into an octree" endpoint; those were removed when
+the session model landed.
+
+## Mutable cloud sessions (the in-RAM source-of-truth model)
+
+Every path-imported point cloud is loaded into a **cloud session**: the full
+attribute set (positions + colours + intensity + scalar extra-dims) is held in
+RAM on the backend as the authoritative copy. The **source file is read exactly
+once, at `create`** (`_source_to_las` → `_read_las_into_arrays`); afterwards
+every edit mutates the in-RAM arrays and rebuilds the derived Potree octree from
+them (`_session_to_las` → PotreeConverter) — the file is never re-read. The
+octree is a disposable render cache; the array is the source of truth.
+
+Deletions are an exact per-point boolean mask (instant, no rebuild); undo is a
+mask-snapshot stack. Compute endpoints (triangulate/skeleton/c2m/icp/export)
+read the masked array directly via `PointSource.session_id`, so they honour
+unbaked deletions with no rebuild. Filter and ground/tree segment run their
+algorithms on the array and append columns; "split"/"extract" spin off child
+sessions from the array. All of it is file-read-free after import.
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| POST | `/api/cloud/session/create` | `main.py` | Load a source file fully into a new in-RAM session and build its first octree. Honours the wizard `column_plan` once (survives all edits). Returns `session_id` + octree metadata. The ONLY point the file is read |
+| POST | `/api/cloud/session/{id}/delete_region` | `main.py` | Set the per-point deleted mask for points in a `region` (box/polygon/squares_union). Instant — array mask only, no rebuild. Returns counts |
+| POST | `/api/cloud/session/{id}/reset_edits` | `main.py` | Undo: restore the deleted mask to an earlier snapshot (`edit_count` deletes kept) |
+| POST | `/api/cloud/session/{id}/bake` | `main.py` | Permanently apply deletions — rebuild the octree from the surviving array points (`_session_to_las` → PotreeConverter), compact the arrays, clear the mask. The one deliberately-slow step. No file read |
+| POST | `/api/cloud/session/{id}/filter` | `main.py` | Delete the points a spatial+scalar filter excludes (array columns), rebuild from the survivors. Composes on the current survivors. Empty result → `point_count: 0`, no commit/rebuild |
+| POST | `/api/cloud/session/{id}/split` | `main.py` | Keep the filter-passing points on this session; move the excluded points to a NEW leftover session. Both rebuilt from arrays. Powers crop/filter "Segment" |
+| POST | `/api/cloud/session/{id}/extract` | `main.py` | Create a NEW child session from the filter-selected points, parent untouched. Powers ground/tree "split into clouds" |
+| POST | `/api/cloud/session/{id}/segment_ground` | `main.py` | Run CSF on the array, append a `ground_class` column, rebuild from arrays |
+| POST | `/api/cloud/session/{id}/segment_trees` | `main.py` | Run TreeIso on the array, append a `tree_instance` column, rebuild from arrays |
+| DELETE | `/api/cloud/session/{id}` | `main.py` | Free the session's in-RAM arrays (called when a cloud is removed from the scene) |
 
 ## Registration & comparison
 

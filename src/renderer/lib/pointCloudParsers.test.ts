@@ -597,10 +597,11 @@ describe('parsePointCloud (auto-detect)', () => {
 
 
 describe('parsePointCloudFromPath', () => {
-  // Helper: build an OctreeMetadata-shaped JSON response, matching the
-  // backend's convert_to_octree contract.
+  // Helper: build a CloudSessionMetadata-shaped JSON response, matching the
+  // backend's create_cloud_session contract (octree metadata + session_id).
   const makeOctreeMetadataResponse = (overrides: Record<string, unknown> = {}) => new Response(
     JSON.stringify({
+      session_id: 'sess1234',
       cache_id: 'a'.repeat(40),
       cache_dir: `/cache/${'a'.repeat(40)}`,
       cached: false,
@@ -620,7 +621,7 @@ describe('parsePointCloudFromPath', () => {
     { status: 200, headers: { 'Content-Type': 'application/json' } },
   );
 
-  it('routes .xyz to convert_to_octree and produces an octree-backed cloud', async () => {
+  it('routes .xyz to create_cloud_session and produces a session-backed octree cloud', async () => {
     const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
     const data = await parsePointCloudFromPath('/abs/path/scan.xyz');
     expect(data.pointCount).toBe(2);
@@ -632,15 +633,17 @@ describe('parsePointCloudFromPath', () => {
     // is intentionally empty so V8 doesn't hold the whole flat cloud.
     expect(data.octree?.cacheId).toBe('a'.repeat(40));
     expect(data.octree?.sourceXyzPath).toBe('/abs/path/scan.xyz');
+    // Session-backed: the cloud carries the backend session id for edits.
+    expect(data.octree?.sessionId).toBe('sess1234');
     expect(data.positions.length).toBe(0);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain('/api/pointcloud/convert_to_octree');
+    expect(url).toContain('/api/cloud/session/create');
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null });
   });
 
-  it('forwards ascii_format to convert_to_octree when provided', async () => {
+  it('forwards ascii_format to create_cloud_session when provided', async () => {
     const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
     await parsePointCloudFromPath('/p/a.xyz', 'x y z r255 g255 b255 reflectance');
     const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
@@ -661,10 +664,10 @@ describe('parsePointCloudFromPath', () => {
     await expect(parsePointCloudFromPath('/missing.xyz')).rejects.toThrow(/Source file not found/);
   });
 
-  // PLY / PCD / LAS / LAZ now route to convert_to_octree like the XYZ family —
-  // every path-backed format produces a streaming octree, not a flat cloud.
+  // PLY / PCD / LAS / LAZ now route to create_cloud_session like the XYZ family —
+  // every path-backed format produces a session-backed streaming octree.
   it.each(['/p/cloud.ply', '/p/cloud.pcd', '/p/cloud.las', '/p/cloud.laz'])(
-    'routes %s to convert_to_octree',
+    'routes %s to create_cloud_session',
     async (path) => {
       const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
       const data = await parsePointCloudFromPath(path);
@@ -673,8 +676,9 @@ describe('parsePointCloudFromPath', () => {
       expect(data.positions.length).toBe(0);
       expect(data.octree?.cacheId).toBe('a'.repeat(40));
       expect(data.octree?.sourceXyzPath).toBe(path);
+      expect(data.octree?.sessionId).toBe('sess1234');
       const [url] = fetchSpy.mock.calls[0];
-      expect(url).toContain('/api/pointcloud/convert_to_octree');
+      expect(url).toContain('/api/cloud/session/create');
     },
   );
 });

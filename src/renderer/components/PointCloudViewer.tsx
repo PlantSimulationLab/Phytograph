@@ -5,7 +5,7 @@ import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Palette } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, cropPointCloudByPath, cropOctree, segmentGround, segmentGroundApply, segmentTrees, segmentTreesApply, type CropOctreeRegion, type CropOctreeResult, type BackendPointSource } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, segmentGround, segmentTrees, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import {
@@ -22,7 +22,7 @@ import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import { type ScanParameters } from '../lib/scanParameters';
 import { type Scan, hasData, hasParams, scanDisplayName } from '../lib/scan';
-import { parsePointCloudFromPath, buildPointCloudFromBackend, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
+import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
 import { dirname } from '../lib/pathUtils';
@@ -32,6 +32,7 @@ import {
   worldBoundsUnion,
   polygonRegionFromCamera,
 } from '../lib/cropGeometry';
+import { pendingDeletesToClipBoxes } from '../lib/deletePreview';
 import {
   computeBoundsFromPositions,
   fuzzyMatch,
@@ -79,6 +80,7 @@ import type {
   PointCloudData,
   PointCloudEntry,
   CloudEditState,
+  PendingDeleteRegion,
   HistoryEntry,
   MeshData,
   MeshEntry,
@@ -134,6 +136,10 @@ interface PointCloudViewerProps {
   canUndoStitch?: () => boolean;
   className?: string;
   importRefsCallback?: (refs: ImportRefs) => void;
+  // Fired when the number of session clouds with UNBAKED deletions changes, so
+  // App can warn before quit (the deletions live only in the backend session's
+  // in-RAM mask until baked; closing without baking discards them).
+  onPendingDeletesChange?: (count: number) => void;
   // Fired when the set of viewer-owned content (meshes, skeletons) changes
   // between empty and non-empty. App uses this to dismiss the empty-state hint
   // when content arrives that isn't a scan — e.g. a generated Helios plant,
@@ -165,6 +171,7 @@ export default function PointCloudViewer({
   canUndoStitch,
   className = '',
   importRefsCallback,
+  onPendingDeletesChange,
   onViewerContentChange,
   onRequestImportWizard,
 }: PointCloudViewerProps) {
@@ -504,6 +511,19 @@ export default function PointCloudViewer({
   // Edit mode and per-cloud edit states
   const [editMode, setEditMode] = useState<EditMode>('none');
   const [editStates, setEditStates] = useState<Map<string, CloudEditState>>(new Map());
+
+  // Report the count of clouds with unbaked deletions up to App (drives the
+  // before-quit warning). Only erase deletes accumulate as pendingDeletes;
+  // crops/filters/segments bake immediately, so this is the erase-not-yet-baked
+  // count.
+  useEffect(() => {
+    if (!onPendingDeletesChange) return;
+    let count = 0;
+    for (const st of editStates.values()) {
+      if ((st.pendingDeletes?.length ?? 0) > 0) count++;
+    }
+    onPendingDeletesChange(count);
+  }, [editStates, onPendingDeletesChange]);
 
   // Crop state lives at the viewer level (not per-cloud) so a single
   // region applies uniformly across every selected scan. See cropGeometry.ts
@@ -1068,6 +1088,27 @@ export default function PointCloudViewer({
   const editStatesRef = useRef(editStates);
   editStatesRef.current = editStates;
 
+  // Build a session-backed octree PointCloudData from a session endpoint result
+  // (bake / filter / segment / split / extract) that carries octree metadata + a
+  // cache_id. Carries forward the existing octree's source/ascii/columnPlan/
+  // categoricals. By default keeps the SAME sessionId (the array is unchanged;
+  // only the derived octree was rebuilt). Pass `sessionIdOverride` for a NEW
+  // child cloud (split leftover / extracted class) so it routes its own edits.
+  const buildSessionOctreeData = useCallback((
+    result: OctreeMetadata & { cache_id: string; point_count: number },
+    octreeInfo: NonNullable<PointCloudData['octree']>,
+    fileName: string,
+    sessionIdOverride?: string | null,
+  ): PointCloudData => buildPointCloudFromOctree(
+    { ...result, cache_dir: result.cache_dir ?? '', cached: false },
+    octreeInfo.sourceXyzPath,
+    fileName,
+    octreeInfo.asciiFormat ?? null,
+    octreeInfo.columnPlan ?? null,
+    octreeInfo.categoricalAttributes,
+    sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
+  ), []);
+
   const handleApplyCrop = useCallback(() => {
     if (editMode !== 'crop' || selectedIds.size === 0) return;
     if (isApplyingCrop) return;
@@ -1094,8 +1135,8 @@ export default function PointCloudViewer({
     // ceiling). This only matters for the in-renderer fallback path
     // (stitched / erased / polygon clouds) on very large flat scans — the
     // common slow case is octree clouds, whose preview is a GPU clip box
-    // with no large JS buffer, so keeping it alive is free. The flat
-    // backend path (cropPointCloudByPath) allocates in Python, not V8. If a
+    // with no large JS buffer, so keeping it alive is free. The backend
+    // session crop allocates in Python, not V8. If a
     // large in-renderer crop is ever observed to OOM, release that cloud's
     // preview right before its two-pass allocation below.
     setIsApplyingCrop(true);
@@ -1219,30 +1260,26 @@ export default function PointCloudViewer({
         return;
       }
 
-      // Octree-backed clouds: route through /api/pointcloud/crop_octree.
-      // The backend re-runs PotreeConverter on a filtered XYZ source and
-      // returns a new cache id; the renderer hot-swaps to it (the
-      // OctreePointCloud component depends on data.octree.cacheId, so
-      // changing it triggers dispose + reload of the underlying
-      // PointCloudOctree without remounting the React node).
-      //
-      // Both box and polygon regions go backend-side. Erased indices from
-      // the in-renderer brush are unreachable here because octree clouds
-      // don't expose flat positions to the brush in the first place —
-      // erase regions are handled by handleApplyErase via the same
-      // crop_octree endpoint.
-      if (cloud.data.octree && cloud.data.octree.sourceXyzPath) {
+      // Octree-backed clouds: the editable session flow. A crop KEEPS the
+      // points inside the box (deletes the outside), so the delete region is
+      // the crop region with `invert` FLIPPED: crop(invert=false) → keep inside
+      // → delete outside → delete_region(invert=true). delete_region is instant
+      // (in-RAM mask, no rebuild); we accumulate the region into edit-state so
+      // the GPU clip-volume preview hides the deleted points and undo can pop
+      // it. Downstream ops read the masked array via the session id.
+      if (cloud.data.octree && cloud.data.octree.sessionId) {
         const octreeInfo = cloud.data.octree;
-        let region: CropOctreeRegion | null = null;
+        const sessionId = octreeInfo.sessionId!;
+        let deleteRegion: CropOctreeRegion | null = null;
         if (cropMode === 'box' && cropBox) {
-          region = {
+          deleteRegion = {
             kind: 'box',
             min: [cropBox.min.x, cropBox.min.y, cropBox.min.z],
             max: [cropBox.max.x, cropBox.max.y, cropBox.max.z],
-            invert: cropInvert,
+            invert: !cropInvert,  // crop keeps inside → delete outside
           };
         } else if ((cropMode === 'polygon' || cropMode === 'rect') && cropPolygon && cropPolygon.points.length >= 3) {
-          region = {
+          deleteRegion = {
             kind: 'polygon',
             points: cropPolygon.points.map(p => [p.x, p.y] as [number, number]),
             projection: cropPolygon.projection,
@@ -1251,191 +1288,74 @@ export default function PointCloudViewer({
               width: cropPolygon.canvasSize.width,
               height: cropPolygon.canvasSize.height,
             },
-            invert: cropInvert,
+            invert: !cropInvert,
           };
         }
 
-        if (region) {
+        if (deleteRegion) {
+          // The crop KEEPS the complement of `deleteRegion` (deleteRegion is the
+          // delete set). The keep-region is therefore deleteRegion with invert
+          // flipped back — i.e. the original crop selection.
+          const keepRegion: CropOctreeRegion = {
+            ...deleteRegion, invert: !(deleteRegion.invert ?? false),
+          } as CropOctreeRegion;
           try {
-            const result = await cropOctree(octreeInfo.sourceXyzPath, {
-              asciiFormat: octreeInfo.asciiFormat ?? null,
-              region,
-              translation: (tx !== 0 || ty !== 0 || tz !== 0)
-                ? [tx, ty, tz]
-                : null,
-            });
-            if (result.point_count === 0 || !result.cache_id) {
-              emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
-              return;
-            }
-            // buildPointCloudFromOctree builds the new PointCloudData
-            // (empty positions, tight_bounds for the new extent, new
-            // cacheId). React passes it to OctreePointCloud which
-            // observes the cacheId change and re-loads the streamed tiles.
-            // Chain `sourceXyzPath` to the persisted filtered LAS so a
-            // subsequent crop/filter composes on the cropped points, not the
-            // original source (else removed points reappear). It's a LAS, so
-            // asciiFormat is null.
-            const newData = buildPointCloudFromOctree(
-              {
-                cache_id: result.cache_id,
-                cache_dir: result.cache_dir ?? '',
-                cached: result.cached,
-                version: result.version,
-                point_count: result.point_count,
-                spacing: result.spacing,
-                scale: result.scale,
-                offset: result.offset,
-                bounds: result.bounds,
-                tight_bounds: result.tight_bounds,
-                attributes: result.attributes,
-              },
-              result.filtered_source_path ?? octreeInfo.sourceXyzPath,
-              src.fileName ?? cloud.id,
-              result.filtered_source_path ? null : (octreeInfo.asciiFormat ?? null),
-            );
-            onUpdateCloud(cloud.id, newData);
-            touchedCloudIds.push(cloud.id);
-            keptCounts.push(result.point_count);
-
-            // Segment mode: re-run the crop with the region inverted and add
-            // the cropped-out points as a new cloud. Same backend endpoint,
-            // just invert flipped. An empty inverse (region enclosed the whole
-            // cloud) is silently skipped — nothing to segment off.
             if (segment && onAddCloud) {
-              try {
-                const invResult = await cropOctree(octreeInfo.sourceXyzPath, {
-                  asciiFormat: octreeInfo.asciiFormat ?? null,
-                  region: { ...region, invert: !cropInvert },
-                  translation: (tx !== 0 || ty !== 0 || tz !== 0)
-                    ? [tx, ty, tz]
-                    : null,
-                });
-                if (invResult.point_count > 0 && invResult.cache_id) {
-                  onAddCloud({
-                    id: crypto.randomUUID(),
-                    data: buildPointCloudFromOctree(
-                      {
-                        cache_id: invResult.cache_id,
-                        cache_dir: invResult.cache_dir ?? '',
-                        cached: invResult.cached,
-                        version: invResult.version,
-                        point_count: invResult.point_count,
-                        spacing: invResult.spacing,
-                        scale: invResult.scale,
-                        offset: invResult.offset,
-                        bounds: invResult.bounds,
-                        tight_bounds: invResult.tight_bounds,
-                        attributes: invResult.attributes,
-                      },
-                      invResult.filtered_source_path ?? octreeInfo.sourceXyzPath,
-                      `${src.fileName ?? cloud.id} (segment)`,
-                      invResult.filtered_source_path ? null : (octreeInfo.asciiFormat ?? null),
-                    ),
-                    visible: true,
-                    color: SEGMENT_COLOR,
-                  });
-                  segmentedCount++;
-                }
-              } catch (err) {
-                console.error('[handleApplyCrop] segment (octree inverse) failed:', err);
-                showToast({
-                  title: `Segment failed for ${src.fileName || 'cloud'}`,
-                  type: 'error',
-                });
+              // Segment mode: split the session into kept (inside the crop) +
+              // a NEW leftover session (the cropped-out points). One array-side
+              // call, no file read; both octrees rebuilt from the arrays.
+              const result = await sessionSplit(sessionId, { region: keepRegion });
+              if (result.kept.point_count === 0) {
+                emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
+                return;
               }
-            }
-            return;
-          } catch (err) {
-            console.error('[handleApplyCrop] crop_octree failed:', err);
-            // No fallback for octree clouds — the in-renderer path below
-            // iterates data.positions which is empty for octrees. Surface
-            // the failure via a toast and skip the cloud.
-            showToast({
-              title: `Crop failed for ${src.fileName || 'cloud'}`,
-              type: 'error',
-            });
-            return;
-          }
-        }
-      }
-
-      // Backend-delegated path. Box mode with a known sourcePath and no
-      // erased points is the common case on freshly-imported scans —
-      // exactly the situation that OOM'd in JS. The backend re-reads the
-      // file, applies the AABB filter with NumPy, and streams the kept
-      // points back; the renderer just decodes one Float32Array per
-      // channel from the response and hands it to onUpdateCloud. No
-      // multi-GB intermediates in V8.
-      if (
-        cropMode === 'box' && cropBox &&
-        cloud.sourcePath && erased.size === 0
-      ) {
-        try {
-          const response = await cropPointCloudByPath(cloud.sourcePath, {
-            asciiFormat: cloud.asciiFormat ?? null,
-            cropMin: cropBox.min,
-            cropMax: cropBox.max,
-            cropInvert,
-            translation: (tx !== 0 || ty !== 0 || tz !== 0)
-              ? { x: tx, y: ty, z: tz }
-              : null,
-          });
-          if (response.pointCount === 0) {
-            emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
-            return;
-          }
-          const newData = buildPointCloudFromBackend(response, src.fileName ?? cloud.id);
-          onUpdateCloud(cloud.id, newData);
-          touchedCloudIds.push(cloud.id);
-          keptCounts.push(response.pointCount);
-
-          // Segment mode: re-read the file with the crop inverted and add the
-          // cropped-out points as a new cloud. Wrapped in its own try/catch so
-          // a failure here doesn't trigger the in-renderer fallback below (the
-          // kept set is already committed).
-          if (segment && onAddCloud) {
-            try {
-              const invResponse = await cropPointCloudByPath(cloud.sourcePath, {
-                asciiFormat: cloud.asciiFormat ?? null,
-                cropMin: cropBox.min,
-                cropMax: cropBox.max,
-                cropInvert: !cropInvert,
-                translation: (tx !== 0 || ty !== 0 || tz !== 0)
-                  ? { x: tx, y: ty, z: tz }
-                  : null,
-              });
-              if (invResponse.pointCount > 0) {
+              onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, src.fileName ?? cloud.id));
+              if (result.leftover) {
                 onAddCloud({
                   id: crypto.randomUUID(),
-                  data: buildPointCloudFromBackend(
-                    invResponse,
-                    `${src.fileName ?? cloud.id} (segment)`,
+                  data: buildSessionOctreeData(
+                    result.leftover, octreeInfo, `${src.fileName ?? cloud.id} (segment)`,
+                    result.leftover.session_id,
                   ),
                   visible: true,
                   color: SEGMENT_COLOR,
                 });
                 segmentedCount++;
               }
-            } catch (err) {
-              console.error('[handleApplyCrop] segment (flat inverse) failed:', err);
-              showToast({
-                title: `Segment failed for ${src.fileName || 'cloud'}`,
-                type: 'error',
-              });
+              touchedCloudIds.push(cloud.id);
+              keptCounts.push(result.kept.point_count);
+              return;
             }
+
+            // Plain crop: delete the outside region on the array + rebuild from
+            // the arrays (no file read). Crop is a keep-inside (inverted) volume
+            // that doesn't combine with the instant CLIP_INSIDE preview, so it
+            // applies exactly via rebuild. Only erase accumulates as instant.
+            const result = await deleteCloudRegion(sessionId, deleteRegion);
+            if (result.remaining_count === 0) {
+              emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
+              return;
+            }
+            const baked = await bakeCloudSession(sessionId);
+            onUpdateCloud(cloud.id, buildSessionOctreeData(baked, octreeInfo, src.fileName ?? cloud.id));
+            touchedCloudIds.push(cloud.id);
+            keptCounts.push(result.remaining_count);
+            return;
+          } catch (err) {
+            console.error('[handleApplyCrop] session crop/split failed:', err);
+            showToast({ title: `Crop failed for ${src.fileName || 'cloud'}`, type: 'error' });
+            return;
           }
-          return;
-        } catch (err) {
-          // Fall through to the in-renderer path. We log so a 5xx from
-          // the backend (or a renamed/moved source file) surfaces in
-          // dev, but otherwise transparently take the slower path —
-          // it'll still work for small clouds.
-          console.warn('[handleApplyCrop] backend crop failed, falling back to in-renderer:', err);
         }
       }
 
-      // In-renderer fallback. Two-pass over typed arrays (count, then
+      // Flat (non-session) clouds: crop in-renderer over the in-memory typed
+      // arrays. These have no backend session and their positions already live
+      // in `data.positions`, so there is nothing to re-read from disk — every
+      // file-imported cloud is session-backed and handled above. (Flat clouds
+      // here are renderer-synthesised / stitched overlays.)
+
+      // In-renderer crop. Two-pass over typed arrays (count, then
       // fill). Used for stitched clouds (no sourcePath), clouds with
       // erased indices, polygon-mode crop, and any case where the
       // backend call raised above.
@@ -1570,59 +1490,39 @@ export default function PointCloudViewer({
 
     if (!cloud || !state) return;
 
-    // Octree clouds: erase is a union of painted screen-space SQUARE stamps,
-    // removed on the backend via crop_octree's squares_union region (invert=true
-    // keeps the complement — every point outside all squares). Mirrors
-    // handleApplyCrop's octree branch: re-convert the filtered source to a fresh
-    // octree and hot-swap the cacheId.
+    // Octree (session) clouds: erase deletes points inside the union of painted
+    // screen-space SQUARE stamps. The session flow makes this instant — set the
+    // mask via delete_region (squares_union, invert=false → delete INSIDE the
+    // squares) and accumulate the region so the GPU clip-volume preview keeps
+    // the points hidden and undo can pop it. No octree rebuild.
     if (cloud.data.octree) {
       const frame = eraseFrame;
       if (!frame || frame.centers.length === 0) return;
       const octreeInfo = cloud.data.octree;
-      if (!octreeInfo.sourceXyzPath) {
-        showToast({ title: 'Cannot erase: cloud has no source path to re-convert.', type: 'error' });
+      if (!octreeInfo.sessionId) {
+        showToast({ title: 'Cannot erase: cloud has no editable session.', type: 'error' });
         return;
       }
-      const tx = state.translation.x, ty = state.translation.y, tz = state.translation.z;
+      const sessionId = octreeInfo.sessionId;
+      const deleteRegion: PendingDeleteRegion = {
+        kind: 'squares_union',
+        centers: frame.centers.map(c => [c.cx, c.cy] as [number, number]),
+        half_sizes: frame.centers.map(() => eraseBrushPx),
+        projection: frame.projection,
+        view: frame.view,
+        canvas: frame.canvas,
+        invert: false, // delete points INSIDE the painted squares
+      };
+      let deletedCount = 0;
       try {
-        const result = await cropOctree(octreeInfo.sourceXyzPath, {
-          asciiFormat: octreeInfo.asciiFormat ?? null,
-          region: {
-            kind: 'squares_union',
-            centers: frame.centers.map(c => [c.cx, c.cy] as [number, number]),
-            half_sizes: frame.centers.map(() => eraseBrushPx),
-            projection: frame.projection,
-            view: frame.view,
-            canvas: frame.canvas,
-            invert: true, // keep points OUTSIDE the painted squares
-          },
-          translation: (tx !== 0 || ty !== 0 || tz !== 0) ? [tx, ty, tz] : null,
-        });
-        if (result.point_count === 0 || !result.cache_id) {
+        const result = await deleteCloudRegion(sessionId, deleteRegion as CropOctreeRegion);
+        if (result.remaining_count === 0) {
           // Every point erased → offer to delete the cloud, like the flat path.
           setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
           setEditMode('none');
           return;
         }
-        const newData = buildPointCloudFromOctree(
-          {
-            cache_id: result.cache_id,
-            cache_dir: result.cache_dir ?? '',
-            cached: result.cached,
-            version: result.version,
-            point_count: result.point_count,
-            spacing: result.spacing,
-            scale: result.scale,
-            offset: result.offset,
-            bounds: result.bounds,
-            tight_bounds: result.tight_bounds,
-            attributes: result.attributes,
-          },
-          result.filtered_source_path ?? octreeInfo.sourceXyzPath,
-          cloud.data.fileName ?? cloud.id,
-          result.filtered_source_path ? null : (octreeInfo.asciiFormat ?? null),
-        );
-        onUpdateCloud(cloud.id, newData);
+        deletedCount = result.deleted_count;
       } catch (err) {
         showToast({
           title: `Erase failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -1630,18 +1530,28 @@ export default function PointCloudViewer({
         });
         return;
       }
-      // Clear the painted squares / preview and reset edit state for this cloud.
+      // Clear the painted squares / live preview, but KEEP the committed delete
+      // in edit-state so the persistent clip-volume preview hides the erased
+      // points. (finishUp / undo manage the accumulated stack.) Record the
+      // backend-reported deleted count so the scan row's point count drops now.
       setEraseFrame(null);
       setErasePreviewBoxes([]);
       setEraseBrushMatrix(null);
       setEditStates(prev => {
         const next = new Map(prev);
-        next.set(cloud.id, { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() });
+        const cur = next.get(cloud.id) ?? { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+        next.set(cloud.id, {
+          translation: { x: 0, y: 0, z: 0 },
+          erasedIndices: new Set<number>(),
+          pendingDeletes: [...(cur.pendingDeletes ?? []), deleteRegion],
+          pendingDeletedCount: deletedCount,
+        });
         return next;
       });
-      setHistory(prev => prev.filter(entry => entry.id !== cloud.id));
-      setHistoryIndex(prev => Math.max(-1, prev - 1));
-      setEditMode('none');
+      // Keep the Erase tool OPEN (so "Permanently apply deletions" / "Undo last
+      // deletion" stay reachable and further stamps can accumulate), but turn
+      // erase MODE off so the view is interactive again.
+      setEraseActive(false);
       return;
     }
 
@@ -1769,6 +1679,59 @@ export default function PointCloudViewer({
     setEditMode('none');
   }, [editMode, selectedIds, clouds, editStates, onUpdateCloud, eraseFrame, eraseBrushPx]);
 
+  // Permanently apply (bake) a session cloud's pending deletions: rebuild the
+  // octree from the survivors and clear the in-session mask + the accumulated
+  // delete stack. The deliberately-slow step (one PotreeConverter run). After
+  // bake the cloud's deletions are real on disk, so the GPU clip preview is no
+  // longer needed (pendingDeletes cleared) and downstream ops/export see the
+  // reduced cloud whether or not they go through the session.
+  const handleBakeEdits = useCallback(async (cloudId: string) => {
+    const cloud = clouds.find(c => c.id === cloudId);
+    const octreeInfo = cloud?.data.octree;
+    if (!cloud || !octreeInfo?.sessionId) return;
+    const sessionId = octreeInfo.sessionId;
+    try {
+      const baked = await bakeCloudSession(sessionId);
+      const newData = buildPointCloudFromOctree(
+        {
+          cache_id: baked.cache_id,
+          cache_dir: baked.cache_dir ?? '',
+          cached: baked.cached,
+          version: baked.version,
+          point_count: baked.point_count,
+          spacing: baked.spacing,
+          scale: baked.scale,
+          offset: baked.offset,
+          bounds: baked.bounds,
+          tight_bounds: baked.tight_bounds,
+          attributes: baked.attributes,
+        },
+        octreeInfo.sourceXyzPath,
+        cloud.data.fileName ?? cloud.id,
+        octreeInfo.asciiFormat ?? null,
+        octreeInfo.columnPlan ?? null,
+        octreeInfo.categoricalAttributes,
+        sessionId,
+      );
+      onUpdateCloud(cloud.id, newData);
+      // Clear the pending-delete stack + history for this cloud now that the
+      // deletions are baked into the octree.
+      setEditStates(prev => {
+        const next = new Map(prev);
+        const cur = next.get(cloud.id);
+        if (cur) next.set(cloud.id, { ...cur, pendingDeletes: [], pendingDeletedCount: 0 });
+        return next;
+      });
+      setHistory(prev => prev.filter(entry => entry.id !== cloud.id));
+      showToast({ title: `Applied deletions — ${baked.point_count.toLocaleString()} points remain`, type: 'success' });
+    } catch (err) {
+      showToast({
+        title: `Apply deletions failed: ${err instanceof Error ? err.message : String(err)}`,
+        type: 'error',
+      });
+    }
+  }, [clouds, onUpdateCloud]);
+
   // Build the crop_octree args (region + scalarFilters + translation) for an
   // octree-backed cloud from its active filters. X/Y/Z range filters become a
   // box region (full extent on any disabled axis); enabled scalar filters
@@ -1817,43 +1780,6 @@ export default function PointCloudViewer({
         : null,
     };
   }, [editStates]);
-
-  // Convert a crop_octree result into PointCloudData (or null when empty).
-  //
-  // The resulting cloud's `sourceXyzPath` is the backend-persisted filtered LAS
-  // (`filtered_source_path`), NOT the original source — so the next crop/filter/
-  // segment composes on the CURRENT point set. Re-reading the original would make
-  // previously-removed points reappear. The persisted source is a LAS, so its
-  // asciiFormat is null. (`fallbackSource`/`fallbackAscii` are only used if the
-  // backend omitted the path — older cache entries pre-this-field.)
-  const octreeResultToData = useCallback((
-    result: CropOctreeResult,
-    fallbackSource: string,
-    fileName: string,
-    fallbackAscii: string | null,
-  ): PointCloudData | null => {
-    if (result.point_count === 0 || !result.cache_id) return null;
-    const chainedSource = result.filtered_source_path ?? fallbackSource;
-    const chainedAscii = result.filtered_source_path ? null : fallbackAscii;
-    return buildPointCloudFromOctree(
-      {
-        cache_id: result.cache_id,
-        cache_dir: result.cache_dir ?? '',
-        cached: result.cached,
-        version: result.version,
-        point_count: result.point_count,
-        spacing: result.spacing,
-        scale: result.scale,
-        offset: result.offset,
-        bounds: result.bounds,
-        tight_bounds: result.tight_bounds,
-        attributes: result.attributes,
-      },
-      chainedSource,
-      fileName,
-      chainedAscii,
-    );
-  }, []);
 
   // Clear edit state, filters, and history for a cloud after a filter commit,
   // then close the panel. Shared by Filter and Segment.
@@ -2003,28 +1929,25 @@ export default function PointCloudViewer({
 
     if (!hasAnyFilter) return;
 
-    // Octree-backed clouds hold no flat positions to iterate; apply the filter
-    // via backend re-conversion (crop_octree). No live preview — applies
-    // directly, like crop on large clouds.
-    if (cloud.data.octree?.sourceXyzPath) {
+    // Session-backed octree clouds: apply the filter on the in-RAM arrays
+    // (delete the excluded points + rebuild from the arrays). No file re-read.
+    if (cloud.data.octree?.sessionId) {
       const octreeInfo = cloud.data.octree;
+      const sessionId = octreeInfo.sessionId!;
       const args = buildOctreeFilterArgs(cloud, filters);
       try {
-        const result = await cropOctree(octreeInfo.sourceXyzPath, {
-          asciiFormat: octreeInfo.asciiFormat ?? null,
-          ...args,
+        const result = await sessionFilter(sessionId, {
+          region: args.region ?? null,
+          scalarFilters: args.scalarFilters ?? null,
+          rebuild: true,
         });
-        const newData = octreeResultToData(
-          result, octreeInfo.sourceXyzPath, cloud.data.fileName ?? cloud.id, octreeInfo.asciiFormat ?? null,
-        );
-        if (!newData) {
-          // Filter excluded everything — offer to delete the cloud.
+        if (result.point_count === 0) {
           setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
           return;
         }
-        onUpdateCloud(cloud.id, newData);
+        onUpdateCloud(cloud.id, buildSessionOctreeData(result, octreeInfo, cloud.data.fileName ?? cloud.id));
       } catch (err) {
-        console.error('[handleApplyFilterPermanently] crop_octree failed:', err);
+        console.error('[handleApplyFilterPermanently] session filter failed:', err);
         showToast({ title: `Filter failed for ${cloud.data.fileName || 'cloud'}`, type: 'error' });
         return;
       }
@@ -2046,7 +1969,7 @@ export default function PointCloudViewer({
     }
     onUpdateCloud(cloud.id, newData);
     clearFilterStateForCloud(cloud.id);
-  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, buildOctreeFilterArgs, octreeResultToData, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
+  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
 
   // Segment by filter: keep the in-range points on the original cloud AND add
   // the out-of-range points as a second cloud. Nothing is discarded — kept +
@@ -2070,29 +1993,35 @@ export default function PointCloudViewer({
 
     const leftoverName = `${cloud.data.fileName ?? 'cloud'} (filtered out)`;
 
-    // Octree: two backend calls — kept (as-is) and leftover (invert_all). The
-    // leftover is the exact complement, so the two never overlap or drop a point.
-    if (cloud.data.octree?.sourceXyzPath) {
+    // Session-backed octree: split the in-RAM array into kept (this session) +
+    // a NEW leftover session. One backend call, no source file read; the two
+    // sides exactly partition the cloud.
+    if (cloud.data.octree?.sessionId) {
       const octreeInfo = cloud.data.octree;
+      const sessionId = octreeInfo.sessionId!;
       const args = buildOctreeFilterArgs(cloud, filters);
       try {
-        const [keptResult, leftoverResult] = await Promise.all([
-          cropOctree(octreeInfo.sourceXyzPath, { asciiFormat: octreeInfo.asciiFormat ?? null, ...args }),
-          cropOctree(octreeInfo.sourceXyzPath, { asciiFormat: octreeInfo.asciiFormat ?? null, ...args, invertAll: true }),
-        ]);
-        const keptData = octreeResultToData(keptResult, octreeInfo.sourceXyzPath, cloud.data.fileName ?? cloud.id, octreeInfo.asciiFormat ?? null);
-        const leftoverData = octreeResultToData(leftoverResult, octreeInfo.sourceXyzPath, leftoverName, octreeInfo.asciiFormat ?? null);
-        if (!keptData) {
-          // Nothing in range — offer to delete rather than blank the cloud.
+        const result = await sessionSplit(sessionId, {
+          region: args.region ?? null,
+          scalarFilters: args.scalarFilters ?? null,
+        });
+        if (result.kept.point_count === 0) {
           setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
           return;
         }
-        onUpdateCloud(cloud.id, keptData);
-        if (leftoverData) {
-          onAddCloud({ id: crypto.randomUUID(), data: leftoverData, visible: true, color: cloud.color });
+        onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, cloud.data.fileName ?? cloud.id));
+        if (result.leftover) {
+          // The leftover is its OWN session — carry its new sessionId (not the
+          // parent's) so its later edits route correctly.
+          onAddCloud({
+            id: crypto.randomUUID(),
+            data: buildSessionOctreeData(result.leftover, octreeInfo, leftoverName, result.leftover.session_id),
+            visible: true,
+            color: cloud.color,
+          });
         }
       } catch (err) {
-        console.error('[handleSegmentFilter] crop_octree failed:', err);
+        console.error('[handleSegmentFilter] session split failed:', err);
         showToast({ title: `Segment failed for ${cloud.data.fileName || 'cloud'}`, type: 'error' });
         return;
       }
@@ -2118,7 +2047,7 @@ export default function PointCloudViewer({
       onAddCloud({ id: crypto.randomUUID(), data: leftoverData, visible: true, color: cloud.color });
     }
     clearFilterStateForCloud(cloud.id);
-  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, onAddCloud, buildOctreeFilterArgs, octreeResultToData, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
+  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, onAddCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -3083,6 +3012,10 @@ export default function PointCloudViewer({
           source_path: octree.sourceXyzPath,
           ascii_format: octree.asciiFormat ?? null,
           translation,
+          // When the cloud is session-backed, downstream ops read the in-RAM
+          // masked array (deletions already applied) instead of re-reading the
+          // source file — so unbaked deletions are honored with no bake.
+          session_id: octree.sessionId ?? null,
         },
       };
     }
@@ -4036,10 +3969,11 @@ export default function PointCloudViewer({
 
   // Segment ground vs plant points (Cloth Simulation Filter). Writes a
   // `ground_class` scalar attribute (1=ground, 2=plant) and colors by it.
-  // Octree clouds re-convert through the backend (the apply endpoint bakes the
-  // class into a new octree); flat clouds get the labels written into
-  // scalarFields directly. Optionally also splits into ground/plant clouds
-  // (flat clouds only — octree split would need a backend class filter).
+  // Session (octree) clouds run CSF on the in-RAM array and append the column
+  // (sessionSegmentGround) — no file re-read; flat clouds get the labels written
+  // into scalarFields directly. Optionally splits into ground/plant clouds: for
+  // session clouds via sessionExtract (parent untouched), for flat clouds in
+  // memory.
   const handleGroundSegment = useCallback(async () => {
     if (selectedIds.size !== 1) return;
     const id = Array.from(selectedIds)[0];
@@ -4058,53 +3992,42 @@ export default function PointCloudViewer({
     try {
       const ps = buildPointSource(cloud);
 
-      // --- Octree-backed cloud: re-convert with ground_class baked in. ---
+      // --- Session-backed octree cloud: CSF on the in-RAM array, append
+      // ground_class, rebuild from arrays (no file re-read). ---
       if (ps.kind === 'source') {
         const octreeInfo = cloud.data.octree;
-        if (!octreeInfo?.sourceXyzPath) {
-          throw new Error('Octree cloud is missing its source file path.');
+        if (!octreeInfo?.sessionId) {
+          throw new Error('Octree cloud is missing its editable session.');
         }
-        const srcPath = octreeInfo.sourceXyzPath;
-        const af = octreeInfo.asciiFormat ?? null;
         const baseName = cloud.data.fileName ?? id;
-
-        // Classify in place: re-convert with ground_class baked in, swap the ref.
-        // The new cloud's source is the backend-persisted segmented LAS (it
-        // carries ground_class), NOT the original XYZ — so a later Filter on
-        // ground_class re-reads a source that actually has the column.
-        const meta = await segmentGroundApply({
-          source_path: srcPath,
-          ascii_format: af,
-          ...csfParams,
-        });
-        const newData = buildPointCloudFromOctree(
-          meta, meta.segmented_source_path, baseName, null,
-        );
-        onUpdateCloud(id, newData);
+        const sessionId = octreeInfo.sessionId;
+        const meta = await sessionSegmentGround(sessionId, csfParams);
+        // The parent keeps ALL points, classified + coloured by ground_class.
+        onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
         setColorMode('scalar');
         setSelectedScalarField(GROUND_CLASS_ATTRIBUTE);
         setShowGroundSegmentPanel(false);
 
-        // Optional split: re-convert once per class into ground/plant octrees.
+        // Optional split: extract each class into its own child session (parent
+        // untouched). Pure array operation — no source file read.
         if (groundSplitClouds && onAddCloud) {
-          const addSplit = async (keepClass: number, suffix: string, color: string) => {
-            const sm = await segmentGroundApply({
-              source_path: srcPath,
-              ascii_format: af,
-              ...csfParams,
-              keep_class: keepClass,
+          const addClassCloud = async (cls: number, suffix: string, color: string) => {
+            const r = await sessionExtract(sessionId, {
+              scalarFilters: [{ slug: 'ground_class', min: cls, max: cls, values: [cls] }],
             });
-            onAddCloud({
-              id: crypto.randomUUID(),
-              data: buildPointCloudFromOctree(
-                sm, sm.segmented_source_path, `${baseName} (${suffix})`, null,
-              ),
-              visible: true,
-              color,
-            });
+            if (r.extracted) {
+              onAddCloud({
+                id: crypto.randomUUID(),
+                data: buildSessionOctreeData(
+                  r.extracted, octreeInfo, `${baseName} (${suffix})`, r.extracted.session_id,
+                ),
+                visible: true,
+                color,
+              });
+            }
           };
-          await addSplit(1, 'ground', '#8c6643');
-          await addSplit(2, 'non-ground', '#4caf50');
+          await addClassCloud(1, 'ground', '#8c6643');
+          await addClassCloud(2, 'non-ground', '#4caf50');
         }
 
         showToast({
@@ -4208,10 +4131,10 @@ export default function PointCloudViewer({
 
   // Segment individual trees (TreeIso cut-pursuit). Writes a `tree_instance`
   // scalar attribute (0=unassigned, 1..N=trees) and colors by it. Mirrors
-  // handleGroundSegment: octree clouds re-convert through the backend apply
-  // endpoint; flat clouds get labels written into scalarFields. Optional trunk
-  // seeds (treeSeedPoints) drive human-in-the-loop seeding, and an optional
-  // split extracts each tree into its own child cloud.
+  // handleGroundSegment: session (octree) clouds run TreeIso on the in-RAM array
+  // and append the column (sessionSegmentTrees) — no file re-read; flat clouds
+  // get labels written into scalarFields. Optional trunk seeds (treeSeedPoints)
+  // drive human-in-the-loop seeding.
   const handleSegmentTrees = useCallback(async () => {
     if (selectedIds.size !== 1) return;
     const id = Array.from(selectedIds)[0];
@@ -4231,28 +4154,19 @@ export default function PointCloudViewer({
     try {
       const ps = buildPointSource(cloud);
 
-      // --- Octree-backed cloud: re-convert with tree_instance baked in. ---
+      // --- Session-backed octree cloud: TreeIso on the in-RAM array, append
+      // tree_instance, rebuild from arrays (no file re-read). ---
       if (ps.kind === 'source') {
         const octreeInfo = cloud.data.octree;
-        if (!octreeInfo?.sourceXyzPath) {
-          throw new Error('Octree cloud is missing its source file path.');
+        if (!octreeInfo?.sessionId) {
+          throw new Error('Octree cloud is missing its editable session.');
         }
-        const srcPath = octreeInfo.sourceXyzPath;
-        const af = octreeInfo.asciiFormat ?? null;
         const baseName = cloud.data.fileName ?? id;
-
-        const meta = await segmentTreesApply({
-          source_path: srcPath,
-          ascii_format: af,
-          seed_points: seeds,
+        const meta = await sessionSegmentTrees(octreeInfo.sessionId, {
           ...tiParams,
+          ...(seeds ? { seed_points: seeds } : {}),
         });
-        // Source becomes the persisted segmented LAS (carries tree_instance) so
-        // a later Filter on tree_instance re-reads a source that has the column.
-        const newData = buildPointCloudFromOctree(
-          meta, meta.segmented_source_path, baseName, null,
-        );
-        onUpdateCloud(id, newData);
+        onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
         setColorMode('scalar');
         setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
         setShowTreeSegmentPanel(false);
@@ -7098,15 +7012,22 @@ export default function PointCloudViewer({
                         }
                       : null
                   }
-                  // Live erase preview: the painted square stamps' camera-aligned
-                  // boxes clip out their points on the GPU while the erase tool is
-                  // active on this (selected) cloud. Apply removes the matching
-                  // screen-space squares for real on the backend.
-                  clipBoxes={
-                    isSelected && editMode === 'erase' && erasePreviewBoxes.length > 0
-                      ? erasePreviewBoxes.map(matrix => ({ matrix }))
-                      : null
-                  }
+                  // GPU clip-volume union (CLIP_INSIDE) combining:
+                  //  - committed but unbaked deletes for THIS cloud (the
+                  //    persistent instant-delete preview — points stay hidden
+                  //    after apply, across multiple deletes, until bake), and
+                  //  - the live erase-brush preview (the in-progress stamps)
+                  //    while the erase tool is active on this selected cloud.
+                  clipBoxes={(() => {
+                    const committed = pendingDeletesToClipBoxes(
+                      getEditState(cloud.id).pendingDeletes ?? [],
+                    );
+                    const live = isSelected && editMode === 'erase' && erasePreviewBoxes.length > 0
+                      ? erasePreviewBoxes
+                      : [];
+                    const all = [...committed, ...live];
+                    return all.length > 0 ? all.map(matrix => ({ matrix })) : null;
+                  })()}
                   // Hand the live octree up so the erase brush can pick the
                   // hovered surface point. Only the selected cloud needs it.
                   onOctreeReady={
@@ -7956,7 +7877,7 @@ export default function PointCloudViewer({
                 ? editState.translation.x !== 0 || editState.translation.y !== 0 || editState.translation.z !== 0 || editState.erasedIndices.size > 0
                 : false;
               const effectivePointCount = scanHasData && editState
-                ? scan.data.pointCount - editState.erasedIndices.size
+                ? scan.data.pointCount - editState.erasedIndices.size - (editState.pendingDeletedCount ?? 0)
                 : 0;
               const displayName = scanDisplayName(scan);
               const isExpanded = expandedScanIds.has(scan.id);
@@ -9455,6 +9376,53 @@ export default function PointCloudViewer({
                   className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
                 >
                   {isOctree ? 'Clear Strokes' : 'Restore All Points'}
+                </button>
+              </div>
+            )}
+            {/* Permanently apply deletions (bake): shown when the selected
+                session cloud has unbaked deletes. Rebuilds the octree from the
+                survivors and frees the in-RAM mask. Slow but exact; not
+                undoable afterward. */}
+            {isOctree && firstSelectedCloud &&
+             (getEditState(firstSelectedCloud.id).pendingDeletes?.length ?? 0) > 0 && (
+              <div className="flex flex-col gap-1 mt-2 pt-2 border-t border-neutral-700">
+                <button
+                  data-testid="erase-bake"
+                  onClick={() => handleBakeEdits(firstSelectedCloud.id)}
+                  className="w-full px-2 py-1.5 text-xs bg-emerald-700 hover:bg-emerald-600 rounded text-white font-medium"
+                  title="Rebuild the octree from the surviving points (permanent, not undoable)"
+                >
+                  Permanently apply deletions
+                </button>
+                <button
+                  data-testid="erase-undo-pending"
+                  onClick={async () => {
+                    const oct = firstSelectedCloud.data.octree;
+                    if (!oct?.sessionId) return;
+                    const stack = getEditState(firstSelectedCloud.id).pendingDeletes ?? [];
+                    if (stack.length === 0) return;
+                    // Undo the most recent committed delete: recompute the
+                    // backend mask from the shortened stack, and drop it from
+                    // the local stack so the GPU preview updates.
+                    try {
+                      const r = await resetCloudEdits(oct.sessionId, stack.length - 1);
+                      setEditStates(prev => {
+                        const next = new Map(prev);
+                        const cur = next.get(firstSelectedCloud.id);
+                        if (cur) next.set(firstSelectedCloud.id, {
+                          ...cur,
+                          pendingDeletes: stack.slice(0, -1),
+                          pendingDeletedCount: r.deleted_count,
+                        });
+                        return next;
+                      });
+                    } catch (err) {
+                      showToast({ title: `Undo failed: ${err instanceof Error ? err.message : String(err)}`, type: 'error' });
+                    }
+                  }}
+                  className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
+                >
+                  Undo last deletion
                 </button>
               </div>
             )}

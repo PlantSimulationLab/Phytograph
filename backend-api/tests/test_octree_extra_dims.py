@@ -1,19 +1,13 @@
 """Tests for carrying arbitrary scalar columns into octree-backed clouds.
 
-Two layers:
-  - Pure-helper unit tests (no PotreeConverter needed) for the column-plan /
-    name-sanitisation logic.
-  - An end-to-end conversion test (gated on a real PotreeConverter binary, like
-    test_pointcloud_convert_to_octree.py) that asserts the extra dimensions and
-    their human-readable labels survive into the octree metadata.
+Pure-helper unit tests (no PotreeConverter needed) for the column-plan /
+name-sanitisation logic.
 
 The committed fixture `fixtures/scalars.xyz` is a comma-headered,
 space-delimited XYZ with two named scalar columns (Reflectance[dB],
 Deviation[]) — the shape produced by terrestrial-scanner exports.
 """
 from pathlib import Path
-
-import pytest
 
 import main
 
@@ -82,55 +76,3 @@ def test_xyz_column_plan_dedupes_slug_collisions(tmp_path):
     names, extras = main._xyz_column_plan(f, "foo bar")
     slugs = [e["slug"] for e in extras]
     assert len(slugs) == len(set(slugs)), f"slugs not unique: {slugs}"
-
-
-# --- End-to-end conversion (needs PotreeConverter) --------------------------
-
-def _converter_available() -> bool:
-    try:
-        main._resolve_potree_converter_path()
-        return True
-    except Exception:
-        return False
-
-
-requires_converter = pytest.mark.skipif(
-    not _converter_available(),
-    reason="PotreeConverter binary not found; build it via npm run build:potree-converter",
-)
-
-
-@pytest.fixture
-def cache_root(tmp_path, monkeypatch) -> Path:
-    root = tmp_path / "octree_cache"
-    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(root))
-    return root
-
-
-@requires_converter
-def test_extra_dims_survive_into_octree_metadata(client, cache_root):
-    res = client.post(
-        "/api/pointcloud/convert_to_octree",
-        json={
-            "source_path": str(FIXTURE),
-            "ascii_format": "x y z reflectance deviation",
-        },
-    )
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["point_count"] == 20
-
-    # The extra dimension carried from 'deviation' should appear in the
-    # octree's attribute list with a sane min/max and its display label.
-    attrs = {a["name"]: a for a in body["attributes"]}
-    assert "Deviation" in attrs, f"attributes were: {list(attrs)}"
-    dev = attrs["Deviation"]
-    assert dev.get("label") == "Deviation"
-    assert "min" in dev and "max" in dev
-    assert dev["min"][0] >= 0.0
-    assert dev["max"][0] <= 3.0
-    assert dev["max"][0] > dev["min"][0]
-
-    # The slug→label sidecar should have been written into the cache dir.
-    sidecar = Path(body["cache_dir"]) / main._OCTREE_LABELS_FILENAME
-    assert sidecar.is_file()

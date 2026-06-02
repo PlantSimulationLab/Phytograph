@@ -126,16 +126,15 @@ it discards the points outside the kept set — if you need them back,
 re-import the original file or use **Segment** so they're kept as a new
 cloud.
 
-!!! note "Apply latency on large XYZ scans"
-    For XYZ-imported scans, **Apply** re-runs the octree converter on the
-    filtered source file. Typical cost is ~3 M points/sec on M-series
-    Macs — a 13 M-point Helios scan takes ~5 s, a 30 M-point scan ~12 s.
-    The render itself stays interactive throughout: the panel closes
-    immediately on click, a **Cropping…** indicator shows the work is
-    running, the removed points stay hidden the whole time, and the
-    cropped cloud streams in when the new octree is ready. Subsequent
-    crops with identical parameters are instant (cached). LAS/LAZ and
-    PLY/PCD scans use the older flat-array path and apply synchronously.
+!!! note "How edits are applied (the in-memory model)"
+    When you import a point cloud, Phytograph reads the file **once** and
+    holds the points in memory as the working copy — the source of truth for
+    every edit. Crop, erase, filter, and segment all operate on that
+    in-memory copy; the file is never re-read. Crops and filters rebuild the
+    displayed octree from the in-memory points (a brief step on large scans),
+    while erase deletes are applied as an instant visibility mask. Either way
+    nothing touches the original file on disk — your edits live in the session
+    until you **Export**.
 
 ## Erase
 
@@ -160,31 +159,37 @@ nothing is deleted until you apply.
 4. Press **`E`** (or the button) again to turn erase mode off **without
    closing the tool** — the view unfreezes so you can reorient, then turn
    erase back on and keep stamping. Painted strokes are kept across toggles.
-5. Click **Apply Erase** to remove the painted points for real, or
-   **Clear Strokes** to discard the preview.
+5. Click **Apply Erase** to delete the painted points, or **Clear Strokes**
+   to discard the preview. The point count drops **immediately** — the erase
+   is applied as an instant visibility mask, with no waiting.
 
 Adjust brush size (in screen pixels) with the slider; because the brush is
 screen-space, its size stays constant on screen regardless of the cloud's
 distance.
 
-Erase composes like crop: each apply removes the painted union from the
-current point set, so you can apply, reorient, and stamp again to clear
-points hidden behind a surface.
+Erase composes: each apply removes the painted union from the current point
+set, so you can apply, reorient, and stamp again to clear points hidden
+behind a surface. Because deletes are masked (not yet written to a new
+octree), they're cheap and reversible:
 
-!!! info "How erase works on large scans"
-    Imported scans stream from an on-disk octree, so the preview is done on
-    the GPU (each square's view-aligned volume clips its points live) and
-    **Apply** re-converts the cloud on the backend at full resolution — the
-    same path **Crop** uses, testing each point's screen position against
-    the painted squares. While erase mode is on, the view is projected
-    orthographically (as the Rect crop does) so the square extrudes as a
-    straight prism and the cleared region matches the brush outline exactly
-    rather than flaring into a perspective trapezoid. Since the test is in
-    screen space the stamp is depth-independent: it removes every point
-    behind the square, not just the near surface — reorient and paint again
-    to clear points it was shielding. You can still use **Crop** with
-    **Keep Outside** for a box, rect, or polygon region when a regular shape
-    fits better.
+- **Undo last deletion** restores the most recent erase.
+- **Permanently apply deletions** bakes the survivors into a fresh octree —
+  the one slower step, and the point at which the deletions become permanent
+  (no longer undoable). You only need this before exporting, or to free the
+  deleted points' memory; until then the masked result is already what every
+  other operation (triangulate, skeleton, segment, export) sees.
+
+!!! info "How erase works"
+    Erase is **instant** because it sets a per-point visibility mask on the
+    in-memory cloud rather than rebuilding anything — the deleted points
+    vanish on the GPU the moment you apply. While erase mode is on, the view
+    is projected orthographically (as the Rect crop does) so the square
+    extrudes as a straight prism and the cleared region matches the brush
+    outline exactly rather than flaring into a perspective trapezoid. Since
+    the test is in screen space the stamp is depth-independent: it removes
+    every point behind the square, not just the near surface — reorient and
+    paint again to clear points it was shielding. **Permanently apply
+    deletions** is what actually rebuilds the octree from the survivors.
 
 ## Filter
 
@@ -226,11 +231,12 @@ Use <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> to undo. If a filter excludes every
 point, you're offered the chance to delete the cloud instead.
 
 !!! info "Small vs large clouds"
-    Small (in-memory) clouds preview the filter live in the viewport as
-    you edit the range. Large, octree-backed clouds have no live preview —
-    committing re-converts the cloud on the backend (the same path
-    **Crop** uses on large clouds), so the change appears once that
-    finishes.
+    Small (in-memory) clouds preview the filter live in the viewport as you
+    edit the range. Large, octree-backed clouds have no live preview —
+    committing applies the filter to the in-memory points and rebuilds the
+    displayed octree from the survivors (the file is not re-read), so the
+    change appears once that brief step finishes. A second filter composes on
+    the first result, never re-admitting points an earlier filter removed.
 
 ## Resample
 

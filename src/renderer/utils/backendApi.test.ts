@@ -3,7 +3,6 @@ import {
   advancePlantSession,
   computeAlignmentDistance,
   createPlantSession,
-  cropOctree,
   deletePlantSession,
   exportPointCloudLasLaz,
   extractSkeleton,
@@ -24,7 +23,6 @@ import {
   parsePlantMorphParameters,
   sampleMeshSurface,
   segmentGround,
-  segmentGroundApply,
   triangulatePointCloud,
 } from './backendApi';
 
@@ -219,43 +217,6 @@ describe('segmentGround', () => {
   it('surfaces detail on error', async () => {
     mockFetchError(500, { detail: 'CSF not installed' });
     await expect(segmentGround(req)).rejects.toThrow('CSF not installed');
-  });
-});
-
-describe('segmentGroundApply', () => {
-  const req = {
-    source_path: '/tmp/scan.xyz',
-    ascii_format: 'x y z object_label',
-    class_threshold: 0.05,
-  };
-
-  it('POSTs to /api/segment/ground/apply and returns an octree ref', async () => {
-    const expected = {
-      cache_id: 'abc123',
-      cache_dir: '/cache/abc123',
-      cached: false,
-      version: '2.0',
-      point_count: 100,
-      spacing: 0.1,
-      scale: [1, 1, 1],
-      offset: [0, 0, 0],
-      bounds: { min: [0, 0, 0], max: [1, 1, 1] },
-      tight_bounds: { min: [0, 0, 0], max: [1, 1, 1] },
-      attributes: [{ name: 'ground_class', size: 4, type: 'float', num_elements: 1, label: 'Ground Class', min: [1], max: [2] }],
-    };
-    const spy = mockFetchOk(expected);
-    const result = await segmentGroundApply(req);
-    const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/segment/ground/apply');
-    expect(init?.method).toBe('POST');
-    expect(JSON.parse(init?.body as string)).toEqual(req);
-    expect(result.cache_id).toBe('abc123');
-    expect(result.attributes[0].name).toBe('ground_class');
-  });
-
-  it('surfaces detail on error', async () => {
-    mockFetchError(400, { detail: 'XYZ-family sources only' });
-    await expect(segmentGroundApply(req)).rejects.toThrow('XYZ-family sources only');
   });
 });
 
@@ -769,121 +730,6 @@ describe('alignment / ICP', () => {
 // the second branch must fire. Covering this branch on representative
 // endpoints rather than all 18 — the source is identical line-for-line.
 // ────────────────────────────────────────────────────────────────────────
-
-describe('cropOctree', () => {
-  it('POSTs source path + box region + translation; returns octree metadata', async () => {
-    const okBody = {
-      cache_id: 'a'.repeat(40),
-      cache_dir: '/cache/a',
-      cached: false,
-      version: '2.0',
-      point_count: 42,
-      spacing: 0.1,
-      scale: [1, 1, 1],
-      offset: [0, 0, 0],
-      bounds: { min: [0, 0, 0], max: [1, 1, 1] },
-      tight_bounds: { min: [0, 0, 0], max: [1, 1, 1] },
-      attributes: [],
-    };
-    const spy = mockFetchOk(okBody);
-
-    const res = await cropOctree('/data/cloud.xyz', {
-      asciiFormat: 'x y z',
-      region: {
-        kind: 'box',
-        min: [0, 0, 0],
-        max: [1, 1, 1],
-        invert: false,
-      },
-      translation: [0.5, 0, 0],
-    });
-
-    expect(res.point_count).toBe(42);
-    expect(res.cache_id).toBe('a'.repeat(40));
-    expect(spy).toHaveBeenCalledTimes(1);
-    const call = spy.mock.calls[0];
-    expect(call[0]).toBe('http://127.0.0.1:8008/api/pointcloud/crop_octree');
-    const init = call[1] as RequestInit;
-    expect(init.method).toBe('POST');
-    const body = JSON.parse(init.body as string);
-    expect(body.source_path).toBe('/data/cloud.xyz');
-    expect(body.ascii_format).toBe('x y z');
-    expect(body.region).toEqual({
-      kind: 'box',
-      min: [0, 0, 0],
-      max: [1, 1, 1],
-      invert: false,
-    });
-    expect(body.translation).toEqual([0.5, 0, 0]);
-  });
-
-  it('returns empty result without throwing when point_count is 0', async () => {
-    mockFetchOk({
-      cache_id: null,
-      cache_dir: null,
-      cached: false,
-      version: '2.0',
-      point_count: 0,
-      spacing: 0,
-      scale: [1, 1, 1],
-      offset: [0, 0, 0],
-      bounds: { min: [0, 0, 0], max: [0, 0, 0] },
-      tight_bounds: { min: [0, 0, 0], max: [0, 0, 0] },
-      attributes: [],
-    });
-
-    const res = await cropOctree('/data/cloud.xyz', {
-      region: { kind: 'box', min: [100, 100, 100], max: [200, 200, 200] },
-    });
-    expect(res.point_count).toBe(0);
-    expect(res.cache_id).toBeNull();
-  });
-
-  it('serialises polygon region with matrices + canvas', async () => {
-    const spy = mockFetchOk({
-      cache_id: 'b'.repeat(40),
-      cache_dir: '/cache/b',
-      cached: false,
-      version: '2.0',
-      point_count: 5,
-      spacing: 0.1,
-      scale: [1, 1, 1],
-      offset: [0, 0, 0],
-      bounds: { min: [0, 0, 0], max: [1, 1, 1] },
-      tight_bounds: { min: [0, 0, 0], max: [1, 1, 1] },
-      attributes: [],
-    });
-    const proj = Array(16).fill(0).map((_, i) => i);
-    const view = Array(16).fill(0).map((_, i) => 16 + i);
-
-    await cropOctree('/c.xyz', {
-      region: {
-        kind: 'polygon',
-        points: [[0, 0], [100, 0], [100, 100]],
-        projection: proj,
-        view,
-        canvas: { width: 1024, height: 768 },
-        invert: true,
-      },
-    });
-
-    const body = JSON.parse((spy.mock.calls[0][1] as RequestInit).body as string);
-    expect(body.region.kind).toBe('polygon');
-    expect(body.region.points).toEqual([[0, 0], [100, 0], [100, 100]]);
-    expect(body.region.projection).toEqual(proj);
-    expect(body.region.view).toEqual(view);
-    expect(body.region.canvas).toEqual({ width: 1024, height: 768 });
-    expect(body.region.invert).toBe(true);
-    expect(body.translation).toBeNull();
-  });
-
-  it('throws with the backend detail on HTTP 4xx/5xx', async () => {
-    mockFetchError(400, { detail: 'region.kind must be box or polygon' });
-    await expect(
-      cropOctree('/c.xyz', { region: { kind: 'box', min: [0, 0, 0], max: [1, 1, 1] } }),
-    ).rejects.toThrow(/region\.kind/);
-  });
-});
 
 describe('no-detail HTTP error fallbacks', () => {
   function noDetailResponse() {

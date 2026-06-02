@@ -29,6 +29,13 @@ export interface ScalarField {
 export interface OctreeRef {
   cacheId: string;            // sha1 hex; also the cache dir name
   sourceXyzPath: string;       // original on-disk source — needed for re-crop
+  // Backend cloud-session id (Family-1 mutable model). When set, this cloud's
+  // points live in an in-RAM backend array that is the source of truth: crop /
+  // erase route through delete_region (instant mask, no rebuild), downstream
+  // ops read the masked array via PointSource.session_id, and "Permanently
+  // apply" bakes a fresh octree (updating `cacheId`). Octree clouds imported
+  // via the editable flow always carry this.
+  sessionId?: string | null;
   asciiFormat?: string | null; // Helios <ASCII_format> hint, when known
   // Optional per-attribute min/max from PotreeConverter's metadata.
   // Keyed by attribute name ("intensity", "rgb", "classification", …).
@@ -42,12 +49,11 @@ export interface OctreeRef {
   // back to showing the slug verbatim.
   attributeLabels?: Record<string, string>;
   // Explicit column layout chosen in the import wizard (ASCII sources only),
-  // kept as provenance of how this cloud was imported. NOTE: as of 0.3.15 the
-  // crop / ground-segment / tree-segment endpoints do NOT yet accept a column
-  // plan, so a re-crop of a custom-column import rebuilds with auto-detect.
-  // For auto-detected imports (the common case) that's identical; a
-  // renamed/remapped column could revert on re-crop. Threading the plan through
-  // those endpoints is a planned follow-up. Absent for auto-detected imports.
+  // kept as provenance of how this cloud was imported. With the cloud-session
+  // flow the wizard plan is honored once at session create and the points then
+  // live in the in-RAM array, so edits never re-auto-detect columns — a
+  // renamed/remapped/categorical scalar survives crop/erase/bake. Absent for
+  // auto-detected imports.
   columnPlan?: ColumnPlan | null;
   // On-disk attribute slugs the user marked categorical in the wizard. The
   // renderer registers these so they colour as discrete classes rather than a
@@ -61,7 +67,7 @@ export interface OctreeRef {
 // fills in (the per-op `max_points`/`want_colors` are added at the call site).
 export type PointSourcePayload =
   | { kind: 'inline'; data: PointCloudData }
-  | { kind: 'source'; source: Pick<BackendPointSource, 'source_path' | 'ascii_format' | 'translation'> };
+  | { kind: 'source'; source: Pick<BackendPointSource, 'source_path' | 'ascii_format' | 'translation' | 'session_id'> };
 
 // Point cloud data interface
 export interface PointCloudData {
@@ -105,7 +111,42 @@ export interface PointCloudEntry {
 export interface CloudEditState {
   translation: { x: number; y: number; z: number };
   erasedIndices: Set<number>;  // Set of erased point indices (flat clouds only)
+  // Session-backed clouds (Family-1): the ordered stack of delete regions
+  // applied this session but NOT yet baked. Each is the exact CropOctreeRegion
+  // sent to the backend's delete_region. Drives (a) the GPU clip-volume preview
+  // so deleted points vanish instantly, (b) undo via reset_edits(count), and
+  // (c) the "unbaked deletions" indicator + on-close bake prompt. Cleared on
+  // bake. Absent/empty when nothing is pending. The region shape is kept as a
+  // plain object (PendingDeleteRegion) to avoid a backendApi import cycle here.
+  pendingDeletes?: PendingDeleteRegion[];
+  // Backend-reported count of points currently deleted by the pending (unbaked)
+  // deletes, so the scan row's point count reflects the deletion immediately
+  // (the octree metadata's pointCount only drops on bake). 0 when none pending.
+  pendingDeletedCount?: number;
 }
+
+// Mirror of backendApi's CropOctreeRegion, duplicated here to keep this
+// types-only module free of a backendApi import. Kept structurally identical so
+// a PendingDeleteRegion passes straight to deleteCloudRegion / the clip preview.
+export type PendingDeleteRegion =
+  | { kind: 'box'; min: [number, number, number]; max: [number, number, number]; invert?: boolean }
+  | {
+      kind: 'polygon';
+      points: Array<[number, number]>;
+      projection: number[];
+      view: number[];
+      canvas: { width: number; height: number };
+      invert?: boolean;
+    }
+  | {
+      kind: 'squares_union';
+      centers: Array<[number, number]>;
+      half_sizes: number[];
+      projection: number[];
+      view: number[];
+      canvas: { width: number; height: number };
+      invert?: boolean;
+    };
 
 // State snapshot for mesh/skeleton
 export interface ObjectState {
