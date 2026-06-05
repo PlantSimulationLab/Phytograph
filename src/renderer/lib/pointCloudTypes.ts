@@ -253,6 +253,43 @@ export interface SkeletonEntry {
   color: string;
 }
 
+// A single voxel of a leaf-area-density result. center/size are world-space;
+// lad is leaf area density (m²/m³); gtheta is the per-cell G-function;
+// hitCount is how many points fell inside (0 = empty cell).
+export interface LADVoxel {
+  index: number;
+  center: [number, number, number];
+  size: [number, number, number];
+  leafArea: number;   // m²
+  lad: number;        // m²/m³
+  gtheta: number;
+  hitCount: number;
+}
+
+// A leaf-area-density result: a 3D grid of voxels each carrying an LAD scalar.
+// Kept separate from MeshEntry (which is triangle/vertex oriented) — LAD is
+// rendered as instanced translucent voxel cells colored by the shared colormap.
+export interface LADResultEntry {
+  id: string;
+  sourceScanIds: string[];   // provenance: which scans produced it
+  voxels: LADVoxel[];
+  nx: number;
+  ny: number;
+  nz: number;
+  bounds: { min: [number, number, number]; max: [number, number, number] };
+  // Which Beer's-law weighting actually ran: 'single' (discrete) or 'multi'
+  // (full-waveform, beams grouped + misses gap-filled). Derived from the
+  // backend's authoritative detection, not the requested return type.
+  returnMode: 'single' | 'multi';
+  visible: boolean;
+  color: string;             // fallback/solid swatch in the object list
+  // Colorbar domain override; undefined => auto from the voxel LAD range.
+  ladMinOverride?: number;
+  ladMaxOverride?: number;
+  hideEmpty: boolean;        // hide cells with lad<=0 / hitCount===0
+  opacity: number;           // 0..1 cell translucency
+}
+
 // Color mapping modes
 // 'per-scan' = each scan colored by its own swatch (the same color shown
 // next to the scan in the side panel). Implemented internally as a 'single'

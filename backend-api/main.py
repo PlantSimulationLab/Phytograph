@@ -93,7 +93,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.18"
+BACKEND_VERSION = "0.3.20"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1914,6 +1914,23 @@ class HeliosScanEntry(BaseModel):
     theta_max: Optional[float] = None   # Zenith angle max (degrees)
     phi_min: Optional[float] = None     # Azimuth angle min (degrees)
     phi_max: Optional[float] = None     # Azimuth angle max (degrees)
+    # Return type for leaf-area-density. "single" needs only x y z; "multi"
+    # (full-waveform) needs per-pulse timestamp/target_index/target_count
+    # columns so Helios can group beams and gap-fill misses. Ignored by
+    # triangulation; consumed by _do_lad_computation.
+    return_type: str = "single"         # "single" | "multi"
+    beam_exit_diameter: Optional[float] = None   # meters (multi-return only)
+    beam_divergence: Optional[float] = None      # milliradians (multi-return only)
+    # LAD point-data source (consumed by _do_lad_computation, ignored by
+    # triangulation). A session-backed cloud passes `session_id`: the LAD path
+    # dumps its surviving in-RAM points — including the per-pulse multi-return
+    # columns when present — via _session_to_lad_ascii, honoring unbaked
+    # deletions and never re-reading the source. A synthetic (flat, in-RAM)
+    # cloud has no file or session, so it passes `points` plus, for
+    # multi-return, the aligned per-pulse columns in `scalar_columns` (a dict of
+    # column-name -> per-point values, e.g. timestamp/target_index/target_count).
+    session_id: Optional[str] = None
+    scalar_columns: Optional[Dict[str, List[float]]] = None
 
 class HeliosGrid(BaseModel):
     """An explicit triangulation grid, derived from a voxel box in the UI.
@@ -1965,6 +1982,61 @@ class HeliosTriangulationResponse(BaseModel):
     # already segmented or cropped). Carries a human-readable companion message.
     grid_warning: bool = False
     grid_message: Optional[str] = None
+
+
+# ==================== LEAF AREA DENSITY (LAD) ====================
+# Per-voxel leaf area density (m^2/m^3) via the PyHelios LiDAR plugin. LAD is
+# NOT the sum of triangle areas: the triangulation only supplies the per-cell
+# G-function (the leaf-projection coefficient for Beer's law); Helios then
+# traces beam paths through the voxel grid and inverts Beer's law per voxel to
+# recover LAD. Unlike triangulation, the voxel grid is REQUIRED — it is the
+# basis of the calculation.
+
+class LADComputeRequest(BaseModel):
+    """Request model for leaf area density computation.
+
+    Reuses HeliosScanEntry for scans (each carrying its scanner origin, angular
+    geometry, and return_type). The grid is REQUIRED (its nx/ny/nz are the LAD
+    voxel divisions) — there is no meaningful "auto single-cell" LAD.
+    """
+    scans: List[HeliosScanEntry]
+    grid: HeliosGrid                       # REQUIRED — the LAD voxel grid
+    lmax: float = 0.1                      # max triangle edge length (G-function)
+    max_aspect_ratio: float = 4.0         # max triangle aspect ratio
+    min_voxel_hits: Optional[int] = None  # min ray hits for a voxel to be solved
+    # Request-level angular fallbacks (degrees), used only for scans that don't
+    # carry their own theta/phi (mirrors HeliosTriangulationRequest).
+    theta_min: float = 30.0
+    theta_max: float = 130.0
+    phi_min: float = 0.0
+    phi_max: float = 360.0
+
+class LADCell(BaseModel):
+    """A single voxel result."""
+    index: int
+    center: List[float]   # [x, y, z]
+    size: List[float]     # [x, y, z]
+    leaf_area: float      # m^2 within the voxel
+    lad: float            # m^2/m^3 (leaf_area / voxel volume)
+    gtheta: float         # G(theta) leaf-projection coefficient
+    hit_count: int        # points falling inside the voxel (numpy-binned)
+
+class LADComputeResponse(BaseModel):
+    """Response model for leaf area density computation."""
+    success: bool
+    cells: List[LADCell] = []
+    nx: int = 1
+    ny: int = 1
+    nz: int = 1
+    grid_center: List[float] = []
+    grid_size: List[float] = []
+    bounds: List[List[float]] = []   # [[lo_x,lo_y,lo_z], [hi_x,hi_y,hi_z]]
+    is_multi_return: bool = False
+    return_mode: str = "single"      # "single" | "multi"
+    total_leaf_area: float = 0.0
+    method_used: str = "helios"
+    warnings: List[str] = []
+    error: Optional[str] = None
 
 
 def _detect_ascii_format(file_path: str) -> str:
@@ -2377,6 +2449,357 @@ async def helios_triangulate(request: HeliosTriangulationRequest):
             yield " "
             await asyncio.sleep(5)
 
+        yield await future
+
+    return StreamingResponse(stream_result(), media_type="application/json")
+
+
+# Tokens the Helios ASCII loader stores into a hit's data map (the `else` branch
+# of loadASCIIFile). Multi-return LAD needs these three present so Helios can
+# group beams by pulse and gap-fill misses; without them isMultiReturnData() and
+# gapfillMisses() cannot work.
+_LAD_MULTI_RETURN_COLUMNS = ("timestamp", "target_index", "target_count")
+
+
+def _write_lad_points_ascii(out_path: str, points: list,
+                            scalar_columns: Optional[dict]) -> tuple:
+    """Write inline LAD points to a Helios-ready ASCII file. Returns
+    (ascii_format, is_multi).
+
+    Used for a flat in-RAM cloud that has no session or source file — e.g. a
+    synthetic full-waveform scan, whose per-pulse columns arrive in
+    `scalar_columns` (column-name -> per-point values, aligned 1:1 with
+    `points`). When all three multi-return columns are present and aligned, they
+    are appended after x y z so Helios runs the multi-return algorithm; otherwise
+    only x y z is written (single-return).
+    """
+    import numpy as np
+
+    pts = np.asarray(points, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] < 3:
+        raise ValueError("LAD points must be an (N, >=3) array")
+    n = pts.shape[0]
+
+    cols = [pts[:, 0], pts[:, 1], pts[:, 2]]
+    tokens = ["x", "y", "z"]
+    is_multi = False
+    if scalar_columns and all(
+        c in scalar_columns and len(scalar_columns[c]) == n
+        for c in _LAD_MULTI_RETURN_COLUMNS
+    ):
+        for c in _LAD_MULTI_RETURN_COLUMNS:
+            cols.append(np.asarray(scalar_columns[c], dtype=float))
+            tokens.append(c)
+        is_multi = True
+
+    np.savetxt(out_path, np.column_stack(cols), fmt="%.6g", delimiter=" ")
+    return " ".join(tokens), is_multi
+
+
+def _do_lad_computation(request: "LADComputeRequest") -> dict:
+    """Compute per-voxel leaf area density via PyHelios. Returns a result dict.
+
+    LAD is NOT a sum of triangle areas. The triangulation supplies the per-cell
+    G-function (the leaf-projection coefficient for Beer's law); Helios then
+    traces beam paths through the voxel grid and inverts Beer's law per voxel to
+    recover leaf area density. Unlike triangulation, the grid is required.
+
+    Point data is fed to Helios via the file/XML path (not the numpy bulk
+    addHitPoints API), because only the ASCII loader populates the per-hit data
+    map (timestamp/target_index/target_count) that single-vs-multi-return
+    detection and gap-filling depend on. All scans share ONE LiDARcloud and ONE
+    grid, since beam tracing and Beer's-law inversion are per-voxel over the
+    whole grid.
+    """
+    import math
+    import tempfile
+    import shutil
+    import os
+    import numpy as np
+
+    warnings: List[str] = []
+    tmpdir = None
+    try:
+        from pyhelios import LiDARCloud, Context
+
+        if request.grid is None:
+            raise ValueError("A voxel grid is required for leaf area density.")
+
+        tmpdir = tempfile.mkdtemp(prefix="phytograph_lad_")
+
+        # Per-scan angular geometry / resolution: prefer the scan's own values,
+        # fall back to request-level (mirrors _do_helios_computation).
+        def _angles(scan_entry):
+            return (
+                scan_entry.theta_min if scan_entry.theta_min is not None else request.theta_min,
+                scan_entry.theta_max if scan_entry.theta_max is not None else request.theta_max,
+                scan_entry.phi_min if scan_entry.phi_min is not None else request.phi_min,
+                scan_entry.phi_max if scan_entry.phi_max is not None else request.phi_max,
+            )
+
+        def _resolution(scan_entry, n_points, theta_span, phi_span):
+            if scan_entry.n_theta and scan_entry.n_phi:
+                return int(scan_entry.n_theta), int(scan_entry.n_phi)
+            aspect = theta_span / max(phi_span, 1e-10)
+            n_phi = max(int(math.sqrt(n_points / max(aspect, 0.01))), 10)
+            n_theta = max(int(n_points / n_phi), 10)
+            return n_theta, n_phi
+
+        # Each scan resolves to (ASCII file, format, point count). Multi-return is
+        # detected AUTHORITATIVELY from whether that resolved data actually
+        # carries the three per-pulse columns — never from the `return_type`
+        # label alone, which can't promise the columns are present. The data
+        # comes from one of three sources, in priority order:
+        #   1. session_id  -> _session_to_lad_ascii dumps surviving in-RAM points
+        #      (+ multi-return columns when the session holds them), honoring
+        #      unbaked deletions and never re-reading the source file.
+        #   2. points (+ scalar_columns) -> a flat in-RAM cloud (e.g. a synthetic
+        #      full-waveform scan) writes x y z plus any aligned per-pulse columns.
+        #   3. file_path -> read the ASCII file from disk with its column format.
+        scans_info = []
+        for scan_entry in request.scans:
+            origin = scan_entry.origin
+            if len(origin) != 3:
+                raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
+
+            theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
+            fp = os.path.join(tmpdir, f"lad_scan_{len(scans_info)}.txt")
+
+            if scan_entry.session_id:
+                sess = _get_cloud_session(scan_entry.session_id)
+                with _cloud_session_lock:
+                    fmt, scan_multi = _session_to_lad_ascii(sess, _Path(fp))
+                n_points, _, _ = _file_xyz_bounds(fp, fmt)
+            elif scan_entry.file_path:
+                fp = scan_entry.file_path
+                if not os.path.isfile(fp):
+                    raise ValueError(f"Scan file not found: {fp}")
+                fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
+                n_points, _, _ = _file_xyz_bounds(fp, fmt)
+                scan_multi = all(c in fmt.split() for c in _LAD_MULTI_RETURN_COLUMNS)
+            else:
+                points = scan_entry.points
+                if not points:
+                    raise ValueError("Scan entry has no points, file_path, or session_id")
+                fmt, scan_multi = _write_lad_points_ascii(
+                    fp, points, scan_entry.scalar_columns)
+                n_points = len(points)
+
+            # A scan flagged multi-return whose resolved data lacks the per-pulse
+            # columns can't run the full-waveform algorithm (gapfillMisses() would
+            # hard-error). Surface that rather than silently mislabeling it.
+            if (scan_entry.return_type or "single") == "multi" and not scan_multi:
+                warnings.append(
+                    "Scan marked multi-return but its point data lacks the per-pulse "
+                    "timestamp/target_index/target_count columns; computed as "
+                    "single-return. Re-import or re-scan preserving those columns "
+                    "for full-waveform LAD."
+                )
+
+            n_theta, n_phi = _resolution(
+                scan_entry, n_points, theta_max - theta_min, phi_max - phi_min)
+
+            scans_info.append({
+                "filepath": fp,
+                "ascii_format": fmt,
+                "origin": origin,
+                "n_theta": n_theta,
+                "n_phi": n_phi,
+                "theta_min": theta_min,
+                "theta_max": theta_max,
+                "phi_min": phi_min,
+                "phi_max": phi_max,
+                "multi": scan_multi,
+            })
+
+        is_multi = any(s["multi"] for s in scans_info)
+        return_mode = "multi" if is_multi else "single"
+
+        grid_center = list(request.grid.center)
+        grid_size = list(request.grid.size)
+        grid_nx, grid_ny, grid_nz = request.grid.nx, request.grid.ny, request.grid.nz
+
+        # One XML with all scans + the grid, then one cloud for the whole thing.
+        xml_path = _generate_helios_xml(
+            tmpdir, scans_info, grid_center, grid_size,
+            grid_nx, grid_ny, grid_nz, xml_name="lad_config.xml",
+        )
+
+        cloud = LiDARCloud()
+        cloud.disableMessages()
+        cloud.loadXML(xml_path)
+        cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
+        if cloud.getTriangleCount() == 0:
+            return {
+                "success": False,
+                "cells": [],
+                "method_used": "helios",
+                "error": "No triangles generated — cannot compute the G-function. "
+                         "Try increasing Lmax or adjusting max_aspect_ratio.",
+                "warnings": warnings,
+            }
+
+        if is_multi:
+            # Required before calculateLeafArea for multi-return data so misses
+            # are accounted for in the transmission probability.
+            cloud.gapfillMisses()
+
+        with Context() as ctx:
+            cloud.calculateLeafArea(ctx, request.min_voxel_hits)
+
+        # Per-cell hit counts: Helios exposes no getter, so bin the points into
+        # the grid AABBs ourselves. Reads each scan file once (positions only).
+        n_cells = cloud.getGridCellCount()
+        cell_centers = [cloud.getCellCenter(i) for i in range(n_cells)]
+        cell_sizes = [cloud.getCellSize(i) for i in range(n_cells)]
+        hit_counts = _count_points_per_cell(scans_info, cell_centers, cell_sizes)
+
+        cells = []
+        total_leaf_area = 0.0
+        for i in range(n_cells):
+            c = cell_centers[i]
+            s = cell_sizes[i]
+            la = float(cloud.getCellLeafArea(i))
+            lad = float(cloud.getCellLeafAreaDensity(i))
+            gt = float(cloud.getCellGtheta(i))
+            # Helios returns NaN for unsolved cells; surface them as 0 so the UI
+            # can treat them as empty rather than choking on NaN in JSON.
+            if la != la:
+                la = 0.0
+            if lad != lad:
+                lad = 0.0
+            if gt != gt:
+                gt = 0.0
+            total_leaf_area += la
+            cells.append({
+                "index": i,
+                "center": [c.x, c.y, c.z],
+                "size": [s.x, s.y, s.z],
+                "leaf_area": la,
+                "lad": lad,
+                "gtheta": gt,
+                "hit_count": int(hit_counts[i]),
+            })
+
+        bb_lo = [grid_center[k] - grid_size[k] / 2 for k in range(3)]
+        bb_hi = [grid_center[k] + grid_size[k] / 2 for k in range(3)]
+
+        return {
+            "success": True,
+            "cells": cells,
+            "nx": grid_nx,
+            "ny": grid_ny,
+            "nz": grid_nz,
+            "grid_center": grid_center,
+            "grid_size": grid_size,
+            "bounds": [bb_lo, bb_hi],
+            "is_multi_return": is_multi,
+            "return_mode": return_mode,
+            "total_leaf_area": total_leaf_area,
+            "method_used": "helios",
+            "warnings": warnings,
+        }
+
+    except ImportError as e:
+        return {
+            "success": False,
+            "cells": [],
+            "method_used": "helios",
+            "error": f"PyHelios not installed: {str(e)}",
+            "warnings": warnings,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "cells": [],
+            "method_used": "helios",
+            "error": f"Leaf area density computation failed: {str(e)}",
+            "warnings": warnings,
+        }
+    finally:
+        if tmpdir and os.path.isdir(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _count_points_per_cell(scans_info: list, cell_centers: list, cell_sizes: list):
+    """Count how many scan points fall inside each voxel (axis-aligned cells).
+
+    Streams each scan file once (positions only) and bins by the grid's regular
+    structure inferred from the cell centers/sizes. Used only to populate the
+    per-voxel `hit_count` for the UI — not part of the LAD math.
+    """
+    import numpy as np
+
+    n_cells = len(cell_centers)
+    counts = np.zeros(n_cells, dtype=np.int64)
+    if n_cells == 0:
+        return counts
+
+    centers = np.array([[c.x, c.y, c.z] for c in cell_centers], dtype=np.float64)
+    sizes = np.array([[s.x, s.y, s.z] for s in cell_sizes], dtype=np.float64)
+
+    # Grid lower corner and per-axis cell counts/steps from the cell layout.
+    grid_lo = (centers - sizes / 2).min(axis=0)
+    grid_hi = (centers + sizes / 2).max(axis=0)
+    step = sizes[0]  # cells are uniform within a Helios grid
+    nper = np.maximum(np.round((grid_hi - grid_lo) / np.where(step > 0, step, 1)).astype(int), 1)
+
+    # Map each cell's (i,j,k) to its index, matching however Helios ordered them.
+    cell_ijk = np.floor((centers - grid_lo) / np.where(step > 0, step, 1)).astype(int)
+    cell_ijk = np.clip(cell_ijk, 0, nper - 1)
+    ijk_to_index = {}
+    for idx in range(n_cells):
+        ijk_to_index[(cell_ijk[idx, 0], cell_ijk[idx, 1], cell_ijk[idx, 2])] = idx
+
+    for scan in scans_info:
+        fp = scan["filepath"]
+        fmt = scan["ascii_format"]
+        xi, yi, zi = _xyz_column_indices(fmt)
+        try:
+            with open(fp) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#') or line.startswith('//'):
+                        continue
+                    cols = line.split()
+                    try:
+                        x, y, z = float(cols[xi]), float(cols[yi]), float(cols[zi])
+                    except (ValueError, IndexError):
+                        continue
+                    p = np.array([x, y, z])
+                    ijk = np.floor((p - grid_lo) / np.where(step > 0, step, 1)).astype(int)
+                    if np.any(ijk < 0) or np.any(ijk >= nper):
+                        continue
+                    idx = ijk_to_index.get((int(ijk[0]), int(ijk[1]), int(ijk[2])))
+                    if idx is not None:
+                        counts[idx] += 1
+        except OSError:
+            continue
+
+    return counts
+
+
+@app.post("/api/lad/compute")
+async def lad_compute(request: LADComputeRequest):
+    """Compute per-voxel leaf area density via PyHelios.
+
+    Like /api/triangulate/helios, uses a StreamingResponse with periodic
+    keepalive whitespace to survive WebKit's ~60s stall timeout on long runs.
+    """
+    import asyncio
+
+    def compute_and_serialize():
+        result = _do_lad_computation(request)
+        return json.dumps(result)
+
+    async def stream_result():
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, compute_and_serialize)
+        while not future.done():
+            yield " "
+            await asyncio.sleep(5)
         yield await future
 
     return StreamingResponse(stream_result(), media_type="application/json")
@@ -6411,18 +6834,29 @@ async def import_point_cloud_las(file: UploadFile = File(...)):
 # packed binary stream so we don't re-trip the same limit on the response.
 
 # Helios <ASCII_format> tokens we recognise for XYZ-family files. Roles in
-# DATA_ROLES populate fields in the response; the others (timestamp,
-# target_index, …) are parsed but dropped so pandas knows the column exists
-# and won't misalign downstream columns.
+# DATA_ROLES populate dedicated fields (positions/colours/intensity); the
+# per-pulse multi-return roles (timestamp/target_index/target_count) are carried
+# as extra dimensions under their canonical slug (see `_MULTI_RETURN_SLUGS`) so
+# the LAD path can recover them; any remaining known-but-unmapped role
+# (deviation, …) is carried as a generic extra so pandas stays column-aligned.
 _XYZ_DATA_ROLES = {
     'x', 'y', 'z',
     'r', 'g', 'b',
     'r255', 'g255', 'b255',
     'intensity', 'reflectance',
 }
-_XYZ_KNOWN_ROLES = _XYZ_DATA_ROLES | {
-    'timestamp', 'target_index', 'target_count', 'deviation',
+# Canonical per-pulse slugs Helios's ASCII loader reads from each hit's data map
+# to tell single- from multi-return scans (see `_LAD_MULTI_RETURN_COLUMNS`). We
+# pin these as extra-dim slugs at import so they survive edits/bake exactly like
+# positions and the LAD accessor can find them deterministically — regardless of
+# the source header text or how the wizard labelled the column.
+_MULTI_RETURN_SLUGS = ('timestamp', 'target_index', 'target_count')
+_MULTI_RETURN_LABELS = {
+    'timestamp': 'Timestamp',
+    'target_index': 'Target Index',
+    'target_count': 'Target Count',
 }
+_XYZ_KNOWN_ROLES = _XYZ_DATA_ROLES | set(_MULTI_RETURN_SLUGS) | {'deviation'}
 
 # Magic bytes on the wire. Renderer aborts if it sees anything else, so the
 # format is implicitly versioned by this value.
@@ -6553,6 +6987,15 @@ def _role_from_header_name(name: str) -> Optional[str]:
         return 'intensity'
     if base in ('reflectance', 'reflectivity'):
         return 'reflectance'
+    # Per-pulse multi-return columns Helios's LAD path needs. Recognise the
+    # canonical names plus the common LAS aliases so a header-only ASCII export
+    # round-trips them under the canonical slug (see `_MULTI_RETURN_SLUGS`).
+    if base in ('timestamp', 'gpstime', 'time'):
+        return 'timestamp'
+    if base in ('targetindex', 'returnnumber'):
+        return 'target_index'
+    if base in ('targetcount', 'numberofreturns', 'numreturns'):
+        return 'target_count'
     return None
 
 
@@ -6744,9 +7187,11 @@ def _plan_columns(roles: List[str], header_names: Optional[List[str]]):
     Shared by `_xyz_column_plan` (the import/convert path) and the preview
     endpoint so the slugs/labels a user sees in the wizard are byte-identical to
     what import produces. A column whose role is reserved (x/y/z/rgb/intensity/
-    reflectance) keeps its role token; anything else ('skip', timestamp,
-    deviation, …) becomes an 'extra:<slug>' carried into the octree, named from
-    the header row when present, else a positional 'Column N' fallback.
+    reflectance) keeps its role token; a multi-return role (timestamp/
+    target_index/target_count) becomes an 'extra:<canonical slug>' so the LAD
+    path can find it deterministically; anything else ('skip', deviation, …)
+    becomes an 'extra:<slug>' carried into the octree, named from the header row
+    when present, else a positional 'Column N' fallback.
 
     Returns (names, extra_dims) where each extra dim is
     {col, slug, label, categorical} ('categorical' defaults False here; the
@@ -6758,6 +7203,16 @@ def _plan_columns(roles: List[str], header_names: Optional[List[str]]):
     for i, role in enumerate(roles):
         if role in _XYZ_RESERVED_ROLES and role != 'skip':
             names.append(role)
+            continue
+        if role in _MULTI_RETURN_SLUGS:
+            # Pin the canonical slug/label regardless of header text so the LAD
+            # accessor can recover these columns by name.
+            slug = _dedupe_slug(role, used_slugs)
+            col_id = f"extra:{slug}"
+            names.append(col_id)
+            extra_dims.append({"col": col_id, "slug": slug,
+                               "label": _MULTI_RETURN_LABELS[role],
+                               "categorical": False})
             continue
         if header_names is not None and i < len(header_names) and header_names[i]:
             label = _humanize_extra_dim_label(header_names[i])
@@ -6778,9 +7233,10 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
 
     Honours each entry's explicit role, and for role=='extra' the user's custom
     slug/label/categorical. Falls back to a sane slug when the wizard omitted
-    one. Reserved roles keep their token; 'skip' (or an extra with no usable
-    name) is dropped. Slugs are de-duplicated so two custom names can't collide
-    on disk.
+    one. Reserved roles keep their token; a multi-return role (or an extra
+    slugged as one) is pinned to its canonical slug/label so the LAD path finds
+    it; 'skip' (or an extra with no usable name) is dropped. Slugs are
+    de-duplicated so two custom names can't collide on disk.
     """
     names: List[str] = []
     extra_dims: List[dict] = []
@@ -6789,6 +7245,18 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
         role = (entry.role or 'skip').lower()
         if role in _XYZ_RESERVED_ROLES and role != 'skip':
             names.append(role)
+            continue
+        # A column mapped to a multi-return field — either by naming the role
+        # token directly or by slugging an 'extra' as one — is carried under the
+        # canonical slug/label so the LAD accessor can recover it by name.
+        mr = role if role in _MULTI_RETURN_SLUGS else (entry.slug or '').lower()
+        if mr in _MULTI_RETURN_SLUGS:
+            slug = _dedupe_slug(mr, used_slugs)
+            col_id = f"extra:{slug}"
+            names.append(col_id)
+            extra_dims.append({"col": col_id, "slug": slug,
+                               "label": (entry.label or '').strip() or _MULTI_RETURN_LABELS[mr],
+                               "categorical": bool(entry.categorical)})
             continue
         if role == 'skip' or (role == 'extra' and not (entry.slug or entry.label)):
             # A skipped column, or an 'extra' with no usable name, carries
@@ -7902,6 +8370,17 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
             suggested_slug = ''
             suggested_label = (header_names[i] if header_names and i < len(header_names)
                                and header_names[i] else role)
+        elif role in _MULTI_RETURN_SLUGS:
+            # A per-pulse multi-return column (timestamp/target_index/
+            # target_count): pin the canonical slug/label regardless of header
+            # text, exactly as `_plan_columns` does, so the wizard's column plan
+            # carries it under the name the LAD accessor recovers it by. Without
+            # this the column defaulted to a positional 'col_N' slug, the LAD
+            # path failed to find the three multi-return columns, and the
+            # full-waveform inversion ran on zeroed data.
+            detected_role = 'extra'
+            suggested_slug = role
+            suggested_label = _MULTI_RETURN_LABELS[role]
         else:
             detected_role = 'extra' if role != 'skip' else 'skip'
             if header_names is not None and i < len(header_names) and header_names[i]:
@@ -8607,6 +9086,21 @@ def _read_las_into_arrays(
         name = d.name
         extras[name] = np.asarray(las[name], dtype=np.float32)
         extra_dims_meta.append({"slug": name, "label": name})
+
+    # Auto-map LAS native per-pulse multi-return dimensions to the canonical
+    # slugs Helios's LAD path reads (see `_MULTI_RETURN_SLUGS`). return_number
+    # is carried verbatim as target_index — Helios auto-detects 0- vs 1-based
+    # indexing, so no base conversion. Only mapped when the source dim is
+    # present and a same-named extra-dim wasn't already captured above.
+    _las_multireturn = (
+        ("return_number", "target_index"),
+        ("number_of_returns", "target_count"),
+        ("gps_time", "timestamp"),
+    )
+    for src_dim, slug in _las_multireturn:
+        if src_dim in dim_names and slug not in extras:
+            extras[slug] = np.asarray(las[src_dim], dtype=np.float32)
+            extra_dims_meta.append({"slug": slug, "label": _MULTI_RETURN_LABELS[slug]})
     return positions, colors, intensity, extras, extra_dims_meta
 
 
@@ -8646,6 +9140,33 @@ def _session_to_las(sess: "CloudSession", out_las: _Path) -> int:
             writer.header.mins = (pos.min(axis=0) - pad).tolist()
             writer.header.maxs = (pos.max(axis=0) + pad).tolist()
     return n
+
+
+def _session_to_lad_ascii(sess: "CloudSession", out_path: _Path) -> tuple[str, bool]:
+    """Write the session's SURVIVING points to a Helios-ready ASCII file for the
+    LAD path, entirely from the in-RAM arrays — no source file read.
+
+    Columns are `x y z` plus, when the session carries all three per-pulse
+    multi-return slugs (timestamp/target_index/target_count), those three in the
+    order Helios's loadASCIIFile and `_do_lad_computation`'s validation expect.
+    Returns (ascii_format, is_multi) where `ascii_format` is the space-joined
+    column tokens (the `<ASCII_format>` string for the Helios XML) and
+    `is_multi` is True iff the multi-return columns were emitted.
+    """
+    keep = ~sess.deleted
+    cols = [sess.positions[keep, 0], sess.positions[keep, 1], sess.positions[keep, 2]]
+    tokens = ["x", "y", "z"]
+    is_multi = all(slug in sess.extras for slug in _MULTI_RETURN_SLUGS)
+    if is_multi:
+        for slug in _MULTI_RETURN_SLUGS:
+            cols.append(sess.extras[slug][keep])
+            tokens.append(slug)
+    data = np.column_stack(cols)
+    # %.6g keeps xyz precise and writes the integer-valued index/count columns
+    # without a trailing decimal that Helios's whitespace parser would still
+    # accept but that reads as noise.
+    np.savetxt(str(out_path), data, fmt="%.6g", delimiter=" ")
+    return " ".join(tokens), is_multi
 
 
 def _build_octree_from_las(las_path: _Path, extra_dims_meta: List[dict]) -> tuple[str, _Path, dict]:

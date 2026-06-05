@@ -94,6 +94,20 @@ scan's swatch color and shows a per-scan legend instead of a colorbar.
 | **Length** | Color edges by their length | Spotting unusually short or long segments. |
 | **Single Color** | Flat color | When you want the skeleton out of the way visually. |
 
+## Leaf area density voxels
+
+A [leaf area density](../concepts/leaf-area-density.md) result is a grid
+of voxel cells, each colored by its LAD value (m²/m³) through the shared
+scalar colormap. A colorbar labelled **LAD [m²/m³]** shows the range.
+
+| Control | What it does |
+|---|---|
+| **Colormap** | Same palette set as scalar fields (viridis default). Shared with the other scalar colorbars. |
+| **Opacity** | Cell translucency, so you can see through the grid into the canopy. |
+| **Hide empty voxels** | On by default — voxels with no returns (LAD ≤ 0) are hidden so only foliage-bearing cells draw. Turn off to see the full grid faintly. |
+
+**Hover** a voxel to read its exact LAD, G(θ), and hit count.
+
 ## Reading scalar colormaps
 
 The default colormap (viridis) goes:

@@ -97,6 +97,14 @@ For most TLS data of stone-fruit trees, defaults work; adjust **Lmax**
 down (to ~5–10 cm) for finer branch surfaces, or up if your scan is
 sparse.
 
+!!! tip "Leaf area density"
+
+    Helios triangulation is also the first step inside
+    [leaf area density estimation](estimate-leaf-area-density.md), where
+    the mesh is used to derive the G-function rather than as the end
+    product. If canopy density is what you're after, use that workflow
+    instead of meshing directly.
+
 ## Color a mesh by surface geometry
 
 A triangulated mesh — one built by triangulating a point cloud, including

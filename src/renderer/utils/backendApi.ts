@@ -351,6 +351,110 @@ export async function heliosTriangulate(
   }
 }
 
+// ==================== LEAF AREA DENSITY (LAD) API ====================
+// Per-voxel leaf area density (m²/m³). The triangulation (Lmax/aspect) only
+// supplies the G-function; Helios traces beam paths through the voxel grid and
+// inverts Beer's law per voxel. The grid is REQUIRED (unlike triangulation).
+
+// A scan for LAD: same as HeliosScanEntry plus the return type (single- vs
+// multi-return changes the backend weighting algorithm).
+export interface LADScanEntry extends HeliosScanEntry {
+  return_type?: 'single' | 'multi';
+  beam_exit_diameter?: number;   // meters (multi-return only)
+  beam_divergence?: number;      // milliradians (multi-return only)
+  // Point-data source for LAD (see backend HeliosScanEntry). A session-backed
+  // cloud passes session_id (the backend dumps its surviving in-RAM points +
+  // any multi-return columns). A flat in-RAM cloud (e.g. a synthetic
+  // full-waveform scan) passes points plus, for multi-return, the aligned
+  // per-pulse columns in scalar_columns (timestamp/target_index/target_count).
+  session_id?: string | null;
+  scalar_columns?: Record<string, number[]>;
+}
+
+export interface LADRequest {
+  scans: LADScanEntry[];
+  grid: HeliosGrid;              // REQUIRED — the LAD voxel grid
+  lmax: number;                 // max triangle edge length (G-function)
+  max_aspect_ratio: number;     // max triangle aspect ratio
+  min_voxel_hits: number;       // min ray hits for a voxel to be solved
+  // Request-level angular fallbacks (degrees) for scans lacking their own.
+  theta_min: number;
+  theta_max: number;
+  phi_min: number;
+  phi_max: number;
+}
+
+export interface LADVoxelResult {
+  index: number;
+  center: [number, number, number];
+  size: [number, number, number];
+  leaf_area: number;   // m²
+  lad: number;         // m²/m³
+  gtheta: number;      // G(theta)
+  hit_count: number;
+}
+
+export interface LADResponse {
+  success: boolean;
+  cells: LADVoxelResult[];
+  nx: number;
+  ny: number;
+  nz: number;
+  grid_center: number[];
+  grid_size: number[];
+  bounds: number[][];          // [[lo...], [hi...]]
+  is_multi_return: boolean;
+  return_mode: string;         // "single" | "multi"
+  total_leaf_area: number;
+  method_used: string;
+  warnings: string[];
+  error?: string;
+}
+
+/**
+ * Compute per-voxel leaf area density via the PyHelios LiDAR plugin.
+ * Mirrors heliosTriangulate: long timeout, StreamingResponse body parsed as JSON.
+ */
+export async function computeLAD(
+  request: LADRequest,
+  signal?: AbortSignal,
+): Promise<LADResponse> {
+  const baseUrl = getBackendUrl();
+  console.log('LAD compute - scans:', request.scans.length,
+    'grid:', `${request.grid.nx}×${request.grid.ny}×${request.grid.nz}`);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
+
+  if (signal) {
+    signal.addEventListener('abort', () => controller.abort());
+  }
+
+  try {
+    const response = await fetch(`${baseUrl}/api/lad/compute`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('LAD computation failed:', error);
+    throw error;
+  }
+}
+
 // ==================== SKELETON EXTRACTION API (BFS Graph-Based Algorithm) ====================
 // Based on Li et al. 2017 "An Automatic Tree Skeleton Extracting Method"
 

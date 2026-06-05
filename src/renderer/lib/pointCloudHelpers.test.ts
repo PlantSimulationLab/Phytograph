@@ -11,6 +11,8 @@ import {
   buildMeshScanColorBuffers,
   meshHasScanColors,
   meshColorModeLabel,
+  roundCoord,
+  roundCoord3,
 } from './pointCloudHelpers';
 import type { MeshData } from './pointCloudTypes';
 
@@ -279,6 +281,37 @@ describe('computeBoundsFromPositions', () => {
     expect(size.x).toBe(8);
     expect(size.y).toBe(4);
     expect(size.z).toBe(12);
+  });
+});
+
+describe('roundCoord', () => {
+  it('snaps noisy floating-point values to 3 decimals by default', () => {
+    // The exact value the user reported from an auto-suggested origin.
+    expect(roundCoord(-0.035371989011764526)).toBe(-0.035);
+  });
+
+  it('respects a custom decimal count', () => {
+    expect(roundCoord(1.23456, 2)).toBe(1.23);
+    expect(roundCoord(1.23456, 0)).toBe(1);
+  });
+
+  it('leaves already-clean values untouched', () => {
+    expect(roundCoord(0)).toBe(0);
+    expect(roundCoord(2.5)).toBe(2.5);
+    expect(roundCoord(-1.25, 2)).toBe(-1.25);
+  });
+
+  it('coerces non-finite input to 0', () => {
+    expect(roundCoord(NaN)).toBe(0);
+    expect(roundCoord(Infinity)).toBe(0);
+  });
+});
+
+describe('roundCoord3', () => {
+  it('rounds every axis of an {x,y,z} coordinate', () => {
+    expect(
+      roundCoord3({ x: -0.035371989, y: 1.0009, z: 12.999999 }),
+    ).toEqual({ x: -0.035, y: 1.001, z: 13 });
   });
 });
 

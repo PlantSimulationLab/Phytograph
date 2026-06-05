@@ -93,6 +93,7 @@ nav:
       - Meshes: concepts/meshes.md
       - Skeletons: concepts/skeletons.md
       - Plant models: concepts/plant-models.md
+      - Leaf area density: concepts/leaf-area-density.md
   - Workflows:
       - workflows/index.md
       - Import & export: workflows/import-export.md
@@ -100,6 +101,7 @@ nav:
       - Clean a point cloud: workflows/clean-point-cloud.md
       - Segment ground points: workflows/segment-ground.md
       - Triangulate a mesh: workflows/triangulate.md
+      - Estimate leaf area density: workflows/estimate-leaf-area-density.md
       - Extract a skeleton: workflows/extract-skeleton.md
       - Generate a plant: workflows/generate-plant.md
       - Morph a plant: workflows/morph-plant.md

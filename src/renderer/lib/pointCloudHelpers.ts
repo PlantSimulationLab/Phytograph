@@ -1,8 +1,9 @@
 // Pure, stateless helpers extracted from PointCloudViewer.tsx. No React, no
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
-import type { MeshData, ShapeType, MeshColorMode } from './pointCloudTypes';
-import type { HeliosGrid } from '../utils/backendApi';
+import type { MeshData, ShapeType, MeshColorMode, LADVoxel } from './pointCloudTypes';
+import type { HeliosGrid, LADRequest, LADScanEntry } from '../utils/backendApi';
+import type { Scan } from './scan';
 import { sampleColormap, type ColormapName } from './colormaps';
 
 // Format a numeric range tick so the colorbar labels stay readable across
@@ -12,6 +13,29 @@ export function formatColorbarTick(value: number): string {
   const abs = Math.abs(value);
   if (abs !== 0 && (abs >= 1e5 || abs < 1e-3)) return value.toExponential(2);
   return value.toLocaleString(undefined, { maximumFractionDigits: 3 });
+}
+
+// Round a coordinate suggested for an editable input field. Scene-derived
+// values (bounding-box centers, etc.) carry full floating-point precision —
+// e.g. -0.035371989011764526 — which is meaningless noise to show in a number
+// box the user is meant to read and tweak. Snap to millimeter precision (3
+// decimals), matching the crop panel's dimension/center inputs.
+export function roundCoord(value: number, decimals = 3): number {
+  if (!isFinite(value)) return 0;
+  const f = 10 ** decimals;
+  return Math.round(value * f) / f;
+}
+
+// Round each axis of an {x,y,z} coordinate suggested for input fields.
+export function roundCoord3(
+  p: { x: number; y: number; z: number },
+  decimals = 3,
+): { x: number; y: number; z: number } {
+  return {
+    x: roundCoord(p.x, decimals),
+    y: roundCoord(p.y, decimals),
+    z: roundCoord(p.z, decimals),
+  };
 }
 
 // Compute bounding box center and size from interleaved [x,y,z,...] positions
@@ -354,5 +378,120 @@ export function generateShapeMesh(shapeType: ShapeType): MeshData {
     normals,
     vertexCount,
     triangleCount,
+  };
+}
+
+// ==================== LEAF AREA DENSITY (LAD) HELPERS ====================
+
+// Normalize a LAD value to a [0,1] colormap parameter, clamped. Returns 0 when
+// the domain is degenerate (min >= max) or the value isn't finite, so empty
+// cells map to the low end of the colormap rather than producing NaN colors.
+export function ladColorT(lad: number, min: number, max: number): number {
+  if (!isFinite(lad) || !isFinite(min) || !isFinite(max) || max <= min) return 0;
+  const t = (lad - min) / (max - min);
+  return t < 0 ? 0 : t > 1 ? 1 : t;
+}
+
+// Finite min/max of LAD across a voxel set, ignoring empty cells when asked.
+// Falls back to [0, 0] when there's nothing to scale.
+export function ladRange(
+  voxels: LADVoxel[],
+  ignoreEmpty = true,
+): { min: number; max: number } {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of voxels) {
+    if (ignoreEmpty && (v.hitCount === 0 || v.lad <= 0)) continue;
+    if (!isFinite(v.lad)) continue;
+    if (v.lad < min) min = v.lad;
+    if (v.lad > max) max = v.lad;
+  }
+  if (!isFinite(min) || !isFinite(max)) return { min: 0, max: 0 };
+  return { min, max };
+}
+
+// Assemble a LADRequest from the selected scans, the chosen voxel grid, and the
+// algorithm parameters. Pure so it can be unit-tested. Mirrors how the Helios
+// triangulation popup builds its request: prefer the on-disk file path, fall
+// back to serialising the points; carry each scan's own angular geometry and
+// return type. Each scan's multi-return beam fields are attached only when that
+// scan is actually multi-return.
+// The per-pulse multi-return columns Helios needs to run the full-waveform LAD
+// algorithm. On a synthetic-scan cloud they live in `scalarFields` under exactly
+// these names (the backend records them under the same keys).
+const LAD_MULTI_RETURN_FIELDS = ['timestamp', 'target_index', 'target_count'] as const;
+
+export function buildLADRequest(
+  scans: Scan[],
+  grid: HeliosGrid,
+  params: { lmax: number; maxAspectRatio: number; minVoxelHits: number },
+): LADRequest {
+  const requestScans: LADScanEntry[] = scans.map(scan => {
+    const p = scan.params!;
+    const entry: LADScanEntry = {
+      origin: [p.origin.x, p.origin.y, p.origin.z],
+      n_theta: p.zenithPoints,
+      n_phi: p.azimuthPoints,
+      theta_min: p.zenithMinDeg,
+      theta_max: p.zenithMaxDeg,
+      phi_min: p.azimuthMinDeg,
+      phi_max: p.azimuthMaxDeg,
+      return_type: p.returnType,
+    };
+    if (p.returnType === 'multi') {
+      entry.beam_exit_diameter = p.beamExitDiameterM;
+      entry.beam_divergence = p.beamDivergenceMrad;
+    }
+    // Source priority mirrors the backend's feed resolution:
+    //   1. session_id — a session-backed (octree) cloud, fed from its in-RAM
+    //      arrays (honors unbaked deletions, carries multi-return columns).
+    //   2. file_path — a file-backed cloud; Helios reads it from disk with its
+    //      own columns (no huge JSON, preserves multi-return columns in-file).
+    //   3. inline points (+ scalar_columns) — an in-memory cloud with neither a
+    //      session nor a source file (e.g. a synthetic full-waveform scan).
+    const sessionId = scan.data?.octree?.sessionId;
+    if (sessionId) {
+      entry.session_id = sessionId;
+    } else if (scan.sourcePath) {
+      entry.file_path = scan.sourcePath;
+      entry.ascii_format = scan.asciiFormat ?? null;
+    } else if (scan.data && scan.data.positions.length > 0) {
+      const points: number[][] = [];
+      for (let i = 0; i < scan.data.pointCount; i++) {
+        const idx = i * 3;
+        points.push([
+          scan.data.positions[idx],
+          scan.data.positions[idx + 1],
+          scan.data.positions[idx + 2],
+        ]);
+      }
+      entry.points = points;
+      // Carry the per-pulse columns for a synthetic full-waveform cloud so the
+      // backend runs the multi-return algorithm. Attach only when ALL three are
+      // present and aligned with the points.
+      const fields = scan.data.scalarFields;
+      if (fields && LAD_MULTI_RETURN_FIELDS.every(
+        f => fields[f] && fields[f].values.length === scan.data!.pointCount)) {
+        const cols: Record<string, number[]> = {};
+        for (const f of LAD_MULTI_RETURN_FIELDS) {
+          cols[f] = Array.from(fields[f].values);
+        }
+        entry.scalar_columns = cols;
+      }
+    }
+    return entry;
+  });
+
+  return {
+    scans: requestScans,
+    grid,
+    lmax: params.lmax,
+    max_aspect_ratio: params.maxAspectRatio,
+    min_voxel_hits: params.minVoxelHits,
+    // Request-level angular fallbacks (per-scan values above take precedence).
+    theta_min: 30,
+    theta_max: 130,
+    phi_min: 0,
+    phi_max: 360,
   };
 }
