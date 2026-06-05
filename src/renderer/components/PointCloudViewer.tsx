@@ -5,7 +5,7 @@ import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Palette } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, sampleMeshSurface, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, segmentGround, segmentTrees, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, segmentGround, segmentTrees, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import {
@@ -448,10 +448,15 @@ export default function PointCloudViewer({
   // crop preview (hidden to-be-cropped points) alive after editMode flips to
   // 'none' and drives the "Cropping…" badge.
   const [isApplyingCrop, setIsApplyingCrop] = useState(false);
-  // Mesh sampling state
-  const [isSamplingMesh, setIsSamplingMesh] = useState(false);
-  const [showSamplingPopup, setShowSamplingPopup] = useState(false);
-  const [samplingDensity, setSamplingDensity] = useState(10000); // Points per m²
+  // Synthetic LiDAR scan state
+  const [isScanning, setIsScanning] = useState(false);
+  // Pending scan awaiting the user's choice when ≥1 target scanner already holds
+  // point data (overwrite / duplicate / cancel). Null when no prompt is open.
+  const [scanOverwriteConfirm, setScanOverwriteConfirm] = useState<{
+    targetMeshes: MeshEntry[];
+    activeScanners: Scan[];
+    count: number;
+  } | null>(null);
   // Plant age stepping state (stateless regeneration approach)
   const [isAdvancingAge, setIsAdvancingAge] = useState(false);
   const [ageStep, setAgeStep] = useState(5); // Custom step for age increment/decrement
@@ -2412,7 +2417,7 @@ export default function PointCloudViewer({
 
       // Mesh tools
       { id: 'mesh-transform', name: 'Transform Mesh', keywords: ['translate', 'move', 'position', 'rotate', 'turn', 'spin', 'resize', 'scale', 'size'], action: () => setShowResizePanel(!showResizePanel), category: 'Mesh', requires: 'mesh' },
-      { id: 'mesh-sample', name: 'Sample to Point Cloud', keywords: ['convert', 'points'], action: () => setShowSamplingPopup(true), category: 'Mesh', requires: 'mesh' },
+      { id: 'lidar-scan', name: 'Synthetic LiDAR Scan', keywords: ['scan', 'lidar', 'simulate', 'points', 'point cloud', 'ray'], action: () => handleRunScan(), category: 'Mesh' },
       { id: 'mesh-export', name: 'Export Mesh', keywords: ['save', 'obj', 'ply'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Mesh', requires: 'mesh' },
 
       // Plant-specific
@@ -3523,159 +3528,257 @@ export default function PointCloudViewer({
     setShowExportPanel(false);
   }, [meshes, clouds, downloadFile]);
 
-  // Sample mesh to point cloud (Discrete Sample)
-  const handleSampleMesh = useCallback(async (meshId: string, density: number) => {
-    const mesh = meshes.find(m => m.id === meshId);
-    if (!mesh) return;
+  // Whether a mesh was produced by triangulating a point cloud (standard or
+  // Helios) — as opposed to a procedural plant, a shape/voxel primitive, or an
+  // imported OBJ. Only these meshes get the per-triangle "Color by" control,
+  // since the geometric/scan scalars are meaningful for reconstructed surfaces.
+  // Helios meshes use sourceCloudId 'helios'; standard triangulations point at
+  // a real cloud id. Plants/shapes/imports use synthetic ids ('plant-…',
+  // 'shape-…', 'imported') that won't match a cloud and aren't plants here.
+  const isTriangulatedMesh = useCallback((mesh: MeshEntry): boolean => {
+    if (mesh.isPlant) return false;
+    if (mesh.method === 'helios' || mesh.sourceCloudId === 'helios') return true;
+    return clouds.some(c => c.id === mesh.sourceCloudId);
+  }, [clouds]);
 
-    setIsSamplingMesh(true);
-    setShowSamplingPopup(false);
+  // Whether a mesh is a valid synthetic-scan TARGET: plant models and
+  // imported-from-file meshes — but NOT triangulation results, the voxel grid,
+  // or generated primitive shapes (those are derived geometry, not real scenes
+  // a user would scan). isTriangulatedMesh already excludes plants and matches
+  // triangulation/helios meshes; we additionally drop voxel grids and shapes.
+  const isScannableMesh = useCallback((mesh: MeshEntry): boolean => {
+    if (mesh.gridSubdivisions) return false;            // voxel grid overlay
+    if (mesh.sourceCloudId.startsWith('shape-')) return false;  // generated shapes
+    if (isTriangulatedMesh(mesh)) return false;         // triangulation / helios
+    return true;                                        // plants + imported meshes
+  }, [isTriangulatedMesh]);
 
-    try {
-      const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
-      const baseName = mesh.isPlant
-        ? `${mesh.plantType}_plant_sampled`
-        : (sourceCloud?.data.fileName?.replace(/\.[^.]+$/, '') || 'mesh') + '_sampled';
+  // Extract a mesh's geometry in WORLD space (scale -> rotate(Euler XYZ) ->
+  // translate), matching how it's rendered. Returns the arrays the scan/scene
+  // API expects. Shared so every scan target is transformed identically.
+  const extractMeshWorldGeometry = useCallback((mesh: MeshEntry) => {
+    const meshPos = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
+    const meshScale = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
+    const meshRot = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 };
 
-      // Get mesh transforms (default to identity if not set)
-      const meshPos = meshPositions.get(meshId) || { x: 0, y: 0, z: 0 };
-      const meshScale = meshScales.get(meshId) || { x: 1, y: 1, z: 1 };
-      const meshRot = meshRotations.get(meshId) || { x: 0, y: 0, z: 0 };
+    const rotX = meshRot.x * Math.PI / 180;
+    const rotY = meshRot.y * Math.PI / 180;
+    const rotZ = meshRot.z * Math.PI / 180;
+    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+    const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
 
-      // Convert rotation from degrees to radians
-      const rotX = meshRot.x * Math.PI / 180;
-      const rotY = meshRot.y * Math.PI / 180;
-      const rotZ = meshRot.z * Math.PI / 180;
+    const vertices: number[][] = [];
+    for (let i = 0; i < mesh.data.vertexCount; i++) {
+      let x = mesh.data.vertices[i * 3] * meshScale.x;
+      let y = mesh.data.vertices[i * 3 + 1] * meshScale.y;
+      let z = mesh.data.vertices[i * 3 + 2] * meshScale.z;
+      // Rotate around X
+      let y1 = y * cosX - z * sinX;
+      let z1 = y * sinX + z * cosX;
+      // Rotate around Y
+      let x2 = x * cosY + z1 * sinY;
+      let z2 = -x * sinY + z1 * cosY;
+      // Rotate around Z
+      let x3 = x2 * cosZ - y1 * sinZ;
+      let y3 = x2 * sinZ + y1 * cosZ;
+      vertices.push([x3 + meshPos.x, y3 + meshPos.y, z2 + meshPos.z]);
+    }
 
-      // Precompute rotation matrix components (Euler XYZ order)
-      const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-      const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-      const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
+    const triangles: number[][] = [];
+    for (let i = 0; i < mesh.data.triangleCount; i++) {
+      triangles.push([
+        mesh.data.indices[i * 3],
+        mesh.data.indices[i * 3 + 1],
+        mesh.data.indices[i * 3 + 2],
+      ]);
+    }
 
-      // Convert mesh data to format expected by API, applying full transform (scale -> rotate -> translate)
-      const vertices: number[][] = [];
+    let colors: number[][] | undefined;
+    if (mesh.data.vertexColors && mesh.data.vertexColors.length > 0) {
+      colors = [];
       for (let i = 0; i < mesh.data.vertexCount; i++) {
-        // Apply scale first
-        let x = mesh.data.vertices[i * 3] * meshScale.x;
-        let y = mesh.data.vertices[i * 3 + 1] * meshScale.y;
-        let z = mesh.data.vertices[i * 3 + 2] * meshScale.z;
-
-        // Apply rotation (Euler XYZ)
-        // Rotate around X
-        let y1 = y * cosX - z * sinX;
-        let z1 = y * sinX + z * cosX;
-        // Rotate around Y
-        let x2 = x * cosY + z1 * sinY;
-        let z2 = -x * sinY + z1 * cosY;
-        // Rotate around Z
-        let x3 = x2 * cosZ - y1 * sinZ;
-        let y3 = x2 * sinZ + y1 * cosZ;
-
-        // Apply translation
-        vertices.push([
-          x3 + meshPos.x,
-          y3 + meshPos.y,
-          z2 + meshPos.z,
+        colors.push([
+          mesh.data.vertexColors[i * 3],
+          mesh.data.vertexColors[i * 3 + 1],
+          mesh.data.vertexColors[i * 3 + 2],
         ]);
       }
+    }
 
-      const triangles: number[][] = [];
-      for (let i = 0; i < mesh.data.triangleCount; i++) {
-        triangles.push([
-          mesh.data.indices[i * 3],
-          mesh.data.indices[i * 3 + 1],
-          mesh.data.indices[i * 3 + 2],
-        ]);
+    return { vertices, triangles, colors };
+  }, [meshPositions, meshScales, meshRotations]);
+
+  // Build PointCloudData from one scanner's scan result: positions, RGB colors,
+  // a dedicated `intensities` array (so "color by intensity" works), and the rest
+  // of the per-hit scalars as named scalarFields (each with min/max), plus bounds.
+  const buildScanCloudData = useCallback((result: LidarScanResult, fileName: string): PointCloudData | null => {
+    const n = result.num_points;
+    if (n === 0) return null;
+
+    const positions = new Float32Array(n * 3);
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const x = result.points[i][0], y = result.points[i][1], z = result.points[i][2];
+      positions[i * 3] = x; positions[i * 3 + 1] = y; positions[i * 3 + 2] = z;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+
+    let colors: Float32Array | undefined;
+    if (result.colors && result.colors.length === n) {
+      colors = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        colors[i * 3] = result.colors[i][0];
+        colors[i * 3 + 1] = result.colors[i][1];
+        colors[i * 3 + 2] = result.colors[i][2];
       }
+    }
 
-      // Convert vertex colors if present
-      let vertexColors: number[][] | undefined;
-      if (mesh.data.vertexColors && mesh.data.vertexColors.length > 0) {
-        vertexColors = [];
-        for (let i = 0; i < mesh.data.vertexCount; i++) {
-          vertexColors.push([
-            mesh.data.vertexColors[i * 3],
-            mesh.data.vertexColors[i * 3 + 1],
-            mesh.data.vertexColors[i * 3 + 2],
-          ]);
-        }
+    // Turn each returned scalar list into a ScalarField (min/max, variance-checked).
+    // `intensity` also populates the dedicated `intensities` array used by the
+    // intensity color mode + filter.
+    let intensities: Float32Array | undefined;
+    const scalarFields: Record<string, ScalarField> = {};
+    for (const [name, values] of Object.entries(result.scalars)) {
+      if (!values || values.length !== n) continue;
+      const arr = new Float32Array(values);
+      let mn = Infinity, mx = -Infinity;
+      for (const v of arr) { if (Number.isFinite(v)) { if (v < mn) mn = v; if (v > mx) mx = v; } }
+      if (name === 'intensity') intensities = arr;
+      // Only expose a scalar field if it actually varies (constant fields are
+      // useless to color by and would clutter the picker).
+      if (Number.isFinite(mn) && Number.isFinite(mx) && mn !== mx) {
+        scalarFields[name] = { values: arr, min: mn, max: mx };
       }
+    }
 
-      const response = await sampleMeshSurface({
-        vertices,
-        triangles,
-        vertex_colors: vertexColors,
-        density: density,
+    return {
+      positions,
+      colors,
+      intensities,
+      scalarFields: Object.keys(scalarFields).length ? scalarFields : undefined,
+      pointCount: n,
+      bounds: {
+        min: new THREE.Vector3(minX, minY, minZ),
+        max: new THREE.Vector3(maxX, maxY, maxZ),
+        center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
+        size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
+      },
+      fileName,
+    };
+  }, []);
+
+  // Execute the scan and write each scanner's hits back into ITS OWN scan.
+  // `overwriteMode` decides what to do for scanners that already carry point data:
+  //   'overwrite' — replace the existing data in place
+  //   'duplicate' — keep the original, add a new scan carrying the synthetic data
+  // Scanners with no existing data always get their data attached in place.
+  const executeScan = useCallback(async (
+    targetMeshes: MeshEntry[],
+    activeScanners: Scan[],
+    overwriteMode: 'overwrite' | 'duplicate',
+  ) => {
+    setIsScanning(true);
+    try {
+      const requestMeshes = targetMeshes.map(extractMeshWorldGeometry);
+      const requestScanners = activeScanners.map(s => {
+        const p = s.params!;
+        return {
+          id: s.id,
+          origin: [p.origin.x, p.origin.y, p.origin.z],
+          n_theta: p.zenithPoints,
+          n_phi: p.azimuthPoints,
+          theta_min_deg: p.zenithMinDeg,
+          theta_max_deg: p.zenithMaxDeg,
+          phi_min_deg: p.azimuthMinDeg,
+          phi_max_deg: p.azimuthMaxDeg,
+          return_type: p.returnType,
+          exit_diameter_m: p.beamExitDiameterM,
+          beam_divergence_mrad: p.beamDivergenceMrad,
+        };
       });
 
-      if (!response.success || response.points.length === 0) {
-        showToast({ title: response.error || 'Sampling returned no points', type: 'error' });
+      const response = await runLidarScan({ meshes: requestMeshes, scanners: requestScanners });
+      if (!response.success) {
+        showToast({ title: response.error || 'Scan failed', type: 'error' });
         return;
       }
 
-      // Create point cloud data from response
-      const positions = new Float32Array(response.num_points * 3);
-      for (let i = 0; i < response.num_points; i++) {
-        positions[i * 3] = response.points[i][0];
-        positions[i * 3 + 1] = response.points[i][1];
-        positions[i * 3 + 2] = response.points[i][2];
-      }
+      const scannerById = new Map(activeScanners.map(s => [s.id, s]));
+      let totalPoints = 0;
+      let scannersWithHits = 0;
 
-      let colors: Float32Array | undefined;
-      if (response.colors && response.colors.length > 0) {
-        colors = new Float32Array(response.num_points * 3);
-        for (let i = 0; i < response.num_points; i++) {
-          colors[i * 3] = response.colors[i][0];
-          colors[i * 3 + 1] = response.colors[i][1];
-          colors[i * 3 + 2] = response.colors[i][2];
+      for (const result of response.results) {
+        const scanner = scannerById.get(result.scanner_id);
+        if (!scanner) continue;
+        if (result.num_points === 0) continue;
+
+        const baseName = `${scanDisplayName(scanner)}_scan`;
+        const data = buildScanCloudData(result, baseName);
+        if (!data) continue;
+
+        totalPoints += result.num_points;
+        scannersWithHits++;
+
+        const alreadyHasData = hasData(scanner);
+        if (alreadyHasData && overwriteMode === 'duplicate') {
+          // Keep the original; spawn a new scan carrying both the params and data.
+          onAddScan?.({
+            id: crypto.randomUUID(),
+            label: `${scanDisplayName(scanner)} (scan)`,
+            visible: true,
+            color: scanner.color,
+            params: scanner.params,
+            data,
+          });
+        } else {
+          // Attach (or overwrite) data on the scanner's own scan in place.
+          onUpdateScanData(scanner.id, data);
         }
       }
 
-      // Calculate bounds
-      let minX = Infinity, minY = Infinity, minZ = Infinity;
-      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-      for (let i = 0; i < response.num_points; i++) {
-        const x = positions[i * 3];
-        const y = positions[i * 3 + 1];
-        const z = positions[i * 3 + 2];
-        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-        minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+      if (scannersWithHits === 0) {
+        showToast({ title: 'Scan returned no hits — check that scanners point at the geometry', type: 'error' });
+        return;
       }
-
-      const newCloud: PointCloudEntry = {
-        id: `sampled-${Date.now()}`,
-        data: {
-          positions,
-          colors,
-          pointCount: response.num_points,
-          bounds: {
-            min: new THREE.Vector3(minX, minY, minZ),
-            max: new THREE.Vector3(maxX, maxY, maxZ),
-            center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
-            size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
-          },
-          fileName: baseName,
-        },
-        visible: true,
-        color: '#22c55e', // Green for sampled points
-      };
-
-      // Add to point clouds
-      if (onAddCloud) {
-        onAddCloud(newCloud);
-        showToast({ title: `Sampled ${response.num_points.toLocaleString()} points from mesh (area: ${response.surface_area.toFixed(4)} m²)`, type: 'success' });
-      } else {
-        showToast({ title: 'Cannot add point cloud: onAddCloud callback not provided', type: 'error' });
-      }
-
+      showToast({
+        title: `Scanned ${totalPoints.toLocaleString()} points across ${scannersWithHits} scanner${scannersWithHits === 1 ? '' : 's'}`,
+        type: 'success',
+      });
     } catch (error) {
-      console.error('Mesh sampling failed:', error);
-      showToast({ title: `Sampling failed: ${error instanceof Error ? error.message : 'Unknown error'}`, type: 'error' });
+      console.error('Synthetic LiDAR scan failed:', error);
+      showToast({ title: `Scan failed: ${error instanceof Error ? error.message : 'Unknown error'}`, type: 'error' });
     } finally {
-      setIsSamplingMesh(false);
+      setIsScanning(false);
     }
-  }, [meshes, clouds, onAddCloud, meshScales, meshPositions, meshRotations]);
+  }, [extractMeshWorldGeometry, buildScanCloudData, onUpdateScanData, onAddScan]);
+
+  // Entry point: validate, then either scan immediately or prompt about scanners
+  // that already hold point data (overwrite / duplicate / cancel).
+  const handleRunScan = useCallback(async () => {
+    const targetMeshes = meshes.filter(m => m.visible && isScannableMesh(m));
+    if (targetMeshes.length === 0) {
+      showToast({ title: 'No scannable geometry — add a plant or import a mesh, and make it visible', type: 'error' });
+      return;
+    }
+    const activeScanners = scans.filter(s => s.visible && s.params);
+    if (activeScanners.length === 0) {
+      showToast({ title: 'No active scanner — place a scanner marker and make it visible', type: 'error' });
+      return;
+    }
+
+    // If any participating scanner already has point data, ask first (#3).
+    const withData = activeScanners.filter(hasData);
+    if (withData.length > 0) {
+      setScanOverwriteConfirm({ targetMeshes, activeScanners, count: withData.length });
+      return;
+    }
+
+    await executeScan(targetMeshes, activeScanners, 'overwrite');
+  }, [meshes, scans, isScannableMesh, executeScan]);
 
   // Export skeleton in various formats
   const exportSkeleton = useCallback((skeletonId: string, format: 'obj' | 'ply' | 'json') => {
@@ -5781,19 +5884,6 @@ export default function PointCloudViewer({
     return options;
   }, [meshes, meshPositions, meshScales]);
 
-  // Whether a mesh was produced by triangulating a point cloud (standard or
-  // Helios) — as opposed to a procedural plant, a shape/voxel primitive, or an
-  // imported OBJ. Only these meshes get the per-triangle "Color by" control,
-  // since the geometric/scan scalars are meaningful for reconstructed surfaces.
-  // Helios meshes use sourceCloudId 'helios'; standard triangulations point at
-  // a real cloud id. Plants/shapes/imports use synthetic ids ('plant-…',
-  // 'shape-…', 'imported') that won't match a cloud and aren't plants here.
-  const isTriangulatedMesh = useCallback((mesh: MeshEntry): boolean => {
-    if (mesh.isPlant) return false;
-    if (mesh.method === 'helios' || mesh.sourceCloudId === 'helios') return true;
-    return clouds.some(c => c.id === mesh.sourceCloudId);
-  }, [clouds]);
-
   // Per-triangle pseudocolor buffers for any mesh with a non-solid color mode.
   // Keyed by mesh id; entry is the non-indexed position/color buffers fed to
   // TriangleMesh. Recomputed only when the mesh set, its modes, or the shared
@@ -7867,6 +7957,32 @@ export default function PointCloudViewer({
               <XSquare className="w-3 h-3 text-neutral-400" />
             </button>
           </div>
+          {/* Run a synthetic LiDAR scan from all visible scanners against all
+              visible plant/imported geometry. Shown whenever any scanner exists
+              so the action is discoverable right where scanners are placed. */}
+          {scansWithParams.length > 0 && (
+            <div className="px-2 pt-2">
+              <button
+                data-testid="run-synthetic-scan"
+                onClick={() => handleRunScan()}
+                disabled={isScanning}
+                className="w-full px-2 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-600 disabled:cursor-not-allowed rounded text-xs text-white flex items-center justify-center gap-1.5"
+                title="Ray-trace every visible scanner against the visible plant/imported geometry"
+              >
+                {isScanning ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Scanning…
+                  </>
+                ) : (
+                  <>
+                    <Radio className="w-3 h-3" />
+                    Run Synthetic LiDAR Scan
+                  </>
+                )}
+              </button>
+            </div>
+          )}
           <div className="overflow-y-auto flex-1 p-1">
             {scansAll.map(scan => {
               const isSelected = selectedScanIds.has(scan.id);
@@ -8750,14 +8866,15 @@ export default function PointCloudViewer({
                   >
                     <Maximize2 className={`w-4 h-4 ${showResizePanel ? 'text-white' : 'text-neutral-300'}`} />
                   </button>
-                  {/* 2. Sample to Point Cloud */}
+                  {/* 2. Synthetic LiDAR Scan */}
                   <button
-                    onClick={() => setShowSamplingPopup(true)}
-                    disabled={isSamplingMesh}
+                    data-testid="tool-lidar-scan"
+                    onClick={() => handleRunScan()}
+                    disabled={isScanning}
                     className="p-2 rounded transition-colors hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Sample to Point Cloud"
+                    title="Run Synthetic LiDAR Scan"
                   >
-                    {isSamplingMesh ? (
+                    {isScanning ? (
                       <Loader2 className="w-4 h-4 text-neutral-300 animate-spin" />
                     ) : (
                       <ChartScatter className="w-4 h-4 text-neutral-300" />
@@ -11679,21 +11796,21 @@ export default function PointCloudViewer({
                   STL
                 </button>
               </div>
-              {/* Sample to Points button */}
+              {/* Synthetic LiDAR Scan button */}
               <button
-                onClick={() => setShowSamplingPopup(true)}
-                disabled={isSamplingMesh}
+                onClick={() => handleRunScan()}
+                disabled={isScanning}
                 className="mt-2 w-full px-2 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-600 disabled:cursor-not-allowed rounded text-xs text-white flex items-center justify-center gap-1.5"
               >
-                {isSamplingMesh ? (
+                {isScanning ? (
                   <>
                     <Loader2 className="w-3 h-3 animate-spin" />
-                    Sampling...
+                    Scanning...
                   </>
                 ) : (
                   <>
-                    <Grid3x3 className="w-3 h-3" />
-                    Sample to Points
+                    <Radio className="w-3 h-3" />
+                    Synthetic LiDAR Scan
                   </>
                 )}
               </button>
@@ -12439,85 +12556,58 @@ export default function PointCloudViewer({
 
       <BulkImportProgress progress={bulkImportProgress} />
 
-      {/* Mesh Sampling Popup */}
-      {showSamplingPopup && selectedMesh && (
+      {/* Overwrite / duplicate / cancel prompt when a scan already has point data (#3) */}
+      {scanOverwriteConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            onClick={() => setShowSamplingPopup(false)}
+            onClick={() => setScanOverwriteConfirm(null)}
           />
-
-          {/* Modal */}
-          <div className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-sm mx-4 overflow-hidden">
-            {/* Header */}
-            <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-700 bg-neutral-800/90">
-              <div className="flex items-center gap-2">
-                <Grid3x3 className="w-5 h-5 text-neutral-400" />
-                <h2 className="text-lg font-semibold text-white">Sample Mesh to Points</h2>
-              </div>
-              <button
-                onClick={() => setShowSamplingPopup(false)}
-                className="p-1 rounded hover:bg-neutral-700 transition-colors"
-              >
-                <X className="w-5 h-5 text-neutral-400" />
-              </button>
+          <div className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-md mx-4 overflow-hidden">
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-neutral-700">
+              <Radio className="w-5 h-5 text-neutral-400" />
+              <h2 className="text-base font-semibold text-white">Scanner already has point data</h2>
             </div>
-
-            {/* Content */}
             <div className="p-4 space-y-4">
-              <div className="text-sm text-neutral-300">
-                Convert mesh to point cloud by sampling {selectedMesh.data.triangleCount.toLocaleString()} triangles.
-              </div>
-
-              {/* Density Input */}
-              <div>
-                <label className="block text-sm font-medium text-neutral-300 mb-1.5">
-                  Point Density (points/m²)
-                </label>
-                <input
-                  type="number"
-                  value={samplingDensity}
-                  onChange={(e) => setSamplingDensity(Math.max(100, parseInt(e.target.value) || 100))}
-                  min={100}
-                  step={1000}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                />
-                <p className="text-xs text-neutral-500 mt-1">
-                  Higher values create denser point clouds
-                </p>
-              </div>
-
-              {/* Preset Buttons */}
-              <div className="flex gap-2">
+              <p className="text-sm text-neutral-300">
+                {scanOverwriteConfirm.count} of the scanners being used already
+                {scanOverwriteConfirm.count === 1 ? ' has' : ' have'} point data
+                (e.g. imported scans). How should the synthetic scan handle
+                {scanOverwriteConfirm.count === 1 ? ' it' : ' them'}?
+              </p>
+              <div className="flex flex-col gap-2">
                 <button
-                  onClick={() => setSamplingDensity(1000)}
-                  className={`flex-1 px-2 py-1.5 rounded text-xs ${samplingDensity === 1000 ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'}`}
+                  data-testid="scan-overwrite-duplicate"
+                  onClick={() => {
+                    const c = scanOverwriteConfirm;
+                    setScanOverwriteConfirm(null);
+                    void executeScan(c.targetMeshes, c.activeScanners, 'duplicate');
+                  }}
+                  className="w-full px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm text-white text-left"
                 >
-                  Sparse (1k)
+                  <div className="font-medium">Keep originals, add duplicates</div>
+                  <div className="text-xs text-blue-100/80">Existing data is preserved; new scans hold the synthetic points.</div>
                 </button>
                 <button
-                  onClick={() => setSamplingDensity(10000)}
-                  className={`flex-1 px-2 py-1.5 rounded text-xs ${samplingDensity === 10000 ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'}`}
+                  data-testid="scan-overwrite-replace"
+                  onClick={() => {
+                    const c = scanOverwriteConfirm;
+                    setScanOverwriteConfirm(null);
+                    void executeScan(c.targetMeshes, c.activeScanners, 'overwrite');
+                  }}
+                  className="w-full px-3 py-2 bg-neutral-700 hover:bg-neutral-600 rounded text-sm text-white text-left"
                 >
-                  Medium (10k)
+                  <div className="font-medium">Overwrite existing data</div>
+                  <div className="text-xs text-neutral-400">Replaces the scanners' current point data with the synthetic scan.</div>
                 </button>
                 <button
-                  onClick={() => setSamplingDensity(50000)}
-                  className={`flex-1 px-2 py-1.5 rounded text-xs ${samplingDensity === 50000 ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'}`}
+                  data-testid="scan-overwrite-cancel"
+                  onClick={() => setScanOverwriteConfirm(null)}
+                  className="w-full px-3 py-2 bg-transparent hover:bg-neutral-700/50 rounded text-sm text-neutral-300 text-center"
                 >
-                  Dense (50k)
+                  Cancel
                 </button>
               </div>
-
-              {/* Submit Button */}
-              <button
-                onClick={() => handleSampleMesh(selectedMesh.id, samplingDensity)}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-white font-medium transition-colors"
-              >
-                <Grid3x3 className="w-4 h-4" />
-                Sample Mesh
-              </button>
             </div>
           </div>
         </div>

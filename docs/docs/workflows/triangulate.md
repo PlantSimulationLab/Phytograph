@@ -124,21 +124,14 @@ appears below; a colorbar in the bottom-right shows the value range. The
 **Source scan** mode shows a per-scan legend instead. Choose **Solid
 color** to go back to the flat mesh color.
 
-## Sample points on a mesh
+## Produce a point cloud from a mesh
 
-The inverse operation: produce a point cloud by sampling points on a
-mesh's surface.
-
-1. Select the mesh in the Scene panel.
-2. Right-click → **Sample points on surface**.
-3. Set:
-    - **Number of points** — target count, or
-    - **Density** — points per square meter
-4. Click **Sample**.
-
-Use this to generate ground-truth point clouds from procedural plants —
-combined with [Simulate a LiDAR scan](simulate-scan.md), it lets you
-test a reconstruction pipeline against a known input.
+The inverse operation — turning a mesh or plant model back into a point
+cloud — is done with a true ray-traced scan, not random surface
+sampling. Place one or more scanners and run a
+[synthetic LiDAR scan](simulate-scan.md); the resulting cloud respects
+occlusion and scanner geometry, so it tests a reconstruction pipeline
+against a realistic (yet perfectly known) input.
 
 ## What's next
 

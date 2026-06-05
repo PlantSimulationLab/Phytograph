@@ -93,7 +93,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.16"
+BACKEND_VERSION = "0.3.18"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -2382,203 +2382,210 @@ async def helios_triangulate(request: HeliosTriangulationRequest):
     return StreamingResponse(stream_result(), media_type="application/json")
 
 
-# ==================== MESH SURFACE SAMPLING ====================
+# ==================== SYNTHETIC LIDAR SCANNING ====================
+# True ray-traced synthetic scanning via the PyHelios `lidar` plugin. The scene
+# geometry (plant + imported meshes, already world-space transformed by the
+# renderer) is loaded into a Helios Context; each placed scanner becomes an
+# addScan() with its ScanParameters; syntheticScan() ray-traces the scene and the
+# resulting hit points are returned as a point cloud — respecting occlusion,
+# scanner position, field of view, and resolution (unlike random surface sampling).
 
-class MeshSampleRequest(BaseModel):
-    """Request model for sampling points from a mesh surface"""
-    vertices: List[List[float]]  # [[x, y, z], ...] - mesh vertices
-    triangles: List[List[int]]  # [[i, j, k], ...] - triangle vertex indices
-    vertex_colors: Optional[List[List[float]]] = None  # [[r, g, b], ...] - colors per vertex (0-1 range)
-
-    # Sampling parameters
-    num_points: Optional[int] = None  # Target number of points (if not using density)
-    density: Optional[float] = None  # Points per square meter (if not using num_points)
-
-    # Options
-    seed: Optional[int] = None  # Random seed for reproducibility
+class LidarScanMesh(BaseModel):
+    """A single mesh to load into the scannable scene (world-space coordinates)."""
+    vertices: List[List[float]]  # [[x, y, z], ...]
+    triangles: List[List[int]]   # [[i, j, k], ...] vertex indices
+    colors: Optional[List[List[float]]] = None  # per-vertex [[r, g, b], ...] (0-1)
 
 
-class MeshSampleResponse(BaseModel):
-    """Response model for mesh sampling results"""
+class LidarScanScanner(BaseModel):
+    """A single scanner position + acquisition geometry (mirrors ScanParameters)."""
+    id: str                      # renderer scan id — results are returned keyed by this
+    origin: List[float]          # [x, y, z] scanner position
+    n_theta: int                 # zenith samples (Ntheta)
+    n_phi: int                   # azimuth samples (Nphi)
+    theta_min_deg: float         # zenith angle range (degrees, 0-180)
+    theta_max_deg: float
+    phi_min_deg: float           # azimuth angle range (degrees, 0-360)
+    phi_max_deg: float
+    return_type: str = "single"  # "single" (discrete) or "multi" (full-waveform)
+    exit_diameter_m: float = 0.0
+    beam_divergence_mrad: float = 0.0
+
+
+class LidarScanRequest(BaseModel):
+    """Request model for a synthetic LiDAR scan."""
+    meshes: List[LidarScanMesh]
+    scanners: List[LidarScanScanner]
+    # Extra per-hit scalar fields to record. The standard set (intensity, distance,
+    # timestamp, target_index, target_count) is always attempted; anything here is
+    # additionally treated as a column-format label, so syntheticScan samples that
+    # named primitive data from the struck primitive onto each hit.
+    extra_fields: List[str] = []
+    # Full-waveform tuning (used only when a scanner has return_type == "multi").
+    rays_per_pulse: int = 100
+    pulse_distance_threshold: float = 0.02
+
+
+class LidarScanResult(BaseModel):
+    """Per-scanner scan result."""
+    scanner_id: str
+    points: List[List[float]] = []                # [[x, y, z], ...] hit points
+    colors: Optional[List[List[float]]] = None    # [[r, g, b], ...] per-point (0-1)
+    # Per-point scalar fields (name -> values aligned 1:1 with points). Includes
+    # "intensity" plus distance/timestamp/target_index/target_count and any
+    # requested extra_fields that the engine actually recorded.
+    scalars: Dict[str, List[float]] = {}
+    num_points: int = 0
+
+
+class LidarScanResponse(BaseModel):
+    """Response model for synthetic LiDAR scan results — one entry per scanner."""
     success: bool
-    points: List[List[float]]  # [[x, y, z], ...] - sampled point positions
-    colors: Optional[List[List[float]]] = None  # [[r, g, b], ...] - interpolated colors
-    num_points: int
-    surface_area: float  # Total surface area of the mesh
+    results: List[LidarScanResult] = []
     error: Optional[str] = None
 
 
-def sample_mesh_surface(
-    vertices: np.ndarray,
-    triangles: np.ndarray,
-    vertex_colors: Optional[np.ndarray],
-    num_points: int,
-    rng: np.random.Generator
-) -> tuple:
+# Standard per-hit scalar keys syntheticScan records (see helios-core lidar
+# LiDAR.cpp). "intensity" is the beam/normal dot product (can be negative) scaled
+# by reflectivity; we abs() it when surfacing so it reads as a 0..1-ish magnitude.
+_LIDAR_STANDARD_HIT_FIELDS = ["intensity", "distance", "timestamp", "target_index", "target_count"]
+
+
+@app.post("/api/lidar/scan", response_model=LidarScanResponse)
+async def lidar_scan(request: LidarScanRequest):
     """
-    Sample points uniformly from a triangulated mesh surface.
+    Perform a true ray-traced synthetic LiDAR scan of the supplied geometry.
 
-    Uses area-weighted random sampling with barycentric coordinate interpolation.
+    The renderer sends:
 
-    Args:
-        vertices: (N, 3) array of vertex positions
-        triangles: (M, 3) array of triangle indices
-        vertex_colors: Optional (N, 3) array of vertex colors
-        num_points: Number of points to sample
-        rng: NumPy random generator
+    * ``meshes`` — plant / imported-mesh geometry (already world-space transformed)
+    * ``scanners`` — one entry per visible scanner marker, each carrying its
+      renderer ``id`` plus its ``ScanParameters`` (origin, angular field of view in
+      degrees, resolution, return type, beam optics)
 
-    Returns:
-        Tuple of (sampled_points, sampled_colors, total_area)
-    """
-    # Get triangle vertices
-    v0 = vertices[triangles[:, 0]]
-    v1 = vertices[triangles[:, 1]]
-    v2 = vertices[triangles[:, 2]]
-
-    # Calculate triangle areas using cross product
-    cross = np.cross(v1 - v0, v2 - v0)
-    areas = 0.5 * np.linalg.norm(cross, axis=1)
-    total_area = np.sum(areas)
-
-    if total_area == 0:
-        return np.array([]), None, 0.0
-
-    # Normalize areas to get probability distribution
-    probs = areas / total_area
-
-    # Sample triangles based on area
-    triangle_indices = rng.choice(len(triangles), size=num_points, p=probs)
-
-    # Generate random barycentric coordinates
-    # Using the square root trick for uniform sampling within triangles
-    r1 = rng.random(num_points)
-    r2 = rng.random(num_points)
-    sqrt_r1 = np.sqrt(r1)
-
-    # Barycentric coordinates
-    u = 1 - sqrt_r1
-    v = sqrt_r1 * (1 - r2)
-    w = sqrt_r1 * r2
-
-    # Get the vertices for sampled triangles
-    sampled_v0 = vertices[triangles[triangle_indices, 0]]
-    sampled_v1 = vertices[triangles[triangle_indices, 1]]
-    sampled_v2 = vertices[triangles[triangle_indices, 2]]
-
-    # Interpolate positions using barycentric coordinates
-    sampled_points = (
-        u[:, np.newaxis] * sampled_v0 +
-        v[:, np.newaxis] * sampled_v1 +
-        w[:, np.newaxis] * sampled_v2
-    )
-
-    # Interpolate colors if provided
-    sampled_colors = None
-    if vertex_colors is not None:
-        c0 = vertex_colors[triangles[triangle_indices, 0]]
-        c1 = vertex_colors[triangles[triangle_indices, 1]]
-        c2 = vertex_colors[triangles[triangle_indices, 2]]
-        sampled_colors = (
-            u[:, np.newaxis] * c0 +
-            v[:, np.newaxis] * c1 +
-            w[:, np.newaxis] * c2
-        )
-        # Clamp colors to [0, 1]
-        sampled_colors = np.clip(sampled_colors, 0, 1)
-
-    return sampled_points, sampled_colors, total_area
-
-
-@app.post("/api/mesh/sample", response_model=MeshSampleResponse)
-async def sample_mesh(request: MeshSampleRequest):
-    """
-    Sample points uniformly from a mesh surface.
-
-    This tool converts a triangulated mesh into a point cloud by randomly sampling
-    points from the mesh surface. Points are distributed uniformly based on triangle
-    area, so larger triangles get proportionally more points.
-
-    If the mesh has vertex colors, they are interpolated to the sampled points.
-
-    Request fields (on ``MeshSampleRequest``):
-
-    * ``num_points`` — target number of points to sample (default: auto based on area)
-    * ``density`` — points per square meter (alternative to ``num_points``)
-    * ``seed`` — random seed for reproducible results
-
-    Returns point positions and optionally colors.
+    All meshes load into one Helios ``Context``; every scanner becomes a
+    ``LiDARCloud.addScan`` (added in request order, so the Helios scanID equals the
+    scanner's request index); ``syntheticScan`` ray-traces the scene once. Hits are
+    then partitioned back to their originating scanner via ``getHitScanID`` and
+    returned **per scanner** — so the renderer can attach each scanner's points to
+    its own scan, with intensity + scalar fields for color-by/filter.
     """
     try:
-        vertices = np.array(request.vertices, dtype=np.float64)
-        triangles = np.array(request.triangles, dtype=np.int32)
+        if not request.meshes:
+            return LidarScanResponse(success=False, error="No geometry to scan")
+        if not request.scanners:
+            return LidarScanResponse(success=False, error="No scanners defined")
 
-        if len(vertices) < 3:
-            return MeshSampleResponse(
-                success=False,
-                points=[],
-                num_points=0,
-                surface_area=0.0,
-                error="Need at least 3 vertices"
-            )
+        # Total triangle count guards against accidentally feeding a huge mesh.
+        total_tris = sum(len(m.triangles) for m in request.meshes)
+        if total_tris < 1:
+            return LidarScanResponse(success=False, error="Geometry has no triangles")
 
-        if len(triangles) < 1:
-            return MeshSampleResponse(
-                success=False,
-                points=[],
-                num_points=0,
-                surface_area=0.0,
-                error="Need at least 1 triangle"
-            )
+        from pyhelios import LiDARCloud, Context
 
-        # Parse vertex colors if provided
-        vertex_colors = None
-        if request.vertex_colors is not None and len(request.vertex_colors) > 0:
-            vertex_colors = np.array(request.vertex_colors, dtype=np.float64)
+        want_waveform = any(s.return_type == "multi" for s in request.scanners)
+        extra_fields = [f for f in request.extra_fields if f]
+        # column_format drives which custom primitive data the scan samples onto
+        # hits; only the extra fields need it (the standard keys are always recorded).
+        column_format = extra_fields if extra_fields else None
 
-        # Calculate surface area first (needed for density-based sampling)
-        v0 = vertices[triangles[:, 0]]
-        v1 = vertices[triangles[:, 1]]
-        v2 = vertices[triangles[:, 2]]
-        cross = np.cross(v1 - v0, v2 - v0)
-        areas = 0.5 * np.linalg.norm(cross, axis=1)
-        total_area = np.sum(areas)
+        with Context() as ctx:
+            # Load every mesh into the scannable scene.
+            for mesh in request.meshes:
+                verts = np.asarray(mesh.vertices, dtype=np.float32)
+                tris = np.asarray(mesh.triangles, dtype=np.int32)
+                if verts.ndim != 2 or verts.shape[1] != 3 or len(verts) < 3:
+                    continue
+                if tris.ndim != 2 or tris.shape[1] != 3 or len(tris) < 1:
+                    continue
+                colors = None
+                if mesh.colors and len(mesh.colors) == len(verts):
+                    colors = np.asarray(mesh.colors, dtype=np.float32)
+                ctx.addTrianglesFromArrays(verts, tris, colors=colors)
 
-        # Determine number of points to sample
-        if request.num_points is not None:
-            num_points = request.num_points
-        elif request.density is not None:
-            num_points = int(request.density * total_area)
-        else:
-            # Default: ~1000 points per square meter, min 100, max 1M
-            num_points = max(100, min(1000000, int(1000 * total_area)))
+            with LiDARCloud() as lidar:
+                lidar.disableMessages()
 
-        # Ensure at least some points
-        num_points = max(1, num_points)
+                # Add scans in request order so Helios scanID == request index.
+                for s in request.scanners:
+                    lidar.addScan(
+                        origin=[float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
+                        Ntheta=int(s.n_theta),
+                        theta_range=(math.radians(s.theta_min_deg), math.radians(s.theta_max_deg)),
+                        Nphi=int(s.n_phi),
+                        phi_range=(math.radians(s.phi_min_deg), math.radians(s.phi_max_deg)),
+                        exit_diameter=float(s.exit_diameter_m),
+                        beam_divergence=float(s.beam_divergence_mrad) * 1e-3,
+                        column_format=column_format,
+                    )
 
-        # Create random generator
-        rng = np.random.default_rng(request.seed)
+                # One ray pass for all scanners (one BVH build). append=False clears
+                # once, then every scan contributes; hits carry their scanID.
+                if want_waveform:
+                    lidar.syntheticScan(
+                        ctx,
+                        rays_per_pulse=int(request.rays_per_pulse),
+                        pulse_distance_threshold=float(request.pulse_distance_threshold),
+                        record_misses=False,
+                        append=False,
+                    )
+                else:
+                    # Discrete-return: never records misses, so only real hits return.
+                    lidar.syntheticScan(ctx)
 
-        # Sample the mesh
-        sampled_points, sampled_colors, _ = sample_mesh_surface(
-            vertices, triangles, vertex_colors, num_points, rng
-        )
+                # Prepare per-scanner accumulators keyed by Helios scanID (= index).
+                fields_to_read = _LIDAR_STANDARD_HIT_FIELDS + extra_fields
+                results = [
+                    {
+                        "scanner_id": s.id,
+                        "points": [],
+                        "colors": [],
+                        "scalars": {f: [] for f in fields_to_read},
+                    }
+                    for s in request.scanners
+                ]
 
-        # Convert to lists for JSON response
-        points_list = sampled_points.tolist()
-        colors_list = sampled_colors.tolist() if sampled_colors is not None else None
+                n = lidar.getHitCount()
+                for i in range(n):
+                    sid = lidar.getHitScanID(i)
+                    if sid < 0 or sid >= len(results):
+                        continue
+                    bucket = results[sid]
+                    xyz = lidar.getHitXYZ(i)
+                    bucket["points"].append([float(xyz.x), float(xyz.y), float(xyz.z)])
+                    c = lidar.getHitColor(i)
+                    bucket["colors"].append([float(c.r), float(c.g), float(c.b)])
+                    for f in fields_to_read:
+                        if lidar.doesHitDataExist(i, f):
+                            v = float(lidar.getHitData(i, f))
+                            # intensity is a signed dot product; surface its magnitude.
+                            bucket["scalars"][f].append(abs(v) if f == "intensity" else v)
+                        else:
+                            bucket["scalars"][f].append(float("nan"))
 
-        return MeshSampleResponse(
-            success=True,
-            points=points_list,
-            colors=colors_list,
-            num_points=len(points_list),
-            surface_area=float(total_area)
-        )
+        out: List[LidarScanResult] = []
+        for r in results:
+            npts = len(r["points"])
+            # Drop scalar fields that never resolved (all-NaN) so the renderer
+            # doesn't offer a dead color-by option.
+            scalars = {
+                k: v for k, v in r["scalars"].items()
+                if any(val == val for val in v)  # any non-NaN
+            }
+            out.append(LidarScanResult(
+                scanner_id=r["scanner_id"],
+                points=r["points"],
+                colors=r["colors"] if npts else None,
+                scalars=scalars,
+                num_points=npts,
+            ))
+
+        return LidarScanResponse(success=True, results=out)
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Mesh sampling failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Synthetic LiDAR scan failed: {str(e)}")
 
 
 # ==================== TREE SKELETON EXTRACTION (BFS Graph-Based Algorithm) ====================

@@ -21,7 +21,7 @@ import {
   importTexturedMesh,
   morphPlant,
   parsePlantMorphParameters,
-  sampleMeshSurface,
+  runLidarScan,
   segmentGround,
   triangulatePointCloud,
 } from './backendApi';
@@ -475,26 +475,46 @@ describe('plant morph', () => {
   });
 });
 
-describe('sampleMeshSurface', () => {
-  it('POSTs to /api/mesh/sample', async () => {
+describe('runLidarScan', () => {
+  it('POSTs to /api/lidar/scan with meshes and scanners', async () => {
     const req = {
-      vertices: [[0, 0, 0]],
-      triangles: [[0, 0, 0]],
-      density: 100,
+      meshes: [{ vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], triangles: [[0, 1, 2]] }],
+      scanners: [{
+        id: 'scanner-1',
+        origin: [0, 0, 2],
+        n_theta: 50, n_phi: 50,
+        theta_min_deg: 0, theta_max_deg: 180,
+        phi_min_deg: 0, phi_max_deg: 360,
+        return_type: 'single' as const,
+        exit_diameter_m: 0, beam_divergence_mrad: 0,
+      }],
     };
-    const spy = mockFetchOk({ success: true, points: [], num_points: 0, surface_area: 1 });
-    await sampleMeshSurface(req);
+    const spy = mockFetchOk({
+      success: true,
+      results: [{
+        scanner_id: 'scanner-1',
+        points: [[0.1, 0.1, 0]],
+        colors: [[1, 1, 1]],
+        scalars: { intensity: [0.9] },
+        num_points: 1,
+      }],
+    });
+    const res = await runLidarScan(req);
     const [url, init] = spy.mock.calls[0];
-    expect(url).toBe('http://127.0.0.1:8008/api/mesh/sample');
+    expect(url).toBe('http://127.0.0.1:8008/api/lidar/scan');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual(req);
+    expect(res.results).toHaveLength(1);
+    expect(res.results[0].scanner_id).toBe('scanner-1');
+    expect(res.results[0].num_points).toBe(1);
+    expect(res.results[0].scalars.intensity).toEqual([0.9]);
   });
 
   it('surfaces error', async () => {
-    mockFetchError(400, { detail: 'no triangles' });
+    mockFetchError(500, { detail: 'lidar plugin unavailable' });
     await expect(
-      sampleMeshSurface({ vertices: [], triangles: [], density: 1 }),
-    ).rejects.toThrow('no triangles');
+      runLidarScan({ meshes: [], scanners: [] }),
+    ).rejects.toThrow('lidar plugin unavailable');
   });
 });
 
@@ -802,10 +822,10 @@ describe('no-detail HTTP error fallbacks', () => {
     ).rejects.toThrow(/HTTP 503/);
   });
 
-  it('sampleMeshSurface falls back', async () => {
+  it('runLidarScan falls back', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(noDetailResponse());
     await expect(
-      sampleMeshSurface({ vertices: [], triangles: [], density: 1 }),
+      runLidarScan({ meshes: [], scanners: [] }),
     ).rejects.toThrow(/HTTP 503/);
   });
 

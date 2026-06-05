@@ -35,7 +35,7 @@ actually returned, producing accurate branch surfaces without the
 | Operation | Workflow |
 |---|---|
 | Translate / rotate / scale | Right-click the mesh → Transform |
-| Sample points on the surface | [Triangulate a mesh: Resample](../workflows/triangulate.md#sample-points-on-a-mesh) |
+| Scan it into a point cloud | [Synthetic LiDAR scan](../workflows/simulate-scan.md) |
 | Align two meshes (ICP) | [Register & compare: M2M](../workflows/register-compare.md#mesh-to-mesh-icp) |
 | Compare a cloud to a mesh | [Register & compare: C2M](../workflows/register-compare.md#cloud-to-mesh) |
 | Export | [Import & export](../workflows/import-export.md#export) |

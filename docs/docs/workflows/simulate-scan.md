@@ -83,33 +83,68 @@ the tag, the parser auto-detects layout from the first non-comment
 row. The hint is ignored for PLY and PCD, which carry their column
 layout in the file header.
 
-## Run the simulation
+## Run the scan
 
-Once one or more scans with parameters exist, the **Simulate Scan**
-button becomes active.
+The **Synthetic LiDAR Scan** action runs a true ray-traced scan through
+the PyHelios `lidar` plugin: every visible scanner traces its rays
+against the scene geometry, so the result respects occlusion, scanner
+position, field of view, and resolution — not a uniform random sprinkle
+of points over the surface.
 
-1. Make sure the scan markers you want to simulate are visible (eye
-   icon on); hidden scanners aren't simulated.
-2. Make sure the geometry to scan is visible.
-3. Click **Simulate Scan**.
+1. Make sure the scan markers you want to use are visible (eye icon on);
+   hidden scanners are skipped.
+2. Make sure the geometry to scan is visible. Only **plant models** and
+   **meshes imported from file** are scanned — triangulation results,
+   the voxel grid, and generated primitive shapes are ignored.
+3. Run it: click **Run Synthetic LiDAR Scan** at the top of the **Scans
+   panel** (this button appears as soon as one scanner exists). The same
+   action is also available on a selected mesh's toolbar and from the
+   command palette (search "scan").
 
-Phytograph generates a point cloud from each visible scan position and
-attaches the result to that scan as its point data. The row's subtitle
-updates from `params · origin (...)` to include the new point count.
+Phytograph loads all visible scannable geometry into one Helios scene,
+ray-traces it once from every visible scanner, then writes each
+scanner's hit points back **onto that scanner's own scan** — the row's
+subtitle changes from `params · origin (…)` to include the point count,
+and the scan now carries both its parameters and the point data. Each
+point also gets scalar fields you can color by or filter on: **intensity**
+(beam–surface angle × reflectivity), **distance**, **timestamp**, and —
+for multi-return — **target index** and **target count**. Switch the
+viewer's color mode to *Intensity* or any scalar to inspect them.
+
+If a scanner already holds point data (e.g. an imported scan), Phytograph
+asks whether to **overwrite** it, **keep the original and add a duplicate**
+scan for the synthetic points, or **cancel**.
+
+If no visible scanner exists, or no scannable geometry is visible, the
+app shows a message explaining what's missing instead of scanning.
+
+!!! note "Scanned colors"
+    Point colors come from the surface each ray strikes. Plant organs are
+    texture-mapped, so a scanned plant currently takes each organ's solid
+    fallback colour (e.g. leaf green) rather than the per-pixel texture
+    colour; texture-accurate scan colours arrive with a pending Helios
+    update. Colour by *Intensity* in the meantime for the most informative
+    view.
+
+!!! note "Flat geometry"
+    The scanner culls rays against each object's 3-D bounding box, so a
+    perfectly flat (single-plane) mesh produces no hits. Plant models and
+    real imported meshes are genuinely three-dimensional, so this only
+    affects degenerate test geometry.
 
 ## Use cases
 
 **Plan a field campaign.** Place 3–4 candidate scanners around a
-generated plant of your target species and age. Run Simulate, then
-visually inspect for coverage gaps. Iterate scanner positions until
-the combined coverage is acceptable, then take those positions to the
-field.
+generated plant of your target species and age. Run the scan, then
+visually inspect the resulting cloud for coverage gaps. Iterate scanner
+positions until the combined coverage is acceptable, then take those
+positions to the field.
 
-**Generate training data.** Generate a procedural plant, simulate
-several scans of it from random positions, stitch the resulting
-clouds. The stitched cloud has the topological properties of a real
-TLS scan but with perfectly known ground truth. Repeat for many
-plants to build a labeled dataset.
+**Generate training data.** Generate a procedural plant, scan it from
+several positions, and use the resulting clouds. The scan respects
+occlusion just like a real TLS, so the cloud has realistic topology but
+perfectly known ground truth. Repeat for many plants to build a labeled
+dataset.
 
 **Sensitivity to scan resolution.** Vary zenith/azimuth point counts;
 run your downstream analysis (triangulation, skeleton extraction); plot

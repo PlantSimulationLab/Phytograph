@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X, Radio, FileUp } from 'lucide-react';
+import { DebouncedNumberInput } from './DebouncedNumberInput';
 import {
   DEFAULT_SCAN_PARAMETERS,
   type ReturnType,
@@ -136,22 +137,15 @@ export function ScanParametersPopup({
     setParams(p => ({ ...p, [key]: Number.isFinite(v) ? Math.max(min, v) : min }));
   };
 
-  // Angular sweep min/max are a coupled pair: the min can't exceed its
-  // matching max, and vice-versa. Clamp on edit so the sweep is always a
-  // valid (min ≤ max) span and the backend never receives an inverted range.
+  // Angular sweep min/max commit on blur/Enter (via DebouncedNumberInput), so a
+  // user can type a full number like "130" without it being clamped against the
+  // other field mid-keystroke. We only clamp to the physical [lo, hi] range here;
+  // the min↔max ordering isn't enforced (the backend handles any sweep ordering),
+  // which is what lets you set min=30 then type max=130 freely.
   const setAngle = (
     key: 'zenithMinDeg' | 'zenithMaxDeg' | 'azimuthMinDeg' | 'azimuthMaxDeg',
-    lo: number,
-    hi: number,
-  ) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const raw = parseFloat(e.target.value);
-    setParams(p => {
-      const v = Math.min(hi, Math.max(lo, Number.isFinite(raw) ? raw : lo));
-      if (key === 'zenithMinDeg') return { ...p, zenithMinDeg: Math.min(v, p.zenithMaxDeg) };
-      if (key === 'zenithMaxDeg') return { ...p, zenithMaxDeg: Math.max(v, p.zenithMinDeg) };
-      if (key === 'azimuthMinDeg') return { ...p, azimuthMinDeg: Math.min(v, p.azimuthMaxDeg) };
-      return { ...p, azimuthMaxDeg: Math.max(v, p.azimuthMinDeg) };
-    });
+  ) => (v: number) => {
+    setParams(p => ({ ...p, [key]: v }));
   };
 
   const setOrigin = (axis: 'x' | 'y' | 'z') => (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -279,24 +273,22 @@ export function ScanParametersPopup({
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Zenith (θ) min / max</label>
                 <div className="grid grid-cols-2 gap-2">
-                  <input
+                  <DebouncedNumberInput
                     data-testid="scan-zenith-min"
-                    type="number"
                     min={0}
                     max={180}
                     step="any"
                     value={params.zenithMinDeg}
-                    onChange={setAngle('zenithMinDeg', 0, 180)}
+                    onCommit={setAngle('zenithMinDeg')}
                     className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                   />
-                  <input
+                  <DebouncedNumberInput
                     data-testid="scan-zenith-max"
-                    type="number"
                     min={0}
                     max={180}
                     step="any"
                     value={params.zenithMaxDeg}
-                    onChange={setAngle('zenithMaxDeg', 0, 180)}
+                    onCommit={setAngle('zenithMaxDeg')}
                     className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                   />
                 </div>
@@ -304,24 +296,22 @@ export function ScanParametersPopup({
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Azimuth (φ) min / max</label>
                 <div className="grid grid-cols-2 gap-2">
-                  <input
+                  <DebouncedNumberInput
                     data-testid="scan-azimuth-min"
-                    type="number"
                     min={0}
                     max={360}
                     step="any"
                     value={params.azimuthMinDeg}
-                    onChange={setAngle('azimuthMinDeg', 0, 360)}
+                    onCommit={setAngle('azimuthMinDeg')}
                     className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                   />
-                  <input
+                  <DebouncedNumberInput
                     data-testid="scan-azimuth-max"
-                    type="number"
                     min={0}
                     max={360}
                     step="any"
                     value={params.azimuthMaxDeg}
-                    onChange={setAngle('azimuthMaxDeg', 0, 360)}
+                    onCommit={setAngle('azimuthMaxDeg')}
                     className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                   />
                 </div>

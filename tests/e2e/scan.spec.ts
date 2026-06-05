@@ -31,7 +31,18 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
     await page.getByTestId('scan-zenith-points').fill('50');
     await page.getByTestId('scan-azimuth-points').fill('180');
     await page.getByTestId('scan-zenith-min').fill('30');
-    await page.getByTestId('scan-zenith-max').fill('150');
+
+    // Regression guard: typing a multi-digit max one keystroke at a time must NOT
+    // be clamped against the min mid-typing. Previously, with min=30, typing "130"
+    // got clamped to 30 the instant "13" was parsed (13 < 30). Type it char by char
+    // and confirm the field ends at 130, not snapped to the min.
+    const zenithMax = page.getByTestId('scan-zenith-max');
+    await zenithMax.click();
+    await zenithMax.fill('');
+    await zenithMax.pressSequentially('130', { delay: 30 });
+    await zenithMax.blur();
+    await expect(zenithMax).toHaveValue('130');
+
     await page.getByTestId('scan-azimuth-min').fill('45');
     await page.getByTestId('scan-azimuth-max').fill('315');
 

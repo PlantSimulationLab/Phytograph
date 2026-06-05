@@ -1002,47 +1002,90 @@ export async function morphPlant(
   }
 }
 
-// ==================== MESH SURFACE SAMPLING API ====================
+// ==================== SYNTHETIC LIDAR SCAN API ====================
 
-export interface MeshSampleRequest {
-  vertices: number[][];  // [[x, y, z], ...] - mesh vertices
+// One mesh to load into the scannable scene (world-space coordinates — the
+// renderer applies each mesh's scale/rotation/translation before sending).
+export interface LidarScanMesh {
+  vertices: number[][];  // [[x, y, z], ...]
   triangles: number[][];  // [[i, j, k], ...] - triangle vertex indices
-  vertex_colors?: number[][];  // [[r, g, b], ...] - colors per vertex (0-1 range)
-  num_points?: number;  // Target number of points (if not using density)
-  density?: number;  // Points per square meter (if not using num_points)
-  seed?: number;  // Random seed for reproducibility
+  colors?: number[][];  // [[r, g, b], ...] - per-vertex colors (0-1 range)
 }
 
-export interface MeshSampleResponse {
-  success: boolean;
-  points: number[][];  // [[x, y, z], ...] - sampled point positions
-  colors?: number[][];  // [[r, g, b], ...] - interpolated colors
+// One scanner position + acquisition geometry (mirrors ScanParameters; angles
+// stay in degrees and the backend converts to radians). `id` is the renderer's
+// scan id — results come back keyed by it so each scanner's points attach to its
+// own scan.
+export interface LidarScanScanner {
+  id: string;
+  origin: number[];  // [x, y, z]
+  n_theta: number;
+  n_phi: number;
+  theta_min_deg: number;
+  theta_max_deg: number;
+  phi_min_deg: number;
+  phi_max_deg: number;
+  return_type: 'single' | 'multi';
+  exit_diameter_m: number;
+  beam_divergence_mrad: number;
+}
+
+export interface LidarScanRequest {
+  meshes: LidarScanMesh[];
+  scanners: LidarScanScanner[];
+  // Extra per-hit scalar fields to record beyond the standard set. Each is also a
+  // column-format label, so the scan samples that named primitive data onto hits.
+  extra_fields?: string[];
+  rays_per_pulse?: number;  // full-waveform only (return_type === 'multi')
+  pulse_distance_threshold?: number;  // full-waveform only (meters)
+}
+
+// Per-scanner scan result. `scalars` maps a field name (intensity, distance,
+// timestamp, target_index, target_count, plus any extra_fields the engine
+// recorded) to per-point values aligned 1:1 with `points`.
+export interface LidarScanResult {
+  scanner_id: string;
+  points: number[][];  // [[x, y, z], ...]
+  colors?: number[][] | null;  // [[r, g, b], ...] (0-1) or null when empty
+  scalars: Record<string, number[]>;
   num_points: number;
-  surface_area: number;  // Total surface area of the mesh
+}
+
+export interface LidarScanResponse {
+  success: boolean;
+  results: LidarScanResult[];
   error?: string;
 }
 
 /**
- * Sample points uniformly from a mesh surface
+ * Run a true ray-traced synthetic LiDAR scan via the PyHelios `lidar` plugin.
  *
- * Converts a triangulated mesh into a point cloud by randomly sampling
- * points from the mesh surface. Points are distributed uniformly based on
- * triangle area.
+ * Loads the supplied geometry into a Helios Context, adds one scan per scanner,
+ * ray-traces the scene, and returns the resulting hit points as a point cloud.
+ * Unlike random surface sampling, the output respects occlusion, scanner
+ * position, field of view, and resolution.
  */
-export async function sampleMeshSurface(
-  request: MeshSampleRequest
-): Promise<MeshSampleResponse> {
+export async function runLidarScan(
+  request: LidarScanRequest
+): Promise<LidarScanResponse> {
   const baseUrl = getBackendUrl();
-  console.log('Mesh sampling - vertices:', request.vertices.length, 'triangles:', request.triangles.length);
+  console.log('LiDAR scan - meshes:', request.meshes.length, 'scanners:', request.scanners.length);
+
+  // A high-resolution scan ray-traces Ntheta×Nphi rays per scanner; allow time.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
 
   try {
-    const response = await fetch(`${baseUrl}/api/mesh/sample`, {
+    const response = await fetch(`${baseUrl}/api/lidar/scan`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(request),
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -1051,7 +1094,8 @@ export async function sampleMeshSurface(
 
     return await response.json();
   } catch (error) {
-    console.error('Mesh sampling failed:', error);
+    clearTimeout(timeoutId);
+    console.error('LiDAR scan failed:', error);
     throw error;
   }
 }
