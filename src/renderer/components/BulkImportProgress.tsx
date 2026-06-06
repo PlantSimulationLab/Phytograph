@@ -3,8 +3,9 @@ import { Loader2 } from 'lucide-react';
 export interface BulkImportProgressState {
   // 1-indexed position of the scan currently being processed (e.g. `1/2`
   // while the first of two scans is parsing). Renders as `current/total` in
-  // the modal and as a filled bar at `current/total` width. The label below
-  // the bar names that same in-flight scan.
+  // the modal. The bar fills to *completed* work (`current - 1` of `total`),
+  // so the first in-flight scan shows 0%, not `1/total`. The label below the
+  // bar names that same in-flight scan.
   current: number;
   total: number;
   // Filename or scan label currently being processed. Shown below the bar.
@@ -27,8 +28,13 @@ interface Props {
 export function BulkImportProgress({ progress }: Props) {
   if (!progress) return null;
 
+  // Fill to *completed* scans, not the in-flight one: while scan 1/2 is
+  // parsing nothing has finished yet, so the bar should read 0%, not 50%.
+  // `current` is 1-indexed and points at the scan being processed, so
+  // `current - 1` is how many have actually completed.
+  const completed = Math.max(0, progress.current - 1);
   const pct = progress.total > 0
-    ? Math.min(100, Math.round((progress.current / progress.total) * 100))
+    ? Math.min(100, Math.round((completed / progress.total) * 100))
     : 0;
 
   return (
