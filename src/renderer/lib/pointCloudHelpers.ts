@@ -449,8 +449,16 @@ export function buildLADRequest(
     //      own columns (no huge JSON, preserves multi-return columns in-file).
     //   3. inline points (+ scalar_columns) — an in-memory cloud with neither a
     //      session nor a source file (e.g. a synthetic full-waveform scan).
+    // When a cloud has BOTH a session and a source file, send both: the backend
+    // prefers the session (honoring unbaked deletions) but falls back to the
+    // file if the session is gone — e.g. after a backend restart, which orphans
+    // the in-memory session while the renderer still holds its id.
     const sessionId = scan.data?.octree?.sessionId;
-    if (sessionId) {
+    if (sessionId && scan.sourcePath) {
+      entry.session_id = sessionId;
+      entry.file_path = scan.sourcePath;
+      entry.ascii_format = scan.asciiFormat ?? null;
+    } else if (sessionId) {
       entry.session_id = sessionId;
     } else if (scan.sourcePath) {
       entry.file_path = scan.sourcePath;

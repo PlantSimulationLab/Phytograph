@@ -131,8 +131,10 @@ describe('buildLADRequest', () => {
     expect(multi.beam_divergence).toBe(0.7);
   });
 
-  it('prefers session_id (octree cloud) over the source file', () => {
-    const scan = makeScan({ sourcePath: '/data/a.xyz' });
+  it('sends both session_id and file_path when a cloud has both (fallback)', () => {
+    // The backend prefers the session but falls back to the file if the session
+    // is gone (e.g. after a backend restart), so we send both.
+    const scan = makeScan({ sourcePath: '/data/a.xyz', asciiFormat: 'x y z' });
     scan.data!.octree = {
       cacheId: 'c1',
       sessionId: 'sess-123',
@@ -141,6 +143,21 @@ describe('buildLADRequest', () => {
     } as any;
     const s = buildLADRequest([scan], GRID, PARAMS).scans[0];
     expect(s.session_id).toBe('sess-123');
+    expect(s.file_path).toBe('/data/a.xyz');
+    expect(s.ascii_format).toBe('x y z');
+    expect(s.points).toBeUndefined();
+  });
+
+  it('sends session_id alone when there is no source file', () => {
+    const scan = makeScan({ sourcePath: undefined });
+    scan.data!.octree = {
+      cacheId: 'c1',
+      sessionId: 'sess-xyz',
+      metadataUrl: '',
+      pointCount: 2,
+    } as any;
+    const s = buildLADRequest([scan], GRID, PARAMS).scans[0];
+    expect(s.session_id).toBe('sess-xyz');
     expect(s.file_path).toBeUndefined();
     expect(s.points).toBeUndefined();
   });

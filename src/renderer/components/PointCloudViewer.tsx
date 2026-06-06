@@ -122,6 +122,16 @@ type EditMode = 'none' | 'translate' | 'crop' | 'rotate' | 'erase';
 // (0.75 base × 1.5).
 const LIGHT_INTENSITY_SCALE = 1.125;
 
+// Default opacity for a freshly-rendered mesh that has no explicit per-mesh
+// override yet. Solid surfaces render slightly translucent so an underlying
+// point cloud stays visible through a triangulation.
+const MESH_DEFAULT_OPACITY = 0.7;
+
+// Grid (voxel-box) meshes default to more translucent so the points and any
+// structure inside the box stay visible through its faces. A voxel box is a
+// mesh carrying `gridSubdivisions`.
+const GRID_MESH_DEFAULT_OPACITY = 0.4;
+
 
 // Import function refs for mesh/skeleton
 export interface ImportRefs {
@@ -133,7 +143,7 @@ interface PointCloudViewerProps {
   scans: Scan[];
   selectedScanIds: Set<string>;
   onToggleVisibility: (id: string) => void;
-  onToggleSelection: (id: string, multiSelect: boolean) => void;
+  onToggleSelection: (id: string, additive: boolean, range: boolean) => void;
   onRemoveScan: (id: string) => void;
   onSelectAll: () => void;
   onDeselectAll: () => void;
@@ -301,7 +311,11 @@ export default function PointCloudViewer({
 
   // Mesh state
   const [meshes, setMeshes] = useState<MeshEntry[]>([]);
-  const [meshOpacity, setMeshOpacity] = useState(0.7);
+  // Per-mesh opacity (0.1–1). Absent entry means MESH_DEFAULT_OPACITY. Only
+  // surfaced for meshes where blending is meaningful — i.e. solid / vertex-
+  // colored surfaces, not textured plants whose alpha-cutout leaf materials
+  // ignore opacity (see meshSupportsOpacity / TexturedPlantMesh).
+  const [meshOpacities, setMeshOpacities] = useState<Map<string, number>>(new Map());
   const [meshWireframe, setMeshWireframe] = useState(false);
   // Per-mesh pseudocolor mode (color by inclination / azimuth / area / scan).
   // Absent entry means 'solid'. The colormap is shared with point-cloud scalar
@@ -3582,6 +3596,23 @@ export default function PointCloudViewer({
     return true;                                        // plants + imported meshes
   }, [isTriangulatedMesh]);
 
+  // Whether a mesh renders through the textured material-group path (plant /
+  // OBJ+MTL with UVs and at least one texture). Mirrors the render-side
+  // condition that picks TexturedPlantMesh over TriangleMesh.
+  const isTexturedMesh = useCallback((mesh: MeshEntry): boolean => {
+    return !!(mesh.data.uvCoordinates && mesh.data.uvCoordinates.length > 0 &&
+              mesh.plantMaterials && mesh.plantMaterials.some(m => m.textureData));
+  }, []);
+
+  // Whether a per-mesh opacity control is meaningful. Transparency blends a
+  // solid / vertex-colored surface; it's a no-op on textured plants, whose
+  // alpha-cutout leaf materials ignore opacity (see TexturedPlantMesh). So we
+  // surface the slider for everything EXCEPT plants and textured meshes.
+  const meshSupportsOpacity = useCallback((mesh: MeshEntry): boolean => {
+    if (mesh.isPlant) return false;
+    return !isTexturedMesh(mesh);
+  }, [isTexturedMesh]);
+
   // Extract a mesh's geometry in WORLD space (scale -> rotate(Euler XYZ) ->
   // translate), matching how it's rendered. Returns the arrays the scan/scene
   // API expects. Shared so every scan target is transformed identically.
@@ -6111,7 +6142,7 @@ export default function PointCloudViewer({
   // Compute per-voxel leaf area density. Mirrors handleHeliosTriangulate: run
   // against the live backend, then add the result as an LADResultEntry the
   // viewer renders as colored voxel cells.
-  const handleComputeLAD = useCallback(async (request: LADRequest, _scanColors: string[] = []) => {
+  const handleComputeLAD = useCallback(async (request: LADRequest, _scanColors: string[] = [], gridMeshId?: string) => {
     if (isLadRunning) return;
 
     const abort = new AbortController();
@@ -6152,11 +6183,22 @@ export default function PointCloudViewer({
         visible: true,
         color: '#22c55e',
         hideEmpty: true,
-        opacity: 0.45,
+        // Default to fully opaque: the voxel cells then read cleanly without the
+        // order-dependent see-through artifacts of alpha blending. The user can
+        // dial opacity down in the LAD row to peer inside the canopy.
+        opacity: 1,
       };
 
       setLadResults(prev => [...prev, entry]);
       setSelectedLadId(entry.id);
+
+      // Auto-hide the voxel-box grid mesh the result was computed on: the LAD
+      // cells occupy the exact same volume, so leaving the box visible causes
+      // z-fighting on the shared faces. The user can re-show it from the Meshes
+      // panel if they want the wireframe back.
+      if (gridMeshId) {
+        setMeshes(prev => prev.map(m => m.id === gridMeshId ? { ...m, visible: false } : m));
+      }
 
       const { max } = ladRange(voxels);
       // Surface backend fallbacks (e.g. multi-return columns missing).
@@ -7314,7 +7356,7 @@ export default function PointCloudViewer({
                   key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
                   data={mesh.data}
                   plantMaterials={mesh.plantMaterials}
-                  opacity={meshOpacity}
+                  opacity={1}
                   wireframe={meshWireframe}
                 />
               ) : (
@@ -7322,7 +7364,7 @@ export default function PointCloudViewer({
                   key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
                   data={mesh.data}
                   color={mesh.color}
-                  opacity={meshOpacity}
+                  opacity={meshOpacities.get(mesh.id) ?? (mesh.gridSubdivisions ? GRID_MESH_DEFAULT_OPACITY : MESH_DEFAULT_OPACITY)}
                   wireframe={meshWireframe}
                   useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
                   triangleColors={meshTriangleColors.get(mesh.id) ?? null}
@@ -8208,12 +8250,12 @@ export default function PointCloudViewer({
                     data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
                     data-selected={isSelected ? 'true' : 'false'}
                     onClick={(e) => {
-                      onToggleSelection(scan.id, e.shiftKey || e.ctrlKey || e.metaKey);
+                      onToggleSelection(scan.id, e.ctrlKey || e.metaKey, e.shiftKey);
                       if (scanHasParams) {
                         setSelectedMarkerScanId(prev => prev === scan.id ? null : scan.id);
                       }
                     }}
-                    className={`flex items-center gap-1.5 p-2 rounded cursor-pointer transition-colors ${
+                    className={`flex items-center gap-1.5 p-2 rounded cursor-pointer select-none transition-colors ${
                       isSelected ? 'bg-blue-600/30 border border-blue-500/50' : 'hover:bg-neutral-700/50'
                     }`}
                   >
@@ -8377,8 +8419,15 @@ export default function PointCloudViewer({
                 // Only triangulated surfaces (standard / Helios) expose the
                 // per-triangle "Color by" control.
                 const canColorByTriangle = isTriangulatedMesh(mesh);
+                // Solid / vertex-colored surfaces expose a per-mesh Opacity
+                // slider; textured plants don't (alpha-cutout leaves ignore it).
+                const canSetOpacity = meshSupportsOpacity(mesh);
+                // The chevron expands the inline options section whenever this
+                // mesh has any per-mesh control (color-by and/or opacity).
+                const canExpand = canColorByTriangle || canSetOpacity;
                 const isExpanded = expandedMeshIds.has(mesh.id);
                 const colorMode = meshColorModes.get(mesh.id) ?? 'solid';
+                const meshOpacity = meshOpacities.get(mesh.id) ?? (mesh.gridSubdivisions ? GRID_MESH_DEFAULT_OPACITY : MESH_DEFAULT_OPACITY);
                 return (
                   <div key={mesh.id}>
                   <div
@@ -8393,9 +8442,9 @@ export default function PointCloudViewer({
                       isSelected ? 'bg-green-600/30 border border-green-500/50' : 'hover:bg-neutral-700/50'
                     }`}
                   >
-                    {/* Expander for the per-mesh Color-by section (triangulated
-                        meshes only); a spacer keeps other rows aligned. */}
-                    {canColorByTriangle ? (
+                    {/* Expander for the per-mesh inline options (color-by and/or
+                        opacity); a spacer keeps other rows aligned. */}
+                    {canExpand ? (
                       <button
                         data-testid="mesh-color-expand"
                         onClick={(e) => {
@@ -8407,7 +8456,7 @@ export default function PointCloudViewer({
                           });
                         }}
                         className="p-0.5 hover:bg-neutral-600 rounded flex-shrink-0"
-                        title="Color options"
+                        title="Mesh options"
                       >
                         {isExpanded
                           ? <ChevronDown className="w-3 h-3 text-neutral-400" />
@@ -8455,9 +8504,13 @@ export default function PointCloudViewer({
                     </button>
                   </div>
 
-                  {/* Inline Color-by section, expanded from the chevron. */}
-                  {canColorByTriangle && isExpanded && (
+                  {/* Inline per-mesh options, expanded from the chevron:
+                      "Color by" (triangulated meshes) and "Opacity" (any
+                      non-textured, non-plant surface). */}
+                  {isExpanded && (
                     <div className="ml-7 mr-2 mb-1 p-2 bg-neutral-900/50 rounded space-y-1.5">
+                      {canColorByTriangle && (
+                      <div className="space-y-1.5">
                       <div className="text-[10px] text-neutral-400 flex items-center gap-1">
                         <Palette className="w-3 h-3" />
                         Color by
@@ -8497,26 +8550,43 @@ export default function PointCloudViewer({
                           ))}
                         </select>
                       )}
+                      </div>
+                      )}
+                      {/* Per-mesh opacity — only for surfaces where blending
+                          is meaningful (not textured plants). */}
+                      {canSetOpacity && (
+                        <div>
+                          <label className="text-[10px] text-neutral-400 block mb-1">
+                            Opacity: {(meshOpacity * 100).toFixed(0)}%
+                          </label>
+                          <input
+                            data-testid="mesh-opacity"
+                            type="range"
+                            min="0.1"
+                            max="1"
+                            step="0.1"
+                            value={meshOpacity}
+                            onChange={(e) => {
+                              const value = parseFloat(e.target.value);
+                              setMeshOpacities(prev => {
+                                const next = new Map(prev);
+                                next.set(mesh.id, value);
+                                return next;
+                              });
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
+                          />
+                        </div>
+                      )}
                     </div>
                   )}
                   </div>
                 );
               })}
             </div>
-            {/* Mesh Settings */}
+            {/* Mesh Settings (global toggles that apply to all meshes). */}
             <div className="p-2 border-t border-neutral-700">
-              <div className="mb-2">
-                <label className="text-[10px] text-neutral-400 block mb-1">Opacity: {(meshOpacity * 100).toFixed(0)}%</label>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="1"
-                  step="0.1"
-                  value={meshOpacity}
-                  onChange={(e) => setMeshOpacity(parseFloat(e.target.value))}
-                  className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
-                />
-              </div>
               <label className="flex items-center gap-2 text-neutral-300 cursor-pointer text-xs">
                 <input
                   type="checkbox"
@@ -12205,98 +12275,99 @@ export default function PointCloudViewer({
           Both require `dataRange`, which is null unless a visible cloud
           actually carries the active field — so the overlay disappears when the
           segmented scan is deleted. */}
-      {isScalarColorMode && colorMode === 'scalar' && selectedScalarField &&
-       dataRange && categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max]) ? (
-        <div
-          className="absolute bottom-4 right-56 z-20"
-          data-testid="class-legend"
-          data-legend-attribute={selectedScalarField}
-        >
-          <ClassLegend
-            scheme={categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max])!}
-            label={dataRange.label}
-          />
-        </div>
-      ) : isScalarColorMode && activeRange && dataRange && (
-        <div
-          className="absolute bottom-4 right-56 z-20"
-          data-testid="colorbar"
-          data-colorbar-label={dataRange.label}
-          data-colorbar-min={activeRange.min}
-          data-colorbar-max={activeRange.max}
-        >
-          <Colorbar
-            colormap={colormap}
-            min={activeRange.min}
-            max={activeRange.max}
-            label={dataRange.label}
-          />
-        </div>
-      )}
+      {/* Colorbars / legends — point cloud, mesh, and LAD. All anchored
+          bottom-LEFT (above the navigation-help bar) and laid out in one
+          flex row so any combination coexists without overlapping each other
+          or the right-side object panels, which grow tall enough (point
+          clouds + meshes + LAD results) to collide with a bottom-right
+          colorbar. */}
+      <div className="absolute bottom-16 left-4 z-20 flex flex-row items-end gap-3 pointer-events-none">
+        {isScalarColorMode && colorMode === 'scalar' && selectedScalarField &&
+         dataRange && categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max]) ? (
+          <div
+            data-testid="class-legend"
+            data-legend-attribute={selectedScalarField}
+          >
+            <ClassLegend
+              scheme={categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max])!}
+              label={dataRange.label}
+            />
+          </div>
+        ) : isScalarColorMode && activeRange && dataRange && (
+          <div
+            data-testid="colorbar"
+            data-colorbar-label={dataRange.label}
+            data-colorbar-min={activeRange.min}
+            data-colorbar-max={activeRange.max}
+          >
+            <Colorbar
+              colormap={colormap}
+              min={activeRange.min}
+              max={activeRange.max}
+              label={dataRange.label}
+            />
+          </div>
+        )}
 
-      {/* Mesh pseudocolor colorbar — shown whenever a mesh is colored by
-          inclination/azimuth/area (selected or not). Sits just above the
-          point-cloud colorbar slot so both can be visible at once. */}
-      {activeMeshColorInfo && (
-        <div
-          className={`absolute bottom-4 z-20 ${isScalarColorMode && activeRange && dataRange ? 'right-[360px]' : 'right-56'}`}
-          data-testid="mesh-colorbar"
-          data-colorbar-label={activeMeshColorInfo.label}
-          data-colorbar-min={activeMeshColorInfo.min}
-          data-colorbar-max={activeMeshColorInfo.max}
-        >
-          <Colorbar
-            colormap={colormap}
-            min={activeMeshColorInfo.min}
-            max={activeMeshColorInfo.max}
-            label={activeMeshColorInfo.label}
-          />
-        </div>
-      )}
+        {/* Mesh pseudocolor colorbar — when a mesh is colored by
+            inclination/azimuth/area. */}
+        {activeMeshColorInfo && (
+          <div
+            data-testid="mesh-colorbar"
+            data-colorbar-label={activeMeshColorInfo.label}
+            data-colorbar-min={activeMeshColorInfo.min}
+            data-colorbar-max={activeMeshColorInfo.max}
+          >
+            <Colorbar
+              colormap={colormap}
+              min={activeMeshColorInfo.min}
+              max={activeMeshColorInfo.max}
+              label={activeMeshColorInfo.label}
+            />
+          </div>
+        )}
 
-      {/* Source-scan legend — shown when a mesh is colored by scan. One swatch
-          per contributing scan, with its triangle count. */}
-      {activeMeshScanLegend && activeMeshScanLegend.length > 0 && (
-        <div
-          className={`absolute bottom-4 z-20 ${isScalarColorMode && activeRange && dataRange ? 'right-[360px]' : 'right-56'}`}
-          data-testid="mesh-scan-legend"
-          data-scan-count={activeMeshScanLegend.length}
-        >
-          <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg px-2.5 py-2 border border-neutral-700/50 select-none max-w-[200px]">
-            <div className="text-[10px] text-neutral-300 mb-1.5">Source scan</div>
-            <div className="space-y-1 max-h-[200px] overflow-y-auto">
-              {activeMeshScanLegend.map(entry => (
-                <div key={entry.index} className="flex items-center gap-2 text-[10px] text-neutral-300">
-                  <span
-                    className="w-3 h-3 rounded-sm border border-neutral-600 flex-shrink-0"
-                    style={{ backgroundColor: entry.color }}
-                  />
-                  <span className="flex-1 truncate">Scan {entry.index + 1}</span>
-                  <span className="text-neutral-500">{entry.count.toLocaleString()}</span>
-                </div>
-              ))}
+        {/* Source-scan legend — when a mesh is colored by scan. */}
+        {activeMeshScanLegend && activeMeshScanLegend.length > 0 && (
+          <div
+            data-testid="mesh-scan-legend"
+            data-scan-count={activeMeshScanLegend.length}
+          >
+            <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg px-2.5 py-2 border border-neutral-700/50 select-none max-w-[200px]">
+              <div className="text-[10px] text-neutral-300 mb-1.5">Source scan</div>
+              <div className="space-y-1 max-h-[200px] overflow-y-auto">
+                {activeMeshScanLegend.map(entry => (
+                  <div key={entry.index} className="flex items-center gap-2 text-[10px] text-neutral-300">
+                    <span
+                      className="w-3 h-3 rounded-sm border border-neutral-600 flex-shrink-0"
+                      style={{ backgroundColor: entry.color }}
+                    />
+                    <span className="flex-1 truncate">Scan {entry.index + 1}</span>
+                    <span className="text-neutral-500">{entry.count.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Leaf area density colorbar — shown whenever an LAD result is visible. */}
-      {activeLadInfo && (
-        <div
-          className={`absolute bottom-4 z-20 ${isScalarColorMode && activeRange && dataRange ? 'right-[360px]' : 'right-56'}`}
-          data-testid="lad-colorbar"
-          data-colorbar-label="LAD"
-          data-colorbar-min={activeLadInfo.min}
-          data-colorbar-max={activeLadInfo.max}
-        >
-          <Colorbar
-            colormap={colormap}
-            min={activeLadInfo.min}
-            max={activeLadInfo.max}
-            label="LAD [m²/m³]"
-          />
-        </div>
-      )}
+        {/* Leaf area density colorbar — when an LAD result is visible. */}
+        {activeLadInfo && (
+          <div
+            data-testid="lad-colorbar"
+            data-colorbar-label="LAD"
+            data-colorbar-min={activeLadInfo.min}
+            data-colorbar-max={activeLadInfo.max}
+          >
+            <Colorbar
+              colormap={colormap}
+              min={activeLadInfo.min}
+              max={activeLadInfo.max}
+              label="LAD [m²/m³]"
+            />
+          </div>
+        )}
+      </div>
 
       {/* LAD voxel hover readout — the value of the cell under the cursor. */}
       {hoveredLadVoxel && (
@@ -12487,9 +12558,9 @@ export default function PointCloudViewer({
                 >
                   <Minus className="w-3 h-3 text-neutral-300" />
                 </button>
-                <input type="range" min="0.5" max="5" step="0.5" value={pointSize} onChange={(e) => setPointSize(parseFloat(e.target.value))} className="flex-1 h-1 bg-neutral-700 rounded appearance-none cursor-pointer" />
+                <input type="range" min="0.5" max="10" step="0.5" value={pointSize} onChange={(e) => setPointSize(parseFloat(e.target.value))} className="flex-1 h-1 bg-neutral-700 rounded appearance-none cursor-pointer" />
                 <button
-                  onClick={() => setPointSize(prev => Math.min(prev + 0.5, 5))}
+                  onClick={() => setPointSize(prev => Math.min(prev + 0.5, 10))}
                   className="p-1 bg-neutral-700 hover:bg-neutral-600 rounded transition-colors"
                   title="Increase Point Size"
                 >

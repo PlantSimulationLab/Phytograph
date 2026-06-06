@@ -10,7 +10,10 @@ interface LADPopupProps {
   isOpen: boolean;
   onClose: () => void;
   // `scanColors` is aligned 1:1 with `request.scans` (same order).
-  onStartLAD: (request: LADRequest, scanColors: string[]) => void;
+  // `gridMeshId` is the id of the voxel-box mesh used as the grid (a GridOption
+  // id is its mesh id), so the caller can auto-hide that box once the LAD result
+  // — which occupies the same space — is shown, avoiding z-fighting.
+  onStartLAD: (request: LADRequest, scanColors: string[], gridMeshId: string) => void;
   scans: Scan[];
   initialSelectedIds?: Set<string>;
   onOpenScanParams?: (scanId: string) => void;
@@ -121,7 +124,7 @@ export function LADPopup({
       minVoxelHits,
     });
 
-    onStartLAD(request, selectedScans.map(s => s.color));
+    onStartLAD(request, selectedScans.map(s => s.color), selectedGrid.id);
     onClose();
   }, [selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, onStartLAD, onClose]);
 

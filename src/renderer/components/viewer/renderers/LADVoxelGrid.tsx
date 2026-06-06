@@ -100,10 +100,20 @@ export function LADVoxelGrid({
       onPointerOut={onHoverVoxel ? handleOut : undefined}
       onClick={onClickVoxel ? handleClick : undefined}
     >
+      {/* At full opacity the cells are genuinely opaque and MUST write depth,
+          or the GPU draws instances in arbitrary order and the ground grid +
+          other cells bleed through (the "some voxels look transparent" bug).
+          Only enable alpha blending (and disable depth writes, which order-
+          independent transparency needs) when the user actually dials opacity
+          below 1. */}
       <meshStandardMaterial
-        transparent
+        // Remount the material when transparency toggles — three.js needs a
+        // shader recompile (needsUpdate) when `transparent` flips; re-keying is
+        // the clean R3F way to force it.
+        key={opacity < 1 ? 'translucent' : 'opaque'}
+        transparent={opacity < 1}
         opacity={opacity}
-        depthWrite={false}
+        depthWrite={opacity >= 1}
         roughness={0.9}
         metalness={0}
       />

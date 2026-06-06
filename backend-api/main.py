@@ -72,6 +72,22 @@ if (_PYHELIOS_SRC / "pyhelios" / "__init__.py").exists():
         else:
             print(f"[pyhelios] WARNING: build script not found at {_build_script}", flush=True)
 
+    # Eagerly load libhelios NOW, at module import, before any endpoint imports
+    # open3d. libhelios links the Homebrew OpenMP runtime; open3d (and torch /
+    # sklearn) ship their own libomp.dylib, and on macOS whichever loads first
+    # wins the two-level-namespace binding. If open3d loads first, libhelios
+    # binds to open3d's libomp and dies on a missing symbol
+    # (e.g. ___kmpc_dispatch_deinit). Importing pyhelios here makes libhelios +
+    # its correct libomp bind first, so subsequent open3d use is harmless.
+    # Best-effort: a failure here is non-fatal (the lazy per-endpoint imports
+    # still surface a clear error), so packaged builds / odd setups don't break.
+    try:
+        import pyhelios as _pyhelios_preload  # noqa: F401
+        print("[pyhelios] native library loaded at startup", flush=True)
+    except Exception as _e:  # noqa: BLE001
+        print(f"[pyhelios] WARNING: startup load failed ({_e}); "
+              "will retry lazily per request", flush=True)
+
 # Unicode subscript to ASCII conversion for phytorch compatibility
 SUBSCRIPT_TO_ASCII = {
     '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
@@ -93,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.20"
+BACKEND_VERSION = "0.3.21"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1481,7 +1497,32 @@ async def triangulate_point_cloud(request: TriangulationRequest):
             mesh.remove_vertices_by_mask(vertices_to_remove)
 
         elif request.method == "alpha_shape":
-            # Alpha Shape
+            # Alpha Shape.
+            #
+            # Open3D's alpha shape builds a Delaunay tetrahedralization (Qhull)
+            # and keeps the faces of tetrahedra whose circumradius <= alpha. On
+            # the near-planar surfaces typical of LiDAR'd leaves, Qhull produces
+            # many exactly-coplanar (zero-volume) tetrahedra. Open3D skips each
+            # one — logging "[CreateFromPointCloudAlphaShape] invalid tetra in
+            # TetraMesh" — which both spams the console and drops faces that
+            # should have bridged the surface, leaving a sparse, holey mesh.
+            #
+            # Two cleanups before handing the cloud to Open3D:
+            #  1. Drop exact duplicate points (overlapping-scan coincidences),
+            #     which are a separate source of degenerate tetrahedra.
+            #  2. Add sub-micron jitter (scaled to the cloud's extent, well below
+            #     any real measurement precision) to break exact coplanarity so
+            #     Qhull yields non-degenerate tetrahedra. In practice this turns
+            #     a handful of triangles into full surface coverage.
+            pcd = pcd.remove_duplicated_points()
+            jpts = np.asarray(pcd.points)
+            if len(jpts) >= 4:
+                extent = float(np.linalg.norm(jpts.max(axis=0) - jpts.min(axis=0)))
+                if extent > 0:
+                    rng = np.random.default_rng(0)  # deterministic across runs
+                    jpts = jpts + rng.normal(0.0, extent * 1e-6, jpts.shape)
+                    pcd.points = o3d.utility.Vector3dVector(jpts)
+
             if request.alpha is None:
                 # Auto-compute alpha from point spacing
                 distances = pcd.compute_nearest_neighbor_distance()
@@ -1489,7 +1530,11 @@ async def triangulate_point_cloud(request: TriangulationRequest):
             else:
                 alpha = request.alpha
 
-            mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha)
+            # Suppress Open3D's per-tetra warnings; any genuinely degenerate
+            # tetrahedra that survive jittering are correctly skipped, not an
+            # error worth surfacing.
+            with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error):
+                mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha)
 
         elif request.method == "delaunay":
             # 2D Delaunay triangulation (project to XY plane, then lift back)
@@ -2565,8 +2610,31 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
             theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
             fp = os.path.join(tmpdir, f"lad_scan_{len(scans_info)}.txt")
 
+            # Resolve the live session if one was requested. A session is an
+            # in-memory object that does NOT survive a backend restart, so the
+            # renderer's session id can be stale (e.g. after a dev reload or a
+            # respawn). When that happens, fall back to the source file the
+            # renderer also sent — losing only unbaked deletions, which we warn
+            # about — instead of failing the whole computation.
+            sess = None
             if scan_entry.session_id:
-                sess = _get_cloud_session(scan_entry.session_id)
+                with _cloud_session_lock:
+                    sess = _cloud_sessions.get(scan_entry.session_id)
+                if sess is None and scan_entry.file_path:
+                    warnings.append(
+                        "The edited point-cloud session was no longer available "
+                        "(the backend likely restarted), so LAD used the source "
+                        "file on disk. Any unbaked deletions were not applied — "
+                        "re-apply them and recompute if needed."
+                    )
+                elif sess is None:
+                    raise ValueError(
+                        f"Cloud session not found: {scan_entry.session_id}. The "
+                        "backend may have restarted since import. Re-import the "
+                        "scan and try again."
+                    )
+
+            if sess is not None:
                 with _cloud_session_lock:
                     fmt, scan_multi = _session_to_lad_ascii(sess, _Path(fp))
                 n_points, _, _ = _file_xyz_bounds(fp, fmt)

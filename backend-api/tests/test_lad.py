@@ -188,6 +188,38 @@ class TestLADRequestShaping:
         assert "gapfill" in names
         assert names.index("gapfill") < names.index("calculateLeafArea")
 
+    def test_stale_session_falls_back_to_file_with_warning(self, tmp_path, stub_pyhelios):
+        # A session id the backend doesn't have (e.g. after a restart) must NOT
+        # 404 the whole computation when the scan also carries a source file —
+        # it falls back to the file and warns that unbaked edits were dropped.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n-0.1 0.0 0.6\n0.2 -0.1 0.4\n")
+        scan = main.HeliosScanEntry(
+            session_id="does-not-exist", file_path=str(f), ascii_format="x y z",
+            origin=[0, 0, 5], return_type="single")
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+            lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
+        result = main._do_lad_computation(req)
+
+        assert result["success"] is True, result.get("error")
+        assert any("no longer available" in w for w in result["warnings"])
+
+    def test_stale_session_without_file_errors_actionably(self, tmp_path, stub_pyhelios):
+        # No fallback available: a clear, actionable error rather than a bare 404.
+        scan = main.HeliosScanEntry(
+            session_id="does-not-exist", origin=[0, 0, 5], return_type="single")
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+            lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
+        result = main._do_lad_computation(req)
+
+        assert result["success"] is False
+        assert "session not found" in result["error"].lower()
+        assert "re-import" in result["error"].lower()
+
 
 # ---------------------------------------------------------------------------
 # Per-cell hit counting (pure numpy, no pyhelios)
