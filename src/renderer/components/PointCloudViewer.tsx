@@ -144,13 +144,19 @@ interface PointCloudViewerProps {
   scans: Scan[];
   selectedScanIds: Set<string>;
   onToggleVisibility: (id: string) => void;
-  onToggleSelection: (id: string, additive: boolean, range: boolean) => void;
+  // allowDeselect: when true, a plain click on the row that is the sole scan
+  // selection toggles it OFF. The Scans pane passes false when a mesh/skeleton
+  // is ALSO selected (mixed mode) — there the click should keep the scan and
+  // let the "clear mesh on cloud-select" effect drop back to single-cloud mode,
+  // not deselect everything.
+  onToggleSelection: (id: string, additive: boolean, range: boolean, allowDeselect?: boolean) => void;
   onRemoveScan: (id: string) => void;
   onSelectAll: () => void;
   onDeselectAll: () => void;
   onUpdateScanData: (id: string, data: PointCloudData) => void;
   onUpdateScanParams: (id: string, params: ScanParameters | undefined) => void;
   onUpdateScanLabel?: (id: string, label: string) => void;
+  onUpdateScanColor?: (id: string, color: string) => void;
   onSave: (data: PointCloudData, fileName: string) => void;
   onAddScan?: (scan: Scan) => void;
   onAddScans?: (scans: Scan[]) => void;
@@ -186,6 +192,7 @@ export default function PointCloudViewer({
   onUpdateScanData,
   onUpdateScanParams,
   onUpdateScanLabel,
+  onUpdateScanColor,
   onSave: _onSave,
   onAddScan,
   onAddScans,
@@ -332,6 +339,9 @@ export default function PointCloudViewer({
   // escaping the panel's overflow clip and backdrop-blur stacking context.
   const [colorPopoverMeshId, setColorPopoverMeshId] = useState<string | null>(null);
   const [colorPopoverAnchor, setColorPopoverAnchor] = useState<{ top: number; left: number } | null>(null);
+  // Same anchored-overlay pattern for per-scan color, keyed by scan id.
+  const [colorPopoverScanId, setColorPopoverScanId] = useState<string | null>(null);
+  const [scanColorPopoverAnchor, setScanColorPopoverAnchor] = useState<{ top: number; left: number } | null>(null);
 
   // Triangulation state
   const [showTriangulationPanel, setShowTriangulationPanel] = useState(false);
@@ -552,7 +562,6 @@ export default function PointCloudViewer({
   // listing (which shows every scan regardless of whether it has data).
   const scansAll = scans;
   const scansWithParams = useMemo(() => scans.filter(hasParams), [scans]);
-  const [selectedMarkerScanId, setSelectedMarkerScanId] = useState<string | null>(null);
   const [scanPopupState, setScanPopupState] = useState<
     | { kind: 'closed' }
     | { kind: 'add' }
@@ -7570,7 +7579,9 @@ export default function PointCloudViewer({
         {scansWithParams.map(scan => {
           if (!scan.visible) return null;
           const scannerHeight = 0.35;
-          const isMarkerSelected = selectedMarkerScanId === scan.id;
+          // Glow follows the Scans-pane selection — single source of truth, so
+          // the marker can never drift out of sync with the row highlight.
+          const isMarkerSelected = selectedScanIds.has(scan.id);
           return (
             <ScannerMarker
               key={scan.id}
@@ -8335,6 +8346,54 @@ export default function PointCloudViewer({
         );
       })()}
 
+      {/* Per-scan color popover — same fixed-overlay pattern as the mesh popover. */}
+      {colorPopoverScanId && scanColorPopoverAnchor && onUpdateScanColor && (() => {
+        const popoverScan = scans.find(s => s.id === colorPopoverScanId);
+        if (!popoverScan) return null;
+        return (
+          <>
+            {/* Click-catcher: dismiss on any outside click. */}
+            <div
+              className="fixed inset-0 z-[59]"
+              onClick={() => setColorPopoverScanId(null)}
+            />
+            <div
+              data-testid="scan-color-popover"
+              onClick={(e) => e.stopPropagation()}
+              style={{ top: scanColorPopoverAnchor.top, left: scanColorPopoverAnchor.left }}
+              className="fixed z-[60] flex items-center gap-2 p-2 bg-neutral-900 border border-neutral-700 rounded shadow-lg"
+            >
+              <input
+                type="color"
+                value={popoverScan.color}
+                onChange={(e) => onUpdateScanColor(popoverScan.id, e.target.value)}
+                className="w-8 h-8 rounded cursor-pointer bg-transparent border-0 p-0"
+                title="Pick color"
+              />
+              <input
+                type="text"
+                value={popoverScan.color}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  // Only commit a complete, valid hex so the render path
+                  // never receives a partial value.
+                  if (/^#[0-9a-fA-F]{6}$/.test(v)) onUpdateScanColor(popoverScan.id, v);
+                }}
+                className="w-20 px-1.5 py-1 text-[11px] bg-neutral-800 border border-neutral-600 rounded text-neutral-200 font-mono"
+                maxLength={7}
+              />
+              <button
+                onClick={() => setColorPopoverScanId(null)}
+                className="text-[10px] text-neutral-400 hover:text-neutral-200 px-1"
+                title="Close"
+              >
+                Done
+              </button>
+            </div>
+          </>
+        );
+      })()}
+
       {/* Right Side Panels Container. z-30 keeps the whole panel stack above the
           viewport SVG overlays (crop/seed boxes at z-10) so panel controls and
           their popovers aren't obstructed by the wireframe crop box. */}
@@ -8437,16 +8496,38 @@ export default function PointCloudViewer({
                     data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
                     data-selected={isSelected ? 'true' : 'false'}
                     onClick={(e) => {
-                      onToggleSelection(scan.id, e.ctrlKey || e.metaKey, e.shiftKey);
-                      if (scanHasParams) {
-                        setSelectedMarkerScanId(prev => prev === scan.id ? null : scan.id);
-                      }
+                      // Only allow toggle-off when this scan is the WHOLE
+                      // selection. If a mesh/skeleton is also selected (mixed
+                      // mode, e.g. after creating a voxel box), the click should
+                      // refocus this scan and clear the mesh — not deselect.
+                      const allowDeselect = selectedMeshIds.size === 0 && selectedSkeletonId === null;
+                      onToggleSelection(scan.id, e.ctrlKey || e.metaKey, e.shiftKey, allowDeselect);
                     }}
                     className={`flex items-center gap-1.5 p-2 rounded cursor-pointer select-none transition-colors ${
                       isSelected ? 'bg-blue-600/30 border border-blue-500/50' : 'hover:bg-neutral-700/50'
                     }`}
                   >
-                    <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: scan.color }} />
+                    {onUpdateScanColor ? (
+                      <button
+                        data-testid="scan-color-swatch"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (colorPopoverScanId === scan.id) {
+                            setColorPopoverScanId(null);
+                            return;
+                          }
+                          // Anchor the fixed popover just below the swatch.
+                          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setScanColorPopoverAnchor({ top: r.bottom + 4, left: r.left });
+                          setColorPopoverScanId(scan.id);
+                        }}
+                        className="w-3 h-3 rounded-full flex-shrink-0 ring-1 ring-white/20 hover:ring-white/60 transition-shadow"
+                        style={{ backgroundColor: scan.color }}
+                        title="Set color"
+                      />
+                    ) : (
+                      <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: scan.color }} />
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="text-xs text-neutral-200 truncate" data-testid="scan-row-name" title={displayName}>{displayName}</div>
                       <div className="text-[10px] text-neutral-500" data-testid="scan-row-subtitle">
@@ -13187,7 +13268,6 @@ export default function PointCloudViewer({
               color: nextColor,
               params,
             });
-            setSelectedMarkerScanId(id);
           }
           setScanPopupState({ kind: 'closed' });
         }}
@@ -13320,9 +13400,6 @@ export default function PointCloudViewer({
             }
 
             onAddScans?.(newScans);
-            if (newScans.length > 0) {
-              setSelectedMarkerScanId(newScans[newScans.length - 1].id);
-            }
             const parts = [`${newScans.length} scan(s)`];
             if (attachedCount > 0) parts.push(`${attachedCount} with data`);
             showToast({ title: `Imported ${parts.join(', ')}`, type: 'success' });

@@ -162,7 +162,10 @@ test('Enter inside a dim input commits the value without applying the crop', asy
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '60');
 
-    await row.click();
+    // A freshly imported scan is auto-selected; crop targets the selection.
+    // (Don't click the row to "select" it — a plain click on the already-sole
+    // selection now toggles it OFF.)
+    await expect(row).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 
     const panel = page.getByTestId('crop-panel');
@@ -208,7 +211,8 @@ test('crop panel × button dismisses without applying', async () => {
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '60');
 
-    await row.click();
+    // A freshly imported scan is auto-selected; crop targets the selection.
+    await expect(row).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 
     const panel = page.getByTestId('crop-panel');

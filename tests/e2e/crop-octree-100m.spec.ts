@@ -127,7 +127,7 @@ test(`crop on ${FIXTURE_N.toLocaleString()}-point octree keeps heap under ${HEAP
     expect(baselineHeap).toBeLessThan(HEAP_BUDGET_BYTES);
 
     // ── Select + open crop ──────────────────────────────────────────────
-    await row.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(row).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 

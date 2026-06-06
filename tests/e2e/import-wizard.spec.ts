@@ -73,7 +73,8 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
-    await row.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(row).toHaveAttribute('data-selected', 'true');
 
     await page.getByRole('button', { name: 'Display' }).click();
     const colorMode = page.getByTestId('display-color-mode');

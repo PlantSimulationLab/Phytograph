@@ -60,7 +60,7 @@ test('exports an octree-backed cloud to XYZ via the backend', async () => {
     const pointCount = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
     expect(pointCount).toBe(60);
 
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Open the cloud export panel and export XYZ (backend path for octree).

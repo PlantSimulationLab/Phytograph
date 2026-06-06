@@ -38,7 +38,7 @@ test('crop Segment splits a scan in two without losing points', async () => {
     await expect(tinyRow).toHaveAttribute('data-point-count', '60');
 
     // ── Enter crop ─────────────────────────────────────────────────────────
-    await tinyRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(tinyRow).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 
@@ -113,7 +113,8 @@ test('crop without Segment discards cropped-out points (no new cloud)', async ()
     await expect(tinyRow).toBeVisible({ timeout: 20_000 });
     await expect(tinyRow).toHaveAttribute('data-point-count', '60');
 
-    await tinyRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(tinyRow).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 
     const panel = page.getByTestId('crop-panel');

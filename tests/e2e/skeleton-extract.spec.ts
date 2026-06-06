@@ -30,8 +30,7 @@ test('extracts a skeleton from a Y-shaped plant cloud via the UI', async () => {
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-point-count', '900');
 
-    // Select.
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Open skeleton panel.

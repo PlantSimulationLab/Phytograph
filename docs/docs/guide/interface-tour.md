@@ -55,7 +55,8 @@ scale; lighter lines every 10 cm let you eyeball details.
 Three stacked lists — **Scans**, **Meshes**, **Skeletons**.
 Each scan entry shows:
 
-- a color dot (also acts as a selection indicator)
+- a color dot (also acts as a selection indicator); click it to pick a
+  custom per-scan color, which drives the **Per-scan color** mode
 - the scan label and a subtitle (point count, scanner origin, or both)
 - visibility and remove controls
 - a paperclip to attach point data (if the scan only has parameters)

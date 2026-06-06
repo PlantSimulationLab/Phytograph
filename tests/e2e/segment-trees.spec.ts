@@ -33,7 +33,7 @@ test('segments individual trees and colours by the tree_instance attribute', asy
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(EXPECTED_POINTS);
 
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Open the Tree Segmentation panel via its toolbar button.

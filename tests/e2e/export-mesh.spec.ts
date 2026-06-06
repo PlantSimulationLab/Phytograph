@@ -71,7 +71,8 @@ test('exports a generated mesh to OBJ via the Export panel', async () => {
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Triangulate via the UI (Poisson at non-default depth 7).
     await page.getByTestId('tool-triangulate').click();

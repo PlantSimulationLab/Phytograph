@@ -43,8 +43,11 @@ test('Computes per-voxel leaf area density for the leaf-cube fixture', async () 
     await posZ.press('Enter');
 
     // --- Run LAD ------------------------------------------------------------
-    // The LAD tool lives on the single-cloud toolbar, so re-select the scan
-    // (creating the box selected the mesh instead).
+    // Creating a voxel box leaves a mixed selection (scan + box). The LAD tool
+    // lives on the single-cloud toolbar, so click the scan row to refocus it:
+    // in mixed mode a plain click keeps the scan and clears the box selection
+    // (it does NOT toggle the scan off — that only happens when the scan is the
+    // entire selection).
     await scanRows.nth(0).click();
     await expect(scanRows.nth(0)).toHaveAttribute('data-selected', 'true');
 

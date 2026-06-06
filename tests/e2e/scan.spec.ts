@@ -101,6 +101,59 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
   }
 });
 
+// A plain click on the row that is *already the sole selection* toggles it
+// off, and clicking again re-selects it. Regression guard: the scanner-marker
+// glow used to keep its own toggle state separate from the row highlight, so
+// repeated clicks flipped the marker while the row stayed highlighted. Both now
+// derive from the single selection set (data-selected), so they move together.
+test('plain-clicking a selected scan row toggles its selection on and off', async () => {
+  const { page, close } = await launchApp();
+
+  try {
+    const panel = page.getByTestId('scans-panel');
+    await expect(panel).toBeVisible();
+
+    // Create a params-only scan; it carries an origin, so it renders a scanner
+    // marker whose glow follows the row selection.
+    await page.getByTestId('tool-add-scan').click();
+    const popup = page.getByTestId('scan-parameters-popup');
+    await expect(popup).toBeVisible();
+    await page.getByTestId('scan-label-input').fill('Toggle Tripod');
+    await page.getByTestId('scan-origin-x').fill('1');
+    await page.getByTestId('scan-origin-y').fill('1');
+    await page.getByTestId('scan-origin-z').fill('0.5');
+    await page.getByTestId('scan-submit').click();
+    await expect(popup).not.toBeVisible();
+
+    const rows = panel.locator('[data-testid="scan-row"]');
+    await expect(rows).toHaveCount(1);
+    const row = rows.first();
+    await expect(row).toHaveAttribute('data-has-params', 'true');
+
+    // Newly created scan is auto-selected.
+    await expect(row).toHaveAttribute('data-selected', 'true');
+
+    // Click the row's name label — a handler-free spot that bubbles to the
+    // row's selection handler (the row center can sit over an action button).
+    const rowName = row.getByTestId('scan-row-name');
+
+    // Plain click deselects (it is the sole selection).
+    await rowName.click();
+    await expect(row).toHaveAttribute('data-selected', 'false');
+
+    // Plain click again re-selects.
+    await rowName.click();
+    await expect(row).toHaveAttribute('data-selected', 'true');
+
+    // And toggles off once more — proving it is a stable two-state toggle, not
+    // a one-way latch.
+    await rowName.click();
+    await expect(row).toHaveAttribute('data-selected', 'false');
+  } finally {
+    await close();
+  }
+});
+
 // Bulk-import from Helios XML, then round-trip a scan's parsed parameters
 // through the edit form. Uses sphere-scan/sphere.xml, whose four <scan>
 // entries reference sibling .xyz files that DO exist — so each scan resolves,

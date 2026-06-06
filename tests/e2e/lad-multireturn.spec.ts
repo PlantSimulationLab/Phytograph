@@ -55,7 +55,10 @@ test('Computes multi-return leaf area density from an imported full-waveform sca
     await posZ.fill('0.5');
     await posZ.press('Enter');
 
-    // Re-select the scan, open the LAD tool, pick the grid, run.
+    // Creating a voxel box leaves a mixed selection (scan + box). Click the scan
+    // row to refocus it: in mixed mode a plain click keeps the scan and clears
+    // the box selection (it does NOT toggle the scan off — that only happens when
+    // the scan is the entire selection). Then open the LAD tool, pick grid, run.
     await scanRows.nth(0).click();
     await expect(scanRows.nth(0)).toHaveAttribute('data-selected', 'true');
 

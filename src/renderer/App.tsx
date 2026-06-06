@@ -552,7 +552,7 @@ function App() {
   // everything between this anchor and the clicked scan, in list order.
   const lastSelectedScanIdRef = useRef<string | null>(null);
 
-  const handleToggleScanSelection = useCallback((id: string, additive: boolean, range: boolean) => {
+  const handleToggleScanSelection = useCallback((id: string, additive: boolean, range: boolean, allowDeselect: boolean = true) => {
     if (range && lastSelectedScanIdRef.current) {
       const anchorId = lastSelectedScanIdRef.current;
       const ids = scans.map(s => s.id);
@@ -571,6 +571,16 @@ function App() {
 
     lastSelectedScanIdRef.current = id;
     setSelectedScanIds(prev => {
+      // Plain click on the row that is *already the sole selection* toggles it
+      // off — clicking a scan a second time deselects it. Clicking a different
+      // row replaces the selection. Ctrl/cmd-click adds/removes from the set.
+      // allowDeselect is false in mixed mode (a mesh/skeleton is also selected):
+      // there the click should refocus this scan and let the mesh-clear effect
+      // run, rather than emptying the selection.
+      const isSoleSelection = !additive && allowDeselect && prev.size === 1 && prev.has(id);
+      if (isSoleSelection) {
+        return new Set();
+      }
       const next = new Set(additive ? prev : []);
       if (prev.has(id) && additive) {
         next.delete(id);
@@ -604,6 +614,12 @@ function App() {
   const handleUpdateScanLabel = useCallback((id: string, label: string) => {
     setScans(prev => prev.map(s =>
       s.id === id ? { ...s, label } : s
+    ));
+  }, []);
+
+  const handleUpdateScanColor = useCallback((id: string, color: string) => {
+    setScans(prev => prev.map(s =>
+      s.id === id ? { ...s, color } : s
     ));
   }, []);
 
@@ -964,6 +980,7 @@ function App() {
           onUpdateScanData={handleUpdateScanData}
           onUpdateScanParams={handleUpdateScanParams}
           onUpdateScanLabel={handleUpdateScanLabel}
+          onUpdateScanColor={handleUpdateScanColor}
           onSave={handleSavePointCloud}
           onAddScan={handleAddScan}
           onAddScans={handleAddScans}

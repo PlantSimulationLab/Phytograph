@@ -41,7 +41,8 @@ test('rect crop: full-viewport drag keeps all enclosed points', async () => {
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '60');
 
-    await row.click();
+    // Freshly imported scan is auto-selected — don't re-click it (a plain click
+    // on the sole selection toggles it off). Crop operates on the selection.
     await expect(row).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 
@@ -122,7 +123,8 @@ test('rect crop: committed region uses an orthographic projection (no perspectiv
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
 
-    await row.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(row).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
     const panel = page.getByTestId('crop-panel');
     await expect(panel).toBeVisible();
@@ -196,7 +198,8 @@ test('rect crop: half-viewport drag keeps a strict subset of points', async () =
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '60');
 
-    await row.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(row).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 
     const panel = page.getByTestId('crop-panel');

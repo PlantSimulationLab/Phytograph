@@ -48,8 +48,8 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
     const canvas = page.locator('canvas').first();
     await expect(canvas).toBeAttached();
 
-    // Select the cloud (tool buttons require a selection).
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected — tool buttons require a selection.
+    // (No re-click — a plain click on the sole selection toggles it off.)
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Open the triangulation panel.

@@ -33,7 +33,7 @@ test('erase masks instantly (count drops with no rebuild), then bake applies', a
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '60');
 
-    await row.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(row).toHaveAttribute('data-selected', 'true');
 
     // Frame the cloud so it fills the viewport (cylinder side-on).
@@ -109,7 +109,8 @@ test('undo last deletion restores the masked points', async () => {
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '60');
-    await row.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(row).toHaveAttribute('data-selected', 'true');
 
     await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
     await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));

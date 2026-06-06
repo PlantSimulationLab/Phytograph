@@ -8,7 +8,7 @@ at once. Change it from the **Color by** dropdown in the Display panel
 
 | Mode | What it shows | When to use |
 |---|---|---|
-| **Per-scan color** | Each cloud drawn flat in its identifier swatch color | Default. Best at-a-glance read of which points came from which scanner. |
+| **Per-scan color** | Each cloud drawn flat in its identifier swatch color (click a scan's color dot in the **Scans** panel to change it) | Default. Best at-a-glance read of which points came from which scanner. |
 | **Height** (Z) | Color by Z-axis position via colormap | Good for any vertical structure — plant scans, terrain. |
 | **X** | Color by X position | Inspecting horizontal stripes or registration along X. |
 | **Y** | Color by Y position | Same, for Y. |

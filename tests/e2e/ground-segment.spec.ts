@@ -31,7 +31,7 @@ test('segments ground vs plant and colours by the ground_class attribute', async
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(2200);
 
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Open the Ground Segmentation panel via its toolbar button.
@@ -91,7 +91,8 @@ test('filters a segmented cloud by ground_class via class checkboxes', async () 
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Segment in place (no split) so the single cloud carries ground_class.
     await page.getByTestId('tool-ground-segment').click();
@@ -146,7 +147,8 @@ test('hides the class legend after the segmented cloud is deleted', async () => 
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Segment in place (no split) so exactly one cloud carries ground_class.
     await page.getByTestId('tool-ground-segment').click();

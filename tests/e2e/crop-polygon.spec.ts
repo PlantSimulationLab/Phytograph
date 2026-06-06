@@ -46,7 +46,7 @@ test('polygon lasso crop: clicks add vertices, Enter closes, Apply keeps enclose
     await expect(row).toHaveAttribute('data-point-count', '60');
 
     // ── Enter crop mode (single-cloud) ─────────────────────────────────────
-    await row.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(row).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 
@@ -137,7 +137,8 @@ test('polygon lasso crop: Keep Outside enclosing all points empties the cloud (d
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '60');
 
-    await row.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(row).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 
     const panel = page.getByTestId('crop-panel');
@@ -210,7 +211,8 @@ test('polygon lasso crop: half-viewport lasso keeps a strict subset of points', 
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '60');
 
-    await row.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+    await expect(row).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-crop').click();
 
     const panel = page.getByTestId('crop-panel');

@@ -36,7 +36,7 @@ async function importAndSelect(page: import('@playwright/test').Page) {
 
   const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
-  await cloudRow.click();
+  // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
   return cloudRow;
 }

@@ -32,8 +32,9 @@ test('T-modal translate moves an octree cloud in the rendered scene', async () =
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     // Load-bearing: this must be an octree cloud, the path the bug affected.
     await expect(cloudRow).toHaveAttribute('data-octree', 'true');
-    // Select it so the transform tools target it.
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected, so the transform tools target it.
+    // (No re-click — a plain click on the sole selection toggles it off.)
+    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Wait for the octree to actually stream in and register its position hook.
     await page.waitForFunction(() => {

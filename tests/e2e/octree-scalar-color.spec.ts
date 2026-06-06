@@ -34,7 +34,7 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
     const pointCount = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
     expect(pointCount).toBe(60);
 
-    await cloudRow.click();
+    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
     // Open the Display panel (collapsed by default).
