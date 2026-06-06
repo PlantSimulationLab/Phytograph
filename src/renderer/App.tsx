@@ -547,17 +547,39 @@ function App() {
     ));
   }, []);
 
-  const handleToggleScanSelection = useCallback((id: string, multiSelect: boolean) => {
+  // Anchor for shift+click range selection — the last scan that was clicked
+  // without shift (a plain click or a ctrl/cmd toggle). Shift+click selects
+  // everything between this anchor and the clicked scan, in list order.
+  const lastSelectedScanIdRef = useRef<string | null>(null);
+
+  const handleToggleScanSelection = useCallback((id: string, additive: boolean, range: boolean) => {
+    if (range && lastSelectedScanIdRef.current) {
+      const anchorId = lastSelectedScanIdRef.current;
+      const ids = scans.map(s => s.id);
+      const anchorIdx = ids.indexOf(anchorId);
+      const clickedIdx = ids.indexOf(id);
+      if (anchorIdx !== -1 && clickedIdx !== -1) {
+        const [lo, hi] = anchorIdx < clickedIdx ? [anchorIdx, clickedIdx] : [clickedIdx, anchorIdx];
+        const rangeIds = ids.slice(lo, hi + 1);
+        // Additive shift (shift+ctrl/cmd) extends the current selection;
+        // plain shift replaces it with just the range.
+        setSelectedScanIds(prev => new Set(additive ? [...prev, ...rangeIds] : rangeIds));
+        // Anchor stays put so the range can be re-dragged from the same origin.
+        return;
+      }
+    }
+
+    lastSelectedScanIdRef.current = id;
     setSelectedScanIds(prev => {
-      const next = new Set(multiSelect ? prev : []);
-      if (prev.has(id) && multiSelect) {
+      const next = new Set(additive ? prev : []);
+      if (prev.has(id) && additive) {
         next.delete(id);
       } else {
         next.add(id);
       }
       return next;
     });
-  }, []);
+  }, [scans]);
 
   const handleSelectAll = useCallback(() => {
     setSelectedScanIds(new Set(scans.map(s => s.id)));

@@ -43,9 +43,14 @@ actually returned, producing accurate branch surfaces without the
 ## Display options
 
 - **Solid** — flat-shaded triangles in the mesh's color.
-- **Wireframe** — only the edges, useful for inspecting topology.
-
-Both can be toggled from the Mesh entry's display dropdown.
+- **Wireframe** — only the edges, useful for inspecting topology. Toggled once
+  for all meshes from the Mesh Settings footer of the Meshes panel.
+- **Opacity** — set per mesh. Expand a mesh row (the chevron at its left) and
+  drag the **Opacity** slider to make that surface semi-transparent, e.g. to
+  see an underlying point cloud through a triangulation. Each mesh keeps its
+  own value. The slider is only shown for meshes where blending is meaningful —
+  solid and vertex-colored surfaces. It is hidden for generated plants and
+  other textured meshes (see [Textures](#textures)).
 
 ## Textures
 
@@ -65,9 +70,10 @@ Two sources produce textured meshes:
   applies them. Faces whose material has no image fall back to that material's
   diffuse color.
 
-Wireframe and opacity apply to textured meshes too. Lowering opacity makes a
-textured mesh semi-transparent; at full opacity, leaf textures are crisp
-cut-outs rather than blended.
+Wireframe applies to textured meshes too. Opacity does not: textured plants
+draw their leaf textures as crisp alpha cut-outs that ignore a blend factor, so
+the per-mesh **Opacity** slider is hidden for them — it would have no visible
+effect. Use opacity on solid or vertex-colored surfaces instead.
 
 ## Triangle counts and performance
 
