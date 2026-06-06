@@ -28,6 +28,19 @@ its own bundled binary.
 This is the same code path that recovers from stale uvicorn processes left
 over from a previous dev session.
 
+## The splash enforces it too
+
+The version lock is checked in two places, not one. Besides the supervisor
+(main process), the renderer's startup splash (`useBackendReady`) polls
+`/version` and only treats the backend as **ready** when the reported version
+equals `EXPECTED_BACKEND_VERSION`. A `200` carrying a *different* version (a
+stale or incompatible backend adopted on port 8008) is **not** accepted — the
+splash stays in its "Starting backend…" state while the supervisor kills and
+respawns the bundled binary, then flips to ready once the matching version
+answers. Without this, the UI could go live against a backend the supervisor
+is in the middle of replacing, and `/api/*` calls would fail silently after
+the splash had already dismissed.
+
 ## Tagging a release
 
 ```bash

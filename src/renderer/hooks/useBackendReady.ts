@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getBackendUrl } from '../utils/backendApi';
+import { EXPECTED_BACKEND_VERSION } from '@shared/constants';
 
 export type BackendStatus = 'starting' | 'ready' | 'failed';
 
@@ -13,9 +14,19 @@ export interface BackendReadyState {
   retry: () => void;
 }
 
-// Polls GET /version until the backend answers. Cold-start of the bundled
-// PyInstaller backend is 10-40s (open3d + pyhelios + uvicorn init), so we
-// keep retrying for up to `timeoutMs` before declaring failure.
+// Polls GET /version until the backend answers WITH A MATCHING VERSION.
+// Cold-start of the bundled PyInstaller backend is 10-40s (open3d + pyhelios
+// + uvicorn init), so we keep retrying for up to `timeoutMs` before declaring
+// failure.
+//
+// We require the reported version to equal EXPECTED_BACKEND_VERSION, not just
+// any 200. A stale/incompatible backend left on the port (see the "Stale
+// backend on 8008" note in CLAUDE.md) answers /version too; accepting it would
+// flip the splash to 'ready' against a backend the supervisor is about to kill
+// and respawn, leaving the UI live against a doomed process. While the version
+// mismatches we stay in 'starting' — the supervisor in src/main/backend.ts is
+// killing the wrong backend and booting the bundled one, which will report the
+// expected version once it's up.
 //
 // `minSplashMs` is a floor on how long the splash stays up even if the
 // backend responds instantly (which happens in dev when uvicorn is already
@@ -48,20 +59,25 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000, minSplas
         const res = await fetch(`${baseUrl}/version`, { signal: AbortSignal.timeout(2000) });
         if (res.ok) {
           const json = (await res.json()) as { version?: string };
-          // Honour the minimum splash time. If the backend was already warm
-          // (typical in dev or on a warm restart) we'd otherwise unmount the
-          // splash within a single frame.
-          const remaining = Math.max(0, minSplashMs - elapsedMs);
-          if (remaining > 0) {
-            setTimeout(() => {
+          // A 200 isn't enough — a stale/incompatible backend answers /version
+          // too. Only treat a version-matched backend as ready; otherwise fall
+          // through and keep polling (the supervisor is replacing it).
+          if (json.version === EXPECTED_BACKEND_VERSION) {
+            // Honour the minimum splash time. If the backend was already warm
+            // (typical in dev or on a warm restart) we'd otherwise unmount the
+            // splash within a single frame. Rather than schedule a one-shot
+            // timer (which would freeze the displayed counter at its first-tick
+            // value for the whole floor), keep looping until the floor is met —
+            // each pass advances elapsedMs below, so the timer keeps climbing.
+            if (elapsedMs >= minSplashMs) {
               if (!cancelled) {
-                setState({ status: 'ready', elapsedMs: Date.now() - startedAt.current, version: json.version });
+                setState({ status: 'ready', elapsedMs, version: json.version });
               }
-            }, remaining);
-          } else if (!cancelled) {
-            setState({ status: 'ready', elapsedMs, version: json.version });
+              return;
+            }
+            // else: backend is up but we're still under the floor — fall
+            // through to the keep-ticking path and re-check next interval.
           }
-          return;
         }
       } catch {
         // Connection refused / timeout — backend not up yet.
@@ -74,6 +90,11 @@ export function useBackendReady(timeoutMs = 120_000, intervalMs = 1000, minSplas
         return;
       }
 
+      // Advance the displayed timer every tick while we're still waiting —
+      // regardless of whether the last fetch refused, timed out, or returned a
+      // mismatched version. (Previously this only ran after a failed fetch, so
+      // a backend that answered on the first tick left the counter pinned at 0
+      // for the whole minSplashMs wait.)
       if (!cancelled) {
         setState((prev) => (prev.status === 'starting' ? { ...prev, elapsedMs } : prev));
       }
