@@ -62,6 +62,11 @@ export interface OctreePointCloudProps {
   // over `clipMode`. We take the box transform matrix and derive the inverse the
   // shader needs here, keeping potree-core's IClipBox detail out of the parent.
   clipBoxes?: Array<{ matrix: THREE.Matrix4 }> | null;
+  // World-space translation for this cloud (the Translate tool / T-modal value).
+  // The PointCloudOctree is attached directly to the scene root (not inside the
+  // parent's React `<group position>`), so the group transform does NOT reach it
+  // — we have to set the offset on the octree object itself. Defaults to origin.
+  translation?: { x: number; y: number; z: number };
   // Fired once, the first time LOD tiles have actually streamed in for this
   // mount. The parent uses it to force a single fresh-material remount so a
   // cloud that mounted directly into a gradient colour mode recompiles its
@@ -115,6 +120,7 @@ export function OctreePointCloud({
   rangeMax,
   clipBox = null,
   clipBoxes = null,
+  translation,
   onFirstTilesReady,
   onOctreeReady,
 }: OctreePointCloudProps) {
@@ -133,6 +139,20 @@ export function OctreePointCloud({
   const onOctreeReadyRef = useRef(onOctreeReady);
   onOctreeReadyRef.current = onOctreeReady;
 
+  // Latest translation in a ref so the cacheId-keyed loader effect can seed the
+  // initial position without taking `translation` as a dependency (which would
+  // tear down and reload the whole octree on every drag tick).
+  const translationRef = useRef(translation);
+  translationRef.current = translation;
+
+  // The position potree-core assigns the cloud at load time. PotreeConverter
+  // stores points relative to a per-cloud offset (usually the bounding-box min),
+  // and potree-core bakes that offset into pco.position so the cloud lands in
+  // world space. Our Translate offset must be ADDED on top of this base — setting
+  // pco.position outright would wipe the loader's offset and slam the cloud's
+  // min-corner to the origin. Captured once per load.
+  const basePositionRef = useRef<THREE.Vector3>(new THREE.Vector3());
+
   // Load on cacheId change, then attach the resulting PointCloudOctree
   // directly to the scene. `<primitive object={...}/>` works but is fiddly
   // when the same Potree manager has multiple clouds — explicit scene.add /
@@ -149,6 +169,19 @@ export function OctreePointCloud({
         if (cancelled) {
           pco.dispose();
           return;
+        }
+        // Snapshot the loader's base offset, then seed our translation on top of
+        // it before the first frame so the cloud streams in at its translated
+        // position (no visible jump). Kept live by the effect below as the user
+        // drags the gizmo / types a value.
+        basePositionRef.current.copy(pco.position);
+        const t = translationRef.current;
+        if (t) {
+          pco.position.set(
+            basePositionRef.current.x + t.x,
+            basePositionRef.current.y + t.y,
+            basePositionRef.current.z + t.z,
+          );
         }
         scene.add(pco);
         pcoForCleanup = pco;
@@ -167,6 +200,53 @@ export function OctreePointCloud({
       }
     };
   }, [data.octree?.cacheId, manager, scene]);
+
+  // Keep the octree's world offset in sync with the Translate tool. The cloud is
+  // attached to the scene root, so the parent's `<group position>` doesn't reach
+  // it — we set the offset on the octree object directly. Runs at frame rate via
+  // React state, which is plenty for a gizmo drag.
+  useEffect(() => {
+    if (!octree) return;
+    // Add the Translate offset on top of the loader's base position — never
+    // replace it (see basePositionRef).
+    const base = basePositionRef.current;
+    octree.position.set(
+      base.x + (translation?.x ?? 0),
+      base.y + (translation?.y ?? 0),
+      base.z + (translation?.z ?? 0),
+    );
+    // E2E hook: expose the live octree's net translation (offset from its base
+    // load position) keyed by cacheId. Tests assert on THIS (the three.js object
+    // state) rather than React state, because the translate bug was precisely
+    // that React state was correct while the rendered object ignored it. Cleaned
+    // up on unmount.
+    const cacheId = data.octree?.cacheId;
+    if (cacheId) {
+      const reg = ((window as any).__octreePositions ??= {});
+      reg[cacheId] = {
+        // Net Translate offset (object position minus loader base).
+        net: {
+          x: octree.position.x - base.x,
+          y: octree.position.y - base.y,
+          z: octree.position.z - base.z,
+        },
+        // Absolute world position of the octree object (loader base + net), so a
+        // test can confirm an untranslated cloud renders at its true world spot
+        // rather than corner-slammed to the origin.
+        world: { x: octree.position.x, y: octree.position.y, z: octree.position.z },
+      };
+    }
+  }, [octree, translation?.x, translation?.y, translation?.z, data.octree?.cacheId]);
+
+  // Drop the E2E position hook for this cloud on unmount.
+  useEffect(() => {
+    const cacheId = data.octree?.cacheId;
+    return () => {
+      if (cacheId && (window as any).__octreePositions) {
+        delete (window as any).__octreePositions[cacheId];
+      }
+    };
+  }, [data.octree?.cacheId]);
 
   // Material settings.
   //

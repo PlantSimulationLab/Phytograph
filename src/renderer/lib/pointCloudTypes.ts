@@ -215,6 +215,9 @@ export interface MeshEntry {
   visible: boolean;
   color: string;
   method: TriangulationMethod;
+  // User-assigned display name. When set, overrides the computed default name
+  // (plant type/age, or source cloud filename). Cleared back to default when blank.
+  name?: string;
   // Plant-specific fields (for Helios plants)
   isPlant?: boolean;
   plantType?: string;

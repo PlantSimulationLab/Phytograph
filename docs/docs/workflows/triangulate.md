@@ -46,6 +46,22 @@ The resulting mesh appears in the Scene panel's **Meshes** list. The
 original cloud stays in the scene; hide it (eye icon) to see the mesh
 alone.
 
+### Manage a mesh in the Meshes list
+
+Each mesh row supports a few quick edits:
+
+- **Rename** — double-click the mesh name to edit it in place. Press
+  <kbd>Enter</kbd> to commit or <kbd>Esc</kbd> to cancel; clearing the
+  field restores the default name (source filename, or plant type/age).
+- **Recolor** — click the color swatch to the left of the name to open a
+  color picker. Pick a color or type a hex value. The color applies to the
+  mesh surface; **texture-mapped meshes ignore it** and keep drawing their
+  texture, so the swatch is only shown for untextured meshes.
+- **Transform** — with a mesh selected, the Blender-style shortcuts
+  <kbd>T</kbd> (translate), <kbd>S</kbd> (scale), and <kbd>R</kbd> (rotate)
+  move it in the viewer; lock an axis with <kbd>X</kbd>/<kbd>Y</kbd>/<kbd>Z</kbd>
+  or type an exact amount. See [Keyboard shortcuts](../reference/shortcuts.md).
+
 !!! note "Large (streamed) clouds are capped"
     Clouds imported from large XYZ scans are streamed from an on-disk octree
     rather than held in memory. When you triangulate one, it is downsampled to

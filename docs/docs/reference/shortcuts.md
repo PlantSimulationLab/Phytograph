@@ -80,9 +80,17 @@ When the Translate tool is active:
 
 | Shortcut | Action |
 |---|---|
-| <kbd>T</kbd> | Switch to translate |
-| <kbd>S</kbd> | Switch to scale |
+| <kbd>T</kbd> | Translate |
+| <kbd>S</kbd> | Scale (meshes only) |
+| <kbd>R</kbd> | Rotate (meshes only) |
 | <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> | Lock to axis |
+| <kbd>Shift</kbd> + <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> | Lock to the perpendicular plane |
+| Type a number | Exact amount (degrees for rotate) — e.g. <kbd>R</kbd> <kbd>X</kbd> `45` |
+| <kbd>Enter</kbd> / click | Commit |
+| <kbd>Esc</kbd> / right-click | Cancel |
+
+Translate works on point clouds, skeletons, and meshes; scale and rotate
+apply to the selected mesh.
 
 ## Selection (Scene panel)
 

@@ -5,6 +5,7 @@ import {
   fuzzyMatch,
   generateShapeMesh,
   octreeScalarFieldOptions,
+  fitGridToBounds,
   voxelMeshToHeliosGrid,
   computeMeshTriangleScalars,
   buildMeshTriangleColorBuffers,
@@ -184,6 +185,62 @@ describe('meshHasScanColors / buildMeshScanColorBuffers', () => {
       expect(out.colors[k * 3 + 1]).toBeCloseTo(0, 5);
       expect(out.colors[k * 3 + 2]).toBeCloseTo(1, 5);
     }
+  });
+});
+
+describe('fitGridToBounds', () => {
+  it('returns null for an empty box list', () => {
+    expect(fitGridToBounds([])).toBeNull();
+  });
+
+  it('returns null when bounds are non-finite', () => {
+    expect(fitGridToBounds([{
+      min: { x: Infinity, y: Infinity, z: Infinity },
+      max: { x: -Infinity, y: -Infinity, z: -Infinity },
+    }])).toBeNull();
+  });
+
+  it('centers on a single box and pads it by 2% of the largest span', () => {
+    // span = max(10, 4, 2) = 10 → eps = 0.2, added on both sides per axis.
+    const fit = fitGridToBounds([{
+      min: { x: 0, y: 0, z: 0 },
+      max: { x: 10, y: 4, z: 2 },
+    }]);
+    expect(fit).not.toBeNull();
+    expect(fit!.center).toEqual({ x: 5, y: 2, z: 1 });
+    expect(fit!.size.x).toBeCloseTo(10.4, 6);
+    expect(fit!.size.y).toBeCloseTo(4.4, 6);
+    expect(fit!.size.z).toBeCloseTo(2.4, 6);
+  });
+
+  it('takes the union AABB across multiple boxes', () => {
+    const fit = fitGridToBounds([
+      { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
+      { min: { x: -2, y: 3, z: -1 }, max: { x: 4, y: 5, z: 0 } },
+    ]);
+    // union min = (-2, 0, -1), max = (4, 5, 1); span = max(6, 5, 2) = 6 → eps = 0.12
+    expect(fit!.center).toEqual({ x: 1, y: 2.5, z: 0 });
+    expect(fit!.size.x).toBeCloseTo(6.24, 6);
+    expect(fit!.size.y).toBeCloseTo(5.24, 6);
+    expect(fit!.size.z).toBeCloseTo(2.24, 6);
+  });
+
+  it('floors the buffer at 1 cm for tiny clouds', () => {
+    // span = 0.1 → 2% would be 0.002, floored to 0.01 → +0.02 per axis.
+    const fit = fitGridToBounds([{
+      min: { x: 0, y: 0, z: 0 },
+      max: { x: 0.1, y: 0.1, z: 0.1 },
+    }]);
+    expect(fit!.size.x).toBeCloseTo(0.12, 6);
+  });
+
+  it('still produces a non-degenerate box for a single point (zero span)', () => {
+    const fit = fitGridToBounds([{
+      min: { x: 5, y: 5, z: 5 },
+      max: { x: 5, y: 5, z: 5 },
+    }]);
+    expect(fit!.center).toEqual({ x: 5, y: 5, z: 5 });
+    expect(fit!.size.x).toBeCloseTo(0.02, 6); // 2 * 1cm floor
   });
 });
 

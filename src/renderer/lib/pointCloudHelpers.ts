@@ -58,6 +58,32 @@ export function computeBoundsFromPositions(positions: Float32Array, count: numbe
   return { center, size };
 }
 
+// Fit a voxel box to a set of world-space axis-aligned bounding boxes (one per
+// selected scan, already translation-baked). Returns the center/size a voxel
+// mesh needs — a voxel's base geometry is a unit cube (±0.5), so mesh position
+// == world center and mesh scale == world size (see voxelMeshToHeliosGrid).
+// The box is padded on every side by `eps`, computed as 2% of the largest span
+// (floored at 1 cm) so points on the very edge of the cloud aren't clipped by a
+// grid face. Returns null when given no boxes or non-finite bounds.
+export function fitGridToBounds(
+  boxes: Array<{ min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } }>,
+): { center: { x: number; y: number; z: number }; size: { x: number; y: number; z: number } } | null {
+  if (boxes.length === 0) return null;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const b of boxes) {
+    minX = Math.min(minX, b.min.x); minY = Math.min(minY, b.min.y); minZ = Math.min(minZ, b.min.z);
+    maxX = Math.max(maxX, b.max.x); maxY = Math.max(maxY, b.max.y); maxZ = Math.max(maxZ, b.max.z);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return null;
+  const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
+  const eps = Math.max(span * 0.02, 0.01);
+  return {
+    center: { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: (minZ + maxZ) / 2 },
+    size: { x: maxX - minX + 2 * eps, y: maxY - minY + 2 * eps, z: maxZ - minZ + 2 * eps },
+  };
+}
+
 // Convert a voxel-box mesh into the explicit Helios triangulation grid the
 // backend expects. A voxel shape's base geometry is a unit cube spanning
 // ±0.5, so its world center is the mesh position and its world size equals the

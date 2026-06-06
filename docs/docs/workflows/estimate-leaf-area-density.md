@@ -16,23 +16,26 @@ surface.
 
 ## Steps
 
-1. **Create the voxel grid.** Click **Create Voxel** (the box icon in the
-   Create group). A 1×1×1 m box appears at the origin and the Transform
-   panel opens.
-    - Move and size the box (Position / Scale) so it encloses the canopy
-      you want measured. The box is its own object in the scene.
+1. **Select the scan(s)** in the Scans panel first, then **create the
+   voxel grid.** Click **Create Voxel** (the box icon in the Create group).
+   A 1×1×1 m box appears at the origin and the Transform panel opens; the
+   scan selection is kept so you can fit the box in one click.
+    - Click **Fit to selected scan(s)** in the Transform panel to resize
+      and center the box around the selected scan(s) (with a small buffer
+      so edge points aren't clipped). The button is enabled whenever one or
+      more scans with points are selected, and you can re-fit at any time.
+    - Adjust the box (Position / Scale) if you want a tighter or different
+      region. The box is its own object in the scene.
     - Set **Grid Resolution** (Nx × Ny × Nz) to the number of voxels you
       want along each axis. Use 1×1×1 for a single canopy-wide value, or
       subdivide for a 3-D density field. A wireframe shows the cells when
       any axis is greater than 1.
 
-2. **Select the scan(s)** in the Scans panel.
-
-3. **Open the LAD tool** (the grid icon, next to Triangulate). The button
+2. **Open the LAD tool** (the grid icon, next to Triangulate). The button
    is disabled until both a parameterized scan is selected *and* a voxel
    box exists — the tooltip tells you which is missing.
 
-4. **In the dialog:**
+3. **In the dialog:**
     - Pick the **voxel grid** to use (required — no auto-grid).
     - **Max Edge Length (Lmax)** and **Max Aspect Ratio** control the
       triangulation that estimates the G-function (not the final mesh).
@@ -42,7 +45,7 @@ surface.
       parameters. Multi-return scans need per-pulse metadata in the source
       (see [the concept page](../concepts/leaf-area-density.md#single-vs-multi-return-scans)).
 
-5. **Click Compute LAD.** The calculation runs on the backend (the first
+4. **Click Compute LAD.** The calculation runs on the backend (the first
    run can take a while as PyHelios warms up). A **Leaf Area Density**
    entry appears in the scene panel when it finishes.
 

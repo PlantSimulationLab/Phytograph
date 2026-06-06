@@ -36,6 +36,7 @@ import {
 import { pendingDeletesToClipBoxes } from '../lib/deletePreview';
 import {
   computeBoundsFromPositions,
+  fitGridToBounds,
   fuzzyMatch,
   generateShapeMesh,
   octreeScalarFieldOptions,
@@ -323,6 +324,14 @@ export default function PointCloudViewer({
   const [meshColorModes, setMeshColorModes] = useState<Map<string, MeshColorMode>>(new Map());
   // Which mesh rows have their inline "Color by" section expanded.
   const [expandedMeshIds, setExpandedMeshIds] = useState<Set<string>>(new Set());
+  // Inline rename: which mesh row is being edited, and the in-progress text.
+  const [renamingMeshId, setRenamingMeshId] = useState<string | null>(null);
+  const [renamingMeshValue, setRenamingMeshValue] = useState('');
+  // Which mesh row's color popover is open (null = none), and the screen anchor
+  // (the swatch's bounding rect) so the popover can render as a fixed overlay —
+  // escaping the panel's overflow clip and backdrop-blur stacking context.
+  const [colorPopoverMeshId, setColorPopoverMeshId] = useState<string | null>(null);
+  const [colorPopoverAnchor, setColorPopoverAnchor] = useState<{ top: number; left: number } | null>(null);
 
   // Triangulation state
   const [showTriangulationPanel, setShowTriangulationPanel] = useState(false);
@@ -410,6 +419,11 @@ export default function PointCloudViewer({
       id: crypto.randomUUID(),
     };
     setMeshes(prev => [...prev, newMesh]);
+    // Seed identity transforms so the first translate/scale/rotate reads a real
+    // origin instead of a fallback (matches the shape/plant creation paths).
+    setMeshPositions(prev => new Map(prev).set(newMesh.id, { x: 0, y: 0, z: 0 }));
+    setMeshScales(prev => new Map(prev).set(newMesh.id, { x: 1, y: 1, z: 1 }));
+    setMeshRotations(prev => new Map(prev).set(newMesh.id, { x: 0, y: 0, z: 0 }));
   }, []);
 
   const importSkeleton = useCallback((skeleton: Omit<SkeletonEntry, 'id'>) => {
@@ -681,7 +695,7 @@ export default function PointCloudViewer({
   // and Shift+X/Y/Z plane lock (Shift+X = constrain to YZ plane, etc.).
   type TransformAxis = 'free' | 'x' | 'y' | 'z' | 'yz' | 'xz' | 'xy';
   interface TransformModalState {
-    op: 'translate' | 'scale';
+    op: 'translate' | 'scale' | 'rotate';
     axis: TransformAxis;
     startScreen: { x: number; y: number };
     pivot: { x: number; y: number; z: number };
@@ -691,6 +705,7 @@ export default function PointCloudViewer({
     cloudIds?: string[];
     originalMeshPos?: { x: number; y: number; z: number };
     originalMeshScale?: { x: number; y: number; z: number };
+    originalMeshRot?: { x: number; y: number; z: number };
     originalSkeletonPos?: { x: number; y: number; z: number };
     originalCloudTranslations?: Map<string, { x: number; y: number; z: number }>;
     // Numeric input buffer (Blender-style). When parseable, overrides mouse-driven value.
@@ -4094,6 +4109,10 @@ export default function PointCloudViewer({
       // Add to meshes
       console.log('Creating mesh entry:', meshEntry);
       setMeshes(prev => [...prev, meshEntry]);
+      // Seed identity transforms so transform shortcuts read a real origin.
+      setMeshPositions(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
+      setMeshScales(prev => new Map(prev).set(meshEntry.id, { x: 1, y: 1, z: 1 }));
+      setMeshRotations(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
       setShowTriangulationPanel(false);
       console.log('Triangulation completed successfully!');
 
@@ -4923,6 +4942,21 @@ export default function PointCloudViewer({
     setMeshes(prev => prev.map(m => m.id === meshId ? { ...m, visible: !m.visible } : m));
   }, []);
 
+  // Rename a mesh. A blank name clears the override so the computed default name
+  // (plant type/age, or source filename) is shown again.
+  const handleRenameMesh = useCallback((meshId: string, name: string) => {
+    const trimmed = name.trim();
+    setMeshes(prev => prev.map(m =>
+      m.id === meshId ? { ...m, name: trimmed.length > 0 ? trimmed : undefined } : m
+    ));
+  }, []);
+
+  // Set a mesh's solid color. Ignored for textured meshes at render time
+  // (TexturedPlantMesh draws the texture and does not read mesh.color).
+  const handleSetMeshColor = useCallback((meshId: string, color: string) => {
+    setMeshes(prev => prev.map(m => m.id === meshId ? { ...m, color } : m));
+  }, []);
+
   // Extract skeleton from selected point cloud
   const handleExtractSkeleton = useCallback(async () => {
     if (selectedIds.size !== 1) return;
@@ -5166,9 +5200,12 @@ export default function PointCloudViewer({
     return skeletons.find(s => s.id === selectedSkeletonId) || null;
   }, [skeletons, selectedSkeletonId]);
 
-  // Blender-style modal transform shortcuts (T translate, S scale; X/Y/Z lock axis,
-  // Shift+X/Y/Z lock to the perpendicular plane). Enter/click commits, Esc/right-click
-  // cancels. Suppressed while an input is focused.
+  // Blender-style modal transform shortcuts (T translate, S scale, R rotate;
+  // X/Y/Z lock axis, Shift+X/Y/Z lock to the perpendicular plane; typing digits
+  // enters an exact value — units for rotate are degrees). Enter/click commits,
+  // Esc/right-click cancels. Scale and rotate apply to the selected mesh only;
+  // translate also works on skeletons and point clouds. Suppressed while an input
+  // is focused.
   useEffect(() => {
     const isInputFocused = (): boolean => {
       const el = document.activeElement as HTMLElement | null;
@@ -5322,6 +5359,54 @@ export default function PointCloudViewer({
       return { x: fx, y: fy, z: fz };
     };
 
+    // Screen-space rotation: the signed angle (degrees) swept by the cursor
+    // around the pivot's projected screen point, from drag start to current.
+    // Sign is adjusted per locked axis so a clockwise on-screen drag matches the
+    // expected right-hand rotation about that world axis.
+    const computeRotationAngle = (
+      camera: THREE.Camera,
+      canvas: HTMLCanvasElement,
+      axis: TransformAxis,
+      pivot: { x: number; y: number; z: number },
+      startScreen: { x: number; y: number },
+      currentScreen: { x: number; y: number },
+    ): number => {
+      const rect = canvas.getBoundingClientRect();
+      const proj = new THREE.Vector3(pivot.x, pivot.y, pivot.z).project(camera);
+      const pivotPx = {
+        x: rect.left + ((proj.x + 1) / 2) * rect.width,
+        y: rect.top + ((-proj.y + 1) / 2) * rect.height,
+      };
+      const aStart = Math.atan2(startScreen.y - pivotPx.y, startScreen.x - pivotPx.x);
+      const aCur = Math.atan2(currentScreen.y - pivotPx.y, currentScreen.x - pivotPx.x);
+      let deg = ((aCur - aStart) * 180) / Math.PI;
+      // Align screen-CW drag with the rotation direction about the locked axis as
+      // seen from the camera: flip when the axis points away from the viewer.
+      if (axis === 'x' || axis === 'y' || axis === 'z') {
+        const axisDir = new THREE.Vector3(axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0);
+        const camDir = new THREE.Vector3();
+        camera.getWorldDirection(camDir);
+        if (axisDir.dot(camDir) > 0) deg = -deg;
+      }
+      return deg;
+    };
+
+    const applyRotate = (modal: TransformModalState, angleDeg: number) => {
+      if (modal.target !== 'mesh' || !modal.meshId || !modal.originalMeshRot) return;
+      const orig = modal.originalMeshRot;
+      // Free rotation has no meaningful single Euler component on screen; default
+      // to the Z (view-facing) axis until the user locks an axis with X/Y/Z.
+      const newRot = { ...orig };
+      if (modal.axis === 'x') newRot.x = orig.x + angleDeg;
+      else if (modal.axis === 'y') newRot.y = orig.y + angleDeg;
+      else if (modal.axis === 'z' || modal.axis === 'free') newRot.z = orig.z + angleDeg;
+      else if (modal.axis === 'yz') { newRot.y = orig.y + angleDeg; newRot.z = orig.z + angleDeg; }
+      else if (modal.axis === 'xz') { newRot.x = orig.x + angleDeg; newRot.z = orig.z + angleDeg; }
+      else if (modal.axis === 'xy') { newRot.x = orig.x + angleDeg; newRot.y = orig.y + angleDeg; }
+      meshRotationsRef.current.set(modal.meshId, newRot);
+      setMeshRotations(prev => new Map(prev).set(modal.meshId!, newRot));
+    };
+
     const applyTranslate = (modal: TransformModalState, delta: THREE.Vector3) => {
       if (modal.target === 'mesh' && modal.meshId && modal.originalMeshPos) {
         const orig = modal.originalMeshPos;
@@ -5383,6 +5468,9 @@ export default function PointCloudViewer({
         else if (modal.axis === 'xz') { dx = value; dz = value; }
         else if (modal.axis === 'yz') { dy = value; dz = value; }
         applyTranslate(modal, new THREE.Vector3(dx, dy, dz));
+      } else if (modal.op === 'rotate') {
+        // Typed value is degrees about the locked axis (or Z when free).
+        applyRotate(modal, value);
       } else {
         const f = { x: 1, y: 1, z: 1 };
         if (modal.axis === 'free') { f.x = value; f.y = value; f.z = value; }
@@ -5411,6 +5499,9 @@ export default function PointCloudViewer({
       if (modal.op === 'translate') {
         const delta = computeTranslateDelta(camera, canvas, modal.axis, modal.pivot, modal.startScreen, cur);
         applyTranslate(modal, delta);
+      } else if (modal.op === 'rotate') {
+        const angle = computeRotationAngle(camera, canvas, modal.axis, modal.pivot, modal.startScreen, cur);
+        applyRotate(modal, angle);
       } else {
         const factor = computeScaleFactor(camera, canvas, modal.axis, modal.pivot, modal.startScreen, cur);
         applyScale(modal, factor);
@@ -5430,6 +5521,11 @@ export default function PointCloudViewer({
           const orig = modal.originalMeshScale;
           meshScalesRef.current.set(modal.meshId, orig);
           setMeshScales(prev => new Map(prev).set(modal.meshId!, orig));
+        }
+        if (modal.originalMeshRot) {
+          const orig = modal.originalMeshRot;
+          meshRotationsRef.current.set(modal.meshId, orig);
+          setMeshRotations(prev => new Map(prev).set(modal.meshId!, orig));
         }
       } else if (modal.target === 'skeleton' && modal.skeletonId && modal.originalSkeletonPos) {
         const orig = modal.originalSkeletonPos;
@@ -5461,7 +5557,7 @@ export default function PointCloudViewer({
       setGizmoDragging(false);
     };
 
-    const startModal = (op: 'translate' | 'scale') => {
+    const startModal = (op: 'translate' | 'scale' | 'rotate') => {
       if (transformModalRef.current) return;
       if (!mainCameraRef.current) return;
       if (!lastMouse.set) return;
@@ -5480,6 +5576,7 @@ export default function PointCloudViewer({
           meshId: selectedMesh.id,
           originalMeshPos: { ...(meshPositionsRef.current.get(selectedMesh.id) || { x: 0, y: 0, z: 0 }) },
           originalMeshScale: { ...(meshScalesRef.current.get(selectedMesh.id) || { x: 1, y: 1, z: 1 }) },
+          originalMeshRot: { ...(meshRotationsRef.current.get(selectedMesh.id) || { x: 0, y: 0, z: 0 }) },
           numericBuffer: '',
         };
         startHistoryEntry('mesh', selectedMesh.id);
@@ -5534,6 +5631,7 @@ export default function PointCloudViewer({
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         if (k === 't') { e.preventDefault(); startModal('translate'); }
         else if (k === 's') { e.preventDefault(); startModal('scale'); }
+        else if (k === 'r') { e.preventDefault(); startModal('rotate'); }
         return;
       }
 
@@ -5864,6 +5962,25 @@ export default function PointCloudViewer({
     return { type, dimensions };
   }, [selectedMeshId, meshes, meshPositions, meshScales]);
 
+  // Center/size a voxel box needs to wrap the currently-selected data-bearing
+  // scans (plus an epsilon buffer; see fitGridToBounds). Translations are baked
+  // in the same way the camera-fit bounds do it (data.bounds +
+  // editState.translation), so the fitted box lines up with where the points
+  // actually render. Returns null when no selected scan has geometry.
+  const computeSelectedScansFitGrid = useCallback(() => {
+    const boxes = clouds
+      .filter(c => selectedIds.has(c.id))
+      .map(c => {
+        const t = getEditState(c.id).translation;
+        const b = c.data.bounds;
+        return {
+          min: { x: b.min.x + t.x, y: b.min.y + t.y, z: b.min.z + t.z },
+          max: { x: b.max.x + t.x, y: b.max.y + t.y, z: b.max.z + t.z },
+        };
+      });
+    return fitGridToBounds(boxes);
+  }, [clouds, selectedIds, getEditState]);
+
   // Handle creating a new shape - takes type, auto-selects, shows resize panel
   const handleCreateShape = useCallback((shapeType: ShapeType) => {
     const meshData = generateShapeMesh(shapeType);
@@ -5889,8 +6006,10 @@ export default function PointCloudViewer({
     setMeshes(prev => [...prev, newMesh]);
     setShapeCounter(prev => prev + 1);
 
-    // Initialize scale for this mesh
-    // Initialize transforms for this mesh
+    // Every shape (including the voxel grid) starts as a unit box at the origin.
+    // The voxel grid is fitted to scans on demand via the "Fit to selected
+    // scan(s)" button in the resize panel — we don't auto-fit on creation, so
+    // that button stays meaningful and nothing resizes "on its own".
     setMeshScales(prev => {
       const next = new Map(prev);
       next.set(newMeshId, { x: 1, y: 1, z: 1 });
@@ -5907,10 +6026,13 @@ export default function PointCloudViewer({
       return next;
     });
 
-    // Auto-select the new mesh and show resize panel
+    // Auto-select the new mesh and show resize panel.
     setSelectedMeshIds(new Set([newMeshId]));
     setSelectedSkeletonId(null);
-    onDeselectAll(); // Clear point cloud selection
+    // For a voxel grid, keep any scan selection so the resize panel's "Fit to
+    // selected scan(s)" button is immediately usable (it fits the box to the
+    // selected scans). Other shapes clear the point-cloud selection as before.
+    if (shapeType !== 'voxel') onDeselectAll();
     setShowResizePanel(true);
 
     // Reset camera to fit new bounds after state updates
@@ -6104,6 +6226,10 @@ export default function PointCloudViewer({
       };
 
       setMeshes(prev => [...prev, meshEntry]);
+      // Seed identity transforms so transform shortcuts read a real origin.
+      setMeshPositions(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
+      setMeshScales(prev => new Map(prev).set(meshEntry.id, { x: 1, y: 1, z: 1 }));
+      setMeshRotations(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
       setShowTriangulationPanel(false);
       showToast({
         type: 'success',
@@ -7242,6 +7368,13 @@ export default function PointCloudViewer({
                   // (swapped into `intensity`) binds correctly.
                   key={`octree-${colorMode}-${selectedScalarField ?? ''}-${sourceData.octree ? (octreePaintGen[sourceData.octree.cacheId] ?? 0) : 0}`}
                   data={sourceData}
+                  // The octree attaches to the scene root, NOT inside the parent
+                  // <group position> above, so the group's translation never
+                  // reaches it. Pass the offset explicitly so the Translate tool
+                  // (gizmo + T-modal) actually moves an octree cloud. The resample
+                  // preview renders at the origin (group position [0,0,0]), so it
+                  // gets no offset either.
+                  translation={hasResamplePreview ? undefined : editState.translation}
                   onFirstTilesReady={
                     sourceData.octree
                       ? () => handleOctreeFirstTiles(sourceData.octree!.cacheId)
@@ -8132,10 +8265,12 @@ export default function PointCloudViewer({
           xz: 'XZ',
           xy: 'XY',
         };
-        const opLabel = transformModal.op === 'translate' ? 'Translate' : 'Scale';
-        const color = transformModal.op === 'translate' ? 'bg-blue-500' : 'bg-amber-500';
+        const opLabel = transformModal.op === 'translate' ? 'Translate'
+          : transformModal.op === 'rotate' ? 'Rotate' : 'Scale';
+        const color = transformModal.op === 'translate' ? 'bg-blue-500'
+          : transformModal.op === 'rotate' ? 'bg-violet-500' : 'bg-amber-500';
         return (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/90 backdrop-blur-sm rounded-full border border-neutral-700/50 z-30 shadow-lg">
+          <div data-testid="transform-hud" data-transform-op={transformModal.op} data-transform-axis={transformModal.axis} className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/90 backdrop-blur-sm rounded-full border border-neutral-700/50 z-30 shadow-lg">
             <span className={`inline-block w-2 h-2 rounded-full ${color}`} />
             <span className="text-[11px] text-neutral-200 font-medium">{opLabel}</span>
             <span className="text-[11px] text-neutral-400">·</span>
@@ -8150,8 +8285,60 @@ export default function PointCloudViewer({
         );
       })()}
 
-      {/* Right Side Panels Container */}
-      <div className="absolute top-4 right-4 flex flex-col gap-2 max-h-[calc(100vh-100px)]">
+      {/* Mesh color popover, rendered at the viewport root as a fixed overlay so
+          it escapes the Meshes panel's overflow clip and backdrop-blur stacking
+          context (which otherwise hid it behind the crop wireframe box). */}
+      {colorPopoverMeshId && colorPopoverAnchor && (() => {
+        const popoverMesh = meshes.find(m => m.id === colorPopoverMeshId);
+        if (!popoverMesh) return null;
+        return (
+          <>
+            {/* Click-catcher: dismiss on any outside click. */}
+            <div
+              className="fixed inset-0 z-[59]"
+              onClick={() => setColorPopoverMeshId(null)}
+            />
+            <div
+              data-testid="mesh-color-popover"
+              onClick={(e) => e.stopPropagation()}
+              style={{ top: colorPopoverAnchor.top, left: colorPopoverAnchor.left }}
+              className="fixed z-[60] flex items-center gap-2 p-2 bg-neutral-900 border border-neutral-700 rounded shadow-lg"
+            >
+              <input
+                type="color"
+                value={popoverMesh.color}
+                onChange={(e) => handleSetMeshColor(popoverMesh.id, e.target.value)}
+                className="w-8 h-8 rounded cursor-pointer bg-transparent border-0 p-0"
+                title="Pick color"
+              />
+              <input
+                type="text"
+                value={popoverMesh.color}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  // Only commit a complete, valid hex so the render path
+                  // (TriangleMesh) never receives a partial value.
+                  if (/^#[0-9a-fA-F]{6}$/.test(v)) handleSetMeshColor(popoverMesh.id, v);
+                }}
+                className="w-20 px-1.5 py-1 text-[11px] bg-neutral-800 border border-neutral-600 rounded text-neutral-200 font-mono"
+                maxLength={7}
+              />
+              <button
+                onClick={() => setColorPopoverMeshId(null)}
+                className="text-[10px] text-neutral-400 hover:text-neutral-200 px-1"
+                title="Close"
+              >
+                Done
+              </button>
+            </div>
+          </>
+        );
+      })()}
+
+      {/* Right Side Panels Container. z-30 keeps the whole panel stack above the
+          viewport SVG overlays (crop/seed boxes at z-10) so panel controls and
+          their popovers aren't obstructed by the wireframe crop box. */}
+      <div className="absolute top-4 right-4 z-30 flex flex-col gap-2 max-h-[calc(100vh-100px)]">
         {/* Unified Scans Panel — shows every scan whether it has data, params,
             or both. Per-row actions adapt to which fields are present. */}
         <div data-testid="scans-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
@@ -8410,12 +8597,23 @@ export default function PointCloudViewer({
               {meshes.map(mesh => {
                 const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
                 const isSelected = selectedMeshIds.has(mesh.id);
-                // Display name: for plants show type/age, otherwise show filename
-                const displayName = mesh.isPlant
+                // Display name: a user-assigned name wins; otherwise for plants
+                // show type/age, and for other meshes the source filename.
+                const computedName = mesh.isPlant
                   ? (mesh.plantCanopy
                       ? `${mesh.plantType} canopy ${mesh.plantCanopy.countX}×${mesh.plantCanopy.countY} (${mesh.plantAge}d)`
                       : `${mesh.plantType} (${mesh.plantAge}d)`)
                   : (sourceCloud?.data.fileName || 'Mesh');
+                const displayName = mesh.name ?? computedName;
+                const isRenaming = renamingMeshId === mesh.id;
+                const isColorOpen = colorPopoverMeshId === mesh.id;
+                // The color swatch / picker only applies where mesh.color
+                // actually affects rendering: solid (untextured) non-plant
+                // meshes. Plants show a Leaf icon; textured meshes (plant or
+                // imported OBJ) draw their texture and ignore mesh.color, so
+                // they get a neutral Box icon and no picker.
+                const meshTextured = isTexturedMesh(mesh);
+                const showColorSwatch = !mesh.isPlant && !meshTextured;
                 // Only triangulated surfaces (standard / Helios) expose the
                 // per-triangle "Color by" control.
                 const canColorByTriangle = isTriangulatedMesh(mesh);
@@ -8437,6 +8635,10 @@ export default function PointCloudViewer({
                     data-is-plant={mesh.isPlant ? 'true' : 'false'}
                     data-textured-materials={mesh.plantMaterials?.filter(m => m.textureData).length ?? 0}
                     data-selected={isSelected ? 'true' : 'false'}
+                    data-mesh-color={mesh.color}
+                    data-mesh-rotation={(() => { const r = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 }; return `${r.x.toFixed(1)},${r.y.toFixed(1)},${r.z.toFixed(1)}`; })()}
+                    data-mesh-position={(() => { const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 }; return `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`; })()}
+                    data-mesh-scale={(() => { const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 }; return `${s.x.toFixed(2)},${s.y.toFixed(2)},${s.z.toFixed(2)}`; })()}
                     onClick={() => handleSelectMesh(mesh.id)}
                     className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
                       isSelected ? 'bg-green-600/30 border border-green-500/50' : 'hover:bg-neutral-700/50'
@@ -8467,13 +8669,72 @@ export default function PointCloudViewer({
                     )}
                     {mesh.isPlant ? (
                       <Leaf className="w-3 h-3 flex-shrink-0 text-green-400" />
+                    ) : !showColorSwatch ? (
+                      // Textured (non-plant) mesh: texture drives the look and
+                      // mesh.color is ignored, so show a neutral icon, not a
+                      // misleading color swatch.
+                      <Box className="w-3 h-3 flex-shrink-0 text-neutral-400" />
                     ) : (
-                      <div className="w-3 h-3 rounded flex-shrink-0" style={{ backgroundColor: mesh.color }} />
+                      // Color swatch doubles as the trigger for a small color
+                      // popover. Only shown for solid (untextured) meshes whose
+                      // mesh.color actually affects rendering.
+                      <div className="flex-shrink-0">
+                        <button
+                          data-testid="mesh-color-swatch"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (isColorOpen) {
+                              setColorPopoverMeshId(null);
+                              return;
+                            }
+                            // Anchor the fixed popover just below the swatch.
+                            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setColorPopoverAnchor({ top: r.bottom + 4, left: r.left });
+                            setColorPopoverMeshId(mesh.id);
+                          }}
+                          className="w-3 h-3 rounded ring-1 ring-white/20 hover:ring-white/60 transition-shadow"
+                          style={{ backgroundColor: mesh.color }}
+                          title="Set color"
+                        />
+                      </div>
                     )}
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs text-neutral-200 truncate" data-testid="mesh-row-name">
-                        {displayName}
-                      </div>
+                      {isRenaming ? (
+                        <input
+                          data-testid="mesh-row-name-input"
+                          autoFocus
+                          value={renamingMeshValue}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => setRenamingMeshValue(e.target.value)}
+                          onFocus={(e) => e.target.select()}
+                          onBlur={() => {
+                            handleRenameMesh(mesh.id, renamingMeshValue);
+                            setRenamingMeshId(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              handleRenameMesh(mesh.id, renamingMeshValue);
+                              setRenamingMeshId(null);
+                            } else if (e.key === 'Escape') {
+                              setRenamingMeshId(null);
+                            }
+                          }}
+                          className="w-full text-xs bg-neutral-900 border border-green-500/50 rounded px-1 py-0.5 text-neutral-100 outline-none"
+                        />
+                      ) : (
+                        <div
+                          className="text-xs text-neutral-200 truncate cursor-text"
+                          data-testid="mesh-row-name"
+                          title="Double-click to rename"
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            setRenamingMeshValue(displayName);
+                            setRenamingMeshId(mesh.id);
+                          }}
+                        >
+                          {displayName}
+                        </div>
+                      )}
                       <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
                         {mesh.data.triangleCount.toLocaleString()} triangles
                         {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
@@ -11355,6 +11616,37 @@ export default function PointCloudViewer({
                 ×
               </button>
             </div>
+
+            {/* Voxel-specific: fit the box to the selected scan(s) */}
+            {isVoxel && (() => {
+              const fit = computeSelectedScansFitGrid();
+              return (
+                <button
+                  data-testid="voxel-fit-to-scans"
+                  disabled={!fit}
+                  title={fit
+                    ? 'Resize and center this voxel box around the selected scan(s)'
+                    : 'Select one or more scans with points first'}
+                  onClick={() => {
+                    if (!fit) return;
+                    setMeshPositions(prev => {
+                      const next = new Map(prev);
+                      next.set(selectedMesh.id, fit.center);
+                      return next;
+                    });
+                    setMeshScales(prev => {
+                      const next = new Map(prev);
+                      next.set(selectedMesh.id, fit.size);
+                      return next;
+                    });
+                  }}
+                  className="w-full mb-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-700 disabled:text-neutral-500 disabled:cursor-not-allowed text-white rounded text-[11px] flex items-center justify-center gap-1.5"
+                >
+                  <Maximize2 className="w-3 h-3" />
+                  Fit to selected scan(s)
+                </button>
+              );
+            })()}
 
             {/* Position */}
             <div className="mb-3 p-2 bg-neutral-900/50 rounded">
