@@ -6,7 +6,8 @@
 |---|---|---|---|
 | `.las` | ✅ | ✅ | LAS 1.2/1.4. Standard fields only on export (x, y, z, intensity, RGB, classification). |
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
-| `.ply` | ✅ | ✅ | Preserves all scalar fields. Best for full-fidelity round-trips. |
+| `.e57` | ✅ | — | Structured scan format. Recovers **sky/miss points** from the grid (see below). Import only. |
+| `.ply` | ✅ | ✅ | Preserves all scalar fields. Best for full-fidelity round-trips. Structured/organized PLYs recover sky/miss points (see below). |
 | `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL). |
 | `.xyz` / `.txt` | ✅ | ✅ | Whitespace-separated. First three columns = x, y, z. |
 | `.csv` | ✅ | ✅ | Comma-separated. First non-numeric row treated as header. |
@@ -62,18 +63,58 @@ PCD scalar fields are **not** preserved. If you need scalar fields from a
 `<ASCII_format>` tag. `.las`/`.laz` clouds retain their native extra
 dimensions.
 
+### Sky/miss points
+
+The [leaf-area-density inversion](../concepts/leaf-area-density.md) needs to know
+which laser pulses hit the **sky** and returned nothing (the "misses"). Helios
+represents each miss as a real point placed very far away (~20 km) from the
+scanner along the pulse direction.
+
+Phytograph recovers misses on import:
+
+- **E57** — the structured-grid `cartesianInvalidState` / `sphericalInvalidState`
+  flag marks cells with no return. Those become miss points along the cell's beam
+  direction. The scanner pose (origin) travels with the scan.
+- **Structured / organized PLY** — vertices with non-finite (NaN/Inf)
+  coordinates, or a `is_miss` / `miss` / `sky` property, are treated as misses.
+
+Recovered misses are tagged with an `is_miss` flag (0 = hit, 1 = miss) and kept
+in the scan. Because their true coordinates are ~20 km away, they are **excluded
+from the viewer's octree** (so they don't wreck camera framing) and **hidden by
+default**. Toggle **Show misses** on a scan row to draw them in a distinct colour,
+relocated onto the scan's bounding sphere so they sit at a sensible distance.
+
+If a scan has **no** miss points but **does** have a `timestamp` column, the LAD
+inversion recovers misses automatically by *gapfilling* the scan grid; if it has
+neither, the inversion warns that its result is likely to be inaccurate.
+
+> **RIEGL `.rxp` is not supported.** It needs RIEGL's license-gated RiVLib SDK,
+> which can't be redistributed. Convert `.rxp` to `.e57` (e.g. in RiSCAN Pro)
+> to import it with miss recovery.
+
 ## Meshes
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
 | `.obj` | ✅ | ✅ | Vertices + faces + normals + vertex colors. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied. |
-| `.ply` | ✅ | ✅ | Full fidelity including arbitrary per-vertex scalars. |
+| `.ply` | ✅ | ✅ | Vertices + faces + normals + per-vertex color. ASCII **and** binary on import (read via open3d). No textures. |
 | `.stl` | ✅ | ✅ | Triangles only — no color or topology metadata. |
 
 Polygonal faces with more than three vertices are triangulated on
 import. Textured `.obj` import reads UV coordinates (`vt`) and per-material
 diffuse color (`Kd`) and texture (`map_Kd`); textures are **not** written on
 export.
+
+### PLY: point cloud or mesh?
+
+`.ply` is an ambiguous container — the same extension is used for point
+clouds (vertices only) and polygon meshes (vertices **and** faces). On import,
+Phytograph reads the PLY header and routes automatically: if it declares
+`element face` with at least one face, the file imports as a **mesh**;
+otherwise it imports as a **point cloud**. You can override this with the
+import menu's explicit **Point cloud** / **Mesh** choices. A PLY mesh imported
+this way keeps its geometry, normals, and per-vertex color, but (unlike PLY
+point clouds) does not carry arbitrary per-vertex scalar fields.
 
 ## Skeletons
 

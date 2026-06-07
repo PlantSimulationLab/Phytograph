@@ -7,7 +7,7 @@ session `extras` under canonical slugs. They must:
   - survive the LAS import path (laspy native return_number/number_of_returns/
     gps_time auto-mapped to the canonical slugs),
   - compact in lockstep with positions across a delete + bake cycle, and
-  - dump back out as a Helios-ready ASCII file via _session_to_lad_ascii.
+  - feed back out as in-RAM arrays (+ a per-hit data map) via _session_to_lad_arrays.
 
 None of these need PotreeConverter — they exercise the in-RAM IO helpers
 directly, building a CloudSession without an octree.
@@ -189,51 +189,103 @@ def test_las_native_multireturn_dims_auto_mapped(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# LAD ASCII accessor
+# LAD in-RAM array accessor (feeds Helios via addHitPointsWithData — no ASCII)
 # ---------------------------------------------------------------------------
 
-def test_session_to_lad_ascii_emits_multireturn_columns(tmp_path):
+def test_session_to_lad_arrays_emits_multireturn_columns(tmp_path):
     f = tmp_path / "scan.xyz"
     _write_multireturn_xyz(f)
     sess = _session_from_xyz(f, tmp_path)
 
-    out = tmp_path / "lad.txt"
-    ascii_format, is_multi = main._session_to_lad_ascii(sess, out)
+    xyz, dirs, labels, vals, flags = main._session_to_lad_arrays(sess, [0, 0, 5])
 
-    assert is_multi is True
-    assert ascii_format == "x y z timestamp target_index target_count"
+    assert flags["multi"] is True
+    assert flags["has_timestamp"] is True
+    assert labels == ["timestamp", "target_index", "target_count"]
+    assert xyz.shape == (len(_MULTI_ROWS), 3)
+    assert dirs.shape == (len(_MULTI_ROWS), 3)
+    assert vals.shape == (len(_MULTI_ROWS), 3)
+    # The 3-return pulse is present in target_count (last label).
+    assert vals[:, 2].max() == pytest.approx(3.0)
+    # x/y/z round-trip from the session positions.
+    np.testing.assert_allclose(xyz[:, 0], [r[0] for r in _MULTI_ROWS], atol=1e-5)
 
-    parsed = np.loadtxt(str(out))
-    assert parsed.shape == (len(_MULTI_ROWS), 6)
-    # Column order matches the format string; the 3-return pulse is present.
-    assert parsed[:, 5].max() == pytest.approx(3.0)
-    # x/y/z round-trip.
-    np.testing.assert_allclose(parsed[:, 0], [r[0] for r in _MULTI_ROWS], atol=1e-5)
 
-
-def test_session_to_lad_ascii_degrades_to_xyz_only(tmp_path):
-    """A positions-only session (no multi-return extras) yields 'x y z'."""
+def test_session_to_lad_arrays_degrades_to_xyz_only(tmp_path):
+    """A positions-only session (no multi-return extras) yields no data map."""
     positions = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=np.float64)
     sess = _session_from_arrays(positions, None, None, {}, [])
 
-    out = tmp_path / "lad.txt"
-    ascii_format, is_multi = main._session_to_lad_ascii(sess, out)
+    xyz, dirs, labels, vals, flags = main._session_to_lad_arrays(sess, [0, 0, 5])
 
-    assert is_multi is False
-    assert ascii_format == "x y z"
-    parsed = np.loadtxt(str(out))
-    assert parsed.shape == (2, 3)
+    assert flags["multi"] is False
+    assert flags["has_timestamp"] is False
+    assert flags["has_misses"] is False
+    assert labels == []
+    assert vals is None
+    assert xyz.shape == (2, 3)
 
 
-def test_session_to_lad_ascii_honors_deletions(tmp_path):
-    """Only surviving (non-deleted) points are written."""
+def test_session_to_lad_arrays_honors_deletions(tmp_path):
+    """Only surviving (non-deleted) points are emitted."""
     f = tmp_path / "scan.xyz"
     _write_multireturn_xyz(f)
     sess = _session_from_xyz(f, tmp_path)
     sess.deleted = sess.positions[:, 2] < 0.6  # drop the last row
 
-    out = tmp_path / "lad.txt"
-    _, is_multi = main._session_to_lad_ascii(sess, out)
-    parsed = np.loadtxt(str(out))
-    assert is_multi is True
-    assert parsed.shape[0] == int((~sess.deleted).sum())
+    xyz, dirs, labels, vals, flags = main._session_to_lad_arrays(sess, [0, 0, 5])
+    assert flags["multi"] is True
+    survivors = int((~sess.deleted).sum())
+    assert xyz.shape[0] == survivors
+    assert vals.shape[0] == survivors
+
+
+def test_session_to_lad_arrays_reports_existing_misses(tmp_path):
+    """A session carrying is_miss=1 points reports has_misses and includes the
+    is_miss column in the LAD data map (so the inversion sees real misses and
+    skips gapfilling)."""
+    positions = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [9.0, 9.0, 9.0]], dtype=np.float64)
+    extras = {
+        "timestamp": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        "is_miss": np.array([0.0, 0.0, 1.0], dtype=np.float32),
+    }
+    meta = [{"slug": "timestamp", "label": "Timestamp"},
+            {"slug": "is_miss", "label": "Miss"}]
+    sess = _session_from_arrays(positions, None, None, extras, meta)
+
+    xyz, dirs, labels, vals, flags = main._session_to_lad_arrays(sess, [0, 0, 5])
+    assert flags["has_misses"] is True
+    assert flags["has_timestamp"] is True
+    assert "is_miss" in labels
+    # The miss column carries the per-point flag aligned to xyz.
+    miss_col = vals[:, labels.index("is_miss")]
+    assert miss_col.tolist() == [0.0, 0.0, 1.0]
+
+
+def test_session_to_lad_arrays_forwards_is_miss_even_with_no_misses(tmp_path):
+    """When a cloud carries an is_miss column but NOTHING is currently flagged a
+    miss, the column is STILL forwarded (every return tagged 0.0). The C++
+    calculateLeafArea fail-fast check reads is_miss per hit, so returns must be
+    explicitly 0.0 rather than relying on the label being absent. has_misses is
+    False (so gapfill still runs if a timestamp is present)."""
+    positions = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=np.float64)
+    extras = {"is_miss": np.array([0.0, 0.0], dtype=np.float32)}
+    meta = [{"slug": "is_miss", "label": "Miss"}]
+    sess = _session_from_arrays(positions, None, None, extras, meta)
+
+    xyz, dirs, labels, vals, flags = main._session_to_lad_arrays(sess, [0, 0, 5])
+    assert "is_miss" in labels                 # forwarded despite no misses
+    assert flags["has_misses"] is False        # ...but nothing is flagged
+    assert vals[:, labels.index("is_miss")].tolist() == [0.0, 0.0]
+
+
+def test_session_to_lad_arrays_no_is_miss_column_not_synthesised(tmp_path):
+    """A plain cloud with no is_miss column does NOT get one synthesised — those
+    clouds recover misses via gapfillMisses() (which sets the flag C++-side)."""
+    positions = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=np.float64)
+    sess = _session_from_arrays(positions, None, None, {}, [])
+
+    xyz, dirs, labels, vals, flags = main._session_to_lad_arrays(sess, [0, 0, 5])
+    assert "is_miss" not in labels
+    assert flags["has_misses"] is False

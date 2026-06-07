@@ -63,6 +63,26 @@ scan's parameters:
 You don't choose the algorithm directly — it follows each scan's
 **return type** (set in its [scan parameters](scans.md)).
 
+## Sky/miss points and gapfilling
+
+The inversion measures *gaps* — beams that passed through a voxel without a
+return — so it needs to know about the beams that hit the **sky** and returned
+nothing at all (the "misses"). Phytograph handles misses three ways, in order of
+preference:
+
+1. **Imported misses.** Scans from an [E57 or structured PLY](../reference/file-formats.md#skymiss-points)
+   carry real miss points (flagged `is_miss`). The inversion uses them directly.
+   Toggle **Show misses** on the scan row to verify they're present — they draw
+   in a distinct colour on the scan's bounding sphere.
+2. **Gapfilled misses.** A scan with **no** miss points but **a `timestamp`
+   column** has its misses recovered automatically at compute time: Phytograph
+   reconstructs the scan grid from the pulse timestamps and fills the gaps. It
+   reports how many misses it recovered.
+3. **No miss information.** A scan with neither miss points nor a timestamp can't
+   account for the gaps, so the inversion **warns that the result is likely
+   inaccurate**. Re-import the scan from a format that carries misses, or one with
+   a timestamp column, for a trustworthy estimate.
+
 ## Reading the result
 
 The result is a grid of translucent voxel cells colored by LAD through

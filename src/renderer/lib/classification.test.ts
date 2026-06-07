@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   GROUND_CLASS_ATTRIBUTE,
+  MISS_ATTRIBUTE,
+  MISS_COLOR,
   buildCategoricalGradientStops,
   buildGenericCategoricalScheme,
   categoricalSchemeFor,
@@ -33,6 +35,26 @@ describe('isCategoricalAttribute', () => {
   it('flags ground_class but not arbitrary scalars', () => {
     expect(isCategoricalAttribute('ground_class')).toBe(true);
     expect(isCategoricalAttribute('intensity')).toBe(false);
+  });
+});
+
+describe('is_miss scheme', () => {
+  it('registers a two-class Hit/Miss scheme', () => {
+    const scheme = categoricalSchemeFor(MISS_ATTRIBUTE);
+    expect(scheme).not.toBeNull();
+    expect(scheme!.classes.map((c) => c.value)).toEqual([0, 1]);
+    expect(scheme!.classes.map((c) => c.label)).toEqual(['Hit', 'Miss']);
+  });
+
+  it('is categorical and case-insensitive', () => {
+    expect(isCategoricalAttribute('is_miss')).toBe(true);
+    expect(categoricalSchemeFor('Is_Miss')).not.toBeNull();
+  });
+
+  it('paints misses in the distinct miss colour, hits in a different colour', () => {
+    const scheme = categoricalSchemeFor(MISS_ATTRIBUTE)!;
+    expect(colorForClassValue(scheme, 1)).toEqual(MISS_COLOR);
+    expect(colorForClassValue(scheme, 0)).not.toEqual(MISS_COLOR);
   });
 });
 

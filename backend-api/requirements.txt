@@ -26,6 +26,11 @@ laspy[lazrs]>=2.5.0
 # Used by _ply_to_las to carry intensity/reflectance/custom scalars into the
 # octree as LAS extra dimensions. Bundled via `collectAll` in build-backend.mjs.
 plyfile>=1.0
+# E57 reader (wraps libE57Format) — used by _e57_to_las to import structured
+# scan grids and recover sky/miss points from the cartesianInvalidState flag for
+# LAD inversion. Prebuilt wheels for CPython on macOS/Linux/Windows; bundled via
+# `collectAll` in scripts/build-backend.mjs.
+pye57>=0.4.0
 # Cloth Simulation Filter — ground/non-ground segmentation. SWIG C-extension
 # (imports as `import CSF`); prebuilt wheels for CPython 3.9-3.12 on
 # macOS/Linux/Windows. Bundled via `collectAll` in scripts/build-backend.mjs.

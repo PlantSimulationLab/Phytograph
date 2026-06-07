@@ -1898,6 +1898,54 @@ export interface ScalarFilter {
 export interface CloudSessionMetadata extends OctreeMetadata {
   session_id: string;
   point_count: number;
+  // Sky/miss points (laser pulses that returned nothing) are kept in the
+  // session for LAD but NOT in the octree (their ~20 km coords would poison the
+  // bounding box). `has_misses` lets the renderer offer a "Show misses" toggle;
+  // `scan_origin` (when the source carried it, e.g. an E57 pose) seeds the
+  // scan's params.origin and the miss-overlay relocation.
+  has_misses?: boolean;
+  miss_count?: number;
+  miss_slug?: string;
+  scan_origin?: [number, number, number];
+}
+
+/** Sky/miss points for a session, relocated onto the hit cloud's bounding
+ * sphere for display (true coords stay in the session for LAD). `positions` is
+ * a flat [x,y,z, ...] triple list. */
+export interface CloudMissesResult {
+  count: number;
+  origin: [number, number, number];
+  radius: number;
+  positions: number[];
+}
+
+/**
+ * Fetch a session's sky/miss points, relocated onto the hit cloud's bounding
+ * sphere so they render at a sensible distance. Pass the scan's true origin when
+ * known so the projection uses the real beam apex; otherwise the backend falls
+ * back to the hit-cloud centre.
+ */
+export async function getCloudMisses(
+  sessionId: string,
+  origin?: { x: number; y: number; z: number } | null,
+): Promise<CloudMissesResult> {
+  const baseUrl = getBackendUrl();
+  const q = origin
+    ? `?origin_x=${origin.x}&origin_y=${origin.y}&origin_z=${origin.z}`
+    : '';
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/misses${q}`,
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudMissesResult;
+  } catch (error) {
+    console.error('get_cloud_misses failed:', error);
+    throw describeBackendError(error, 'Misses');
+  }
 }
 
 /** Result of a delete_region / reset_edits call — counts only (no rebuild). */

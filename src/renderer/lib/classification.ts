@@ -122,11 +122,29 @@ export function buildGenericCategoricalScheme(
   return { attribute, classes };
 }
 
+// Sky/miss flag (is_miss): 0 = a real return (hit), 1 = a sky/miss point (the
+// laser pulse returned nothing). Misses are hidden by default and drawn by a
+// dedicated overlay, but when shown inline they get a distinct, unmistakable
+// colour so they read as "not real geometry": muted slate for hits, warm orange
+// for misses.
+export const MISS_ATTRIBUTE = 'is_miss';
+// The colour the dedicated miss overlay (and the inline scheme) paints misses.
+export const MISS_COLOR: RGB = [1.0, 0.55, 0.0];
+
+const MISS_SCHEME: CategoricalScheme = {
+  attribute: MISS_ATTRIBUTE,
+  classes: [
+    { value: 0, label: 'Hit', color: [0.55, 0.60, 0.65] },
+    { value: 1, label: 'Miss', color: MISS_COLOR },
+  ],
+};
+
 // Registry of known categorical schemes, keyed by attribute slug. Future
 // classifications (organ type, semantic labels, …) register here and get
 // discrete coloring + a legend for free.
 const SCHEMES: Record<string, CategoricalScheme> = {
   [GROUND_CLASS_ATTRIBUTE]: GROUND_SCHEME,
+  [MISS_ATTRIBUTE]: MISS_SCHEME,
 };
 
 // Slugs the user marked categorical in the import wizard. Lower-cased on insert

@@ -84,6 +84,12 @@ diffuse color (`Kd`) for each material; faces with no image fall back to that
 material's color. Untextured `.obj` files (and `.stl`) import as plain geometry
 as before. See [Meshes: Textures](../concepts/meshes.md#textures).
 
+A `.ply` is imported as a mesh when its header declares faces (otherwise it
+imports as a point cloud — see
+[File formats: PLY](../reference/file-formats.md#ply-point-cloud-or-mesh)).
+Both ASCII and binary PLY meshes are read, including per-vertex color; PLY
+meshes carry no textures.
+
 ### Importing ASCII clouds with custom columns
 
 For `.xyz`, `.txt`, and `.csv` files, auto-detection treats the first three
@@ -93,6 +99,17 @@ after the column header (or `Column N` if there's no header). The
 the file uses a non-standard column order, RGB stored as 0–1 floats, or a
 class column that should be categorical. You can color the cloud by any
 scalar field later — see **[Color modes](../reference/color-modes.md)**.
+
+### Importing scans with sky/miss points
+
+`.e57` and structured `.ply` scans carry **sky/miss points** — pulses that hit
+the sky and returned nothing — which the
+[leaf-area-density inversion](../concepts/leaf-area-density.md) relies on.
+Phytograph recovers and tags them on import. They're hidden by default (their
+true positions are ~20 km away); toggle the **Show misses** button on a scan row
+to draw them in a distinct colour, relocated onto the scan's bounding sphere, so
+you can confirm a scan actually carries miss information. See
+**[Sky/miss points](../reference/file-formats.md#skymiss-points)**.
 
 ## Export
 

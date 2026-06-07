@@ -5,6 +5,7 @@
 // code, so importing this module has zero side effects.
 import * as THREE from 'three';
 import type { BackendPointSource, ColumnPlan, TriangulationMethod } from '../utils/backendApi';
+import type { ScanParameters } from './scanParameters';
 
 // potree-core's RequestManager interface isn't re-exported from the package
 // root in v2.0.15. The shape is small and stable, so mirror it locally
@@ -59,6 +60,14 @@ export interface OctreeRef {
   // renderer registers these so they colour as discrete classes rather than a
   // continuous gradient. See classification.ts registerCategoricalSlug.
   categoricalAttributes?: string[];
+  // Sky/miss points (laser pulses that returned nothing). They live in the
+  // backend session for LAD but are NOT in this octree (their ~20 km coords
+  // would poison its bounding box), so they're fetched on demand and drawn as a
+  // separate overlay relocated onto the bounding sphere. `hasMisses` gates the
+  // "Show misses" toggle; `scanOrigin` (when the source carried it) is the true
+  // beam apex used to project the overlay. See getCloudMisses / MissOverlay.
+  hasMisses?: boolean;
+  scanOrigin?: [number, number, number] | null;
 }
 
 // Result of buildPointSource: either an in-memory cloud (flat path) or a
@@ -103,6 +112,12 @@ export interface PointCloudEntry {
   // Helios <ASCII_format> hint preserved from the importing XML so the
   // backend can re-parse XYZ-family files with the same column layout.
   asciiFormat?: string | null;
+  // Mirrors Scan.showMisses — whether to draw the sky/miss overlay for this
+  // cloud (off by default; offered only when data.octree.hasMisses).
+  showMisses?: boolean;
+  // Scanner geometry (origin etc.) when the scan carries params, so the miss
+  // overlay can project misses along the true beam direction.
+  params?: ScanParameters;
 }
 
 // Per-cloud edit state. The crop region is no longer per-cloud — it
@@ -234,6 +249,20 @@ export interface MeshEntry {
   // Voxel-specific: per-axis grid subdivision count for the PyHelios LiDAR grid.
   // Only set on shape-voxel meshes; renders as a wireframe overlay when any axis > 1.
   gridSubdivisions?: { x: number; y: number; z: number };
+}
+
+// The label shown for a mesh in the scene list, delete confirm, and export panel.
+// A user-assigned `name` wins; otherwise plants show type/age (or canopy grid),
+// and every other mesh falls back to its source filename, then a generic "Mesh".
+// `sourceFileName` is the imported/triangulated source cloud's filename when known.
+export function meshDisplayName(mesh: MeshEntry, sourceFileName?: string): string {
+  if (mesh.name) return mesh.name;
+  if (mesh.isPlant) {
+    return mesh.plantCanopy
+      ? `${mesh.plantType} canopy ${mesh.plantCanopy.countX}×${mesh.plantCanopy.countY} (${mesh.plantAge}d)`
+      : `${mesh.plantType} (${mesh.plantAge}d)`;
+  }
+  return sourceFileName || 'Mesh';
 }
 
 // Skeleton data from extraction

@@ -51,6 +51,16 @@ class _FakeCloud:
     def loadXML(self, path):
         self.calls.append(("loadXML", path))
 
+    def addScan(self, **kwargs):
+        self.calls.append(("addScan", kwargs))
+        return len([c for c in self.calls if c[0] == "addScan"]) - 1
+
+    def addHitPointsWithData(self, scanID, xyz, dirs, labels, vals):
+        self.calls.append(("addHitPointsWithData", scanID, len(xyz), tuple(labels or [])))
+
+    def addGrid(self, center, size, ndiv, rotation=0.0):
+        self.calls.append(("addGrid", tuple(center), tuple(size), tuple(ndiv)))
+
     def triangulateHitPoints(self, lmax, aspect):
         self.calls.append(("triangulate", lmax, aspect))
 
@@ -59,6 +69,14 @@ class _FakeCloud:
 
     def gapfillMisses(self):
         self.calls.append(("gapfill",))
+        # Simulate Helios tagging synthesised misses with gapfillMisses_code=1.0
+        # on top of the original hits (code 0.0). Two recovered misses here.
+        self._gapfill_codes = [0.0, 0.0, 1.0, 1.0]
+
+    def getHitDataAll(self, label):
+        if label == "gapfillMisses_code":
+            return getattr(self, "_gapfill_codes", [])
+        return []
 
     def calculateLeafArea(self, ctx, min_hits):
         self.calls.append(("calculateLeafArea", min_hits))
@@ -188,6 +206,72 @@ class TestLADRequestShaping:
         assert "gapfill" in names
         assert names.index("gapfill") < names.index("calculateLeafArea")
 
+    def test_single_return_with_timestamp_gapfills_and_reports(self, tmp_path, stub_pyhelios):
+        # A single-return scan that carries a timestamp (but no target_*) is
+        # gapfillable: misses are recovered from the timestamp gaps. Widening the
+        # old multi-return-only trigger. The recovered count is surfaced.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5 1.0\n0.0 0.0 0.6 2.0\n0.2 -0.1 0.4 3.0\n")
+        scan = main.HeliosScanEntry(
+            file_path=str(f), ascii_format="x y z timestamp",
+            origin=[0, 0, 5], return_type="single")
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+            lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
+        result = main._do_lad_computation(req)
+
+        assert result["success"] is True
+        # Single-return mode, but gapfill still runs (timestamp present).
+        assert result["return_mode"] == "single"
+        cloud = stub_pyhelios.instances[-1]
+        assert "gapfill" in [c[0] for c in cloud.calls]
+        assert result["gapfilled_misses"] == 2
+        assert any("Recovered 2" in w for w in result["warnings"])
+
+    def test_no_misses_no_timestamp_warns_inaccurate(self, tmp_path, stub_pyhelios):
+        # Neither miss points nor a timestamp: can't account for gaps. The
+        # computation still succeeds but warns the result is likely inaccurate,
+        # and gapfill is NOT run.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n0.0 0.0 0.6\n0.2 -0.1 0.4\n")
+        scan = main.HeliosScanEntry(
+            file_path=str(f), ascii_format="x y z",
+            origin=[0, 0, 5], return_type="single")
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+            lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
+        result = main._do_lad_computation(req)
+
+        assert result["success"] is True
+        cloud = stub_pyhelios.instances[-1]
+        assert "gapfill" not in [c[0] for c in cloud.calls]
+        assert result["gapfilled_misses"] == 0
+        assert any("likely to be inaccurate" in w for w in result["warnings"])
+
+    def test_existing_misses_skip_gapfill(self, tmp_path, stub_pyhelios):
+        # A scan that already carries miss points (is_miss=1) must NOT be
+        # gapfilled — that would synthesise duplicates on top of real misses.
+        f = tmp_path / "scan.xyz"
+        # x y z timestamp is_miss — one row flagged as an existing miss.
+        f.write_text("0.1 0.1 0.5 1.0 0\n0.0 0.0 0.6 2.0 0\n9.0 9.0 9.0 3.0 1\n")
+        scan = main.HeliosScanEntry(
+            file_path=str(f), ascii_format="x y z timestamp is_miss",
+            origin=[0, 0, 5], return_type="single")
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+            lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
+        result = main._do_lad_computation(req)
+
+        assert result["success"] is True
+        cloud = stub_pyhelios.instances[-1]
+        assert "gapfill" not in [c[0] for c in cloud.calls]
+        assert result["had_miss_points"] is True
+        # Not the "no misses / no timestamp" warning — misses ARE present.
+        assert not any("likely to be inaccurate" in w for w in result["warnings"])
+
     def test_stale_session_falls_back_to_file_with_warning(self, tmp_path, stub_pyhelios):
         # A session id the backend doesn't have (e.g. after a restart) must NOT
         # 404 the whole computation when the scan also carries a source file —
@@ -226,14 +310,13 @@ class TestLADRequestShaping:
 # ---------------------------------------------------------------------------
 
 class TestCountPointsPerCell:
-    def test_bins_points_into_uniform_grid(self, tmp_path):
+    def test_bins_points_into_uniform_grid(self):
         # 2x1x1 grid spanning x in [-1,1], cells centered at -0.5 and +0.5.
-        f = tmp_path / "scan.xyz"
-        f.write_text("-0.5 0 0\n-0.6 0 0\n0.5 0 0\n")
-        scans_info = [{"filepath": str(f), "ascii_format": "x y z"}]
+        import numpy as np
+        scan_xyz = [np.array([[-0.5, 0, 0], [-0.6, 0, 0], [0.5, 0, 0]], dtype=np.float64)]
         centers = [main_vec(-0.5, 0, 0), main_vec(0.5, 0, 0)]
         sizes = [main_vec(1, 1, 1), main_vec(1, 1, 1)]
-        counts = main._count_points_per_cell(scans_info, centers, sizes)
+        counts = main._count_points_per_cell(scan_xyz, centers, sizes)
         assert counts[0] == 2   # the two negative-x points
         assert counts[1] == 1   # the one positive-x point
 
@@ -283,6 +366,150 @@ class TestLeafCubeLAD:
         # allow RMSE < 0.5 across the eight cells.
         rmse = math.sqrt(sum((c["lad"] - 2.0) ** 2 for c in cells) / len(cells))
         assert rmse < 0.5, f"per-cell LAD RMSE too high: {rmse}"
+
+
+# ---------------------------------------------------------------------------
+# Faithful port of the C++ "LiDAR Eight Voxel Isotropic Patches Test"
+# (plugins/lidar/tests/selfTest.cpp), driven through our backend's
+# _do_lad_computation instead of calling calculateLeafArea() on a syntheticScan
+# cloud directly. This is the authoritative 2x2x2 oracle: the exact per-cell LAD
+# is computed from the leaf-cube primitive areas, and we assert our backend path
+# recovers it. We test BOTH the well-conditioned multi-return case (misses are
+# recorded, so hits+misses share one raster) and the single-return case (Helios
+# synthesizes the miss raster from Ntheta/Nphi), which is the regime the
+# real-data sphere case fell over in.
+# ---------------------------------------------------------------------------
+
+_GEOM_XML = "plugins/lidar/xml/leaf_cube_LAI2_lw0_01_spherical.xml"
+_HELIOS_CORE = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "..", "pyhelios", "helios-core"))
+
+
+@pytest.mark.skipif(
+    not os.path.isfile(os.path.join(_HELIOS_CORE, _GEOM_XML)),
+    reason="leaf-cube geometry not present (helios-core submodule)")
+class TestEightVoxelIsotropicPatches:
+    """Mirror the C++ Eight Voxel Isotropic Patches test on a 2x2x2 grid, but feed
+    the scan through the backend's inline-points path. Generates a fresh dense
+    synthetic scan at test time (like the C++ test's syntheticScan) and asserts
+    per-cell LAD against the exact primitive-derived truth."""
+
+    NTHETA, NPHI = 10000, 12000
+    ORIGIN = [-5.0, 0.0, 0.5]
+    GRID_CENTER = [0.0, 0.0, 0.5]
+    GRID_SIZE = [1.0, 1.0, 1.0]
+
+    def _exact_per_cell_lad(self, ctx, uuids, cloud):
+        """Exact LAD per voxel = (primitive area assigned to that voxel) / voxel
+        volume, binning each primitive by its first vertex like the C++ test."""
+        gs = cloud.getCellSize(0)
+        vol = gs.x * gs.y * gs.z
+        lad_ex = [0.0] * 8
+        for uuid in uuids:
+            v = ctx.getPrimitiveVertices(uuid)[0]
+            i = 1 if v.x > 0.0 else 0
+            j = 1 if v.y > 0.0 else 0
+            k = 1 if v.z > 0.5 else 0
+            lad_ex[k * 4 + j * 2 + i] += ctx.getPrimitiveArea(uuid) / vol
+        return lad_ex
+
+    def _generate_scan(self, multi_return):
+        """Return (points (N,3), scalar_columns|None, exact_lad[8]) for a fresh
+        dense synthetic scan, generated from helios-core's working directory."""
+        pytest.importorskip("pyhelios")
+        import math
+        from pyhelios import LiDARCloud, Context
+
+        cwd = os.getcwd()
+        os.chdir(_HELIOS_CORE)
+        try:
+            cloud = LiDARCloud()
+            cloud.disableMessages()
+            cloud.addScan(
+                origin=self.ORIGIN, Ntheta=self.NTHETA, theta_range=(0.0, math.pi),
+                Nphi=self.NPHI, phi_range=(0.0, 2 * math.pi),
+                exit_diameter=(0.01 if multi_return else 0.0),
+                beam_divergence=(0.0003 if multi_return else 0.0))
+            cloud.addGrid(center=self.GRID_CENTER, size=self.GRID_SIZE, ndiv=[2, 2, 2])
+            with Context() as ctx:
+                uuids = ctx.loadXML(_GEOM_XML, True)
+                exact = self._exact_per_cell_lad(ctx, uuids, cloud)
+                if multi_return:
+                    cloud.syntheticScan(ctx, rays_per_pulse=10,
+                                        pulse_distance_threshold=0.02,
+                                        record_misses=True)
+                else:
+                    cloud.syntheticScan(ctx, record_misses=False)
+                positions, _ = cloud.getHitsXYZRGB()
+                cols = None
+                if multi_return:
+                    cols = {c: cloud.getHitDataAll(c)
+                            for c in ("timestamp", "target_index", "target_count")}
+        finally:
+            os.chdir(cwd)
+
+        xyz = np.array([[p.x, p.y, p.z] for p in positions], dtype=np.float64)
+        return xyz, cols, exact
+
+    def _run(self, xyz, cols, return_type):
+        scan = main.HeliosScanEntry(
+            points=xyz.tolist(),
+            scalar_columns=cols,
+            origin=self.ORIGIN, n_theta=self.NTHETA, n_phi=self.NPHI,
+            theta_min=0, theta_max=180, phi_min=0, phi_max=360,
+            return_type=return_type)
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=self.GRID_CENTER, size=self.GRID_SIZE,
+                                 nx=2, ny=2, nz=2),
+            lmax=0.04, max_aspect_ratio=10, min_voxel_hits=1)
+        return main._do_lad_computation(req)
+
+    def _rmse(self, cells, exact):
+        # Map each result cell to the exact value by its (i,j,k) octant.
+        per = []
+        for c in cells:
+            cx, cy, cz = c["center"]
+            i = 1 if cx > 0.0 else 0
+            j = 1 if cy > 0.0 else 0
+            k = 1 if cz > 0.5 else 0
+            per.append((c["lad"] - exact[k * 4 + j * 2 + i]) ** 2)
+        return math.sqrt(sum(per) / len(per))
+
+    def test_multireturn_recovers_exact_per_cell_lad(self):
+        """Multi-return (misses recorded → consistent raster) must recover the
+        exact per-cell LAD across all eight voxels."""
+        xyz, cols, exact = self._generate_scan(multi_return=True)
+        result = self._run(xyz, cols, "multi")
+        assert result["success"] is True, result.get("error")
+        assert result["return_mode"] == "multi"
+        cells = result["cells"]
+        assert len(cells) == 8
+        # No cell may be a degenerate zero — every voxel of the uniform cube has
+        # leaf area. (The sphere bug manifested as a whole layer pinned near 0.)
+        # This is the deterministic regression guard; the RMSE bound below is
+        # looser because the multi-return finite-beam scan samples randomly
+        # (observed RMSE ~0.12-0.14 across runs, so 0.4 leaves tail headroom).
+        assert all(c["lad"] > 0.5 for c in cells), \
+            f"degenerate cell(s): {[round(c['lad'], 3) for c in cells]}"
+        rmse = self._rmse(cells, exact)
+        assert rmse < 0.4, f"per-cell LAD RMSE too high: {rmse} (exact {exact})"
+
+    def test_singlereturn_recovers_exact_per_cell_lad(self):
+        """Single-return (Helios synthesizes the miss raster from Ntheta/Nphi)
+        must recover the exact per-cell LAD across all eight voxels — including
+        the upper layer. This is the regime the real-data sphere case failed in
+        (one z-layer pinned near zero)."""
+        xyz, _, exact = self._generate_scan(multi_return=False)
+        result = self._run(xyz, None, "single")
+        assert result["success"] is True, result.get("error")
+        assert result["return_mode"] == "single"
+        cells = result["cells"]
+        assert len(cells) == 8
+        assert all(c["lad"] > 0.5 for c in cells), \
+            f"degenerate cell(s): {[round(c['lad'], 3) for c in cells]}"
+        rmse = self._rmse(cells, exact)
+        assert rmse < 0.3, f"per-cell LAD RMSE too high: {rmse} (exact {exact})"
 
 
 # ---------------------------------------------------------------------------

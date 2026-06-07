@@ -8,7 +8,7 @@ import { BulkImportProgress, type BulkImportProgressState } from "./components/B
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
 import type { Scan } from "./lib/scan";
 import type { ScanParameters } from "./lib/scanParameters";
-import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
+import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
 import { importTexturedMesh, deleteCloudSession, type MeshImportResponse } from "./utils/backendApi";
 import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
@@ -18,11 +18,20 @@ import { registerCategoricalSlug } from "./lib/classification";
 // we have a disk path. Every supported point-cloud format is here; only inputs
 // without an on-disk path (Blob/test fixtures) fall back to the in-renderer
 // flat-array parsers.
-const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz']);
+const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57']);
 import logoImage from "./assets/logo.png";
 
 type NavItem = 'viewer' | 'options';
 type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton';
+
+// Strip the directory and trailing extension from a file name for use as a
+// default display label (e.g. "tree_scan.ply" → "tree_scan"). Falls back to the
+// full name when there's no extension.
+function baseNameForLabel(fileName: string): string {
+  const base = fileName.split(/[\\/]/).pop() ?? fileName;
+  const dot = base.lastIndexOf('.');
+  return dot > 0 ? base.slice(0, dot) : base;
+}
 
 // Predefined colors for scans (for labels/identification)
 const SCAN_COLORS = [
@@ -203,6 +212,10 @@ function App() {
           shouldImportAsMesh = true;
         } else if (isSkeletonFile(file.name)) {
           shouldImportAsSkeleton = true;
+        } else if (file.name.toLowerCase().endsWith('.ply') && (await plyHasFaces(file))) {
+          // PLY is an ambiguous container: faces ⇒ polygon mesh, otherwise a
+          // point cloud. Only a face-bearing PLY routes to the mesh path.
+          shouldImportAsMesh = true;
         } else {
           // fall through to point cloud import
         }
@@ -212,11 +225,12 @@ function App() {
         if (!importRefsRef.current) {
           showToast({ title: 'Viewer not ready for mesh import', type: 'error' });
         } else {
-          // For OBJ files we have an on-disk path for, try the backend importer
-          // first: it parses the sibling MTL + texture images and returns real
-          // UVs + base64 textures so the mesh renders textured. Fall back to the
-          // in-renderer geometry-only parser when there's no path, it's not an
-          // OBJ, the backend import fails, or the OBJ carries no textures.
+          // When we have an on-disk path, prefer the backend importer. For OBJ it
+          // parses the sibling MTL + texture images and returns real UVs + base64
+          // textures; for PLY (which has no MTL/textures) it reads ASCII *and*
+          // binary geometry + per-vertex color. Fall back to the in-renderer
+          // parser when there's no path, the format isn't backend-handled, or the
+          // backend import fails / yields nothing usable.
           const ext = file.name.toLowerCase().split('.').pop() ?? '';
           let objPath: string | undefined;
           try {
@@ -225,18 +239,22 @@ function App() {
             objPath = undefined;
           }
 
-          let textured: MeshImportResponse | null = null;
-          if (ext === 'obj' && objPath) {
+          let backendMesh: MeshImportResponse | null = null;
+          if ((ext === 'obj' || ext === 'ply') && objPath) {
             try {
               const resp = await importTexturedMesh(objPath);
-              if (resp.success && resp.has_textures) textured = resp;
+              // OBJ is only worth the backend path when it actually has textures
+              // (otherwise the local parser is equivalent and avoids the round
+              // trip). PLY backend import is always preferred — it's the only
+              // path that handles binary PLY and per-vertex color.
+              if (resp.success && (ext === 'ply' || resp.has_textures)) backendMesh = resp;
             } catch (e) {
-              console.warn('Textured OBJ import failed, falling back to geometry-only parse:', e);
+              console.warn('Backend mesh import failed, falling back to local parse:', e);
             }
           }
 
-          if (textured) {
-            const { data, plantMaterials } = plantResponseToMeshData(textured);
+          if (backendMesh) {
+            const { data, plantMaterials } = plantResponseToMeshData(backendMesh);
             importRefsRef.current.importMesh({
               sourceCloudId: 'imported',
               data,
@@ -244,9 +262,11 @@ function App() {
               visible: true,
               color: getNextColor(),
               method: 'delaunay',
+              name: baseNameForLabel(file.name),
             });
             setActiveNav('viewer');
-            showToast({ title: `Loaded textured mesh with ${textured.triangle_count.toLocaleString()} triangles from ${file.name}`, type: 'success' });
+            const texturedLabel = backendMesh.has_textures ? 'textured mesh' : 'mesh';
+            showToast({ title: `Loaded ${texturedLabel} with ${backendMesh.triangle_count.toLocaleString()} triangles from ${file.name}`, type: 'success' });
           } else {
             const meshData = await parseMesh(file);
             importRefsRef.current.importMesh({
@@ -255,12 +275,14 @@ function App() {
                 vertices: meshData.vertices,
                 indices: meshData.indices,
                 normals: meshData.normals,
+                vertexColors: meshData.vertexColors,
                 vertexCount: meshData.vertexCount,
                 triangleCount: meshData.triangleCount,
               },
               visible: true,
               color: getNextColor(),
               method: 'delaunay', // Default for imported meshes
+              name: baseNameForLabel(file.name),
             });
             setActiveNav('viewer');
             showToast({ title: `Loaded mesh with ${meshData.triangleCount.toLocaleString()} triangles from ${file.name}`, type: 'success' });
@@ -388,27 +410,65 @@ function App() {
             shouldImportAsMesh = true;
           } else if (isSkeletonFile(file.name)) {
             shouldImportAsSkeleton = true;
+          } else if (file.name.toLowerCase().endsWith('.ply') && (await plyHasFaces(file))) {
+            // Face-bearing PLY ⇒ polygon mesh; vertices-only PLY stays a cloud.
+            shouldImportAsMesh = true;
           }
         }
 
         if (shouldImportAsMesh) {
-          // Parse as mesh
-          const meshData = await parseMesh(file);
-          if (importRefsRef.current) {
+          // Path-backed PLY/OBJ prefer the backend importer (binary PLY + per-vertex
+          // color for PLY; MTL/textures for OBJ); everything else parses locally.
+          const ext = file.name.toLowerCase().split('.').pop() ?? '';
+          let meshPath: string | undefined;
+          try {
+            meshPath = window.electronAPI?.getPathForFile?.(file) || undefined;
+          } catch {
+            meshPath = undefined;
+          }
+
+          let backendMesh: MeshImportResponse | null = null;
+          if ((ext === 'obj' || ext === 'ply') && meshPath) {
+            try {
+              const resp = await importTexturedMesh(meshPath);
+              if (resp.success && (ext === 'ply' || resp.has_textures)) backendMesh = resp;
+            } catch (e) {
+              console.warn('Backend mesh import failed, falling back to local parse:', e);
+            }
+          }
+
+          if (backendMesh && importRefsRef.current) {
+            const { data, plantMaterials } = plantResponseToMeshData(backendMesh);
             importRefsRef.current.importMesh({
               sourceCloudId: 'imported',
-              data: {
-                vertices: meshData.vertices,
-                indices: meshData.indices,
-                normals: meshData.normals,
-                vertexCount: meshData.vertexCount,
-                triangleCount: meshData.triangleCount,
-              },
+              data,
+              plantMaterials,
               visible: true,
               color: getColorForFile(),
               method: 'delaunay',
+              name: baseNameForLabel(file.name),
             });
             meshCount++;
+          } else {
+            const meshData = await parseMesh(file);
+            if (importRefsRef.current) {
+              importRefsRef.current.importMesh({
+                sourceCloudId: 'imported',
+                data: {
+                  vertices: meshData.vertices,
+                  indices: meshData.indices,
+                  normals: meshData.normals,
+                  vertexColors: meshData.vertexColors,
+                  vertexCount: meshData.vertexCount,
+                  triangleCount: meshData.triangleCount,
+                },
+                visible: true,
+                color: getColorForFile(),
+                method: 'delaunay',
+                name: baseNameForLabel(file.name),
+              });
+              meshCount++;
+            }
           }
         } else if (shouldImportAsSkeleton) {
           // Parse as skeleton
@@ -544,6 +604,15 @@ function App() {
   const handleToggleScanVisibility = useCallback((id: string) => {
     setScans(prev => prev.map(s =>
       s.id === id ? { ...s, visible: !s.visible } : s
+    ));
+  }, []);
+
+  // Toggle the sky/miss overlay for a scan. Misses are hidden by default; this
+  // lets the user reveal them (in a distinct colour, on the bounding sphere) to
+  // verify a scan actually carries miss information for the LAD inversion.
+  const handleToggleScanMisses = useCallback((id: string) => {
+    setScans(prev => prev.map(s =>
+      s.id === id ? { ...s, showMisses: !s.showMisses } : s
     ));
   }, []);
 
@@ -973,6 +1042,7 @@ function App() {
           scans={scans}
           selectedScanIds={selectedScanIds}
           onToggleVisibility={handleToggleScanVisibility}
+          onToggleMisses={handleToggleScanMisses}
           onToggleSelection={handleToggleScanSelection}
           onRemoveScan={handleRemoveScan}
           onSelectAll={handleSelectAll}

@@ -773,8 +773,10 @@ const BACKEND_PATH_EXTENSIONS = new Set([
 // PotreeConverter: XYZ-family via pandas, PLY via plyfile (scalar fields
 // preserved as LAS extra dims), PCD via open3d (position + RGB only), and
 // LAS/LAZ pass straight through. PLY/PCD stay in BACKEND_PATH_EXTENSIONS as the
-// flat fallback for Blob/no-path inputs that can't be octree'd.
-const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz']);
+// flat fallback for Blob/no-path inputs that can't be octree'd. E57 is
+// octree-only (binary structured scan format; converted via pye57, recovering
+// sky/miss points) with no flat fallback.
+const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57']);
 
 export async function parsePointCloudFromPath(
   path: string,
@@ -868,6 +870,12 @@ export function buildPointCloudFromOctree(
       columnPlan: columnPlan ?? null,
       categoricalAttributes: categoricalAttributes && categoricalAttributes.length
         ? categoricalAttributes
+        : undefined,
+      // Sky/miss info comes from the cloud-session create response (a superset
+      // of OctreeMetadata); plain OctreeMetadata callers leave these undefined.
+      hasMisses: 'has_misses' in meta ? Boolean((meta as { has_misses?: boolean }).has_misses) : undefined,
+      scanOrigin: 'scan_origin' in meta
+        ? ((meta as { scan_origin?: [number, number, number] }).scan_origin ?? null)
         : undefined,
     },
   };
@@ -973,6 +981,7 @@ export async function parsePointCloud(file: File): Promise<PointCloudData> {
 export const POINT_CLOUD_FORMATS = [
   { ext: '.las', name: 'LAS', desc: 'LiDAR Data Exchange' },
   { ext: '.laz', name: 'LAZ', desc: 'Compressed LiDAR' },
+  { ext: '.e57', name: 'E57', desc: 'Structured scan (recovers sky/miss)' },
   { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (ASCII)' },
   { ext: '.pcd', name: 'PCD', desc: 'Point Cloud Data (ASCII)' },
   { ext: '.xyz', name: 'XYZ', desc: 'X Y Z coordinates' },
@@ -985,6 +994,7 @@ export const POINT_CLOUD_FORMATS = [
 export const MESH_FORMATS = [
   { ext: '.obj', name: 'OBJ', desc: 'Wavefront mesh' },
   { ext: '.stl', name: 'STL', desc: 'Stereolithography (ASCII)' },
+  { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (mesh)' },
 ];
 
 export const SKELETON_FORMATS = [
@@ -1000,6 +1010,7 @@ export interface ParsedMesh {
   vertices: Float32Array;
   indices: Uint32Array;
   normals?: Float32Array;
+  vertexColors?: Float32Array; // r, g, b interleaved (0-1), present iff PLY carried per-vertex color
   vertexCount: number;
   triangleCount: number;
   fileName: string;
@@ -1133,6 +1144,157 @@ export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
   };
 }
 
+// Sniff a PLY file's header to decide whether it carries polygon-mesh data
+// (an `element face N` with N>0) versus a bare point cloud (vertices only). The
+// PLY header is always ASCII text even in binary PLY, so reading the leading
+// bytes is enough — we never decode the body. Returns false on any parse trouble
+// so an unreadable/odd file falls back to the (default) point-cloud path.
+export async function plyHasFaces(file: File): Promise<boolean> {
+  try {
+    // 64 KB comfortably covers any PLY header (they're tiny — a few hundred bytes).
+    const head = file.slice(0, 64 * 1024);
+    const text = await head.text();
+    const lines = text.split('\n');
+    for (const raw of lines) {
+      const line = raw.trim();
+      const low = line.toLowerCase();
+      if (low === 'end_header') break;
+      if (low.startsWith('element ')) {
+        const parts = line.split(/\s+/);
+        // `element face <count>` (also handle `tristrips`, another face encoding)
+        if (parts.length >= 3 && (parts[1].toLowerCase() === 'face' || parts[1].toLowerCase() === 'tristrips')) {
+          const count = parseInt(parts[2], 10);
+          if (Number.isFinite(count) && count > 0) return true;
+        }
+      }
+    }
+  } catch {
+    // fall through — treat as not-a-mesh
+  }
+  return false;
+}
+
+// Parse an ASCII PLY polygon mesh into geometry. This is the in-renderer fallback
+// for path-less Blobs / test fixtures; path-backed files go through the backend
+// importer (which also handles binary PLY). Binary PLY here throws a clear message.
+export async function parsePLYMesh(file: File): Promise<ParsedMesh> {
+  const buffer = await file.arrayBuffer();
+  const text = new TextDecoder().decode(buffer);
+
+  const headerEnd = text.indexOf('end_header');
+  if (headerEnd === -1) throw new Error('Invalid PLY file: no end_header found');
+
+  const header = text.substring(0, headerEnd);
+  const headerLines = header.split('\n');
+
+  let format = 'ascii';
+  let vertexCount = 0;
+  let faceCount = 0;
+  // Track which element a `property` line belongs to as we walk the header.
+  let currentElement: 'vertex' | 'face' | 'other' | null = null;
+  const vertexProps: string[] = [];
+
+  for (const line of headerLines) {
+    const parts = line.trim().split(/\s+/);
+    if (parts[0] === 'format') {
+      format = parts[1];
+    } else if (parts[0] === 'element') {
+      if (parts[1] === 'vertex') {
+        currentElement = 'vertex';
+        vertexCount = parseInt(parts[2], 10);
+      } else if (parts[1] === 'face') {
+        currentElement = 'face';
+        faceCount = parseInt(parts[2], 10);
+      } else {
+        currentElement = 'other';
+      }
+    } else if (parts[0] === 'property' && currentElement === 'vertex') {
+      // last token is the property name (e.g. `property float x`)
+      vertexProps.push(parts[parts.length - 1]);
+    }
+  }
+
+  if (format !== 'ascii') {
+    throw new Error('Binary PLY meshes must be imported from a file path (drag the file in or use the file picker), not from this source.');
+  }
+  if (vertexCount === 0) throw new Error('No vertices found in PLY file');
+  if (faceCount === 0) throw new Error('No faces found in PLY file (this PLY is a point cloud, not a mesh).');
+
+  const xIdx = vertexProps.indexOf('x');
+  const yIdx = vertexProps.indexOf('y');
+  const zIdx = vertexProps.indexOf('z');
+  if (xIdx === -1 || yIdx === -1 || zIdx === -1) {
+    throw new Error('PLY mesh must have x, y, z vertex properties');
+  }
+  const rIdx = vertexProps.findIndex(p => p === 'red' || p === 'r');
+  const gIdx = vertexProps.findIndex(p => p === 'green' || p === 'g');
+  const bIdx = vertexProps.findIndex(p => p === 'blue' || p === 'b');
+  const hasColor = rIdx !== -1 && gIdx !== -1 && bIdx !== -1;
+
+  const dataStart = headerEnd + 'end_header'.length + 1;
+  const dataLines = text.substring(dataStart).split('\n');
+
+  const vertices = new Float32Array(vertexCount * 3);
+  const vertexColors = hasColor ? new Float32Array(vertexCount * 3) : undefined;
+
+  let cursor = 0;
+  // Skip leading blank lines, then read exactly vertexCount vertex rows.
+  for (let v = 0; v < vertexCount; ) {
+    if (cursor >= dataLines.length) throw new Error('PLY mesh truncated: not enough vertex rows');
+    const row = dataLines[cursor++].trim();
+    if (!row) continue;
+    const values = row.split(/\s+/).map(Number);
+    vertices[v * 3] = values[xIdx];
+    vertices[v * 3 + 1] = values[yIdx];
+    vertices[v * 3 + 2] = values[zIdx];
+    if (vertexColors) {
+      const r = values[rIdx];
+      const g = values[gIdx];
+      const b = values[bIdx];
+      const scale = r > 1 || g > 1 || b > 1 ? 1 / 255 : 1;
+      vertexColors[v * 3] = r * scale;
+      vertexColors[v * 3 + 1] = g * scale;
+      vertexColors[v * 3 + 2] = b * scale;
+    }
+    v++;
+  }
+
+  // Each face row is `<n> i0 i1 ... i(n-1)`; fan-triangulate n-gons.
+  const faces: number[][] = [];
+  for (let fRead = 0; fRead < faceCount; ) {
+    if (cursor >= dataLines.length) throw new Error('PLY mesh truncated: not enough face rows');
+    const row = dataLines[cursor++].trim();
+    if (!row) continue;
+    const tokens = row.split(/\s+/).map(Number);
+    const n = tokens[0];
+    if (!Number.isFinite(n) || n < 3) { fRead++; continue; }
+    const idx = tokens.slice(1, 1 + n);
+    for (let i = 1; i < idx.length - 1; i++) {
+      faces.push([idx[0], idx[i], idx[i + 1]]);
+    }
+    fRead++;
+  }
+
+  if (faces.length === 0) throw new Error('No triangles found in PLY mesh');
+
+  const indices = new Uint32Array(faces.length * 3);
+  for (let i = 0; i < faces.length; i++) {
+    indices[i * 3] = faces[i][0];
+    indices[i * 3 + 1] = faces[i][1];
+    indices[i * 3 + 2] = faces[i][2];
+  }
+
+  const result: ParsedMesh = {
+    vertices,
+    indices,
+    vertexCount,
+    triangleCount: faces.length,
+    fileName: file.name,
+  };
+  if (vertexColors) result.vertexColors = vertexColors;
+  return result;
+}
+
 // Auto-detect mesh format and parse
 export async function parseMesh(file: File): Promise<ParsedMesh> {
   const ext = file.name.toLowerCase().split('.').pop();
@@ -1142,8 +1304,10 @@ export async function parseMesh(file: File): Promise<ParsedMesh> {
       return parseOBJMesh(file);
     case 'stl':
       return parseSTLMesh(file);
+    case 'ply':
+      return parsePLYMesh(file);
     default:
-      throw new Error(`Unsupported mesh format: .${ext}. Supported: OBJ, STL`);
+      throw new Error(`Unsupported mesh format: .${ext}. Supported: OBJ, STL, PLY`);
   }
 }
 

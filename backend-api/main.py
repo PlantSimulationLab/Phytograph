@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.3.21"
+BACKEND_VERSION = "0.6.0"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1968,8 +1968,8 @@ class HeliosScanEntry(BaseModel):
     beam_divergence: Optional[float] = None      # milliradians (multi-return only)
     # LAD point-data source (consumed by _do_lad_computation, ignored by
     # triangulation). A session-backed cloud passes `session_id`: the LAD path
-    # dumps its surviving in-RAM points — including the per-pulse multi-return
-    # columns when present — via _session_to_lad_ascii, honoring unbaked
+    # feeds its surviving in-RAM points — including the per-pulse multi-return
+    # columns when present — via _session_to_lad_arrays, honoring unbaked
     # deletions and never re-reading the source. A synthetic (flat, in-RAM)
     # cloud has no file or session, so it passes `points` plus, for
     # multi-return, the aligned per-pulse columns in `scalar_columns` (a dict of
@@ -2235,7 +2235,7 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
 
     tmpdir = None
     try:
-        from pyhelios import LiDARCloud, Context
+        from pyhelios import LiDARCloud
 
         tmpdir = tempfile.mkdtemp(prefix="phytograph_helios_")
 
@@ -2323,9 +2323,10 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
                 bb_hi = np.maximum(bb_hi, pts_arr_scan[:, :3].max(axis=0))
 
                 pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
-                with open(pts_path, "w") as f:
-                    for pt in points:
-                        f.write(f"{pt[0]} {pt[1]} {pt[2]}\n")
+                # Bulk-serialize x y z (np.savetxt) rather than a per-point
+                # Python write loop. Points-mode is the small-cloud fallback;
+                # large scans use file_path, which pyhelios reads directly.
+                np.savetxt(pts_path, pts_arr_scan[:, :3], fmt="%.6g", delimiter=" ")
 
                 theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
                 n_theta, n_phi = _resolution(
@@ -2371,12 +2372,12 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
         # (it groups hit points by scanID before the Delaunay pass), so running
         # one LiDARCloud per scan yields the same triangles as a single merged
         # cloud — it just makes the provenance explicit, which a merged run
-        # discards at the Context boundary. Vertices are deduplicated globally
-        # so shared geometry between scans still collapses.
-        vertex_map = {}       # (rx, ry, rz) -> index
-        unique_vertices = []  # deduplicated vertex list
-        triangles_list = []
-        triangle_scan_ids = []
+        # discards at the Context boundary. Triangle vertices are pulled in ONE
+        # bulk FFI call per scan (getTriangleVerticesAll) instead of a per-UUID
+        # Context loop, then deduplicated globally in numpy so shared geometry
+        # between scans still collapses.
+        scan_vert_blocks = []   # list of (T_s*9,) float32 flat-vertex arrays
+        scan_id_blocks = []     # list of (T_s,) per-triangle source scan index
 
         for scan_idx, scan_info in enumerate(scans_info):
             xml_path = _generate_helios_xml(
@@ -2389,26 +2390,15 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
             cloud.disableMessages()
             cloud.loadXML(xml_path)
             cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
-            if cloud.getTriangleCount() == 0:
+            tri_count = cloud.getTriangleCount()
+            if tri_count == 0:
                 continue
 
-            with Context() as ctx:
-                cloud.addTrianglesToContext(ctx)
-                for uuid in ctx.getAllUUIDs():
-                    tri_verts = ctx.getPrimitiveVertices(uuid)
-                    if len(tri_verts) != 3:
-                        continue
-                    tri_indices = []
-                    for v in tri_verts:
-                        key = (round(v.x, 5), round(v.y, 5), round(v.z, 5))
-                        if key not in vertex_map:
-                            vertex_map[key] = len(unique_vertices)
-                            unique_vertices.append([key[0], key[1], key[2]])
-                        tri_indices.append(vertex_map[key])
-                    triangles_list.append(tri_indices)
-                    triangle_scan_ids.append(scan_idx)
+            flat, _ = cloud.getTriangleVerticesAll()
+            scan_vert_blocks.append(flat)
+            scan_id_blocks.append(np.full(tri_count, scan_idx, dtype=np.int64))
 
-        if not triangles_list:
+        if not scan_vert_blocks:
             return {
                 "success": True,
                 "vertices": [],
@@ -2421,12 +2411,23 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
                 "grid_message": grid_message,
             }
 
-        # Calculate surface area from deduplicated data
-        verts_arr = np.array(unique_vertices)
-        tris_arr = np.array(triangles_list)
-        v0 = verts_arr[tris_arr[:, 0]]
-        v1 = verts_arr[tris_arr[:, 1]]
-        v2 = verts_arr[tris_arr[:, 2]]
+        # Dedup vertices in numpy. Round to 5 dp first to match the old hash-dedup
+        # (100 µm), so shared edges/vertices collapse to one index. np.unique
+        # returns the inverse map, which becomes the (T,3) triangle index list.
+        all_verts = np.concatenate(scan_vert_blocks).reshape(-1, 3)
+        triangle_scan_ids = np.concatenate(scan_id_blocks).tolist()
+        rounded = np.round(all_verts, 5)
+        unique_arr, inverse = np.unique(rounded, axis=0, return_inverse=True)
+        # ravel() guards against numpy versions that return inverse as (N,1).
+        triangles_arr = inverse.ravel().reshape(-1, 3)
+
+        unique_vertices = unique_arr.tolist()
+        triangles_list = triangles_arr.tolist()
+
+        # Surface area from deduplicated data.
+        v0 = unique_arr[triangles_arr[:, 0]]
+        v1 = unique_arr[triangles_arr[:, 1]]
+        v2 = unique_arr[triangles_arr[:, 2]]
         total_area = float(0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1).sum())
 
         return {
@@ -2506,39 +2507,202 @@ async def helios_triangulate(request: HeliosTriangulationRequest):
 _LAD_MULTI_RETURN_COLUMNS = ("timestamp", "target_index", "target_count")
 
 
-def _write_lad_points_ascii(out_path: str, points: list,
-                            scalar_columns: Optional[dict]) -> tuple:
-    """Write inline LAD points to a Helios-ready ASCII file. Returns
-    (ascii_format, is_multi).
+def _directions_from_origin(xyz: "np.ndarray", origin) -> "np.ndarray":
+    """Reconstruct per-hit ray directions as Helios's loadASCIIFile does when a
+    scan has no zenith/azimuth columns: cart2sphere(xyz - origin).
 
-    Used for a flat in-RAM cloud that has no session or source file — e.g. a
-    synthetic full-waveform scan, whose per-pulse columns arrive in
-    `scalar_columns` (column-name -> per-point values, aligned 1:1 with
-    `points`). When all three multi-return columns are present and aligned, they
-    are appended after x y z so Helios runs the multi-return algorithm; otherwise
-    only x y z is written (single-return).
+    Returns (N,3) float32 [radius, elevation, azimuth] matching helios
+    cart2sphere (global.cpp): radius = ||d||, elevation = asin(dz/radius),
+    azimuth = atan2_2pi(dx, dy) which equals np.arctan2(dx, dy) (x first, y
+    second; signed, no 2*pi wrap). Verified against getHitRaydir to ~1e-7.
     """
     import numpy as np
 
-    pts = np.asarray(points, dtype=float)
-    if pts.ndim != 2 or pts.shape[1] < 3:
-        raise ValueError("LAD points must be an (N, >=3) array")
-    n = pts.shape[0]
+    d = np.asarray(xyz, dtype=np.float64) - np.asarray(origin, dtype=np.float64)
+    r = np.linalg.norm(d, axis=1)
+    rs = np.where(r > 0, r, 1.0)
+    elevation = np.arcsin(np.clip(d[:, 2] / rs, -1.0, 1.0))
+    azimuth = np.arctan2(d[:, 0], d[:, 1])
+    return np.column_stack([r, elevation, azimuth]).astype(np.float32)
 
-    cols = [pts[:, 0], pts[:, 1], pts[:, 2]]
-    tokens = ["x", "y", "z"]
-    is_multi = False
-    if scalar_columns and all(
-        c in scalar_columns and len(scalar_columns[c]) == n
-        for c in _LAD_MULTI_RETURN_COLUMNS
-    ):
+
+def _cull_to_grid(xyz: "np.ndarray", origin, grid_center, grid_size,
+                  expand: float = 0.05) -> "np.ndarray":
+    """Boolean keep-mask for points whose beam (origin -> point) can pass through
+    the grid's (expanded) AABB.
+
+    LAD needs through-grid MISS rays for Beer's law, so cull by "segment
+    origin->point intersects the grid AABB", NOT "point is inside the grid": a
+    far miss whose beam grazes the small grid still contributes transmittance and
+    must be kept. Slab test over t in [0, 1]; axis-parallel beams (d==0) are kept
+    only if the origin already lies within that axis's slab. `expand` adds a
+    small margin so beams grazing the grid face (finite footprint) aren't dropped.
+    """
+    import numpy as np
+
+    o = np.asarray(origin, dtype=np.float64)
+    half = np.asarray(grid_size, dtype=np.float64) / 2.0 + expand
+    lo = np.asarray(grid_center, dtype=np.float64) - half
+    hi = np.asarray(grid_center, dtype=np.float64) + half
+
+    d = np.asarray(xyz, dtype=np.float64) - o  # segment vector (length = range)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t1 = (lo - o) / d
+        t2 = (hi - o) / d
+    tmin = np.nanmax(np.minimum(t1, t2), axis=1)
+    tmax = np.nanmin(np.maximum(t1, t2), axis=1)
+
+    # Axis-parallel beams: d==0 on an axis -> only inside that slab if the origin
+    # is within [lo, hi] on it. Otherwise the beam can never enter the box.
+    par = d == 0.0
+    origin_in = (o >= lo) & (o <= hi)
+    bad_par = np.any(par & ~origin_in, axis=1)
+
+    keep = (tmax >= np.maximum(tmin, 0.0)) & (tmin <= 1.0) & ~bad_par
+    return keep
+
+
+# Flags a LAD array-builder reports back about the resolved scan data, so
+# `_do_lad_computation` can decide whether to gapfill (timestamp present, no
+# misses yet), whether the cloud already carries miss points (skip gapfill), and
+# whether to warn that the inversion will be inaccurate (no misses, no timestamp).
+def _lad_flags(has_timestamp: bool, is_multi: bool, has_misses: bool) -> dict:
+    return {"has_timestamp": has_timestamp, "multi": is_multi, "has_misses": has_misses}
+
+
+def _lad_labels_vals(column_getter, n: int):
+    """Assemble the (labels, vals, flags) a LAD builder feeds Helios.
+
+    `column_getter(slug)` returns the aligned (N,) float array for a slug or None.
+    Always include `timestamp` when present (gapfillMisses() needs only it);
+    include target_index/target_count too when ALL three exist (full multi-return
+    path).
+
+    `is_miss` is forwarded to Helios as a per-hit data value (0.0 = return,
+    1.0 = miss) whenever the cloud carries the column AT ALL — not only when a
+    miss is currently flagged. This is the canonical convention the C++
+    `calculateLeafArea` fail-fast check reads to refuse a cloud with no sky/miss
+    rays, so every return must arrive explicitly tagged 0.0 rather than relying on
+    the label's absence. A cloud with no `is_miss` column (e.g. plain XYZ) does
+    NOT get a synthesised one — those recover misses via gapfillMisses(), which
+    sets the same flag C++-side. Returns labels (list[str]), vals ((N,k)|None),
+    flags (see `_lad_flags`).
+    """
+    import numpy as np
+
+    ts = column_getter('timestamp')
+    has_timestamp = ts is not None
+    is_multi = has_timestamp and all(
+        column_getter(c) is not None for c in ('target_index', 'target_count'))
+    miss = column_getter(_MISS_SLUG)
+    has_miss_column = miss is not None
+    has_misses = has_miss_column and bool(np.any(np.asarray(miss) != 0))
+
+    labels: List[str] = []
+    cols: list = []
+    if is_multi:
         for c in _LAD_MULTI_RETURN_COLUMNS:
-            cols.append(np.asarray(scalar_columns[c], dtype=float))
-            tokens.append(c)
-        is_multi = True
+            labels.append(c)
+            cols.append(np.asarray(column_getter(c), dtype=np.float64))
+    elif has_timestamp:
+        labels.append('timestamp')
+        cols.append(np.asarray(ts, dtype=np.float64))
+    # Forward is_miss for every hit whenever the column exists, so returns carry
+    # an explicit 0.0 and the C++ check can count misses by flag, not geometry.
+    if has_miss_column:
+        labels.append(_MISS_SLUG)
+        cols.append(np.asarray(miss, dtype=np.float64))
 
-    np.savetxt(out_path, np.column_stack(cols), fmt="%.6g", delimiter=" ")
-    return " ".join(tokens), is_multi
+    vals = np.column_stack(cols).astype(np.float64) if cols else None
+    return labels, vals, _lad_flags(has_timestamp, is_multi, has_misses)
+
+
+def _session_to_lad_arrays(sess: "CloudSession", origin):
+    """Surviving session points as in-RAM arrays for the LAD path — no disk, no
+    source-file read.
+
+    Returns (xyz float64 (N,3), dirs float32 (N,3), labels list[str],
+    vals float64 (N,k)|None, flags). Honors ~sess.deleted. `flags` (see
+    `_lad_flags`) tells the caller whether to gapfill / warn.
+    """
+    import numpy as np
+
+    keep = ~sess.deleted
+    xyz = np.ascontiguousarray(sess.positions[keep], dtype=np.float64)
+    dirs = _directions_from_origin(xyz, origin)
+
+    def _get(slug):
+        return sess.extras[slug][keep] if slug in sess.extras else None
+
+    labels, vals, flags = _lad_labels_vals(_get, xyz.shape[0])
+    return xyz, dirs, labels, vals, flags
+
+
+def _inline_to_lad_arrays(points: list, scalar_columns: Optional[dict], origin):
+    """Inline synthetic points (+ aligned scalar_columns) as LAD arrays. Same
+    contract as _session_to_lad_arrays.
+    """
+    import numpy as np
+
+    xyz = np.asarray(points, dtype=np.float64)
+    if xyz.ndim != 2 or xyz.shape[1] < 3:
+        raise ValueError("LAD points must be an (N, >=3) array")
+    xyz = np.ascontiguousarray(xyz[:, :3])
+    n = xyz.shape[0]
+    dirs = _directions_from_origin(xyz, origin)
+
+    def _get(slug):
+        if scalar_columns and slug in scalar_columns and len(scalar_columns[slug]) == n:
+            return np.asarray(scalar_columns[slug])
+        return None
+
+    labels, vals, flags = _lad_labels_vals(_get, n)
+    return xyz, dirs, labels, vals, flags
+
+
+def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
+    """Legacy fallback: read an ASCII scan file once into LAD arrays (used only
+    when a scan has neither a live session nor inline points — e.g. a stale
+    session id that fell back to the source file). Locates x/y/z plus any
+    timestamp/target/miss columns via the format string; never re-read after this.
+    """
+    import numpy as np
+
+    fmt = ascii_format or _detect_ascii_format(file_path)
+    tokens = fmt.split()
+    xi, yi, zi = _xyz_column_indices(fmt)
+    # Locate every per-pulse / miss column the format declares.
+    wanted = list(_LAD_MULTI_RETURN_COLUMNS) + [_MISS_SLUG]
+    col_idx = {c: tokens.index(c) for c in wanted if c in tokens}
+
+    rows = []
+    extra_rows: dict = {c: [] for c in col_idx}
+    need = max([xi, yi, zi] + list(col_idx.values())) + 1
+    with open(file_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line[0] in "#/":
+                continue
+            cols = line.split()
+            if len(cols) < need:
+                continue
+            try:
+                vals_xyz = (float(cols[xi]), float(cols[yi]), float(cols[zi]))
+                parsed = {c: float(cols[col_idx[c]]) for c in col_idx}
+            except (ValueError, IndexError):
+                continue
+            rows.append(vals_xyz)
+            for c in col_idx:
+                extra_rows[c].append(parsed[c])
+
+    xyz = np.asarray(rows, dtype=np.float64) if rows else np.empty((0, 3), np.float64)
+    dirs = _directions_from_origin(xyz, origin)
+
+    def _get(slug):
+        return np.asarray(extra_rows[slug], dtype=np.float64) if slug in col_idx else None
+
+    labels, vals, flags = _lad_labels_vals(_get, xyz.shape[0])
+    return xyz, dirs, labels, vals, flags
 
 
 def _do_lad_computation(request: "LADComputeRequest") -> dict:
@@ -2549,28 +2713,25 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
     traces beam paths through the voxel grid and inverts Beer's law per voxel to
     recover leaf area density. Unlike triangulation, the grid is required.
 
-    Point data is fed to Helios via the file/XML path (not the numpy bulk
-    addHitPoints API), because only the ASCII loader populates the per-hit data
-    map (timestamp/target_index/target_count) that single-vs-multi-return
-    detection and gap-filling depend on. All scans share ONE LiDARcloud and ONE
-    grid, since beam tracing and Beer's-law inversion are per-voxel over the
-    whole grid.
+    Point data is fed to Helios straight from the in-RAM session arrays via the
+    bulk addHitPointsWithData FFI — no ASCII file, no disk round-trip — for both
+    single- and multi-return (the data map carries timestamp/target_index/
+    target_count so isMultiReturnData()/gapfillMisses() work). Points are first
+    culled to the grid's beam frustum, then ray directions are reconstructed as
+    cart2sphere(xyz - origin) to match the old loadASCIIFile path. All scans
+    share ONE LiDARcloud and ONE grid, since beam tracing and Beer's-law
+    inversion are per-voxel over the whole grid.
     """
     import math
-    import tempfile
-    import shutil
     import os
     import numpy as np
 
     warnings: List[str] = []
-    tmpdir = None
     try:
         from pyhelios import LiDARCloud, Context
 
         if request.grid is None:
             raise ValueError("A voxel grid is required for leaf area density.")
-
-        tmpdir = tempfile.mkdtemp(prefix="phytograph_lad_")
 
         # Per-scan angular geometry / resolution: prefer the scan's own values,
         # fall back to request-level (mirrors _do_helios_computation).
@@ -2590,25 +2751,29 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
             n_theta = max(int(n_points / n_phi), 10)
             return n_theta, n_phi
 
-        # Each scan resolves to (ASCII file, format, point count). Multi-return is
-        # detected AUTHORITATIVELY from whether that resolved data actually
-        # carries the three per-pulse columns — never from the `return_type`
-        # label alone, which can't promise the columns are present. The data
-        # comes from one of three sources, in priority order:
-        #   1. session_id  -> _session_to_lad_ascii dumps surviving in-RAM points
-        #      (+ multi-return columns when the session holds them), honoring
-        #      unbaked deletions and never re-reading the source file.
+        grid_center = list(request.grid.center)
+        grid_size = list(request.grid.size)
+        grid_nx, grid_ny, grid_nz = request.grid.nx, request.grid.ny, request.grid.nz
+
+        # Each scan resolves to in-RAM arrays (xyz + ray directions + an optional
+        # multi-return data map). Multi-return is detected AUTHORITATIVELY from
+        # whether the resolved data actually carries the three per-pulse columns —
+        # never from the `return_type` label alone. Source priority:
+        #   1. session_id  -> surviving in-RAM points (+ multi-return columns when
+        #      the session holds them), honoring unbaked deletions, never
+        #      re-reading the source file.
         #   2. points (+ scalar_columns) -> a flat in-RAM cloud (e.g. a synthetic
-        #      full-waveform scan) writes x y z plus any aligned per-pulse columns.
-        #   3. file_path -> read the ASCII file from disk with its column format.
-        scans_info = []
+        #      full-waveform scan).
+        #   3. file_path -> read the ASCII file from disk once (legacy fallback).
+        # Points are then culled to the grid's beam frustum before ingest.
+        scans_arrays = []
+        scan_xyz_for_counts = []
         for scan_entry in request.scans:
             origin = scan_entry.origin
             if len(origin) != 3:
                 raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
 
             theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
-            fp = os.path.join(tmpdir, f"lad_scan_{len(scans_info)}.txt")
 
             # Resolve the live session if one was requested. A session is an
             # in-memory object that does NOT survive a backend restart, so the
@@ -2636,22 +2801,35 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
 
             if sess is not None:
                 with _cloud_session_lock:
-                    fmt, scan_multi = _session_to_lad_ascii(sess, _Path(fp))
-                n_points, _, _ = _file_xyz_bounds(fp, fmt)
+                    xyz, dirs, labels, vals, scan_flags = _session_to_lad_arrays(sess, origin)
+            elif scan_entry.points:
+                xyz, dirs, labels, vals, scan_flags = _inline_to_lad_arrays(
+                    scan_entry.points, scan_entry.scalar_columns, origin)
             elif scan_entry.file_path:
-                fp = scan_entry.file_path
-                if not os.path.isfile(fp):
-                    raise ValueError(f"Scan file not found: {fp}")
-                fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
-                n_points, _, _ = _file_xyz_bounds(fp, fmt)
-                scan_multi = all(c in fmt.split() for c in _LAD_MULTI_RETURN_COLUMNS)
+                if not os.path.isfile(scan_entry.file_path):
+                    raise ValueError(f"Scan file not found: {scan_entry.file_path}")
+                xyz, dirs, labels, vals, scan_flags = _file_to_lad_arrays(
+                    scan_entry.file_path, scan_entry.ascii_format, origin)
             else:
-                points = scan_entry.points
-                if not points:
-                    raise ValueError("Scan entry has no points, file_path, or session_id")
-                fmt, scan_multi = _write_lad_points_ascii(
-                    fp, points, scan_entry.scalar_columns)
-                n_points = len(points)
+                raise ValueError("Scan entry has no points, file_path, or session_id")
+            scan_multi = scan_flags["multi"]
+
+            # Cull to the grid's beam frustum: keep only beams (origin -> point)
+            # whose segment can pass through the grid AABB. This preserves
+            # through-grid miss rays (Beer's law) while dropping far-field points
+            # whose beams never touch the grid — the biggest win for a localized
+            # grid in a large scene.
+            n_before = xyz.shape[0]
+            keep = _cull_to_grid(xyz, origin, grid_center, grid_size)
+            if not keep.all():
+                xyz = xyz[keep]
+                dirs = dirs[keep]
+                if vals is not None:
+                    vals = vals[keep]
+            n_after = xyz.shape[0]
+            if n_after < n_before:
+                print(f"[lad] grid cull: kept {n_after}/{n_before} points "
+                      f"({100.0 * n_after / max(n_before, 1):.1f}%)", flush=True)
 
             # A scan flagged multi-return whose resolved data lacks the per-pulse
             # columns can't run the full-waveform algorithm (gapfillMisses() would
@@ -2664,13 +2842,36 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
                     "for full-waveform LAD."
                 )
 
-            n_theta, n_phi = _resolution(
-                scan_entry, n_points, theta_max - theta_min, phi_max - phi_min)
+            # Miss accounting drives LAD accuracy. A scan is in good shape if it
+            # already carries miss points (E57 / structured PLY) OR it has a
+            # timestamp column we can gapfill from. With neither, the inversion
+            # can't see the gaps and is likely inaccurate — warn loudly.
+            scan_label = (getattr(scan_entry, 'label', None)
+                          or os.path.basename(scan_entry.file_path or '')
+                          or 'this scan')
+            if not scan_flags["has_misses"] and not scan_flags["has_timestamp"]:
+                warnings.append(
+                    f"Scan '{scan_label}' has no sky/miss points and no timestamp "
+                    "column, so LAD cannot account for beams that hit the sky and is "
+                    "likely to be inaccurate. Re-import a scan that carries miss "
+                    "points (E57 / structured PLY) or a timestamp column so misses "
+                    "can be recovered by gapfilling."
+                )
 
-            scans_info.append({
-                "filepath": fp,
-                "ascii_format": fmt,
+            # Ntheta/Nphi describe the scanner's angular raster, not the surviving
+            # points — so estimate from the PRE-cull count when the scan doesn't
+            # carry explicit values. The LAD inversion is very sensitive to this
+            # resolution (it sets the beam raster the Beer's-law path lengths are
+            # traced over), so culling must not shrink it.
+            n_theta, n_phi = _resolution(
+                scan_entry, n_before, theta_max - theta_min, phi_max - phi_min)
+
+            scans_arrays.append({
                 "origin": origin,
+                "xyz": xyz,
+                "dirs": dirs,
+                "labels": labels,
+                "vals": vals,
                 "n_theta": n_theta,
                 "n_phi": n_phi,
                 "theta_min": theta_min,
@@ -2678,24 +2879,44 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
                 "phi_min": phi_min,
                 "phi_max": phi_max,
                 "multi": scan_multi,
+                "has_timestamp": scan_flags["has_timestamp"],
+                "has_misses": scan_flags["has_misses"],
             })
+            scan_xyz_for_counts.append(xyz)
 
-        is_multi = any(s["multi"] for s in scans_info)
+        is_multi = any(s["multi"] for s in scans_arrays)
         return_mode = "multi" if is_multi else "single"
+        # Gapfill recovers miss points from timestamp gaps. Run it when ANY scan
+        # carries a timestamp but does NOT already have miss points — this widens
+        # the old multi-return-only trigger to single-return timestamped scans.
+        # Skip entirely when misses are already present (E57/structured PLY), so
+        # we don't synthesise duplicates on top of real misses.
+        any_has_misses = any(s["has_misses"] for s in scans_arrays)
+        can_gapfill = any(s["has_timestamp"] for s in scans_arrays)
+        do_gapfill = can_gapfill and not any_has_misses
 
-        grid_center = list(request.grid.center)
-        grid_size = list(request.grid.size)
-        grid_nx, grid_ny, grid_nz = request.grid.nx, request.grid.ny, request.grid.nz
-
-        # One XML with all scans + the grid, then one cloud for the whole thing.
-        xml_path = _generate_helios_xml(
-            tmpdir, scans_info, grid_center, grid_size,
-            grid_nx, grid_ny, grid_nz, xml_name="lad_config.xml",
-        )
-
+        # Build the cloud entirely in RAM: one scan + bulk hit ingest per scan,
+        # then the grid — no XML, no ASCII file. addScan takes radians; our
+        # angles are degrees. Beam divergence is supplied in milliradians.
         cloud = LiDARCloud()
         cloud.disableMessages()
-        cloud.loadXML(xml_path)
+        for entry, scan_entry in zip(scans_arrays, request.scans):
+            sid = cloud.addScan(
+                origin=entry["origin"],
+                Ntheta=entry["n_theta"],
+                theta_range=(math.radians(entry["theta_min"]), math.radians(entry["theta_max"])),
+                Nphi=entry["n_phi"],
+                phi_range=(math.radians(entry["phi_min"]), math.radians(entry["phi_max"])),
+                exit_diameter=(scan_entry.beam_exit_diameter or 0.0),
+                beam_divergence=((scan_entry.beam_divergence or 0.0) / 1000.0),
+            )
+            if entry["xyz"].shape[0] > 0:
+                cloud.addHitPointsWithData(
+                    sid, entry["xyz"], entry["dirs"],
+                    entry["labels"], entry["vals"])
+        cloud.addGrid(center=grid_center, size=grid_size,
+                      ndiv=[grid_nx, grid_ny, grid_nz])
+
         cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
         if cloud.getTriangleCount() == 0:
             return {
@@ -2707,10 +2928,25 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
                 "warnings": warnings,
             }
 
-        if is_multi:
-            # Required before calculateLeafArea for multi-return data so misses
-            # are accounted for in the transmission probability.
+        recovered_misses = 0
+        if do_gapfill:
+            # Recover sky/miss points from timestamp gaps so they're accounted for
+            # in the Beer's-law transmission probability. gapfillMisses() needs
+            # only a per-hit timestamp (target_index/target_count optional), so
+            # this works for single-return timestamped scans too — not just
+            # full-waveform data. Synthesised misses are tagged in-cloud with
+            # gapfillMisses_code == 1.0; count them to report back to the user.
             cloud.gapfillMisses()
+            try:
+                codes = cloud.getHitDataAll("gapfillMisses_code")
+                recovered_misses = int(sum(1 for c in codes if c and c == c and c >= 1.0))
+            except Exception:
+                recovered_misses = 0
+            if recovered_misses > 0:
+                warnings.append(
+                    f"Recovered {recovered_misses} sky/miss point(s) via gapfilling "
+                    "(no miss points were present, but a timestamp column was)."
+                )
 
         with Context() as ctx:
             cloud.calculateLeafArea(ctx, request.min_voxel_hits)
@@ -2720,7 +2956,7 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
         n_cells = cloud.getGridCellCount()
         cell_centers = [cloud.getCellCenter(i) for i in range(n_cells)]
         cell_sizes = [cloud.getCellSize(i) for i in range(n_cells)]
-        hit_counts = _count_points_per_cell(scans_info, cell_centers, cell_sizes)
+        hit_counts = _count_points_per_cell(scan_xyz_for_counts, cell_centers, cell_sizes)
 
         cells = []
         total_leaf_area = 0.0
@@ -2764,6 +3000,8 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
             "is_multi_return": is_multi,
             "return_mode": return_mode,
             "total_leaf_area": total_leaf_area,
+            "gapfilled_misses": recovered_misses,
+            "had_miss_points": any_has_misses,
             "method_used": "helios",
             "warnings": warnings,
         }
@@ -2786,15 +3024,12 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
             "error": f"Leaf area density computation failed: {str(e)}",
             "warnings": warnings,
         }
-    finally:
-        if tmpdir and os.path.isdir(tmpdir):
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _count_points_per_cell(scans_info: list, cell_centers: list, cell_sizes: list):
+def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: list):
     """Count how many scan points fall inside each voxel (axis-aligned cells).
 
-    Streams each scan file once (positions only) and bins by the grid's regular
+    Bins the in-RAM (N,3) position arrays (one per scan) by the grid's regular
     structure inferred from the cell centers/sizes. Used only to populate the
     per-voxel `hit_count` for the UI — not part of the LAD math.
     """
@@ -2812,39 +3047,33 @@ def _count_points_per_cell(scans_info: list, cell_centers: list, cell_sizes: lis
     grid_lo = (centers - sizes / 2).min(axis=0)
     grid_hi = (centers + sizes / 2).max(axis=0)
     step = sizes[0]  # cells are uniform within a Helios grid
-    nper = np.maximum(np.round((grid_hi - grid_lo) / np.where(step > 0, step, 1)).astype(int), 1)
+    safe_step = np.where(step > 0, step, 1)
+    nper = np.maximum(np.round((grid_hi - grid_lo) / safe_step).astype(int), 1)
 
     # Map each cell's (i,j,k) to its index, matching however Helios ordered them.
-    cell_ijk = np.floor((centers - grid_lo) / np.where(step > 0, step, 1)).astype(int)
-    cell_ijk = np.clip(cell_ijk, 0, nper - 1)
-    ijk_to_index = {}
-    for idx in range(n_cells):
-        ijk_to_index[(cell_ijk[idx, 0], cell_ijk[idx, 1], cell_ijk[idx, 2])] = idx
+    cell_ijk = np.clip(
+        np.floor((centers - grid_lo) / safe_step).astype(int), 0, nper - 1)
+    ijk_to_index = {
+        (cell_ijk[idx, 0], cell_ijk[idx, 1], cell_ijk[idx, 2]): idx
+        for idx in range(n_cells)
+    }
+    # Flat (i,j,k) -> cell index lookup table, vectorized over all points.
+    lut = np.full((nper[0], nper[1], nper[2]), -1, dtype=np.int64)
+    for (i, j, k), idx in ijk_to_index.items():
+        lut[i, j, k] = idx
 
-    for scan in scans_info:
-        fp = scan["filepath"]
-        fmt = scan["ascii_format"]
-        xi, yi, zi = _xyz_column_indices(fmt)
-        try:
-            with open(fp) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#') or line.startswith('//'):
-                        continue
-                    cols = line.split()
-                    try:
-                        x, y, z = float(cols[xi]), float(cols[yi]), float(cols[zi])
-                    except (ValueError, IndexError):
-                        continue
-                    p = np.array([x, y, z])
-                    ijk = np.floor((p - grid_lo) / np.where(step > 0, step, 1)).astype(int)
-                    if np.any(ijk < 0) or np.any(ijk >= nper):
-                        continue
-                    idx = ijk_to_index.get((int(ijk[0]), int(ijk[1]), int(ijk[2])))
-                    if idx is not None:
-                        counts[idx] += 1
-        except OSError:
+    for xyz in scan_xyz_list:
+        xyz = np.asarray(xyz, dtype=np.float64)
+        if xyz.size == 0:
             continue
+        ijk = np.floor((xyz - grid_lo) / safe_step).astype(int)
+        inside = np.all((ijk >= 0) & (ijk < nper), axis=1)
+        ijk = ijk[inside]
+        if ijk.size == 0:
+            continue
+        cell_idx = lut[ijk[:, 0], ijk[:, 1], ijk[:, 2]]
+        cell_idx = cell_idx[cell_idx >= 0]
+        np.add.at(counts, cell_idx, 1)
 
     return counts
 
@@ -6373,6 +6602,56 @@ def _parse_mtl(mtl_path: Path) -> Dict[str, dict]:
     return materials
 
 
+def _import_ply_mesh(ply_path: Path) -> MeshImportResponse:
+    """Read a polygon-mesh PLY (ASCII or binary) into MeshImportResponse geometry.
+
+    PLY is an ambiguous container — it may hold a point cloud (vertices only) or a
+    polygon mesh (vertices + faces). The caller has already decided this is a mesh
+    (the frontend sniffs the header for `element face`); here we require triangles
+    and reject a vertices-only PLY. open3d's read_triangle_mesh transparently
+    handles ascii / binary_little_endian / binary_big_endian. PLY meshes carry no
+    MTL or textures, so the textured fields stay empty."""
+    import open3d as o3d
+
+    try:
+        mesh = o3d.io.read_triangle_mesh(str(ply_path))
+    except Exception as e:  # noqa: BLE001 - surface a clean 400
+        raise HTTPException(status_code=400, detail=f"Failed to read PLY mesh: {e}")
+
+    triangles = np.asarray(mesh.triangles)
+    if triangles.size == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No faces found in PLY mesh (file appears to be a point cloud).",
+        )
+
+    if not mesh.has_vertex_normals():
+        mesh.compute_vertex_normals()
+
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    normals = np.asarray(mesh.vertex_normals, dtype=float)
+    colors_arr = np.asarray(mesh.vertex_colors, dtype=float)  # 0-1, per vertex
+
+    out_colors = colors_arr.tolist() if colors_arr.shape[0] == vertices.shape[0] else None
+    out_normals = normals.tolist() if normals.shape[0] == vertices.shape[0] else None
+
+    return MeshImportResponse(
+        success=True,
+        vertices=vertices.tolist(),
+        indices=triangles.tolist(),
+        normals=out_normals,
+        colors=out_colors,
+        uv_coordinates=None,
+        materials=None,
+        material_groups=None,
+        textures=None,
+        vertex_count=int(vertices.shape[0]),
+        triangle_count=int(triangles.shape[0]),
+        filename=ply_path.name,
+        has_textures=False,
+    )
+
+
 @app.post("/api/mesh/import", response_model=MeshImportResponse)
 async def import_textured_mesh(request: MeshImportRequest):
     """Parse an OBJ (+ MTL + texture images) from disk into textured geometry."""
@@ -6381,8 +6660,12 @@ async def import_textured_mesh(request: MeshImportRequest):
     obj_path = Path(request.path)
     if not obj_path.is_file():
         raise HTTPException(status_code=404, detail=f"Mesh file not found: {request.path}")
-    if obj_path.suffix.lower() != '.obj':
-        raise HTTPException(status_code=400, detail="Only .obj files are supported for textured import")
+    ext = obj_path.suffix.lower()
+    if ext == '.ply':
+        # PLY meshes carry no MTL/textures; open3d reads ASCII + binary directly.
+        return _import_ply_mesh(obj_path)
+    if ext != '.obj':
+        raise HTTPException(status_code=400, detail="Only .obj and .ply files are supported for mesh import")
 
     base_dir = obj_path.parent
 
@@ -6925,6 +7208,22 @@ _MULTI_RETURN_LABELS = {
     'target_count': 'Target Count',
 }
 _XYZ_KNOWN_ROLES = _XYZ_DATA_ROLES | set(_MULTI_RETURN_SLUGS) | {'deviation'}
+
+# Per-point sky/miss flag carried as a LAS extra dimension (0.0 = hit, 1.0 =
+# miss). Misses are laser pulses that returned nothing (hit the sky); Helios
+# represents each as a real point placed `_MISS_GAP_DISTANCE` metres from the
+# scanner along the pulse direction. They flow through the same extra-dim →
+# octree → session → LAD machinery as any scalar, so deletes/bake keep them in
+# lockstep with positions, the renderer can colour/hide them, and the LAD path
+# reads them for free. The slug is pinned (case-insensitive aliases accepted on
+# import) so the renderer and LAD find it deterministically.
+_MISS_SLUG = 'is_miss'
+_MISS_LABEL = 'Miss'
+# Aliases a source column may use for the miss flag (PLY property / E57 field).
+_MISS_ALIASES = {'is_miss', 'miss', 'sky', 'ismiss'}
+# Distance (metres) at which a miss point is placed from the scanner origin along
+# its pulse direction. Matches Helios's gap_distance (LiDAR.cpp gapfillMisses).
+_MISS_GAP_DISTANCE = 20000.0
 
 # Magic bytes on the wire. Renderer aborts if it sees anything else, so the
 # format is implicitly versioned by this value.
@@ -7916,8 +8215,17 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     property is carried as a float32 extra dimension so the renderer can colour
     by it — the same mechanism `_xyz_to_las` uses for unmapped ASCII columns.
 
+    Sky/miss handling (for LAD): a property aliased to `is_miss` (is_miss/miss/
+    sky) is normalised to the canonical `is_miss` extra dim. Rows with non-finite
+    (NaN/Inf) coordinates are also treated as misses — a structured/organized PLY
+    marks empty grid cells that way. A generic PLY carries no scanner origin, so
+    a NaN-coord miss has no recoverable beam direction; those rows are dropped
+    (they can't be placed as a far-field point) while any miss that DOES have
+    finite far-field coords (e.g. exported from Helios) is kept and tagged.
+
     Returns (total_points, extra_dims), where extra_dims is the
-    [{slug, label}, ...] list for the slug→label sidecar.
+    [{slug, label}, ...] list for the slug→label sidecar; `is_miss` is included
+    whenever the PLY carried miss information.
     """
     import laspy  # local: only when this code path runs
     from plyfile import PlyData
@@ -7951,11 +8259,17 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         None,
     )
 
+    # An explicit miss-flag property (is_miss/miss/sky) maps to the canonical
+    # `is_miss` slug, not a generic positional extra dim.
+    miss_col = next((c for c in names if c.lower() in _MISS_ALIASES), None)
+
     reserved = {"x", "y", "z"}
     if rgb_cols:
         reserved.update(rgb_cols)
     if intensity_col:
         reserved.add(intensity_col)
+    if miss_col:
+        reserved.add(miss_col)
 
     # Carry every other numeric property as a float32 extra dim. Dedupe slugs
     # the same way the ASCII path does, since two headers can sanitise alike.
@@ -7972,29 +8286,59 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         used_slugs.add(slug)
         extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col)})
 
+    x = vertex["x"].astype(np.float64)
+    y = vertex["y"].astype(np.float64)
+    z = vertex["z"].astype(np.float64)
+
+    # Build the per-point miss flag from the explicit column and/or non-finite
+    # coordinates (an organized PLY's empty grid cells).
+    is_miss = np.zeros(len(vertex), dtype=np.float32)
+    has_miss_info = False
+    if miss_col is not None:
+        is_miss = (np.asarray(vertex[miss_col]).astype(np.float64) != 0).astype(np.float32)
+        has_miss_info = True
+    nonfinite = ~(np.isfinite(x) & np.isfinite(y) & np.isfinite(z))
+    if nonfinite.any():
+        is_miss[nonfinite] = 1.0
+        has_miss_info = True
+
+    # Drop misses we can't place: a generic PLY has no scanner origin, so a
+    # NaN-coord miss has no direction to project onto. A miss that still carries
+    # finite (far-field) coords — e.g. a Helios export — is kept and tagged.
+    keep = np.ones(len(vertex), dtype=bool)
+    if nonfinite.any():
+        keep = ~nonfinite
+
+    if has_miss_info:
+        # `is_miss` rides along as a normal extra dim through octree/session/LAD.
+        extra_dims.append({"col": None, "slug": _MISS_SLUG, "label": _MISS_LABEL})
+
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
     header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
-    n = len(vertex)
+    n = int(keep.sum())
     record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
-    record.x = vertex["x"].astype(np.float64)
-    record.y = vertex["y"].astype(np.float64)
-    record.z = vertex["z"].astype(np.float64)
+    record.x = x[keep]
+    record.y = y[keep]
+    record.z = z[keep]
     if rgb_cols:
         # PLY RGB is 0-255 (uint8); LAS RGB is uint16. *256 keeps perceptual
         # brightness and lets the renderer right-shift to recover 8-bit, the
         # same convention as `_xyz_to_las`.
-        record.red = vertex[rgb_cols[0]].astype(np.uint16) * 256
-        record.green = vertex[rgb_cols[1]].astype(np.uint16) * 256
-        record.blue = vertex[rgb_cols[2]].astype(np.uint16) * 256
+        record.red = vertex[rgb_cols[0]][keep].astype(np.uint16) * 256
+        record.green = vertex[rgb_cols[1]][keep].astype(np.uint16) * 256
+        record.blue = vertex[rgb_cols[2]][keep].astype(np.uint16) * 256
     if intensity_col is not None:
-        refl = vertex[intensity_col].astype(np.float32)
+        refl = vertex[intensity_col][keep].astype(np.float32)
         record.intensity = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
     for ed in extra_dims:
-        record[ed["slug"]] = vertex[ed["col"]].astype(np.float32)
+        if ed["slug"] == _MISS_SLUG and ed.get("col") is None:
+            record[_MISS_SLUG] = is_miss[keep]
+        else:
+            record[ed["slug"]] = vertex[ed["col"]][keep].astype(np.float32)
 
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         writer.write_points(record)
@@ -8035,6 +8379,178 @@ def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         writer.write_points(record)
 
     return n, []
+
+
+# Scanner origin recovered from the most recent E57 conversion, keyed by the
+# absolute output LAS path. `_e57_to_las` writes it; `create_cloud_session` pops
+# it right after conversion to surface the origin (and a hasMisses flag) to the
+# renderer so it can place the scan's `ScanParameters.origin` and relocate miss
+# points onto the bounding sphere for display. Threaded this way (rather than
+# widening `_source_to_las`'s tuple) so the many other callers stay untouched.
+_e57_scan_meta: Dict[str, dict] = {}
+
+
+def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
+    """Convert an E57 to LAS, recovering sky/miss points from the structured
+    grid so the LAD inversion can account for beams that returned nothing.
+
+    E57 carries each scan as a structured grid; a cell with no return is flagged
+    via `cartesianInvalidState` (or `sphericalInvalidState`). We read the RAW
+    scan (all cells, in the scanner-local frame) so misses survive, then:
+      - valid cells -> real world point (pose-transformed), `is_miss = 0`;
+      - invalid cells (misses) -> a far-field point `origin + dir * gap_distance`
+        along the pulse direction (from spherical angles when present, else the
+        local cartesian direction), `is_miss = 1` — matching how Helios stores a
+        miss. The TRUE far-field coords are kept; the renderer relocates them for
+        display only, so LAD (which needs the real direction) is unaffected.
+
+    Multi-scan E57s are merged into one cloud (one imported scan == one cloud,
+    as elsewhere). Carries intensity and, when present, the canonical per-pulse
+    multi-return slugs. The scanner origin (first scan's pose translation) is
+    stashed in `_e57_scan_meta` for the create endpoint. Returns (n, extra_dims)
+    with `is_miss` always among the extra dims.
+    """
+    import laspy  # local: only when this code path runs
+    import pye57
+
+    e = pye57.E57(str(source_path))
+    try:
+        n_scans = e.scan_count
+        if n_scans == 0:
+            raise HTTPException(status_code=400, detail="E57 file has no scans.")
+
+        all_xyz: List[np.ndarray] = []
+        all_miss: List[np.ndarray] = []
+        all_intensity: List[np.ndarray] = []
+        any_intensity = False
+        first_origin = None
+
+        for si in range(n_scans):
+            header = e.get_header(si)
+            try:
+                rot = np.asarray(header.rotation_matrix, dtype=np.float64).reshape(3, 3)
+            except Exception:
+                rot = np.eye(3)
+            try:
+                trans = np.asarray(header.translation, dtype=np.float64).reshape(3)
+            except Exception:
+                trans = np.zeros(3)
+            if first_origin is None:
+                first_origin = trans.copy()
+
+            raw = e.read_scan_raw(si)
+            keys = set(raw.keys())
+
+            # Local-frame cartesian for every cell (misses may be zeroed).
+            if {"cartesianX", "cartesianY", "cartesianZ"} <= keys:
+                local = np.column_stack([
+                    np.asarray(raw["cartesianX"], dtype=np.float64),
+                    np.asarray(raw["cartesianY"], dtype=np.float64),
+                    np.asarray(raw["cartesianZ"], dtype=np.float64),
+                ])
+            elif {"sphericalRange", "sphericalAzimuth", "sphericalElevation"} <= keys:
+                rng = np.asarray(raw["sphericalRange"], dtype=np.float64)
+                az = np.asarray(raw["sphericalAzimuth"], dtype=np.float64)
+                el = np.asarray(raw["sphericalElevation"], dtype=np.float64)
+                local = np.column_stack([
+                    rng * np.cos(el) * np.cos(az),
+                    rng * np.cos(el) * np.sin(az),
+                    rng * np.sin(el),
+                ])
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="E57 scan has neither cartesian nor spherical point data.",
+                )
+
+            n_cell = local.shape[0]
+            # Miss flag: prefer the explicit invalid-state field. invalidState
+            # is 0 for a good return, non-zero for a miss/invalid cell.
+            miss = np.zeros(n_cell, dtype=bool)
+            for inv_key in ("cartesianInvalidState", "sphericalInvalidState"):
+                if inv_key in keys:
+                    miss = np.asarray(raw[inv_key]).astype(np.int64) != 0
+                    break
+
+            # Per-cell pulse direction (local frame). For misses with zeroed
+            # cartesian, recover direction from spherical angles when present.
+            local_dir = local.copy()
+            if miss.any() and {"sphericalAzimuth", "sphericalElevation"} <= keys:
+                az = np.asarray(raw["sphericalAzimuth"], dtype=np.float64)
+                el = np.asarray(raw["sphericalElevation"], dtype=np.float64)
+                sdir = np.column_stack([
+                    np.cos(el) * np.cos(az),
+                    np.cos(el) * np.sin(az),
+                    np.sin(el),
+                ])
+                local_dir[miss] = sdir[miss]
+
+            # Drop misses we can't place (no usable direction) rather than emit a
+            # bogus point at the origin that would corrupt the inversion.
+            dir_norm = np.linalg.norm(local_dir, axis=1)
+            undirected_miss = miss & (dir_norm < 1e-9)
+            if undirected_miss.any():
+                keep_cell = ~undirected_miss
+                local = local[keep_cell]
+                local_dir = local_dir[keep_cell]
+                miss = miss[keep_cell]
+                dir_norm = dir_norm[keep_cell]
+                n_cell = local.shape[0]
+
+            # World coords: pose-transform real hits; far-field place misses.
+            world = (rot @ local.T).T + trans
+            if miss.any():
+                unit = local_dir[miss] / dir_norm[miss][:, None]
+                world_dir = (rot @ unit.T).T
+                world[miss] = trans + world_dir * _MISS_GAP_DISTANCE
+
+            all_xyz.append(world)
+            all_miss.append(miss.astype(np.float32))
+
+            if "intensity" in keys:
+                inten = np.asarray(raw["intensity"], dtype=np.float32)
+                if undirected_miss.any():
+                    inten = inten[keep_cell]
+                # Misses have no real return; zero their intensity.
+                inten = np.where(miss, 0.0, inten).astype(np.float32)
+                all_intensity.append(inten)
+                any_intensity = True
+            else:
+                all_intensity.append(np.zeros(n_cell, dtype=np.float32))
+    finally:
+        e.close()
+
+    xyz = np.concatenate(all_xyz, axis=0) if all_xyz else np.empty((0, 3), np.float64)
+    is_miss = np.concatenate(all_miss, axis=0) if all_miss else np.empty((0,), np.float32)
+    intensity = (np.concatenate(all_intensity, axis=0) if all_intensity
+                 else np.empty((0,), np.float32))
+    n = int(xyz.shape[0])
+
+    extra_dims = [{"slug": _MISS_SLUG, "label": _MISS_LABEL}]
+
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    header.add_extra_dim(laspy.ExtraBytesParams(name=_MISS_SLUG, type=np.float32))
+
+    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+    if n > 0:
+        record.x = xyz[:, 0]
+        record.y = xyz[:, 1]
+        record.z = xyz[:, 2]
+        if any_intensity:
+            record.intensity = np.clip(intensity, 0, 65535).astype(np.uint16)
+        record[_MISS_SLUG] = is_miss
+
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        writer.write_points(record)
+
+    _e57_scan_meta[str(out_las.resolve())] = {
+        "origin": (first_origin.tolist() if first_origin is not None else [0.0, 0.0, 0.0]),
+        "has_misses": bool(is_miss.any()),
+        "miss_count": int(is_miss.sum()),
+    }
+    return n, extra_dims
 
 
 def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
@@ -8086,6 +8602,10 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
     if ext == "pcd":
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims = _pcd_to_las(source_path, out)
+        return out, True, extra_dims
+    if ext == "e57":
+        out = work_dir / (source_path.stem + ".las")
+        _, extra_dims = _e57_to_las(source_path, out)
         return out, True, extra_dims
     raise HTTPException(
         status_code=400,
@@ -8638,6 +9158,48 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
     )
 
 
+def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
+    """Summarise an E57's structure for the import wizard without decoding the
+    full point data. Reports the scan count, total points, and (cheaply) whether
+    the file carries miss cells. Columns are fixed (E57 defines its own layout),
+    so they're not remappable — we surface position + intensity + the `is_miss`
+    flag the converter will populate."""
+    import pye57
+    e = pye57.E57(file_path)
+    try:
+        n_scans = e.scan_count
+        total = 0
+        has_misses = False
+        for si in range(n_scans):
+            try:
+                h = e.get_header(si)
+                total += int(h.point_count)
+            except Exception:
+                pass
+        columns = [
+            PreviewColumn(index=0, header_name='x', detected_role='x',
+                          suggested_label='x', suggested_slug='', type_hint='float',
+                          remappable=False),
+            PreviewColumn(index=1, header_name='y', detected_role='y',
+                          suggested_label='y', suggested_slug='', type_hint='float',
+                          remappable=False),
+            PreviewColumn(index=2, header_name='z', detected_role='z',
+                          suggested_label='z', suggested_slug='', type_hint='float',
+                          remappable=False),
+            PreviewColumn(index=3, header_name=_MISS_SLUG, detected_role='extra',
+                          suggested_label=_MISS_LABEL, suggested_slug=_MISS_SLUG,
+                          type_hint='categorical', remappable=False),
+        ]
+        warn = (f"E57 with {n_scans} scan(s), ~{total} points. Sky/miss points "
+                "are recovered from the structured grid and tagged for LAD.")
+    finally:
+        e.close()
+    return PointCloudPreviewResponse(
+        kind='e57', delimiter=None, has_header=True, columns=columns,
+        sample_rows=[], warning=warn,
+    )
+
+
 @app.post("/api/pointcloud/preview")
 async def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewResponse:
     """Cheaply inspect a point-cloud file for the import wizard.
@@ -8658,6 +9220,8 @@ async def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPre
             return _preview_ply(str(source))
         if ext == 'pcd':
             return _preview_pcd(str(source))
+        if ext == 'e57':
+            return _preview_e57(str(source))
         if ext in ('las', 'laz'):
             return _preview_las(str(source), max_rows)
     except Exception as e:  # never block import on a preview failure
@@ -9172,14 +9736,24 @@ def _read_las_into_arrays(
     return positions, colors, intensity, extras, extra_dims_meta
 
 
-def _session_to_las(sess: "CloudSession", out_las: _Path) -> int:
+def _session_to_las(sess: "CloudSession", out_las: _Path,
+                    exclude_misses: bool = False) -> int:
     """Write the session's SURVIVING points (positions[~deleted] + all
     attributes) to a LAS, entirely from the in-RAM arrays — no source file read.
     Mirrors `_xyz_to_las`'s header/record layout so PotreeConverter ingests it
     identically. Returns the survivor count.
+
+    `exclude_misses=True` additionally drops sky/miss points (is_miss != 0).
+    Misses are real points placed ~20 km away, so leaving them in poisons the
+    octree's bounding box (and thus camera framing). The octree is built
+    hits-only; misses live in the session for LAD + the on-demand overlay. A bake
+    (which round-trips the LAS back into the session) must NOT exclude them, or
+    the misses would be lost — only the octree build passes True.
     """
     import laspy
     keep = ~sess.deleted
+    if exclude_misses and _MISS_SLUG in sess.extras:
+        keep = keep & (sess.extras[_MISS_SLUG] == 0)
     n = int(keep.sum())
 
     header = laspy.LasHeader(point_format=3, version="1.4")
@@ -9208,33 +9782,6 @@ def _session_to_las(sess: "CloudSession", out_las: _Path) -> int:
             writer.header.mins = (pos.min(axis=0) - pad).tolist()
             writer.header.maxs = (pos.max(axis=0) + pad).tolist()
     return n
-
-
-def _session_to_lad_ascii(sess: "CloudSession", out_path: _Path) -> tuple[str, bool]:
-    """Write the session's SURVIVING points to a Helios-ready ASCII file for the
-    LAD path, entirely from the in-RAM arrays — no source file read.
-
-    Columns are `x y z` plus, when the session carries all three per-pulse
-    multi-return slugs (timestamp/target_index/target_count), those three in the
-    order Helios's loadASCIIFile and `_do_lad_computation`'s validation expect.
-    Returns (ascii_format, is_multi) where `ascii_format` is the space-joined
-    column tokens (the `<ASCII_format>` string for the Helios XML) and
-    `is_multi` is True iff the multi-return columns were emitted.
-    """
-    keep = ~sess.deleted
-    cols = [sess.positions[keep, 0], sess.positions[keep, 1], sess.positions[keep, 2]]
-    tokens = ["x", "y", "z"]
-    is_multi = all(slug in sess.extras for slug in _MULTI_RETURN_SLUGS)
-    if is_multi:
-        for slug in _MULTI_RETURN_SLUGS:
-            cols.append(sess.extras[slug][keep])
-            tokens.append(slug)
-    data = np.column_stack(cols)
-    # %.6g keeps xyz precise and writes the integer-valued index/count columns
-    # without a trailing decimal that Helios's whitespace parser would still
-    # accept but that reads as noise.
-    np.savetxt(str(out_path), data, fmt="%.6g", delimiter=" ")
-    return " ".join(tokens), is_multi
 
 
 def _build_octree_from_las(las_path: _Path, extra_dims_meta: List[dict]) -> tuple[str, _Path, dict]:
@@ -9322,34 +9869,119 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         _label_by_slug = {ed["slug"]: ed.get("label", ed["slug"]) for ed in (source_extra_dims or [])}
         for ed in extra_dims_meta:
             ed["label"] = _label_by_slug.get(ed["slug"], ed["label"])
-        cache_key, cache_dir, meta = _build_octree_from_las(las_path, extra_dims_meta)
+        # E57 stashes the scanner origin + miss summary keyed by the temp LAS
+        # path; pop it so we can surface them in the response (renderer uses the
+        # origin for the scan params and miss-point display relocation).
+        scan_meta = _e57_scan_meta.pop(str(las_path.resolve()), None)
         if las_is_temp:
             try:
                 las_path.unlink()
             except FileNotFoundError:
                 pass
 
-    n = int(len(positions))
-    sess = CloudSession(
-        session_id=session_id,
-        source_path=str(source_path),
-        ascii_format=request.ascii_format,
-        column_plan=request.column_plan,
-        positions=positions,
-        colors=colors,
-        intensity=intensity,
-        extras=extras,
-        extra_dims_meta=extra_dims_meta,
-        deleted=np.zeros(n, dtype=bool),
-        deleted_history=[],
-        octree_cache_id=cache_key,
-        created_at=time.time(),
-    )
+        n = int(len(positions))
+        sess = CloudSession(
+            session_id=session_id,
+            source_path=str(source_path),
+            ascii_format=request.ascii_format,
+            column_plan=request.column_plan,
+            positions=positions,
+            colors=colors,
+            intensity=intensity,
+            extras=extras,
+            extra_dims_meta=extra_dims_meta,
+            deleted=np.zeros(n, dtype=bool),
+            deleted_history=[],
+            octree_cache_id=None,
+            created_at=time.time(),
+        )
+        # Build the octree from a HITS-ONLY LAS so far-field misses (~20 km) don't
+        # poison its bounding box / camera framing. Misses stay in the session
+        # (is_miss + true coords) for LAD and the on-demand miss overlay.
+        hits_las = tmp_dir / "octree_hits.las"
+        _session_to_las(sess, hits_las, exclude_misses=True)
+        cache_key, cache_dir, meta = _build_octree_from_las(hits_las, extra_dims_meta)
+        sess.octree_cache_id = cache_key
+
     with _cloud_session_lock:
         _cloud_sessions[session_id] = sess
     meta = {"cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
 
-    return {"session_id": session_id, "point_count": n, **meta}
+    # Surface sky/miss info so the renderer can hide misses by default, colour
+    # them distinctly, and relocate them onto the bounding sphere for display.
+    # `has_misses` is derived from the actual data (any source that carried an
+    # is_miss extra dim), not just E57. The scanner origin (when known, e.g. from
+    # E57 pose) lets the renderer place the scan params + the display relocation.
+    miss_arr = extras.get(_MISS_SLUG)
+    has_misses = bool(miss_arr is not None and np.any(miss_arr != 0))
+    miss_info: dict = {"has_misses": has_misses, "miss_slug": _MISS_SLUG}
+    if has_misses:
+        miss_info["miss_count"] = int(np.count_nonzero(miss_arr != 0))
+    if scan_meta and scan_meta.get("origin") is not None:
+        miss_info["scan_origin"] = scan_meta["origin"]
+
+    return {"session_id": session_id, "point_count": n, **miss_info, **meta}
+
+
+@app.get("/api/cloud/session/{session_id}/misses")
+async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
+                           origin_y: Optional[float] = None,
+                           origin_z: Optional[float] = None):
+    """Return the session's sky/miss points relocated onto the hit cloud's
+    bounding sphere for display.
+
+    Misses are stored at their true far-field coordinates (~20 km) so LAD reads
+    real beam directions, but those coordinates are useless to look at. This
+    endpoint projects each miss onto a sphere of radius = the hit cloud's
+    bounding-sphere radius, centred on the scanner origin, so the renderer can
+    draw them at a sensible distance in a distinct colour. The scanner origin is
+    taken from the query params when supplied (the scan's params.origin); else it
+    falls back to the hit cloud's centre.
+
+    Returns {count, origin, radius, positions} where positions is a flat
+    [x,y,z, x,y,z, ...] list of the relocated miss points (empty when none).
+    """
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        if miss_arr is None:
+            return {"count": 0, "origin": [0.0, 0.0, 0.0], "radius": 0.0, "positions": []}
+        keep = ~sess.deleted
+        is_miss = (miss_arr != 0) & keep
+        hits = (~(miss_arr != 0)) & keep
+        miss_pos = np.ascontiguousarray(sess.positions[is_miss], dtype=np.float64)
+        hit_pos = sess.positions[hits]
+
+    if miss_pos.shape[0] == 0:
+        return {"count": 0, "origin": [0.0, 0.0, 0.0], "radius": 0.0, "positions": []}
+
+    # Bounding sphere of the HITS (never the misses — they'd blow the radius up).
+    if hit_pos.shape[0] > 0:
+        center = hit_pos.mean(axis=0)
+        radius = float(np.max(np.linalg.norm(hit_pos - center, axis=1)))
+    else:
+        center = miss_pos.mean(axis=0)
+        radius = 1.0
+    if radius <= 0:
+        radius = 1.0
+
+    # Scanner origin: prefer the caller-supplied scan origin (true beam apex);
+    # fall back to the hit-cloud centre when unknown.
+    if None not in (origin_x, origin_y, origin_z):
+        origin = np.array([origin_x, origin_y, origin_z], dtype=np.float64)
+    else:
+        origin = center
+
+    d = miss_pos - origin
+    n = np.linalg.norm(d, axis=1)
+    n_safe = np.where(n > 0, n, 1.0)
+    relocated = origin + (d / n_safe[:, None]) * radius
+    return {
+        "count": int(miss_pos.shape[0]),
+        "origin": origin.tolist(),
+        "radius": radius,
+        "positions": relocated.astype(np.float32).ravel().tolist(),
+    }
 
 
 @app.post("/api/cloud/session/{session_id}/delete_region")
@@ -9449,7 +10081,8 @@ async def bake_cloud_session(session_id: str):
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "baked.las"
         with _cloud_session_lock:
-            _session_to_las(sess, las_path)
+            # Octree is hits-only (misses stay in the session for LAD/overlay).
+            _session_to_las(sess, las_path, exclude_misses=True)
             extra_dims_meta = list(sess.extra_dims_meta)
         cache_key, cache_dir, meta = _build_octree_from_las(las_path, extra_dims_meta)
 
@@ -9509,7 +10142,8 @@ def _session_rebuild(sess: "CloudSession") -> tuple[str, _Path, dict]:
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "rebuilt.las"
         with _cloud_session_lock:
-            _session_to_las(sess, las_path)
+            # Octree is hits-only (misses stay in the session for LAD/overlay).
+            _session_to_las(sess, las_path, exclude_misses=True)
             extra_dims_meta = list(sess.extra_dims_meta)
         cache_key, cache_dir, meta = _build_octree_from_las(las_path, extra_dims_meta)
     with _cloud_session_lock:

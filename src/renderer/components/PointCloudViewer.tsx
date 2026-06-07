@@ -54,6 +54,7 @@ import { ClassLegend } from './viewer/ClassLegend';
 import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
+import { MissOverlay } from './viewer/renderers/MissOverlay';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
 import { VoxelGridOverlay } from './viewer/renderers/VoxelGridOverlay';
@@ -99,6 +100,7 @@ import type {
   FilterRange,
   CloudFilters,
 } from '../lib/pointCloudTypes';
+import { meshDisplayName } from '../lib/pointCloudTypes';
 export type {
   ScalarField,
   OctreeRef,
@@ -144,6 +146,9 @@ interface PointCloudViewerProps {
   scans: Scan[];
   selectedScanIds: Set<string>;
   onToggleVisibility: (id: string) => void;
+  // Toggle the sky/miss overlay for a scan (hidden by default). Offered only on
+  // scans whose cloud carries miss info (octree.hasMisses).
+  onToggleMisses?: (id: string) => void;
   // allowDeselect: when true, a plain click on the row that is the sole scan
   // selection toggles it OFF. The Scans pane passes false when a mesh/skeleton
   // is ALSO selected (mixed mode) — there the click should keep the scan and
@@ -185,6 +190,7 @@ export default function PointCloudViewer({
   scans,
   selectedScanIds,
   onToggleVisibility,
+  onToggleMisses,
   onToggleSelection,
   onRemoveScan,
   onSelectAll,
@@ -218,6 +224,8 @@ export default function PointCloudViewer({
       color: s.color,
       sourcePath: s.sourcePath,
       asciiFormat: s.asciiFormat,
+      showMisses: s.showMisses,
+      params: s.params,
     })),
     [scans],
   );
@@ -7466,6 +7474,45 @@ export default function PointCloudViewer({
           );
         })}
 
+        {/* Sky/miss overlays. Misses live in the backend session (not the
+            octree), so they're drawn here as a separate point set relocated onto
+            the hit cloud's bounding sphere. Rendered at absolute coordinates
+            (not inside the per-cloud translated group) so they line up with the
+            octree, which also takes its offset by prop rather than the group.
+            Shown only when the user toggles "Show misses" on a scan that has
+            miss info. */}
+        {clouds.map(cloud => {
+          if (!cloud.visible || !cloud.showMisses) return null;
+          const oct = cloud.data?.octree;
+          if (!oct?.hasMisses || !oct.sessionId) return null;
+          const editState = getEditState(cloud.id);
+          // Prefer the scan's true scanner origin; fall back to the source's
+          // recorded scanOrigin (e.g. E57 pose). The overlay relocation is
+          // computed backend-side; passing the origin makes it project along the
+          // real beam direction.
+          // Pass the TRUE (untranslated) origin: the backend relocates misses in
+          // the cloud's own coordinate frame, and the wrapping <group> applies
+          // the same translation the octree gets, so the two stay aligned under
+          // the Translate tool.
+          const originPt = cloud.params?.origin
+            ?? (oct.scanOrigin
+              ? { x: oct.scanOrigin[0], y: oct.scanOrigin[1], z: oct.scanOrigin[2] }
+              : null);
+          return (
+            <group
+              key={`miss-${cloud.id}`}
+              position={[editState.translation.x, editState.translation.y, editState.translation.z]}
+            >
+              <MissOverlay
+                sessionId={oct.sessionId}
+                origin={originPt}
+                pointSize={pointSize}
+                refreshKey={oct.cacheId}
+              />
+            </group>
+          );
+        })}
+
         {/* Render all visible meshes */}
         {meshes.map(mesh => {
           if (!mesh.visible) return null;
@@ -8567,6 +8614,18 @@ export default function PointCloudViewer({
                         <EyeOff className="w-3 h-3 text-neutral-600" />
                       )}
                     </button>
+                    {scan.data?.octree?.hasMisses && onToggleMisses && (
+                      <button
+                        data-testid={`scan-toggle-misses-${scan.id}`}
+                        onClick={(e) => { e.stopPropagation(); onToggleMisses(scan.id); }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title={scan.showMisses ? 'Hide sky/miss points' : 'Show sky/miss points'}
+                      >
+                        <CircleDot
+                          className={`w-3 h-3 ${scan.showMisses ? 'text-amber-500' : 'text-neutral-600'}`}
+                        />
+                      </button>
+                    )}
                     {!scanHasData && (
                       <button
                         data-testid={`scan-attach-data-${scan.id}`}
@@ -8574,7 +8633,7 @@ export default function PointCloudViewer({
                           e.stopPropagation();
                           const picked = await window.electronAPI.dialog.open({
                             title: 'Attach point cloud data',
-                            filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
+                            filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'e57', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
                           });
                           if (!picked) return;
                           const path = Array.isArray(picked) ? picked[0] : picked;
@@ -8680,12 +8739,7 @@ export default function PointCloudViewer({
                 const isSelected = selectedMeshIds.has(mesh.id);
                 // Display name: a user-assigned name wins; otherwise for plants
                 // show type/age, and for other meshes the source filename.
-                const computedName = mesh.isPlant
-                  ? (mesh.plantCanopy
-                      ? `${mesh.plantType} canopy ${mesh.plantCanopy.countX}×${mesh.plantCanopy.countY} (${mesh.plantAge}d)`
-                      : `${mesh.plantType} (${mesh.plantAge}d)`)
-                  : (sourceCloud?.data.fileName || 'Mesh');
-                const displayName = mesh.name ?? computedName;
+                const displayName = meshDisplayName(mesh, sourceCloud?.data.fileName);
                 const isRenaming = renamingMeshId === mesh.id;
                 const isColorOpen = colorPopoverMeshId === mesh.id;
                 // The color swatch / picker only applies where mesh.color
@@ -8836,8 +8890,7 @@ export default function PointCloudViewer({
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        const sourceName = sourceCloud?.data.fileName || 'Mesh';
-                        setDeleteConfirm({ type: 'mesh', id: mesh.id, name: sourceName });
+                        setDeleteConfirm({ type: 'mesh', id: mesh.id, name: displayName });
                       }}
                       className="p-1 hover:bg-red-600/30 rounded"
                       title="Remove"
@@ -9715,7 +9768,7 @@ export default function PointCloudViewer({
               {selectionType === 'mesh' && selectedMesh && (
                 <button
                   onClick={() => {
-                    const sourceName = clouds.find(c => c.id === selectedMesh.sourceCloudId)?.data.fileName || 'Mesh';
+                    const sourceName = meshDisplayName(selectedMesh, clouds.find(c => c.id === selectedMesh.sourceCloudId)?.data.fileName);
                     setDeleteConfirm({ type: 'mesh', id: selectedMesh.id, name: sourceName });
                   }}
                   className="p-2 rounded transition-colors hover:bg-red-600/30"
@@ -12553,7 +12606,7 @@ export default function PointCloudViewer({
           {selectionType === 'mesh' && selectedMesh && (
             <div className="mb-4">
               <div className="text-[10px] font-medium text-neutral-400 mb-2">
-                {clouds.find(c => c.id === selectedMesh.sourceCloudId)?.data.fileName || 'Mesh'}
+                {meshDisplayName(selectedMesh, clouds.find(c => c.id === selectedMesh.sourceCloudId)?.data.fileName)}
               </div>
               <div className="text-[10px] text-neutral-500 mb-2">
                 {selectedMesh.data.triangleCount.toLocaleString()} triangles

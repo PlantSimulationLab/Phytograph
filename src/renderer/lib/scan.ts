@@ -16,6 +16,12 @@ export interface Scan {
   color: string;
   data?: PointCloudData;
   params?: ScanParameters;
+  // Sky/miss points (laser pulses that returned nothing) are kept in the
+  // backend session for LAD but excluded from the octree, so they're drawn by a
+  // separate overlay. `showMisses` toggles that overlay (off by default — misses
+  // are hidden until the user asks to verify them). The data's
+  // `octree.hasMisses` is the source of truth for whether the toggle is offered.
+  showMisses?: boolean;
   sourcePath?: string;
   // Helios <ASCII_format> hint preserved from XML import so the backend
   // can re-parse the file (e.g. for crop-by-path) with the same column

@@ -134,7 +134,10 @@ const hiddenImports = [
 // .so/.pyd must travel with the bundle); skimage/numpy_indexed pull in
 // submodules PyInstaller doesn't always trace. The TreeIso algorithm itself is
 // vendored under backend-api/vendor/treeiso/ and handled by treeisoExtraArgs.
-const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'numpy_indexed'];
+// pye57 wraps libE57Format as a compiled extension — collect-all so its native
+// .so/.pyd + any data travel with the bundle (used by _e57_to_las for E57 import
+// and sky/miss recovery).
+const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'numpy_indexed', 'pye57'];
 
 // Vendored TreeIso (MIT) lives under backend-api/vendor/ and is imported lazily
 // via a runtime sys.path tweak in main.py. Add vendor/ to the analysis path so
