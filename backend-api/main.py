@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.6.0"
+BACKEND_VERSION = "0.7.0"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -4947,6 +4947,192 @@ class PlantSessionStatusResponse(BaseModel):
     current_age: float
     height: Optional[float] = None
     error: Optional[str] = None
+
+
+# ==================== QSM (Quantitative Structure Model) ====================
+# True QSM build: reconstruct a dormant TLS tree as connected cylinders with radii
+# + topology, segment continuous shoots, and classify them by shoot rank (trunk=0,
+# scaffolds=1, ...). All logic lives in the qsm/ package (pure, unit-tested across
+# Layer-1 synthetic + Layer-2 PyHelios fixtures); this endpoint is a thin adapter.
+
+
+class QSMBuildRequest(BaseModel):
+    """Request for a full QSM build. Points come inline (`points`) or from a
+    file/octree cloud (`source`), mirroring /api/skeleton/extract."""
+    points: Optional[List[List[float]]] = None
+    source: Optional[PointSource] = None
+    # Per-species measured twig radius (mm) the radius taper is anchored to as
+    # growth length -> 0. Orchard cultivars are absent from rTwig's DB, so this is
+    # user-supplied; default 4.23 mm is rTwig's published example.
+    twig_radius_mm: float = 4.23
+    # Continuation-rule weights (largest-GrowthLength by default). Exposed for
+    # experimentation; the validated default is (1, 0, 0).
+    w_growthlength: float = 1.0
+    w_area: float = 0.0
+    w_colinear: float = 0.0
+
+
+class QSMCylinder(BaseModel):
+    """One fitted cylinder of the woody structure."""
+    cyl_id: int
+    start: List[float]  # [x, y, z] meters
+    end: List[float]
+    radius: float  # meters
+    parent_id: int  # cyl_id of parent, or -1
+    shoot_id: int
+    rank: int  # topological shoot rank with axis continuation (trunk = 0)
+    surf_cov: Optional[float] = None  # surface coverage in [0,1]; low => one-sided
+    mad: Optional[float] = None  # mean abs point-to-surface distance, meters
+
+
+class QSMShoot(BaseModel):
+    """A continuous botanical axis (a maximal chain of continuation cylinders)."""
+    shoot_id: int
+    rank: int
+    cylinder_ids: List[int]  # ordered base->tip
+    parent_shoot_id: int
+    parent_cyl_id: int
+    child_shoot_ids: List[int]
+
+
+class QSMRankMetrics(BaseModel):
+    rank: int
+    n_shoots: int
+    total_length_m: float
+    mean_shoot_length_m: float
+    woody_volume_m3: float
+    mean_diameter_mm: float
+    mean_branch_angle_deg: Optional[float] = None
+
+
+class QSMMetricsResponse(BaseModel):
+    tcsa_m2: float
+    trunk_diameter_mm: float
+    tree_height_m: float
+    n_scaffolds: int
+    n_shoots_total: int
+    max_rank: int
+    total_woody_volume_m3: float
+    stem_volume_m3: float
+    branch_volume_m3: float
+    total_length_m: float
+    canopy_width_m: float
+    canopy_height_m: float
+    per_rank: List[QSMRankMetrics]
+
+
+class QSMBuildResponse(BaseModel):
+    success: bool
+    cylinders: List[QSMCylinder] = []
+    shoots: List[QSMShoot] = []
+    metrics: Optional[QSMMetricsResponse] = None
+    n_cylinders: int = 0
+    n_shoots: int = 0
+    points_used: int = 0
+    error: Optional[str] = None
+
+
+@app.post("/api/qsm/build", response_model=QSMBuildResponse)
+async def build_qsm(request: QSMBuildRequest):
+    """Build a true QSM from a dormant-tree point cloud.
+
+    Pipeline (all in the qsm/ package): geodesic level-set skeleton (B) -> segment
+    tree + GrowthLength continuation + SHOOT RANK (C) -> robust IRLS cylinder fit +
+    SurfCov (D) -> monotone-taper radius correction (E) -> horticultural metrics.
+
+    The headline output is the per-shoot rank: continuous shoots classified by
+    topological branching order with axis continuation (trunk=0, scaffolds=1, ...).
+    """
+    from qsm.skeleton import extract_skeleton
+    from qsm.segments import segments_to_qsm, SegmentOptions
+    from qsm.cylinders import fit_qsm_cylinders
+    from qsm.radius import correct_radii, RadiusCorrectionOptions
+    from qsm.metrics import compute_metrics
+
+    try:
+        if request.source is not None:
+            points, _, _ = _read_points_from_source(request.source)
+        else:
+            points = np.array(request.points or [], dtype=np.float64)
+
+        if len(points) < 50:
+            return QSMBuildResponse(
+                success=False, points_used=len(points),
+                error="Need at least 50 points to build a QSM",
+            )
+
+        # B: skeleton.
+        graph = extract_skeleton(points)
+        if len(graph) == 0:
+            return QSMBuildResponse(
+                success=False, points_used=len(points),
+                error="Skeleton extraction produced no nodes (cloud too sparse "
+                      "or disconnected)",
+            )
+
+        # C: segments + shoot rank (HEADLINE).
+        qsm = segments_to_qsm(graph, SegmentOptions(
+            w_growthlength=request.w_growthlength,
+            w_area=request.w_area,
+            w_colinear=request.w_colinear,
+        ))
+
+        # D: robust cylinder fit + SurfCov/mad (replaces provisional radii).
+        qsm = fit_qsm_cylinders(qsm, points)
+
+        # E: radius correction (monotone taper + parent cap + twig anchor).
+        qsm = correct_radii(qsm, RadiusCorrectionOptions(
+            twig_radius=request.twig_radius_mm / 1000.0,
+        ))
+
+        m = compute_metrics(qsm)
+
+        return QSMBuildResponse(
+            success=True,
+            points_used=len(points),
+            n_cylinders=len(qsm.cylinders),
+            n_shoots=len(qsm.shoots),
+            cylinders=[
+                QSMCylinder(
+                    cyl_id=c.cyl_id, start=c.start.tolist(), end=c.end.tolist(),
+                    radius=c.radius, parent_id=c.parent_id, shoot_id=c.shoot_id,
+                    rank=c.rank, surf_cov=c.surf_cov, mad=c.mad,
+                )
+                for c in qsm.cylinders
+            ],
+            shoots=[
+                QSMShoot(
+                    shoot_id=s.shoot_id, rank=s.rank, cylinder_ids=s.cylinder_ids,
+                    parent_shoot_id=s.parent_shoot_id, parent_cyl_id=s.parent_cyl_id,
+                    child_shoot_ids=s.child_shoot_ids,
+                )
+                for s in qsm.shoots
+            ],
+            metrics=QSMMetricsResponse(
+                tcsa_m2=m.tcsa_m2, trunk_diameter_mm=m.trunk_diameter_mm,
+                tree_height_m=m.tree_height_m, n_scaffolds=m.n_scaffolds,
+                n_shoots_total=m.n_shoots_total, max_rank=m.max_rank,
+                total_woody_volume_m3=m.total_woody_volume_m3,
+                stem_volume_m3=m.stem_volume_m3, branch_volume_m3=m.branch_volume_m3,
+                total_length_m=m.total_length_m, canopy_width_m=m.canopy_width_m,
+                canopy_height_m=m.canopy_height_m,
+                per_rank=[
+                    QSMRankMetrics(
+                        rank=pr.rank, n_shoots=pr.n_shoots,
+                        total_length_m=pr.total_length_m,
+                        mean_shoot_length_m=pr.mean_shoot_length_m,
+                        woody_volume_m3=pr.woody_volume_m3,
+                        mean_diameter_mm=pr.mean_diameter_mm,
+                        mean_branch_angle_deg=pr.mean_branch_angle_deg,
+                    )
+                    for pr in m.per_rank
+                ],
+            ),
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return QSMBuildResponse(success=False, error=f"QSM build failed: {e}")
 
 
 @app.get("/api/plant/models")

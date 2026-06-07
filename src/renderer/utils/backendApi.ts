@@ -2275,3 +2275,98 @@ export async function deleteCloudSession(sessionId: string): Promise<void> {
   }
 }
 
+// ==================== QSM (Quantitative Structure Model) API ====================
+
+/**
+ * Build a true QSM from a dormant-tree point cloud: connected cylinders with
+ * radii + topology, continuous shoots classified by SHOOT RANK (trunk=0,
+ * scaffolds=1, ...). Send inline `points` for flat clouds or a `source` for
+ * octree-backed clouds. `twig_radius_mm` anchors the radius taper at the tips
+ * (per-species; orchard cultivars are user-supplied).
+ */
+export interface QSMBuildRequest {
+  points?: number[][];          // [[x, y, z], ...] — omit when `source` is set
+  source?: BackendPointSource;  // octree-backed clouds read from disk
+  twig_radius_mm?: number;      // tip radius anchor, default 4.23 mm
+  w_growthlength?: number;      // continuation weights; default (1, 0, 0)
+  w_area?: number;
+  w_colinear?: number;
+}
+
+export interface QSMCylinder {
+  cyl_id: number;
+  start: [number, number, number];
+  end: [number, number, number];
+  radius: number;               // meters
+  parent_id: number;            // cyl_id of parent, or -1
+  shoot_id: number;
+  rank: number;                 // shoot rank with axis continuation (trunk = 0)
+  surf_cov: number | null;      // surface coverage [0,1]; low => one-sided
+  mad: number | null;           // mean abs point-to-surface distance, meters
+}
+
+export interface QSMShoot {
+  shoot_id: number;
+  rank: number;
+  cylinder_ids: number[];       // ordered base->tip
+  parent_shoot_id: number;
+  parent_cyl_id: number;
+  child_shoot_ids: number[];
+}
+
+export interface QSMRankMetrics {
+  rank: number;
+  n_shoots: number;
+  total_length_m: number;
+  mean_shoot_length_m: number;
+  woody_volume_m3: number;
+  mean_diameter_mm: number;
+  mean_branch_angle_deg: number | null;
+}
+
+export interface QSMMetrics {
+  tcsa_m2: number;
+  trunk_diameter_mm: number;
+  tree_height_m: number;
+  n_scaffolds: number;
+  n_shoots_total: number;
+  max_rank: number;
+  total_woody_volume_m3: number;
+  stem_volume_m3: number;
+  branch_volume_m3: number;
+  total_length_m: number;
+  canopy_width_m: number;
+  canopy_height_m: number;
+  per_rank: QSMRankMetrics[];
+}
+
+export interface QSMBuildResponse {
+  success: boolean;
+  cylinders: QSMCylinder[];
+  shoots: QSMShoot[];
+  metrics: QSMMetrics | null;
+  n_cylinders: number;
+  n_shoots: number;
+  points_used: number;
+  error?: string;
+}
+
+export async function buildQSM(request: QSMBuildRequest): Promise<QSMBuildResponse> {
+  const baseUrl = getBackendUrl();
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/build`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('QSM build request failed:', error);
+    throw error;
+  }
+}
+

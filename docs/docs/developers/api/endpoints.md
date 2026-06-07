@@ -45,6 +45,28 @@ is defined.
 |---|---|---|---|
 | POST | `/api/skeleton/extract` | `main.py:3101` | Extract a topological skeleton |
 
+## QSM (Quantitative Structure Model)
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| POST | `/api/qsm/build` | `main.py` | Reconstruct a dormant tree as connected cylinders with radii + topology, segment continuous shoots, and classify them by **shoot rank** (trunk=0, scaffolds=1, …) |
+
+Takes inline `points` or a `source` descriptor (octree-backed clouds). The full
+pipeline lives in the `qsm/` package and is a thin call from the endpoint:
+geodesic level-set **skeleton** → **segment** tree + GrowthLength continuation +
+**shoot rank** (largest-GrowthLength axis continuation; trunk=0) → robust IRLS
+**cylinder fit** + SurfCov/mad → monotone-taper **radius correction** (anchored to
+a per-species `twig_radius_mm`, default 4.23 mm) → horticultural **metrics**.
+
+Returns `cylinders[]` (each with `start`/`end`/`radius`/`parent_id`/`shoot_id`/
+`rank`/`surf_cov`/`mad`), `shoots[]` (continuous axes with `rank` + parent/child
+links), and a `metrics` block (TCSA, trunk diameter, height, scaffold count, woody
+volume split stem-vs-branch, plus per-rank length/diameter/crotch-angle). The
+headline output is the per-shoot **rank** — topological branching order with axis
+continuation (NOT Strahler). Validated against PyHelios ground-truth fixtures
+(`backend-api/tests/qsm/`) on both determinate-trunk and central-leader
+architectures.
+
 ## Ground segmentation
 
 | Method | Path | Source | Purpose |

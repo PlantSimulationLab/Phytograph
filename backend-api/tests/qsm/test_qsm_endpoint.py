@@ -1,0 +1,118 @@
+"""Phase F: /api/qsm/build endpoint integration test.
+
+Drives the REAL FastAPI app (via the session `client` TestClient -- no mocks) with
+a deterministic synthetic cloud sampled from a known tree, and asserts CONCRETE
+correctness on the response: schema-valid cylinders + shoots, exactly one rank-0
+trunk shoot, ranks present, parent links consistent, and metrics in plausible
+ranges that track the known geometry. Per CLAUDE.md this exercises the live
+backend end-to-end (the same code path a packaged build runs).
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from qsm.validation.synthetic import sample_cloud, simple_tree
+
+
+@pytest.fixture(scope="module")
+def cloud_points() -> list[list[float]]:
+    """A dense, low-noise cloud sampled from the known simple_tree. Committable
+    (generated in-process, deterministic seed), and exercises the real pipeline."""
+    gt = simple_tree()
+    cloud = sample_cloud(gt, seed=7, points_per_m2=12000, noise_sigma=0.0006)
+    return cloud.tolist()
+
+
+def test_build_qsm_returns_valid_schema(client, cloud_points):
+    resp = client.post("/api/qsm/build", json={"points": cloud_points})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True, body.get("error")
+    assert body["n_cylinders"] > 0
+    assert body["n_shoots"] > 0
+    assert body["points_used"] == len(cloud_points)
+    assert len(body["cylinders"]) == body["n_cylinders"]
+    assert len(body["shoots"]) == body["n_shoots"]
+
+
+def test_build_qsm_headline_shoot_rank(client, cloud_points):
+    """The headline feature: continuous shoots classified by rank. Exactly one
+    rank-0 (trunk) shoot, at least one rank-1 (scaffold), and every cylinder
+    carries a rank/shoot id."""
+    body = client.post("/api/qsm/build", json={"points": cloud_points}).json()
+    shoots = body["shoots"]
+    rank0 = [s for s in shoots if s["rank"] == 0]
+    assert len(rank0) == 1, f"expected one trunk shoot, got {len(rank0)}"
+    assert any(s["rank"] == 1 for s in shoots), "no scaffold (rank-1) shoot"
+    for c in body["cylinders"]:
+        assert c["rank"] >= 0
+        assert c["shoot_id"] >= 0
+
+
+def test_build_qsm_topology_consistent(client, cloud_points):
+    """Parent links are valid: exactly one root cylinder (parent -1), and every
+    other parent_id references an existing cylinder."""
+    body = client.post("/api/qsm/build", json={"points": cloud_points}).json()
+    ids = {c["cyl_id"] for c in body["cylinders"]}
+    roots = [c for c in body["cylinders"] if c["parent_id"] == -1]
+    assert len(roots) == 1, f"expected one root cylinder, got {len(roots)}"
+    for c in body["cylinders"]:
+        if c["parent_id"] != -1:
+            assert c["parent_id"] in ids
+
+
+def test_build_qsm_metrics_plausible(client, cloud_points):
+    """Metrics track the known simple_tree geometry: trunk ~100mm diameter, height
+    ~2 m, positive woody volume split into stem + branch, ~3 scaffolds."""
+    body = client.post("/api/qsm/build", json={"points": cloud_points}).json()
+    m = body["metrics"]
+    assert m is not None
+    assert 70.0 < m["trunk_diameter_mm"] < 120.0, m["trunk_diameter_mm"]
+    assert 1.5 < m["tree_height_m"] < 3.5, m["tree_height_m"]
+    assert m["total_woody_volume_m3"] > 0
+    assert m["stem_volume_m3"] > 0 and m["branch_volume_m3"] > 0
+    assert m["total_woody_volume_m3"] == pytest.approx(
+        m["stem_volume_m3"] + m["branch_volume_m3"], rel=1e-6
+    )
+    # 3 true scaffolds; allow +-1 for the whorl over-extension edge case.
+    assert abs(m["n_scaffolds"] - 3) <= 1, m["n_scaffolds"]
+    # Per-rank diameters present and tapering.
+    by_rank = {pr["rank"]: pr for pr in m["per_rank"]}
+    assert by_rank[0]["mean_diameter_mm"] > by_rank[1]["mean_diameter_mm"]
+
+
+def test_build_qsm_radii_corrected_and_quality_populated(client, cloud_points):
+    """Cylinders carry fitted radii + SurfCov (Phase D/E ran): radii are in a
+    sane range and most cylinders report a coverage value."""
+    body = client.post("/api/qsm/build", json={"points": cloud_points}).json()
+    radii = [c["radius"] for c in body["cylinders"]]
+    assert all(0.0005 < r < 0.2 for r in radii), (min(radii), max(radii))
+    with_cov = [c for c in body["cylinders"] if c["surf_cov"] is not None]
+    assert len(with_cov) > 0.5 * len(body["cylinders"])
+    assert all(0.0 <= c["surf_cov"] <= 1.0 for c in with_cov)
+
+
+def test_build_qsm_too_few_points(client):
+    resp = client.post("/api/qsm/build", json={"points": [[0, 0, 0], [0, 0, 1]]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is False
+    assert "50 points" in body["error"]
+
+
+def test_build_qsm_twig_radius_option(client, cloud_points):
+    """The twig_radius_mm option flows through (a larger anchor yields >= total
+    woody volume, since low-coverage tips lean on the larger-anchored taper)."""
+    small = client.post(
+        "/api/qsm/build", json={"points": cloud_points, "twig_radius_mm": 2.0}
+    ).json()
+    large = client.post(
+        "/api/qsm/build", json={"points": cloud_points, "twig_radius_mm": 10.0}
+    ).json()
+    assert small["success"] and large["success"]
+    assert (
+        large["metrics"]["total_woody_volume_m3"]
+        >= small["metrics"]["total_woody_volume_m3"]
+    )
