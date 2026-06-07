@@ -285,6 +285,19 @@ export interface SkeletonEntry {
   color: string;
 }
 
+// A built QSM (Quantitative Structure Model): cylinders + shoots + metrics from
+// /api/qsm/build, plus per-entry display state. The cylinder/shoot/metrics shapes
+// mirror the backend response types in utils/backendApi.ts.
+export interface QSMEntry {
+  id: string;
+  sourceCloudId: string;
+  // Raw backend response payload (cylinders, shoots, metrics, counts).
+  cylinders: import('../utils/backendApi').QSMCylinder[];
+  shoots: import('../utils/backendApi').QSMShoot[];
+  metrics: import('../utils/backendApi').QSMMetrics | null;
+  visible: boolean;
+}
+
 // A single voxel of a leaf-area-density result. center/size are world-space;
 // lad is leaf area density (m²/m³); gtheta is the per-cell G-function;
 // hitCount is how many points fell inside (0 = empty cell).

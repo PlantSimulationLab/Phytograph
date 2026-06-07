@@ -5,7 +5,7 @@ import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Palette } from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, segmentGround, segmentTrees, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, segmentGround, segmentTrees, buildQSM, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import {
@@ -62,6 +62,7 @@ import { LADVoxelGrid } from './viewer/renderers/LADVoxelGrid';
 import { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
 export { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
 import { Skeleton3D } from './viewer/renderers/Skeleton3D';
+import { QSM3D, type QSMColorMode } from './viewer/renderers/QSM3D';
 import { SkeletonPoints } from './viewer/renderers/SkeletonPoints';
 import { CameraController } from './viewer/scene/CameraController';
 import { ViewportAxesGizmo } from './viewer/scene/ViewportAxesGizmo';
@@ -92,6 +93,7 @@ import type {
   MeshEntry,
   SkeletonData,
   SkeletonEntry,
+  QSMEntry,
   LADVoxel,
   LADResultEntry,
   ColorMode,
@@ -429,6 +431,18 @@ export default function PointCloudViewer({
   const [skeletonUseNonlinearQuant, setSkeletonUseNonlinearQuant] = useState(true);
   const [skeletonUseProportionFilter, setSkeletonUseProportionFilter] = useState(true);
   const [skeletonProportionThreshold] = useState(0.1);
+
+  // QSM (Quantitative Structure Model) build state. Mirrors the skeleton feature:
+  // a build panel + options, a results panel, and a 3D renderer. The headline is
+  // the per-shoot RANK (continuous shoots classified by branching order with axis
+  // continuation, trunk=0). All compute is in the qsm/ backend package.
+  const [showQSMPanel, setShowQSMPanel] = useState(false);
+  const [qsmInProgress, setQSMInProgress] = useState(false);
+  const [qsmError, setQSMError] = useState<string | null>(null);
+  const [qsmTwigRadiusMm, setQSMTwigRadiusMm] = useState(4.23); // tip radius anchor
+  const [qsms, setQSMs] = useState<QSMEntry[]>([]);
+  const [qsmColorMode, setQSMColorMode] = useState<QSMColorMode>('rank');
+  const [selectedQSMShootId, setSelectedQSMShootId] = useState<number | null>(null);
 
   // Import functions for external use
   const importMesh = useCallback((mesh: Omit<MeshEntry, 'id'>) => {
@@ -869,6 +883,7 @@ export default function PointCloudViewer({
     if (except !== 'ground-segment') setShowGroundSegmentPanel(false);
     if (except !== 'tree-segment') { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }
     if (except !== 'skeleton') setShowSkeletonPanel(false);
+    if (except !== 'qsm') setShowQSMPanel(false);
     if (except !== 'export') setShowExportPanel(false);
     if (except !== 'morph') setShowMorphPopup(false);
   }, []);
@@ -2486,6 +2501,7 @@ export default function PointCloudViewer({
       { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud' },
+      { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPanel(!showQSMPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setShowLADPopup(true); }, category: 'Point Cloud', requires: null },
       { id: 'cloud-export', name: 'Export Point Cloud', keywords: ['save', 'las', 'laz', 'xyz'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => { if (selectedIds.size >= 2 && onStitchClouds) onStitchClouds(Array.from(selectedIds)); }, category: 'Point Cloud', requires: 'multiple-clouds' },
@@ -5126,6 +5142,87 @@ export default function PointCloudViewer({
     }
   }, [selectedIds, clouds, buildPointSource, skeletonRemoveOutliers, skeletonSearchRadius, skeletonRootThreshold, skeletonQuantizationLevels, skeletonUseNonlinearQuant, skeletonThresholdFilter, skeletonUseProportionFilter, skeletonProportionThreshold, skeletonSmooth, skeletonSmoothIterations]);
 
+  // Build a QSM from the selected point cloud. The backend pipeline does all the
+  // preprocessing/skeleton/fit/correction; the renderer just hands it points (a
+  // backend source for octree clouds, inline+downsampled for flat clouds, same as
+  // the skeleton path).
+  const handleBuildQSM = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    if (!cloud) return;
+
+    setQSMInProgress(true);
+    setQSMError(null);
+
+    try {
+      const MAX_QSM_POINTS = 60000; // dormant trees are sparse; this is plenty
+      const ps = buildPointSource(cloud);
+      let points: number[][] | undefined;
+      let source: BackendPointSource | undefined;
+
+      if (ps.kind === 'source') {
+        source = { ...ps.source, max_points: MAX_QSM_POINTS };
+      } else {
+        const displayData = ps.data;
+        const total = displayData.pointCount;
+        const skip = total > MAX_QSM_POINTS ? Math.ceil(total / MAX_QSM_POINTS) : 1;
+        points = [];
+        for (let i = 0; i < total; i += skip) {
+          points.push([
+            displayData.positions[i * 3],
+            displayData.positions[i * 3 + 1],
+            displayData.positions[i * 3 + 2],
+          ]);
+        }
+      }
+
+      const response = await buildQSM({
+        points,
+        source,
+        twig_radius_mm: qsmTwigRadiusMm,
+      });
+
+      if (!response.success) {
+        setQSMError(response.error || 'QSM build failed');
+        return;
+      }
+
+      const entry: QSMEntry = {
+        id: crypto.randomUUID(),
+        sourceCloudId: cloud.id,
+        cylinders: response.cylinders,
+        shoots: response.shoots,
+        metrics: response.metrics,
+        visible: true,
+      };
+      setQSMs(prev => [...prev, entry]);
+      setSelectedQSMShootId(null);
+      setShowQSMPanel(false);
+
+      const m = response.metrics;
+      showToast({
+        title:
+          `QSM built: ${response.n_cylinders} cylinders, ${response.n_shoots} shoots` +
+          (m ? ` (${m.n_scaffolds} scaffolds, trunk ${m.trunk_diameter_mm.toFixed(0)}mm)` : ''),
+        type: 'success',
+      });
+    } catch (err) {
+      setQSMError(err instanceof Error ? err.message : 'QSM build failed');
+    } finally {
+      setQSMInProgress(false);
+    }
+  }, [selectedIds, clouds, buildPointSource, qsmTwigRadiusMm, showToast]);
+
+  // Remove a QSM.
+  const handleRemoveQSM = useCallback((qsmId: string) => {
+    setQSMs(prev => prev.filter(q => q.id !== qsmId));
+  }, []);
+
+  const handleToggleQSMVisibility = useCallback((qsmId: string) => {
+    setQSMs(prev => prev.map(q => (q.id === qsmId ? { ...q, visible: !q.visible } : q)));
+  }, []);
+
   // Remove a skeleton
   const handleRemoveSkeleton = useCallback((skeletonId: string) => {
     setSkeletons(prev => prev.filter(s => s.id !== skeletonId));
@@ -7598,6 +7695,22 @@ export default function PointCloudViewer({
           );
         })}
 
+        {/* QSM results — connected cylinders at their fitted radii, colored by
+            shoot rank or shoot id. Rendered in the source cloud's coordinate
+            frame (backend returns absolute coords). */}
+        {qsms.map(qsm => {
+          if (!qsm.visible) return null;
+          return (
+            <group key={qsm.id}>
+              <QSM3D
+                cylinders={qsm.cylinders}
+                colorMode={qsmColorMode}
+                selectedShootId={selectedQSMShootId}
+              />
+            </group>
+          );
+        })}
+
         {/* Leaf area density results — instanced translucent voxel cells colored
             by LAD through the shared colormap. */}
         {ladResults.map(result => {
@@ -9092,6 +9205,125 @@ export default function PointCloudViewer({
           </div>
         )}
 
+        {/* QSM Results Panel */}
+        {qsms.length > 0 && (
+          <div data-testid="qsm-results-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[50vh] flex flex-col">
+            <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
+              <Dna className="w-4 h-4 text-neutral-400" />
+              <span className="text-xs font-medium text-neutral-300 flex-1">QSM</span>
+            </div>
+            <div className="overflow-y-auto flex-1 p-1">
+              {qsms.map(qsm => {
+                const sourceCloud = clouds.find(c => c.id === qsm.sourceCloudId);
+                const m = qsm.metrics;
+                // Per-shoot length + length-weighted diameter, for the shoot list.
+                const cylById = new Map(qsm.cylinders.map(c => [c.cyl_id, c]));
+                const shootStats = qsm.shoots.map(s => {
+                  let len = 0, wdia = 0;
+                  for (const cid of s.cylinder_ids) {
+                    const c = cylById.get(cid);
+                    if (!c) continue;
+                    const dx = c.end[0] - c.start[0], dy = c.end[1] - c.start[1], dz = c.end[2] - c.start[2];
+                    const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    len += l;
+                    wdia += 2 * c.radius * l;
+                  }
+                  return { shoot: s, length: len, diameterMm: len > 0 ? (wdia / len) * 1000 : 0 };
+                });
+                return (
+                  <div
+                    key={qsm.id}
+                    data-testid="qsm-row"
+                    data-cylinder-count={qsm.cylinders.length}
+                    data-shoot-count={qsm.shoots.length}
+                    data-trunk-count={qsm.shoots.filter(s => s.rank === 0).length}
+                    data-scaffold-count={qsm.shoots.filter(s => s.rank === 1).length}
+                    data-max-rank={m ? m.max_rank : 0}
+                    data-min-radius={qsm.cylinders.length ? Math.min(...qsm.cylinders.map(c => c.radius)) : 0}
+                    data-max-radius={qsm.cylinders.length ? Math.max(...qsm.cylinders.map(c => c.radius)) : 0}
+                    className="p-2 rounded hover:bg-neutral-700/40"
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-neutral-200 truncate" data-testid="qsm-row-name">
+                          {sourceCloud?.data.fileName || 'QSM'}
+                        </div>
+                        <div className="text-[10px] text-neutral-500" data-testid="qsm-row-stats">
+                          {qsm.cylinders.length} cyl · {qsm.shoots.length} shoots
+                          {m ? ` · ${m.n_scaffolds} scaffolds` : ''}
+                        </div>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleToggleQSMVisibility(qsm.id); }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title={qsm.visible ? 'Hide' : 'Show'}
+                      >
+                        {qsm.visible ? <Eye className="w-3 h-3 text-neutral-300" /> : <EyeOff className="w-3 h-3 text-neutral-500" />}
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleRemoveQSM(qsm.id); }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title="Delete"
+                      >
+                        <Trash2 className="w-3 h-3 text-neutral-400" />
+                      </button>
+                    </div>
+
+                    {/* Whole-tree metrics */}
+                    {m && (
+                      <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10px] text-neutral-400" data-testid="qsm-metrics">
+                        <span>Trunk Ø</span><span className="text-neutral-200 text-right">{m.trunk_diameter_mm.toFixed(1)} mm</span>
+                        <span>Height</span><span className="text-neutral-200 text-right">{m.tree_height_m.toFixed(2)} m</span>
+                        <span>Woody vol</span><span className="text-neutral-200 text-right">{(m.total_woody_volume_m3 * 1e6).toFixed(0)} cm³</span>
+                        <span>Max rank</span><span className="text-neutral-200 text-right">{m.max_rank}</span>
+                      </div>
+                    )}
+
+                    {/* Shoot list — click to highlight the whole continuous axis. */}
+                    <div className="mt-2 max-h-32 overflow-y-auto border-t border-neutral-700/50 pt-1">
+                      {shootStats.map(({ shoot, length, diameterMm }) => {
+                        const sel = selectedQSMShootId === shoot.shoot_id;
+                        return (
+                          <div
+                            key={shoot.shoot_id}
+                            data-testid="qsm-shoot-row"
+                            data-shoot-id={shoot.shoot_id}
+                            data-rank={shoot.rank}
+                            onClick={() => setSelectedQSMShootId(sel ? null : shoot.shoot_id)}
+                            className={`flex items-center justify-between gap-2 px-1 py-0.5 rounded cursor-pointer text-[10px] ${
+                              sel ? 'bg-amber-600/30' : 'hover:bg-neutral-700/50'
+                            }`}
+                          >
+                            <span className="text-neutral-300">
+                              {shoot.rank === 0 ? 'Trunk' : `Rank ${shoot.rank}`} #{shoot.shoot_id}
+                            </span>
+                            <span className="text-neutral-500">
+                              {length.toFixed(2)}m · {diameterMm.toFixed(1)}mm
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {/* Display settings: color mode. */}
+            <div className="p-2 border-t border-neutral-700 flex items-center gap-2">
+              <span className="text-[10px] text-neutral-400">Color by</span>
+              <select
+                data-testid="qsm-color-mode"
+                value={qsmColorMode}
+                onChange={(e) => setQSMColorMode(e.target.value as QSMColorMode)}
+                className="flex-1 bg-neutral-700 text-neutral-200 text-[10px] rounded px-1 py-0.5 border border-neutral-600"
+              >
+                <option value="rank">Shoot rank</option>
+                <option value="shoot">Shoot id</option>
+              </select>
+            </div>
+          </div>
+        )}
+
         {/* Leaf Area Density results */}
         {ladResults.length > 0 && (
           <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
@@ -9556,6 +9788,24 @@ export default function PointCloudViewer({
                     disabled={selectedIds.size !== 1}
                   >
                     <GitBranch className={`w-4 h-4 ${showSkeletonPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
+                  </button>
+                  {/* 8b. Build QSM (single cloud only) — cylinders + radii +
+                       shoot rank. */}
+                  <button
+                    data-testid="tool-qsm"
+                    onClick={() => {
+                      if (showQSMPanel) {
+                        setShowQSMPanel(false);
+                      } else {
+                        closeAllToolPanels('qsm');
+                        setShowQSMPanel(true);
+                      }
+                    }}
+                    className={`p-2 rounded transition-colors ${showQSMPanel ? 'bg-amber-600 text-white' : 'hover:bg-neutral-700'}`}
+                    title="Build QSM (cylinders + shoot rank)"
+                    disabled={selectedIds.size !== 1}
+                  >
+                    <Dna className={`w-4 h-4 ${showQSMPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
                   </button>
                   {/* 8a. Leaf Area Density (single cloud). Needs scan params +
                        an explicit voxel grid (LAD is per-voxel). */}
@@ -11685,6 +11935,77 @@ export default function PointCloudViewer({
               <>
                 <GitBranch className="w-3 h-3" />
                 Extract Skeleton
+              </>
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* QSM Build Panel */}
+      {showQSMPanel && selectedIds.size === 1 && (
+        <div data-testid="qsm-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
+              <Dna className="w-3 h-3" />
+              Build QSM
+            </div>
+            <button onClick={() => setShowQSMPanel(false)} className="p-1 hover:bg-neutral-700 rounded">
+              <X className="w-3 h-3 text-neutral-400" />
+            </button>
+          </div>
+
+          <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
+            Reconstruct the tree as connected cylinders with radii, segment continuous
+            shoots, and classify them by shoot rank (trunk = 0, scaffolds = 1, …).
+            Best on dormant (leaf-off) scans.
+          </div>
+
+          {/* Twig radius anchor */}
+          <div className="mb-3">
+            <label className="block text-[10px] text-neutral-400 mb-1">
+              Twig radius: {qsmTwigRadiusMm.toFixed(2)} mm
+            </label>
+            <input
+              data-testid="qsm-twig-radius"
+              type="range"
+              min={1}
+              max={15}
+              step={0.1}
+              value={qsmTwigRadiusMm}
+              onChange={(e) => setQSMTwigRadiusMm(parseFloat(e.target.value))}
+              disabled={qsmInProgress}
+              className="w-full accent-amber-500"
+            />
+            <div className="text-[9px] text-neutral-500 mt-1">
+              Per-species twig diameter the radius taper is anchored to at the tips.
+            </div>
+          </div>
+
+          {qsmError && (
+            <div className="mb-3 p-2 bg-red-900/40 border border-red-700/50 rounded text-[10px] text-red-300">
+              {qsmError}
+            </div>
+          )}
+
+          <button
+            data-testid="qsm-build-button"
+            onClick={handleBuildQSM}
+            disabled={qsmInProgress}
+            className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
+              qsmInProgress
+                ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
+                : 'bg-amber-600 hover:bg-amber-500 text-white'
+            }`}
+          >
+            {qsmInProgress ? (
+              <>
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Building…
+              </>
+            ) : (
+              <>
+                <Dna className="w-3 h-3" />
+                Build QSM
               </>
             )}
           </button>
