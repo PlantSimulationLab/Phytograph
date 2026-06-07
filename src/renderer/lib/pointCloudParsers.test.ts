@@ -9,6 +9,8 @@ import {
   parseOBJMesh,
   parsePCD,
   parsePLY,
+  parsePLYMesh,
+  plyHasFaces,
   parsePointCloud,
   parsePointCloudFromPath,
   parseSkeleton,
@@ -472,6 +474,90 @@ describe('parseMesh (auto-detect)', () => {
 
   it('rejects unsupported extensions', async () => {
     await expect(parseMesh(textFile('x', 'mesh.xyz'))).rejects.toThrow(/Unsupported mesh/);
+  });
+
+  it('dispatches PLY-with-faces to the mesh parser', async () => {
+    const content = [
+      'ply', 'format ascii 1.0',
+      'element vertex 3',
+      'property float x', 'property float y', 'property float z',
+      'element face 1',
+      'property list uchar int vertex_indices',
+      'end_header',
+      '0 0 0', '1 0 0', '0 1 0',
+      '3 0 1 2', '',
+    ].join('\n');
+    const mesh = await parseMesh(textFile(content, 'tri.ply'));
+    expect(mesh.triangleCount).toBe(1);
+    expect(mesh.vertexCount).toBe(3);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// PLY mesh detection + parsing (the ambiguous PLY container).
+// ────────────────────────────────────────────────────────────────────────
+
+const PLY_QUAD_MESH = [
+  'ply', 'format ascii 1.0',
+  'element vertex 4',
+  'property float x', 'property float y', 'property float z',
+  'property uchar red', 'property uchar green', 'property uchar blue',
+  'element face 2',
+  'property list uchar int vertex_indices',
+  'end_header',
+  '0 0 0 255 0 0',
+  '1 0 0 0 255 0',
+  '1 1 0 0 0 255',
+  '0 1 0 255 255 0',
+  '4 0 1 2 3',  // a quad face — should fan-triangulate to 2 triangles
+  '3 0 1 2',
+  '',
+].join('\n');
+
+const PLY_POINTCLOUD = [
+  'ply', 'format ascii 1.0',
+  'element vertex 3',
+  'property float x', 'property float y', 'property float z',
+  'end_header',
+  '0 0 0', '1 0 0', '0 1 0', '',
+].join('\n');
+
+describe('plyHasFaces', () => {
+  it('returns true for a PLY declaring faces', async () => {
+    expect(await plyHasFaces(textFile(PLY_QUAD_MESH, 'm.ply'))).toBe(true);
+  });
+
+  it('returns false for a vertices-only PLY (point cloud)', async () => {
+    expect(await plyHasFaces(textFile(PLY_POINTCLOUD, 'c.ply'))).toBe(false);
+  });
+
+  it('returns false for element face 0', async () => {
+    const content = PLY_POINTCLOUD.replace('end_header', 'element face 0\nproperty list uchar int vertex_indices\nend_header');
+    expect(await plyHasFaces(textFile(content, 'z.ply'))).toBe(false);
+  });
+});
+
+describe('parsePLYMesh', () => {
+  it('parses vertices, fan-triangulated faces, and per-vertex colors', async () => {
+    const mesh = await parsePLYMesh(textFile(PLY_QUAD_MESH, 'm.ply'));
+    expect(mesh.vertexCount).toBe(4);
+    // quad (2 tris) + triangle (1 tri) = 3 triangles
+    expect(mesh.triangleCount).toBe(3);
+    expect(mesh.indices.length).toBe(9);
+    expect(mesh.vertexColors).toBeDefined();
+    expect(mesh.vertexColors!.length).toBe(12); // 4 verts * rgb
+    // First vertex is red (255,0,0) → normalized to (1,0,0).
+    expect(mesh.vertexColors![0]).toBeCloseTo(1, 5);
+    expect(mesh.vertexColors![1]).toBeCloseTo(0, 5);
+  });
+
+  it('rejects a vertices-only PLY as not a mesh', async () => {
+    await expect(parsePLYMesh(textFile(PLY_POINTCLOUD, 'c.ply'))).rejects.toThrow(/point cloud|No faces/i);
+  });
+
+  it('rejects binary PLY (must use a file path)', async () => {
+    const content = PLY_QUAD_MESH.replace('format ascii 1.0', 'format binary_little_endian 1.0');
+    await expect(parsePLYMesh(textFile(content, 'bin.ply'))).rejects.toThrow(/Binary PLY/);
   });
 });
 

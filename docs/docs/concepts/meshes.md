@@ -11,7 +11,9 @@ There are three ways to bring a mesh into Phytograph:
 
 1. **Import** an existing `.obj`, `.ply`, or `.stl` file. A textured `.obj`
    with a sibling `.mtl` and image files is imported with its textures applied
-   (see [Textures](#textures)).
+   (see [Textures](#textures)). A `.ply` is recognized as a mesh when it
+   contains faces, and as a point cloud when it does not — see
+   [File formats: PLY](../reference/file-formats.md#ply-point-cloud-or-mesh).
 2. **Triangulate** a point cloud — see [Triangulate a mesh](../workflows/triangulate.md).
 3. **Generate** a plant — every procedurally generated plant arrives as a mesh of stems, branches, and leaves. See [Generate a plant](../workflows/generate-plant.md).
 

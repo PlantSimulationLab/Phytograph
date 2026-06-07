@@ -385,3 +385,107 @@ def test_mesh_import_rejects_non_obj(client, tmp_path):
     stl.write_text("solid x\nendsolid x\n")
     resp = client.post("/api/mesh/import", json={"path": str(stl)})
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# PLY mesh import (the ambiguous PLY container, resolved as a polygon mesh)
+# ---------------------------------------------------------------------------
+
+# A unit quad as a polygon mesh: 4 vertices with per-vertex RGB, 2 triangles.
+_PLY_QUAD_ASCII = """ply
+format ascii 1.0
+element vertex 4
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+element face 2
+property list uchar int vertex_indices
+end_header
+0 0 0 255 0 0
+1 0 0 0 255 0
+1 1 0 0 0 255
+0 1 0 255 255 0
+3 0 1 2
+3 0 2 3
+"""
+
+
+def _write_binary_ply_quad(path) -> None:
+    """Write the same quad as a binary PLY via open3d (the common real-world case)."""
+    import numpy as np
+    import open3d as o3d
+
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(
+        np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], dtype=float)
+    )
+    mesh.triangles = o3d.utility.Vector3iVector(
+        np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+    )
+    mesh.vertex_colors = o3d.utility.Vector3dVector(
+        np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0]], dtype=float)
+    )
+    o3d.io.write_triangle_mesh(str(path), mesh, write_ascii=False)
+
+
+def test_mesh_import_ply_ascii(client, tmp_path):
+    """An ASCII PLY mesh imports as geometry with per-vertex colour, no textures."""
+    ply = tmp_path / "quad_ascii.ply"
+    ply.write_text(_PLY_QUAD_ASCII)
+    resp = client.post("/api/mesh/import", json={"path": str(ply)})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["success"] is True
+    assert body["has_textures"] is False
+    assert body["materials"] is None
+    assert body["textures"] is None
+    # Indexed geometry: 4 vertices, 2 triangles.
+    assert body["vertex_count"] == 4
+    assert body["triangle_count"] == 2
+    assert sorted(tuple(t) for t in body["indices"]) == [(0, 1, 2), (0, 2, 3)]
+
+    # Per-vertex colours preserved (0-1), first vertex is red.
+    assert body["colors"] is not None
+    assert len(body["colors"]) == 4
+    r, g, b = body["colors"][0]
+    assert r > 0.9 and g < 0.1 and b < 0.1
+    # Normals computed (quad lies in z=0 plane → normal ±z).
+    assert body["normals"] is not None
+    assert abs(abs(body["normals"][0][2]) - 1.0) < 1e-6
+
+
+def test_mesh_import_ply_binary(client, tmp_path):
+    """Binary PLY meshes (the default export of most tools) import correctly."""
+    ply = tmp_path / "quad_binary.ply"
+    _write_binary_ply_quad(ply)
+    resp = client.post("/api/mesh/import", json={"path": str(ply)})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["success"] is True
+    assert body["vertex_count"] == 4
+    assert body["triangle_count"] == 2
+    assert body["colors"] is not None and len(body["colors"]) == 4
+
+
+def test_mesh_import_ply_pointcloud_rejected(client, tmp_path):
+    """A vertices-only PLY (no faces) is not a mesh — the mesh endpoint rejects it
+    with a 400 so the caller routes it to the point-cloud path instead."""
+    ply = tmp_path / "cloud.ply"
+    ply.write_text(
+        "ply\n"
+        "format ascii 1.0\n"
+        "element vertex 3\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "end_header\n"
+        "0 0 0\n1 0 0\n0 1 0\n"
+    )
+    resp = client.post("/api/mesh/import", json={"path": str(ply)})
+    assert resp.status_code == 400
+    assert "face" in resp.json()["detail"].lower()

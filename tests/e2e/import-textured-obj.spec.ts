@@ -32,6 +32,9 @@ test('imports a textured OBJ+MTL and renders it textured', async () => {
     // Two triangles in the fixture.
     await expect(meshRow).toHaveAttribute('data-triangle-count', '2');
 
+    // Auto-named after the imported file's base name (quad.obj → quad).
+    await expect(meshRow).toHaveAttribute('data-mesh-name', 'quad');
+
     // The backend resolved the MTL + PNG, so the mesh must carry exactly one
     // textured material into the renderer.
     const texturedStr = await meshRow.getAttribute('data-textured-materials');
