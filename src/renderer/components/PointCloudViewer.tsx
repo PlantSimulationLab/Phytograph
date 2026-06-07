@@ -7696,8 +7696,11 @@ export default function PointCloudViewer({
         })}
 
         {/* QSM results — connected cylinders at their fitted radii, colored by
-            shoot rank or shoot id. Rendered in the source cloud's coordinate
-            frame (backend returns absolute coords). */}
+            shoot rank or shoot id. The backend builds the QSM from the points it
+            was given, which already carry the source cloud's translation (the
+            inline path bakes editState.translation into getDisplayData; the octree
+            path forwards translation to the backend). So the QSM lands in the same
+            world frame the cloud renders in — no extra <group> offset needed. */}
         {qsms.map(qsm => {
           if (!qsm.visible) return null;
           return (

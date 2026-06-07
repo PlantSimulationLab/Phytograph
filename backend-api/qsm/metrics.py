@@ -145,11 +145,14 @@ def compute_metrics(qsm: QSM) -> QSMMetrics:
     total_vol = stem_vol + branch_vol
     total_len = float(sum(c.length for c in cyls))
 
-    # Per-rank aggregates.
-    ranks = sorted({c.rank for c in cyls})
+    # Per-rank aggregates. Take ranks from the UNION of cylinder ranks and shoot
+    # ranks so a rank that exists only among shoots (e.g. a shoot whose cylinders
+    # were all dropped) still gets a per_rank entry and stays consistent with the
+    # shoot-based n_scaffolds / n_shoots_total counts below.
+    ranks = sorted({c.rank for c in cyls} | {s.rank for s in qsm.shoots})
     cyls_by_rank: dict[int, list] = {r: [] for r in ranks}
     for c in cyls:
-        cyls_by_rank[c.rank].append(c)
+        cyls_by_rank.setdefault(c.rank, []).append(c)
     shoots_by_rank: dict[int, list] = {r: [] for r in ranks}
     for s in qsm.shoots:
         shoots_by_rank.setdefault(s.rank, []).append(s)

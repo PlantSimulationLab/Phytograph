@@ -2353,18 +2353,27 @@ export interface QSMBuildResponse {
 
 export async function buildQSM(request: QSMBuildRequest): Promise<QSMBuildResponse> {
   const baseUrl = getBackendUrl();
+  // The QSM pipeline (skeleton → segments → IRLS cylinder fit → radius correction
+  // → metrics) is heavier than skeleton extraction, so bound it with the same
+  // 5-minute abort the other long endpoints use — otherwise a large/pathological
+  // cloud leaves the UI stuck in qsmInProgress with no way to recover.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
   try {
     const response = await fetch(`${baseUrl}/api/qsm/build`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
     return await response.json();
   } catch (error) {
+    clearTimeout(timeoutId);
     console.error('QSM build request failed:', error);
     throw error;
   }

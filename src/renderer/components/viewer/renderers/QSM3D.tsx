@@ -39,6 +39,11 @@ export function rankColor(rank: number): THREE.Color {
   return RANK_COLORS[idx];
 }
 
+// Reused (not re-allocated per cylinder) for the selected-shoot highlight/dim
+// lerp in the geometry hot loop.
+const HIGHLIGHT_COLOR = new THREE.Color('#ffffff');
+const DIM_COLOR = new THREE.Color('#000000');
+
 // Deterministic distinct color per shoot id via the golden-ratio hue rotation
 // (so adjacent shoot ids look clearly different, and the same id always maps to
 // the same color across renders).
@@ -92,9 +97,9 @@ export function QSM3D({
       tmp.copy(base);
       if (selectedShootId != null) {
         if (c.shoot_id === selectedShootId) {
-          tmp.lerp(new THREE.Color('#ffffff'), 0.35); // highlight
+          tmp.lerp(HIGHLIGHT_COLOR, 0.35); // highlight
         } else {
-          tmp.lerp(new THREE.Color('#000000'), 0.55); // dim others
+          tmp.lerp(DIM_COLOR, 0.55); // dim others
         }
       }
 
