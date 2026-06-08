@@ -32,14 +32,17 @@ export interface QSM3DProps {
 }
 
 // Rank palette: trunk (0) dark/woody -> outward orders brighten. Index by rank,
-// clamped. Chosen to read as "thick dark trunk, lighter branches".
+// clamped. Lightened from the original palette so no rank reads as a near-black
+// blob against the dark viewer background (the old trunk brown + blue were too
+// dark). Trunk is still the most muted so the structure reads "solid trunk,
+// brighter branches".
 export const RANK_COLORS = [
-  new THREE.Color('#5b3a1e'), // rank 0 trunk - dark brown
-  new THREE.Color('#c2761a'), // rank 1 scaffold - amber
-  new THREE.Color('#3b82f6'), // rank 2 - blue
-  new THREE.Color('#22c55e'), // rank 3 - green
-  new THREE.Color('#a855f7'), // rank 4 - violet
-  new THREE.Color('#ec4899'), // rank 5+ - pink
+  new THREE.Color('#c08552'), // rank 0 trunk - warm brown (was too-dark #5b3a1e)
+  new THREE.Color('#e0922b'), // rank 1 scaffold - amber
+  new THREE.Color('#5fa8ff'), // rank 2 - sky blue (lifted from #3b82f6)
+  new THREE.Color('#3ed47a'), // rank 3 - green
+  new THREE.Color('#c08bff'), // rank 4 - violet
+  new THREE.Color('#ff6fb0'), // rank 5+ - pink
 ];
 
 export function rankColor(rank: number): THREE.Color {
@@ -54,10 +57,22 @@ const DIM_COLOR = new THREE.Color('#000000');
 
 // Deterministic distinct color per shoot id via the golden-ratio hue rotation
 // (so adjacent shoot ids look clearly different, and the same id always maps to
-// the same color across renders).
+// the same color across renders). At equal HSL lightness, reds (~0deg) and blues
+// (~0.66) look much darker than yellows/greens, so a plain red sampled here used
+// to read as a near-black maroon against the dark viewer background; we add
+// lightness back for those hues so no shoot color comes out dark/muddy.
 export function shootColor(shootId: number): THREE.Color {
   const hue = (shootId * 0.61803398875) % 1.0;
-  return new THREE.Color().setHSL(hue, 0.62, 0.55);
+  // Keep colors vivid (not pastel) but never DARK: a modest per-hue lightness lift
+  // for the hues that read darkest at equal HSL lightness -- red (~0deg) and blue
+  // (~0.66) -- so a sampled red comes out a clear red, not the near-black maroon
+  // the old fixed 0.55 lightness produced against the dark viewer background. The
+  // material's emissive glow provides the overall "lift off the background", so we
+  // don't push lightness so high that colors wash out.
+  const redLift = Math.cos(hue * 2 * Math.PI) * 0.5 + 0.5; // 1 at red, 0 at cyan
+  const blueLift = Math.cos((hue - 0.66) * 2 * Math.PI) * 0.5 + 0.5; // 1 at blue
+  const lightness = 0.54 + 0.06 * Math.max(redLift, blueLift); // 0.54..0.60
+  return new THREE.Color().setHSL(hue, 0.7, lightness);
 }
 
 const MIN_RADIUS = 1e-5;
@@ -298,17 +313,28 @@ export function QSM3D({
     // useMemo), so including it would force a needless geometry rebuild.
   }, [cylinders, shoots, colorMode, selectedShootId, radialSegments]);
 
-  const material = useMemo(
-    () =>
-      new THREE.MeshStandardMaterial({
-        vertexColors: true,
-        transparent: opacity < 1,
-        opacity,
-        roughness: 0.7,
-        metalness: 0.1,
-      }),
-    [opacity]
-  );
+  const material = useMemo(() => {
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      transparent: opacity < 1,
+      opacity,
+      roughness: 0.6,
+      metalness: 0.05,
+    });
+    // Self-illuminate the tubes a bit so they don't render dark when the scene
+    // lights are dimmed (the QSM has no dedicated light). three's flat `emissive`
+    // is a single color and would wash out the per-shoot/rank hues, so instead we
+    // inject a fraction of the per-vertex color into the emissive term via a tiny
+    // shader patch -- each tube keeps its own color but gets a baseline glow that
+    // lifts it off the dark background regardless of scene lighting.
+    mat.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        '#include <emissivemap_fragment>\n  totalEmissiveRadiance += vColor.rgb * 0.25;'
+      );
+    };
+    return mat;
+  }, [opacity]);
 
   useEffect(() => () => geometry?.dispose(), [geometry]);
   useEffect(() => () => material.dispose(), [material]);
