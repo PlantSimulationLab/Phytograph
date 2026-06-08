@@ -1,7 +1,7 @@
 {
   "name": "phytograph",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Phytograph desktop app.",
   "author": "Phytograph",
   "main": "dist-main/main.js",

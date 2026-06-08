@@ -50,6 +50,15 @@ attributes. Field names come from the file's header row when present
 fallback. The hint is ignored for PLY/PCD because those formats encode
 their column layout in-file.
 
+`intensity` and `reflectance` are read at whatever scale the source uses —
+Helios reflectance in **dB** (negative), `[0, 1]` floats, `[0, 255]` bytes, or
+Helios's raw signed beam·normal dot product — and normalised to the viewer's
+gradient by their observed range, so the **Intensity** color mode works for any
+of them. When a file carries **both** an `intensity` and a `reflectance`
+column, the first becomes the dedicated intensity channel and the second is
+kept as a named scalar field (color-mappable under **Scalar Field**), so
+neither is dropped.
+
 When no `<ASCII_format>` hint is given, Phytograph auto-detects the
 layout: a header row's column names — whether plain or written as a
 leading `#` comment — are matched to roles where recognised (so

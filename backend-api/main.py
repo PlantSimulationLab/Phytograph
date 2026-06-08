@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.6.1"
+BACKEND_VERSION = "0.6.2"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -8240,6 +8240,42 @@ def _resolve_potree_converter_path() -> _Path:
     )
 
 
+def _intensity_to_las_uint16(values: "np.ndarray",
+                             lo: "Optional[float]" = None,
+                             hi: "Optional[float]" = None) -> "np.ndarray":
+    """Map an intensity/reflectance column to the LAS uint16 field by normalising
+    a finite range to 0..65535.
+
+    The LAS intensity field is uint16, so the source values must land in
+    [0, 65535] as non-negative integers. We can't assume a fixed source scale:
+    Helios reflectance is reported in dB (negative, e.g. -14..0), other exports
+    use [0, 1] floats, the legacy convention was [0, 255], and Helios's raw
+    "intensity" is a signed beam·normal dot product. A fixed `* 256` + clip(0, …)
+    crushes every all-negative column (dB, signed dot-products) to a uniform 0 —
+    losing the field entirely. Normalising from the column's range instead
+    preserves the gradient for any scale; the renderer colours by the resulting
+    range either way (see OctreePointCloud `attributeRanges.intensity`). Mirrors
+    the E57 path's per-scan normalisation.
+
+    Pass `lo`/`hi` to normalise against a precomputed GLOBAL range (the chunked
+    ASCII path does this so the gradient is consistent across chunk seams); omit
+    them to use this array's own finite min/max. Non-finite values map to 0. A
+    zero-width range maps to all-0 (no gradient, and avoids a divide-by-zero).
+    """
+    v = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(v)
+    if lo is None or hi is None:
+        if not finite.any():
+            return np.zeros(len(v), dtype=np.uint16)
+        lo = float(v[finite].min())
+        hi = float(v[finite].max())
+    span = hi - lo
+    if span <= 1e-12:
+        return np.zeros(len(v), dtype=np.uint16)
+    scaled = np.where(finite, (v - lo) / span * 65535.0, 0.0)
+    return np.clip(scaled, 0, 65535).astype(np.uint16)
+
+
 def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                 column_plan: "Optional[ColumnPlan]" = None) -> tuple[int, List[dict]]:
     """Stream an XYZ-family ASCII file into a LAS file via laspy in chunks.
@@ -8283,6 +8319,22 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     rgb_cols = rgb255_cols if has_rgb255 else (rgb01_cols if has_rgb01 else None)
     intensity_role = next((r for r in ("intensity", "reflectance") if r in names), None)
 
+    # A scan with BOTH intensity and reflectance columns can only put one in the
+    # LAS intensity field. The other is a reserved role (so `_plan_columns`
+    # didn't carry it) yet pandas still reads it — without rescue it's silently
+    # dropped. Carry it as an extra dim under its own slug so it's colourable /
+    # filterable like any scalar, instead of vanishing.
+    secondary_intensity = None
+    if intensity_role is not None:
+        other = "reflectance" if intensity_role == "intensity" else "intensity"
+        if other in names:
+            secondary_intensity = {
+                "col": other,
+                "slug": _dedupe_slug(other, {e["slug"] for e in extra_dims}),
+                "label": other.capitalize(),
+            }
+            extra_dims = extra_dims + [secondary_intensity]
+
     # LAS point format 3 carries XYZ + intensity + RGB. Extra numeric columns
     # are added as float32 extra dimensions; PotreeConverter writes the full
     # LAS schema (no --attributes filter), so they survive into the octree's
@@ -8297,6 +8349,30 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
 
     chunk_rows = 2_000_000
+
+    # Normalise the intensity/reflectance column to the LAS uint16 field by its
+    # GLOBAL finite range so the gradient is consistent across chunk boundaries.
+    # A per-chunk min/max would rescale each 2M-row chunk independently, banding
+    # the cloud at chunk seams. Scan just that one column first (cheap); skip the
+    # pass when there's no intensity column to map.
+    intensity_lo = intensity_hi = None
+    if intensity_role is not None:
+        # Read just that column by POSITION (not via names=, which may be
+        # narrower than the file's field count for a partial column plan).
+        intensity_pos = names.index(intensity_role)
+        gmin, gmax = np.inf, -np.inf
+        for col_chunk in pd.read_csv(
+            source_path, sep=r"\s+", header=None,
+            usecols=[intensity_pos], comment="#",
+            skiprows=skiprows, chunksize=chunk_rows, engine="c",
+        ):
+            vals = col_chunk.iloc[:, 0].to_numpy(dtype=np.float64)
+            vals = vals[np.isfinite(vals)]
+            if vals.size:
+                gmin = min(gmin, float(vals.min()))
+                gmax = max(gmax, float(vals.max()))
+        if np.isfinite(gmin) and np.isfinite(gmax):
+            intensity_lo, intensity_hi = gmin, gmax
     total_points = 0
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         reader = pd.read_csv(
@@ -8339,12 +8415,18 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                     record.green = np.clip(chunk[gc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
                     record.blue = np.clip(chunk[bc].to_numpy(dtype=np.float32) * 65535.0, 0, 65535).astype(np.uint16)
             if intensity_role is not None:
-                # Both 'intensity' and 'reflectance' fields in Helios scans
-                # span 0-255. Map to LAS intensity's 0-65535 range.
-                refl = chunk[intensity_role].to_numpy(dtype=np.float32)
-                scaled = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
-                record.intensity = scaled
+                # Map intensity/reflectance to the LAS uint16 field, normalising
+                # the column's GLOBAL finite range (computed above) — handles dB,
+                # [0,1], [0,255], and signed dot-product scales uniformly.
+                record.intensity = _intensity_to_las_uint16(
+                    chunk[intensity_role].to_numpy(dtype=np.float64),
+                    intensity_lo, intensity_hi,
+                )
             for ed in extra_dims:
+                # Extra dims carry RAW values (the renderer normalises by the
+                # attribute's own range) — including a rescued secondary
+                # intensity/reflectance column, so its true dB/float values stay
+                # available for colour-by and filtering.
                 record[ed["slug"]] = chunk[ed["col"]].to_numpy(dtype=np.float32)
             writer.write_points(record)
             total_points += n
@@ -8480,8 +8562,10 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         record.green = vertex[rgb_cols[1]][keep].astype(np.uint16) * 256
         record.blue = vertex[rgb_cols[2]][keep].astype(np.uint16) * 256
     if intensity_col is not None:
-        refl = vertex[intensity_col][keep].astype(np.float32)
-        record.intensity = np.clip(refl * 256.0, 0, 65535).astype(np.uint16)
+        # Normalise the intensity/reflectance property's range to the LAS uint16
+        # field — handles dB / [0,1] / [0,255] / signed scales uniformly, instead
+        # of a fixed `* 256` that crushes all-negative columns to 0.
+        record.intensity = _intensity_to_las_uint16(vertex[intensity_col][keep])
     for ed in extra_dims:
         if ed["slug"] == _MISS_SLUG and ed.get("col") is None:
             record[_MISS_SLUG] = is_miss[keep]
