@@ -404,7 +404,7 @@ export default function PointCloudViewer({
 
   // Delete confirmation dialog state
   const [deleteConfirm, setDeleteConfirm] = useState<{
-    type: 'mesh' | 'skeleton' | 'cloud';
+    type: 'mesh' | 'skeleton' | 'cloud' | 'qsm';
     id: string;
     name: string;
   } | null>(null);
@@ -7707,6 +7707,7 @@ export default function PointCloudViewer({
             <group key={qsm.id}>
               <QSM3D
                 cylinders={qsm.cylinders}
+                shoots={qsm.shoots}
                 colorMode={qsmColorMode}
                 selectedShootId={selectedQSMShootId}
               />
