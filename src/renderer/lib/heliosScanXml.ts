@@ -9,8 +9,12 @@
 // We extract the optional <filename> (relative path to the recorded point
 // data) and <ASCII_format> (column layout descriptor) so the caller can
 // auto-attach the referenced point cloud and forward the format hint to the
-// backend. <translation> / <rotation> / the surrounding <grid> are still
-// ignored.
+// backend.
+//
+// We also parse top-level <grid> blocks (siblings of <scan>, per the Helios
+// LiDAR XML format) into HeliosXmlGrid descriptors so the caller can
+// auto-create matching voxel-grid meshes. <translation> / per-scan <rotation>
+// are still ignored.
 
 import { DEFAULT_SCAN_PARAMETERS, type ScanParameters } from './scanParameters';
 
@@ -31,8 +35,21 @@ export interface HeliosXmlScan {
   asciiFormat: string | null;
 }
 
+// A top-level <grid> block. Maps onto a voxel-box mesh: center → mesh
+// position, size → mesh scale (full extents; the base geometry is a unit
+// cube), subdivisions → gridSubdivisions, rotationDeg → mesh z-rotation
+// (degrees, about the z-axis, per the Helios convention).
+export interface HeliosXmlGrid {
+  center: { x: number; y: number; z: number };
+  size: { x: number; y: number; z: number };
+  subdivisions: { x: number; y: number; z: number }; // Nx, Ny, Nz (>= 1)
+  rotationDeg: number; // about z; 0 when absent
+  label: string;       // "Grid N"
+}
+
 export interface HeliosXmlParseResult {
   scans: HeliosXmlScan[];
+  grids: HeliosXmlGrid[];
 }
 
 export class HeliosXmlParseError extends Error {
@@ -64,12 +81,46 @@ export function parseHeliosScanXml(xmlText: string): HeliosXmlParseResult {
   }
 
   const scanEls = Array.from(doc.getElementsByTagName('scan'));
-  if (scanEls.length === 0) {
-    throw new HeliosXmlParseError('No <scan> elements found in XML.');
+  const gridEls = Array.from(doc.getElementsByTagName('grid'));
+  // Grids can stand alone — a grid-only XML still imports. Only a document with
+  // neither scans nor grids is an error.
+  if (scanEls.length === 0 && gridEls.length === 0) {
+    throw new HeliosXmlParseError('No <scan> or <grid> elements found in XML.');
   }
 
   const scans: HeliosXmlScan[] = scanEls.map((el, idx) => parseScanElement(el, idx));
-  return { scans };
+  const grids: HeliosXmlGrid[] = gridEls.map((el, idx) => parseGridElement(el, idx));
+  return { scans, grids };
+}
+
+function parseGridElement(el: Element, index: number): HeliosXmlGrid {
+  const center = parseVec3Tag(el, 'center');
+  if (!center) {
+    throw new HeliosXmlParseError(`<grid> at index ${index} is missing required <center>.`);
+  }
+  const size = parseVec3Tag(el, 'size');
+  if (!size) {
+    throw new HeliosXmlParseError(`<grid> at index ${index} is missing required <size>.`);
+  }
+  if (size.some(v => !(v > 0))) {
+    throw new HeliosXmlParseError(
+      `<grid> at index ${index} has a non-positive <size> component (${size.join(' ')}).`,
+    );
+  }
+
+  // Nx/Ny/Nz default to 1 (single cell); rotation defaults to 0 degrees.
+  const nx = Math.max(1, Math.round(parseNumberTag(el, 'Nx') ?? 1));
+  const ny = Math.max(1, Math.round(parseNumberTag(el, 'Ny') ?? 1));
+  const nz = Math.max(1, Math.round(parseNumberTag(el, 'Nz') ?? 1));
+  const rotationDeg = parseNumberTag(el, 'rotation') ?? 0;
+
+  return {
+    center: { x: center[0], y: center[1], z: center[2] },
+    size: { x: size[0], y: size[1], z: size[2] },
+    subdivisions: { x: nx, y: ny, z: nz },
+    rotationDeg,
+    label: `Grid ${index + 1}`,
+  };
 }
 
 function parseScanElement(el: Element, index: number): HeliosXmlScan {

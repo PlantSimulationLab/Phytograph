@@ -54,10 +54,18 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'b', label: 'Blue' },
   { value: 'intensity', label: 'Intensity' },
   { value: 'reflectance', label: 'Reflectance' },
+  { value: 'row_index', label: 'Scan Row Index' },
+  { value: 'column_index', label: 'Scan Column Index' },
   { value: 'extra', label: 'Scalar' },
   { value: 'label', label: 'Label' },
   { value: 'skip', label: 'Skip' },
 ];
+// 'row_index'/'column_index' are structured-scan raster indices: integer (row,
+// column) positions within the scanner's rectangular acquisition grid. They
+// pass straight through buildColumnPlan as their own role token — the backend
+// pins them to canonical extra-dim slugs so the gap-filling / miss-recovery
+// path can reconstruct the raster — so they need no rename box and aren't in
+// SCALAR_ROLES below.
 
 // Roles that carry a named scalar field (and so get a rename box). 'label' is
 // the categorical variant of 'extra'.
@@ -181,6 +189,11 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   const [stepIdx, setStepIdx] = useState(0);
   const [configs, setConfigs] = useState<ScanConfig[]>(() => inputs.map(blankScanConfig));
   const [applyToAll, setApplyToAll] = useState(false);
+  // Furthest scan the user has reached via Next. For a multi-scan import we only
+  // enable the Import button once they've either stepped through every scan
+  // (maxStepReached === last) or checked "apply to all" — otherwise it's too easy
+  // to import without realising the per-scan choices on later scans went unseen.
+  const [maxStepReached, setMaxStepReached] = useState(0);
 
   const total = inputs.length;
   const current = inputs[stepIdx];
@@ -291,7 +304,16 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   }, [inputs, configs, onComplete]);
 
   const goPrev = () => setStepIdx((i) => Math.max(0, i - 1));
-  const goNext = () => setStepIdx((i) => Math.min(total - 1, i + 1));
+  const goNext = () => setStepIdx((i) => {
+    const next = Math.min(total - 1, i + 1);
+    setMaxStepReached((m) => Math.max(m, next));
+    return next;
+  });
+
+  // For a single scan there's nothing to step through; for many, require that the
+  // user has either seen every scan (advanced Next to the last) or opted to apply
+  // one scan's settings to all.
+  const reviewedAll = total <= 1 || applyToAll || maxStepReached >= total - 1;
 
   const sampleRows = cfg?.preview?.sample_rows ?? [];
 
@@ -372,11 +394,14 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                             </div>
                             {/* Role dropdown. 'Scalar' = continuous gradient,
                                 'Label' = categorical (discrete classes). For
-                                in-file formats (PLY/PCD/LAS) the file fixes the
-                                layout, so roles can't be reassigned — EXCEPT a
+                                in-file formats (PLY/PCD/LAS/E57) the file fixes
+                                the layout, so roles can't be reassigned — EXCEPT a
                                 scalar column can still toggle Scalar↔Label, since
                                 that's a renderer-side colouring choice, not a
-                                re-mapping of the file. */}
+                                re-mapping of the file. A fixed non-scalar role
+                                (X/Y/Z/Intensity/RGB) shows its OWN role as a lone
+                                disabled option, so the select displays "X" rather
+                                than falling back to the first list entry. */}
                             <select
                               data-testid="import-wizard-role"
                               value={col.role}
@@ -384,7 +409,11 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                               onChange={(e) => updateColumn(col.index, { role: e.target.value })}
                               className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                              {(col.remappable ? ROLE_OPTIONS : ROLE_OPTIONS.filter((o) => SCALAR_ROLES.has(o.value)))
+                              {(col.remappable
+                                ? ROLE_OPTIONS
+                                : isScalar
+                                  ? ROLE_OPTIONS.filter((o) => SCALAR_ROLES.has(o.value))
+                                  : ROLE_OPTIONS.filter((o) => o.value === col.role))
                                 .map((o) => (
                                   <option key={o.value} value={o.value}>{o.label}</option>
                                 ))}
@@ -452,8 +481,13 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                 </table>
               </div>
 
-              {/* RGB scale toggle — shown only when an RGB role is present. */}
-              {cfg.columns.some((c) => c.role === 'r' || c.role === 'g' || c.role === 'b') && (
+              {/* RGB scale toggle — shown only when an RGB role is present AND
+                  the layout is remappable (ASCII). For in-file formats (E57/PLY/
+                  PCD/LAS) the colour scale is known from the file — the converter
+                  normalises it — so the toggle would be misleading dead UI:
+                  buildColumnPlan returns null for non-remappable scans, so
+                  rgbIs255 is never even sent. */}
+              {cfg.columns.some((c) => (c.role === 'r' || c.role === 'g' || c.role === 'b') && c.remappable) && (
                 <div className="flex items-center gap-3 text-[11px] text-neutral-300">
                   <span className="font-medium">RGB range:</span>
                   <label className="flex items-center gap-1.5 cursor-pointer">
@@ -538,6 +572,11 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
             )}
           </div>
           <div className="flex items-center gap-2">
+            {total > 1 && !reviewedAll && (
+              <span data-testid="import-wizard-review-hint" className="text-[11px] text-neutral-400">
+                Step through every scan, or check “apply to all”, to import.
+              </span>
+            )}
             <button
               onClick={onCancel}
               data-testid="import-wizard-cancel"
@@ -547,7 +586,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
             </button>
             <button
               onClick={handleImport}
-              disabled={!allReady}
+              disabled={!allReady || !reviewedAll}
               data-testid="import-wizard-import"
               className="px-4 py-1.5 text-xs font-medium bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >

@@ -1,7 +1,7 @@
 // Pure, stateless helpers extracted from PointCloudViewer.tsx. No React, no
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
-import type { MeshData, ShapeType, MeshColorMode, LADVoxel } from './pointCloudTypes';
+import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData } from './pointCloudTypes';
 import type { HeliosGrid, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { sampleColormap, type ColormapName } from './colormaps';
@@ -528,4 +528,86 @@ export function buildLADRequest(
     phi_min: 0,
     phi_max: 360,
   };
+}
+
+// Randomly downsample a flat point cloud, keeping a fraction of the points.
+// `targetCount` is derived from `originalCount * fraction` (the original count is
+// passed in so a live preview resamples against the pristine point total, not a
+// previously-previewed subset), then that many points are drawn from `data`
+// without replacement (Fisher–Yates, kept indices sorted to preserve order).
+// All parallel buffers — colors, intensities, scalar fields — are carried along,
+// and bounds are recomputed. Returns a new PointCloudData; `data` is untouched.
+export function resampleCloud(
+  data: PointCloudData,
+  fraction: number,
+  originalCount: number,
+): PointCloudData {
+  const sourceCount = data.pointCount;
+  const targetCount = Math.max(1, Math.round(originalCount * fraction));
+
+  // Fisher–Yates shuffle of [0..sourceCount), then take the first targetCount.
+  const indices: number[] = [];
+  for (let i = 0; i < sourceCount; i++) indices.push(i);
+  for (let i = indices.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [indices[i], indices[j]] = [indices[j], indices[i]];
+  }
+  const keptIndices = indices.slice(0, targetCount).sort((a, b) => a - b);
+
+  const newPositions = new Float32Array(targetCount * 3);
+  const newColors = data.colors ? new Float32Array(targetCount * 3) : undefined;
+  const newIntensities = data.intensities ? new Float32Array(targetCount) : undefined;
+  const newScalarFields: Record<string, { values: Float32Array; min: number; max: number }> = {};
+
+  Object.keys(data.scalarFields || {}).forEach(name => {
+    newScalarFields[name] = { values: new Float32Array(targetCount), min: Infinity, max: -Infinity };
+  });
+
+  for (let i = 0; i < targetCount; i++) {
+    const srcIdx = keptIndices[i];
+    newPositions[i * 3] = data.positions[srcIdx * 3];
+    newPositions[i * 3 + 1] = data.positions[srcIdx * 3 + 1];
+    newPositions[i * 3 + 2] = data.positions[srcIdx * 3 + 2];
+
+    if (newColors && data.colors) {
+      newColors[i * 3] = data.colors[srcIdx * 3];
+      newColors[i * 3 + 1] = data.colors[srcIdx * 3 + 1];
+      newColors[i * 3 + 2] = data.colors[srcIdx * 3 + 2];
+    }
+    if (newIntensities && data.intensities) {
+      newIntensities[i] = data.intensities[srcIdx];
+    }
+    Object.entries(data.scalarFields || {}).forEach(([name, field]) => {
+      const val = field.values[srcIdx];
+      newScalarFields[name].values[i] = val;
+      newScalarFields[name].min = Math.min(newScalarFields[name].min, val);
+      newScalarFields[name].max = Math.max(newScalarFields[name].max, val);
+    });
+  }
+
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < targetCount; i++) {
+    const x = newPositions[i * 3];
+    const y = newPositions[i * 3 + 1];
+    const z = newPositions[i * 3 + 2];
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+  }
+
+  return {
+    ...data,
+    positions: newPositions,
+    colors: newColors,
+    intensities: newIntensities,
+    scalarFields: newScalarFields,
+    pointCount: targetCount,
+    bounds: {
+      min: new THREE.Vector3(minX, minY, minZ),
+      max: new THREE.Vector3(maxX, maxY, maxZ),
+      center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
+      size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
+    },
+  } as PointCloudData;
 }

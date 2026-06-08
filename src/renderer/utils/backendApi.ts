@@ -55,6 +55,11 @@ export interface TriangulationResponse {
 }
 
 import { BACKEND_PORT_PROD } from '../../shared/constants';
+// The wire shape of the backend `scan_params` dict (E57/PCD scan-pattern
+// metadata). Canonically defined in scanParameters.ts alongside the converter
+// that turns it into ScanParameters; imported here for CloudSessionMetadata and
+// re-exported below so backendApi consumers get it without a second import.
+import type { ScanParamsFromFile } from '../lib/scanParameters';
 
 /**
  * Get the backend API base URL.
@@ -1907,23 +1912,38 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   miss_count?: number;
   miss_slug?: string;
   scan_origin?: [number, number, number];
+  // Full scan-pattern parameters recovered from the source file (E57 pose +
+  // angular sweep + grid resolution; PCD VIEWPOINT origin). Present only when
+  // the format carried them; each field is independently optional. The renderer
+  // turns this into a Scan's ScanParameters at import (XML-parity), filling any
+  // missing field from the defaults. Angles are in degrees, origin in metres.
+  scan_params?: ScanParamsFromFile;
 }
 
-/** Sky/miss points for a session, relocated onto the hit cloud's bounding
- * sphere for display (true coords stay in the session for LAD). `positions` is
- * a flat [x,y,z, ...] triple list. */
+// The wire shape of the backend `scan_params` dict. Canonically defined in
+// scanParameters.ts (alongside the converter that turns it into ScanParameters)
+// and re-exported here so backendApi consumers get it without a second import.
+export type { ScanParamsFromFile } from '../lib/scanParameters';
+
+/** Sky/miss points for a session. With NO origin, returned at their true stored
+ * coordinates; with an origin, projected onto a sphere centred on the origin at
+ * a radius just beyond the farthest hit. `positions` is a flat [x,y,z, ...]
+ * triple list. `count` is how many are DRAWN (placeable); `total` includes
+ * unplaceable misses (flagged but with no direction yet — awaiting Helios grid
+ * recovery), which are not drawn. */
 export interface CloudMissesResult {
   count: number;
+  total: number;
   origin: [number, number, number];
   radius: number;
   positions: number[];
 }
 
 /**
- * Fetch a session's sky/miss points, relocated onto the hit cloud's bounding
- * sphere so they render at a sensible distance. Pass the scan's true origin when
- * known so the projection uses the real beam apex; otherwise the backend falls
- * back to the hit-cloud centre.
+ * Fetch a session's sky/miss points for the overlay. When an origin is passed
+ * (the scan's params.origin), the backend projects each miss onto a sphere
+ * centred on that origin, just beyond the farthest hit. When omitted, the
+ * misses are returned at their true stored coordinates (no relocation).
  */
 export async function getCloudMisses(
   sessionId: string,

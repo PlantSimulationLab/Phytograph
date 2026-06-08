@@ -91,6 +91,41 @@ def test_column_plan_pins_canonical_multireturn_slugs(tmp_path):
     assert labels["target_count"] == "Target Count"
 
 
+def test_categorical_override_of_multireturn_column_keeps_class_field():
+    """A multi-return column the user explicitly marks categorical (the wizard's
+    'Label' role) is a discrete class field BY INTENT — it must NOT be diverted
+    into the LAD canonicalisation that lower-cases the slug and relabels it as a
+    per-pulse field. It carries as a normal categorical extra-dim under a
+    readable, sanitised slug ('Target_Index'), so the renderer colours it as
+    classes and the colour-mode option matches.
+
+    The non-categorical default still pins the canonical lower-case slug so the
+    LAD accessor finds it — that path is unchanged.
+    """
+    def _plan(categorical):
+        cols = [
+            main.ColumnPlanEntry(index=0, role='x', slug=None, label=None, categorical=False),
+            main.ColumnPlanEntry(index=1, role='y', slug=None, label=None, categorical=False),
+            main.ColumnPlanEntry(index=2, role='z', slug=None, label=None, categorical=False),
+            # The wizard sends the preview's lower-cased canonical slug verbatim.
+            main.ColumnPlanEntry(index=3, role='extra', slug='target_index',
+                                 label='Target Index', categorical=categorical),
+        ]
+        return main.ColumnPlan(columns=cols, rgb_is_255=True)
+
+    # Categorical (Label) override -> readable slug, categorical preserved.
+    _, extras = main._plan_columns_from_column_plan(_plan(categorical=True))
+    ti = next(e for e in extras if e["label"] == "Target Index")
+    assert ti["slug"] == "Target_Index"
+    assert ti["categorical"] is True
+
+    # Default (Scalar) -> canonical lower-case slug so the LAD path finds it.
+    _, extras_def = main._plan_columns_from_column_plan(_plan(categorical=False))
+    ti_def = next(e for e in extras_def if e["label"] == "Target Index")
+    assert ti_def["slug"] == "target_index"
+    assert ti_def["categorical"] is False
+
+
 def test_header_named_multireturn_columns_round_trip(tmp_path):
     """Auto-detect (no ascii_format): a header naming the columns maps to the
     canonical slugs, including the common LAS aliases."""
@@ -186,6 +221,27 @@ def test_las_native_multireturn_dims_auto_mapped(tmp_path):
     np.testing.assert_allclose(extras["timestamp"], [1.0, 2.0, 2.0, 2.0, 3.0])
     slugs = {ed["slug"] for ed in extra_dims_meta}
     assert {"timestamp", "target_index", "target_count"} <= slugs
+
+
+def test_las_degenerate_standard_dims_not_mapped(tmp_path):
+    """return_number/number_of_returns/gps_time are STANDARD LAS dims present
+    (all-zero) in every point-format-3 record. A plain cloud that never had
+    per-pulse data must NOT get phantom multi-return slugs from those zeros —
+    otherwise LAD flips to the full-waveform algorithm and gapfills garbage."""
+    las_path = tmp_path / "plain.las"
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    las = laspy.LasData(header)
+    las.x = np.array([0.1, 0.3, 0.5])
+    las.y = np.array([0.2, 0.4, 0.6])
+    las.z = np.array([1.0, 1.5, 0.5])
+    # Leave return_number/number_of_returns/gps_time at their default zeros.
+    las.write(str(las_path))
+
+    _, _, _, extras, _ = main._read_las_into_arrays(las_path)
+    for slug in main._MULTI_RETURN_SLUGS:
+        assert slug not in extras, f"phantom {slug} mapped from all-zero standard dim"
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ import { BackendSplash } from "./components/BackendSplash";
 import { BulkImportProgress, type BulkImportProgressState } from "./components/BulkImportProgress";
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
 import type { Scan } from "./lib/scan";
-import type { ScanParameters } from "./lib/scanParameters";
+import { scanParametersFromFile, type ScanParameters } from "./lib/scanParameters";
 import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
 import { importTexturedMesh, deleteCloudSession, type MeshImportResponse } from "./utils/backendApi";
 import { plantResponseToMeshData } from "./lib/plantMeshData";
@@ -178,13 +178,22 @@ function App() {
       input.path, asciiFormat, columnPlan, categoricalSlugs,
     );
     for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
+    // Scan params precedence: an explicit XML <scan> (input.params) wins; else,
+    // if the file itself carried scan-pattern metadata (E57 pose + angular sweep
+    // + grid, or a PCD VIEWPOINT origin), auto-populate from it so a lone-file
+    // import creates a Scan with as much of ScanParameters filled as the format
+    // recorded — fields the file omitted stay at their default. Plain formats
+    // (XYZ/LAS/PLY/...) carry nothing, so params stays undefined as before.
+    const fileScanParams = data.octree?.scanParams ?? null;
+    const params = input.params
+      ?? (fileScanParams ? scanParametersFromFile(fileScanParams) : undefined);
     return {
       id: crypto.randomUUID(),
       label: input.label ?? data.fileName ?? 'Scan',
       visible: true,
       color: input.color ?? color,
       data,
-      params: input.params,
+      params,
       sourcePath: input.path,
       asciiFormat,
     };

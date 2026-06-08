@@ -6,6 +6,7 @@ import {
   createCloudSession,
   type OctreeMetadata,
   type ColumnPlan,
+  type ScanParamsFromFile,
 } from '../utils/backendApi';
 
 // Calculate bounds from position array
@@ -876,6 +877,12 @@ export function buildPointCloudFromOctree(
       hasMisses: 'has_misses' in meta ? Boolean((meta as { has_misses?: boolean }).has_misses) : undefined,
       scanOrigin: 'scan_origin' in meta
         ? ((meta as { scan_origin?: [number, number, number] }).scan_origin ?? null)
+        : undefined,
+      // Full scan-pattern params recovered from the file header (E57/PCD), used
+      // to auto-populate the Scan's ScanParameters at import. Absent for plain
+      // OctreeMetadata callers and for files that carried no scan metadata.
+      scanParams: 'scan_params' in meta
+        ? ((meta as { scan_params?: ScanParamsFromFile }).scan_params ?? null)
         : undefined,
     },
   };

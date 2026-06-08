@@ -30,6 +30,10 @@ surface.
       want along each axis. Use 1×1×1 for a single canopy-wide value, or
       subdivide for a 3-D density field. A wireframe shows the cells when
       any axis is greater than 1.
+    - Alternatively, if your Helios scan XML defines a `<grid>` block, the
+      voxel grid is created automatically on
+      [import](import-export.md#importing-several-files-at-once) — no
+      need to build it by hand.
 
 2. **Open the LAD tool** (the grid icon, next to Triangulate). The button
    is disabled until both a parameterized scan is selected *and* a voxel

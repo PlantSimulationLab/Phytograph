@@ -4,7 +4,7 @@
 // import them without a components → lib cycle. Pure types only — no runtime
 // code, so importing this module has zero side effects.
 import * as THREE from 'three';
-import type { BackendPointSource, ColumnPlan, TriangulationMethod } from '../utils/backendApi';
+import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationMethod } from '../utils/backendApi';
 import type { ScanParameters } from './scanParameters';
 
 // potree-core's RequestManager interface isn't re-exported from the package
@@ -68,6 +68,12 @@ export interface OctreeRef {
   // beam apex used to project the overlay. See getCloudMisses / MissOverlay.
   hasMisses?: boolean;
   scanOrigin?: [number, number, number] | null;
+  // Full scan-pattern parameters recovered from the source file (E57 pose +
+  // angular sweep + grid resolution; PCD VIEWPOINT origin), when present. The
+  // import path turns this into the Scan's ScanParameters so a lone-file import
+  // auto-creates a populated scan, mirroring the Helios-XML path. Absent for
+  // formats/files that carry no scan metadata. See buildScanFromWizardResult.
+  scanParams?: ScanParamsFromFile | null;
 }
 
 // Result of buildPointSource: either an in-memory cloud (flat path) or a

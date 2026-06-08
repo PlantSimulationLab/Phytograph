@@ -10,6 +10,7 @@ import {
   parseHeliosScanXml,
   HeliosXmlParseError,
   type HeliosXmlScan,
+  type HeliosXmlGrid,
 } from '../lib/heliosScanXml';
 
 // What the popup is doing in this open. Drives the title and submit-button
@@ -33,10 +34,11 @@ interface ScanParametersPopupProps {
   defaults?: { label?: string; params?: Partial<ScanParameters> };
   mode?: ScanParametersPopupMode;
   // When true, the popup shows an "Import from XML" button. The caller
-  // receives parsed Helios scans along with the XML's on-disk path so it
-  // can resolve any <filename> references relative to the XML directory.
+  // receives parsed Helios scans and grids along with the XML's on-disk path so
+  // it can resolve any <filename> references relative to the XML directory and
+  // create voxel-grid meshes from any <grid> blocks.
   showBulkImport?: boolean;
-  onBulkImport?: (scans: HeliosXmlScan[], xmlPath: string) => void | Promise<void>;
+  onBulkImport?: (scans: HeliosXmlScan[], grids: HeliosXmlGrid[], xmlPath: string) => void | Promise<void>;
 }
 
 export function ScanParametersPopup({
@@ -99,10 +101,10 @@ export function ScanParametersPopup({
     const path = Array.isArray(picked) ? picked[0] : picked;
 
     // Parse first so XML errors stay surfaced inside the popup.
-    let parsedScans;
+    let parsed;
     try {
       const text = await window.electronAPI.fs.readText(path);
-      parsedScans = parseHeliosScanXml(text).scans;
+      parsed = parseHeliosScanXml(text);
     } catch (err) {
       const msg = err instanceof HeliosXmlParseError
         ? err.message
@@ -124,7 +126,7 @@ export function ScanParametersPopup({
     //      happening. Parent shows a progress modal instead.
     // Fire-and-forget the import; the parent owns errors/progress now.
     onClose();
-    void onBulkImport?.(parsedScans, path);
+    void onBulkImport?.(parsed.scans, parsed.grids, path);
   };
 
   const setNum = (key: keyof Omit<ScanParameters, 'origin' | 'returnType'>, min = 0) => (e: React.ChangeEvent<HTMLInputElement>) => {

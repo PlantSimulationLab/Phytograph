@@ -14,8 +14,10 @@ import {
   meshColorModeLabel,
   roundCoord,
   roundCoord3,
+  resampleCloud,
 } from './pointCloudHelpers';
-import type { MeshData } from './pointCloudTypes';
+import type { MeshData, PointCloudData } from './pointCloudTypes';
+import * as THREE from 'three';
 
 // Build a minimal MeshData from a flat vertex list and triangle index list.
 function makeMesh(
@@ -478,5 +480,100 @@ describe('octreeScalarFieldOptions', () => {
     };
     const opts = octreeScalarFieldOptions(ranges, { Timestamp_s: 'Timestamp [s]' });
     expect(opts.map(o => o.value)).toEqual(['Timestamp_s']);
+  });
+});
+
+describe('resampleCloud', () => {
+  // Build a 10-point cloud where every parallel buffer encodes the point index,
+  // so we can verify the survivors keep their colors/intensities/scalars aligned.
+  function makeCloud(n: number): PointCloudData {
+    const positions = new Float32Array(n * 3);
+    const colors = new Float32Array(n * 3);
+    const intensities = new Float32Array(n);
+    const scalar = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      positions[i * 3] = i;
+      positions[i * 3 + 1] = i * 2;
+      positions[i * 3 + 2] = i * 3;
+      colors[i * 3] = i / n;
+      colors[i * 3 + 1] = i / n;
+      colors[i * 3 + 2] = i / n;
+      intensities[i] = i * 10;
+      scalar[i] = i * 100;
+    }
+    return {
+      positions,
+      colors,
+      intensities,
+      scalarFields: { height: { values: scalar, min: 0, max: (n - 1) * 100 } },
+      pointCount: n,
+      bounds: {
+        min: new THREE.Vector3(0, 0, 0),
+        max: new THREE.Vector3(n - 1, (n - 1) * 2, (n - 1) * 3),
+        center: new THREE.Vector3((n - 1) / 2, n - 1, (n - 1) * 1.5),
+        size: new THREE.Vector3(n - 1, (n - 1) * 2, (n - 1) * 3),
+      },
+    };
+  }
+
+  it('keeps round(originalCount * fraction) points', () => {
+    const out = resampleCloud(makeCloud(10), 0.5, 10);
+    expect(out.pointCount).toBe(5);
+    expect(out.positions.length).toBe(5 * 3);
+    expect(out.colors!.length).toBe(5 * 3);
+    expect(out.intensities!.length).toBe(5);
+    expect(out.scalarFields!.height.values.length).toBe(5);
+  });
+
+  it('keeps at least one point even at a tiny fraction', () => {
+    expect(resampleCloud(makeCloud(10), 0.001, 10).pointCount).toBe(1);
+  });
+
+  it('keeps the parallel buffers index-aligned for each survivor', () => {
+    const out = resampleCloud(makeCloud(10), 0.5, 10);
+    // Recover each survivor's original index from its x position, then assert the
+    // other buffers carry that same index's values — i.e. no buffer got shuffled
+    // independently of the positions.
+    for (let i = 0; i < out.pointCount; i++) {
+      const idx = out.positions[i * 3]; // x === original index
+      expect(out.positions[i * 3 + 1]).toBeCloseTo(idx * 2);
+      expect(out.positions[i * 3 + 2]).toBeCloseTo(idx * 3);
+      expect(out.intensities![i]).toBeCloseTo(idx * 10);
+      expect(out.scalarFields!.height.values[i]).toBeCloseTo(idx * 100);
+    }
+  });
+
+  it('recomputes scalar-field and spatial bounds from the survivors', () => {
+    const out = resampleCloud(makeCloud(10), 1.0, 10);
+    // fraction 1.0 keeps every point (in shuffled-then-resorted order), so the
+    // bounds must match the full original extents.
+    expect(out.pointCount).toBe(10);
+    expect(out.bounds.min.x).toBeCloseTo(0);
+    expect(out.bounds.max.x).toBeCloseTo(9);
+    expect(out.bounds.max.z).toBeCloseTo(27);
+    const h = out.scalarFields!.height;
+    expect(h.min).toBeCloseTo(0);
+    expect(h.max).toBeCloseTo(900);
+  });
+
+  it('drops optional buffers when the source lacks them', () => {
+    const base = makeCloud(8);
+    const out = resampleCloud(
+      { ...base, colors: undefined, intensities: undefined, scalarFields: {} },
+      0.5,
+      8,
+    );
+    expect(out.pointCount).toBe(4);
+    expect(out.colors).toBeUndefined();
+    expect(out.intensities).toBeUndefined();
+    expect(Object.keys(out.scalarFields!)).toHaveLength(0);
+  });
+
+  it('does not mutate the source cloud', () => {
+    const src = makeCloud(10);
+    const before = src.positions.slice();
+    resampleCloud(src, 0.3, 10);
+    expect(src.pointCount).toBe(10);
+    expect(Array.from(src.positions)).toEqual(Array.from(before));
   });
 });
