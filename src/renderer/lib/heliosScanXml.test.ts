@@ -93,9 +93,80 @@ describe('parseHeliosScanXml', () => {
     expect(scans[1].asciiFormat).toBeNull();
   });
 
-  it('throws HeliosXmlParseError when no <scan> elements are present', () => {
+  it('throws HeliosXmlParseError when neither <scan> nor <grid> elements are present', () => {
+    expect(() => parseHeliosScanXml('<helios><note>nothing useful</note></helios>'))
+      .toThrow(/No <scan> or <grid> elements found/);
+  });
+
+  it('parses the <grid> block in sphere.xml (defaults Nz=1, rotation=0)', () => {
+    const xml = readFileSync(FIXTURE_PATH, 'utf-8');
+    const { grids } = parseHeliosScanXml(xml);
+    expect(grids).toHaveLength(1);
+    const g = grids[0];
+    expect(g.center).toEqual({ x: 0, y: 0, z: 0.5 });
+    expect(g.size).toEqual({ x: 0.5, y: 0.5, z: 0.5 });
+    // Nx/Ny given as 1; Nz absent → defaults to 1; rotation absent → 0.
+    expect(g.subdivisions).toEqual({ x: 1, y: 1, z: 1 });
+    expect(g.rotationDeg).toBe(0);
+    expect(g.label).toBe('Grid 1');
+  });
+
+  it('parses multiple <grid> blocks with subdivisions and rotation', () => {
+    const xml = `
+      <scan><origin>0 0 0</origin><size>10 10</size></scan>
+      <grid>
+        <center>1 2 3</center>
+        <size>4 5 6</size>
+        <Nx>2</Nx>
+        <Ny>3</Ny>
+        <Nz>4</Nz>
+        <rotation>45</rotation>
+      </grid>
+      <grid>
+        <center>0 0 0</center>
+        <size>1 1 1</size>
+      </grid>
+    `;
+    const { scans, grids } = parseHeliosScanXml(xml);
+    expect(scans).toHaveLength(1);
+    expect(grids).toHaveLength(2);
+    expect(grids[0].center).toEqual({ x: 1, y: 2, z: 3 });
+    expect(grids[0].size).toEqual({ x: 4, y: 5, z: 6 });
+    expect(grids[0].subdivisions).toEqual({ x: 2, y: 3, z: 4 });
+    expect(grids[0].rotationDeg).toBe(45);
+    expect(grids[0].label).toBe('Grid 1');
+    // Second grid: defaults.
+    expect(grids[1].subdivisions).toEqual({ x: 1, y: 1, z: 1 });
+    expect(grids[1].rotationDeg).toBe(0);
+    expect(grids[1].label).toBe('Grid 2');
+  });
+
+  it('imports a grid-only XML (no <scan>) without error', () => {
+    const xml = `
+      <grid>
+        <center>0 0 0.5</center>
+        <size>2 2 2</size>
+        <Nx>5</Nx><Ny>5</Ny><Nz>5</Nz>
+      </grid>
+    `;
+    const { scans, grids } = parseHeliosScanXml(xml);
+    expect(scans).toEqual([]);
+    expect(grids).toHaveLength(1);
+    expect(grids[0].subdivisions).toEqual({ x: 5, y: 5, z: 5 });
+  });
+
+  it('throws when a <grid> is missing <center> or <size>', () => {
+    expect(() => parseHeliosScanXml('<grid><size>1 1 1</size></grid>'))
+      .toThrow(/missing required <center>/);
     expect(() => parseHeliosScanXml('<grid><center>0 0 0</center></grid>'))
-      .toThrow(HeliosXmlParseError);
+      .toThrow(/missing required <size>/);
+  });
+
+  it('throws when a <grid> <size> has a non-positive component', () => {
+    expect(() => parseHeliosScanXml('<grid><center>0 0 0</center><size>1 0 1</size></grid>'))
+      .toThrow(/non-positive <size>/);
+    expect(() => parseHeliosScanXml('<grid><center>0 0 0</center><size>1 -2 1</size></grid>'))
+      .toThrow(/non-positive <size>/);
   });
 
   it('throws when <origin> is missing', () => {

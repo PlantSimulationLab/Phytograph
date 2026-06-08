@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+
+<!--
+  Same as sphere.xml (one resolvable scan referencing sphere_scan0.xyz) but
+  with a top-level <grid> block. Exercises Phytograph's <grid> import: a Helios
+  grid (center/size/Nx/Ny/Nz/rotation) becomes a voxel-grid mesh named "Grid 1"
+  placed at the grid's center/size with its z-rotation. Only one scan to keep
+  the E2E import wizard quick.
+-->
+
+<helios>
+
+<scan>
+  <filename> sphere_scan0.xyz </filename>
+  <ASCII_format> row column x y z r g b reflectance </ASCII_format>
+  <origin> -2.000000 0.000000 0.500000 </origin>
+  <size> 100 200 </size>
+</scan>
+
+<grid>
+  <center> 0.25 -0.5 0.75 </center>
+  <size> 1.5 2 2.5 </size>
+  <Nx> 2 </Nx>
+  <Ny> 3 </Ny>
+  <Nz> 4 </Nz>
+  <rotation> 30 </rotation>
+</grid>
+
+</helios>

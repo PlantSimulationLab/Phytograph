@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, RotateCcw, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Leaf, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Film, Play, StopCircle, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Palette } from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings} from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, segmentGround, segmentTrees, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -45,9 +45,9 @@ import {
   buildMeshScanColorBuffers,
   computeMeshTriangleScalars,
   meshColorModeLabel,
-  meshHasScanColors,
   ladRange,
   roundCoord3,
+  resampleCloud,
 } from '../lib/pointCloudHelpers';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
@@ -74,6 +74,22 @@ import { PolygonCameraSnapshotter } from './viewer/gizmos/PolygonCameraSnapshott
 import { OrthoProjectionOverride } from './viewer/gizmos/OrthoProjectionOverride';
 import { EraseBrush } from './viewer/gizmos/EraseBrush';
 import { EraseBrushOctree, type EraseSquareFrame } from './viewer/gizmos/EraseBrushOctree';
+import { TriangulationPanel } from './viewer/panels/TriangulationPanel';
+import { GroundSegmentPanel } from './viewer/panels/GroundSegmentPanel';
+import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
+import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
+import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
+import { ExportPanel } from './viewer/panels/ExportPanel';
+import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
+import { TransformPanel } from './viewer/panels/TransformPanel';
+import { TranslatePanel } from './viewer/panels/TranslatePanel';
+import { ResamplePanel } from './viewer/panels/ResamplePanel';
+import { FilterPanel } from './viewer/panels/FilterPanel';
+import { ErasePanel } from './viewer/panels/ErasePanel';
+import { CropPanel } from './viewer/panels/CropPanel';
+import { SkeletonsListPanel } from './viewer/panels/SkeletonsListPanel';
+import { LADResultsPanel } from './viewer/panels/LADResultsPanel';
+import { MeshesListPanel } from './viewer/panels/MeshesListPanel';
 
 // Shared viewer types now live in lib/pointCloudTypes.ts so the extracted leaf
 // components (components/viewer/**) and the lib parsers can import them without
@@ -431,17 +447,26 @@ export default function PointCloudViewer({
   const [skeletonProportionThreshold] = useState(0.1);
 
   // Import functions for external use
-  const importMesh = useCallback((mesh: Omit<MeshEntry, 'id'>) => {
+  const importMesh = useCallback((
+    mesh: Omit<MeshEntry, 'id'>,
+    transform?: {
+      position?: { x: number; y: number; z: number };
+      scale?: { x: number; y: number; z: number };
+      rotation?: { x: number; y: number; z: number };
+    },
+  ) => {
     const newMesh: MeshEntry = {
       ...mesh,
       id: crypto.randomUUID(),
     };
     setMeshes(prev => [...prev, newMesh]);
-    // Seed identity transforms so the first translate/scale/rotate reads a real
-    // origin instead of a fallback (matches the shape/plant creation paths).
-    setMeshPositions(prev => new Map(prev).set(newMesh.id, { x: 0, y: 0, z: 0 }));
-    setMeshScales(prev => new Map(prev).set(newMesh.id, { x: 1, y: 1, z: 1 }));
-    setMeshRotations(prev => new Map(prev).set(newMesh.id, { x: 0, y: 0, z: 0 }));
+    // Seed transforms so the first translate/scale/rotate reads a real origin
+    // instead of a fallback (matches the shape/plant creation paths). Callers
+    // may supply an initial transform (e.g. a voxel grid placed at the Helios
+    // <grid> center/size/rotation); otherwise identity.
+    setMeshPositions(prev => new Map(prev).set(newMesh.id, transform?.position ?? { x: 0, y: 0, z: 0 }));
+    setMeshScales(prev => new Map(prev).set(newMesh.id, transform?.scale ?? { x: 1, y: 1, z: 1 }));
+    setMeshRotations(prev => new Map(prev).set(newMesh.id, transform?.rotation ?? { x: 0, y: 0, z: 0 }));
   }, []);
 
   const importSkeleton = useCallback((skeleton: Omit<SkeletonEntry, 'id'>) => {
@@ -8728,468 +8753,79 @@ export default function PointCloudViewer({
 
         {/* Meshes Panel */}
         {meshes.length > 0 && (
-          <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
-            <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
-              <Box className="w-4 h-4 text-neutral-400" />
-              <span className="text-xs font-medium text-neutral-300 flex-1">Meshes</span>
-            </div>
-            <div className="overflow-y-auto flex-1 p-1">
-              {meshes.map(mesh => {
-                const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
-                const isSelected = selectedMeshIds.has(mesh.id);
-                // Display name: a user-assigned name wins; otherwise for plants
-                // show type/age, and for other meshes the source filename.
-                const displayName = meshDisplayName(mesh, sourceCloud?.data.fileName);
-                const isRenaming = renamingMeshId === mesh.id;
-                const isColorOpen = colorPopoverMeshId === mesh.id;
-                // The color swatch / picker only applies where mesh.color
-                // actually affects rendering: solid (untextured) non-plant
-                // meshes. Plants show a Leaf icon; textured meshes (plant or
-                // imported OBJ) draw their texture and ignore mesh.color, so
-                // they get a neutral Box icon and no picker.
-                const meshTextured = isTexturedMesh(mesh);
-                const showColorSwatch = !mesh.isPlant && !meshTextured;
-                // Only triangulated surfaces (standard / Helios) expose the
-                // per-triangle "Color by" control.
-                const canColorByTriangle = isTriangulatedMesh(mesh);
-                // Solid / vertex-colored surfaces expose a per-mesh Opacity
-                // slider; textured plants don't (alpha-cutout leaves ignore it).
-                const canSetOpacity = meshSupportsOpacity(mesh);
-                // The chevron expands the inline options section whenever this
-                // mesh has any per-mesh control (color-by and/or opacity).
-                const canExpand = canColorByTriangle || canSetOpacity;
-                const isExpanded = expandedMeshIds.has(mesh.id);
-                const colorMode = meshColorModes.get(mesh.id) ?? 'solid';
-                const meshOpacity = meshOpacities.get(mesh.id) ?? (mesh.gridSubdivisions ? GRID_MESH_DEFAULT_OPACITY : MESH_DEFAULT_OPACITY);
-                return (
-                  <div key={mesh.id}>
-                  <div
-                    data-testid="mesh-row"
-                    data-mesh-name={displayName}
-                    data-triangle-count={mesh.data.triangleCount}
-                    data-is-plant={mesh.isPlant ? 'true' : 'false'}
-                    data-textured-materials={mesh.plantMaterials?.filter(m => m.textureData).length ?? 0}
-                    data-selected={isSelected ? 'true' : 'false'}
-                    data-mesh-color={mesh.color}
-                    data-mesh-rotation={(() => { const r = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 }; return `${r.x.toFixed(1)},${r.y.toFixed(1)},${r.z.toFixed(1)}`; })()}
-                    data-mesh-position={(() => { const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 }; return `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`; })()}
-                    data-mesh-scale={(() => { const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 }; return `${s.x.toFixed(2)},${s.y.toFixed(2)},${s.z.toFixed(2)}`; })()}
-                    onClick={() => handleSelectMesh(mesh.id)}
-                    className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
-                      isSelected ? 'bg-green-600/30 border border-green-500/50' : 'hover:bg-neutral-700/50'
-                    }`}
-                  >
-                    {/* Expander for the per-mesh inline options (color-by and/or
-                        opacity); a spacer keeps other rows aligned. */}
-                    {canExpand ? (
-                      <button
-                        data-testid="mesh-color-expand"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setExpandedMeshIds(prev => {
-                            const next = new Set(prev);
-                            if (next.has(mesh.id)) next.delete(mesh.id); else next.add(mesh.id);
-                            return next;
-                          });
-                        }}
-                        className="p-0.5 hover:bg-neutral-600 rounded flex-shrink-0"
-                        title="Mesh options"
-                      >
-                        {isExpanded
-                          ? <ChevronDown className="w-3 h-3 text-neutral-400" />
-                          : <ChevronRight className="w-3 h-3 text-neutral-400" />}
-                      </button>
-                    ) : (
-                      <div className="w-4 flex-shrink-0" />
-                    )}
-                    {mesh.isPlant ? (
-                      <Leaf className="w-3 h-3 flex-shrink-0 text-green-400" />
-                    ) : !showColorSwatch ? (
-                      // Textured (non-plant) mesh: texture drives the look and
-                      // mesh.color is ignored, so show a neutral icon, not a
-                      // misleading color swatch.
-                      <Box className="w-3 h-3 flex-shrink-0 text-neutral-400" />
-                    ) : (
-                      // Color swatch doubles as the trigger for a small color
-                      // popover. Only shown for solid (untextured) meshes whose
-                      // mesh.color actually affects rendering.
-                      <div className="flex-shrink-0">
-                        <button
-                          data-testid="mesh-color-swatch"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (isColorOpen) {
-                              setColorPopoverMeshId(null);
-                              return;
-                            }
-                            // Anchor the fixed popover just below the swatch.
-                            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                            setColorPopoverAnchor({ top: r.bottom + 4, left: r.left });
-                            setColorPopoverMeshId(mesh.id);
-                          }}
-                          className="w-3 h-3 rounded ring-1 ring-white/20 hover:ring-white/60 transition-shadow"
-                          style={{ backgroundColor: mesh.color }}
-                          title="Set color"
-                        />
-                      </div>
-                    )}
-                    <div className="flex-1 min-w-0">
-                      {isRenaming ? (
-                        <input
-                          data-testid="mesh-row-name-input"
-                          autoFocus
-                          value={renamingMeshValue}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => setRenamingMeshValue(e.target.value)}
-                          onFocus={(e) => e.target.select()}
-                          onBlur={() => {
-                            handleRenameMesh(mesh.id, renamingMeshValue);
-                            setRenamingMeshId(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              handleRenameMesh(mesh.id, renamingMeshValue);
-                              setRenamingMeshId(null);
-                            } else if (e.key === 'Escape') {
-                              setRenamingMeshId(null);
-                            }
-                          }}
-                          className="w-full text-xs bg-neutral-900 border border-green-500/50 rounded px-1 py-0.5 text-neutral-100 outline-none"
-                        />
-                      ) : (
-                        <div
-                          className="text-xs text-neutral-200 truncate cursor-text"
-                          data-testid="mesh-row-name"
-                          title="Double-click to rename"
-                          onDoubleClick={(e) => {
-                            e.stopPropagation();
-                            setRenamingMeshValue(displayName);
-                            setRenamingMeshId(mesh.id);
-                          }}
-                        >
-                          {displayName}
-                        </div>
-                      )}
-                      <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
-                        {mesh.data.triangleCount.toLocaleString()} triangles
-                        {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
-                        {mesh.isPlant && ' · Helios Plant'}
-                      </div>
-                    </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleToggleMeshVisibility(mesh.id); }}
-                      className="p-1 hover:bg-neutral-600 rounded"
-                      title={mesh.visible ? 'Hide' : 'Show'}
-                    >
-                      {mesh.visible ? (
-                        <Eye className="w-3 h-3 text-neutral-400" />
-                      ) : (
-                        <EyeOff className="w-3 h-3 text-neutral-600" />
-                      )}
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteConfirm({ type: 'mesh', id: mesh.id, name: displayName });
-                      }}
-                      className="p-1 hover:bg-red-600/30 rounded"
-                      title="Remove"
-                    >
-                      <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
-                    </button>
-                  </div>
-
-                  {/* Inline per-mesh options, expanded from the chevron:
-                      "Color by" (triangulated meshes) and "Opacity" (any
-                      non-textured, non-plant surface). */}
-                  {isExpanded && (
-                    <div className="ml-7 mr-2 mb-1 p-2 bg-neutral-900/50 rounded space-y-1.5">
-                      {canColorByTriangle && (
-                      <div className="space-y-1.5">
-                      <div className="text-[10px] text-neutral-400 flex items-center gap-1">
-                        <Palette className="w-3 h-3" />
-                        Color by
-                      </div>
-                      <select
-                        data-testid="mesh-color-mode"
-                        value={colorMode}
-                        onChange={(e) => {
-                          const mode = e.target.value as MeshColorMode;
-                          setMeshColorModes(prev => {
-                            const next = new Map(prev);
-                            if (mode === 'solid') next.delete(mesh.id);
-                            else next.set(mesh.id, mode);
-                            return next;
-                          });
-                        }}
-                        className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
-                      >
-                        <option value="solid">Solid color</option>
-                        <option value="inclination">Inclination (zenith of normal)</option>
-                        <option value="azimuth">Azimuth (of normal)</option>
-                        <option value="area">Triangle area</option>
-                        {meshHasScanColors(mesh.data) && (
-                          <option value="scan">Source scan</option>
-                        )}
-                      </select>
-                      {/* Colormap picker applies only to the scalar gradient modes. */}
-                      {!['solid', 'scan'].includes(colorMode) && (
-                        <select
-                          data-testid="mesh-color-colormap"
-                          value={colormap}
-                          onChange={(e) => setColormap(e.target.value as ColormapName)}
-                          className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
-                        >
-                          {COLORMAP_NAMES.map(name => (
-                            <option key={name} value={name}>{name}</option>
-                          ))}
-                        </select>
-                      )}
-                      </div>
-                      )}
-                      {/* Per-mesh opacity — only for surfaces where blending
-                          is meaningful (not textured plants). */}
-                      {canSetOpacity && (
-                        <div>
-                          <label className="text-[10px] text-neutral-400 block mb-1">
-                            Opacity: {(meshOpacity * 100).toFixed(0)}%
-                          </label>
-                          <input
-                            data-testid="mesh-opacity"
-                            type="range"
-                            min="0.1"
-                            max="1"
-                            step="0.1"
-                            value={meshOpacity}
-                            onChange={(e) => {
-                              const value = parseFloat(e.target.value);
-                              setMeshOpacities(prev => {
-                                const next = new Map(prev);
-                                next.set(mesh.id, value);
-                                return next;
-                              });
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  </div>
-                );
-              })}
-            </div>
-            {/* Mesh Settings (global toggles that apply to all meshes). */}
-            <div className="p-2 border-t border-neutral-700">
-              <label className="flex items-center gap-2 text-neutral-300 cursor-pointer text-xs">
-                <input
-                  type="checkbox"
-                  checked={meshWireframe}
-                  onChange={(e) => setMeshWireframe(e.target.checked)}
-                  className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-                />
-                Wireframe
-              </label>
-            </div>
-          </div>
+          <MeshesListPanel
+            meshes={meshes}
+            clouds={clouds}
+            selectedMeshIds={selectedMeshIds}
+            expandedMeshIds={expandedMeshIds}
+            renamingMeshId={renamingMeshId}
+            renamingMeshValue={renamingMeshValue}
+            colorPopoverMeshId={colorPopoverMeshId}
+            meshColorModes={meshColorModes}
+            meshOpacities={meshOpacities}
+            meshRotations={meshRotations}
+            meshPositions={meshPositions}
+            meshScales={meshScales}
+            colormap={colormap}
+            meshWireframe={meshWireframe}
+            defaultOpacityFor={(mesh) => mesh.gridSubdivisions ? GRID_MESH_DEFAULT_OPACITY : MESH_DEFAULT_OPACITY}
+            isTextured={isTexturedMesh}
+            isTriangulated={isTriangulatedMesh}
+            supportsOpacity={meshSupportsOpacity}
+            onSelect={handleSelectMesh}
+            onToggleVisibility={handleToggleMeshVisibility}
+            onRequestDelete={(id, name) => setDeleteConfirm({ type: 'mesh', id, name })}
+            onToggleExpanded={(id) => setExpandedMeshIds(prev => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id); else next.add(id);
+              return next;
+            })}
+            onRename={handleRenameMesh}
+            onRenamingChange={(id, value) => { setRenamingMeshId(id); setRenamingMeshValue(value); }}
+            onOpenColorPopover={(id, anchor) => { setColorPopoverAnchor(anchor); setColorPopoverMeshId(id); }}
+            onCloseColorPopover={() => setColorPopoverMeshId(null)}
+            onColorModeChange={(id, mode) => setMeshColorModes(prev => {
+              const next = new Map(prev);
+              if (mode === 'solid') next.delete(id);
+              else next.set(id, mode);
+              return next;
+            })}
+            onColormapChange={setColormap}
+            onOpacityChange={(id, value) => setMeshOpacities(prev => new Map(prev).set(id, value))}
+            onWireframeChange={setMeshWireframe}
+          />
         )}
 
         {/* Skeletons Panel */}
         {skeletons.length > 0 && (
-          <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
-            <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
-              <GitBranch className="w-4 h-4 text-neutral-400" />
-              <span className="text-xs font-medium text-neutral-300 flex-1">Skeletons</span>
-            </div>
-            <div className="overflow-y-auto flex-1 p-1">
-              {skeletons.map(skeleton => {
-                const sourceCloud = clouds.find(c => c.id === skeleton.sourceCloudId);
-                const isSelected = selectedSkeletonId === skeleton.id;
-                return (
-                  <div
-                    key={skeleton.id}
-                    data-testid="skeleton-row"
-                    data-skeleton-name={sourceCloud?.data.fileName || 'Skeleton'}
-                    data-total-length={skeleton.data.totalLength}
-                    data-point-count={skeleton.data.pointCount}
-                    data-selected={isSelected ? 'true' : 'false'}
-                    onClick={() => handleSelectSkeleton(skeleton.id)}
-                    className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
-                      isSelected ? 'bg-amber-600/30 border border-amber-500/50' : 'hover:bg-neutral-700/50'
-                    }`}
-                  >
-                    <div className="w-3 h-3 rounded flex-shrink-0" style={{ backgroundColor: skeleton.color }} />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs text-neutral-200 truncate" data-testid="skeleton-row-name">
-                        {sourceCloud?.data.fileName || 'Skeleton'}
-                      </div>
-                      <div className="text-[10px] text-neutral-500" data-testid="skeleton-row-stats">
-                        {skeleton.data.totalLength.toFixed(2)}m · {skeleton.data.pointCount} pts
-                      </div>
-                    </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleToggleSkeletonVisibility(skeleton.id); }}
-                      className="p-1 hover:bg-neutral-600 rounded"
-                      title={skeleton.visible ? 'Hide' : 'Show'}
-                    >
-                      {skeleton.visible ? (
-                        <Eye className="w-3 h-3 text-neutral-400" />
-                      ) : (
-                        <EyeOff className="w-3 h-3 text-neutral-600" />
-                      )}
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const sourceName = sourceCloud?.data.fileName || 'Skeleton';
-                        setDeleteConfirm({ type: 'skeleton', id: skeleton.id, name: sourceName });
-                      }}
-                      className="p-1 hover:bg-red-600/30 rounded"
-                      title="Remove"
-                    >
-                      <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-            {/* Skeleton Settings */}
-            <div className="p-2 border-t border-neutral-700">
-              <label className="flex items-center gap-2 text-[10px] text-neutral-400 cursor-pointer mb-2">
-                <input
-                  type="checkbox"
-                  checked={skeletonShowAsCylinders}
-                  onChange={(e) => setSkeletonShowAsCylinders(e.target.checked)}
-                  className="rounded bg-neutral-700 border-neutral-600 w-3 h-3 accent-neutral-500"
-                />
-                Show as cylinders
-              </label>
-              {skeletonShowAsCylinders && (
-                <div className="mb-2">
-                  <label className="text-[10px] text-neutral-400 block mb-1">Tube Radius: {skeletonTubeRadius.toFixed(3)}</label>
-                  <input
-                    type="range"
-                    min="0.005"
-                    max="0.1"
-                    step="0.005"
-                    value={skeletonTubeRadius}
-                    onChange={(e) => setSkeletonTubeRadius(parseFloat(e.target.value))}
-                    className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
-                  />
-                </div>
-              )}
-              <label className="flex items-center gap-2 text-[10px] text-neutral-400 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={skeletonColorByBranchOrder}
-                  onChange={(e) => setSkeletonColorByBranchOrder(e.target.checked)}
-                  className="rounded bg-neutral-700 border-neutral-600 w-3 h-3 accent-neutral-500"
-                />
-                Color by branch order
-              </label>
-            </div>
-          </div>
+          <SkeletonsListPanel
+            skeletons={skeletons}
+            clouds={clouds}
+            selectedSkeletonId={selectedSkeletonId}
+            showAsCylinders={skeletonShowAsCylinders}
+            tubeRadius={skeletonTubeRadius}
+            colorByBranchOrder={skeletonColorByBranchOrder}
+            onSelect={handleSelectSkeleton}
+            onToggleVisibility={handleToggleSkeletonVisibility}
+            onRequestDelete={(id, name) => setDeleteConfirm({ type: 'skeleton', id, name })}
+            onShowAsCylindersChange={setSkeletonShowAsCylinders}
+            onTubeRadiusChange={setSkeletonTubeRadius}
+            onColorByBranchOrderChange={setSkeletonColorByBranchOrder}
+          />
         )}
 
         {/* Leaf Area Density results */}
         {ladResults.length > 0 && (
-          <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
-            <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
-              <Grid3x3 className="w-4 h-4 text-neutral-400" />
-              <span className="text-xs font-medium text-neutral-300 flex-1">Leaf Area Density</span>
-            </div>
-            <div className="overflow-y-auto flex-1 p-1">
-              {ladResults.map(result => {
-                const isSelected = selectedLadId === result.id;
-                const { max } = ladRange(result.voxels);
-                return (
-                  <div key={result.id}>
-                    <div
-                      data-testid="lad-row"
-                      data-voxel-count={result.voxels.length}
-                      data-lad-max={max}
-                      data-return-mode={result.returnMode}
-                      data-selected={isSelected ? 'true' : 'false'}
-                      onClick={() => setSelectedLadId(result.id)}
-                      className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
-                        isSelected ? 'bg-green-600/30 border border-green-500/50' : 'hover:bg-neutral-700/50'
-                      }`}
-                    >
-                      <div className="w-3 h-3 rounded flex-shrink-0" style={{ backgroundColor: result.color }} />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs text-neutral-200 truncate" data-testid="lad-row-name">
-                          LAD {result.nx}×{result.ny}×{result.nz}
-                        </div>
-                        <div className="text-[10px] text-neutral-500">
-                          {result.voxels.length.toLocaleString()} voxels · max {max.toFixed(2)} m²/m³ · {result.returnMode === 'multi' ? 'multi-return' : 'single-return'}
-                        </div>
-                      </div>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); toggleLadVisible(result.id); }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title={result.visible ? 'Hide' : 'Show'}
-                      >
-                        {result.visible ? (
-                          <Eye className="w-3 h-3 text-neutral-400" />
-                        ) : (
-                          <EyeOff className="w-3 h-3 text-neutral-600" />
-                        )}
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); removeLadResult(result.id); }}
-                        className="p-1 hover:bg-red-600/30 rounded"
-                        title="Remove"
-                      >
-                        <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
-                      </button>
-                    </div>
-                    {isSelected && (
-                      <div className="px-2 py-2 space-y-2 border-t border-neutral-700/50">
-                        <div>
-                          <label className="text-[10px] text-neutral-400 block mb-1">
-                            Opacity: {result.opacity.toFixed(2)}
-                          </label>
-                          <input
-                            type="range"
-                            min="0.05"
-                            max="1"
-                            step="0.05"
-                            value={result.opacity}
-                            onChange={(e) => updateLadResult(result.id, { opacity: parseFloat(e.target.value) })}
-                            className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
-                          />
-                        </div>
-                        <label className="flex items-center gap-2 text-[10px] text-neutral-400 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            data-testid="lad-hide-empty"
-                            checked={result.hideEmpty}
-                            onChange={(e) => updateLadResult(result.id, { hideEmpty: e.target.checked })}
-                            className="rounded bg-neutral-700 border-neutral-600 w-3 h-3 accent-neutral-500"
-                          />
-                          Hide empty voxels
-                        </label>
-                        <div>
-                          <label className="text-[10px] text-neutral-400 block mb-1">Colormap</label>
-                          <select
-                            data-testid="lad-colormap"
-                            value={colormap}
-                            onChange={(e) => setColormap(e.target.value as ColormapName)}
-                            className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
-                          >
-                            {COLORMAP_NAMES.map(name => (
-                              <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          <LADResultsPanel
+            ladResults={ladResults}
+            selectedLadId={selectedLadId}
+            colormap={colormap}
+            onSelect={setSelectedLadId}
+            onToggleVisible={toggleLadVisible}
+            onRemove={removeLadResult}
+            onUpdate={updateLadResult}
+            onColormapChange={setColormap}
+          />
         )}
 
         {/* The standalone Scan Locations panel was unified into the Scans
@@ -9835,325 +9471,82 @@ export default function PointCloudViewer({
         const cropBoxMaxStr = cropBox
           ? `${cropBox.max.x.toFixed(3)},${cropBox.max.y.toFixed(3)},${cropBox.max.z.toFixed(3)}`
           : '';
+        // Projection kind of a committed screen-space region (rect / polygon). An
+        // orthographic projection matrix has m[15]=1, m[11]=0; a perspective one
+        // has m[15]=0, m[11]=-1. The Rect tool draws orthographically so its
+        // extrusion is a true prism — exposed for the trapezoid-regression test.
+        const cropProjectionKind = cropPolygon
+          ? (Math.abs(cropPolygon.projection[15] - 1) < 1e-6 &&
+             Math.abs(cropPolygon.projection[11]) < 1e-6
+              ? 'orthographic' as const
+              : 'perspective' as const)
+          : '' as const;
+
         return (
-          <div
-            data-testid="crop-panel"
-            data-selection-count={selectedIds.size}
-            data-crop-mode={cropMode}
-            data-crop-min={cropBoxMinStr}
-            data-crop-max={cropBoxMaxStr}
-            // Projection kind of a committed screen-space region (rect /
-            // polygon). An orthographic projection matrix has m[15]=1, m[11]=0;
-            // a perspective one has m[15]=0, m[11]=-1. The Rect tool draws
-            // orthographically so its extrusion is a true prism — this exposes
-            // that for the trapezoid-regression test. Empty until committed.
-            data-crop-projection-kind={
-              cropPolygon
-                ? (Math.abs(cropPolygon.projection[15] - 1) < 1e-6 &&
-                   Math.abs(cropPolygon.projection[11]) < 1e-6
-                    ? 'orthographic'
-                    : 'perspective')
-                : ''
+          <CropPanel
+            selectionCount={selectedIds.size}
+            cropMode={cropMode}
+            cropDrawState={cropDrawState}
+            cropBox={cropBox}
+            hasCropPolygon={!!cropPolygon}
+            polygonVertexCount={polygonInProgress.length}
+            cropPolygonPointCount={cropPolygon?.points.length ?? 0}
+            cropInvert={cropInvert}
+            cropSegment={cropSegment}
+            applyDisabled={
+              (cropMode === 'box' && !cropBox) ||
+              ((cropMode === 'polygon' || cropMode === 'rect') && !cropPolygon)
             }
-            // z-20 keeps the panel above the polygon lasso overlay (z-10),
-            // which now fills the whole viewport while drawing — without
-            // this the transparent SVG would swallow clicks on the panel's
-            // controls (shape toggle, Keep In/Out, Apply, dim inputs).
-            className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56 z-20"
-          >
-            <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
-              <span className="flex items-center gap-2">
-                <Crop className="w-3 h-3" />
-                Crop Region
-              </span>
-              <button
-                data-testid="crop-close"
-                onClick={closeCropPanel}
-                className="p-1 rounded hover:bg-neutral-700 transition-colors"
-                aria-label="Close"
-                title="Close (don't apply crop)"
-              >
-                <X className="w-4 h-4 text-neutral-400" />
-              </button>
-            </div>
-
-            {selectedIds.size > 1 && (
-              <div data-testid="crop-multi-hint" className="text-[10px] text-blue-300 text-center mb-2 py-1 bg-blue-900/20 rounded">
-                Applies to {selectedIds.size} scans
-              </div>
-            )}
-
-            {/* Shape: Box (world AABB) vs Rect (screen-space rectangle, any
-                view) vs Polygon (freeform lasso, any view). */}
-            <div className="mb-3 p-2 bg-neutral-900/50 rounded">
-              <div className="text-[10px] text-neutral-400 mb-2">Shape</div>
-              <div className="flex gap-1">
-                <button
-                  data-testid="crop-shape-box"
-                  onClick={() => {
-                    setCropMode('box');
-                    setCropDrawState('idle');
-                    setPolygonInProgress([]);
-                    setCropPolygon(null);
-                    setRectDragStart(null);
-                    rectDragCurrentRef.current = null;
-                    if (!cropBox) resetWorldBox();
-                  }}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropMode === 'box' ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
-                >
-                  Box
-                </button>
-                <button
-                  data-testid="crop-shape-rect"
-                  onClick={() => {
-                    setCropMode('rect');
-                    setCropDrawState('drawing-rect');
-                    setPolygonInProgress([]);
-                    setCropPolygon(null);
-                    setRectDragStart(null);
-                    rectDragCurrentRef.current = null;
-                  }}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropMode === 'rect' ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
-                >
-                  Rect
-                </button>
-                <button
-                  data-testid="crop-shape-polygon"
-                  onClick={() => {
-                    setCropMode('polygon');
-                    setCropDrawState('drawing-polygon');
-                    setPolygonInProgress([]);
-                    setCropPolygon(null);
-                    setRectDragStart(null);
-                    rectDragCurrentRef.current = null;
-                  }}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropMode === 'polygon' ? 'bg-blue-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
-                >
-                  Polygon
-                </button>
-              </div>
-            </div>
-
-            {/* Mode: Keep Inside / Keep Outside / Segment.
-                These are mutually exclusive. Internally they map onto two
-                states: cropInvert picks which half the original keeps, and
-                cropSegment decides whether the other half is discarded or
-                spun off as a new cloud. Segment keeps the in-region points in
-                the original and the out-of-region points in the new cloud. */}
-            <div className="mb-3 p-2 bg-neutral-900/50 rounded">
-              <div className="text-[10px] text-neutral-400 mb-2">Mode</div>
-              <div className="flex gap-1">
-                <button
-                  data-testid="crop-mode-inside"
-                  aria-pressed={!cropInvert && !cropSegment}
-                  onClick={() => { setCropInvert(false); setCropSegment(false); }}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${!cropInvert && !cropSegment ? 'bg-green-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
-                >
-                  Keep Inside
-                </button>
-                <button
-                  data-testid="crop-mode-outside"
-                  aria-pressed={cropInvert && !cropSegment}
-                  onClick={() => { setCropInvert(true); setCropSegment(false); }}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropInvert && !cropSegment ? 'bg-red-600 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
-                >
-                  Keep Outside
-                </button>
-                <button
-                  data-testid="crop-mode-segment"
-                  aria-pressed={cropSegment}
-                  onClick={() => { setCropInvert(false); setCropSegment(true); }}
-                  className={`flex-1 px-2 py-1.5 text-xs rounded ${cropSegment ? 'bg-amber-500 text-white' : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'}`}
-                >
-                  Segment
-                </button>
-              </div>
-              <div className="text-[10px] text-neutral-500 mt-1.5 leading-tight">
-                {cropSegment
-                  ? 'Splits in two: original keeps the in-region points, a new cloud gets the rest.'
-                  : 'Cropped-out points are discarded.'}
-              </div>
-            </div>
-
-            {cropMode === 'box' && cropBox && (
-              <>
-                {/* Box dimensions */}
-                <div className="mb-3 p-2 bg-neutral-900/50 rounded">
-                  <div className="text-[10px] text-neutral-400 mb-2">Dimensions</div>
-                  <div className="grid grid-cols-3 gap-1">
-                    {(['x', 'y', 'z'] as const).map((axisKey) => {
-                      const size = cropBox.max[axisKey] - cropBox.min[axisKey];
-                      return (
-                        <div key={axisKey} className="flex flex-col">
-                          <label className="text-[9px] text-neutral-500 mb-0.5">{axisKey.toUpperCase()}</label>
-                          <DebouncedNumberInput
-                            data-testid={`crop-dim-${axisKey}`}
-                            step={0.1}
-                            value={parseFloat(size.toFixed(2))}
-                            onCommit={(newSize) => {
-                              setCropBox(prev => {
-                                if (!prev) return prev;
-                                const center = (prev.min[axisKey] + prev.max[axisKey]) / 2;
-                                return {
-                                  min: { ...prev.min, [axisKey]: center - newSize / 2 },
-                                  max: { ...prev.max, [axisKey]: center + newSize / 2 },
-                                };
-                              });
-                            }}
-                            className="w-full px-1 py-0.5 text-[10px] bg-neutral-700 border border-neutral-600 rounded text-white text-center"
-                          />
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-                {/* Center position */}
-                <div className="mb-3 p-2 bg-neutral-900/50 rounded">
-                  <div className="text-[10px] text-neutral-400 mb-2">Center Position</div>
-                  <div className="grid grid-cols-3 gap-1">
-                    {(['x', 'y', 'z'] as const).map((axisKey) => {
-                      const center = (cropBox.max[axisKey] + cropBox.min[axisKey]) / 2;
-                      return (
-                        <div key={axisKey} className="flex flex-col">
-                          <label className="text-[9px] text-neutral-500 mb-0.5">{axisKey.toUpperCase()}</label>
-                          <DebouncedNumberInput
-                            data-testid={`crop-center-${axisKey}`}
-                            step={0.1}
-                            value={parseFloat(center.toFixed(2))}
-                            onCommit={(newCenter) => {
-                              setCropBox(prev => {
-                                if (!prev) return prev;
-                                const halfSize = (prev.max[axisKey] - prev.min[axisKey]) / 2;
-                                return {
-                                  min: { ...prev.min, [axisKey]: newCenter - halfSize },
-                                  max: { ...prev.max, [axisKey]: newCenter + halfSize },
-                                };
-                              });
-                            }}
-                            className="w-full px-1 py-0.5 text-[10px] bg-neutral-700 border border-neutral-600 rounded text-white text-center"
-                          />
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-                <button
-                  data-testid="crop-draw-box"
-                  onClick={() => {
-                    boxDrawFirstCornerRef.current = null;
-                    boxDrawCursorRef.current = null;
-                    setCropDrawState('awaiting-box-corner-1');
-                  }}
-                  className={`w-full px-2 py-1.5 text-xs rounded mb-2 ${cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2' ? 'bg-amber-600 text-white' : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'}`}
-                >
-                  {cropDrawState === 'awaiting-box-corner-1'
-                    ? 'Click first corner on ground…'
-                    : cropDrawState === 'awaiting-box-corner-2'
-                      ? 'Click second corner on ground…'
-                      : 'Draw box in viewport'}
-                </button>
-                <button
-                  onClick={resetWorldBox}
-                  className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded mb-2"
-                >
-                  Reset Crop Box
-                </button>
-              </>
-            )}
-
-            {cropMode === 'polygon' && (
-              <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-300">
-                {cropDrawState === 'drawing-polygon' ? (
-                  <>
-                    <div className="font-medium text-neutral-200 mb-1">Drawing polygon</div>
-                    Click in the viewport to add vertices. Right-click or Backspace removes the last. Press Enter to close, Esc to cancel.
-                    <div className="mt-2 text-neutral-400">Vertices: {polygonInProgress.length}</div>
-                  </>
-                ) : cropPolygon ? (
-                  <>
-                    <div className="font-medium text-neutral-200 mb-1">Polygon ({cropPolygon.points.length} vertices)</div>
-                    Preview shown above. Press Enter to apply, or click below to redraw.
-                    <button
-                      onClick={() => {
-                        setCropPolygon(null);
-                        setPolygonInProgress([]);
-                        setCropDrawState('drawing-polygon');
-                      }}
-                      className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
-                    >
-                      Redraw polygon
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    No polygon yet.
-                    <button
-                      onClick={() => {
-                        setPolygonInProgress([]);
-                        setCropDrawState('drawing-polygon');
-                      }}
-                      className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
-                    >
-                      Start drawing
-                    </button>
-                  </>
-                )}
-              </div>
-            )}
-
-            {cropMode === 'rect' && (
-              <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-300">
-                {cropDrawState === 'drawing-rect' ? (
-                  <>
-                    <div className="font-medium text-neutral-200 mb-1">Drawing rectangle</div>
-                    Drag in the viewport to draw a rectangle from any angle. Esc to cancel.
-                  </>
-                ) : cropPolygon ? (
-                  <>
-                    <div className="font-medium text-neutral-200 mb-1">Rectangle ready</div>
-                    Preview shown above. Press Apply, or click below to redraw.
-                    <button
-                      onClick={() => {
-                        setCropPolygon(null);
-                        setRectDragStart(null);
-                        rectDragCurrentRef.current = null;
-                        setCropDrawState('drawing-rect');
-                      }}
-                      className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
-                    >
-                      Redraw rectangle
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    No rectangle yet.
-                    <button
-                      onClick={() => {
-                        setRectDragStart(null);
-                        rectDragCurrentRef.current = null;
-                        setCropDrawState('drawing-rect');
-                      }}
-                      className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
-                    >
-                      Start drawing
-                    </button>
-                  </>
-                )}
-              </div>
-            )}
-
-            <button
-              data-testid="crop-apply"
-              onClick={handleApplyCrop}
-              disabled={
-                (cropMode === 'box' && !cropBox) ||
-                ((cropMode === 'polygon' || cropMode === 'rect') && !cropPolygon)
+            cropBoxMinStr={cropBoxMinStr}
+            cropBoxMaxStr={cropBoxMaxStr}
+            cropProjectionKind={cropProjectionKind}
+            onClose={closeCropPanel}
+            onSelectShape={(mode) => {
+              setCropMode(mode);
+              setPolygonInProgress([]);
+              setCropPolygon(null);
+              setRectDragStart(null);
+              rectDragCurrentRef.current = null;
+              if (mode === 'box') {
+                setCropDrawState('idle');
+                if (!cropBox) resetWorldBox();
+              } else if (mode === 'rect') {
+                setCropDrawState('drawing-rect');
+              } else {
+                setCropDrawState('drawing-polygon');
               }
-              className="w-full px-2 py-1.5 mt-1 text-xs font-medium rounded bg-green-600 hover:bg-green-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white disabled:cursor-not-allowed transition-colors"
-            >
-              {cropSegment ? 'Segment' : 'Apply crop to'} {selectedIds.size} scan{selectedIds.size === 1 ? '' : 's'}
-            </button>
-          </div>
+            }}
+            onKeepInside={() => { setCropInvert(false); setCropSegment(false); }}
+            onKeepOutside={() => { setCropInvert(true); setCropSegment(false); }}
+            onSegment={() => { setCropInvert(false); setCropSegment(true); }}
+            onSetBoxSize={(axisKey, newSize) => setCropBox(prev => {
+              if (!prev) return prev;
+              const center = (prev.min[axisKey] + prev.max[axisKey]) / 2;
+              return {
+                min: { ...prev.min, [axisKey]: center - newSize / 2 },
+                max: { ...prev.max, [axisKey]: center + newSize / 2 },
+              };
+            })}
+            onSetBoxCenter={(axisKey, newCenter) => setCropBox(prev => {
+              if (!prev) return prev;
+              const halfSize = (prev.max[axisKey] - prev.min[axisKey]) / 2;
+              return {
+                min: { ...prev.min, [axisKey]: newCenter - halfSize },
+                max: { ...prev.max, [axisKey]: newCenter + halfSize },
+              };
+            })}
+            onDrawBox={() => {
+              boxDrawFirstCornerRef.current = null;
+              boxDrawCursorRef.current = null;
+              setCropDrawState('awaiting-box-corner-1');
+            }}
+            onResetBox={resetWorldBox}
+            onRedrawPolygon={() => { setCropPolygon(null); setPolygonInProgress([]); setCropDrawState('drawing-polygon'); }}
+            onStartPolygon={() => { setPolygonInProgress([]); setCropDrawState('drawing-polygon'); }}
+            onRedrawRect={() => { setCropPolygon(null); setRectDragStart(null); rectDragCurrentRef.current = null; setCropDrawState('drawing-rect'); }}
+            onStartRect={() => { setRectDragStart(null); rectDragCurrentRef.current = null; setCropDrawState('drawing-rect'); }}
+            onApply={handleApplyCrop}
+          />
         );
       })()}
 
@@ -10175,180 +9568,74 @@ export default function PointCloudViewer({
         const flatMax = diag > 0 ? diag / 5 : 1;
         const flatStep = (flatMax - flatMin) / 100;
 
+        // Projection kind of the painted frame. Erase runs under an orthographic
+        // override so the square cuts a straight prism whose footprint matches the
+        // brush outline (ortho ⇒ m[15]=1, m[11]=0). Asserted by the regression
+        // test guarding against the center-biased perspective trapezoid.
+        const eraseProjectionKind = eraseFrame
+          ? (Math.abs(eraseFrame.projection[15] - 1) < 1e-6 &&
+             Math.abs(eraseFrame.projection[11]) < 1e-6
+              ? 'orthographic' as const
+              : 'perspective' as const)
+          : '' as const;
+        const cloud = firstSelectedCloud;
+
         return (
-          <div
-            data-testid="erase-panel"
-            data-erased-count={erasedCount}
-            data-stamp-count={stampCount}
-            data-erase-active={eraseActive ? 'true' : 'false'}
-            // Projection kind of the painted frame. Erase runs under an
-            // orthographic override so the square cuts a straight prism whose
-            // footprint matches the brush outline (ortho ⇒ m[15]=1, m[11]=0).
-            // Asserted by the regression test guarding against the center-biased
-            // perspective trapezoid.
-            data-erase-projection-kind={
-              eraseFrame
-                ? (Math.abs(eraseFrame.projection[15] - 1) < 1e-6 &&
-                   Math.abs(eraseFrame.projection[11]) < 1e-6
-                    ? 'orthographic'
-                    : 'perspective')
-                : ''
-            }
-            className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
-          >
-            <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center gap-2">
-              <Eraser className="w-3 h-3" />
-              Erase Brush
-            </div>
-            {isOctree && (
-              // Erase-mode toggle: ON freezes the view and makes clicks stamp;
-              // OFF lets the user orbit to reframe without leaving the tool. The
-              // 'e' key toggles this same button.
-              <button
-                data-testid="erase-mode-toggle"
-                onClick={() => setEraseActive(a => !a)}
-                className={`w-full mb-3 px-2 py-1.5 text-xs font-medium rounded transition-colors ${
-                  eraseActive
-                    ? 'bg-red-600 hover:bg-red-500 text-white'
-                    : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
-                }`}
-              >
-                {eraseActive ? 'Erasing — view frozen (E)' : 'Start Erasing (E)'}
-              </button>
-            )}
-            <div className="mb-3">
-              {isOctree ? (
-                <>
-                  <label className="text-[10px] text-neutral-400 block mb-1">
-                    Brush Size: {Math.round(eraseBrushPx * 2)} px
-                  </label>
-                  <input
-                    type="range"
-                    min={4}
-                    max={150}
-                    step={1}
-                    value={eraseBrushPx}
-                    onChange={(e) => setEraseBrushPx(parseFloat(e.target.value))}
-                    className="w-full h-1 bg-neutral-600 rounded appearance-none cursor-pointer"
-                  />
-                </>
-              ) : (
-                <>
-                  <label className="text-[10px] text-neutral-400 block mb-1">
-                    Brush Size: {eraseBrushSize < 1 ? eraseBrushSize.toFixed(3) : eraseBrushSize.toFixed(2)}
-                  </label>
-                  <input
-                    type="range"
-                    min={flatMin}
-                    max={flatMax}
-                    step={flatStep}
-                    value={eraseBrushSize}
-                    onChange={(e) => setEraseBrushSize(parseFloat(e.target.value))}
-                    className="w-full h-1 bg-neutral-600 rounded appearance-none cursor-pointer"
-                  />
-                </>
-              )}
-              <div className="flex justify-between text-[9px] text-neutral-500 mt-1">
-                <span>Small</span>
-                <span>Large</span>
-              </div>
-            </div>
-            <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-              {isOctree ? (
-                pendingCount > 0 ? (
-                  <span>{pendingCount.toLocaleString()} stroke{pendingCount === 1 ? '' : 's'} painted — preview shown. Apply to remove.</span>
-                ) : eraseActive ? (
-                  <span>View frozen. Click or drag on the cloud to stamp a square erase region — it cuts straight through. Press 'E' to pause and reframe.</span>
-                ) : (
-                  <span>Orbit to frame your view, then press 'E' or the button above to start erasing.</span>
-                )
-              ) : (
-                erasedCount > 0 ? (
-                  <span>{erasedCount.toLocaleString()} points erased</span>
-                ) : (
-                  <span>Move cursor over the cloud, then hold 'E' to erase</span>
-                )
-              )}
-            </div>
-            {pendingCount > 0 && (
-              <div className="flex flex-col gap-2">
-                <button
-                  data-testid="erase-apply"
-                  onClick={handleApplyErase}
-                  className="w-full px-2 py-1.5 text-xs bg-red-600 hover:bg-red-500 rounded text-white font-medium"
-                >
-                  {isOctree
-                    ? `Apply Erase (${pendingCount.toLocaleString()} stroke${pendingCount === 1 ? '' : 's'})`
-                    : `Apply Erase (${erasedCount.toLocaleString()} points)`}
-                </button>
-                <button
-                  data-testid="erase-restore"
-                  onClick={() => {
-                    if (isOctree) {
-                      // Discard painted squares without touching the cloud — the
-                      // preview clears with the frame.
-                      setEraseFrame(null);
-                      setErasePreviewBoxes([]);
-                    } else {
-                      saveToHistory();
-                      updateSelectedEditStates(s => ({ ...s, erasedIndices: new Set<number>() }));
-                      setTimeout(saveToHistory, 0);
-                    }
-                  }}
-                  className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
-                >
-                  {isOctree ? 'Clear Strokes' : 'Restore All Points'}
-                </button>
-              </div>
-            )}
-            {/* Permanently apply deletions (bake): shown when the selected
-                session cloud has unbaked deletes. Rebuilds the octree from the
-                survivors and frees the in-RAM mask. Slow but exact; not
-                undoable afterward. */}
-            {isOctree && firstSelectedCloud &&
-             (getEditState(firstSelectedCloud.id).pendingDeletes?.length ?? 0) > 0 && (
-              <div className="flex flex-col gap-1 mt-2 pt-2 border-t border-neutral-700">
-                <button
-                  data-testid="erase-bake"
-                  onClick={() => handleBakeEdits(firstSelectedCloud.id)}
-                  className="w-full px-2 py-1.5 text-xs bg-emerald-700 hover:bg-emerald-600 rounded text-white font-medium"
-                  title="Rebuild the octree from the surviving points (permanent, not undoable)"
-                >
-                  Permanently apply deletions
-                </button>
-                <button
-                  data-testid="erase-undo-pending"
-                  onClick={async () => {
-                    const oct = firstSelectedCloud.data.octree;
-                    if (!oct?.sessionId) return;
-                    const stack = getEditState(firstSelectedCloud.id).pendingDeletes ?? [];
-                    if (stack.length === 0) return;
-                    // Undo the most recent committed delete: recompute the
-                    // backend mask from the shortened stack, and drop it from
-                    // the local stack so the GPU preview updates.
-                    try {
-                      const r = await resetCloudEdits(oct.sessionId, stack.length - 1);
-                      setEditStates(prev => {
-                        const next = new Map(prev);
-                        const cur = next.get(firstSelectedCloud.id);
-                        if (cur) next.set(firstSelectedCloud.id, {
-                          ...cur,
-                          pendingDeletes: stack.slice(0, -1),
-                          pendingDeletedCount: r.deleted_count,
-                        });
-                        return next;
-                      });
-                    } catch (err) {
-                      showToast({ title: `Undo failed: ${err instanceof Error ? err.message : String(err)}`, type: 'error' });
-                    }
-                  }}
-                  className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
-                >
-                  Undo last deletion
-                </button>
-              </div>
-            )}
-          </div>
+          <ErasePanel
+            isOctree={isOctree}
+            eraseActive={eraseActive}
+            erasedCount={erasedCount}
+            stampCount={stampCount}
+            pendingCount={pendingCount}
+            eraseBrushPx={eraseBrushPx}
+            eraseBrushSize={eraseBrushSize}
+            flatMin={flatMin}
+            flatMax={flatMax}
+            flatStep={flatStep}
+            eraseProjectionKind={eraseProjectionKind}
+            hasPendingDeletes={(getEditState(cloud.id).pendingDeletes?.length ?? 0) > 0}
+            onToggleEraseActive={() => setEraseActive(a => !a)}
+            onBrushPxChange={setEraseBrushPx}
+            onBrushSizeChange={setEraseBrushSize}
+            onApply={handleApplyErase}
+            onRestore={() => {
+              if (isOctree) {
+                // Discard painted squares without touching the cloud — the preview
+                // clears with the frame.
+                setEraseFrame(null);
+                setErasePreviewBoxes([]);
+              } else {
+                saveToHistory();
+                updateSelectedEditStates(s => ({ ...s, erasedIndices: new Set<number>() }));
+                setTimeout(saveToHistory, 0);
+              }
+            }}
+            onBake={() => handleBakeEdits(cloud.id)}
+            onUndoPending={async () => {
+              const oct = cloud.data.octree;
+              if (!oct?.sessionId) return;
+              const stack = getEditState(cloud.id).pendingDeletes ?? [];
+              if (stack.length === 0) return;
+              // Undo the most recent committed delete: recompute the backend mask
+              // from the shortened stack, and drop it from the local stack so the
+              // GPU preview updates.
+              try {
+                const r = await resetCloudEdits(oct.sessionId, stack.length - 1);
+                setEditStates(prev => {
+                  const next = new Map(prev);
+                  const cur = next.get(cloud.id);
+                  if (cur) next.set(cloud.id, {
+                    ...cur,
+                    pendingDeletes: stack.slice(0, -1),
+                    pendingDeletedCount: r.deleted_count,
+                  });
+                  return next;
+                });
+              } catch (err) {
+                showToast({ title: `Undo failed: ${err instanceof Error ? err.message : String(err)}`, type: 'error' });
+              }
+            }}
+          />
         );
       })()}
 
@@ -10571,426 +9858,71 @@ export default function PointCloudViewer({
           ?? [];
 
         return (
-          <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
-            <div className="flex items-center justify-between mb-3">
-              <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-                <Filter className="w-3 h-3" />
-                Filter Points
-              </div>
-              <button
-                onClick={() => setShowFilterPanel(false)}
-                className="p-1 hover:bg-neutral-700 rounded"
-              >
-                <X className="w-3 h-3 text-neutral-400" />
-              </button>
-            </div>
-
-            {/* Field Dropdown */}
-            <div className="mb-3">
-              <label className="text-[10px] text-neutral-400 block mb-1">Field</label>
-              <select
-                data-testid="filter-field-select"
-                value={selectedFilterField || ''}
-                onChange={(e) => handleFieldChange(e.target.value)}
-                className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
-              >
-                <option value="">Select a field...</option>
-                {availableFields.map(f => (
-                  <option key={f.value} value={f.value}>
-                    {f.label} {getFieldFilter(f.value)?.enabled ? '(active)' : ''}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Categorical field: class checkboxes (keep the checked classes). */}
-            {selectedFilterField && selectedField && categoricalScheme && (
-              <div className="mb-3">
-                <div className="text-[10px] text-neutral-500 mb-1">
-                  Keep classes ({selectedClasses.length}/{categoricalScheme.classes.length})
-                </div>
-                <div className="max-h-40 overflow-y-auto space-y-1 mb-2 pr-1">
-                  {categoricalScheme.classes.map(c => {
-                    const checked = selectedClasses.includes(c.value);
-                    return (
-                      <label
-                        key={c.value}
-                        className="flex items-center gap-2 text-xs text-neutral-200 cursor-pointer hover:bg-neutral-700/40 rounded px-1 py-0.5"
-                      >
-                        <input
-                          data-testid={`filter-class-${c.value}`}
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => {
-                            const next = checked
-                              ? selectedClasses.filter(v => v !== c.value)
-                              : [...selectedClasses, c.value].sort((a, b) => a - b);
-                            commitClasses(next);
-                          }}
-                        />
-                        <span
-                          className="inline-block w-3 h-3 rounded-sm border border-neutral-600 shrink-0"
-                          style={{ backgroundColor: `rgb(${c.color.map(ch => Math.round(ch * 255)).join(',')})` }}
-                        />
-                        <span className="truncate">{c.label}</span>
-                        <span className="text-neutral-500 ml-auto">{c.value}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-                <div className="flex gap-2 mb-2">
-                  <button
-                    data-testid="filter-class-all"
-                    onClick={() => commitClasses(categoricalScheme.classes.map(c => c.value))}
-                    className="flex-1 px-2 py-1 text-[10px] bg-neutral-700 hover:bg-neutral-600 rounded"
-                  >
-                    All
-                  </button>
-                  <button
-                    data-testid="filter-class-none"
-                    onClick={() => commitClasses([])}
-                    className="flex-1 px-2 py-1 text-[10px] bg-neutral-700 hover:bg-neutral-600 rounded"
-                  >
-                    None
-                  </button>
-                </div>
-                {currentFilter?.enabled && (
-                  <button
-                    onClick={removeFilter}
-                    className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
-                  >
-                    Remove this filter
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Min/Max Inputs - continuous fields only (categorical uses the
-                class checkboxes above). */}
-            {selectedFilterField && selectedField && !categoricalScheme && (
-              <div className="mb-3">
-                <div className="text-[10px] text-neutral-500 mb-1">
-                  Range: {selectedField.bounds.min.toFixed(2)} to {selectedField.bounds.max.toFixed(2)}
-                </div>
-                <div className="flex gap-2 mb-2">
-                  <div className="flex-1">
-                    <label className="text-[10px] text-neutral-400 block mb-1">Min</label>
-                    <input
-                      data-testid="filter-min-input"
-                      type="number"
-                      value={pendingFilterMin}
-                      onChange={(e) => { setPendingFilterMin(e.target.value); commitFilter(e.target.value, pendingFilterMax); }}
-                      step="any"
-                      className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <label className="text-[10px] text-neutral-400 block mb-1">Max</label>
-                    <input
-                      data-testid="filter-max-input"
-                      type="number"
-                      value={pendingFilterMax}
-                      onChange={(e) => { setPendingFilterMax(e.target.value); commitFilter(pendingFilterMin, e.target.value); }}
-                      step="any"
-                      className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
-                    />
-                  </div>
-                </div>
-                {currentFilter?.enabled && (
-                  <button
-                    onClick={removeFilter}
-                    className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
-                  >
-                    Remove this filter
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Active Filters List */}
-            {activeFilters.length > 0 && (
-              <div className="mb-3">
-                <div className="text-[10px] text-neutral-500 mb-1 font-medium">Active Filters</div>
-                <div className="space-y-1">
-                  {activeFilters.map(f => {
-                    const filter = getFieldFilter(f.value);
-                    const summary = filter?.selectedClasses
-                      ? `classes ${filter.selectedClasses.join(', ') || '(none)'}`
-                      : `${filter?.min.toFixed(2)} - ${filter?.max.toFixed(2)}`;
-                    return (
-                      <div key={f.value} className="text-[10px] text-neutral-300 bg-neutral-900/50 rounded px-2 py-1 flex justify-between items-center">
-                        <span>{f.label}: {summary}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Clear All button */}
-            {hasAnyFilter && (
-              <button
-                onClick={clearAllFilters}
-                className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded mb-2"
-              >
-                Clear All Filters
-              </button>
-            )}
-
-            {/* Commit actions: remove the out-of-range points, or segment the
-                cloud into in-range + out-of-range (keeps both). */}
-            {hasAnyFilter && (
-              <div className="flex flex-col gap-2">
-                <button
-                  data-testid="filter-remove"
-                  onClick={handleApplyFilterPermanently}
-                  className="w-full px-2 py-1.5 text-xs bg-red-600 hover:bg-red-500 rounded text-white"
-                >
-                  Filter (remove points)
-                </button>
-                <button
-                  data-testid="filter-segment"
-                  onClick={handleSegmentFilter}
-                  className="w-full px-2 py-1.5 text-xs bg-cyan-600 hover:bg-cyan-500 rounded text-white"
-                >
-                  Segment (split into two clouds)
-                </button>
-              </div>
-            )}
-          </div>
+          <FilterPanel
+            availableFields={availableFields}
+            selectedFilterField={selectedFilterField}
+            selectedField={selectedField}
+            currentFilter={currentFilter}
+            categoricalScheme={categoricalScheme}
+            selectedClasses={selectedClasses}
+            pendingFilterMin={pendingFilterMin}
+            pendingFilterMax={pendingFilterMax}
+            activeFilters={activeFilters}
+            hasAnyFilter={!!hasAnyFilter}
+            getFieldFilter={getFieldFilter}
+            onClose={() => setShowFilterPanel(false)}
+            onFieldChange={handleFieldChange}
+            onCommitClasses={commitClasses}
+            onPendingMinChange={(value) => { setPendingFilterMin(value); commitFilter(value, pendingFilterMax); }}
+            onPendingMaxChange={(value) => { setPendingFilterMax(value); commitFilter(pendingFilterMin, value); }}
+            onRemoveFilter={removeFilter}
+            onClearAllFilters={clearAllFilters}
+            onApplyFilter={handleApplyFilterPermanently}
+            onSegmentFilter={handleSegmentFilter}
+          />
         );
       })()}
 
       {/* Resample Panel */}
       {showResamplePanel && firstSelectedCloud && (() => {
         const cloud = firstSelectedCloud;
-        const originalCount = resamplePreview?.cloudId === cloud.id
-          ? resamplePreview.originalPointCount
-          : cloud.data.pointCount;
+        // When a preview is active, resample against the pristine point total it
+        // captured; otherwise against the cloud's current count.
         const isPreviewActive = resamplePreview?.cloudId === cloud.id;
-        const previewCount = isPreviewActive ? resamplePreview.previewData.pointCount : null;
-
-        // Helper to compute resampled data
-        const computeResampledData = () => {
-          const data = cloud.data;
-          const sourceCount = data.pointCount;
-          const targetCount = Math.max(1, Math.round(originalCount * resampleFraction));
-
-          // Generate random indices to keep
-          const indices: number[] = [];
-          for (let i = 0; i < sourceCount; i++) {
-            indices.push(i);
-          }
-          // Fisher-Yates shuffle and take first targetCount
-          for (let i = indices.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [indices[i], indices[j]] = [indices[j], indices[i]];
-          }
-          const keptIndices = indices.slice(0, targetCount).sort((a, b) => a - b);
-
-          // Build new arrays
-          const newPositions = new Float32Array(targetCount * 3);
-          const newColors = data.colors ? new Float32Array(targetCount * 3) : undefined;
-          const newIntensities = data.intensities ? new Float32Array(targetCount) : undefined;
-          const newScalarFields: Record<string, { values: Float32Array; min: number; max: number }> = {};
-
-          // Initialize scalar fields
-          Object.keys(data.scalarFields || {}).forEach(name => {
-            newScalarFields[name] = {
-              values: new Float32Array(targetCount),
-              min: Infinity,
-              max: -Infinity,
-            };
-          });
-
-          // Copy data at kept indices
-          for (let i = 0; i < targetCount; i++) {
-            const srcIdx = keptIndices[i];
-            newPositions[i * 3] = data.positions[srcIdx * 3];
-            newPositions[i * 3 + 1] = data.positions[srcIdx * 3 + 1];
-            newPositions[i * 3 + 2] = data.positions[srcIdx * 3 + 2];
-
-            if (newColors && data.colors) {
-              newColors[i * 3] = data.colors[srcIdx * 3];
-              newColors[i * 3 + 1] = data.colors[srcIdx * 3 + 1];
-              newColors[i * 3 + 2] = data.colors[srcIdx * 3 + 2];
-            }
-            if (newIntensities && data.intensities) {
-              newIntensities[i] = data.intensities[srcIdx];
-            }
-            Object.entries(data.scalarFields || {}).forEach(([name, field]) => {
-              const val = field.values[srcIdx];
-              newScalarFields[name].values[i] = val;
-              newScalarFields[name].min = Math.min(newScalarFields[name].min, val);
-              newScalarFields[name].max = Math.max(newScalarFields[name].max, val);
-            });
-          }
-
-          // Recompute bounds
-          let minX = Infinity, minY = Infinity, minZ = Infinity;
-          let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-          for (let i = 0; i < targetCount; i++) {
-            const x = newPositions[i * 3];
-            const y = newPositions[i * 3 + 1];
-            const z = newPositions[i * 3 + 2];
-            minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-            minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-            minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
-          }
-
-          return {
-            ...data,
-            positions: newPositions,
-            colors: newColors,
-            intensities: newIntensities,
-            scalarFields: newScalarFields,
-            pointCount: targetCount,
-            bounds: {
-              min: new THREE.Vector3(minX, minY, minZ),
-              max: new THREE.Vector3(maxX, maxY, maxZ),
-              center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
-              size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
-            },
-          } as PointCloudData;
-        };
+        const originalCount = isPreviewActive ? resamplePreview.originalPointCount : cloud.data.pointCount;
 
         return (
-          <div
-            className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') {
-                setResamplePreview(null);
-                setShowResamplePanel(false);
-              }
+          <ResamplePanel
+            originalCount={originalCount}
+            fraction={resampleFraction}
+            isPreviewActive={isPreviewActive}
+            previewCount={isPreviewActive ? resamplePreview.previewData.pointCount : null}
+            onClose={() => { setResamplePreview(null); setShowResamplePanel(false); }}
+            onFractionChange={(f) => { setResampleFraction(f); setResamplePreview(null); }}
+            onPreview={() => {
+              if (resampleFraction >= 1.0) return;
+              const previewData = resampleCloud(cloud.data, resampleFraction, originalCount);
+              setResamplePreview({ cloudId: cloud.id, previewData, originalPointCount: originalCount });
+              showToast({
+                type: 'info',
+                title: 'Preview Active',
+                message: `Showing ${previewData.pointCount.toLocaleString()} points (temporary)`,
+              });
             }}
-            ref={(el) => el?.focus()}
-          >
-            <div className="flex items-center justify-between mb-3">
-              <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-                <ChartScatter className="w-3 h-3" />
-                Resample
-              </div>
-              <button
-                onClick={() => {
-                  setResamplePreview(null);
-                  setShowResamplePanel(false);
-                }}
-                className="p-1 hover:bg-neutral-700 rounded"
-              >
-                <X className="w-3 h-3 text-neutral-400" />
-              </button>
-            </div>
-
-            {/* Point count info */}
-            <div className="mb-3 text-[10px] text-neutral-400">
-              Original: {originalCount.toLocaleString()} points
-              {isPreviewActive && (
-                <span className="text-cyan-400 ml-2">(Preview: {previewCount?.toLocaleString()})</span>
-              )}
-            </div>
-
-            {/* Fraction Input */}
-            <div className="mb-3">
-              <label className="text-[10px] text-neutral-400 block mb-1">Keep fraction (0.001 - 1.0)</label>
-              <input
-                type="number"
-                min={0.001}
-                max={1.0}
-                step={0.01}
-                value={resampleFraction}
-                onChange={(e) => {
-                  const val = parseFloat(e.target.value);
-                  if (!isNaN(val)) {
-                    setResampleFraction(Math.min(1.0, Math.max(0.001, val)));
-                    setResamplePreview(null); // Clear preview when fraction changes
-                  }
-                }}
-                className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
-              />
-              {/* Quick presets */}
-              <div className="flex gap-1 mt-1.5 flex-wrap">
-                {[1.0, 0.5, 0.25, 0.1, 0.05, 0.01].map(preset => (
-                  <button
-                    key={preset}
-                    onClick={() => {
-                      setResampleFraction(preset);
-                      setResamplePreview(null);
-                    }}
-                    className={`px-1.5 py-0.5 text-[10px] rounded ${
-                      resampleFraction === preset
-                        ? 'bg-cyan-600 text-white'
-                        : 'bg-neutral-700 text-neutral-400 hover:bg-neutral-600'
-                    }`}
-                  >
-                    {preset * 100}%
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Result Preview */}
-            <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-              Result: ~{Math.round(originalCount * resampleFraction).toLocaleString()} points
-            </div>
-
-            {/* Preview Button */}
-            <button
-              onClick={() => {
-                if (resampleFraction >= 1.0) return;
-                const previewData = computeResampledData();
-                setResamplePreview({
-                  cloudId: cloud.id,
-                  previewData,
-                  originalPointCount: originalCount,
-                });
-                showToast({
-                  type: 'info',
-                  title: 'Preview Active',
-                  message: `Showing ${previewData.pointCount.toLocaleString()} points (temporary)`,
-                });
-              }}
-              disabled={resampleFraction >= 1.0}
-              className={`w-full px-2 py-1.5 text-xs rounded text-white mb-2 ${resampleFraction >= 1.0 ? 'bg-neutral-600 cursor-not-allowed' : 'bg-cyan-600 hover:bg-cyan-500'}`}
-            >
-              {isPreviewActive ? 'Refresh Preview' : 'Preview'}
-            </button>
-
-            {/* Permanently Resample Button */}
-            <button
-              onClick={() => {
-                if (resampleFraction >= 1.0) return;
-
-                // Use preview data if available, otherwise compute fresh
-                const finalData = isPreviewActive ? resamplePreview.previewData : computeResampledData();
-
-                // Update cloud data permanently
-                onUpdateCloud(cloud.id, finalData);
-
-                showToast({
-                  type: 'success',
-                  title: 'Resampled',
-                  message: `Reduced from ${originalCount.toLocaleString()} to ${finalData.pointCount.toLocaleString()} points`,
-                });
-                setResamplePreview(null);
-                setShowResamplePanel(false);
-              }}
-              disabled={resampleFraction >= 1.0}
-              className={`w-full px-2 py-1.5 text-xs rounded text-white ${resampleFraction >= 1.0 ? 'bg-neutral-600 cursor-not-allowed' : 'bg-red-600 hover:bg-red-500'}`}
-            >
-              Permanently Resample Point Cloud
-            </button>
-
-            {/* Cancel Preview Button (only when preview is active) */}
-            {isPreviewActive && (
-              <button
-                onClick={() => setResamplePreview(null)}
-                className="w-full px-2 py-1.5 text-xs rounded text-neutral-300 bg-neutral-700 hover:bg-neutral-600 mt-2"
-              >
-                Cancel Preview
-              </button>
-            )}
-          </div>
+            onApply={() => {
+              if (resampleFraction >= 1.0) return;
+              const finalData = isPreviewActive ? resamplePreview.previewData : resampleCloud(cloud.data, resampleFraction, originalCount);
+              onUpdateCloud(cloud.id, finalData);
+              showToast({
+                type: 'success',
+                title: 'Resampled',
+                message: `Reduced from ${originalCount.toLocaleString()} to ${finalData.pointCount.toLocaleString()} points`,
+              });
+              setResamplePreview(null);
+              setShowResamplePanel(false);
+            }}
+            onCancelPreview={() => setResamplePreview(null)}
+          />
         );
       })()}
 
@@ -11035,942 +9967,169 @@ export default function PointCloudViewer({
 
       {/* Triangulation Panel */}
       {showTriangulationPanel && selectedIds.size === 1 && (
-        <div data-testid="triangulation-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-              <Triangle className="w-3 h-3" />
-              Triangulation
-            </div>
-            <button
-              onClick={() => setShowTriangulationPanel(false)}
-              className="p-1 hover:bg-neutral-700 rounded"
-            >
-              <X className="w-3 h-3 text-neutral-400" />
-            </button>
-          </div>
-
-          {/* Method Selection */}
-          <div className="mb-3">
-            <label className="text-[10px] text-neutral-400 block mb-1">Method</label>
-            <select
-              data-testid="triangulation-method"
-              value={triangulationMethod}
-              onChange={(e) => setTriangulationMethod(e.target.value as TriangulationMethod)}
-              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
-              disabled={triangulationInProgress}
-            >
-              <option value="ball_pivoting">Ball Pivoting</option>
-              <option value="poisson">Poisson</option>
-              <option value="alpha_shape">Alpha Shape</option>
-              <option value="delaunay">Delaunay (2D)</option>
-              <option value="helios">Helios</option>
-            </select>
-          </div>
-
-          {/* Method Description */}
-          <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-            {triangulationMethod === 'ball_pivoting' && 'Good for clean, uniformly sampled point clouds'}
-            {triangulationMethod === 'poisson' && 'Creates watertight meshes, good for noisy data'}
-            {triangulationMethod === 'alpha_shape' && 'Good for concave shapes'}
-            {triangulationMethod === 'delaunay' && 'Fast 2D projection, best for roughly planar surfaces'}
-            {triangulationMethod === 'helios' && 'Spherical Delaunay triangulation for multi-scan LiDAR data'}
-          </div>
-
-          {/* Method-specific Parameters */}
-          {triangulationMethod === 'poisson' && (
-            <div className="mb-3">
-              <label className="text-[10px] text-neutral-400 block mb-1">
-                Octree Depth: {poissonDepth}
-              </label>
-              <input
-                data-testid="triangulation-poisson-depth"
-                type="range"
-                min="4"
-                max="12"
-                value={poissonDepth}
-                onChange={(e) => setPoissonDepth(parseInt(e.target.value))}
-                className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
-                disabled={triangulationInProgress}
-              />
-              <div className="flex justify-between text-[9px] text-neutral-500 mt-0.5">
-                <span>Coarse</span>
-                <span>Fine</span>
-              </div>
-            </div>
-          )}
-
-          {triangulationMethod === 'alpha_shape' && (
-            <div className="mb-3">
-              <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-1">
-                <input
-                  type="checkbox"
-                  checked={alphaValue === null}
-                  onChange={(e) => setAlphaValue(e.target.checked ? null : 0.1)}
-                  className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-                  disabled={triangulationInProgress}
-                />
-                Auto Alpha
-              </label>
-              {alphaValue !== null && (
-                <input
-                  type="number"
-                  value={alphaValue}
-                  onChange={(e) => setAlphaValue(parseFloat(e.target.value) || 0.1)}
-                  className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600 mt-1"
-                  step="0.01"
-                  min="0.001"
-                  disabled={triangulationInProgress}
-                />
-              )}
-            </div>
-          )}
-
-          {/* Error Message */}
-          {triangulationError && (
-            <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
-              {triangulationError}
-            </div>
-          )}
-
-          {/* Triangulate / Setup Button */}
-          {(triangulationMethod === 'helios' || selectedIds.size > 1) ? (
-            <button
-              data-testid="triangulation-setup-button"
-              onClick={() => setShowHeliosPopup(true)}
-              className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
-            >
-              <Triangle className="w-3 h-3" />
-              Setup
-            </button>
-          ) : (
-            <button
-              data-testid="triangulation-run-button"
-              onClick={handleTriangulate}
-              disabled={triangulationInProgress}
-              className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
-                triangulationInProgress
-                  ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
-                  : 'bg-green-600 hover:bg-green-500 text-white'
-              }`}
-            >
-              {triangulationInProgress ? (
-                <>
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  Triangulating...
-                </>
-              ) : (
-                <>
-                  <Triangle className="w-3 h-3" />
-                  Triangulate
-                </>
-              )}
-            </button>
-          )}
-        </div>
+        <TriangulationPanel
+          method={triangulationMethod}
+          inProgress={triangulationInProgress}
+          error={triangulationError}
+          poissonDepth={poissonDepth}
+          alphaValue={alphaValue}
+          useSetup={triangulationMethod === 'helios' || selectedIds.size > 1}
+          onClose={() => setShowTriangulationPanel(false)}
+          onMethodChange={setTriangulationMethod}
+          onPoissonDepthChange={setPoissonDepth}
+          onAlphaValueChange={setAlphaValue}
+          onSetup={() => setShowHeliosPopup(true)}
+          onTriangulate={handleTriangulate}
+        />
       )}
 
       {/* Ground Segmentation Panel */}
       {showGroundSegmentPanel && selectedIds.size === 1 && (
-        <div data-testid="ground-segment-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-              <Layers className="w-3 h-3" />
-              Ground Segmentation
-            </div>
-            <button
-              onClick={() => setShowGroundSegmentPanel(false)}
-              className="p-1 hover:bg-neutral-700 rounded"
-            >
-              <X className="w-3 h-3 text-neutral-400" />
-            </button>
-          </div>
-
-          <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-            Cloth Simulation Filter separates ground from plant points. Lower
-            tolerance keeps low plant material; higher merges it into ground.
-          </div>
-
-          {/* Cloth resolution */}
-          <div className="mb-3">
-            <label className="text-[10px] text-neutral-400 block mb-1">Cloth resolution (m)</label>
-            <DebouncedNumberInput
-              data-testid="ground-cloth-resolution"
-              value={groundClothResolution}
-              onCommit={(n) => setGroundClothResolution(n)}
-              min={0.005}
-              max={2}
-              step={0.01}
-              disabled={groundSegmentInProgress}
-              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-            />
-          </div>
-
-          {/* Ground tolerance (class threshold) */}
-          <div className="mb-3">
-            <label className="text-[10px] text-neutral-400 block mb-1">Ground tolerance (m)</label>
-            <DebouncedNumberInput
-              data-testid="ground-class-threshold"
-              value={groundClassThreshold}
-              onCommit={(n) => setGroundClassThreshold(n)}
-              min={0.001}
-              max={1}
-              step={0.01}
-              disabled={groundSegmentInProgress}
-              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-            />
-          </div>
-
-          {/* Rigidness */}
-          <div className="mb-3">
-            <label className="text-[10px] text-neutral-400 block mb-1">Rigidness (1–3)</label>
-            <DebouncedNumberInput
-              data-testid="ground-rigidness"
-              value={groundRigidness}
-              onCommit={(n) => setGroundRigidness(Math.max(1, Math.min(3, Math.round(n))))}
-              min={1}
-              max={3}
-              step={1}
-              disabled={groundSegmentInProgress}
-              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-            />
-          </div>
-
-          {/* Split checkbox */}
-          <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-3">
-            <input
-              data-testid="ground-split-clouds"
-              type="checkbox"
-              checked={groundSplitClouds}
-              onChange={(e) => setGroundSplitClouds(e.target.checked)}
-              className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-              disabled={groundSegmentInProgress}
-            />
-            Split into ground + plant clouds
-          </label>
-
-          {groundSegmentError && (
-            <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
-              {groundSegmentError}
-            </div>
-          )}
-
-          <button
-            data-testid="ground-segment-run-button"
-            onClick={handleGroundSegment}
-            disabled={groundSegmentInProgress}
-            className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
-              groundSegmentInProgress
-                ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
-                : 'bg-green-600 hover:bg-green-500 text-white'
-            }`}
-          >
-            {groundSegmentInProgress ? (
-              <>
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Segmenting...
-              </>
-            ) : (
-              <>
-                <Layers className="w-3 h-3" />
-                Segment Ground
-              </>
-            )}
-          </button>
-        </div>
+        <GroundSegmentPanel
+          clothResolution={groundClothResolution}
+          classThreshold={groundClassThreshold}
+          rigidness={groundRigidness}
+          splitClouds={groundSplitClouds}
+          inProgress={groundSegmentInProgress}
+          error={groundSegmentError}
+          onClose={() => setShowGroundSegmentPanel(false)}
+          onClothResolutionChange={setGroundClothResolution}
+          onClassThresholdChange={setGroundClassThreshold}
+          onRigidnessChange={setGroundRigidness}
+          onSplitCloudsChange={setGroundSplitClouds}
+          onSegment={handleGroundSegment}
+        />
       )}
 
       {/* Tree Segmentation Panel (TreeIso) */}
       {showTreeSegmentPanel && selectedIds.size === 1 && (
-        <div data-testid="tree-segment-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-              <Sprout className="w-3 h-3" />
-              Tree Segmentation
-            </div>
-            <button
-              onClick={() => { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }}
-              className="p-1 hover:bg-neutral-700 rounded"
-            >
-              <X className="w-3 h-3 text-neutral-400" />
-            </button>
-          </div>
-
-          <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-            TreeIso isolates individual trees by cut-pursuit graph segmentation.
-            Works best on ground-removed clouds — run Ground Segmentation first.
-          </div>
-
-          {/* Regularization strength 1 (3D) */}
-          <div className="mb-3">
-            <label className="text-[10px] text-neutral-400 block mb-1">3D reg. strength (λ₁)</label>
-            <DebouncedNumberInput
-              data-testid="tree-reg-strength1"
-              value={treeRegStrength1}
-              onCommit={(n) => setTreeRegStrength1(n)}
-              min={0.1} max={10} step={0.1}
-              disabled={treeSegmentInProgress}
-              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-            />
-          </div>
-
-          {/* Regularization strength 2 (2D) */}
-          <div className="mb-3">
-            <label className="text-[10px] text-neutral-400 block mb-1">2D reg. strength (λ₂)</label>
-            <DebouncedNumberInput
-              data-testid="tree-reg-strength2"
-              value={treeRegStrength2}
-              onCommit={(n) => setTreeRegStrength2(n)}
-              min={1} max={100} step={1}
-              disabled={treeSegmentInProgress}
-              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-            />
-          </div>
-
-          {/* Max gap */}
-          <div className="mb-3">
-            <label className="text-[10px] text-neutral-400 block mb-1">Max intra-tree gap (m)</label>
-            <DebouncedNumberInput
-              data-testid="tree-max-gap"
-              value={treeMaxGap}
-              onCommit={(n) => setTreeMaxGap(n)}
-              min={0.1} max={10} step={0.1}
-              disabled={treeSegmentInProgress}
-              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-            />
-          </div>
-
-          {/* Trunk seeding (human-in-the-loop) */}
-          <div className="mb-3 p-2 bg-neutral-900/50 rounded">
-            <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-2">
-              <input
-                data-testid="tree-seed-mode"
-                type="checkbox"
-                checked={treeSeedMode}
-                onChange={(e) => setTreeSeedMode(e.target.checked)}
-                className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-                disabled={treeSegmentInProgress}
-              />
-              Seed trunks (left-click to add)
-            </label>
-            {treeSeedMode && (
-              <div className="text-[10px] text-neutral-500 mb-1">
-                Click trunks in the view (camera locked); right-click removes the last seed.
-              </div>
-            )}
-            <div className="flex items-center justify-between text-[10px] text-neutral-500">
-              <span data-testid="tree-seed-count">{treeSeedPoints.length} seed{treeSeedPoints.length === 1 ? '' : 's'}</span>
-              {treeSeedPoints.length > 0 && (
-                <button
-                  className="px-2 py-0.5 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-300"
-                  onClick={() => setTreeSeedPoints([])}
-                  disabled={treeSegmentInProgress}
-                >
-                  Clear seeds
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Split checkbox */}
-          <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-3">
-            <input
-              data-testid="tree-split-clouds"
-              type="checkbox"
-              checked={treeSplitClouds}
-              onChange={(e) => setTreeSplitClouds(e.target.checked)}
-              className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-              disabled={treeSegmentInProgress}
-            />
-            Split into one cloud per tree
-          </label>
-
-          {treeSegmentError && (
-            <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
-              {treeSegmentError}
-            </div>
-          )}
-
-          <button
-            data-testid="tree-segment-run-button"
-            onClick={handleSegmentTrees}
-            disabled={treeSegmentInProgress}
-            className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
-              treeSegmentInProgress
-                ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
-                : 'bg-green-600 hover:bg-green-500 text-white'
-            }`}
-          >
-            {treeSegmentInProgress ? (
-              <>
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Segmenting...
-              </>
-            ) : (
-              <>
-                <Sprout className="w-3 h-3" />
-                Segment Trees
-              </>
-            )}
-          </button>
-
-          {/* Refine: merge / split the current tree_instance field (flat clouds). */}
-          {(() => {
-            const c = clouds.find(cl => selectedIds.has(cl.id));
-            const hasTrees = !!c?.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE];
-            if (!hasTrees) return null;
-            return (
-              <div data-testid="tree-refine" className="mt-3 pt-3 border-t border-neutral-700">
-                <div className="text-[10px] font-medium text-neutral-300 mb-2">Refine</div>
-                {/* Merge */}
-                <div className="flex items-end gap-1 mb-2">
-                  <div className="flex-1">
-                    <label className="text-[10px] text-neutral-500 block">Merge tree</label>
-                    <DebouncedNumberInput
-                      data-testid="tree-merge-a"
-                      value={treeMergeA}
-                      onCommit={(n) => setTreeMergeA(Math.max(1, Math.round(n)))}
-                      min={1} step={1}
-                      className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-                    />
-                  </div>
-                  <span className="text-[10px] text-neutral-500 pb-1">+</span>
-                  <div className="flex-1">
-                    <label className="text-[10px] text-neutral-500 block">into</label>
-                    <DebouncedNumberInput
-                      data-testid="tree-merge-b"
-                      value={treeMergeB}
-                      onCommit={(n) => setTreeMergeB(Math.max(1, Math.round(n)))}
-                      min={1} step={1}
-                      className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-                    />
-                  </div>
-                  <button
-                    data-testid="tree-merge-run"
-                    onClick={handleMergeTrees}
-                    className="px-2 py-1 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
-                  >
-                    Merge
-                  </button>
-                </div>
-                {/* Split */}
-                <div className="flex items-end gap-1">
-                  <div className="flex-1">
-                    <label className="text-[10px] text-neutral-500 block">Split tree (by gaps)</label>
-                    <DebouncedNumberInput
-                      data-testid="tree-split-id"
-                      value={treeSplitId}
-                      onCommit={(n) => setTreeSplitId(Math.max(1, Math.round(n)))}
-                      min={1} step={1}
-                      className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-                    />
-                  </div>
-                  <button
-                    data-testid="tree-split-run"
-                    onClick={handleSplitTree}
-                    className="px-2 py-1 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
-                  >
-                    Split
-                  </button>
-                </div>
-              </div>
-            );
-          })()}
-        </div>
+        <TreeSegmentPanel
+          regStrength1={treeRegStrength1}
+          regStrength2={treeRegStrength2}
+          maxGap={treeMaxGap}
+          seedMode={treeSeedMode}
+          seedCount={treeSeedPoints.length}
+          splitClouds={treeSplitClouds}
+          inProgress={treeSegmentInProgress}
+          error={treeSegmentError}
+          hasTrees={!!clouds.find(cl => selectedIds.has(cl.id))?.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE]}
+          mergeA={treeMergeA}
+          mergeB={treeMergeB}
+          splitId={treeSplitId}
+          onClose={() => { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }}
+          onRegStrength1Change={setTreeRegStrength1}
+          onRegStrength2Change={setTreeRegStrength2}
+          onMaxGapChange={setTreeMaxGap}
+          onSeedModeChange={setTreeSeedMode}
+          onClearSeeds={() => setTreeSeedPoints([])}
+          onSplitCloudsChange={setTreeSplitClouds}
+          onSegment={handleSegmentTrees}
+          onMergeAChange={setTreeMergeA}
+          onMergeBChange={setTreeMergeB}
+          onSplitIdChange={setTreeSplitId}
+          onMerge={handleMergeTrees}
+          onSplit={handleSplitTree}
+        />
       )}
 
       {/* Skeleton Extraction Panel */}
       {showSkeletonPanel && selectedIds.size === 1 && (
-        <div data-testid="skeleton-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-              <GitBranch className="w-3 h-3" />
-              Skeleton Extraction (BFS Graph)
-            </div>
-            <button
-              onClick={() => setShowSkeletonPanel(false)}
-              className="p-1 hover:bg-neutral-700 rounded"
-            >
-              <X className="w-3 h-3 text-neutral-400" />
-            </button>
-          </div>
-
-          {/* Description */}
-          <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-            BFS graph-based algorithm for tree skeleton extraction. Follows branch connectivity from root to tips.
-          </div>
-
-          {/* Main Parameters */}
-          <div className="mb-3 space-y-2">
-            <label className="flex items-center gap-2 text-[10px] text-neutral-300 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={skeletonRemoveOutliers}
-                onChange={(e) => setSkeletonRemoveOutliers(e.target.checked)}
-                className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-                disabled={skeletonInProgress}
-              />
-              Remove outlier points
-            </label>
-            <label className="flex items-center gap-2 text-[10px] text-neutral-300 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={skeletonSmooth}
-                onChange={(e) => setSkeletonSmooth(e.target.checked)}
-                className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-                disabled={skeletonInProgress}
-              />
-              Smooth skeleton (Laplace)
-            </label>
-          </div>
-
-          {/* Search Radius */}
-          <div className="mb-3">
-            <label className="text-[10px] text-neutral-400 block mb-1">
-              Search Radius: {skeletonSearchRadius < 0.001 ? 'Auto (based on density)' : `${skeletonSearchRadius.toFixed(3)}m`}
-            </label>
-            <input
-              data-testid="skeleton-search-radius"
-              type="range"
-              min="0"
-              max="0.2"
-              step="0.005"
-              value={skeletonSearchRadius}
-              onChange={(e) => setSkeletonSearchRadius(parseFloat(e.target.value))}
-              className="w-full h-1 bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-              disabled={skeletonInProgress}
-            />
-            <div className="text-[9px] text-neutral-500 mt-1">
-              Neighbor connection distance. Set to 0 for auto-calculation from point density.
-            </div>
-          </div>
-
-          {/* Threshold Filter */}
-          <div className="mb-3">
-            <label className="text-[10px] text-neutral-400 block mb-1">
-              Min Points/Block: {skeletonThresholdFilter}
-            </label>
-            <input
-              data-testid="skeleton-min-points"
-              type="range"
-              min="1"
-              max="50"
-              step="1"
-              value={skeletonThresholdFilter}
-              onChange={(e) => setSkeletonThresholdFilter(parseInt(e.target.value))}
-              className="w-full h-1 bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-              disabled={skeletonInProgress}
-            />
-            <div className="text-[9px] text-neutral-500 mt-1">
-              Filter noise/small branches. Lower for more detail.
-            </div>
-          </div>
-
-          {/* Advanced Options Toggle */}
-          <button
-            onClick={() => setSkeletonShowAdvanced(!skeletonShowAdvanced)}
-            className="w-full text-left text-[10px] text-neutral-400 hover:text-neutral-300 mb-2 flex items-center gap-1"
-          >
-            <ChevronRight className={`w-3 h-3 transition-transform ${skeletonShowAdvanced ? 'rotate-90' : ''}`} />
-            Advanced Options
-          </button>
-
-          {/* Advanced Options */}
-          {skeletonShowAdvanced && (
-            <div className="mb-3 pl-2 border-l border-neutral-700 space-y-3">
-              {/* Root Threshold */}
-              <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">
-                  Root Threshold: {skeletonRootThreshold.toFixed(3)}m
-                </label>
-                <input
-                  type="range"
-                  min="0.005"
-                  max="0.1"
-                  step="0.005"
-                  value={skeletonRootThreshold}
-                  onChange={(e) => setSkeletonRootThreshold(parseFloat(e.target.value))}
-                  className="w-full h-1 bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                  disabled={skeletonInProgress}
-                />
-              </div>
-
-              {/* Quantization Levels */}
-              <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">
-                  Quantization Levels: {skeletonQuantizationLevels}
-                </label>
-                <input
-                  type="range"
-                  min="20"
-                  max="120"
-                  step="10"
-                  value={skeletonQuantizationLevels}
-                  onChange={(e) => setSkeletonQuantizationLevels(parseInt(e.target.value))}
-                  className="w-full h-1 bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                  disabled={skeletonInProgress}
-                />
-              </div>
-
-              <label className="flex items-center gap-2 text-[10px] text-neutral-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={skeletonUseNonlinearQuant}
-                  onChange={(e) => setSkeletonUseNonlinearQuant(e.target.checked)}
-                  className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-                  disabled={skeletonInProgress}
-                />
-                Nonlinear quantization (sqrt scaling)
-              </label>
-
-              <label className="flex items-center gap-2 text-[10px] text-neutral-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={skeletonUseProportionFilter}
-                  onChange={(e) => setSkeletonUseProportionFilter(e.target.checked)}
-                  className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-                  disabled={skeletonInProgress}
-                />
-                Proportion filter (parent/child ratio)
-              </label>
-
-              {/* Smoothing Iterations */}
-              {skeletonSmooth && (
-                <div>
-                  <label className="text-[10px] text-neutral-400 block mb-1">
-                    Smoothing Iterations: {skeletonSmoothIterations}
-                  </label>
-                  <input
-                    type="range"
-                    min="1"
-                    max="5"
-                    step="1"
-                    value={skeletonSmoothIterations}
-                    onChange={(e) => setSkeletonSmoothIterations(parseInt(e.target.value))}
-                    className="w-full h-1 bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                    disabled={skeletonInProgress}
-                  />
-                </div>
-              )}
-
-              <div className="text-[9px] text-neutral-500">
-                Nonlinear quantization preserves branch detail. Proportion filter removes small disconnected clusters.
-              </div>
-            </div>
-          )}
-
-          {/* Error Message */}
-          {skeletonError && (
-            <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
-              {skeletonError}
-            </div>
-          )}
-
-          {/* Extract Button */}
-          <button
-            data-testid="skeleton-extract-button"
-            onClick={handleExtractSkeleton}
-            disabled={skeletonInProgress}
-            className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
-              skeletonInProgress
-                ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
-                : 'bg-amber-600 hover:bg-amber-500 text-white'
-            }`}
-          >
-            {skeletonInProgress ? (
-              <>
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Extracting...
-              </>
-            ) : (
-              <>
-                <GitBranch className="w-3 h-3" />
-                Extract Skeleton
-              </>
-            )}
-          </button>
-        </div>
+        <SkeletonExtractionPanel
+          removeOutliers={skeletonRemoveOutliers}
+          smooth={skeletonSmooth}
+          searchRadius={skeletonSearchRadius}
+          thresholdFilter={skeletonThresholdFilter}
+          showAdvanced={skeletonShowAdvanced}
+          rootThreshold={skeletonRootThreshold}
+          quantizationLevels={skeletonQuantizationLevels}
+          useNonlinearQuant={skeletonUseNonlinearQuant}
+          useProportionFilter={skeletonUseProportionFilter}
+          smoothIterations={skeletonSmoothIterations}
+          inProgress={skeletonInProgress}
+          error={skeletonError}
+          onClose={() => setShowSkeletonPanel(false)}
+          onRemoveOutliersChange={setSkeletonRemoveOutliers}
+          onSmoothChange={setSkeletonSmooth}
+          onSearchRadiusChange={setSkeletonSearchRadius}
+          onThresholdFilterChange={setSkeletonThresholdFilter}
+          onShowAdvancedChange={setSkeletonShowAdvanced}
+          onRootThresholdChange={setSkeletonRootThreshold}
+          onQuantizationLevelsChange={setSkeletonQuantizationLevels}
+          onUseNonlinearQuantChange={setSkeletonUseNonlinearQuant}
+          onUseProportionFilterChange={setSkeletonUseProportionFilter}
+          onSmoothIterationsChange={setSkeletonSmoothIterations}
+          onExtract={handleExtractSkeleton}
+        />
       )}
 
       {/* Transform Panel - shows when a mesh is selected and the Transform button is toggled */}
       {showResizePanel && selectedMesh && (() => {
-        const scale = meshScales.get(selectedMesh.id) || { x: 1, y: 1, z: 1 };
-        const pos = meshPositions.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
-        const rotation = meshRotations.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
-        const isShape = selectedMesh.sourceCloudId.startsWith('shape-');
-        const isVoxel = selectedMesh.sourceCloudId.includes('voxel');
-        const grid = selectedMesh.gridSubdivisions || { x: 1, y: 1, z: 1 };
-        const translateActive = editMode === 'translate';
-        const rotateActive = editMode === 'rotate';
-
-        const handleSetGrid = (axis: 'x' | 'y' | 'z', value: string) => {
-          // Allow empty while editing; commit only valid positive integers.
-          if (value === '') return;
-          const v = Math.max(1, Math.floor(Number(value)));
-          if (!Number.isFinite(v)) return;
-          setMeshes(prev => prev.map(m => {
-            if (m.id !== selectedMesh.id) return m;
-            const cur = m.gridSubdivisions || { x: 1, y: 1, z: 1 };
-            return { ...m, gridSubdivisions: { ...cur, [axis]: v } };
-          }));
-        };
-
-        const handleSetMeshPos = (axis: 'x' | 'y' | 'z', value: string) => {
-          const v = parseFloat(value);
-          if (isNaN(v)) return;
-          setMeshPositions(prev => {
-            const next = new Map(prev);
-            const cur = next.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
-            next.set(selectedMesh.id, { ...cur, [axis]: v });
-            return next;
-          });
-        };
-
-        const handleSetMeshRot = (axis: 'x' | 'y' | 'z', value: string) => {
-          const v = parseFloat(value);
-          if (isNaN(v)) return;
-          setMeshRotations(prev => {
-            const next = new Map(prev);
-            const cur = next.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
-            next.set(selectedMesh.id, { ...cur, [axis]: v });
-            return next;
-          });
-        };
-
+        const mesh = selectedMesh;
+        const scale = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
+        // A voxel-grid mesh is identified by carrying gridSubdivisions —
+        // covers both "Create Voxel" boxes and grids imported from a Helios
+        // <grid> block (whose synthetic sourceCloudId doesn't contain "voxel").
+        const isVoxel = !!mesh.gridSubdivisions;
+        const fit = isVoxel ? computeSelectedScansFitGrid() : null;
         return (
-          <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
-            <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
-              <span className="flex items-center gap-2">
-                <Maximize2 className="w-3 h-3" />
-                Transform {isShape ? 'Shape' : 'Mesh'}
-              </span>
-              <button
-                onClick={() => setShowResizePanel(false)}
-                className="text-neutral-500 hover:text-neutral-300"
-              >
-                ×
-              </button>
-            </div>
-
-            {/* Voxel-specific: fit the box to the selected scan(s) */}
-            {isVoxel && (() => {
-              const fit = computeSelectedScansFitGrid();
-              return (
-                <button
-                  data-testid="voxel-fit-to-scans"
-                  disabled={!fit}
-                  title={fit
-                    ? 'Resize and center this voxel box around the selected scan(s)'
-                    : 'Select one or more scans with points first'}
-                  onClick={() => {
-                    if (!fit) return;
-                    setMeshPositions(prev => {
-                      const next = new Map(prev);
-                      next.set(selectedMesh.id, fit.center);
-                      return next;
-                    });
-                    setMeshScales(prev => {
-                      const next = new Map(prev);
-                      next.set(selectedMesh.id, fit.size);
-                      return next;
-                    });
-                  }}
-                  className="w-full mb-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-700 disabled:text-neutral-500 disabled:cursor-not-allowed text-white rounded text-[11px] flex items-center justify-center gap-1.5"
-                >
-                  <Maximize2 className="w-3 h-3" />
-                  Fit to selected scan(s)
-                </button>
-              );
-            })()}
-
-            {/* Position */}
-            <div className="mb-3 p-2 bg-neutral-900/50 rounded">
-              <div className="flex items-center justify-between mb-1.5">
-                <div className="text-[10px] text-neutral-400 flex items-center gap-1">
-                  <Move className="w-3 h-3" />
-                  Position
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={handleMoveToOrigin}
-                    className="p-0.5 hover:bg-neutral-700 rounded text-neutral-400 hover:text-neutral-200"
-                    title="Move to Origin"
-                  >
-                    <CircleDot className="w-3 h-3" />
-                  </button>
-                  <button
-                    onClick={() => setEditMode(translateActive ? 'none' : 'translate')}
-                    className={`p-0.5 rounded ${translateActive ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-700'}`}
-                    title={translateActive ? 'Hide translate gizmo' : 'Show translate gizmo'}
-                  >
-                    <Move className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                {(['x', 'y', 'z'] as const).map((axis) => (
-                  <div key={axis} className="flex items-center gap-2">
-                    <label className="text-[10px] text-neutral-500 w-3 uppercase font-medium">{axis}</label>
-                    <DebouncedNumberInput
-                      data-testid={`mesh-pos-${axis}`}
-                      step={0.1}
-                      value={pos[axis]}
-                      format={(n) => n.toFixed(3)}
-                      onCommit={(n) => handleSetMeshPos(axis, String(n))}
-                      className="flex-1 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
-                ))}
-              </div>
-              <button
-                onClick={() => {
-                  setMeshPositions(prev => {
-                    const next = new Map(prev);
-                    next.set(selectedMesh.id, { x: 0, y: 0, z: 0 });
-                    return next;
-                  });
-                }}
-                className="w-full mt-2 py-1 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[10px]"
-              >
-                Reset Position
-              </button>
-            </div>
-
-            {/* Rotation */}
-            <div className="mb-3 p-2 bg-neutral-900/50 rounded">
-              <div className="flex items-center justify-between mb-1.5">
-                <div className="text-[10px] text-neutral-400 flex items-center gap-1">
-                  <RotateCcw className="w-3 h-3" />
-                  Rotation (°)
-                </div>
-                <button
-                  onClick={() => setEditMode(rotateActive ? 'none' : 'rotate')}
-                  className={`p-0.5 rounded ${rotateActive ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-700'}`}
-                  title={rotateActive ? 'Hide rotate gizmo' : 'Show rotate gizmo'}
-                >
-                  <RotateCcw className="w-3 h-3" />
-                </button>
-              </div>
-              <div className="space-y-1.5">
-                {(['x', 'y', 'z'] as const).map((axis) => (
-                  <div key={axis} className="flex items-center gap-2">
-                    <label className="text-[10px] text-neutral-500 w-3 uppercase font-medium">{axis}</label>
-                    <DebouncedNumberInput
-                      step={5}
-                      value={rotation[axis]}
-                      format={(n) => n.toFixed(1)}
-                      onCommit={(n) => handleSetMeshRot(axis, String(n))}
-                      className="flex-1 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
-                ))}
-              </div>
-              <button
-                onClick={() => {
-                  setMeshRotations(prev => {
-                    const next = new Map(prev);
-                    next.set(selectedMesh.id, { x: 0, y: 0, z: 0 });
-                    return next;
-                  });
-                }}
-                className="w-full mt-2 py-1 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[10px]"
-              >
-                Reset Rotation
-              </button>
-            </div>
-
-            {/* Per-Axis Scale */}
-            <div className={`${isVoxel ? 'mb-3' : ''} p-2 bg-neutral-900/50 rounded`}>
-              <div className="flex items-center justify-between mb-1.5">
-                <div className="text-[10px] text-neutral-400 flex items-center gap-1">
-                  <Maximize2 className="w-3 h-3" />
-                  Scale
-                </div>
-                <label className="flex items-center gap-1 text-[10px] text-neutral-400 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={scaleLocked}
-                    onChange={(e) => setScaleLocked(e.target.checked)}
-                    className="accent-blue-500"
-                  />
-                  Lock
-                </label>
-              </div>
-              <div className="space-y-1.5">
-                {(['x', 'y', 'z'] as const).map((axis) => (
-                  <div key={axis} className="flex items-center gap-2">
-                    <label className="text-[10px] text-neutral-500 w-3 uppercase font-medium">{axis}</label>
-                    <DebouncedNumberInput
-                      step={0.1}
-                      min={0}
-                      value={scale[axis]}
-                      format={(n) => n.toFixed(2)}
-                      onCommit={(v) => {
-                        setMeshScales(prev => {
-                          const next = new Map(prev);
-                          next.set(selectedMesh.id, scaleLocked ? { x: v, y: v, z: v } : { ...scale, [axis]: v });
-                          return next;
-                        });
-                      }}
-                      className="flex-1 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
-                ))}
-              </div>
-              <button
-                onClick={() => {
-                  setMeshScales(prev => {
-                    const next = new Map(prev);
-                    next.set(selectedMesh.id, { x: 1, y: 1, z: 1 });
-                    return next;
-                  });
-                }}
-                className="w-full mt-2 py-1 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[10px]"
-              >
-                Reset Scale
-              </button>
-            </div>
-
-            {/* Voxel-specific: Grid subdivision (for PyHelios LiDAR grid) */}
-            {isVoxel && (
-              <div className="p-2 bg-neutral-900/50 rounded">
-                <div className="text-[10px] text-neutral-400 mb-1.5 flex items-center gap-1">
-                  <Grid3x3 className="w-3 h-3" />
-                  Grid Resolution
-                </div>
-                <div className="space-y-1.5">
-                  {(['x', 'y', 'z'] as const).map((axis) => (
-                    <div key={axis} className="flex items-center gap-2">
-                      <label className="text-[10px] text-neutral-500 w-3 uppercase font-medium">{axis}</label>
-                      <DebouncedNumberInput
-                        data-testid={`voxel-grid-${axis}`}
-                        min={1}
-                        step={1}
-                        parse={(s) => parseInt(s, 10)}
-                        value={grid[axis]}
-                        onCommit={(n) => handleSetGrid(axis, String(n))}
-                        className="flex-1 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
-                      />
-                    </div>
-                  ))}
-                </div>
-                <button
-                  onClick={() => setMeshes(prev => prev.map(m => m.id === selectedMesh.id ? { ...m, gridSubdivisions: { x: 1, y: 1, z: 1 } } : m))}
-                  className="w-full mt-2 py-1 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[10px]"
-                >
-                  Reset Grid
-                </button>
-              </div>
-            )}
-          </div>
+          <TransformPanel
+            isShape={mesh.sourceCloudId.startsWith('shape-')}
+            isVoxel={isVoxel}
+            position={meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 }}
+            rotation={meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 }}
+            scale={scale}
+            grid={mesh.gridSubdivisions || { x: 1, y: 1, z: 1 }}
+            scaleLocked={scaleLocked}
+            translateActive={editMode === 'translate'}
+            rotateActive={editMode === 'rotate'}
+            fitAvailable={!!fit}
+            onClose={() => setShowResizePanel(false)}
+            onScaleLockedChange={setScaleLocked}
+            onToggleTranslate={() => setEditMode(editMode === 'translate' ? 'none' : 'translate')}
+            onToggleRotate={() => setEditMode(editMode === 'rotate' ? 'none' : 'rotate')}
+            onMoveToOrigin={handleMoveToOrigin}
+            onFitToScans={() => {
+              if (!fit) return;
+              setMeshPositions(prev => new Map(prev).set(mesh.id, fit.center));
+              setMeshScales(prev => new Map(prev).set(mesh.id, fit.size));
+            }}
+            onSetPosition={(axis, v) => setMeshPositions(prev => {
+              const next = new Map(prev);
+              next.set(mesh.id, { ...(next.get(mesh.id) || { x: 0, y: 0, z: 0 }), [axis]: v });
+              return next;
+            })}
+            onResetPosition={() => setMeshPositions(prev => new Map(prev).set(mesh.id, { x: 0, y: 0, z: 0 }))}
+            onSetRotation={(axis, v) => setMeshRotations(prev => {
+              const next = new Map(prev);
+              next.set(mesh.id, { ...(next.get(mesh.id) || { x: 0, y: 0, z: 0 }), [axis]: v });
+              return next;
+            })}
+            onResetRotation={() => setMeshRotations(prev => new Map(prev).set(mesh.id, { x: 0, y: 0, z: 0 }))}
+            onSetScale={(axis, v) => setMeshScales(prev => {
+              const next = new Map(prev);
+              next.set(mesh.id, scaleLocked ? { x: v, y: v, z: v } : { ...scale, [axis]: v });
+              return next;
+            })}
+            onResetScale={() => setMeshScales(prev => new Map(prev).set(mesh.id, { x: 1, y: 1, z: 1 }))}
+            onSetGrid={(axis, value) => {
+              const v = Math.max(1, Math.floor(value));
+              if (!Number.isFinite(v)) return;
+              setMeshes(prev => prev.map(m => {
+                if (m.id !== mesh.id) return m;
+                const cur = m.gridSubdivisions || { x: 1, y: 1, z: 1 };
+                return { ...m, gridSubdivisions: { ...cur, [axis]: v } };
+              }));
+            }}
+            onResetGrid={() => setMeshes(prev => prev.map(m => m.id === mesh.id ? { ...m, gridSubdivisions: { x: 1, y: 1, z: 1 } } : m))}
+          />
         );
       })()}
 
       {/* Translate Coordinates Panel - shown for clouds/skeletons. Meshes use the Transform panel instead. */}
       {editMode === 'translate' && !selectedMesh && (selectedSkeletonId || selectedIds.size > 0) && (() => {
-        // Get current position based on selection type
+        // Resolve current translation + display name from the active selection.
         let currentPos = { x: 0, y: 0, z: 0 };
         let objectName = '';
-
         if (selectedSkeletonId) {
           currentPos = skeletonPositions.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
           const skeleton = skeletons.find(s => s.id === selectedSkeletonId);
@@ -11979,721 +10138,112 @@ export default function PointCloudViewer({
           const firstCloudId = Array.from(selectedIds)[0];
           const editState = getEditState(firstCloudId);
           currentPos = editState ? { x: editState.translation.x, y: editState.translation.y, z: editState.translation.z } : { x: 0, y: 0, z: 0 };
-          const cloud = clouds.find(c => c.id === firstCloudId);
-          objectName = cloud?.data.fileName || 'Point Cloud';
+          objectName = clouds.find(c => c.id === firstCloudId)?.data.fileName || 'Point Cloud';
         }
 
-        const handleCoordChange = (axis: 'x' | 'y' | 'z', value: string) => {
-          const numValue = parseFloat(value);
-          if (isNaN(numValue)) return;
-
-          if (selectedSkeletonId) {
-            setSkeletonPositions(prev => {
-              const next = new Map(prev);
-              const pos = next.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
-              next.set(selectedSkeletonId, { ...pos, [axis]: numValue });
-              return next;
-            });
-          } else if (selectedIds.size > 0) {
-            // For point clouds, update edit states
-            setEditStates(prev => {
-              const next = new Map(prev);
-              for (const cloudId of selectedIds) {
-                const state = next.get(cloudId) || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
-                next.set(cloudId, {
-                  ...state,
-                  translation: { ...state.translation, [axis]: numValue }
+        return (
+          <TranslatePanel
+            position={currentPos}
+            objectName={objectName}
+            onCoordChange={(axis, numValue) => {
+              if (selectedSkeletonId) {
+                setSkeletonPositions(prev => {
+                  const next = new Map(prev);
+                  const pos = next.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
+                  next.set(selectedSkeletonId, { ...pos, [axis]: numValue });
+                  return next;
+                });
+              } else if (selectedIds.size > 0) {
+                setEditStates(prev => {
+                  const next = new Map(prev);
+                  for (const cloudId of selectedIds) {
+                    const state = next.get(cloudId) || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+                    next.set(cloudId, { ...state, translation: { ...state.translation, [axis]: numValue } });
+                  }
+                  return next;
                 });
               }
-              return next;
-            });
-          }
-        };
-
-        return (
-          <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
-            <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
-              <span className="flex items-center gap-2">
-                <Move className="w-3 h-3" />
-                Position
-              </span>
-              <span className="text-[9px] text-neutral-500 truncate max-w-[100px]" title={objectName}>
-                {objectName}
-              </span>
-            </div>
-
-            <div className="space-y-2">
-              {(['x', 'y', 'z'] as const).map((axis) => (
-                <div key={axis} className="flex items-center gap-2">
-                  <label className="text-[10px] text-neutral-400 w-3 uppercase font-medium">
-                    {axis}
-                  </label>
-                  <DebouncedNumberInput
-                    step={0.1}
-                    value={currentPos[axis]}
-                    format={(n) => n.toFixed(3)}
-                    onCommit={(n) => handleCoordChange(axis, String(n))}
-                    className="flex-1 bg-neutral-700 text-neutral-200 text-xs px-2 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
-                  />
-                </div>
-              ))}
-            </div>
-
-            <button
-              onClick={() => {
-                if (selectedSkeletonId) {
-                  setSkeletonPositions(prev => {
-                    const next = new Map(prev);
-                    next.set(selectedSkeletonId, { x: 0, y: 0, z: 0 });
-                    return next;
-                  });
-                } else if (selectedIds.size > 0) {
-                  setEditStates(prev => {
-                    const next = new Map(prev);
-                    for (const cloudId of selectedIds) {
-                      const state = next.get(cloudId);
-                      if (state) {
-                        next.set(cloudId, { ...state, translation: { x: 0, y: 0, z: 0 } });
-                      }
-                    }
-                    return next;
-                  });
-                }
-              }}
-              className="w-full mt-3 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-xs"
-            >
-              Reset Position
-            </button>
-          </div>
+            }}
+            onReset={() => {
+              if (selectedSkeletonId) {
+                setSkeletonPositions(prev => new Map(prev).set(selectedSkeletonId, { x: 0, y: 0, z: 0 }));
+              } else if (selectedIds.size > 0) {
+                setEditStates(prev => {
+                  const next = new Map(prev);
+                  for (const cloudId of selectedIds) {
+                    const state = next.get(cloudId);
+                    if (state) next.set(cloudId, { ...state, translation: { x: 0, y: 0, z: 0 } });
+                  }
+                  return next;
+                });
+              }
+            }}
+          />
         );
       })()}
 
       {/* Plant Growth Panel - shows when plant mesh is selected and growth panel is open */}
       {/* Positioned to the left of the main right panel to avoid overlap */}
-      {showPlantGrowthPanel && selectedMesh?.isPlant && (() => {
-        const currentAge = selectedMesh.plantAge ?? 0;
-        const handleGoToAge = () => {
-          const target = parseFloat(targetAge);
-          if (!isNaN(target) && target >= 0) {
-            const delta = target - currentAge;
-            if (delta !== 0) {
-              handleAdvancePlantAge(selectedMesh.id, delta);
-            }
-          }
-        };
-        return (
-          <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
-            <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
-              <span className="flex items-center gap-2">
-                <ClockPlus className="w-3 h-3 text-neutral-400" />
-                Plant Growth
-              </span>
-              <button
-                onClick={() => setShowPlantGrowthPanel(false)}
-                className="text-neutral-500 hover:text-neutral-300"
-              >
-                ×
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              {/* Current Age Display */}
-              <div className="text-[10px] text-neutral-400">
-                Current Age: <span className="text-white font-medium">{currentAge.toFixed(0)} days</span>
-              </div>
-
-              {/* Quick Increment Buttons */}
-              <div>
-                <div className="text-[9px] text-neutral-500 mb-1">Quick Adjust</div>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => handleAdvancePlantAge(selectedMesh.id, -1)}
-                    disabled={isAdvancingAge || currentAge <= 0}
-                    className="flex-1 px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-600/50 disabled:cursor-not-allowed rounded text-[10px] text-white font-medium transition-colors"
-                  >
-                    -1
-                  </button>
-                  <button
-                    onClick={() => handleAdvancePlantAge(selectedMesh.id, 1)}
-                    disabled={isAdvancingAge}
-                    className="flex-1 px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-600/50 disabled:cursor-not-allowed rounded text-[10px] text-white font-medium transition-colors"
-                  >
-                    +1
-                  </button>
-                </div>
-              </div>
-
-              {/* Custom Step Section */}
-              <div>
-                <div className="text-[9px] text-neutral-500 mb-1">Custom Step</div>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => handleAdvancePlantAge(selectedMesh.id, -ageStep)}
-                    disabled={isAdvancingAge || currentAge - ageStep < 0}
-                    className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-600/50 disabled:cursor-not-allowed rounded text-[10px] text-white font-medium transition-colors"
-                  >
-                    −
-                  </button>
-                  <input
-                    type="number"
-                    value={ageStep}
-                    onChange={(e) => setAgeStep(Math.max(1, parseInt(e.target.value) || 1))}
-                    min={1}
-                    className="flex-1 w-12 px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white text-center focus:outline-none focus:ring-1 focus:ring-neutral-500"
-                    disabled={isAdvancingAge}
-                  />
-                  <button
-                    onClick={() => handleAdvancePlantAge(selectedMesh.id, ageStep)}
-                    disabled={isAdvancingAge}
-                    className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-600/50 disabled:cursor-not-allowed rounded text-[10px] text-white font-medium transition-colors"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-
-              {/* Go To Age Section */}
-              <div>
-                <div className="text-[9px] text-neutral-500 mb-1">Go to Age</div>
-                <div className="flex gap-1">
-                  <input
-                    type="number"
-                    value={targetAge}
-                    onChange={(e) => setTargetAge(e.target.value)}
-                    placeholder={currentAge.toFixed(0)}
-                    min={0}
-                    className="flex-1 px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white focus:outline-none focus:ring-1 focus:ring-neutral-500"
-                    disabled={isAdvancingAge}
-                    onKeyDown={(e) => e.key === 'Enter' && handleGoToAge()}
-                  />
-                  <button
-                    onClick={handleGoToAge}
-                    disabled={isAdvancingAge || !targetAge || parseFloat(targetAge) === currentAge}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-600/50 disabled:cursor-not-allowed rounded text-[10px] text-white font-medium transition-colors"
-                  >
-                    Go
-                  </button>
-                </div>
-              </div>
-
-              {/* Growth Animation Section */}
-              <div className="border-t border-neutral-700 pt-3 mt-1">
-                <div className="text-[9px] text-neutral-500 mb-1">Growth Animation</div>
-                <div className="flex gap-1 mb-2">
-                  <div className="flex-1">
-                    <label className="text-[8px] text-neutral-500 block mb-0.5">Start</label>
-                    <input
-                      type="number"
-                      value={animationStartAge}
-                      onChange={(e) => setAnimationStartAge(e.target.value)}
-                      min={0}
-                      className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white focus:outline-none focus:ring-1 focus:ring-neutral-500"
-                      disabled={isAnimating || isAdvancingAge}
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <label className="text-[8px] text-neutral-500 block mb-0.5">End</label>
-                    <input
-                      type="number"
-                      value={animationEndAge}
-                      onChange={(e) => setAnimationEndAge(e.target.value)}
-                      min={0}
-                      className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white focus:outline-none focus:ring-1 focus:ring-neutral-500"
-                      disabled={isAnimating || isAdvancingAge}
-                    />
-                  </div>
-                </div>
-                {/* GIF Settings Row */}
-                <div className="flex gap-2 mb-2">
-                  <div className="flex-1">
-                    <label className="text-[8px] text-neutral-500 block mb-0.5">Background</label>
-                    <select
-                      value={gifBackground}
-                      onChange={(e) => setGifBackground(e.target.value as 'transparent' | 'black' | 'white')}
-                      className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white focus:outline-none focus:ring-1 focus:ring-neutral-500"
-                      disabled={isAnimating || isGeneratingGif || isAdvancingAge}
-                    >
-                      <option value="black">Black</option>
-                      <option value="white">White</option>
-                      <option value="transparent">Transparent</option>
-                    </select>
-                  </div>
-                </div>
-                {/* GIF Camera View */}
-                <div className="mb-2">
-                  <label className="text-[8px] text-neutral-500 block mb-1">Camera View</label>
-                  <div className="flex gap-1">
-                    <button
-                      onClick={() => setGifCameraView('current')}
-                      disabled={isAnimating || isGeneratingGif || isAdvancingAge}
-                      className={`flex-1 px-2 py-1 rounded text-[9px] transition-colors ${
-                        gifCameraView === 'current'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
-                      } disabled:opacity-50`}
-                      title="Use current camera angle"
-                    >
-                      Current
-                    </button>
-                    <button
-                      onClick={() => setGifCameraView('front')}
-                      disabled={isAnimating || isGeneratingGif || isAdvancingAge}
-                      className={`flex-1 px-2 py-1 rounded text-[9px] transition-colors ${
-                        gifCameraView === 'front'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
-                      } disabled:opacity-50`}
-                      title="Front view"
-                    >
-                      Front
-                    </button>
-                    <button
-                      onClick={() => setGifCameraView('side')}
-                      disabled={isAnimating || isGeneratingGif || isAdvancingAge}
-                      className={`flex-1 px-2 py-1 rounded text-[9px] transition-colors ${
-                        gifCameraView === 'side'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
-                      } disabled:opacity-50`}
-                      title="Side view"
-                    >
-                      Side
-                    </button>
-                    <button
-                      onClick={() => setGifCameraView('top')}
-                      disabled={isAnimating || isGeneratingGif || isAdvancingAge}
-                      className={`flex-1 px-2 py-1 rounded text-[9px] transition-colors ${
-                        gifCameraView === 'top'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
-                      } disabled:opacity-50`}
-                      title="Top view"
-                    >
-                      Top
-                    </button>
-                    <button
-                      onClick={() => setGifCameraView('iso')}
-                      disabled={isAnimating || isGeneratingGif || isAdvancingAge}
-                      className={`flex-1 px-2 py-1 rounded text-[9px] transition-colors ${
-                        gifCameraView === 'iso'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
-                      } disabled:opacity-50`}
-                      title="Isometric view"
-                    >
-                      Iso
-                    </button>
-                  </div>
-                </div>
-                <div className="flex gap-1">
-                  {!isAnimating && !isGeneratingGif ? (
-                    <>
-                      <button
-                        onClick={() => handleStartGrowthAnimation(selectedMesh.id)}
-                        disabled={isAdvancingAge || parseInt(animationStartAge) >= parseInt(animationEndAge)}
-                        className="flex-1 px-3 py-1.5 bg-green-600 hover:bg-green-500 disabled:bg-neutral-600/50 disabled:cursor-not-allowed rounded text-[10px] text-white font-medium transition-colors flex items-center justify-center gap-1"
-                      >
-                        <Play className="w-3 h-3" />
-                        Start
-                      </button>
-                      <button
-                        onClick={() => handleMakeGIF(selectedMesh.id)}
-                        disabled={isAdvancingAge || parseInt(animationStartAge) >= parseInt(animationEndAge)}
-                        className="flex-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-600/50 disabled:cursor-not-allowed rounded text-[10px] text-white font-medium transition-colors flex items-center justify-center gap-1"
-                      >
-                        <Film className="w-3 h-3" />
-                        Make GIF
-                      </button>
-                    </>
-                  ) : isAnimating ? (
-                    <button
-                      onClick={handleStopGrowthAnimation}
-                      className="flex-1 px-3 py-1.5 bg-red-600 hover:bg-red-500 rounded text-[10px] text-white font-medium transition-colors flex items-center justify-center gap-1"
-                    >
-                      <StopCircle className="w-3 h-3" />
-                      Stop
-                    </button>
-                  ) : (
-                    <button
-                      onClick={handleStopMakeGIF}
-                      className="flex-1 px-3 py-1.5 bg-red-600 hover:bg-red-500 rounded text-[10px] text-white font-medium transition-colors flex items-center justify-center gap-1"
-                    >
-                      <StopCircle className="w-3 h-3" />
-                      Cancel GIF
-                    </button>
-                  )}
-                </div>
-                {/* Animation Progress */}
-                {isAnimating && animationProgress !== null && (
-                  <div className="mt-2">
-                    <div className="flex items-center justify-between text-[9px] text-neutral-400 mb-1">
-                      <span>Progress</span>
-                      <span>{animationProgress} / {animationEndAge} days</span>
-                    </div>
-                    <div className="w-full bg-neutral-700 rounded-full h-1.5">
-                      <div
-                        className="bg-green-500 h-1.5 rounded-full transition-all duration-100"
-                        style={{
-                          width: `${((animationProgress - parseInt(animationStartAge)) / (parseInt(animationEndAge) - parseInt(animationStartAge))) * 100}%`
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-                {/* GIF Progress */}
-                {isGeneratingGif && gifProgress && (
-                  <div className="mt-2">
-                    <div className="flex items-center justify-between text-[9px] text-neutral-400 mb-1">
-                      <span>{gifProgress.phase === 'frames' ? 'Capturing frames' : 'Encoding GIF...'}</span>
-                      <span>{gifProgress.current} / {gifProgress.total}</span>
-                    </div>
-                    <div className="w-full bg-neutral-700 rounded-full h-1.5">
-                      <div
-                        className="bg-purple-500 h-1.5 rounded-full transition-all duration-100"
-                        style={{
-                          width: `${(gifProgress.current / gifProgress.total) * 100}%`
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Loading Indicator */}
-              {isAdvancingAge && (
-                <div className="flex items-center gap-2 text-[9px] text-neutral-400">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  Regenerating plant...
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })()}
+      {showPlantGrowthPanel && selectedMesh?.isPlant && (
+        <PlantGrowthPanel
+          currentAge={selectedMesh.plantAge ?? 0}
+          ageStep={ageStep}
+          targetAge={targetAge}
+          animationStartAge={animationStartAge}
+          animationEndAge={animationEndAge}
+          gifBackground={gifBackground}
+          gifCameraView={gifCameraView}
+          isAdvancingAge={isAdvancingAge}
+          isAnimating={isAnimating}
+          isGeneratingGif={isGeneratingGif}
+          animationProgress={animationProgress}
+          gifProgress={gifProgress}
+          onClose={() => setShowPlantGrowthPanel(false)}
+          onAdvanceAge={(delta) => handleAdvancePlantAge(selectedMesh.id, delta)}
+          onAgeStepChange={setAgeStep}
+          onTargetAgeChange={setTargetAge}
+          onAnimationStartAgeChange={setAnimationStartAge}
+          onAnimationEndAgeChange={setAnimationEndAge}
+          onGifBackgroundChange={setGifBackground}
+          onGifCameraViewChange={setGifCameraView}
+          onStartAnimation={() => handleStartGrowthAnimation(selectedMesh.id)}
+          onMakeGif={() => handleMakeGIF(selectedMesh.id)}
+          onStopAnimation={handleStopGrowthAnimation}
+          onStopMakeGif={handleStopMakeGIF}
+        />
+      )}
 
       {/* Alignment Results Panel */}
       {showAlignmentPanel && alignmentResults && (
-        <div
-          className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto"
-          tabIndex={0}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') setShowAlignmentPanel(false); }}
-          ref={(el) => el?.focus()}
-        >
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-              <Globe className="w-3 h-3" />
-              Alignment
-            </div>
-            <button
-              onClick={() => setShowAlignmentPanel(false)}
-              className="p-1 hover:bg-neutral-700 rounded"
-            >
-              <X className="w-3 h-3 text-neutral-400" />
-            </button>
-          </div>
-
-          <div className="space-y-3">
-            {/* Key Statistics */}
-            <div className="grid grid-cols-2 gap-2">
-              <div className="bg-neutral-700/50 rounded p-2">
-                <div className="text-[10px] text-neutral-400">Mean Distance</div>
-                <div className="text-sm font-medium text-cyan-400">
-                  {alignmentResults.mean_distance !== undefined ? `${(alignmentResults.mean_distance * 1000).toFixed(2)} mm` : 'N/A'}
-                </div>
-              </div>
-              <div className="bg-neutral-700/50 rounded p-2">
-                <div className="text-[10px] text-neutral-400">RMSE</div>
-                <div className="text-sm font-medium text-cyan-400">
-                  {alignmentResults.rmse !== undefined ? `${(alignmentResults.rmse * 1000).toFixed(2)} mm` : 'N/A'}
-                </div>
-              </div>
-              <div className="bg-neutral-700/50 rounded p-2">
-                <div className="text-[10px] text-neutral-400">Std Deviation</div>
-                <div className="text-sm font-medium text-neutral-200">
-                  {alignmentResults.std_deviation !== undefined ? `${(alignmentResults.std_deviation * 1000).toFixed(2)} mm` : 'N/A'}
-                </div>
-              </div>
-              <div className="bg-neutral-700/50 rounded p-2">
-                <div className="text-[10px] text-neutral-400">Median</div>
-                <div className="text-sm font-medium text-neutral-200">
-                  {alignmentResults.median_distance !== undefined ? `${(alignmentResults.median_distance * 1000).toFixed(2)} mm` : 'N/A'}
-                </div>
-              </div>
-            </div>
-
-            {/* Range */}
-            <div className="bg-neutral-700/50 rounded p-2">
-              <div className="text-[10px] text-neutral-400 mb-1">Distance Range</div>
-              <div className="flex justify-between text-xs">
-                <span className="text-green-400">Min: {alignmentResults.min_distance !== undefined ? `${(alignmentResults.min_distance * 1000).toFixed(2)} mm` : 'N/A'}</span>
-                <span className="text-red-400">Max: {alignmentResults.max_distance !== undefined ? `${(alignmentResults.max_distance * 1000).toFixed(2)} mm` : 'N/A'}</span>
-              </div>
-            </div>
-
-            {/* Percentiles */}
-            <div className="bg-neutral-700/50 rounded p-2">
-              <div className="text-[10px] text-neutral-400 mb-1">Percentiles</div>
-              <div className="space-y-1 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-neutral-400">90th:</span>
-                  <span className="text-neutral-200">{alignmentResults.percentile_90 !== undefined ? `${(alignmentResults.percentile_90 * 1000).toFixed(2)} mm` : 'N/A'}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-neutral-400">95th:</span>
-                  <span className="text-neutral-200">{alignmentResults.percentile_95 !== undefined ? `${(alignmentResults.percentile_95 * 1000).toFixed(2)} mm` : 'N/A'}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-neutral-400">99th:</span>
-                  <span className="text-neutral-200">{alignmentResults.percentile_99 !== undefined ? `${(alignmentResults.percentile_99 * 1000).toFixed(2)} mm` : 'N/A'}</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Coverage Statistics */}
-            <div className="bg-neutral-700/50 rounded p-2">
-              <div className="text-[10px] text-neutral-400 mb-1">Coverage (points within distance)</div>
-              <div className="space-y-1 text-xs">
-                <div className="flex justify-between items-center">
-                  <span className="text-neutral-400">&lt; 1mm:</span>
-                  <div className="flex items-center gap-2">
-                    <div className="w-16 h-1.5 bg-neutral-600 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-green-500"
-                        style={{ width: `${alignmentResults.points_within_1mm || 0}%` }}
-                      />
-                    </div>
-                    <span className="text-neutral-200 w-12 text-right">{alignmentResults.points_within_1mm?.toFixed(1)}%</span>
-                  </div>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-neutral-400">&lt; 5mm:</span>
-                  <div className="flex items-center gap-2">
-                    <div className="w-16 h-1.5 bg-neutral-600 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-yellow-500"
-                        style={{ width: `${alignmentResults.points_within_5mm || 0}%` }}
-                      />
-                    </div>
-                    <span className="text-neutral-200 w-12 text-right">{alignmentResults.points_within_5mm?.toFixed(1)}%</span>
-                  </div>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-neutral-400">&lt; 10mm:</span>
-                  <div className="flex items-center gap-2">
-                    <div className="w-16 h-1.5 bg-neutral-600 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-orange-500"
-                        style={{ width: `${alignmentResults.points_within_10mm || 0}%` }}
-                      />
-                    </div>
-                    <span className="text-neutral-200 w-12 text-right">{alignmentResults.points_within_10mm?.toFixed(1)}%</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Snap to Fit Button */}
-            <button
-              onClick={handleICPSnapToFit}
-              disabled={isRunningICP || selectionType !== 'mixed'}
-              className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 ${
-                isRunningICP || selectionType !== 'mixed'
-                  ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
-                  : 'bg-cyan-600 hover:bg-cyan-500 text-white'
-              }`}
-              title="Use ICP registration to automatically align the mesh to the point cloud"
-            >
-              {isRunningICP ? (
-                <>
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  Aligning...
-                </>
-              ) : (
-                <>
-                  <Maximize2 className="w-3 h-3" />
-                  Snap to Fit (ICP)
-                </>
-              )}
-            </button>
-
-            {/* Point Count */}
-            <div className="text-[10px] text-neutral-500 text-center">
-              Computed from {alignmentResults.point_count?.toLocaleString()} points
-            </div>
-          </div>
-        </div>
+        <AlignmentPanel
+          results={alignmentResults}
+          snapEnabled={selectionType === 'mixed'}
+          isRunningICP={isRunningICP}
+          onClose={() => setShowAlignmentPanel(false)}
+          onSnapToFit={handleICPSnapToFit}
+        />
       )}
 
       {/* Export Panel - context-sensitive based on selection */}
       {showExportPanel && (
-        <div data-testid="export-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-              <Download className="w-3 h-3" />
-              Export {selectionType === 'cloud' ? 'Point Cloud' : selectionType === 'mesh' ? 'Mesh' : selectionType === 'skeleton' ? 'Skeleton' : ''}
-            </div>
-            <button
-              onClick={() => setShowExportPanel(false)}
-              className="p-1 hover:bg-neutral-700 rounded"
-            >
-              <X className="w-3 h-3 text-neutral-400" />
-            </button>
-          </div>
-
-          {/* Point Cloud Export */}
-          {selectionType === 'cloud' && selectedIds.size === 1 && (
-            <div className="mb-4">
-              <div className="text-[10px] font-medium text-neutral-400 mb-2">
-                {clouds.find(c => c.id === Array.from(selectedIds)[0])?.data.fileName || 'Point Cloud'}
-              </div>
-              <div className="grid grid-cols-3 gap-1">
-                <button
-                  data-testid="export-cloud-las"
-                  onClick={() => exportPointCloud('las')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  LAS
-                </button>
-                <button
-                  data-testid="export-cloud-laz"
-                  onClick={() => exportPointCloud('laz')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                  title="Compressed LAS (requires backend)"
-                >
-                  LAZ
-                </button>
-                <button
-                  data-testid="export-cloud-ply"
-                  onClick={() => exportPointCloud('ply')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  PLY
-                </button>
-                <button
-                  data-testid="export-cloud-xyz"
-                  onClick={() => exportPointCloud('xyz')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  XYZ
-                </button>
-                <button
-                  data-testid="export-cloud-csv"
-                  onClick={() => exportPointCloud('csv')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  CSV
-                </button>
-                <button
-                  data-testid="export-cloud-txt"
-                  onClick={() => exportPointCloud('txt')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                  title="Space-delimited with header and scalar fields"
-                >
-                  TXT
-                </button>
-                <button
-                  data-testid="export-cloud-obj"
-                  onClick={() => exportPointCloud('obj')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  OBJ
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Selected Mesh Export */}
-          {selectionType === 'mesh' && selectedMesh && (
-            <div className="mb-4">
-              <div className="text-[10px] font-medium text-neutral-400 mb-2">
-                {meshDisplayName(selectedMesh, clouds.find(c => c.id === selectedMesh.sourceCloudId)?.data.fileName)}
-              </div>
-              <div className="text-[10px] text-neutral-500 mb-2">
-                {selectedMesh.data.triangleCount.toLocaleString()} triangles
-              </div>
-              <div className="grid grid-cols-3 gap-1">
-                <button
-                  data-testid="export-mesh-obj"
-                  onClick={() => exportMesh(selectedMesh.id, 'obj')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  OBJ
-                </button>
-                <button
-                  data-testid="export-mesh-ply"
-                  onClick={() => exportMesh(selectedMesh.id, 'ply')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  PLY
-                </button>
-                <button
-                  data-testid="export-mesh-stl"
-                  onClick={() => exportMesh(selectedMesh.id, 'stl')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  STL
-                </button>
-              </div>
-              {/* Synthetic LiDAR Scan button */}
-              <button
-                onClick={() => handleRunScan()}
-                disabled={isScanning}
-                className="mt-2 w-full px-2 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-600 disabled:cursor-not-allowed rounded text-xs text-white flex items-center justify-center gap-1.5"
-              >
-                {isScanning ? (
-                  <>
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    Scanning...
-                  </>
-                ) : (
-                  <>
-                    <Radio className="w-3 h-3" />
-                    Synthetic LiDAR Scan
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-
-          {/* Selected Skeleton Export */}
-          {selectionType === 'skeleton' && selectedSkeleton && (
-            <div className="mb-4">
-              <div className="text-[10px] font-medium text-neutral-400 mb-2">
-                {clouds.find(c => c.id === selectedSkeleton.sourceCloudId)?.data.fileName || 'Skeleton'}
-              </div>
-              <div className="text-[10px] text-neutral-500 mb-2">
-                {selectedSkeleton.data.pointCount} nodes · {selectedSkeleton.data.totalLength.toFixed(2)}m
-              </div>
-              <div className="grid grid-cols-3 gap-1">
-                <button
-                  onClick={() => exportSkeleton(selectedSkeleton.id, 'obj')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  OBJ
-                </button>
-                <button
-                  onClick={() => exportSkeleton(selectedSkeleton.id, 'ply')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  PLY
-                </button>
-                <button
-                  onClick={() => exportSkeleton(selectedSkeleton.id, 'json')}
-                  className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200"
-                >
-                  JSON
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* No selection message */}
-          {selectionType === 'none' && (
-            <div className="text-[10px] text-neutral-500 text-center py-2">
-              Select an object to export
-            </div>
-          )}
-        </div>
+        <ExportPanel
+          selectionType={selectionType}
+          singleCloudSelected={selectedIds.size === 1}
+          cloudName={clouds.find(c => c.id === Array.from(selectedIds)[0])?.data.fileName || ''}
+          meshSelected={!!selectedMesh}
+          meshName={selectedMesh ? meshDisplayName(selectedMesh, clouds.find(c => c.id === selectedMesh.sourceCloudId)?.data.fileName) : ''}
+          meshTriangleCount={selectedMesh?.data.triangleCount ?? 0}
+          isScanning={isScanning}
+          skeletonSelected={!!selectedSkeleton}
+          skeletonName={selectedSkeleton ? (clouds.find(c => c.id === selectedSkeleton.sourceCloudId)?.data.fileName || '') : ''}
+          skeletonNodeCount={selectedSkeleton?.data.pointCount ?? 0}
+          skeletonTotalLength={selectedSkeleton?.data.totalLength ?? 0}
+          onClose={() => setShowExportPanel(false)}
+          onExportCloud={exportPointCloud}
+          onExportMesh={(format) => { if (selectedMesh) exportMesh(selectedMesh.id, format); }}
+          onExportSkeleton={(format) => { if (selectedSkeleton) exportSkeleton(selectedSkeleton.id, format); }}
+          onRunScan={() => handleRunScan()}
+        />
       )}
 
       {/* Scalar overlay — categorical attributes (e.g. ground_class) show a
@@ -13329,8 +10879,35 @@ export default function PointCloudViewer({
           }
           setScanPopupState({ kind: 'closed' });
         }}
-        onBulkImport={async (heliosScans, xmlPath) => {
-          if (heliosScans.length === 0) return;
+        onBulkImport={async (heliosScans, grids, xmlPath) => {
+          if (heliosScans.length === 0 && grids.length === 0) return;
+          // Create voxel-grid meshes from any <grid> blocks first — they're
+          // independent of scans (top-level siblings) and need no wizard, so a
+          // grid-only XML still produces objects. Each grid maps onto a voxel
+          // box: center → position, size → scale, Nx/Ny/Nz → gridSubdivisions,
+          // rotation (deg about z) → mesh z-rotation.
+          grids.forEach((g, i) => {
+            importMesh(
+              {
+                sourceCloudId: `helios-grid-${i}`,
+                data: generateShapeMesh('voxel'),
+                visible: true,
+                color: '#60a5fa', // same blue as Create Voxel
+                method: 'delaunay', // placeholder, matches handleCreateShape
+                name: g.label,
+                gridSubdivisions: { ...g.subdivisions },
+              },
+              {
+                position: { ...g.center },
+                scale: { ...g.size },
+                rotation: { x: 0, y: 0, z: g.rotationDeg },
+              },
+            );
+          });
+          if (heliosScans.length === 0) {
+            showToast({ title: `Imported ${grids.length} grid(s)`, type: 'success' });
+            return;
+          }
           const xmlDir = xmlPath ? dirname(xmlPath) : '';
           const used = new Set(scans.map(s => s.color));
           const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
@@ -13460,6 +11037,7 @@ export default function PointCloudViewer({
             onAddScans?.(newScans);
             const parts = [`${newScans.length} scan(s)`];
             if (attachedCount > 0) parts.push(`${attachedCount} with data`);
+            if (grids.length > 0) parts.push(`${grids.length} grid(s)`);
             showToast({ title: `Imported ${parts.join(', ')}`, type: 'success' });
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);

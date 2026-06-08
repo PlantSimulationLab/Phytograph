@@ -173,6 +173,19 @@ tool's **Import from XML file** action, not by dropping it into the viewer.
 Dropping an XML file directly is rejected with a message pointing you to the
 right place.
 
+A Helios XML may also contain top-level `<grid>` blocks (siblings of `<scan>`),
+which describe the voxel grid Helios uses for leaf-area-density. On import,
+each `<grid>` becomes a **voxel grid** object named `Grid 1`, `Grid 2`, …:
+
+| `<grid>` tag | Maps to | Notes |
+|---|---|---|
+| `<center>` x y z | grid position | world coordinates (required) |
+| `<size>` x y z | grid size | full extent per axis; all > 0 (required) |
+| `<Nx>` `<Ny>` `<Nz>` | subdivisions | integer cells per axis; default 1 |
+| `<rotation>` | z-rotation | degrees about the z-axis; default 0 |
+
+An XML with only `<grid>` blocks (no `<scan>`) imports just the grids.
+
 ### Scan parameters recovered from the point-cloud file
 
 Some point-cloud formats embed the scanner's geometry in the file header. When

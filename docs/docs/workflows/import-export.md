@@ -85,6 +85,14 @@ multi-GB scan from disk can take 30 seconds or more.
 Importing a Helios scan **XML** (which can reference several scans at once)
 runs the same wizard, once the referenced point-cloud files are located.
 
+If the XML also contains one or more top-level `<grid>` blocks — the voxel grid
+Helios uses for leaf-area-density computation — Phytograph creates a matching
+**voxel grid** for each, named `Grid 1`, `Grid 2`, … The grid's `<center>`,
+`<size>`, `<Nx>/<Ny>/<Nz>`, and optional `<rotation>` (degrees about z) become
+the box's position, size, subdivisions, and rotation, so it's ready to use as
+the grid input for [leaf-area-density](estimate-leaf-area-density.md) with no
+manual setup. A grid-only XML (no `<scan>`) imports just the grids.
+
 ### Importing textured meshes
 
 A `.obj` that references a `.mtl` material library is imported with its image
