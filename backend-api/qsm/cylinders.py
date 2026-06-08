@@ -39,13 +39,21 @@ from .model import QSM, Cylinder
 
 @dataclass
 class CylinderFitOptions:
-    # --- point -> cylinder assignment ---
-    # A point is assigned to the provisional cylinder whose AXIS segment it is
-    # nearest to, but only if it lies within assign_band_scale * provisional_r
-    # (plus assign_band_abs) of that axis. Generous band so an under-estimated
-    # provisional radius still collects the surface ring; the fit then tightens.
+    # --- point -> cylinder assignment (true nearest-cylinder) ---
+    # Each cloud point is assigned to the cylinder whose axis is NEAREST (global
+    # hard assignment), via a KD-tree of axis samples spaced this finely. Finer =
+    # more accurate nearest-axis (esp. for long cylinders) at more samples; ~the
+    # SurfCov grid resolution is a good match.
+    assign_sample_spacing: float = 0.03  # meters between axis samples
+    # A point whose nearest axis sample is farther than this is dropped (other
+    # trees, ground, gross outliers). Generous enough to reach a thick trunk's bark
+    # (real trunks here ~0.2 m radius) but not so large it absorbs a neighbouring
+    # tree. Points genuinely on the tree sit within this of SOME cylinder axis.
+    max_assign_dist: float = 0.5  # meters
+    # Legacy radial-band knobs, kept for the re-fit helper / tests that call
+    # _assign_points directly. Not used by the main nearest-cylinder path.
     assign_band_scale: float = 3.0
-    assign_band_abs: float = 0.02  # meters, floor for very thin provisional cyls
+    assign_band_abs: float = 0.02
     min_points: int = 6  # below this, keep the provisional radius (cannot fit)
 
     # --- Gauss-Newton / IRLS ---
@@ -72,10 +80,15 @@ class CylinderFitOptions:
     radius_min: float = 0.001
     radius_max: float = 0.50
     # A fit whose radius jumps beyond this factor of the provisional estimate AND
-    # has low SurfCov is rejected (keep provisional). Guards the one-sided-arc
-    # blow-up before Phase E even runs.
+    # has low SurfCov AND is a LOOSE fit (mad > runaway_mad_frac * radius) is
+    # rejected (keep provisional). The mad condition distinguishes a true one-sided-
+    # arc balloon (points scattered off the inflated circle -> large mad) from a
+    # legitimately thick-but-short cylinder slice (low SurfCov from few axial layers
+    # but points tight on the real shell -> small mad). Without it, the guard wrongly
+    # rejected correct thick-trunk fits.
     runaway_factor: float = 4.0
     runaway_surfcov: float = 0.3
+    runaway_mad_frac: float = 0.25  # mad above this fraction of radius == loose fit
 
 
 # ---------------------------------------------------------------------------
@@ -355,18 +368,27 @@ def fit_qsm_cylinders(
             new_cyls.append(_clone(c))
         return _rebuild(qsm, new_cyls, fitted=0, reason="empty_cloud")
 
-    tree = cKDTree(cloud)
+    # TRUE NEAREST-CYLINDER ASSIGNMENT. Each cloud point is assigned to the single
+    # cylinder whose AXIS it is nearest to (a global competition), not to every
+    # cylinder within a radial band. This de-conflates the crowded crown: a point
+    # on a rank-1 branch's bark goes to that branch, not to the nearby trunk or a
+    # sibling, so each cylinder's fit sees its OWN surface. The radius emerges from
+    # the points genuinely closest to this axis -- no band prior to guess. Done in
+    # ONE batched query against a KD-tree of densely-sampled axis points (each
+    # tagged with its cyl_id), so it is fast (O(N log M)) rather than O(N*cyls).
+    assigned = _assign_nearest_cylinder(qsm, cloud, opts)
+
     n_fit = 0
     for c in qsm.cylinders:
-        pts = _assign_points(c, cloud, tree, opts)
+        pts = assigned.get(c.cyl_id, _EMPTY)
         fit = (
             fit_cylinder(pts, c.start, c.end, c.radius, opts)
             if pts.shape[0] >= opts.min_points
             else None
         )
+
         nc = _clone(c)
         if fit is None:
-            # Keep provisional radius; record coverage if we have any points.
             nc.surf_cov = (
                 _surface_coverage(pts, c.start, c.end, c.radius, opts)
                 if pts.shape[0] > 0 else 0.0
@@ -375,9 +397,17 @@ def fit_qsm_cylinders(
             new_cyls.append(nc)
             continue
 
+        # Runaway = a fit that ballooned far past the provisional radius on a
+        # one-sided arc. The tell-tale of a TRUE balloon is that the points DON'T
+        # lie on the inflated circle (large mad relative to radius) AND coverage is
+        # low. A short-but-fat trunk slice also has low SurfCov (few axial layers)
+        # but its points sit TIGHTLY on the real shell (small mad), so we must NOT
+        # reject it. Hence: big-radius + low-coverage + LOOSE fit (or no mad).
+        loose = fit.mad is None or fit.mad > opts.runaway_mad_frac * fit.radius
         runaway = (
             fit.radius > opts.runaway_factor * max(c.radius, opts.radius_min)
             and fit.surf_cov < opts.runaway_surfcov
+            and loose
         )
         if fit.reliable and not runaway:
             nc.start = fit.start
@@ -387,8 +417,6 @@ def fit_qsm_cylinders(
             nc.mad = fit.mad
             n_fit += 1
         else:
-            # Unreliable / runaway: keep provisional radius + axis, but record the
-            # measured coverage so Phase E knows this one is suspect.
             nc.surf_cov = fit.surf_cov
             nc.mad = fit.mad
         new_cyls.append(nc)
@@ -396,22 +424,79 @@ def fit_qsm_cylinders(
     return _rebuild(qsm, new_cyls, fitted=n_fit, reason="ok")
 
 
-def _assign_points(
-    c: Cylinder, cloud: np.ndarray, tree: cKDTree, opts: CylinderFitOptions
+_EMPTY = np.zeros((0, 3), dtype=np.float64)
+
+
+def _assign_nearest_cylinder(
+    qsm: QSM, cloud: np.ndarray, opts: CylinderFitOptions
+) -> dict[int, np.ndarray]:
+    """Assign each cloud point to the cylinder whose AXIS is nearest, returning
+    {cyl_id: points (K,3)}.
+
+    Implementation: sample every cylinder's axis at ~``assign_sample_spacing`` and
+    build ONE KD-tree over those samples (each remembers its cyl_id). A single
+    batched nearest-neighbour query maps every cloud point to its nearest axis
+    sample -> nearest cylinder. Points whose nearest axis sample is farther than
+    ``max_assign_dist`` (other trees, ground, gross outliers) are dropped. This is
+    a per-point hard assignment, so neighbouring cylinders in a dense crown no
+    longer share each other's bark. O(N log M); one tree build + one query."""
+    samples: list[np.ndarray] = []
+    sample_cyl: list[np.ndarray] = []
+    spacing = opts.assign_sample_spacing
+    for c in qsm.cylinders:
+        L = c.length
+        n = max(2, int(np.ceil(L / spacing)) + 1) if L > 0 else 1
+        ts = np.linspace(0.0, 1.0, n)
+        pts = c.start[None, :] + ts[:, None] * (c.end - c.start)[None, :]
+        samples.append(pts)
+        sample_cyl.append(np.full(n, c.cyl_id, dtype=np.int64))
+    if not samples:
+        return {}
+    axis_pts = np.concatenate(samples, axis=0)
+    axis_cyl = np.concatenate(sample_cyl, axis=0)
+
+    axis_tree = cKDTree(axis_pts)
+    dist, idx = axis_tree.query(cloud, k=1)
+    nearest_cyl = axis_cyl[idx]
+    keep = dist <= opts.max_assign_dist
+
+    out: dict[int, np.ndarray] = {}
+    cl = cloud[keep]
+    nc = nearest_cyl[keep]
+    order = np.argsort(nc, kind="stable")
+    nc_sorted = nc[order]
+    cl_sorted = cl[order]
+    # Split the sorted points into per-cylinder contiguous blocks.
+    uniq, starts = np.unique(nc_sorted, return_index=True)
+    ends = np.append(starts[1:], len(nc_sorted))
+    for cid, s, e in zip(uniq.tolist(), starts.tolist(), ends.tolist()):
+        out[cid] = cl_sorted[s:e]
+    return out
+
+
+def _assign_points_within(
+    c: Cylinder, cloud: np.ndarray, tree: cKDTree, band: float
 ) -> np.ndarray:
-    """Points whose distance to this cylinder's AXIS segment is within the
-    assignment band. KD-tree pre-filters by a ball around the segment midpoint;
-    then exact segment distance prunes. (A point may fall in two cylinders' bands
-    near a fork -- that's fine, both fits see the shared ring.)"""
-    band = opts.assign_band_scale * c.radius + opts.assign_band_abs
-    mid = c.midpoint
+    """Points whose distance to this cylinder's AXIS segment is within ``band``.
+    KD-tree pre-filters by a ball around the midpoint; exact segment distance
+    prunes. (A point may fall in two cylinders' bands near a fork -- fine, both
+    fits see the shared ring.)"""
     reach = 0.5 * c.length + band
-    cand_idx = tree.query_ball_point(mid, reach)
+    cand_idx = tree.query_ball_point(c.midpoint, reach)
     if not cand_idx:
         return np.zeros((0, 3))
     cand = cloud[cand_idx]
     d = _dist_to_segment(cand, c.start, c.end)
     return cand[d <= band]
+
+
+def _assign_points(
+    c: Cylinder, cloud: np.ndarray, tree: cKDTree, opts: CylinderFitOptions
+) -> np.ndarray:
+    """Assignment using a band tied to the cylinder's CURRENT radius (used for the
+    conditional re-fit, where the radius is already a real fitted value)."""
+    band = opts.assign_band_scale * c.radius + opts.assign_band_abs
+    return _assign_points_within(c, cloud, tree, band)
 
 
 def _dist_to_segment(points: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
