@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import * as THREE from 'three';
 import { getCloudMisses } from '../../../utils/backendApi';
 import { MISS_COLOR } from '../../../lib/classification';
+import { showToast } from '../../Toast';
 
 interface MissOverlayProps {
   // Backend cloud-session that holds the sky/miss points.
@@ -20,9 +21,11 @@ interface MissOverlayProps {
  * Renders a scan's sky/miss points as a distinct overlay. Misses are stored at
  * their true far-field coordinates (~20 km) for LAD, so they're NOT in the
  * octree (their extent would wreck camera framing). This component fetches them
- * on demand, already relocated onto the hit cloud's bounding sphere, and draws
- * them in the unmistakable miss colour. Mounted only while the user has "Show
- * misses" enabled for the scan, so the fetch cost is paid only when wanted.
+ * on demand and draws them in the unmistakable miss colour. When the scan has a
+ * scanner origin, the backend projects the misses onto a sphere just beyond the
+ * farthest hit so they stay visible against the cloud; with no origin they come
+ * back at their true coordinates. Mounted only while the user has "Show misses"
+ * enabled for the scan, so the fetch cost is paid only when wanted.
  */
 export function MissOverlay({ sessionId, origin, pointSize = 0.05, refreshKey }: MissOverlayProps) {
   const [positions, setPositions] = useState<Float32Array | null>(null);
@@ -33,6 +36,23 @@ export function MissOverlay({ sessionId, origin, pointSize = 0.05, refreshKey }:
       .then((res) => {
         if (cancelled) return;
         setPositions(res.positions.length ? new Float32Array(res.positions) : new Float32Array(0));
+        // Don't let the toggle look like a silent no-op. When the scan has misses
+        // but none can be drawn yet, say why instead of rendering nothing.
+        if (res.count === 0 && res.total > 0) {
+          showToast({
+            type: 'info',
+            title: 'Sky/miss points not yet placeable',
+            message: `${res.total.toLocaleString()} sky/miss point(s) are flagged but have no beam direction yet `
+              + '(the scanner zeroed invalid-cell coordinates). Their directions are recovered from the scan grid '
+              + 'during the leaf-area-density inversion; they can be shown once recovered.',
+          });
+        } else if (res.count === 0 && res.total === 0) {
+          showToast({
+            type: 'info',
+            title: 'No sky/miss points',
+            message: 'This scan has no sky/miss points to display.',
+          });
+        }
       })
       .catch(() => {
         if (!cancelled) setPositions(new Float32Array(0));

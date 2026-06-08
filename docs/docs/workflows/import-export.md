@@ -36,13 +36,20 @@ dropdowns in; you correct anything that's wrong before importing:
 
 - **Column roles** — for ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`,
   `.asc`), each column's dropdown sets its role: **X / Y / Z**,
-  **Red / Green / Blue**, **Intensity**, **Reflectance**, **Scalar**,
-  **Label**, or **Skip**. X, Y, and Z must be assigned before you can import.
+  **Red / Green / Blue**, **Intensity**, **Reflectance**,
+  **Scan Row Index**, **Scan Column Index**, **Scalar**, **Label**, or
+  **Skip**. X, Y, and Z must be assigned before you can import.
 - **Scalar vs Label** — a **Scalar** column is a continuous measurement
   (intensity, height, timestamp) and colors as a smooth gradient; a
   **Label** column holds class ids (tree id, segment, classification) and
   colors as discrete classes with a legend. The wizard flags columns whose
   values look like class labels with a one-click *"use Label?"* suggestion.
+- **Scan Row / Column Index** — integer positions of each point within the
+  scanner's rectangular acquisition grid. Mapping these preserves the scan's
+  raster layout, which the gap-filling / miss-reconstruction tools use to
+  rebuild missing pulses within the scan pattern. They carry through as
+  scalar fields (slugs `row_index` / `column_index`) and auto-detect from
+  common headers like `Row` / `Column` / `row_index`.
 - **RGB range** — when an RGB role is present, choose whether the values are
   **0–255 integers** or **0–1 floats**, so colors import at the right
   brightness.
@@ -64,7 +71,10 @@ Drop multiple files together, or select several at once from the
 **Import** menu. The wizard **steps through each scan** — use **Back** /
 **Next** to move between them, and tick **Apply these settings to all
 scans with the same column layout** to copy one scan's column mapping onto
-the others. Each file becomes its own entry in the Scene panel with a
+the others. So you don't import later scans without reviewing their column
+mapping, the **Import** button stays disabled until you've either stepped
+through to the last scan with **Next** or ticked **Apply these settings to
+all scans**. Each file becomes its own entry in the Scene panel with a
 distinct color; nothing is merged automatically. If you want to merge
 clouds, use [Stitch](register-compare.md#stitch) after import.
 
@@ -110,6 +120,16 @@ true positions are ~20 km away); toggle the **Show misses** button on a scan row
 to draw them in a distinct colour, relocated onto the scan's bounding sphere, so
 you can confirm a scan actually carries miss information. See
 **[Sky/miss points](../reference/file-formats.md#skymiss-points)**.
+
+### Scans that bring their own parameters
+
+When a point-cloud file records the scanner's geometry in its header, importing
+it on its own auto-fills the scan's **scan parameters** — no need to enter them
+by hand. `.e57` brings the scanner origin and orientation, plus the angular
+sweep and grid resolution when present; `.pcd` brings a sensor origin from its
+`VIEWPOINT` field. Anything the file omits stays at its default. (Loading a
+Helios XML still takes precedence — its `<scan>` definitions win.) See
+**[Scan parameters recovered from the point-cloud file](../reference/file-formats.md#scan-parameters-recovered-from-the-point-cloud-file)**.
 
 ## Export
 

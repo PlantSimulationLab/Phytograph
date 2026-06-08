@@ -51,3 +51,37 @@ export function makeDefaultScanParameters(
       : { ...DEFAULT_SCAN_PARAMETERS.origin },
   };
 }
+
+// Scan-pattern parameters as recovered from a point-cloud FILE header (E57 pose
+// + angular sweep + grid resolution; PCD VIEWPOINT origin). Every field but
+// `origin` is optional — formats carry different subsets. Mirrors the backend
+// `scan_params` dict surfaced by create_cloud_session.
+export interface ScanParamsFromFile {
+  origin: [number, number, number];
+  n_theta?: number;
+  n_phi?: number;
+  theta_min?: number;
+  theta_max?: number;
+  phi_min?: number;
+  phi_max?: number;
+}
+
+// Build ScanParameters from the partial set a file header carried, filling any
+// field the file omitted from DEFAULT_SCAN_PARAMETERS. This is the non-XML
+// import equivalent of parsing a Helios <scan>: whatever the format records
+// (always origin, plus angular sweep + grid for E57) is populated, and the rest
+// stays at the sensible default — so "not in the file" continues to mean
+// "left blank" exactly as it does today.
+export function scanParametersFromFile(src: ScanParamsFromFile): ScanParameters {
+  const p: ScanParameters = {
+    ...DEFAULT_SCAN_PARAMETERS,
+    origin: { x: src.origin[0], y: src.origin[1], z: src.origin[2] },
+  };
+  if (typeof src.n_theta === 'number') p.zenithPoints = src.n_theta;
+  if (typeof src.n_phi === 'number') p.azimuthPoints = src.n_phi;
+  if (typeof src.theta_min === 'number') p.zenithMinDeg = src.theta_min;
+  if (typeof src.theta_max === 'number') p.zenithMaxDeg = src.theta_max;
+  if (typeof src.phi_min === 'number') p.azimuthMinDeg = src.phi_min;
+  if (typeof src.phi_max === 'number') p.azimuthMaxDeg = src.phi_max;
+  return p;
+}

@@ -1,6 +1,6 @@
 // Keep BACKEND_VERSION in sync with backend-api/main.py BACKEND_VERSION.
 // Bump when backend changes require users to receive a new build.
-export const EXPECTED_BACKEND_VERSION = '0.6.0';
+export const EXPECTED_BACKEND_VERSION = '0.6.1';
 
 // Ports mirror the Tauri build:
 //   dev:  backend on 8007 (uvicorn --reload)

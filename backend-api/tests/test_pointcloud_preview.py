@@ -70,6 +70,93 @@ def test_preview_headered_xyz_with_extra_scalars(client, tmp_path: Path):
     assert body["sample_rows"][0][:3] == ["0.0", "0.0", "0.0"]
 
 
+def test_preview_commented_header_recovers_labels_and_roles(client, tmp_path: Path):
+    # A '#'-commented column legend (some exporters write the header as a comment
+    # so loaders that honour comment='#' skip it as data). Preview must recover
+    # the labels, map each to a role, and NOT consume the first data row.
+    f = tmp_path / "commented.xyz"
+    f.write_text(
+        "# x y z r255 g255 b255 row column is_miss\n"
+        "1.0 2.0 3.0 51 65 49 267 0 0\n"
+        "1.1 2.1 3.1 54 70 55 268 0 1\n"
+    )
+    res = client.post("/api/pointcloud/preview", json={"file_path": str(f)})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["has_header"] is True
+    cols = body["columns"]
+    assert [c["header_name"] for c in cols] == [
+        "x", "y", "z", "r255", "g255", "b255", "row", "column", "is_miss"]
+    roles = [c["detected_role"] for c in cols]
+    # x/y/z + RGB (r255 spelling recognised) + grid indices; is_miss carried as a
+    # scalar pinned to the canonical is_miss slug.
+    assert roles[:6] == ["x", "y", "z", "r255", "g255", "b255"]
+    assert roles[6:8] == ["row_index", "column_index"]
+    assert cols[8]["detected_role"] == "extra"
+    assert cols[8]["suggested_slug"] == "is_miss"
+    assert cols[8]["suggested_label"] == "Miss"
+    # The commented header is dropped by comment='#', so the FIRST sample row must
+    # be the first real data row — not silently lost to a phantom header skip.
+    assert body["sample_rows"][0][:3] == ["1.0", "2.0", "3.0"]
+    assert len(body["sample_rows"]) == 2
+
+
+def test_commented_header_does_not_trigger_skiprows(tmp_path: Path):
+    # pandas is told comment='#', which already drops a commented header. The
+    # skiprows heuristic must therefore NOT also skip a data row, or row one
+    # vanishes from every import.
+    f = tmp_path / "commented.xyz"
+    f.write_text("# x y z\n1 2 3\n4 5 6\n")
+    assert main._first_data_row_has_letters(str(f)) is False
+    assert main._read_ascii_header_names(str(f)) == ["x", "y", "z"]
+
+
+def test_plain_prose_comment_is_not_treated_as_header(tmp_path: Path):
+    # A '#' remark that doesn't resolve to an x/y/z layout is just a comment, not
+    # a header — header recovery declines and positional auto-detect still works.
+    f = tmp_path / "prose.xyz"
+    f.write_text("# exported by FooScan v2.1 on 2026-01-01\n0 0 0\n1 1 1\n")
+    assert main._read_ascii_header_names(str(f)) is None
+    assert main._autodetect_xyz_columns(str(f)) == ["x", "y", "z"]
+
+
+def test_commented_header_import_carries_canonical_slugs(client, tmp_path: Path):
+    # End-to-end auto-detect import of a commented-header cloud: every data row
+    # parses and the scan-structure columns land under their canonical slugs so
+    # the LAD / grid-recovery paths find them by name.
+    f = tmp_path / "scan.xyz"
+    f.write_text(
+        "# x y z r255 g255 b255 row column is_miss\n"
+        "0.0 0.0 0.0 10 20 30 0 0 0\n"
+        "0.1 0.1 0.1 11 21 31 0 1 0\n"
+        "0.2 0.2 0.2 12 22 32 1 0 1\n"
+    )
+    names, extra = main._xyz_column_plan(main._Path(str(f)), None, None)
+    assert names[:6] == ["x", "y", "z", "r255", "g255", "b255"]
+    slugs = {e["slug"] for e in extra}
+    assert {"row_index", "column_index", "is_miss"} <= slugs
+    # Import all three rows (none lost to a phantom header skip).
+    res = client.post("/api/pointcloud/import_by_path", json={"file_path": str(f)})
+    assert res.status_code == 200, res.text
+    hdr = _unpack_header(res.content)
+    assert hdr["count"] == 3
+    assert hdr["has_colors"] is True
+
+
+def test_miss_alias_spellings_normalise_to_is_miss(tmp_path: Path):
+    # 'sky' / 'miss' header spellings (and a column_plan slug) all canonicalise
+    # to the is_miss slug so the LAD path finds the flag regardless of source.
+    assert main._role_from_header_name("sky") == "is_miss"
+    assert main._role_from_header_name("Miss") == "is_miss"
+    assert main._normalise_miss_alias("Sky") == "is_miss"
+    cp = _plan([
+        {"index": 0, "role": "x"}, {"index": 1, "role": "y"}, {"index": 2, "role": "z"},
+        {"index": 3, "role": "extra", "slug": "sky", "label": "Sky"},
+    ])
+    _, extra = main._xyz_column_plan(None, None, cp)
+    assert [e["slug"] for e in extra] == ["is_miss"]
+
+
 def test_preview_headerless_xyz_positional(client, tmp_path: Path):
     # No header; 4 columns → x y z + a small-integer class column.
     f = tmp_path / "plants.xyz"

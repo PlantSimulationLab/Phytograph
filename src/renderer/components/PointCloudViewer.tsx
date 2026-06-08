@@ -12701,13 +12701,18 @@ export default function PointCloudViewer({
           Both require `dataRange`, which is null unless a visible cloud
           actually carries the active field — so the overlay disappears when the
           segmented scan is deleted. */}
-      {/* Colorbars / legends — point cloud, mesh, and LAD. All anchored
-          bottom-LEFT (above the navigation-help bar) and laid out in one
-          flex row so any combination coexists without overlapping each other
-          or the right-side object panels, which grow tall enough (point
-          clouds + meshes + LAD results) to collide with a bottom-right
-          colorbar. */}
-      <div className="absolute bottom-16 left-4 z-20 flex flex-row items-end gap-3 pointer-events-none">
+      {/* Colorbars / legends — point cloud, mesh, and LAD. Anchored bottom-
+          right but in the `right-[280px]` gutter, i.e. just LEFT of the
+          object-panel column (`top-4 right-4`, w-64 → occupies the rightmost
+          ~260px). That column can grow all the way to the bottom of the
+          window, so we clear it horizontally rather than vertically: the
+          colorbar sits to its left no matter how tall the panels get. The
+          296px offset is just past the lane the tool panels use (`right-
+          [280px]`), leaving a small buffer so the panel column doesn't sit
+          flush against the colorbar when it grows to the bottom. Laid out in
+          one bottom-aligned flex row so any combination of colorbars coexists
+          without overlapping each other. */}
+      <div className="absolute bottom-4 right-[296px] z-20 flex flex-row items-end gap-3 pointer-events-none">
         {isScalarColorMode && colorMode === 'scalar' && selectedScalarField &&
          dataRange && categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max]) ? (
           <div

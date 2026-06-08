@@ -5,6 +5,28 @@ evaluate TreeIso individual-tree segmentation. The data is **not committed**
 (large; CC-BY but not redistributable here) — everything except this README is
 gitignored. Download the sets you want into this folder, then run the harness.
 
+## E57 sky/miss test scans (LAD)
+
+Real structured terrestrial scans from the libE57 reference dataset, for testing
+E57 import + sky/miss recovery for the leaf-area-density inversion. Both are the
+same scene (a 345×1074 grid = 370,530 cells; 155,201 returns + 215,329 sky/miss
+cells), differing only in how the misses are encoded:
+
+| File | Miss encoding | On import |
+|---|---|---|
+| `pumpASpherical.e57` | spherical angles | all 215,329 misses **placed** at 20 km (works fully today) |
+| `pumpARowColumnIndex.e57` | cartesian grid (misses zeroed) + `rowIndex`/`columnIndex` | misses **kept + flagged** `is_miss=1`, directions recovered from the grid in Helios C++ |
+
+Source: [libE57 example data](https://sourceforge.net/projects/e57-3d-imgfmt/files/E57Example-data/)
+(`pumpA*` variants). Gitignored like the rest of this folder; re-download with:
+
+```bash
+curl -L -o example-datasets/pumpASpherical.e57 \
+  "https://sourceforge.net/projects/e57-3d-imgfmt/files/E57Example-data/pumpASpherical.e57/download"
+curl -L -o example-datasets/pumpARowColumnIndex.e57 \
+  "https://sourceforge.net/projects/e57-3d-imgfmt/files/E57Example-data/pumpARowColumnIndex.e57/download"
+```
+
 ## Datasets
 
 | Dataset | Sensor | Trees | License | Download |

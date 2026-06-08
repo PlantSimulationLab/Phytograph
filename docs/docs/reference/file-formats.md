@@ -6,7 +6,7 @@
 |---|---|---|---|
 | `.las` | ✅ | ✅ | LAS 1.2/1.4. Standard fields only on export (x, y, z, intensity, RGB, classification). |
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
-| `.e57` | ✅ | — | Structured scan format. Recovers **sky/miss points** from the grid (see below). Import only. |
+| `.e57` | ✅ | — | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid (see below). Import only. |
 | `.ply` | ✅ | ✅ | Preserves all scalar fields. Best for full-fidelity round-trips. Structured/organized PLYs recover sky/miss points (see below). |
 | `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL). |
 | `.xyz` / `.txt` | ✅ | ✅ | Whitespace-separated. First three columns = x, y, z. |
@@ -22,7 +22,12 @@
   column names become field names. Otherwise fields are named
   `field_0`, `field_1`, ….
 - Separator is auto-detected: comma for `.csv`, whitespace otherwise.
-- Lines starting with `#` are treated as comments.
+- Lines starting with `#` (or `//`) are treated as comments. A comment on
+  the **first** line is also read as a column header when its tokens resolve
+  to a valid `x`/`y`/`z` layout — so a legend like
+  `# x y z r255 g255 b255 row column is_miss` names every field on import
+  instead of being discarded. A `#` remark that isn't a column list (e.g.
+  `# exported by FooScan`) stays an ordinary comment.
 
 When a point cloud is loaded by path (dragged into the viewer, or attached
 via Helios XML bulk import), it is converted to a streaming **octree** in the
@@ -36,7 +41,8 @@ for an XYZ-family file, Phytograph forwards it to the parser; recognised
 column tokens are `x`, `y`, `z`, `r`/`g`/`b` (0–1 range),
 `r255`/`g255`/`b255` (0–255 range, normalised to 0–1 on read),
 `intensity`, `reflectance`, `timestamp`, `target_index`, `target_count`,
-`deviation`. Any other numeric columns are carried through as named
+`row`/`column` (structured-scan grid indices), `is_miss`/`miss`/`sky`
+(sky/miss flag), `deviation`. Any other numeric columns are carried through as named
 **scalar fields** (color-mappable in the viewer) rather than discarded —
 on large octree-streamed clouds they travel into the octree as extra
 attributes. Field names come from the file's header row when present
@@ -45,10 +51,11 @@ fallback. The hint is ignored for PLY/PCD because those formats encode
 their column layout in-file.
 
 When no `<ASCII_format>` hint is given, Phytograph auto-detects the
-layout: a header row's column names are matched to roles where
-recognised (so `XYZ[0][m]`/`XYZ[1][m]`/`XYZ[2][m]` map to x/y/z and the
-rest become scalar fields), otherwise it falls back to a positional
-guess (xyz, then RGB at six columns, then intensity at seven).
+layout: a header row's column names — whether plain or written as a
+leading `#` comment — are matched to roles where recognised (so
+`XYZ[0][m]`/`XYZ[1][m]`/`XYZ[2][m]` map to x/y/z and the rest become
+scalar fields), otherwise it falls back to a positional guess (xyz, then
+RGB at six columns, then intensity at seven).
 
 `.ply` clouds are parsed directly (not via open3d), so arbitrary per-vertex
 scalar properties — intensity, reflectance, and any custom numeric field —
@@ -62,6 +69,11 @@ PCD scalar fields are **not** preserved. If you need scalar fields from a
 `.pcd`, convert it to `.ply` or to `.xyz` with the columns named in an
 `<ASCII_format>` tag. `.las`/`.laz` clouds retain their native extra
 dimensions.
+
+`.e57` clouds carry **intensity** and **RGB colour** when the file records them
+(both are surfaced in the import wizard and become color-mappable in the viewer);
+colour on the recovered sky/miss points is set to black. Other E57 per-point
+fields beyond position, intensity, and colour are not yet preserved.
 
 ### Sky/miss points
 
@@ -160,6 +172,34 @@ cloud files — it holds no coordinates itself. Load it through the **Add Scan**
 tool's **Import from XML file** action, not by dropping it into the viewer.
 Dropping an XML file directly is rejected with a message pointing you to the
 right place.
+
+### Scan parameters recovered from the point-cloud file
+
+Some point-cloud formats embed the scanner's geometry in the file header. When
+you import one of these **on its own** (not via a Helios XML), Phytograph reads
+that metadata and auto-populates the new scan's **scan parameters** — the same
+fields the XML carries — so you don't have to enter them by hand. Whatever the
+file *doesn't* record is left at its default (blank), exactly as before.
+
+| Format | Origin | Orientation | Angular sweep (zenith/azimuth) | Sample resolution |
+|---|---|---|---|---|
+| `.e57` | ✅ pose translation | ✅ pose rotation (applied to points) | ✅ from `sphericalBounds`, when present | ✅ from the structured grid, when present |
+| `.pcd` | ✅ `VIEWPOINT`, when non-identity | — | — | — |
+| `.las` / `.laz` | — | — | — | — |
+| `.ply` | — | — | — | — |
+| ASCII (`.xyz`, …) | — | — | — | — |
+
+- **E57** is the richest source: each scan's pose (origin + rotation) is applied
+  to its points, and the angular sweep and grid resolution are read when the
+  file includes them. A multi-scan E57 uses the first scan's parameters for the
+  merged cloud. E57 elevation (measured from the horizontal plane) is converted
+  to Phytograph's zenith angle automatically.
+- **PCD** records only a sensor origin (`VIEWPOINT`); it's used only when it
+  differs from the identity default that most files leave in place.
+- **LAS/LAZ, PLY, and ASCII** carry no standard scanner-geometry fields, so an
+  imported scan starts with default parameters — set them in the **Add Scan**
+  tool if you need them for [Helios triangulation](../workflows/triangulate.md)
+  or [LAD](../workflows/estimate-leaf-area-density.md).
 
 ## Plant parameter presets
 

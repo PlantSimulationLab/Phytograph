@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.6.0"
+BACKEND_VERSION = "0.6.1"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -2612,6 +2612,14 @@ def _lad_labels_vals(column_getter, n: int):
     if has_miss_column:
         labels.append(_MISS_SLUG)
         cols.append(np.asarray(miss, dtype=np.float64))
+    # Forward the structured-grid indices when present so the C++ grid-based
+    # direction recovery (for unplaceable misses) has the raster to interpolate
+    # over. Carried only when the source provided them (E57 row/column index).
+    for grid_slug in ('row_index', 'column_index'):
+        gcol = column_getter(grid_slug)
+        if gcol is not None:
+            labels.append(grid_slug)
+            cols.append(np.asarray(gcol, dtype=np.float64))
 
     vals = np.column_stack(cols).astype(np.float64) if cols else None
     return labels, vals, _lad_flags(has_timestamp, is_multi, has_misses)
@@ -7207,7 +7215,21 @@ _MULTI_RETURN_LABELS = {
     'target_index': 'Target Index',
     'target_count': 'Target Count',
 }
-_XYZ_KNOWN_ROLES = _XYZ_DATA_ROLES | set(_MULTI_RETURN_SLUGS) | {'deviation'}
+# Structured-scan raster indices: the integer (row, column) position of each
+# point within the scanner's rectangular acquisition grid. Carried as extra
+# dimensions under these pinned slugs so the C++ grid-based direction recovery
+# (LiDAR.cpp, for gap-filling unplaceable misses) finds the raster by name —
+# exactly like the E57 structured-import path emits them (see `_e57_*`). Pinning
+# the slug means an ASCII export with row/column columns round-trips into the
+# same recovery machinery regardless of the source header text.
+_GRID_INDEX_SLUGS = ('row_index', 'column_index')
+_GRID_INDEX_LABELS = {
+    'row_index': 'Row Index',
+    'column_index': 'Column Index',
+}
+_XYZ_KNOWN_ROLES = (
+    _XYZ_DATA_ROLES | set(_MULTI_RETURN_SLUGS) | set(_GRID_INDEX_SLUGS) | {'deviation'}
+)
 
 # Per-point sky/miss flag carried as a LAS extra dimension (0.0 = hit, 1.0 =
 # miss). Misses are laser pulses that returned nothing (hit the sky); Helios
@@ -7221,6 +7243,15 @@ _MISS_SLUG = 'is_miss'
 _MISS_LABEL = 'Miss'
 # Aliases a source column may use for the miss flag (PLY property / E57 field).
 _MISS_ALIASES = {'is_miss', 'miss', 'sky', 'ismiss'}
+# Same set with punctuation/case stripped, for matching a sanitised slug.
+_MISS_ALIASES_NORMALISED = {re.sub(r'[^a-z0-9]+', '', a) for a in _MISS_ALIASES}
+
+
+def _normalise_miss_alias(name: str) -> Optional[str]:
+    """Return `_MISS_SLUG` when `name` is any miss-flag spelling (is_miss / miss
+    / sky, case- and punctuation-insensitive), else None."""
+    base = re.sub(r'[^a-z0-9]+', '', name.strip().lower())
+    return _MISS_SLUG if base in _MISS_ALIASES_NORMALISED else None
 # Distance (metres) at which a miss point is placed from the scanner origin along
 # its pulse direction. Matches Helios's gap_distance (LiDAR.cpp gapfillMisses).
 _MISS_GAP_DISTANCE = 20000.0
@@ -7324,6 +7355,32 @@ def _tokenize_ascii_format(fmt: str) -> List[str]:
             for tok in fmt.split()]
 
 
+def _first_nonblank_ascii_line(file_path: str) -> Optional[tuple]:
+    """Return (line_text, was_commented) for the first meaningful line of an
+    ASCII point file, or None if the file is empty/all-blank.
+
+    `line_text` has any leading comment marker ('#' / '//') and surrounding
+    whitespace stripped, so the caller can inspect a *commented* header the same
+    way it would a bare one. Some exporters write the column legend as a comment
+    (e.g. '# x y z r255 g255 b255 row column is_miss') so pandas — which is told
+    comment='#' — skips it as data while a human still sees the labels. We
+    recover those labels here. `was_commented` lets callers that drive pandas's
+    `skiprows` know the line is already dropped by `comment='#'` and must NOT be
+    counted again.
+    """
+    with open(file_path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith('#'):
+                return line.lstrip('#').strip(), True
+            if line.startswith('//'):
+                return line[2:].strip(), True
+            return line, False
+    return None
+
+
 def _role_from_header_name(name: str) -> Optional[str]:
     """Map a header column name to a known XYZ role, or None if unrecognised.
 
@@ -7344,11 +7401,11 @@ def _role_from_header_name(name: str) -> Optional[str]:
         return 'y'
     if base in ('z', 'height', 'elevation'):
         return 'z'
-    if base in ('r', 'red'):
+    if base in ('r', 'red', 'r255', 'red255'):
         return 'r255'
-    if base in ('g', 'green'):
+    if base in ('g', 'green', 'g255', 'green255'):
         return 'g255'
-    if base in ('b', 'blue'):
+    if base in ('b', 'blue', 'b255', 'blue255'):
         return 'b255'
     if base in ('intensity',):
         return 'intensity'
@@ -7363,6 +7420,19 @@ def _role_from_header_name(name: str) -> Optional[str]:
         return 'target_index'
     if base in ('targetcount', 'numberofreturns', 'numreturns'):
         return 'target_count'
+    # Structured-scan raster indices (see `_GRID_INDEX_SLUGS`). Recognise the
+    # canonical slugs plus the common row/col header spellings so a scan export
+    # carrying its grid position round-trips into the recovery path.
+    if base in ('rowindex', 'row', 'scanrow', 'scanrowindex', 'rasterrow'):
+        return 'row_index'
+    if base in ('columnindex', 'column', 'col', 'scancolumn', 'scancol',
+                'scancolumnindex', 'rastercolumn'):
+        return 'column_index'
+    # Sky/miss flag (see `_MISS_ALIASES`). Pinned to the canonical `is_miss`
+    # slug so a header-carrying ASCII export round-trips the column the LAD path
+    # reads, matching the E57/structured-PLY recovery convention.
+    if base in _MISS_ALIASES_NORMALISED:
+        return _MISS_SLUG
     return None
 
 
@@ -7410,18 +7480,23 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
 
 
 def _first_data_row_has_letters(file_path: str) -> bool:
-    """Detect a leading text header row.
+    """Detect a leading *uncommented* text header row that pandas must skip.
 
     Helios scan files don't have one, but plain XYZ exports from other tools
     sometimes do (e.g. 'X Y Z R G B'). We skip such a row so pandas can read
-    the rest as floats without falling off the C engine."""
-    with open(file_path) as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith('#') or line.startswith('//'):
-                continue
-            return any(re.search(r'[a-zA-Z]', tok) for tok in line.split())
-    return False
+    the rest as floats without falling off the C engine.
+
+    A *commented* header ('# X Y Z ...') is NOT counted here: the readers pass
+    comment='#' to pandas, which already drops it, so adding skiprows on top
+    would eat the first real data row. We still recover its labels via
+    `_read_ascii_header_names`."""
+    first = _first_nonblank_ascii_line(file_path)
+    if first is None:
+        return False
+    line, was_commented = first
+    if was_commented:
+        return False
+    return any(re.search(r'[a-zA-Z]', tok) for tok in line.split())
 
 
 # Roles that already map to a dedicated LAS field — never carried as extra
@@ -7509,17 +7584,27 @@ def _read_ascii_header_names(file_path: str) -> Optional[List[str]]:
 
     Splits on commas when the line is comma-delimited, else on whitespace, so
     multi-word names like 'Target Index[]' survive in the comma case.
+
+    A *commented* first line ('# x y z ...') is also accepted as a header, but
+    only when its tokens actually resolve to x/y/z roles — that guard keeps a
+    plain prose comment ('# exported by FooScan v2') from being mistaken for
+    column names.
     """
-    with open(file_path) as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith('#') or line.startswith('//'):
-                continue
-            if not any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
-                return None
-            parts = line.split(',') if ',' in line else line.split()
-            return [p.strip() for p in parts]
-    return None
+    first = _first_nonblank_ascii_line(file_path)
+    if first is None:
+        return None
+    line, was_commented = first
+    if not any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
+        return None
+    parts = line.split(',') if ',' in line else line.split()
+    names = [p.strip() for p in parts]
+    if was_commented:
+        # Be conservative with commented lines: only trust them as a header when
+        # they map to a real x/y/z layout, else they're just a remark.
+        roles = [_role_from_header_name(n) for n in names]
+        if not all(r in roles for r in ('x', 'y', 'z')):
+            return None
+    return names
 
 
 # A pandas `names=` list can't contain a repeated value, so a column plan that
@@ -7581,6 +7666,27 @@ def _plan_columns(roles: List[str], header_names: Optional[List[str]]):
                                "label": _MULTI_RETURN_LABELS[role],
                                "categorical": False})
             continue
+        if role in _GRID_INDEX_SLUGS:
+            # Structured-scan raster index: pin the canonical slug/label so the
+            # grid-based miss-recovery path finds the raster by name (same as the
+            # multi-return slugs above, and what the E57 structured path emits).
+            slug = _dedupe_slug(role, used_slugs)
+            col_id = f"extra:{slug}"
+            names.append(col_id)
+            extra_dims.append({"col": col_id, "slug": slug,
+                               "label": _GRID_INDEX_LABELS[role],
+                               "categorical": False})
+            continue
+        if role == _MISS_SLUG:
+            # Sky/miss flag: pin the canonical is_miss slug/label regardless of
+            # the source header spelling (is_miss/miss/sky) so the LAD path and
+            # renderer find it by name, matching the E57/PLY recovery convention.
+            slug = _dedupe_slug(_MISS_SLUG, used_slugs)
+            col_id = f"extra:{slug}"
+            names.append(col_id)
+            extra_dims.append({"col": col_id, "slug": slug,
+                               "label": _MISS_LABEL, "categorical": False})
+            continue
         if header_names is not None and i < len(header_names) and header_names[i]:
             label = _humanize_extra_dim_label(header_names[i])
             base = _sanitize_extra_dim_name(header_names[i])
@@ -7615,15 +7721,50 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
             continue
         # A column mapped to a multi-return field — either by naming the role
         # token directly or by slugging an 'extra' as one — is carried under the
-        # canonical slug/label so the LAD accessor can recover it by name.
+        # canonical slug/label so the LAD accessor can recover it by name. But a
+        # column the user explicitly marked categorical (the wizard's 'Label'
+        # role) is a discrete class field by intent: multi-return per-pulse
+        # values (timestamp/target index/count) are never categorical, so honour
+        # the user's choice and let it fall through to the generic extra-dim path
+        # (preserving its sanitised slug + categorical flag) instead of diverting
+        # it into the LAD canonicalisation, which would lower-case the slug and
+        # relabel it as a per-pulse field.
         mr = role if role in _MULTI_RETURN_SLUGS else (entry.slug or '').lower()
-        if mr in _MULTI_RETURN_SLUGS:
+        if mr in _MULTI_RETURN_SLUGS and not entry.categorical:
             slug = _dedupe_slug(mr, used_slugs)
             col_id = f"extra:{slug}"
             names.append(col_id)
             extra_dims.append({"col": col_id, "slug": slug,
                                "label": (entry.label or '').strip() or _MULTI_RETURN_LABELS[mr],
                                "categorical": bool(entry.categorical)})
+            continue
+        # Structured-grid indices (scan row / column): carry under the canonical
+        # `row_index`/`column_index` slug so the LAD/recovery path finds the
+        # raster by name — same treatment as the multi-return slugs above, and
+        # matching what the E57 structured-import path emits. These are integer
+        # grid positions, never categorical class fields.
+        gi = role if role in _GRID_INDEX_SLUGS else (entry.slug or '').lower()
+        if gi in _GRID_INDEX_SLUGS:
+            slug = _dedupe_slug(gi, used_slugs)
+            col_id = f"extra:{slug}"
+            names.append(col_id)
+            extra_dims.append({"col": col_id, "slug": slug,
+                               "label": (entry.label or '').strip() or _GRID_INDEX_LABELS[gi],
+                               "categorical": False})
+            continue
+        # Sky/miss flag: a column whose role token or slug names a miss alias
+        # (is_miss/miss/sky) carries under the canonical is_miss slug so the LAD
+        # path and renderer find it by name — matching the E57/PLY convention.
+        # Never categorical (it's a 0/1 flag the LAD check reads as a continuous
+        # value), so honour it regardless of the wizard's categorical toggle.
+        ms = role if role == _MISS_SLUG else _normalise_miss_alias(entry.slug or '')
+        if ms == _MISS_SLUG:
+            slug = _dedupe_slug(_MISS_SLUG, used_slugs)
+            col_id = f"extra:{slug}"
+            names.append(col_id)
+            extra_dims.append({"col": col_id, "slug": slug,
+                               "label": (entry.label or '').strip() or _MISS_LABEL,
+                               "categorical": False})
             continue
         if role == 'skip' or (role == 'extra' and not (entry.slug or entry.label)):
             # A skipped column, or an 'extra' with no usable name, carries
@@ -7633,7 +7774,14 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
             names.append(_skip_name(pos))
             continue
         # role == 'extra' (or any unreserved token) → carry as an extra dim.
-        base = _sanitize_extra_dim_name(entry.slug or entry.label or f"col_{entry.index + 1}")
+        # A categorical override of a multi-return column reaches here with the
+        # wizard's lower-cased canonical slug (e.g. 'target_index'); prefer the
+        # human label so it slugs to a readable class-field name ('Target_Index')
+        # rather than the LAD canonical it's no longer being used as.
+        slug_source = entry.slug
+        if entry.categorical and (entry.slug or '').lower() in _MULTI_RETURN_SLUGS:
+            slug_source = entry.label or entry.slug
+        base = _sanitize_extra_dim_name(slug_source or entry.label or f"col_{entry.index + 1}")
         slug = _dedupe_slug(base, used_slugs)
         label = (entry.label or "").strip() or _humanize_extra_dim_label(slug)
         col_id = f"extra:{slug}"
@@ -8346,13 +8494,48 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     return n, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
 
 
+def _pcd_viewpoint_origin(source_path: _Path) -> Optional[list]:
+    """Read the PCD header `VIEWPOINT tx ty tz qw qx qy qz` field and return the
+    scanner translation `[tx, ty, tz]` when it is meaningfully non-identity.
+
+    PCD is the only other supported format (besides E57) that records a sensor
+    pose, but it carries ONLY a translation + orientation quaternion — no angular
+    sweep or grid — and the overwhelming majority of files leave it at the
+    identity default (`0 0 0 1 0 0 0`). We surface just the origin, and only when
+    it differs from the default, so we don't fabricate a (0,0,0) scan origin for
+    every PCD. The header is plain ASCII even in binary PCDs, so a small text
+    scan of the first lines suffices. Returns None when absent/identity/unreadable.
+    """
+    try:
+        with open(source_path, "r", encoding="ascii", errors="ignore") as fh:
+            for _ in range(64):  # VIEWPOINT lives in the small fixed header
+                line = fh.readline()
+                if not line:
+                    break
+                if line.startswith("VIEWPOINT"):
+                    parts = line.split()[1:]
+                    if len(parts) < 3:
+                        return None
+                    tx, ty, tz = (float(parts[0]), float(parts[1]), float(parts[2]))
+                    if abs(tx) < 1e-9 and abs(ty) < 1e-9 and abs(tz) < 1e-9:
+                        return None  # identity default — nothing to populate
+                    return [tx, ty, tz]
+                if line.startswith("DATA"):
+                    break  # header ended without a VIEWPOINT
+    except Exception:
+        return None
+    return None
+
+
 def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     """Convert a PCD to LAS so it can feed the PotreeConverter octree pipeline.
 
     PCD goes through open3d (`_load_ply_pcd_arrays`), which carries position and
     RGB only — PCD's ascii/binary/binary_compressed variants make robust scalar
     parsing more than this is worth for now, so scalar fields are not preserved.
-    Returns (total_points, []).
+    A non-identity PCD `VIEWPOINT` translation is stashed (keyed by the output
+    LAS path) so create_cloud_session can auto-populate the scan origin, the same
+    channel E57 uses. Returns (total_points, []).
     """
     import laspy  # local: only when this code path runs
 
@@ -8378,6 +8561,19 @@ def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         writer.write_points(record)
 
+    # Surface a non-identity sensor origin from the PCD VIEWPOINT, if any, via
+    # the same per-output-LAS channel E57 uses. Only origin is recoverable from
+    # PCD (no angular sweep / grid), so the rest of ScanParameters stays default.
+    vp = _pcd_viewpoint_origin(source_path)
+    if vp is not None:
+        _e57_scan_meta[str(out_las.resolve())] = {
+            "origin": vp,
+            "scan_params": {"origin": vp},
+            "has_misses": False,
+            "miss_count": 0,
+            "unplaceable_miss_count": 0,
+        }
+
     return n, []
 
 
@@ -8390,6 +8586,83 @@ def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
 _e57_scan_meta: Dict[str, dict] = {}
 
 
+def _e57_scan_params(header, has_grid: bool) -> dict:
+    """Recover scanner scan-pattern parameters from an E57 scan header so a
+    non-XML E57 import can auto-populate a Scan's `ScanParameters` (origin +
+    angular sweep + grid resolution), the same fields the Helios XML carries.
+
+    E57 stores these in two optional header sub-structures:
+      - `sphericalBounds`: azimuthStart/azimuthEnd and elevationMinimum/Maximum
+        (radians). E57 elevation is measured from the XY plane (+up, range
+        -pi/2..pi/2); Phytograph/Helios uses zenith (polar angle from +Z), so
+        `zenith = 90 - elevation_deg`. Azimuth maps directly to phi (degrees).
+      - `indexBounds`: row/column min/max — the structured-grid dimensions,
+        which give the sample counts (n_theta = rows, n_phi = columns).
+
+    `has_grid` says whether the SCAN DATA actually carried row/column indices
+    (a true raster). indexBounds is only trusted for sample counts when it does:
+    pye57 writes a degenerate indexBounds even for a flat, unstructured cloud
+    (rowMaximum = point_count - 1), which would otherwise masquerade as a zenith
+    resolution. Angular bounds (sphericalBounds) are independent of the grid and
+    are read whenever present.
+
+    Both sub-structures are optional in the spec; many files omit one or both.
+    Every field is guarded independently — whatever isn't present is simply left
+    out so the renderer falls back to its default (XML-parity behaviour: blank
+    stays blank). Returns a dict with only the recoverable keys (may be empty).
+    """
+    params: dict = {}
+
+    # Angular sweep from sphericalBounds (radians -> degrees, elevation->zenith).
+    try:
+        sb = header["sphericalBounds"]
+    except Exception:
+        sb = None
+    if sb is not None:
+        def _node_val(name):
+            try:
+                return float(sb[name].value())
+            except Exception:
+                return None
+        az_start = _node_val("azimuthStart")
+        az_end = _node_val("azimuthEnd")
+        el_min = _node_val("elevationMinimum")
+        el_max = _node_val("elevationMaximum")
+        if az_start is not None and az_end is not None:
+            params["phi_min"] = math.degrees(az_start)
+            params["phi_max"] = math.degrees(az_end)
+        if el_min is not None and el_max is not None:
+            # zenith = 90 - elevation; min/max swap under the negation.
+            params["theta_min"] = 90.0 - math.degrees(el_max)
+            params["theta_max"] = 90.0 - math.degrees(el_min)
+
+    # Grid resolution from indexBounds (row/column counts = sample counts), but
+    # only when the scan is genuinely a raster (carried row/column indices) —
+    # otherwise pye57's degenerate indexBounds would fake a zenith resolution.
+    try:
+        ib = header["indexBounds"] if has_grid else None
+    except Exception:
+        ib = None
+    if ib is not None:
+        def _ib_count(min_name, max_name):
+            try:
+                lo = int(ib[min_name].value())
+                hi = int(ib[max_name].value())
+            except Exception:
+                return None
+            n = hi - lo + 1
+            return n if n > 1 else None
+        n_rows = _ib_count("rowMinimum", "rowMaximum")
+        n_cols = _ib_count("columnMinimum", "columnMaximum")
+        # E57 grids are row=elevation/theta, column=azimuth/phi.
+        if n_rows is not None:
+            params["n_theta"] = n_rows
+        if n_cols is not None:
+            params["n_phi"] = n_cols
+
+    return params
+
+
 def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     """Convert an E57 to LAS, recovering sky/miss points from the structured
     grid so the LAD inversion can account for beams that returned nothing.
@@ -8398,17 +8671,25 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     via `cartesianInvalidState` (or `sphericalInvalidState`). We read the RAW
     scan (all cells, in the scanner-local frame) so misses survive, then:
       - valid cells -> real world point (pose-transformed), `is_miss = 0`;
-      - invalid cells (misses) -> a far-field point `origin + dir * gap_distance`
-        along the pulse direction (from spherical angles when present, else the
-        local cartesian direction), `is_miss = 1` — matching how Helios stores a
-        miss. The TRUE far-field coords are kept; the renderer relocates them for
-        display only, so LAD (which needs the real direction) is unaffected.
+      - invalid cells (misses) -> `is_miss = 1`. When a direction is recoverable
+        (spherical angles, or a non-zero cartesian vector) the miss is PLACED at
+        a far-field point `origin + dir * gap_distance` along the pulse direction,
+        matching how Helios stores a miss. When it is NOT recoverable here (the
+        common cartesian-grid case where invalid cells are zeroed and there are
+        no spherical angles), the miss is KEPT and flagged but left at the scanner
+        origin: direction recovery from the row/column raster (with tilt/noise
+        handling and edge extrapolation) is done downstream in Helios C++. We
+        preserve `row_index`/`column_index` so that recovery has the grid to work
+        from. Unplaceable misses are counted and surfaced, never silently dropped.
 
-    Multi-scan E57s are merged into one cloud (one imported scan == one cloud,
-    as elsewhere). Carries intensity and, when present, the canonical per-pulse
-    multi-return slugs. The scanner origin (first scan's pose translation) is
-    stashed in `_e57_scan_meta` for the create endpoint. Returns (n, extra_dims)
-    with `is_miss` always among the extra dims.
+    Each scan is transformed by ITS OWN pose (rotation + translation); a
+    multi-scan E57 merges into one cloud with every scan's misses placed relative
+    to its own origin. The first scan's origin is stashed in `_e57_scan_meta`
+    (plus per-scan origins + the unplaceable-miss count) for the create endpoint.
+    Intensity is normalised per scan from its observed valid range (E57 intensity
+    is often 0..1 float); RGB colour (colorRed/Green/Blue) is carried into the LAS
+    when present (misses get black). Returns (n, extra_dims) with `is_miss` always
+    present and `row_index`/`column_index` present when the source carried a grid.
     """
     import laspy  # local: only when this code path runs
     import pye57
@@ -8422,8 +8703,15 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         all_xyz: List[np.ndarray] = []
         all_miss: List[np.ndarray] = []
         all_intensity: List[np.ndarray] = []
+        all_rgb: List[np.ndarray] = []
+        all_row: List[np.ndarray] = []
+        all_col: List[np.ndarray] = []
         any_intensity = False
-        first_origin = None
+        any_color = False
+        any_grid = False
+        scan_origins: List[list] = []
+        scan_params_list: List[dict] = []
+        unplaceable_misses = 0
 
         for si in range(n_scans):
             header = e.get_header(si)
@@ -8435,8 +8723,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
                 trans = np.asarray(header.translation, dtype=np.float64).reshape(3)
             except Exception:
                 trans = np.zeros(3)
-            if first_origin is None:
-                first_origin = trans.copy()
+            scan_origins.append(trans.tolist())
 
             raw = e.read_scan_raw(si)
             keys = set(raw.keys())
@@ -8464,6 +8751,17 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
                 )
 
             n_cell = local.shape[0]
+            # Recover this scan's scan-pattern parameters (angular sweep + grid
+            # resolution) so a non-XML E57 import auto-populates ScanParameters,
+            # the same way an XML import does. Whatever the file omits is left
+            # out and the renderer falls back to its default. Grid resolution is
+            # only trusted when the scan is a true raster (carried row/column
+            # indices) — see _e57_scan_params.
+            cell_has_grid = {"rowIndex", "columnIndex"} <= keys
+            sp = _e57_scan_params(header, cell_has_grid)
+            sp["origin"] = trans.tolist()
+            scan_params_list.append(sp)
+
             # Miss flag: prefer the explicit invalid-state field. invalidState
             # is 0 for a good return, non-zero for a miss/invalid cell.
             miss = np.zeros(n_cell, dtype=bool)
@@ -8485,38 +8783,83 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
                 ])
                 local_dir[miss] = sdir[miss]
 
-            # Drop misses we can't place (no usable direction) rather than emit a
-            # bogus point at the origin that would corrupt the inversion.
             dir_norm = np.linalg.norm(local_dir, axis=1)
-            undirected_miss = miss & (dir_norm < 1e-9)
-            if undirected_miss.any():
-                keep_cell = ~undirected_miss
-                local = local[keep_cell]
-                local_dir = local_dir[keep_cell]
-                miss = miss[keep_cell]
-                dir_norm = dir_norm[keep_cell]
-                n_cell = local.shape[0]
+            # A miss we can place here has a usable direction; one we can't
+            # (zeroed cartesian, no spherical) is KEPT and flagged for Helios to
+            # recover from the grid, not dropped.
+            placeable_miss = miss & (dir_norm >= 1e-9)
+            unplaceable_miss = miss & (dir_norm < 1e-9)
+            unplaceable_misses += int(unplaceable_miss.sum())
 
-            # World coords: pose-transform real hits; far-field place misses.
+            # World coords: pose-transform real hits; far-field place the misses
+            # we can; leave unplaceable misses at the scanner origin (flagged).
             world = (rot @ local.T).T + trans
-            if miss.any():
-                unit = local_dir[miss] / dir_norm[miss][:, None]
+            if placeable_miss.any():
+                unit = local_dir[placeable_miss] / dir_norm[placeable_miss][:, None]
                 world_dir = (rot @ unit.T).T
-                world[miss] = trans + world_dir * _MISS_GAP_DISTANCE
+                world[placeable_miss] = trans + world_dir * _MISS_GAP_DISTANCE
+            if unplaceable_miss.any():
+                world[unplaceable_miss] = trans  # at origin until C++ recovery
 
             all_xyz.append(world)
             all_miss.append(miss.astype(np.float32))
 
+            # Preserve the structured-grid indices so downstream (Helios C++) can
+            # recover unplaceable-miss directions from the raster.
+            if {"rowIndex", "columnIndex"} <= keys:
+                all_row.append(np.asarray(raw["rowIndex"], dtype=np.float32))
+                all_col.append(np.asarray(raw["columnIndex"], dtype=np.float32))
+                any_grid = True
+            else:
+                all_row.append(np.full(n_cell, -1.0, dtype=np.float32))
+                all_col.append(np.full(n_cell, -1.0, dtype=np.float32))
+
             if "intensity" in keys:
-                inten = np.asarray(raw["intensity"], dtype=np.float32)
-                if undirected_miss.any():
-                    inten = inten[keep_cell]
-                # Misses have no real return; zero their intensity.
-                inten = np.where(miss, 0.0, inten).astype(np.float32)
-                all_intensity.append(inten)
+                inten = np.asarray(raw["intensity"], dtype=np.float64)
+                # Normalise from the VALID cells' observed range to LAS uint16.
+                # E57 intensity is commonly 0..1 float; a flat clip(0,65535) would
+                # crush it to ~0. Misses have no real return -> 0.
+                valid = ~miss
+                if valid.any():
+                    lo = float(np.nanmin(inten[valid]))
+                    hi = float(np.nanmax(inten[valid]))
+                else:
+                    lo, hi = 0.0, 1.0
+                span = hi - lo
+                if span > 1e-12:
+                    scaled = (inten - lo) / span * 65535.0
+                else:
+                    scaled = np.zeros_like(inten)
+                scaled[miss] = 0.0
+                all_intensity.append(np.clip(scaled, 0, 65535).astype(np.float32))
                 any_intensity = True
             else:
                 all_intensity.append(np.zeros(n_cell, dtype=np.float32))
+
+            # RGB colour, when the scan carries it. E57 stores per-channel
+            # colorRed/Green/Blue, usually uint8 0..255 but the spec allows other
+            # integer ranges (declared in the file's colorLimits). Normalise each
+            # channel from its declared/observed max to 8-bit, then store as the
+            # LAS uint16 convention (8-bit << 8) used by the PLY/PCD paths. Misses
+            # get black — they have no real return.
+            if {"colorRed", "colorGreen", "colorBlue"} <= keys:
+                cr = np.asarray(raw["colorRed"], dtype=np.float64)
+                cg = np.asarray(raw["colorGreen"], dtype=np.float64)
+                cb = np.asarray(raw["colorBlue"], dtype=np.float64)
+                cmax = float(max(cr.max(initial=0.0), cg.max(initial=0.0),
+                                 cb.max(initial=0.0)))
+                # Scale so the brightest channel value maps to 255. Files that are
+                # already 0..255 (the common case) pass through unchanged; a
+                # 0..1 or 0..65535 file is brought into 8-bit range.
+                scale = (255.0 / cmax) if cmax > 255.0 or (0.0 < cmax <= 1.0) else 1.0
+                rgb8 = np.clip(
+                    np.column_stack([cr, cg, cb]) * scale, 0, 255
+                ).astype(np.uint16)
+                rgb8[miss] = 0
+                all_rgb.append(rgb8)
+                any_color = True
+            else:
+                all_rgb.append(np.zeros((n_cell, 3), dtype=np.uint16))
     finally:
         e.close()
 
@@ -8524,14 +8867,22 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     is_miss = np.concatenate(all_miss, axis=0) if all_miss else np.empty((0,), np.float32)
     intensity = (np.concatenate(all_intensity, axis=0) if all_intensity
                  else np.empty((0,), np.float32))
+    rgb = (np.concatenate(all_rgb, axis=0) if all_rgb
+           else np.empty((0, 3), np.uint16))
+    row_idx = np.concatenate(all_row, axis=0) if all_row else np.empty((0,), np.float32)
+    col_idx = np.concatenate(all_col, axis=0) if all_col else np.empty((0,), np.float32)
     n = int(xyz.shape[0])
 
     extra_dims = [{"slug": _MISS_SLUG, "label": _MISS_LABEL}]
+    if any_grid:
+        extra_dims.append({"slug": "row_index", "label": "Row Index"})
+        extra_dims.append({"slug": "column_index", "label": "Column Index"})
 
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
     header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    header.add_extra_dim(laspy.ExtraBytesParams(name=_MISS_SLUG, type=np.float32))
+    for ed in extra_dims:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
     record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
     if n > 0:
@@ -8540,15 +8891,32 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         record.z = xyz[:, 2]
         if any_intensity:
             record.intensity = np.clip(intensity, 0, 65535).astype(np.uint16)
+        if any_color:
+            # Point format 3 carries RGB; *256 lifts 8-bit into the 16-bit LAS
+            # channel, matching _ply_to_las / _pcd_to_las so colours render
+            # identically regardless of source format.
+            record.red = rgb[:, 0] * 256
+            record.green = rgb[:, 1] * 256
+            record.blue = rgb[:, 2] * 256
         record[_MISS_SLUG] = is_miss
+        if any_grid:
+            record["row_index"] = row_idx
+            record["column_index"] = col_idx
 
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         writer.write_points(record)
 
     _e57_scan_meta[str(out_las.resolve())] = {
-        "origin": (first_origin.tolist() if first_origin is not None else [0.0, 0.0, 0.0]),
+        "origin": (scan_origins[0] if scan_origins else [0.0, 0.0, 0.0]),
+        "scan_origins": scan_origins,
+        # Full scan-pattern parameters of the first scan (origin + whatever
+        # angular sweep / grid resolution the file carried). create_cloud_session
+        # forwards this so a lone-E57 import auto-creates a Scan with populated
+        # ScanParameters, mirroring the Helios-XML import path.
+        "scan_params": (scan_params_list[0] if scan_params_list else {"origin": [0.0, 0.0, 0.0]}),
         "has_misses": bool(is_miss.any()),
         "miss_count": int(is_miss.sum()),
+        "unplaceable_miss_count": unplaceable_misses,
     }
     return n, extra_dims
 
@@ -8890,9 +9258,18 @@ def _split_ascii_row(line: str, delimiter: Optional[str]) -> List[str]:
 def _read_ascii_sample_rows(file_path: str, delimiter: Optional[str],
                             skip_header: bool, max_rows: int) -> List[List[str]]:
     """Return up to `max_rows` data rows as raw string tokens. Reads at most
-    that many lines — never the whole file."""
+    that many lines — never the whole file.
+
+    `skip_header` drops a single leading header row. A *commented* header
+    ('# x y z ...') is already dropped by the comment-line skip below, so we
+    must NOT also consume the first data row — otherwise the wizard preview
+    would silently lose row one. Detect that case up front."""
+    # A commented header is removed by the '#'/'//' filter, so there is no
+    # uncommented header row left to skip.
+    first = _first_nonblank_ascii_line(file_path)
+    header_is_commented = first is not None and first[1]
     rows: List[List[str]] = []
-    header_skipped = not skip_header
+    header_skipped = (not skip_header) or header_is_commented
     with open(file_path) as f:
         for raw in f:
             line = raw.strip()
@@ -8969,6 +9346,22 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
             detected_role = 'extra'
             suggested_slug = role
             suggested_label = _MULTI_RETURN_LABELS[role]
+        elif role in _GRID_INDEX_SLUGS:
+            # A structured-scan raster index (row_index/column_index): the wizard
+            # exposes these as dedicated dropdown roles, so report the role token
+            # directly (not 'extra') to pre-select the matching option. The slug
+            # is pinned to the canonical name so the recovery path finds the grid.
+            detected_role = role
+            suggested_slug = role
+            suggested_label = _GRID_INDEX_LABELS[role]
+        elif role == _MISS_SLUG:
+            # A sky/miss flag: carried as a scalar extra dim under the canonical
+            # is_miss slug (the wizard has no dedicated miss role), so the LAD
+            # path and renderer find it by name regardless of the source spelling
+            # (is_miss/miss/sky). Pin the slug/label to match `_plan_columns`.
+            detected_role = 'extra'
+            suggested_slug = _MISS_SLUG
+            suggested_label = _MISS_LABEL
         else:
             detected_role = 'extra' if role != 'skip' else 'skip'
             if header_names is not None and i < len(header_names) and header_names[i]:
@@ -9061,6 +9454,10 @@ def _preview_ply(file_path: str) -> PointCloudPreviewResponse:
     props, is_ascii, sample_rows, _ = _ply_header_properties(file_path)
     columns: List[PreviewColumn] = []
     for i, name in enumerate(props):
+        # `is_miss`/`miss`/`sky` is a system-managed sky/miss flag, not a
+        # user-mappable column — keep it out of the wizard.
+        if name.lower() in _MISS_ALIASES:
+            continue
         role = _ply_role_for(name)
         is_extra = role == 'extra'
         col_values = [r[i] for r in sample_rows if i < len(r)]
@@ -9131,6 +9528,11 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
             return 'extra'
         extra_names = {d.name for d in pf.extra_dimensions}
         for i, n in enumerate(names):
+            # `is_miss` is a system-managed sky/miss flag, not a user-mappable
+            # column — never present it in the wizard (and don't let it be
+            # renamed off the canonical slug the renderer/LAD depend on).
+            if n.lower() in _MISS_ALIASES:
+                continue
             role = role_for(n)
             is_extra = n in extra_names or role == 'extra'
             columns.append(PreviewColumn(
@@ -9160,22 +9562,31 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
 
 def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
     """Summarise an E57's structure for the import wizard without decoding the
-    full point data. Reports the scan count, total points, and (cheaply) whether
-    the file carries miss cells. Columns are fixed (E57 defines its own layout),
-    so they're not remappable — we surface position + intensity + the `is_miss`
-    flag the converter will populate."""
+    full point data. Reports the scan count, total points, and which attributes
+    the file carries (read cheaply from the first scan's declared `point_fields`,
+    no point decode). Columns are fixed (E57 defines its own layout), so they're
+    not remappable — we surface position plus whatever of intensity / RGB the
+    file actually contains, so the user can see (and colour by) them.
+
+    `is_miss` is deliberately omitted: it's a system-managed flag the converter
+    populates, not a user column — showing it as an editable "scalar" would imply
+    a rename the import ignores, and the flag is excluded from the octree anyway.
+    """
     import pye57
     e = pye57.E57(file_path)
     try:
         n_scans = e.scan_count
         total = 0
-        has_misses = False
+        fields: set[str] = set()
         for si in range(n_scans):
             try:
                 h = e.get_header(si)
                 total += int(h.point_count)
+                # Declared field names — available without decoding any points.
+                fields.update(getattr(h, "point_fields", []) or [])
             except Exception:
                 pass
+
         columns = [
             PreviewColumn(index=0, header_name='x', detected_role='x',
                           suggested_label='x', suggested_slug='', type_hint='float',
@@ -9186,12 +9597,27 @@ def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
             PreviewColumn(index=2, header_name='z', detected_role='z',
                           suggested_label='z', suggested_slug='', type_hint='float',
                           remappable=False),
-            PreviewColumn(index=3, header_name=_MISS_SLUG, detected_role='extra',
-                          suggested_label=_MISS_LABEL, suggested_slug=_MISS_SLUG,
-                          type_hint='categorical', remappable=False),
         ]
+        idx = 3
+        # Surface the real scalars the converter carries through, so the wizard
+        # shows the user what they'll be able to colour by (intensity / RGB).
+        if 'intensity' in fields:
+            columns.append(PreviewColumn(
+                index=idx, header_name='intensity', detected_role='intensity',
+                suggested_label='intensity', suggested_slug='', type_hint='float',
+                remappable=False))
+            idx += 1
+        if {'colorRed', 'colorGreen', 'colorBlue'} <= fields:
+            for ch, role in (('red', 'r255'), ('green', 'g255'), ('blue', 'b255')):
+                columns.append(PreviewColumn(
+                    index=idx, header_name=ch, detected_role=role,
+                    suggested_label=ch, suggested_slug='', type_hint='float',
+                    remappable=False))
+                idx += 1
+
         warn = (f"E57 with {n_scans} scan(s), ~{total} points. Sky/miss points "
-                "are recovered from the structured grid and tagged for LAD.")
+                "are recovered from the structured grid and tagged for LAD "
+                "(hidden by default; use 'Show sky/miss points' to view).")
     finally:
         e.close()
     return PointCloudPreviewResponse(
@@ -9724,6 +10150,15 @@ def _read_las_into_arrays(
     # is carried verbatim as target_index — Helios auto-detects 0- vs 1-based
     # indexing, so no base conversion. Only mapped when the source dim is
     # present and a same-named extra-dim wasn't already captured above.
+    #
+    # CRUCIALLY, only map a dim that actually carries data. return_number,
+    # number_of_returns and gps_time are STANDARD LAS dimensions present in every
+    # point-format-3 record, so they exist (all-zero) even on a plain XYZ/E57
+    # import that never had per-pulse data. Mapping those zeros would make the LAD
+    # path see phantom multi-return columns — flipping it to the full-waveform
+    # algorithm and running gapfillMisses() on garbage timestamps. Require a
+    # non-degenerate column (some non-zero value, and for indices not all-equal)
+    # so only genuinely populated airborne-style LAS triggers multi-return.
     _las_multireturn = (
         ("return_number", "target_index"),
         ("number_of_returns", "target_count"),
@@ -9731,8 +10166,10 @@ def _read_las_into_arrays(
     )
     for src_dim, slug in _las_multireturn:
         if src_dim in dim_names and slug not in extras:
-            extras[slug] = np.asarray(las[src_dim], dtype=np.float32)
-            extra_dims_meta.append({"slug": slug, "label": _MULTI_RETURN_LABELS[slug]})
+            vals = np.asarray(las[src_dim])
+            if vals.size and np.any(vals != vals.flat[0]):  # not constant/all-zero
+                extras[slug] = vals.astype(np.float32)
+                extra_dims_meta.append({"slug": slug, "label": _MULTI_RETURN_LABELS[slug]})
     return positions, colors, intensity, extras, extra_dims_meta
 
 
@@ -9919,6 +10356,27 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         miss_info["miss_count"] = int(np.count_nonzero(miss_arr != 0))
     if scan_meta and scan_meta.get("origin") is not None:
         miss_info["scan_origin"] = scan_meta["origin"]
+    # Full scan-pattern params (origin + angular sweep + grid resolution) when
+    # the source carried them (E57, and PCD VIEWPOINT for origin). The renderer
+    # uses these to auto-create a Scan with populated ScanParameters, mirroring
+    # the Helios-XML import path. Only the recoverable fields are present.
+    if scan_meta and scan_meta.get("scan_params"):
+        miss_info["scan_params"] = scan_meta["scan_params"]
+    # Unplaceable misses: flagged miss cells whose beam direction couldn't be
+    # recovered at import (zeroed cartesian, no spherical) and so sit at the
+    # scanner origin until Helios recovers them from the row/column grid. Surface
+    # the count + a warning so this is never silent — a scan that imported "with
+    # misses" but whose misses are all unplaceable would otherwise look fine while
+    # the LAD geometry is incomplete until the C++ grid recovery runs.
+    if scan_meta and scan_meta.get("unplaceable_miss_count"):
+        upc = int(scan_meta["unplaceable_miss_count"])
+        miss_info["unplaceable_miss_count"] = upc
+        miss_info["warnings"] = [
+            f"{upc} sky/miss point(s) were flagged but could not be placed at "
+            "import (the scanner zeroed invalid-cell coordinates and the file "
+            "carries no scan angles). They are kept and tagged; their beam "
+            "directions are recovered from the scan grid during LAD."
+        ]
 
     return {"session_id": session_id, "point_count": n, **miss_info, **meta}
 
@@ -9927,57 +10385,85 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
 async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
                            origin_y: Optional[float] = None,
                            origin_z: Optional[float] = None):
-    """Return the session's sky/miss points relocated onto the hit cloud's
-    bounding sphere for display.
+    """Return the session's sky/miss points for display.
 
-    Misses are stored at their true far-field coordinates (~20 km) so LAD reads
-    real beam directions, but those coordinates are useless to look at. This
-    endpoint projects each miss onto a sphere of radius = the hit cloud's
-    bounding-sphere radius, centred on the scanner origin, so the renderer can
-    draw them at a sensible distance in a distinct colour. The scanner origin is
-    taken from the query params when supplied (the scan's params.origin); else it
-    falls back to the hit cloud's centre.
+    Misses are stored at their true coordinates (typically far-field, ~20 km,
+    along the real beam direction). Two display modes, chosen by whether the
+    caller supplies a scanner origin:
 
-    Returns {count, origin, radius, positions} where positions is a flat
-    [x,y,z, x,y,z, ...] list of the relocated miss points (empty when none).
+    - **No origin** (scan has no params yet): return the misses at their TRUE
+      stored coordinates, untouched. The data is the source of truth; we don't
+      invent positions. Far-field misses will sit far from the tree, but that
+      is honest and never shifts.
+
+    - **Origin supplied** (scan params define a scanner): project each miss onto
+      a sphere centred on the origin, with radius = the farthest hit's distance
+      from that origin plus a small margin, so misses always lie just BEYOND any
+      hit point. This keeps them visible against the cloud without depending on
+      anything but the stored beam direction and the origin.
+
+    Returns {count, total, origin, radius, positions} where positions is a flat
+    [x,y,z, x,y,z, ...] list (empty when none). `count` is how many are drawn;
+    `total` includes any miss that couldn't be placed (sitting AT the origin
+    with no beam direction yet — awaiting Helios grid recovery).
     """
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
         miss_arr = sess.extras.get(_MISS_SLUG)
         if miss_arr is None:
-            return {"count": 0, "origin": [0.0, 0.0, 0.0], "radius": 0.0, "positions": []}
+            return {"count": 0, "total": 0, "origin": [0.0, 0.0, 0.0], "radius": 0.0, "positions": []}
         keep = ~sess.deleted
         is_miss = (miss_arr != 0) & keep
         hits = (~(miss_arr != 0)) & keep
         miss_pos = np.ascontiguousarray(sess.positions[is_miss], dtype=np.float64)
-        hit_pos = sess.positions[hits]
+        hit_pos = np.ascontiguousarray(sess.positions[hits], dtype=np.float64)
 
     if miss_pos.shape[0] == 0:
-        return {"count": 0, "origin": [0.0, 0.0, 0.0], "radius": 0.0, "positions": []}
+        return {"count": 0, "total": 0, "origin": [0.0, 0.0, 0.0], "radius": 0.0, "positions": []}
 
-    # Bounding sphere of the HITS (never the misses — they'd blow the radius up).
+    has_origin = None not in (origin_x, origin_y, origin_z)
+
+    # No scanner origin defined: draw misses at their TRUE stored coordinates.
+    # Don't relocate — the array is the source of truth for display too.
+    if not has_origin:
+        return {
+            "count": int(miss_pos.shape[0]),
+            "total": int(miss_pos.shape[0]),
+            "origin": [0.0, 0.0, 0.0],
+            "radius": 0.0,
+            "positions": miss_pos.astype(np.float32).ravel().tolist(),
+        }
+
+    # Origin defined: project each miss onto a sphere centred on the origin, at a
+    # radius just beyond the farthest hit so misses always sit outside the cloud.
+    origin = np.array([origin_x, origin_y, origin_z], dtype=np.float64)
+    # Radius = farthest hit distance FROM THE ORIGIN (not the hit centre — the
+    # projection is origin-centred, so the enclosing radius must be too), plus a
+    # 5% margin to guarantee misses clear every hit point.
+    _MISS_SPHERE_MARGIN = 1.05
     if hit_pos.shape[0] > 0:
-        center = hit_pos.mean(axis=0)
-        radius = float(np.max(np.linalg.norm(hit_pos - center, axis=1)))
+        radius = float(np.max(np.linalg.norm(hit_pos - origin, axis=1))) * _MISS_SPHERE_MARGIN
     else:
-        center = miss_pos.mean(axis=0)
         radius = 1.0
     if radius <= 0:
         radius = 1.0
 
-    # Scanner origin: prefer the caller-supplied scan origin (true beam apex);
-    # fall back to the hit-cloud centre when unknown.
-    if None not in (origin_x, origin_y, origin_z):
-        origin = np.array([origin_x, origin_y, origin_z], dtype=np.float64)
-    else:
-        origin = center
-
     d = miss_pos - origin
     n = np.linalg.norm(d, axis=1)
-    n_safe = np.where(n > 0, n, 1.0)
-    relocated = origin + (d / n_safe[:, None]) * radius
+    # Skip unplaceable misses (sitting AT the scanner origin, no direction yet —
+    # those get their direction from the grid in Helios C++). Drawing them would
+    # pile a degenerate dot on the scanner. Only relocate misses with a real
+    # beam direction.
+    drawable = n > 1e-9
+    d = d[drawable]
+    n = n[drawable]
+    relocated = origin + (d / n[:, None]) * radius
     return {
-        "count": int(miss_pos.shape[0]),
+        # `count` is how many misses are DRAWN (placeable). `total` includes the
+        # unplaceable ones (sitting at origin, awaiting C++ grid recovery) that
+        # are flagged in the data but not shown in the overlay.
+        "count": int(relocated.shape[0]),
+        "total": int(miss_pos.shape[0]),
         "origin": origin.tolist(),
         "radius": radius,
         "positions": relocated.astype(np.float32).ravel().tolist(),

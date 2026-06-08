@@ -73,7 +73,10 @@ preference:
 1. **Imported misses.** Scans from an [E57 or structured PLY](../reference/file-formats.md#skymiss-points)
    carry real miss points (flagged `is_miss`). The inversion uses them directly.
    Toggle **Show misses** on the scan row to verify they're present — they draw
-   in a distinct colour on the scan's bounding sphere.
+   in a distinct colour. Until the scan has a scanner [origin](../workflows/simulate-scan.md),
+   the misses show at their true (typically far-field) coordinates; once you give
+   the scan a scanner origin, they're drawn on a sphere just beyond the farthest
+   hit so they stay visible against the cloud.
 2. **Gapfilled misses.** A scan with **no** miss points but **a `timestamp`
    column** has its misses recovered automatically at compute time: Phytograph
    reconstructs the scan grid from the pulse timestamps and fills the gaps. It
