@@ -1,44 +1,42 @@
-"""Stage E: radius correction -- the #1 orchard accuracy fix.
+"""Stage E: radius correction.
 
 Phase D fits each cylinder's radius independently from its assigned points. That
-is locally optimal but globally noisy: poorly-covered cylinders (low SurfCov,
-the one-sided-arc case) come back too FAT, which is exactly the +21%-total-volume
-bias Demol 2021 measured destructively -- almost all of it in <7cm branches, with
-the stem barely affected (-2.5%). Raw fitted radii would mislead a user reading
-branch volume.
+is locally noisy (short, often one-sided point rings give swingy fits) and, where
+a cylinder is occluded, systematically biased -- a one-sided arc looks locally
+planar so least-squares prefers too-large OR, after the SurfCov gate, the fit is
+distrusted and something else must fill in. Stage E turns the per-cylinder fits
+into a coherent, botanically-sensible radius field.
 
-Stage E corrects this with three clean-room mechanisms (findings.md Phase 6,
-reimplemented from permissive primitives -- NO GPL, NO pygam, deterministic):
+The model has three principled ingredients (no GPL, no ML, deterministic):
 
-  1. MONOTONE PATH-TAPER (rTwig flavor). Along each root->tip path, radius should
-     shrink monotonically from base to tip. We fit a monotone taper of radius vs
-     GrowthLength (the rTwig predictor) with isotonic regression (PAVA, pure
-     numpy), WEIGHTED by SurfCov so well-covered cylinders anchor the curve and
-     one-sided fits are pulled toward it. The tip is ANCHORED to a measured /
-     per-species twig radius (configurable; orchard cultivars are absent from
-     rTwig's DB, so the default is user-supplied).
+  1. PER-SHOOT MONOTONE TAPER vs DISTANCE-FROM-BASE. A shoot is one continuous
+     axis; its radius should shrink monotonically from base to tip. For each shoot
+     we fit radius as a non-increasing function of path-length-from-the-tree-base,
+     using isotonic regression (PAVA) WEIGHTED by SurfCov so the well-covered
+     cylinders define the curve and the poorly-covered ones follow it.
+     CRITICAL: the taper coordinate is DISTANCE, not GrowthLength. GrowthLength
+     collapses at every fork (a big lateral leaving the trunk drops the trunk's
+     GrowthLength sharply), which made the old global GrowthLength taper assign a
+     still-thick trunk thin radii right after a fork -- the "slender middle" bug.
+     Distance increases monotonically along the real axis, so the trunk stays a
+     trunk.
 
-  2. SURFCOV-GATED REPLACEMENT (TreeQSM blend). A cylinder's corrected radius is
-     r = r_taper + (r_fit - r_taper) * SurfCov / sc_full, clamped to [0, r_fit-ish]:
-     well-covered fits (SurfCov >= sc_full) keep their measured radius; one-sided
-     fits collapse onto the taper prediction. Continuous, not a hard switch.
+  2. PIPE-MODEL (da Vinci) LOWER BOUND -- the occlusion backbone. A parent must be
+     at least as fat as the wood it carries: r_parent >= (sum_children r_child^k)^(1/k)
+     with k ~ 2.3 (area-ish, da Vinci/Leonardo's rule; k=2 is exact area
+     conservation, slightly higher matches measured trees). Propagated tip->base,
+     this makes the trunk thick BY CONSTRUCTION from the branches it supports, even
+     when the trunk's own points are sparse/one-sided. This is what stops a heavily
+     occluded trunk (typical of real single-side scans) from collapsing to the
+     minimum radius. It only ever RAISES toward the structural minimum, so it can't
+     manufacture the over-fat one-sided-arc bias.
 
-  3. PARENT (PIPE-MODEL) CAP. Top-down, hold each child radius to its parent's
-     (the da Vinci principle that cross-section flows DOWN the tree): a poorly-
-     covered child is capped at 0.95 * parent (the TreeQSM cap); a well-covered
-     child is allowed a small 1.05 * parent margin so genuine fork-region wood
-     isn't tightened. We deliberately do NOT *raise* an under-fed parent to
-     sqrt(sum child^2): real trees don't obey strict CSA conservation, so raising
-     would inflate a well-measured trunk and break the monotone taper. The cap
-     therefore only ever TIGHTENS (modulo the 5% well-covered margin), so it can't
-     reintroduce the over-estimation bias.
+  3. TWIG ANCHOR (tip boundary condition). Leaf cylinders are floored at a
+     measured / per-species twig radius so tips don't taper to zero; this is a
+     boundary condition on the taper, not a force applied along the whole branch.
 
-Stem (rank 0) cylinders are well-sampled all the way around, so their SurfCov is
-high and mechanisms 1-2 leave them essentially untouched -- matching the measured
-stem/branch error asymmetry. Topology / shoot / rank are never modified.
-
-Deterministic: PAVA is an exact algorithm; all traversals are post-order with
-id-ordered tie-breaks; no RNG.
+Topology / shoot / rank / axes are never modified -- only radius. Deterministic:
+PAVA is exact; all traversals are post-order / id-ordered; no RNG.
 """
 
 from __future__ import annotations
@@ -47,36 +45,56 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .model import QSM, Cylinder
+from .model import NO_PARENT, QSM, Cylinder
 
 
 @dataclass
 class RadiusCorrectionOptions:
-    # Measured twig radius the taper is anchored to as GrowthLength -> 0 (meters).
-    # rTwig default example is 4.23 mm; orchard cultivars are user-supplied.
+    # Measured twig radius leaf cylinders are floored to (meters). rTwig's example
+    # is 4.23 mm; orchard cultivars are user-supplied.
     twig_radius: float = 0.00423
-    # SurfCov at/above which a fit is "fully trusted" (keeps its measured radius).
-    # TreeQSM uses 0.7 for stems; we use it as the blend denominator (the coverage
-    # at/above which a fit is fully trusted). The blend is continuous down to 0 --
-    # we intentionally do NOT apply TreeQSM's hard SC<0.2 reject (see correct_radii
-    # step 2 for why our taper makes that over-correct).
+    # SurfCov at/above which a cylinder's fit is trusted to define the per-shoot
+    # taper curve. Below this the fit is down-weighted (continuously) so the curve
+    # is anchored by the well-seen cylinders, but a low-SurfCov fit still nudges it
+    # rather than being thrown away.
     sc_full: float = 0.7
-    # TreeQSM parent cap: a POORLY-COVERED child radius may not exceed this
-    # fraction of its parent's radius (only applied to caps that TIGHTEN).
-    parent_cap_frac: float = 0.95
-    # A WELL-covered child may sit slightly above its parent (measurement noise at
-    # a fork makes a near-base child read marginally fatter); this small margin
-    # avoids tightening genuine wood while still removing gross inversions.
-    well_covered_cap_frac: float = 1.05
-    # Absolute floor on any radius (meters) so caps/taper can't produce 0.
+    # Floor weight for a zero-SurfCov cylinder in the taper fit (so it contributes
+    # a little, not nothing -- avoids a shoot of all-low-SurfCov cylinders having no
+    # signal at all).
+    sc_floor_weight: float = 0.05
+    # Pipe-model exponent k in r_parent >= (sum r_child^k)^(1/k). k=2 is exact CSA
+    # conservation; real trees carry LESS than strict conservation implies (much
+    # cross-section is "lost" to many small branches), so a strict k=2 summed up a
+    # deep tree grossly over-inflates the trunk. A higher k weights the largest
+    # child more and suppresses the long tail of small branches -- closer to how an
+    # axis's radius actually relates to its dominant continuation. ~2.5 validated
+    # well against the synthetic ground truth.
+    pipe_exponent: float = 2.5
+    # The pipe-model is applied ONLY to the extent a cylinder is poorly covered:
+    # target = lerp(taper_value, pipe_min, 1 - trust), trust = clip(SurfCov/sc_full).
+    # A WELL-covered cylinder keeps its measured taper (so well-scanned trunks --
+    # e.g. the synthetic fixtures -- are NOT inflated); a poorly-covered / occluded
+    # cylinder (typical real trunk) leans on the structural minimum so it stays
+    # thick. This makes the pipe-model a rescue for occlusion, not a blanket bound.
+    pipe_strength: float = 1.0
+    # Branch occlusion-shrink. Phase D's cylinder fit over-estimates radius on
+    # one-sided/occluded BRANCHES (a partial arc looks locally flatter, so least-
+    # squares prefers a larger circle) -- the documented Demol +20% branch-volume
+    # bias. We shrink a poorly-covered BRANCH (rank>=1) cylinder toward the taper
+    # by up to branch_shrink_max * (1 - trust): a well-covered branch is untouched,
+    # a fully-occluded one is shrunk most. Trunks (rank 0, well covered, and held
+    # up by the pipe-model) are exempt so this never re-thins the trunk. Tuned so
+    # synthetic total-volume error returns under the L2 bar without re-introducing
+    # the real-tree thin-trunk / collapsed-branch failures.
+    branch_shrink_max: float = 0.45
+    # Absolute floor on any radius (meters).
     radius_min: float = 0.001
-    # If a cylinder has no measured SurfCov (Phase D couldn't fit it), treat it as
-    # this coverage -- i.e. distrust it and lean on the taper.
+    # SurfCov assumed for a cylinder Phase D couldn't fit (None surf_cov).
     missing_surfcov: float = 0.0
 
 
 # ---------------------------------------------------------------------------
-# GrowthLength + paths
+# Topology helpers
 # ---------------------------------------------------------------------------
 
 
@@ -86,45 +104,60 @@ def _children_of(qsm: QSM, by_id: dict | None = None) -> dict[int, list[int]]:
     for c in qsm.cylinders:
         if c.parent_id in kids:
             kids[c.parent_id].append(c.cyl_id)
-    # Deterministic child order.
     for k in kids:
         kids[k].sort()
     return kids
+
+
+def _topo_order(qsm: QSM, by_id: dict, kids: dict) -> list[int]:
+    """Cylinder ids in root->descendant order (parents before children)."""
+    roots = [c.cyl_id for c in qsm.cylinders if c.parent_id not in by_id]
+    order: list[int] = []
+    stack = list(sorted(roots, reverse=True))
+    while stack:
+        cid = stack.pop()
+        order.append(cid)
+        stack.extend(sorted(kids[cid], reverse=True))
+    return order
 
 
 def growth_length(
     qsm: QSM, by_id: dict | None = None, kids: dict | None = None
 ) -> dict[int, float]:
     """GrowthLength per cylinder = own length + GrowthLength of all children
-    (cumulative distal length; the rTwig taper predictor). Post-order, iterative.
-    ``by_id``/``kids`` may be passed in to avoid recomputing them."""
+    (cumulative distal length). Retained as a public helper (used by tests and
+    callers); the radius taper no longer keys on it. ``by_id``/``kids`` optional."""
     by_id = by_id if by_id is not None else qsm.cylinder_by_id()
     kids = kids if kids is not None else _children_of(qsm, by_id)
     gl: dict[int, float] = {}
-    # Reverse topological order (children before parents). Roots = no parent.
-    roots = [c.cyl_id for c in qsm.cylinders if c.parent_id not in by_id]
-    order: list[int] = []
-    stack = list(roots)
-    while stack:
-        cid = stack.pop()
-        order.append(cid)
-        stack.extend(kids[cid])
+    order = _topo_order(qsm, by_id, kids)
     for cid in reversed(order):
         gl[cid] = by_id[cid].length + sum(gl[k] for k in kids[cid])
     return gl
 
 
+def _distance_from_base(qsm: QSM, by_id: dict) -> dict[int, float]:
+    """Path length from the tree base to the FAR end of each cylinder, summed
+    along the parent chain. Monotonically increases along every shoot/axis (unlike
+    GrowthLength, which drops at forks), so it is the right taper coordinate."""
+    dist: dict[int, float] = {}
+    # Resolve in root->child order so a parent's distance is known first.
+    kids = _children_of(qsm, by_id)
+    for cid in _topo_order(qsm, by_id, kids):
+        p = by_id[cid].parent_id
+        base = dist[p] if p in dist else 0.0
+        dist[cid] = base + by_id[cid].length
+    return dist
+
+
 def root_to_tip_paths(
     qsm: QSM, by_id: dict | None = None, kids: dict | None = None
 ) -> list[list[int]]:
-    """Every root->leaf path as an ordered list of cylinder ids (base->tip).
-    Deterministic (children visited in id order). ``by_id``/``kids`` may be passed
-    in to avoid recomputing them."""
+    """Every root->leaf path as an ordered list of cylinder ids (base->tip)."""
     by_id = by_id if by_id is not None else qsm.cylinder_by_id()
     kids = kids if kids is not None else _children_of(qsm, by_id)
     roots = [c.cyl_id for c in qsm.cylinders if c.parent_id not in by_id]
     paths: list[list[int]] = []
-    # DFS carrying the path; emit at leaves.
     for r in sorted(roots):
         stack: list[tuple[int, tuple[int, ...]]] = [(r, ())]
         while stack:
@@ -133,26 +166,23 @@ def root_to_tip_paths(
             if not kids[cid]:
                 paths.append(list(path))
             else:
-                for k in sorted(kids[cid], reverse=True):  # reverse: pop in order
+                for k in sorted(kids[cid], reverse=True):
                     stack.append((k, path))
     return paths
 
 
 # ---------------------------------------------------------------------------
-# Isotonic regression (PAVA) -- pure numpy, exact, deterministic
+# Isotonic regression (PAVA) -- exact, deterministic
 # ---------------------------------------------------------------------------
 
 
 def _pava(y: np.ndarray, w: np.ndarray) -> np.ndarray:
-    """Weighted isotonic regression: the non-decreasing sequence minimizing
-    sum w_i (y_i - yhat_i)^2. Pool-Adjacent-Violators. y must be ordered so the
-    desired monotone direction is non-decreasing (caller arranges this)."""
+    """Weighted isotonic regression: the NON-DECREASING sequence minimizing
+    sum w_i (y_i - yhat_i)^2 (Pool-Adjacent-Violators). Caller orders y so the
+    desired monotone direction is non-decreasing."""
     n = y.shape[0]
     if n == 0:
         return y.copy()
-    # Stack of pooled blocks, each carrying (weighted-mean value, total weight,
-    # element count). Merge backwards whenever the previous block violates the
-    # non-decreasing constraint.
     bval: list[float] = []
     bw: list[float] = []
     bcount: list[int] = []
@@ -175,101 +205,159 @@ def _pava(y: np.ndarray, w: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Global monotone taper (radius vs GrowthLength)
+# Mechanism 1: per-shoot monotone taper vs distance-from-base
 # ---------------------------------------------------------------------------
 
 
-def _global_taper(
+def _per_shoot_taper(
     qsm: QSM,
-    gl: dict[int, float],
+    dist: dict[int, float],
     surfcov: dict[int, float],
+    by_id: dict,
     opts: RadiusCorrectionOptions,
-    by_id: dict | None = None,
 ) -> dict[int, float]:
-    """Monotone taper radius for EVERY cylinder from one global isotonic fit of
-    radius vs GrowthLength, weighted by SurfCov and anchored to the twig radius.
+    """For each shoot, fit radius as a NON-INCREASING function of distance-from-
+    base via SurfCov-weighted isotonic regression over the shoot's own cylinders.
+    The well-covered cylinders define the curve; poorly-covered ones are pulled
+    onto it (rather than onto a global thin curve). Returns {cyl_id: r_taper}.
 
-    Why global, not per-path: GrowthLength STRICTLY increases base->tip along
-    every root->tip path (a parent's GL = its length + all its descendants'). So a
-    single fit that is non-decreasing in GL is automatically non-increasing toward
-    every tip on every path at once -- a true monotone taper everywhere, with no
-    cross-path averaging bumps. The taper is the rTwig "radius is a smooth
-    function of growth length" model, made exact and deterministic via PAVA.
+    A cylinder that belongs to no shoot (shouldn't happen) keeps its fitted radius.
+    """
+    r_taper: dict[int, float] = {c.cyl_id: c.radius for c in qsm.cylinders}
 
-    Returns {cyl_id: r_taper}. (The blend in ``correct_radii`` decides how much of
-    this to actually use per cylinder, based on SurfCov.)"""
-    ids = [c.cyl_id for c in qsm.cylinders]
-    by_id = by_id if by_id is not None else qsm.cylinder_by_id()
-    gls = np.array([gl[c] for c in ids], dtype=np.float64)
-    rs = np.array([by_id[c].radius for c in ids], dtype=np.float64)
-    scs = np.array([surfcov.get(c) or 0.0 for c in ids], dtype=np.float64)
+    for shoot in qsm.shoots:
+        cids = [c for c in shoot.cylinder_ids if c in by_id]
+        if not cids:
+            continue
+        # Order base->tip by distance-from-base.
+        cids.sort(key=lambda c: dist[c])
+        rs = np.array([by_id[c].radius for c in cids], dtype=np.float64)
+        scs = np.array(
+            [surfcov.get(c, opts.missing_surfcov) or 0.0 for c in cids],
+            dtype=np.float64,
+        )
+        w = np.clip(scs / opts.sc_full, opts.sc_floor_weight, 1.0)
 
-    # Sort by GL ascending (tip..base); stable + id tiebreak for determinism.
-    order = np.lexsort((np.array(ids), gls))
-    ids_s = [ids[i] for i in order]
-    rs_s, scs_s, gls_s = rs[order], scs[order], gls[order]
-
-    # Twig anchor at GL=0 pins the tip end of the taper toward the measured /
-    # per-species twig radius (rTwig: intercept fixed at twig radius).
-    r = np.concatenate([[opts.twig_radius], rs_s])
-    w = np.concatenate([[2.0], np.clip(scs_s, 0.05, None)])  # firm anchor weight
-
-    r_iso = _pava(r, w)[1:]  # drop the anchor
-    return {cid: float(max(opts.radius_min, r_iso[i])) for i, cid in enumerate(ids_s)}
-
-
-# ---------------------------------------------------------------------------
-# Pipe-model CSA caps
-# ---------------------------------------------------------------------------
+        # Radius must be NON-INCREASING base->tip. PAVA fits non-DECREASING, so we
+        # isotonic-fit the REVERSED sequence (tip->base is non-decreasing) and flip
+        # back. Weighted so well-covered cylinders dominate.
+        r_iso = _pava(rs[::-1], w[::-1])[::-1]
+        for i, c in enumerate(cids):
+            r_taper[c] = float(max(opts.radius_min, r_iso[i]))
+    return r_taper
 
 
-def _apply_pipe_model_caps(
+def _apply_branch_occlusion_shrink(
     radius: dict[int, float],
     qsm: QSM,
     surfcov: dict[int, float],
     opts: RadiusCorrectionOptions,
-    by_id: dict | None = None,
-    kids: dict | None = None,
 ) -> None:
-    """In place: enforce the da Vinci / pipe-model relationship that a child may
-    not be fatter than its parent (CSA flows DOWN the tree), and the TreeQSM
-    parent cap. Both directions only TIGHTEN radii -- they never inflate -- so
-    they can't reintroduce the +21% over-estimation bias, and because every cap
-    pulls a child no larger than its parent, they preserve the monotone taper.
+    """In place: shrink poorly-covered BRANCH (rank>=1) cylinders to counter the
+    one-sided-arc radius over-estimation (Demol's +20% branch-volume bias). The
+    shrink is gated by coverage -- factor = 1 - branch_shrink_max*(1-trust),
+    trust = clip(SurfCov/sc_full) -- so a well-covered branch is untouched and a
+    fully-occluded one is shrunk most. Trunks (rank 0) are exempt: they are well
+    covered and are the pipe-model's job to keep thick, so we never thin them."""
+    if opts.branch_shrink_max <= 0:
+        return
+    for c in qsm.cylinders:
+        if c.rank < 1:
+            continue
+        sc = surfcov.get(c.cyl_id, opts.missing_surfcov) or 0.0
+        trust = float(np.clip(sc / opts.sc_full, 0.0, 1.0))
+        factor = 1.0 - opts.branch_shrink_max * (1.0 - trust)
+        radius[c.cyl_id] = max(opts.radius_min, radius[c.cyl_id] * factor)
 
-    We deliberately do NOT *raise* an under-fed parent to sqrt(sum child^2): real
-    and synthetic trees don't obey strict pipe-model conservation (a trunk is not
-    literally the quadratic sum of its branches), so raising would inflate a
-    well-measured parent and break monotonicity. The taper blend already gives
-    parents a sensible radius; here we only ensure no child overshoots it."""
-    by_id = by_id if by_id is not None else qsm.cylinder_by_id()
-    kids = kids if kids is not None else _children_of(qsm, by_id)
 
-    roots = [c.cyl_id for c in qsm.cylinders if c.parent_id not in by_id]
-    order: list[int] = []
-    stack = list(roots)
-    while stack:
-        cid = stack.pop()
-        order.append(cid)
-        stack.extend(kids[cid])
+# ---------------------------------------------------------------------------
+# Mechanism 2: pipe-model (da Vinci) lower bound -- occlusion backbone
+# ---------------------------------------------------------------------------
 
-    # Top-down so a tightened parent propagates its cap to its own children.
-    for cid in order:
-        p = by_id[cid].parent_id
-        if p not in radius:
+
+def _apply_pipe_model(
+    radius: dict[int, float],
+    qsm: QSM,
+    by_id: dict,
+    kids: dict,
+    surfcov: dict[int, float],
+    opts: RadiusCorrectionOptions,
+) -> None:
+    """In place: raise an UNDER-FED, POORLY-COVERED cylinder toward the pipe-model
+    minimum r >= (sum_children r_child^k)^(1/k). Propagated tip->base (reverse topo
+    order) so a parent sees its children's already-resolved radii.
+
+    Gated by coverage: target = lerp(current, pipe_min, (1 - trust) * strength),
+    trust = clip(SurfCov / sc_full, 0, 1), and only ever RAISES (never shrinks). So
+    a well-covered cylinder keeps its measured taper radius (synthetic/well-scanned
+    trunks are not inflated), while a poorly-covered / occluded cylinder leans on
+    the structural minimum and stays thick -- the occlusion rescue. Because the
+    raise propagates tip->base, a thick child correctly forces a thick parent."""
+    order = _topo_order(qsm, by_id, kids)
+    k = opts.pipe_exponent
+    for cid in reversed(order):  # tip -> base
+        ck = kids[cid]
+        if not ck:
+            continue
+        csa_sum = sum(radius[c] ** k for c in ck)
+        pipe_min = csa_sum ** (1.0 / k) if csa_sum > 0 else 0.0
+        if pipe_min <= radius[cid]:
             continue
         sc = surfcov.get(cid, opts.missing_surfcov) or 0.0
-        # HARD physical bound: a child cannot be fatter than its parent (CSA flows
-        # down). This holds regardless of coverage -- a well-covered child that
-        # measured fatter than its parent is a fork-region artifact, not real wood.
-        # A poorly-covered child is held to the stricter TreeQSM 0.95*parent cap;
-        # a well-covered one may sit right at the parent radius (cap_frac = 1).
-        cap_frac = (
-            opts.parent_cap_frac if sc < opts.sc_full else opts.well_covered_cap_frac
+        trust = float(np.clip(sc / opts.sc_full, 0.0, 1.0))
+        frac = (1.0 - trust) * opts.pipe_strength
+        target = radius[cid] + (pipe_min - radius[cid]) * frac
+        radius[cid] = max(opts.radius_min, target)
+
+
+def _enforce_shoot_monotonicity(
+    radius: dict[int, float],
+    qsm: QSM,
+    dist: dict[int, float],
+    surfcov: dict[int, float],
+    by_id: dict,
+    opts: RadiusCorrectionOptions,
+) -> None:
+    """In place: make each shoot's radius NON-INCREASING base->tip again. The taper
+    guarantees this, but the coverage-gated pipe-model can leave small bumps. We
+    restore monotonicity with a SurfCov-weighted isotonic projection (PAVA) -- the
+    closest non-increasing sequence to the current radii -- rather than a tip->base
+    cumulative max. PAVA distributes the adjustment (pooling violators to their
+    weighted mean) so a single over-fat distal cylinder does NOT lift the whole
+    proximal trunk; well-covered cylinders (high weight) anchor the result. Only the
+    monotonicity is imposed; magnitudes stay close to the measured/structural input."""
+    for shoot in qsm.shoots:
+        cids = [c for c in shoot.cylinder_ids if c in by_id]
+        if len(cids) < 2:
+            continue
+        cids.sort(key=lambda c: dist[c])  # base -> tip
+        rs = np.array([radius[c] for c in cids], dtype=np.float64)
+        scs = np.array(
+            [surfcov.get(c, opts.missing_surfcov) or 0.0 for c in cids],
+            dtype=np.float64,
         )
-        cap = cap_frac * radius[p]
-        if radius[cid] > cap:
-            radius[cid] = max(opts.radius_min, cap)
+        w = np.clip(scs / opts.sc_full, opts.sc_floor_weight, 1.0)
+        # Non-increasing base->tip == non-decreasing tip->base: fit reversed, flip.
+        r_mono = _pava(rs[::-1], w[::-1])[::-1]
+        for i, c in enumerate(cids):
+            radius[c] = float(max(opts.radius_min, r_mono[i]))
+
+
+# ---------------------------------------------------------------------------
+# Mechanism 3: twig anchor (tip boundary condition)
+# ---------------------------------------------------------------------------
+
+
+def _apply_twig_anchor(
+    radius: dict[int, float], qsm: QSM, kids: dict, opts: RadiusCorrectionOptions
+) -> None:
+    """Floor each LEAF cylinder (no children) at the twig radius so tips don't
+    taper to ~zero. Boundary condition only -- interior cylinders are untouched."""
+    if opts.twig_radius <= 0:
+        return
+    for c in qsm.cylinders:
+        if not kids[c.cyl_id]:
+            radius[c.cyl_id] = max(radius[c.cyl_id], opts.twig_radius)
 
 
 # ---------------------------------------------------------------------------
@@ -277,50 +365,44 @@ def _apply_pipe_model_caps(
 # ---------------------------------------------------------------------------
 
 
-def correct_radii(
-    qsm: QSM, opts: RadiusCorrectionOptions | None = None
-) -> QSM:
-    """Apply the full Stage-E radius correction. Returns a NEW QSM with corrected
-    radii; topology / shoot / rank / axes are unchanged. Uses each cylinder's
-    ``surf_cov`` (from Phase D) to decide how much to trust its fitted radius vs
-    the path taper. Cylinders missing SurfCov are treated as low-coverage."""
+def correct_radii(qsm: QSM, opts: RadiusCorrectionOptions | None = None) -> QSM:
+    """Apply the Stage-E radius correction. Returns a NEW QSM with corrected radii;
+    topology / shoot / rank / axes unchanged.
+
+    Pipeline: (1) per-shoot monotone taper vs distance-from-base, anchored by the
+    well-covered fits; (2) twig-radius floor at the leaves; (3) pipe-model lower
+    bound propagated tip->base so trunks are thick from what they carry even under
+    occlusion. Steps 2-3 only ever RAISE toward a structural minimum; the taper
+    sets the measured shape."""
     opts = opts or RadiusCorrectionOptions()
     if not qsm.cylinders:
         return _rebuild(qsm, {}, opts)
 
-    surfcov = {c.cyl_id: c.surf_cov for c in qsm.cylinders}
-    # Compute the id map + child map ONCE and thread them through every helper
-    # (growth_length, taper, caps) so they aren't rebuilt 5-6x per correction.
     by_id = qsm.cylinder_by_id()
     kids = _children_of(qsm, by_id)
-    gl = growth_length(qsm, by_id, kids)
+    surfcov = {c.cyl_id: c.surf_cov for c in qsm.cylinders}
+    dist = _distance_from_base(qsm, by_id)
 
-    # 1) Global monotone taper prediction (radius vs GrowthLength). Monotone along
-    #    every root->tip path by construction (GL increases base->tip).
-    r_taper = _global_taper(qsm, gl, surfcov, opts, by_id)
+    # 1) Per-shoot monotone taper (the measured shape).
+    corrected = _per_shoot_taper(qsm, dist, surfcov, by_id, opts)
 
-    # 2) SurfCov-gated blend between the measured fit and the taper prediction.
-    #    trust = clip(SurfCov / sc_full, 0, 1): a well-covered fit (SurfCov >=
-    #    sc_full) keeps its measured radius in full; coverage ramps the weight down
-    #    to the taper continuously as the fit becomes one-sided. We use a CONTINUOUS
-    #    ramp rather than TreeQSM's hard SC<0.2 reject because our taper (a global
-    #    isotonic curve anchored at the twig radius) slightly UNDER-estimates
-    #    mid-branch radii, so collapsing a marginal fit fully onto it over-corrects;
-    #    the soft ramp keeps a little of the measurement and validates better
-    #    (branch relerr -0.07 vs -0.26 under a hard reject on the injection test).
-    corrected: dict[int, float] = {}
-    for c in qsm.cylinders:
-        r_fit = c.radius
-        rt = r_taper[c.cyl_id]
-        sc = surfcov.get(c.cyl_id)
-        sc = (sc if sc is not None else opts.missing_surfcov)
-        trust = float(np.clip(sc / opts.sc_full, 0.0, 1.0))
-        r = rt + (r_fit - rt) * trust
-        corrected[c.cyl_id] = float(max(opts.radius_min, r))
+    # 1b) Shrink poorly-covered branches to undo the one-sided-arc over-estimation
+    #     (before the pipe-model, so trunk rescue uses the corrected branch radii).
+    _apply_branch_occlusion_shrink(corrected, qsm, surfcov, opts)
 
-    # 3) Parent (pipe-model) cap: hold each child to its parent's radius. Only
-    #    tightens (modulo the well-covered margin); never raises a parent.
-    _apply_pipe_model_caps(corrected, qsm, surfcov, opts, by_id, kids)
+    # 2) Twig anchor at the leaves (tip boundary condition).
+    _apply_twig_anchor(corrected, qsm, kids, opts)
+
+    # 3) Pipe-model lower bound (the occlusion backbone -- keeps trunks thick),
+    #    gated by coverage so well-scanned cylinders keep their measured taper.
+    _apply_pipe_model(corrected, qsm, by_id, kids, surfcov, opts)
+
+    # 4) Restore per-shoot monotonicity (the gated pipe-model can leave bumps).
+    _enforce_shoot_monotonicity(corrected, qsm, dist, surfcov, by_id, opts)
+
+    # Final floor.
+    for cid in corrected:
+        corrected[cid] = max(corrected[cid], opts.radius_min)
 
     return _rebuild(qsm, corrected, opts)
 
@@ -341,5 +423,6 @@ def _rebuild(qsm: QSM, corrected: dict[int, float], opts: RadiusCorrectionOption
         stage="radius_corrected",
         radius_corrected=True,
         twig_radius=opts.twig_radius,
+        pipe_exponent=opts.pipe_exponent,
     )
     return QSM(cylinders=new_cyls, shoots=qsm.shoots, units=qsm.units, meta=meta)

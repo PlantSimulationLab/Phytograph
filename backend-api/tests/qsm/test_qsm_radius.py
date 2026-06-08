@@ -1,25 +1,26 @@
-"""Phase E: radius correction (monotone taper + pipe-model caps + twig anchor).
+"""Phase E: radius correction.
 
-The accuracy bug this stage fixes (Demol 2021, destructive over 65 trees): QSM
-radii over-estimate total volume by ~+21%, almost ALL of it in <7cm branches,
-while the STEM is barely affected (-2.5%). Phase D's independent per-cylinder
-fits reproduce exactly that failure mode -- poorly-covered (one-sided) branch
-cylinders come back too fat. Phase E must:
+Model (reworked 2026-06-08 after real-data feedback): per-shoot MONOTONE taper vs
+DISTANCE-FROM-BASE (anchored by the well-covered fits), a coverage-gated BRANCH
+occlusion-shrink (undo the one-sided-arc over-fattening), a TWIG anchor at the
+leaves, and a coverage-gated PIPE-MODEL lower bound propagated tip->base (keeps a
+heavily-occluded trunk thick from the wood it carries), followed by a PAVA
+monotonicity projection. The earlier GrowthLength-keyed global taper made a still-
+thick trunk go thin right after a fork (GrowthLength drops at every fork) and
+collapsed occluded trunks to the floor; distance-from-base + pipe-model fix both.
 
-  1. PRESERVE THE STEM. Well-sampled rank-0 cylinders (high SurfCov) must come
-     out essentially unchanged -- the correction is not allowed to "fix" wood
-     that was already right. This is the -2.5% vs +21% asymmetry.
-  2. CORRECT FAT BRANCHES. Injected over-fat, low-SurfCov branch cylinders must
-     be pulled back toward truth, reducing branch radius error and total volume
-     error.
-  3. RESTORE MONOTONE TAPER. After correction, no cylinder is grossly fatter than
-     its parent (radius shrinks base->tip); residual inversions are bounded by the
-     well-covered margin, never the raw-fit blow-up.
+Phase E must:
+  1. PRESERVE THE STEM. Well-sampled rank-0 radius comes out essentially
+     unchanged (the Demol -2.5% vs +21% stem/branch asymmetry).
+  2. CORRECT FAT BRANCHES. Injected over-fat, low-SurfCov branch cylinders are
+     pulled back toward truth (the branch occlusion-shrink).
+  3. MONOTONE PER SHOOT. Each continuous shoot is non-increasing base->tip after
+     correction (a radius increase ACROSS a fork, trunk-tip -> thick lateral, is
+     legitimate and not penalized).
 
-We validate by INJECTING the documented failure mode (fat low-coverage branch
-radii) into a clean Phase-D fit and checking the correction removes it without
-touching the stem -- reported stem vs branch SEPARATELY, as the plan requires.
-An overlay PNG is rendered for visual check.
+We validate by INJECTING the documented failure mode (fat low-coverage branches)
+into a clean Phase-D fit and checking the correction removes it without touching
+the stem -- stem vs branch reported SEPARATELY. An overlay PNG is rendered too.
 """
 
 from __future__ import annotations
@@ -35,7 +36,6 @@ from qsm.radius import (
     RadiusCorrectionOptions,
     correct_radii,
     growth_length,
-    root_to_tip_paths,
     _pava,
 )
 from qsm.segments import segments_to_qsm
@@ -71,19 +71,6 @@ def _inject_fat_branches(qsm, factor=1.8, surfcov=0.2):
             n += 1
     assert n > 0
     return out
-
-
-def _max_relative_inversion(qsm) -> float:
-    """Largest (child_r - parent_r)/parent_r over all parent->child edges (0 if
-    perfectly monotone)."""
-    by_id = qsm.cylinder_by_id()
-    worst = 0.0
-    for path in root_to_tip_paths(qsm):
-        rs = [by_id[c].radius for c in path]
-        for a, b in zip(rs[:-1], rs[1:]):
-            if b > a:
-                worst = max(worst, (b - a) / a)
-    return worst
 
 
 # --------------------------------------------------------------------------
@@ -157,20 +144,39 @@ def test_correction_fixes_fat_low_coverage_branches():
     assert abs(m_corr.mean_relerr_stem) < 0.06, m_corr.mean_relerr_stem
 
 
+def _max_within_shoot_inversion(qsm) -> float:
+    """Largest (r[i+1]-r[i])/r[i] where i,i+1 are consecutive base->tip cylinders
+    of the SAME shoot (0 if every shoot is perfectly non-increasing). Per-shoot is
+    the new model's contract: across a fork (trunk-tip -> thick lateral base) a
+    radius increase is legitimate, so we check WITHIN each continuous axis only."""
+    from qsm.radius import _distance_from_base
+    by_id = qsm.cylinder_by_id()
+    dist = _distance_from_base(qsm, by_id)
+    worst = 0.0
+    for s in qsm.shoots:
+        cids = [c for c in s.cylinder_ids if c in by_id]
+        cids.sort(key=lambda c: dist[c])  # base -> tip
+        rs = [by_id[c].radius for c in cids]
+        for a, b in zip(rs[:-1], rs[1:]):
+            if b > a:
+                worst = max(worst, (b - a) / a)
+    return worst
+
+
 def test_correction_restores_monotone_taper():
-    """After correction, gross radius inversions (a child much fatter than its
-    parent) are removed -- the worst relative inversion drops well below the raw
-    fit's and is bounded by the well-covered margin."""
+    """The reworked model guarantees each SHOOT is non-increasing base->tip (the
+    per-shoot monotone taper + the PAVA monotonicity pass). Even after injecting
+    grossly fat branch cylinders, every shoot comes out monotone -- the within-shoot
+    inversion is ~0, far below the injected fit's."""
     _, _, fit = _fit()
     inj = _inject_fat_branches(fit)
-    opts = RadiusCorrectionOptions(twig_radius=TWIG_R)
-    corr = correct_radii(inj, opts)
+    corr = correct_radii(inj, RadiusCorrectionOptions(twig_radius=TWIG_R))
 
-    raw_worst = _max_relative_inversion(inj)
-    corr_worst = _max_relative_inversion(corr)
+    raw_worst = _max_within_shoot_inversion(inj)
+    corr_worst = _max_within_shoot_inversion(corr)
     assert corr_worst < raw_worst, f"inversion {raw_worst:.3f} -> {corr_worst:.3f}"
-    # No inversion exceeds the well-covered margin (gross inversions eliminated).
-    assert corr_worst <= opts.well_covered_cap_frac - 1.0 + 1e-6, corr_worst
+    # Each shoot is monotone non-increasing base->tip (allow float noise only).
+    assert corr_worst <= 1e-6, f"within-shoot inversion {corr_worst:.4f} (not monotone)"
 
 
 def test_twig_anchor_pulls_low_coverage_tips_toward_twig_radius():
