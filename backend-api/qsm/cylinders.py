@@ -443,7 +443,38 @@ def fit_qsm_cylinders(
             nc.mad = fit.mad
         new_cyls.append(nc)
 
+    _reconnect_child_bases(new_cyls, qsm)
     return _rebuild(qsm, new_cyls, fitted=n_fit, reason="ok")
+
+
+def _reconnect_child_bases(cyls: list[Cylinder], qsm: QSM) -> None:
+    """In place: snap each CHILD-SHOOT base cylinder's start onto its parent so the
+    branch is physically connected.
+
+    The skeleton attaches every child branch's base EXACTLY to its parent (gap 0),
+    but Phase D fits each cylinder's axis independently, so the shared parent->child
+    node drifts a few cm apart -- leaving the child tube floating off the parent.
+    We move ONLY the base cylinder of each shoot whose parent is in a DIFFERENT
+    shoot (the cross-fork join; within-shoot joins are reconciled elsewhere),
+    setting its start to the nearest point on the parent cylinder's fitted axis
+    segment. This re-establishes connectivity in the QSM DATA so every consumer
+    (renderer, metrics, export) sees a connected model; it shifts one endpoint by a
+    few cm and never changes topology, radius, or any other cylinder."""
+    by_id = {c.cyl_id: c for c in cyls}
+    cyl_shoot = {c.cyl_id: c.shoot_id for c in cyls}
+    for c in cyls:
+        p = by_id.get(c.parent_id)
+        if p is None or cyl_shoot.get(p.cyl_id) == c.shoot_id:
+            continue  # root, or a within-shoot join (handled by joint averaging)
+        # Nearest point on the parent's segment to the child's current base.
+        ab = p.end - p.start
+        L2 = float(ab @ ab)
+        if L2 == 0:
+            attach = p.start
+        else:
+            t = float(np.clip((c.start - p.start) @ ab / L2, 0.0, 1.0))
+            attach = p.start + t * ab
+        c.start = attach
 
 
 _EMPTY = np.zeros((0, 3), dtype=np.float64)

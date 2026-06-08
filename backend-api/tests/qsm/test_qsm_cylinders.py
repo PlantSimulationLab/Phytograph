@@ -244,6 +244,36 @@ def test_no_fitted_cylinder_grossly_longer_than_provisional():
         )
 
 
+def test_child_shoots_are_connected_to_their_parent():
+    """Every child shoot's base cylinder must sit ON its parent (physical
+    connection). The skeleton attaches them exactly, but the independent per-
+    cylinder fit drifts the shared node a few cm apart; the Phase-D reconnection
+    pass must snap it back so branches don't float off the trunk."""
+    gt, cloud, prov, fitted = _provisional_and_fitted()
+    bid = fitted.cylinder_by_id()
+
+    def seg_dist(p, a, b):
+        ab = b - a
+        L2 = float(ab @ ab)
+        if L2 == 0:
+            return float(np.linalg.norm(p - a))
+        t = float(np.clip((p - a) @ ab / L2, 0.0, 1.0))
+        return float(np.linalg.norm(p - (a + t * ab)))
+
+    n_checked = 0
+    for s in fitted.shoots:
+        if s.parent_shoot_id < 0 or not s.cylinder_ids:
+            continue
+        c0 = bid[s.cylinder_ids[0]]
+        parent = bid.get(c0.parent_id)
+        if parent is None:
+            continue
+        gap = seg_dist(np.asarray(c0.start), np.asarray(parent.start), np.asarray(parent.end))
+        assert gap < 1e-6, f"child shoot {s.shoot_id} base floats {gap:.4f} m off parent"
+        n_checked += 1
+    assert n_checked > 0  # the fixture actually has child shoots
+
+
 def test_divergence_guard_rejects_relocated_fit():
     """A cylinder fed points that pull its fitted axis far from the seed is flagged
     unreliable, so its geometry is NOT moved. Simulate a clean cylinder PLUS a
