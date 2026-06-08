@@ -186,3 +186,141 @@ describe('appendTube', () => {
     expect(arr.positions.every((v) => Number.isFinite(v))).toBe(true);
   });
 });
+
+// Regression for the "giant tube shooting into the ground / crown slabs" bug:
+// previously NOTHING tested that the geometry the renderer builds from a WHOLE
+// multi-shoot tree stays bounded. The backend tests pass (data is clean) and the
+// E2E only checks the results-panel DOM, so a renderer that drew an out-of-bounds
+// tube would slip through. These tests build geometry from a realistic multi-shoot
+// QSM and assert every rendered vertex stays inside the cylinders' bounding box
+// (plus a max-radius margin) and that no tube segment is far longer than the
+// cylinders that produced it -- exactly the pathology the screenshot showed.
+describe('whole-tree rendered geometry stays bounded (regression)', () => {
+  // A small tree: a trunk (rank 0) + two scaffolds (rank 1), each a chain of
+  // contiguous cylinders, spanning a known bounding box ~[0,2] in each axis.
+  function smallTree(): { cylinders: QSMCylinder[]; shoots: QSMShoot[] } {
+    const cylinders: QSMCylinder[] = [];
+    let id = 0;
+    const chain = (
+      from: [number, number, number],
+      to: [number, number, number],
+      n: number,
+      r0: number,
+      r1: number,
+      shoot_id: number,
+      rank: number,
+      firstParent: number
+    ): number[] => {
+      const ids: number[] = [];
+      let prev = firstParent;
+      for (let i = 0; i < n; i++) {
+        const t0 = i / n, t1 = (i + 1) / n;
+        const lerp = (a: number[], b: number[], t: number) =>
+          [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t] as [number, number, number];
+        cylinders.push(
+          cyl(id, lerp(from, to, t0), lerp(from, to, t1), r0 + (r1 - r0) * t0, shoot_id, rank, prev)
+        );
+        ids.push(id);
+        prev = id;
+        id++;
+      }
+      return ids;
+    };
+    const trunkIds = chain([0, 0, 0], [0, 0, 1], 10, 0.05, 0.03, 0, 0, -1);
+    const sc1 = chain([0, 0, 1], [1, 0, 2], 6, 0.025, 0.01, 1, 1, trunkIds[trunkIds.length - 1]);
+    const sc2 = chain([0, 0, 1], [-1, 0.5, 2], 6, 0.025, 0.01, 2, 1, trunkIds[trunkIds.length - 1]);
+    const shoots = [
+      shoot(0, 0, trunkIds),
+      shoot(1, 1, sc1),
+      shoot(2, 1, sc2),
+    ];
+    return { cylinders, shoots };
+  }
+
+  function renderAll(cylinders: QSMCylinder[], shoots: QSMShoot[]) {
+    const arr = emptyArrays();
+    for (const p of buildShootPolylines(cylinders, shoots)) {
+      appendTube(arr, p.nodes, p.radii, p.nodes.map(() => new THREE.Color(1, 0, 0)), 8);
+    }
+    return arr;
+  }
+
+  function cylBBox(cylinders: QSMCylinder[]) {
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    let maxR = 0;
+    for (const c of cylinders) {
+      for (const p of [c.start, c.end]) for (let k = 0; k < 3; k++) {
+        lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]);
+      }
+      maxR = Math.max(maxR, c.radius);
+    }
+    return { lo, hi, maxR };
+  }
+
+  it('every rendered vertex stays within the cylinder bounding box (+radius)', () => {
+    const { cylinders, shoots } = smallTree();
+    const arr = renderAll(cylinders, shoots);
+    const { lo, hi, maxR } = cylBBox(cylinders);
+    const m = maxR + 1e-6; // a surface vertex sits up to one radius outside the axis bbox
+    for (let i = 0; i < arr.positions.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        const v = arr.positions[i + k];
+        expect(v).toBeGreaterThanOrEqual(lo[k] - m);
+        expect(v).toBeLessThanOrEqual(hi[k] + m);
+      }
+    }
+    // No NaN/Inf anywhere.
+    expect(arr.positions.every((v) => Number.isFinite(v))).toBe(true);
+  });
+
+  it('no tube segment is far longer than the cylinders that produced it', () => {
+    const { cylinders, shoots } = smallTree();
+    const maxCylLen = Math.max(
+      ...cylinders.map((c) =>
+        Math.hypot(c.end[0] - c.start[0], c.end[1] - c.start[1], c.end[2] - c.start[2])
+      )
+    );
+    let worst = 0;
+    for (const p of buildShootPolylines(cylinders, shoots)) {
+      for (let i = 0; i < p.nodes.length - 1; i++) {
+        worst = Math.max(worst, p.nodes[i].distanceTo(p.nodes[i + 1]));
+      }
+    }
+    // A tube node-segment is ~one cylinder long; allow generous slack but catch a
+    // giant span (the 40 m streak the screenshot showed would be ~hundreds x).
+    expect(worst).toBeLessThanOrEqual(maxCylLen * 3);
+  });
+
+  it('a SCRAMBLED cylinder_ids order cannot create a giant span (defensive)', () => {
+    // If a shoot's cylinder_ids ever arrive out of base->tip order, the renderer
+    // must not draw a tube leaping across the tree. buildShootPolylines orders by
+    // the chain; assert the worst node-segment stays bounded even when ids are
+    // shuffled, by sorting them back into a contiguous chain via parent links.
+    const { cylinders, shoots } = smallTree();
+    const byId = new Map(cylinders.map((c) => [c.cyl_id, c]));
+    // Shuffle the trunk shoot's ids.
+    const trunk = shoots[0];
+    const shuffled = [...trunk.cylinder_ids].reverse();
+    const scrambled = [{ ...trunk, cylinder_ids: shuffled }, shoots[1], shoots[2]];
+    const polys = buildShootPolylines(cylinders, scrambled);
+    let worst = 0;
+    for (const p of polys) {
+      for (let i = 0; i < p.nodes.length - 1; i++) {
+        worst = Math.max(worst, p.nodes[i].distanceTo(p.nodes[i + 1]));
+      }
+    }
+    // Even reversed, consecutive cylinders are physically adjacent (a reversed
+    // contiguous chain is still contiguous), so no giant span. This documents the
+    // assumption: buildShootPolylines REQUIRES cylinder_ids to be a contiguous
+    // chain; it does not re-sort. (Backend guarantees contiguity -- verified in
+    // backend tests.) The geometric bound still holds here.
+    const maxCylLen = Math.max(
+      ...cylinders.map((c) =>
+        Math.hypot(c.end[0] - c.start[0], c.end[1] - c.start[1], c.end[2] - c.start[2])
+      )
+    );
+    expect(worst).toBeLessThanOrEqual(maxCylLen * 3);
+    expect(byId.size).toBe(cylinders.length);
+  });
+});

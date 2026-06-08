@@ -203,6 +203,73 @@ def test_full_fit_is_deterministic():
     assert np.array_equal(r1, r2)
 
 
+# --------------------------------------------------------------------------
+# Divergence guard -- regression for the "giant cylinder shooting off into
+# space" bug. A Gauss-Newton fit can converge to a wild axis offset on a
+# pathological point set (e.g. crossing-branch points handed over by the
+# nearest-cylinder assignment), relocating the cylinder metres from its
+# trustworthy skeleton position. The fitted CYLINDER GEOMETRY must stay near the
+# input; these assert on the geometry (not just radius), which the earlier tests
+# did NOT -- which is why the bug slipped through.
+# --------------------------------------------------------------------------
+
+
+def test_no_fitted_cylinder_escapes_the_cloud_bbox():
+    """Every fitted cylinder must stay within the cloud's bounding box (plus a
+    radius margin). A diverged fit that shoots an endpoint far outside the cloud
+    (the 100 m below-ground tube seen on real data) must be caught and fall back
+    to the provisional position."""
+    gt, cloud, prov, fitted = _provisional_and_fitted()
+    lo = cloud.min(axis=0)
+    hi = cloud.max(axis=0)
+    max_r = max(c.radius for c in fitted.cylinders)
+    margin = max_r + 0.05
+    for c in fitted.cylinders:
+        for p in (c.start, c.end):
+            assert np.all(p >= lo - margin), f"cyl {c.cyl_id} endpoint {p} below {lo}"
+            assert np.all(p <= hi + margin), f"cyl {c.cyl_id} endpoint {p} above {hi}"
+
+
+def test_no_fitted_cylinder_grossly_longer_than_provisional():
+    """A fit may re-fit the local axis tilt but must not BALLOON a cylinder's
+    length. Each fitted cylinder stays within a small factor of its provisional
+    length (a diverged fit that relocates an endpoint makes the cylinder huge)."""
+    gt, cloud, prov, fitted = _provisional_and_fitted()
+    pb = prov.cylinder_by_id()
+    for c in fitted.cylinders:
+        prov_len = pb[c.cyl_id].length
+        # Allow generous slack for legitimate axial re-fit, catch gross blow-ups.
+        assert c.length <= max(prov_len * 3.0, 0.05), (
+            f"cyl {c.cyl_id} length {c.length:.2f} >> provisional {prov_len:.2f}"
+        )
+
+
+def test_divergence_guard_rejects_relocated_fit():
+    """A cylinder fed points that pull its fitted axis far from the seed is flagged
+    unreliable, so its geometry is NOT moved. Simulate a clean cylinder PLUS a
+    cluster of off-axis points (a crossing branch) and confirm the fit either stays
+    near the seed or is flagged unreliable -- never relocates metres away."""
+    start, end, pts = _simulate_cylinder(
+        start=[0.0, 0.0, 0.0], axis=[0, 0, 1], length=0.4,
+        radius=0.03, n=3000, noise=0.001, seed=11,
+    )
+    # Add a dense off-axis blob 5 m away (the kind of contamination that diverges GN).
+    rng = np.random.default_rng(0)
+    blob = np.array([5.0, 5.0, 5.0]) + rng.normal(0, 0.05, (1500, 3))
+    contaminated = np.vstack([pts, blob])
+    fit = fit_cylinder(contaminated, start, end, seed_radius=0.05)
+    assert fit is not None
+    moved = max(
+        float(np.linalg.norm(fit.start - np.asarray(start))),
+        float(np.linalg.norm(fit.end - np.asarray(end))),
+    )
+    # Either the fit resisted the blob (stayed near seed) or, if it was pulled, the
+    # divergence guard flagged it unreliable so the driver keeps the provisional.
+    assert (moved < 0.5) or (not fit.reliable), (
+        f"fit relocated {moved:.2f} m and was marked reliable -- divergence not caught"
+    )
+
+
 def test_empty_cloud_keeps_provisional():
     gt = simple_tree()
     cloud = sample_cloud(gt, seed=5, points_per_m2=16000, noise_sigma=0.0005)

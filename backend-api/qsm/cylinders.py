@@ -89,6 +89,12 @@ class CylinderFitOptions:
     runaway_factor: float = 4.0
     runaway_surfcov: float = 0.3
     runaway_mad_frac: float = 0.25  # mad above this fraction of radius == loose fit
+    # Divergence guard: a fitted axis that relocates an endpoint farther than
+    # (scale*seg_len + abs) from the skeleton seed is a diverged Gauss-Newton fit
+    # (wild axis offset) -> rejected, keep the provisional position. The skeleton
+    # axis is trustworthy, so a real fit only nudges the axis by < its own length.
+    max_axis_shift_scale: float = 2.0   # multiples of the cylinder's own length
+    max_axis_shift_abs: float = 0.10    # meters, floor for very short cylinders
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +281,22 @@ def fit_cylinder(
 
     fit_start = project(seed_start)
     fit_end = project(seed_end)
+
+    # DIVERGENCE GUARD. Gauss-Newton can converge to a wild axis OFFSET (x0,y0 blow
+    # up) on a pathological point set -- e.g. points from a crossing branch that the
+    # nearest-cylinder assignment handed this cylinder -- which projects the
+    # endpoints metres away from the (trustworthy) skeleton position. The result is
+    # a giant cylinder shooting off into space. The skeleton axis is reliable, so a
+    # fit that RELOCATES an endpoint farther than max_axis_shift_scale*seg_len +
+    # max_axis_shift_abs from its seed is a divergence: flag it unreliable so the
+    # driver keeps the provisional position + radius.
+    shift = max(
+        float(np.linalg.norm(fit_start - seed_start)),
+        float(np.linalg.norm(fit_end - seed_end)),
+    )
+    max_shift = opts.max_axis_shift_scale * seg_len + opts.max_axis_shift_abs
+    if shift > max_shift:
+        reliable = False
 
     # Quality metrics on the final fit (use the rotated-frame residuals).
     dist, _ = residual_and_jac(par)
