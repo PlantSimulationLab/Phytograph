@@ -76,6 +76,36 @@ test('builds a QSM with shoot ranks from a plant cloud via the UI', async () => 
     // assert the click is accepted and the row stays present.
     await trunkShoot.click();
     await expect(trunkShoot).toBeVisible();
+
+    // --- Deleting the source scan must NOT bring back the import overlay ---
+    // The QSM outlives its source scan; with the scan gone the scene is still
+    // non-empty, so the empty-viewer hint must stay hidden.
+    await expect(page.getByTestId('empty-viewer-hint')).toHaveCount(0);
+    const scanId = await cloudRow.getAttribute('data-scan-id');
+    await page.getByTestId(`scan-delete-${scanId}`).click();
+    await expect(page.getByText('Delete cloud?', { exact: true })).toBeVisible();
+    await page.getByTestId('confirm-delete').click();
+    // Scan row gone, QSM row remains, and the import overlay does NOT appear.
+    await expect(cloudRow).toHaveCount(0);
+    await expect(page.getByTestId('qsm-row')).toHaveCount(1);
+    await expect(page.getByTestId('empty-viewer-hint')).toHaveCount(0);
+
+    // --- Delete requires confirmation (like scans/meshes/skeletons) ---
+    // Click the QSM's delete (trash) button: a confirmation dialog must appear
+    // rather than deleting immediately.
+    await page.getByTestId(/^qsm-delete-/).first().click();
+    const dialog = page.getByText('Delete QSM?', { exact: true });
+    await expect(dialog).toBeVisible();
+    // Cancel keeps the QSM.
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByTestId('qsm-row')).toHaveCount(1);
+
+    // Re-open the dialog and confirm: the QSM row is removed.
+    await page.getByTestId(/^qsm-delete-/).first().click();
+    await expect(page.getByText('Delete QSM?', { exact: true })).toBeVisible();
+    await page.getByTestId('confirm-delete').click();
+    await expect(page.getByTestId('qsm-row')).toHaveCount(0);
   } finally {
     await close();
   }

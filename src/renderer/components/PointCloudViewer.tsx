@@ -473,11 +473,13 @@ export default function PointCloudViewer({
     }
   }, [importRefsCallback, importMesh, importSkeleton]);
 
-  // Report whether the viewer holds any non-scan content (meshes or skeletons)
-  // so App can dismiss the empty-state hint when e.g. a plant is generated.
+  // Report whether the viewer holds any non-scan content (meshes, skeletons, or
+  // QSMs) so App can dismiss the empty-state hint when e.g. a plant is generated
+  // or a QSM is built — these outlive the source scan, so deleting the scan must
+  // not bring the import overlay back while they're still rendered.
   useEffect(() => {
-    onViewerContentChange?.(meshes.length > 0 || skeletons.length > 0);
-  }, [onViewerContentChange, meshes.length, skeletons.length]);
+    onViewerContentChange?.(meshes.length > 0 || skeletons.length > 0 || qsms.length > 0);
+  }, [onViewerContentChange, meshes.length, skeletons.length, qsms.length]);
 
   // Export panel state
   const [showExportPanel, setShowExportPanel] = useState(false);
@@ -5248,10 +5250,12 @@ export default function PointCloudViewer({
       }
     } else if (deleteConfirm.type === 'cloud') {
       onRemoveCloud(deleteConfirm.id);
+    } else if (deleteConfirm.type === 'qsm') {
+      handleRemoveQSM(deleteConfirm.id);
     }
 
     setDeleteConfirm(null);
-  }, [deleteConfirm, handleRemoveMesh, handleRemoveSkeleton, onRemoveCloud, selectedMeshId, selectedSkeletonId]);
+  }, [deleteConfirm, handleRemoveMesh, handleRemoveSkeleton, handleRemoveQSM, onRemoveCloud, selectedMeshId, selectedSkeletonId]);
 
   // Toggle skeleton visibility
   const handleToggleSkeletonVisibility = useCallback((skeletonId: string) => {
@@ -9265,7 +9269,8 @@ export default function PointCloudViewer({
                         {qsm.visible ? <Eye className="w-3 h-3 text-neutral-300" /> : <EyeOff className="w-3 h-3 text-neutral-500" />}
                       </button>
                       <button
-                        onClick={(e) => { e.stopPropagation(); handleRemoveQSM(qsm.id); }}
+                        data-testid={`qsm-delete-${qsm.id}`}
+                        onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'qsm', id: qsm.id, name: sourceCloud?.data.fileName || 'QSM' }); }}
                         className="p-1 hover:bg-neutral-600 rounded"
                         title="Delete"
                       >
@@ -13377,7 +13382,7 @@ export default function PointCloudViewer({
       {deleteConfirm && (
         <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-neutral-800 rounded-lg p-4 shadow-xl max-w-sm mx-4">
-            <div className="text-sm font-medium text-neutral-200 mb-2">Delete {deleteConfirm.type}?</div>
+            <div className="text-sm font-medium text-neutral-200 mb-2">Delete {deleteConfirm.type === 'qsm' ? 'QSM' : deleteConfirm.type}?</div>
             <div className="text-xs text-neutral-400 mb-4">
               Are you sure you want to delete "{deleteConfirm.name}"? This action cannot be undone.
             </div>
