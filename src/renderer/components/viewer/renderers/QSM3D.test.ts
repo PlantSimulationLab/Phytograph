@@ -3,9 +3,34 @@ import * as THREE from 'three';
 import {
   buildShootPolylines,
   appendTube,
+  rankColor,
+  RANK_COLORS,
   type MeshArrays,
 } from './QSM3D';
 import type { QSMCylinder, QSMShoot } from '../../../utils/backendApi';
+
+// Regression: adjacent ranks must be visually DISTINGUISHABLE. The trunk (rank 0)
+// and scaffold (rank 1) were once nearly the same hue (brown vs amber), so a parent
+// and its child branch read as the same colour even though their ranks differed.
+describe('rank colors are distinguishable', () => {
+  const rgbDist = (a: THREE.Color, b: THREE.Color) =>
+    Math.sqrt((a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2);
+
+  it('every adjacent rank pair is clearly separated', () => {
+    for (let i = 0; i < RANK_COLORS.length - 1; i++) {
+      const d = rgbDist(rankColor(i), rankColor(i + 1));
+      expect(d).toBeGreaterThan(0.4); // the old brown->amber was 0.23 (too close)
+    }
+  });
+
+  it('every rank color is bright enough for the dark background', () => {
+    for (let i = 0; i < RANK_COLORS.length; i++) {
+      const c = rankColor(i);
+      const lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+      expect(lum).toBeGreaterThan(0.2);
+    }
+  });
+});
 
 // Helpers to fabricate minimal QSM data with exact, known geometry.
 function cyl(

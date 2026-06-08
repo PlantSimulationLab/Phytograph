@@ -36,13 +36,19 @@ export interface QSM3DProps {
 // blob against the dark viewer background (the old trunk brown + blue were too
 // dark). Trunk is still the most muted so the structure reads "solid trunk,
 // brighter branches".
+// Each adjacent rank pair must be clearly DISTINGUISHABLE. The previous brown
+// trunk + amber scaffold were nearly the same hue (20deg vs 22deg, RGB dist 0.23),
+// so a rank-0 trunk and its rank-1 scaffold read as the same colour. This palette
+// keeps the trunk a neutral wood-tan but makes rank 1 a clearly different
+// red-orange, and cycles well-separated hues after (every adjacent pair RGB dist
+// >= 0.42), while keeping every colour bright enough for the dark background.
 export const RANK_COLORS = [
-  new THREE.Color('#c08552'), // rank 0 trunk - warm brown (was too-dark #5b3a1e)
-  new THREE.Color('#e0922b'), // rank 1 scaffold - amber
-  new THREE.Color('#5fa8ff'), // rank 2 - sky blue (lifted from #3b82f6)
-  new THREE.Color('#3ed47a'), // rank 3 - green
-  new THREE.Color('#c08bff'), // rank 4 - violet
-  new THREE.Color('#ff6fb0'), // rank 5+ - pink
+  new THREE.Color('#b08d57'), // rank 0 trunk - neutral wood tan
+  new THREE.Color('#e8552d'), // rank 1 scaffold - red-orange (distinct from trunk)
+  new THREE.Color('#3e9bff'), // rank 2 - blue
+  new THREE.Color('#2fcf6b'), // rank 3 - green
+  new THREE.Color('#b76bff'), // rank 4 - violet
+  new THREE.Color('#ff5fa8'), // rank 5+ - pink
 ];
 
 export function rankColor(rank: number): THREE.Color {
