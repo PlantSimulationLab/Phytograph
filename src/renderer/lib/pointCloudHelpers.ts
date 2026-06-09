@@ -107,6 +107,97 @@ export function voxelMeshToHeliosGrid(
   };
 }
 
+// Per-triangle geometry derived from the face normal, in the leaf-angle
+// convention (Z up). Single source of truth for the mesh pseudocolor modes
+// (computeMeshTriangleScalars) and the leaf-angle distribution
+// (leafAngleDistribution.ts), so both read identical angles/areas.
+//   inclination — angle of the face normal from +Z, folded to [0,90]deg
+//                 (0 = horizontal face, 90 = vertical); NaN for degenerate tris.
+//   azimuth     — bearing of the (outward) normal's horizontal projection in
+//                 [0,360)deg; NaN for (near-)horizontal faces with no meaningful
+//                 azimuth. See `outwardRef` for how "outward" is decided.
+//   area        — triangle area in the mesh's squared units (always finite >= 0).
+// `vertices` is x,y,z-interleaved; `indices` is the flat triangle index list;
+// `t` is the triangle ordinal (reads indices[t*3 .. t*3+2]).
+//
+// `outwardRef` (optional) is a point the facet's outward normal should face —
+// the sensor origin that scanned this triangle. When given, the normal is
+// oriented toward it (away from the surface, toward the scanner), so a scanned
+// closed surface like a sphere reads a CONTINUOUS outward azimuth with no
+// hemisphere seam. When omitted (no scan provenance, or unreliable winding), we
+// fall back to orienting the normal into the upper hemisphere (flip when nz<0),
+// which is deterministic but seams a sphere at its equator. Inclination is
+// orientation-independent (uses |nz|), so this only affects azimuth.
+export function triangleGeometry(
+  vertices: Float32Array | number[],
+  indices: Uint32Array | number[],
+  t: number,
+  outwardRef?: { x: number; y: number; z: number } | null,
+): { inclination: number; azimuth: number; area: number } {
+  const i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
+  const ax = vertices[i0 * 3], ay = vertices[i0 * 3 + 1], az = vertices[i0 * 3 + 2];
+  const bx = vertices[i1 * 3], by = vertices[i1 * 3 + 1], bz = vertices[i1 * 3 + 2];
+  const cx = vertices[i2 * 3], cy = vertices[i2 * 3 + 1], cz = vertices[i2 * 3 + 2];
+  // n = (b - a) x (c - a); |n| = 2 * area; direction = face normal.
+  const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+  const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+  const nx = e1y * e2z - e1z * e2y;
+  const ny = e1z * e2x - e1x * e2z;
+  const nz = e1x * e2y - e1y * e2x;
+  const len = Math.hypot(nx, ny, nz);
+  const area = 0.5 * len;
+
+  if (len < 1e-20) {
+    return { inclination: NaN, azimuth: NaN, area };
+  }
+  // Inclination folds up/down faces together via |n.z|.
+  const inclination = Math.acos(Math.min(1, Math.abs(nz / len))) * (180 / Math.PI);
+
+  // Orient the normal before reading its bearing.
+  let ox = nx, oy = ny, oz = nz;
+  if (outwardRef) {
+    // Point the normal toward the scanner: flip it if it currently points away
+    // from `outwardRef` (negative dot with centroid→ref). Gives the true
+    // outward direction on a scanned surface regardless of triangle winding.
+    const gx = (ax + bx + cx) / 3, gy = (ay + by + cy) / 3, gz = (az + bz + cz) / 3;
+    const rx = outwardRef.x - gx, ry = outwardRef.y - gy, rz = outwardRef.z - gz;
+    if (nx * rx + ny * ry + nz * rz < 0) { ox = -ox; oy = -oy; oz = -oz; }
+  } else if (nz < 0) {
+    // No reference: fold into the upper hemisphere for determinism.
+    ox = -ox; oy = -oy; oz = -oz;
+  }
+
+  // Azimuth: compass bearing of the oriented normal's horizontal projection.
+  const h = Math.hypot(ox, oy);
+  let azimuth: number;
+  if (h < 1e-12) {
+    azimuth = NaN;  // (near-)horizontal face has no meaningful azimuth
+  } else {
+    let deg = Math.atan2(oy, ox) * (180 / Math.PI);
+    if (deg < 0) deg += 360;
+    azimuth = deg;
+  }
+  return { inclination, azimuth, area };
+}
+
+// Resolve the per-triangle outward reference (the scanner origin that saw
+// triangle `t`) from a mesh's scan provenance, or null when the mesh carries no
+// scan origins. Pass the result as `triangleGeometry`'s `outwardRef` so azimuth
+// uses the true outward normal. Returns a closure so the flat scanOrigins
+// buffer is decoded lazily per triangle without per-call allocation.
+export function outwardRefForMesh(
+  data: MeshData,
+): ((t: number) => { x: number; y: number; z: number } | null) | null {
+  const { triangleScanIds, scanOrigins } = data;
+  if (!triangleScanIds || !scanOrigins) return null;
+  const nScans = scanOrigins.length / 3;
+  return (t: number) => {
+    const s = triangleScanIds[t];
+    if (s < 0 || s >= nScans) return null;
+    return { x: scanOrigins[s * 3], y: scanOrigins[s * 3 + 1], z: scanOrigins[s * 3 + 2] };
+  };
+}
+
 // Compute one scalar per triangle of a mesh for a given pseudocolor mode.
 // Returns the per-triangle values plus their finite min/max (for the colorbar).
 // 'solid' returns null — there's nothing to scale.
@@ -119,13 +210,12 @@ export function voxelMeshToHeliosGrid(
 //
 // IMPORTANT (azimuth/normal orientation): a triangulated point cloud has no
 // consistent face winding, so the raw cross-product normal points to an
-// arbitrary side per triangle — adjacent coplanar faces can disagree by 180deg,
-// which made azimuth flip randomly. Helios's Triangulation stores no normal to
-// follow, so there is no upstream convention. We adopt the standard leaf-angle
-// convention: orient every normal into the upper hemisphere (force n.z >= 0)
-// before deriving angles. This is deterministic and matches how leaf
-// inclination/azimuth distributions are defined for plant LiDAR. (Inclination
-// already used |n.z| so it was unaffected; azimuth now uses the oriented n.)
+// arbitrary side per triangle. For azimuth we orient each normal toward the
+// scanner that saw the triangle when the mesh carries scan origins (true
+// outward bearing, continuous across a closed surface); otherwise we fall back
+// to folding into the upper hemisphere (deterministic but seams a sphere at the
+// equator). See `triangleGeometry`/`outwardRefForMesh`. Inclination uses |n.z|
+// and is orientation-independent.
 export function computeMeshTriangleScalars(
   data: MeshData,
   mode: MeshColorMode,
@@ -137,49 +227,14 @@ export function computeMeshTriangleScalars(
   let min = Infinity;
   let max = -Infinity;
 
-  const ax = new THREE.Vector3();
-  const bx = new THREE.Vector3();
-  const cx = new THREE.Vector3();
-  const e1 = new THREE.Vector3();
-  const e2 = new THREE.Vector3();
-  const n = new THREE.Vector3();
+  // Only azimuth needs the outward reference; skip the lookup for other modes.
+  const refFor = mode === 'azimuth' ? outwardRefForMesh(data) : null;
 
   for (let t = 0; t < triangleCount; t++) {
-    const i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
-    ax.set(vertices[i0 * 3], vertices[i0 * 3 + 1], vertices[i0 * 3 + 2]);
-    bx.set(vertices[i1 * 3], vertices[i1 * 3 + 1], vertices[i1 * 3 + 2]);
-    cx.set(vertices[i2 * 3], vertices[i2 * 3 + 1], vertices[i2 * 3 + 2]);
-    e1.subVectors(bx, ax);
-    e2.subVectors(cx, ax);
-    n.crossVectors(e1, e2); // length = 2 * area; direction = face normal
-
-    let v: number;
-    if (mode === 'area') {
-      v = 0.5 * n.length();
-    } else {
-      const len = n.length();
-      if (len < 1e-20) {
-        v = NaN; // degenerate triangle — no meaningful normal
-      } else if (mode === 'inclination') {
-        // Fold to [0,90]: a face and its back read the same inclination.
-        const cosz = Math.abs(n.z / len);
-        v = Math.acos(Math.min(1, cosz)) * (180 / Math.PI);
-      } else {
-        // azimuth: bearing of the normal's horizontal projection. Orient the
-        // normal into the upper hemisphere first (flip when n.z < 0) so the
-        // arbitrary triangle winding can't flip the bearing by 180deg.
-        let nx = n.x, ny = n.y;
-        if (n.z < 0) { nx = -nx; ny = -ny; }
-        const h = Math.hypot(nx, ny);
-        if (h < 1e-12) {
-          v = NaN; // (near-)horizontal face has no meaningful azimuth
-        } else {
-          let deg = Math.atan2(ny, nx) * (180 / Math.PI);
-          if (deg < 0) deg += 360;
-          v = deg;
-        }
-      }
-    }
+    const g = triangleGeometry(vertices, indices, t, refFor ? refFor(t) : null);
+    const v = mode === 'area' ? g.area
+      : mode === 'inclination' ? g.inclination
+      : g.azimuth;
 
     values[t] = v;
     if (Number.isFinite(v)) {

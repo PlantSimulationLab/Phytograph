@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.8.0"
+BACKEND_VERSION = "0.9.1"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -2139,6 +2139,12 @@ class HeliosTriangulationResponse(BaseModel):
     # triangle belongs to exactly one scan; this lets the UI color triangles by
     # their originating scan.
     triangle_scan_ids: List[int] = []
+    # Grid cell index (into the request grid, row-major i + nx*(j + ny*k)) that
+    # each triangle's centroid falls in, aligned 1:1 with `triangles`. -1 means
+    # the centroid fell outside every cell. With the auto 1x1x1 grid every
+    # triangle lands in cell 0. Lets the UI split per-cell leaf-angle
+    # distributions.
+    triangle_cell_ids: List[int] = []
     # True when no explicit grid was supplied and the backend triangulated all
     # points within their auto-computed bounding box (assumes ground/trunk were
     # already segmented or cropped). Carries a human-readable companion message.
@@ -2333,6 +2339,47 @@ def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
     return xml_path
 
 
+def _triangulation_zero_message(diag: dict, lmax: float, max_aspect: float) -> str:
+    """Human-readable explanation for a 0-triangle result, derived from the
+    filter breakdown so the user can tell a data problem from a filter problem.
+    """
+    cand = diag["candidates"]
+    if cand == 0:
+        return ("No triangles generated: the triangulation produced no candidate "
+                "triangles at all. The selected points are too few, collinear, or "
+                "fell outside the grid box — check that the scan has data inside "
+                "the triangulation grid.")
+    lm, asp = diag["dropped_lmax"], diag["dropped_aspect"]
+    # Attribute to whichever filter removed the most candidates.
+    if lm >= asp:
+        return (f"No triangles generated: all {cand} candidate triangle(s) were "
+                f"filtered, {lm} of them because an edge exceeded Lmax "
+                f"({lmax:g} m). The point spacing is coarser than Lmax — increase "
+                f"Lmax (or rescan at higher resolution).")
+    return (f"No triangles generated: all {cand} candidate triangle(s) were "
+            f"filtered, {asp} of them by the aspect-ratio limit "
+            f"({max_aspect:g}). Raise the Max Aspect Ratio to keep elongated "
+            f"triangles.")
+
+
+def _triangulation_quality_warning(diag: dict):
+    """Warn when a mesh was produced but almost nothing was filtered, which
+    means Lmax/aspect are large enough to bridge real gaps — the mesh may
+    contain spurious triangles spanning unsampled regions. Returns None when
+    the result looks healthy.
+    """
+    cand = diag["candidates"]
+    if cand == 0 or diag["kept"] == 0:
+        return None
+    dropped = diag["dropped_lmax"] + diag["dropped_aspect"] + diag["dropped_degenerate"]
+    if dropped / cand < 0.01:
+        return (f"Only {dropped} of {cand} candidate triangle(s) were filtered "
+                f"(<1%). Lmax/Max Aspect Ratio may be large enough to bridge real "
+                f"gaps in the point cloud — inspect the mesh for triangles spanning "
+                f"unsampled regions, and lower Lmax if so.")
+    return None
+
+
 def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
     """Run Helios triangulation synchronously. Returns a result dict.
 
@@ -2496,6 +2543,13 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
         scan_vert_blocks = []   # list of (T_s*9,) float32 flat-vertex arrays
         scan_id_blocks = []     # list of (T_s,) per-triangle source scan index
 
+        # Triangulation filter diagnostics, summed across the per-scan clouds.
+        # Helios attributes each dropped candidate to ONE primary reason (edge
+        # length > Lmax, then aspect ratio, then degenerate/NaN area), so
+        # candidates == kept + dropped_lmax + dropped_aspect + dropped_degenerate.
+        diag = {"candidates": 0, "kept": 0, "dropped_lmax": 0,
+                "dropped_aspect": 0, "dropped_degenerate": 0}
+
         for scan_idx, scan_info in enumerate(scans_info):
             xml_path = _generate_helios_xml(
                 tmpdir, [scan_info], grid_center, grid_size,
@@ -2508,6 +2562,14 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
             cloud.loadXML(xml_path)
             cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
             tri_count = cloud.getTriangleCount()
+
+            stats = cloud.getTriangulationStats()
+            diag["candidates"] += stats["candidates"]
+            diag["kept"] += tri_count
+            diag["dropped_lmax"] += stats["dropped_lmax"]
+            diag["dropped_aspect"] += stats["dropped_aspect"]
+            diag["dropped_degenerate"] += stats["dropped_degenerate"]
+
             if tri_count == 0:
                 continue
 
@@ -2516,14 +2578,21 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
             scan_id_blocks.append(np.full(tri_count, scan_idx, dtype=np.int64))
 
         if not scan_vert_blocks:
+            # A genuine zero. Report success=False (the UI keys off this) and
+            # surface the filter breakdown so the user can tell whether the data
+            # was too coarse for Lmax (most/all candidates dropped by Lmax),
+            # the shape filter was too aggressive (dropped by aspect), or there
+            # was simply nothing to triangulate (no candidates at all).
             return {
-                "success": True,
+                "success": False,
                 "vertices": [],
                 "triangles": [],
                 "num_triangles": 0,
                 "num_vertices": 0,
                 "method_used": "helios",
-                "error": "No triangles generated. Try increasing Lmax or adjusting max_aspect_ratio.",
+                "error": _triangulation_zero_message(diag, request.lmax,
+                                                     request.max_aspect_ratio),
+                "diagnostics": diag,
                 "grid_warning": grid_warning,
                 "grid_message": grid_message,
             }
@@ -2547,6 +2616,15 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
         v2 = unique_arr[triangles_arr[:, 2]]
         total_area = float(0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1).sum())
 
+        # Per-triangle grid cell: bin each triangle's centroid into the request
+        # grid (the same grid Helios triangulated within). Lets the UI split the
+        # leaf-angle distribution per voxel. With the auto 1x1x1 grid this is all
+        # zeros.
+        centroids = (v0 + v1 + v2) / 3.0
+        triangle_cell_ids = _bin_points_to_cells(
+            centroids, grid_center, grid_size, grid_nx, grid_ny, grid_nz
+        ).tolist()
+
         return {
             "success": True,
             "vertices": unique_vertices,
@@ -2556,6 +2634,9 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
             "num_vertices": len(unique_vertices),
             "method_used": "helios",
             "triangle_scan_ids": triangle_scan_ids,
+            "triangle_cell_ids": triangle_cell_ids,
+            "diagnostics": diag,
+            "diagnostics_warning": _triangulation_quality_warning(diag),
             "grid_warning": grid_warning,
             "grid_message": grid_message,
         }
@@ -3149,6 +3230,39 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
             "error": f"Leaf area density computation failed: {str(e)}",
             "warnings": warnings,
         }
+
+
+def _bin_points_to_cells(points, grid_center, grid_size, nx: int, ny: int, nz: int):
+    """Assign each point to a grid cell, returning a flat (N,) int array of cell
+    indices (row-major i + nx*(j + ny*k)); points outside the grid get -1.
+
+    The grid is the explicit request grid (center/size are full extents,
+    nx/ny/nz the per-axis subdivisions) — a regular axis-aligned lattice, so the
+    cell of a point is a direct floor-divide. This is the binning shared by the
+    per-voxel hit count and the per-triangle cell assignment; the row-major
+    ordering here is the convention the frontend reconstructs cells with.
+    """
+    import numpy as np
+
+    pts = np.asarray(points, dtype=np.float64)
+    n = pts.shape[0] if pts.ndim == 2 else 0
+    if n == 0:
+        return np.empty(0, dtype=np.int64)
+
+    center = np.asarray(grid_center, dtype=np.float64)
+    size = np.asarray(grid_size, dtype=np.float64)
+    ndiv = np.array([max(1, int(nx)), max(1, int(ny)), max(1, int(nz))], dtype=np.int64)
+
+    lo = center - size / 2.0
+    step = np.where(ndiv > 0, size / ndiv, 1.0)
+    safe_step = np.where(step > 0, step, 1.0)
+
+    ijk = np.floor((pts - lo) / safe_step).astype(np.int64)
+    inside = np.all((ijk >= 0) & (ijk < ndiv), axis=1)
+    flat = np.full(n, -1, dtype=np.int64)
+    ii = ijk[inside]
+    flat[inside] = ii[:, 0] + ndiv[0] * (ii[:, 1] + ndiv[1] * ii[:, 2])
+    return flat
 
 
 def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: list):
@@ -8250,6 +8364,24 @@ def _first_data_row_has_letters(file_path: str) -> bool:
     return any(re.search(r'[a-zA-Z]', tok) for tok in line.split())
 
 
+def _ascii_pandas_sep(file_path: str) -> str:
+    """pandas `sep` for an ASCII xyz-family file, from its sniffed delimiter.
+
+    The wizard preview splits rows with `_detect_ascii_delimiter` /
+    `_split_ascii_row` (comma → tab → semicolon → whitespace), but the loaders
+    historically hardcoded `sep=r'\\s+'`. That silently broke comma- /
+    semicolon-delimited exports (e.g. CloudCompare's `//X,Y,Z,...` files): the
+    whole row landed in column 0 and `usecols=[1, 2, ...]` raised "Usecols do
+    not match columns". Resolve the same delimiter the preview used so the
+    load path agrees with what the user saw.
+
+    Returns a regex/literal suitable for pandas `sep=`. Whitespace (and the
+    no-data fallback) stays `r'\\s+'` to collapse runs of spaces/tabs.
+    """
+    delim = _detect_ascii_delimiter(file_path)
+    return {'comma': ',', 'tab': '\t', 'semicolon': ';'}.get(delim, r'\s+')
+
+
 def _ascii_skiprows(file_path: str) -> int:
     """How many leading lines pandas must be told to skip explicitly.
 
@@ -8689,11 +8821,12 @@ def _load_xyz_arrays(
     names = [role for role, _ in sorted_roles]
 
     skiprows = _ascii_skiprows(file_path)
+    sep = _ascii_pandas_sep(file_path)
 
     try:
         df = pd.read_csv(
             file_path,
-            sep=r'\s+', header=None, comment='#',
+            sep=sep, header=None, comment='#',
             usecols=usecols, names=names,
             dtype=np.float32, engine='c', skip_blank_lines=True,
             skiprows=skiprows, on_bad_lines='skip',
@@ -9134,6 +9267,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
     skiprows = _ascii_skiprows(str(source_path))
+    sep = _ascii_pandas_sep(str(source_path))
 
     chunk_rows = 2_000_000
 
@@ -9149,7 +9283,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
         intensity_pos = names.index(intensity_role)
         gmin, gmax = np.inf, -np.inf
         for col_chunk in pd.read_csv(
-            source_path, sep=r"\s+", header=None,
+            source_path, sep=sep, header=None,
             usecols=[intensity_pos], comment="#",
             skiprows=skiprows, chunksize=chunk_rows, engine="c",
         ):
@@ -9171,7 +9305,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
         order = np.argsort(np.argsort(xyz_pos))  # usecols sorts by position; map back to x,y,z
         xyz_min = np.array([np.inf, np.inf, np.inf])
         for col_chunk in pd.read_csv(
-            source_path, sep=r"\s+", header=None,
+            source_path, sep=sep, header=None,
             usecols=xyz_pos, comment="#",
             skiprows=skiprows, chunksize=chunk_rows, engine="c",
         ):
@@ -9182,7 +9316,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
         header.offsets = np.floor(np.where(np.isfinite(xyz_min), xyz_min, 0.0))
 
         total_points = _xyz_to_las_stream(
-            source_path, out_las, header, names, skiprows, chunk_rows,
+            source_path, out_las, header, names, skiprows, sep, chunk_rows,
             rgb_cols, rgb_is_255, intensity_role, intensity_lo, intensity_hi,
             extra_dims,
         )
@@ -9205,9 +9339,9 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     return total_points, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
 
 
-def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, chunk_rows,
-                       rgb_cols, rgb_is_255, intensity_role, intensity_lo,
-                       intensity_hi, extra_dims) -> int:
+def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
+                       chunk_rows, rgb_cols, rgb_is_255, intensity_role,
+                       intensity_lo, intensity_hi, extra_dims) -> int:
     """Inner streaming loop for `_xyz_to_las`, split out so the caller can wrap
     column-mismatch errors (raised here from the float casts) into a clean 400.
     Returns the total points written."""
@@ -9216,7 +9350,7 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, chunk_rows
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         reader = pd.read_csv(
             source_path,
-            sep=r"\s+",
+            sep=sep,
             header=None,
             names=names,
             usecols=[i for i, c in enumerate(names) if not _is_skip_name(c)],
@@ -11905,8 +12039,9 @@ def _load_cloud_for_segmentation(
                 detail=f"ASCII format must include x/y/z. Got columns: {names}",
             )
         skiprows = _ascii_skiprows(str(source_path))
+        sep = _ascii_pandas_sep(str(source_path))
         df = pd.read_csv(
-            source_path, sep=r"\s+", header=None, names=names,
+            source_path, sep=sep, header=None, names=names,
             usecols=[i for i, c in enumerate(names) if not _is_skip_name(c)],
             comment="#", skiprows=skiprows, engine="c",
         )

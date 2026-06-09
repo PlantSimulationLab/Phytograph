@@ -371,10 +371,31 @@ export interface HeliosTriangulationResponse {
   // Source scan index for each triangle (aligned 1:1 with `triangles`), so the
   // viewer can color triangles by the scan they came from.
   triangle_scan_ids?: number[];
+  // Grid cell index (into the request grid, row-major i + nx*(j + ny*k)) for
+  // each triangle's centroid, aligned 1:1 with `triangles`; -1 = outside the
+  // grid. With the auto 1×1×1 grid every triangle is 0. Drives per-cell
+  // leaf-angle distributions.
+  triangle_cell_ids?: number[];
   // Set when no grid box was supplied and all points were triangulated within
   // their bounding box; grid_message is the human-readable warning to surface.
   grid_warning?: boolean;
   grid_message?: string | null;
+  // Triangulation filter breakdown. Helios attributes each dropped candidate to
+  // one primary reason, so candidates === kept + dropped_lmax + dropped_aspect
+  // + dropped_degenerate. Lets the UI tell a data problem (most candidates
+  // dropped by Lmax, or zero candidates) from a too-aggressive shape filter.
+  diagnostics?: HeliosTriangulationDiagnostics;
+  // Present on a successful run when almost nothing was filtered (Lmax/aspect
+  // large enough to bridge real gaps) — the mesh may contain spurious triangles.
+  diagnostics_warning?: string | null;
+}
+
+export interface HeliosTriangulationDiagnostics {
+  candidates: number;          // pre-filter triangle count
+  kept: number;                // survivors (=== num_triangles)
+  dropped_lmax: number;        // dropped: an edge exceeded Lmax
+  dropped_aspect: number;      // dropped: aspect-ratio / separation-ratio limit
+  dropped_degenerate: number;  // dropped: degenerate (NaN) area
 }
 
 /**

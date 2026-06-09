@@ -186,6 +186,108 @@ def test_correction_restores_monotone_taper():
     assert corr_worst <= 1e-6, f"within-shoot inversion {corr_worst:.4f} (not monotone)"
 
 
+def _fork_qsm(parent_r, child_base_r, child_tip_r):
+    """A minimal two-shoot fork: a 2-cylinder trunk (shoot 0) with a 2-cylinder
+    lateral (shoot 1) branching off the trunk's FIRST cylinder. All cylinders are
+    well-covered (surf_cov high) so the correction's coverage-gated mechanisms are
+    inert and we isolate the cross-fork cap. Radii are passed in so a test can make
+    the child base deliberately fatter than its parent."""
+    from qsm.model import QSM, Cylinder, Shoot
+    z = np.array([0.0, 0.0, 1.0])
+    x = np.array([1.0, 0.0, 0.0])
+    cyls = [
+        # Trunk (shoot 0): cyl 0 base -> cyl 1 tip, along +z.
+        Cylinder(cyl_id=0, start=np.zeros(3), end=z * 0.5, radius=parent_r,
+                 parent_id=-1, shoot_id=0, rank=0, surf_cov=0.9, mad=0.001),
+        Cylinder(cyl_id=1, start=z * 0.5, end=z * 1.0, radius=parent_r * 0.8,
+                 parent_id=0, shoot_id=0, rank=0, surf_cov=0.9, mad=0.001),
+        # Lateral (shoot 1) off trunk cyl 0, growing in +x: base cyl 2 -> tip cyl 3.
+        Cylinder(cyl_id=2, start=z * 0.5, end=z * 0.5 + x * 0.4, radius=child_base_r,
+                 parent_id=0, shoot_id=1, rank=1, surf_cov=0.9, mad=0.001),
+        Cylinder(cyl_id=3, start=z * 0.5 + x * 0.4, end=z * 0.5 + x * 0.8,
+                 radius=child_tip_r, parent_id=2, shoot_id=1, rank=1,
+                 surf_cov=0.9, mad=0.001),
+    ]
+    shoots = [
+        Shoot(shoot_id=0, rank=0, cylinder_ids=[0, 1], parent_shoot_id=-1),
+        Shoot(shoot_id=1, rank=1, cylinder_ids=[2, 3], parent_shoot_id=0,
+              parent_cyl_id=0, child_shoot_ids=[]),
+    ]
+    return QSM(cylinders=cyls, shoots=shoots)
+
+
+def test_cross_fork_cap_lowers_fat_child_base_to_parent():
+    """A child branch fit fatter than the parent it grows from is physically
+    impossible. The cross-fork cap lowers the child base to the parent's radius and
+    re-flows the cap down the child shoot -- WITHOUT touching the parent (one-
+    directional). Parent r=40mm, child base injected at 90mm (>2x)."""
+    qsm = _fork_qsm(parent_r=0.040, child_base_r=0.090, child_tip_r=0.030)
+    corr = correct_radii(qsm, RadiusCorrectionOptions(twig_radius=0.001))
+    r = corr.cylinder_by_id()
+    parent_at_fork = r[0].radius  # trunk cyl 0, the actual parent of the lateral base
+    # Child base no longer exceeds its parent.
+    assert r[2].radius <= parent_at_fork + 1e-9, (
+        f"child base {r[2].radius:.4f} still > parent {parent_at_fork:.4f}"
+    )
+    # The cap fired and is recorded.
+    assert corr.meta["cross_fork_capped"] >= 1
+    # The parent was NOT raised to accommodate the fat child (one-directional): its
+    # radius stays at the well-covered fit value, ~40mm (pipe-model is coverage-gated
+    # off for a surf_cov=0.9 trunk, so it neither inflates nor is touched).
+    assert abs(parent_at_fork - 0.040) < 0.005, f"parent moved to {parent_at_fork:.4f}"
+    # Child shoot stays monotone non-increasing after the cap.
+    assert r[3].radius <= r[2].radius + 1e-9
+
+
+def test_cross_fork_cap_leaves_thin_child_untouched():
+    """A child base already thinner than its parent is a legitimate taper and must
+    be left exactly as-is -- the cap is a one-sided ceiling, not a normalizer."""
+    qsm = _fork_qsm(parent_r=0.040, child_base_r=0.020, child_tip_r=0.010)
+    base_in = qsm.cylinder_by_id()[2].radius
+    corr = correct_radii(qsm, RadiusCorrectionOptions(twig_radius=0.001))
+    r = corr.cylinder_by_id()
+    assert corr.meta["cross_fork_capped"] == 0, "no cap should fire on a thin child"
+    assert abs(r[2].radius - base_in) < 1e-9, "thin child base was altered"
+
+
+def test_cross_fork_cap_can_be_disabled():
+    """With cross_fork_cap=False the violation survives -- proving the cap, not some
+    other mechanism, is what removes it (anti-gaming: the fat child is otherwise
+    well-covered so no coverage-gated step would touch it)."""
+    qsm = _fork_qsm(parent_r=0.040, child_base_r=0.090, child_tip_r=0.030)
+    corr = correct_radii(
+        qsm, RadiusCorrectionOptions(twig_radius=0.001, cross_fork_cap=False)
+    )
+    r = corr.cylinder_by_id()
+    assert r[2].radius > r[0].radius + 1e-9, (
+        "child base should still exceed parent when the cap is disabled"
+    )
+    assert corr.meta["cross_fork_capped"] == 0
+
+
+def test_cross_fork_cap_clears_all_violations_on_real_tree():
+    """End-to-end on a real L1 tree: after the full default pipeline NO child-shoot
+    base exceeds its parent cylinder at the fork. This is the user-reported defect
+    (Tree_6/Tree_9) reduced to zero."""
+    tree = (
+        Path(__file__).parents[3] / "example-datasets" / "L1-Tree" / "Tree_9.txt"
+    )
+    if not tree.exists():
+        pytest.skip(f"missing fixture {tree}")
+    points = np.loadtxt(tree, usecols=(0, 1, 2), dtype=np.float64)
+    fit = fit_qsm_cylinders(segments_to_qsm(extract_skeleton(points)), points)
+    corr = correct_radii(fit, RadiusCorrectionOptions())
+    by_id = corr.cylinder_by_id()
+    violations = [
+        c.cyl_id for c in corr.cylinders
+        if (p := by_id.get(c.parent_id)) is not None
+        and c.shoot_id != p.shoot_id
+        and c.radius > p.radius + 1e-9
+    ]
+    assert not violations, f"{len(violations)} child>parent fork violations remain"
+    assert corr.meta["cross_fork_capped"] >= 1  # the defect was present and fixed
+
+
 def test_twig_anchor_pulls_low_coverage_tips_toward_twig_radius():
     """The taper is anchored to the twig radius as GrowthLength->0. For LOW-COVERAGE
     tip cylinders (which lean on the taper, not their own noisy fit), a larger twig

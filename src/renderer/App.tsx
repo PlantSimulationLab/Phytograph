@@ -13,6 +13,7 @@ import { importTexturedMesh, deleteCloudSession, type MeshImportResponse } from 
 import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
 import { registerCategoricalSlug } from "./lib/classification";
+import { resolveTargets } from "./lib/bulkActions";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
 // we have a disk path. Every supported point-cloud format is here; only inputs
@@ -625,6 +626,15 @@ function App() {
     ));
   }, []);
 
+  // Bulk show/hide for the Scans panel header. Acts on the current selection
+  // when one exists, otherwise on every scan. A single press lands on a uniform
+  // state: hide all targets if any is visible, else show all. See resolveTargets.
+  const handleToggleScansVisibility = useCallback(() => {
+    const { targetIds, nextVisible } = resolveTargets(scans, selectedScanIds);
+    const target = new Set(targetIds);
+    setScans(prev => prev.map(s => target.has(s.id) ? { ...s, visible: nextVisible } : s));
+  }, [scans, selectedScanIds]);
+
   // Force a scan hidden (idempotent). Used after a QSM build so the source
   // scan's points don't obscure the newly created QSM.
   const handleHideScan = useCallback((id: string) => {
@@ -695,8 +705,15 @@ function App() {
   }, []);
 
   const handleUpdateScanData = useCallback((id: string, data: PointCloudData) => {
+    // Replacing the in-RAM data makes any prior `sourcePath` stale: it points at
+    // the file the OLD data came from, not the new `data`. Downstream ops
+    // (triangulate, LAD) prefer `file_path` and would silently re-read that
+    // stale file — e.g. a synthetic scan overwriting a coarse imported cloud
+    // would still triangulate the coarse on-disk points. The new `data` is the
+    // source of truth, so drop the path (and its column hint) and let consumers
+    // send points in-RAM.
     setScans(prev => prev.map(s =>
-      s.id === id ? { ...s, data } : s
+      s.id === id ? { ...s, data, sourcePath: undefined, asciiFormat: undefined } : s
     ));
   }, []);
 
@@ -1068,6 +1085,7 @@ function App() {
           scans={scans}
           selectedScanIds={selectedScanIds}
           onToggleVisibility={handleToggleScanVisibility}
+          onToggleScansVisibility={handleToggleScansVisibility}
           onHideScan={handleHideScan}
           onToggleMisses={handleToggleScanMisses}
           onToggleSelection={handleToggleScanSelection}

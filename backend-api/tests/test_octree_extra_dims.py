@@ -263,6 +263,55 @@ def test_xyz_to_las_double_slash_header_imports(tmp_path):
     np.testing.assert_allclose(np.asarray(las.z), [0, 3, 6], atol=1e-3)
 
 
+def test_ascii_pandas_sep_matches_detected_delimiter(tmp_path):
+    """The loader's pandas `sep` must agree with the wizard's sniffed delimiter,
+    or comma/tab/semicolon files collapse into column 0 and `usecols` fails."""
+    def _sep(text: str) -> str:
+        f = tmp_path / "s.txt"
+        f.write_text(text)
+        return main._ascii_pandas_sep(str(f))
+
+    assert _sep("0,0,0\n1,2,3\n") == ","
+    assert _sep("0\t0\t0\n1\t2\t3\n") == "\t"
+    assert _sep("0;0;0\n1;2;3\n") == ";"
+    assert _sep("0 0 0\n1 2 3\n") == r"\s+"
+
+
+def test_xyz_to_las_comma_delimited_cloudcompare_export(tmp_path):
+    """Regression: a comma-delimited CloudCompare export ('//X,Y,Z,R,G,B,...'
+    header, comma-separated data) must import through `_xyz_to_las`. The loaders
+    previously hardcoded `sep=r'\\s+'`, so the whole row landed in column 0 and
+    `usecols=[1, 2, ...]` raised 'Usecols do not match columns, columns expected
+    but not found: [1, 2]' — even though the wizard preview parsed it fine."""
+    src = tmp_path / "redbud.txt"
+    src.write_text(
+        "//X,Y,Z,R,G,B,Scalar field,Illuminance (PCV)\n"
+        "9.71,-10.25,-13.15,1,1,2,996.51,0.21\n"
+        "9.69,-10.26,-13.14,3,1,1,996.51,0.24\n"
+        "9.64,-10.24,-13.15,15,1,1,996.48,0.02\n"
+    )
+    out = tmp_path / "redbud.las"
+    cp = main.ColumnPlan(columns=[
+        main.ColumnPlanEntry(index=0, role='x'),
+        main.ColumnPlanEntry(index=1, role='y'),
+        main.ColumnPlanEntry(index=2, role='z'),
+        main.ColumnPlanEntry(index=3, role='r255'),
+        main.ColumnPlanEntry(index=4, role='g255'),
+        main.ColumnPlanEntry(index=5, role='b255'),
+        main.ColumnPlanEntry(index=6, role='extra:Scalar field'),
+        main.ColumnPlanEntry(index=7, role='extra:Illuminance (PCV)'),
+    ], rgb_is_255=True)
+    n, eds = main._xyz_to_las(main._Path(str(src)), None, main._Path(str(out)), cp)
+    assert n == 3
+    assert len(eds) == 2  # the two extra scalar columns are carried
+    las = laspy.read(str(out))
+    np.testing.assert_allclose(np.asarray(las.x), [9.71, 9.69, 9.64], atol=1e-3)
+    np.testing.assert_allclose(np.asarray(las.y), [-10.25, -10.26, -10.24], atol=1e-3)
+    np.testing.assert_allclose(np.asarray(las.z), [-13.15, -13.14, -13.15], atol=1e-3)
+    # RGB survives the comma split (0-255 ints scaled to LAS 0-65535).
+    np.testing.assert_allclose(np.asarray(las.red) / 257.0, [1, 3, 15], atol=1)
+
+
 def test_xyz_to_las_format_mismatch_raises_actionable_400(tmp_path):
     """When the chosen column format doesn't match the file (a non-numeric token
     reaches the x/y/z cast — exactly what a bulk import that applies one file's

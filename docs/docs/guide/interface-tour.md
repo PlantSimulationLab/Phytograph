@@ -66,9 +66,26 @@ Each scan entry shows:
 A scan can hold point data, scan parameters (origin, sweep, return type),
 or both — see [Scans](../concepts/scans.md) for details.
 
-Multi-select with <kbd>Shift</kbd>+click or <kbd>⌘/Ctrl</kbd>+click.
-Many operations (Stitch, Align, Filter) act on the current selection,
-so being deliberate about what's selected matters.
+Multi-select with <kbd>Shift</kbd>+click (range) or
+<kbd>⌘/Ctrl</kbd>+click (toggle). Many operations (Stitch, Align, Filter)
+act on the current selection, so being deliberate about what's selected
+matters.
+
+### Bulk show/hide and delete
+
+Each list's header has an **eye** and a **trash** button that act on
+multiple entries at once:
+
+- With one or more rows **selected**, they apply to just the selection —
+  "hide the 3 selected scans", "delete the 2 selected meshes".
+- With **nothing selected**, they apply to the whole list — hide or show
+  every entry, or clear the list.
+
+The eye button toggles to a single uniform state: if any target is
+visible it hides them all; press again to show them all. A bulk delete
+asks for confirmation **once** for the whole batch, rather than once per
+entry. The same multi-select + header buttons work for **Meshes**,
+**Skeletons**, and **QSM** results.
 
 The **colormap legend** in the bottom-right shows the current
 scalar-to-color mapping (e.g., height in meters → viridis). Different

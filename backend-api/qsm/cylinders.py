@@ -89,6 +89,20 @@ class CylinderFitOptions:
     runaway_factor: float = 4.0
     runaway_surfcov: float = 0.3
     runaway_mad_frac: float = 0.25  # mad above this fraction of radius == loose fit
+    # ONE-SIDED-ARC reject (Mode A balloon). A circle fit to points spanning less
+    # than ~half the circumference is radially under-constrained: a shallow arc
+    # looks locally flat, so least-squares prefers a huge circle, and -- crucially --
+    # the few points sit TIGHTLY on that inflated arc (small mad), so the mad-based
+    # loose test above does NOT catch it. So an inflated fit (radius >> provisional)
+    # whose band-gated points cover less than runaway_angular_cov of the full circle
+    # is ALSO a runaway, regardless of mad. A legitimate thick-but-short trunk slice
+    # is fully wrapped (high angular_cov) and is therefore exempt.
+    runaway_angular_cov: float = 0.5
+    # Minimum band-gated points to trust a fitted radius at all: a circle through a
+    # handful of points (e.g. 3 points / 31 deg) is meaningless and balloons. Below
+    # this, reject the fit (keep provisional) -- independent of the factor test, so
+    # it also catches a sparse fit that didn't happen to exceed runaway_factor.
+    runaway_min_band_points: int = 8
     # Divergence guard: a fitted axis that relocates an endpoint farther than
     # (scale*seg_len + abs) from the skeleton seed is a diverged Gauss-Newton fit
     # (wild axis offset) -> rejected, keep the provisional position. The skeleton
@@ -150,6 +164,15 @@ class _FitResult:
     mad: float
     reliable: bool
     n_points: int
+    # Fraction of the full circle (0..1) the band-gated points' azimuths occupy.
+    # A one-sided arc (occlusion) covers << 0.5; a fully-seen ring approaches 1.
+    # Distinct from surf_cov (which also drops with too FEW axial layers): a short-
+    # but-fully-wrapped trunk slice has low surf_cov but HIGH angular_cov. Used by
+    # the runaway guard to reject a tight balloon fit to a one-sided arc.
+    angular_cov: float = 0.0
+    # Number of points that fell in the radial band [0.8r, 1.2r] -- how many points
+    # actually constrain the fitted radius. A circle through a handful is meaningless.
+    n_band_points: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -302,10 +325,12 @@ def fit_cylinder(
     dist, _ = residual_and_jac(par)
     mad = float(np.mean(np.abs(dist)))
     surf_cov = _surface_coverage(P, fit_start, fit_end, r, opts)
+    angular_cov, n_band = _angular_coverage(P, fit_start, fit_end, r, opts)
 
     return _FitResult(
         start=fit_start, end=fit_end, radius=r,
         surf_cov=surf_cov, mad=mad, reliable=reliable, n_points=P.shape[0],
+        angular_cov=angular_cov, n_band_points=n_band,
     )
 
 
@@ -358,6 +383,51 @@ def _surface_coverage(
     si = np.clip(((ang + np.pi) / (2.0 * np.pi) * ns).astype(int), 0, ns - 1)
     occupied = len(set(zip(li.tolist(), si.tolist())))
     return float(occupied) / float(nl * ns)
+
+
+def _angular_coverage(
+    points: np.ndarray,
+    start: np.ndarray,
+    end: np.ndarray,
+    radius: float,
+    opts: CylinderFitOptions,
+) -> tuple[float, int]:
+    """Azimuthal spread of the band-gated points about the fitted axis, ignoring
+    the axial dimension that SurfCov mixes in. Returns ``(fraction_of_circle,
+    n_band_points)`` where the fraction is the share of ``surfcov_max_sectors``
+    angular bins occupied (0 = nothing, 1 = fully wrapped). A one-sided arc
+    (occlusion) yields a small fraction even when the points sit tightly on the
+    (wrongly inflated) circle, which is exactly the balloon the mad-based loose
+    test misses. ``n_band_points`` is how many points fell in the radial band --
+    a fit constrained by only a handful is meaningless regardless of span."""
+    axis = end - start
+    L = float(np.linalg.norm(axis))
+    if L <= 0 or radius <= 0:
+        return 0.0, 0
+    axis_u = axis / L
+    ap = points - start[None, :]
+    t = ap @ axis_u
+    radial_vec = ap - t[:, None] * axis_u[None, :]
+    radial = np.linalg.norm(radial_vec, axis=1)
+    inside = (
+        (t >= 0)
+        & (t <= L)
+        & (radial >= opts.surfcov_band_lo * radius)
+        & (radial <= opts.surfcov_band_hi * radius)
+    )
+    n_band = int(np.count_nonzero(inside))
+    if n_band == 0:
+        return 0.0, 0
+    rv = radial_vec[inside]
+    seed_v = np.array([1.0, 0.0, 0.0]) if abs(axis_u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = seed_v - axis_u * float(np.dot(seed_v, axis_u))
+    u /= np.linalg.norm(u) or 1.0
+    v = np.cross(axis_u, u)
+    ang = np.arctan2(rv @ v, rv @ u)  # [-pi, pi]
+    ns = opts.surfcov_max_sectors
+    si = np.clip(((ang + np.pi) / (2.0 * np.pi) * ns).astype(int), 0, ns - 1)
+    occupied = len(set(si.tolist()))
+    return float(occupied) / float(ns), n_band
 
 
 # ---------------------------------------------------------------------------
@@ -419,17 +489,27 @@ def fit_qsm_cylinders(
             new_cyls.append(nc)
             continue
 
-        # Runaway = a fit that ballooned far past the provisional radius on a
-        # one-sided arc. The tell-tale of a TRUE balloon is that the points DON'T
-        # lie on the inflated circle (large mad relative to radius) AND coverage is
-        # low. A short-but-fat trunk slice also has low SurfCov (few axial layers)
-        # but its points sit TIGHTLY on the real shell (small mad), so we must NOT
-        # reject it. Hence: big-radius + low-coverage + LOOSE fit (or no mad).
+        # Runaway = a fit that ballooned far past the provisional radius because it
+        # is radially under-constrained. There are TWO tells of an under-constrained
+        # balloon, and the fit only needs ONE of them (the old guard required the
+        # first AND missed the second entirely):
+        #   (1) LOOSE -- points scattered off the inflated circle (large mad/r). The
+        #       classic "arc that doesn't even fit a circle" case.
+        #   (2) ONE-SIDED -- points span less than runaway_angular_cov of the circle.
+        #       A shallow arc looks locally flat, so least-squares prefers a huge
+        #       circle and the few points sit TIGHTLY on it (small mad) -- so (1)
+        #       does NOT catch it. This is the dominant child>parent balloon on the
+        #       L1 trees (e.g. a 212 mm fit to 3 points spanning 31 deg).
+        # A legitimate thick-but-short trunk slice has low SurfCov (few axial layers)
+        # but is FULLY WRAPPED (high angular_cov) and TIGHT (small mad), so neither
+        # tell fires and it is correctly kept. Independently, a fit constrained by
+        # only a handful of band points is meaningless and is rejected outright.
         loose = fit.mad is None or fit.mad > opts.runaway_mad_frac * fit.radius
+        one_sided = fit.angular_cov < opts.runaway_angular_cov
+        inflated = fit.radius > opts.runaway_factor * max(c.radius, opts.radius_min)
         runaway = (
-            fit.radius > opts.runaway_factor * max(c.radius, opts.radius_min)
-            and fit.surf_cov < opts.runaway_surfcov
-            and loose
+            (inflated and fit.surf_cov < opts.runaway_surfcov and (loose or one_sided))
+            or (inflated and fit.n_band_points < opts.runaway_min_band_points)
         )
         if fit.reliable and not runaway:
             nc.start = fit.start

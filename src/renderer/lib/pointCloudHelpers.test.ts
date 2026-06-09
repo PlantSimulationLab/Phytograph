@@ -102,6 +102,52 @@ describe('computeMeshTriangleScalars', () => {
   });
 });
 
+describe('computeMeshTriangleScalars — scanner-oriented azimuth', () => {
+  // Two facets on the EAST side of a sphere: one on the upper hemisphere
+  // (normal (1,0,1), leans up+east) and one on the lower hemisphere (normal
+  // (1,0,-1), leans down+east). Both should read the SAME outward azimuth
+  // (east, ~0deg) when oriented toward an eastern scanner — that's the fix for
+  // the 180deg equator seam. The upper-east facet's normal cross product is
+  // (1,0,1); the lower-east facet's is (1,0,-1) (verified by the winding).
+  const upperEast = [0, 0, 0, 0, 1, 0, -1, 0, 1];   // n = (1,0,1)
+  const lowerEast = [0, 0, 0, 0, 1, 0, 1, 0, 1];    // n = (1,0,-1)
+
+  it('without scan origins, the two hemispheres seam 180deg apart (old fold)', () => {
+    const up = computeMeshTriangleScalars(makeMesh(upperEast, [0, 1, 2]), 'azimuth')!.values[0];
+    const lo = computeMeshTriangleScalars(makeMesh(lowerEast, [0, 1, 2]), 'azimuth')!.values[0];
+    // Upper reads east (~0); lower folds to the upper hemisphere → west (~180).
+    expect(up).toBeCloseTo(0, 2);
+    expect(lo).toBeCloseTo(180, 2);
+  });
+
+  it('with an eastern scanner origin, both hemispheres read the same azimuth', () => {
+    // Scanner far to the east (+X): each facet's outward normal is oriented
+    // toward it, so both read east (~0deg) — continuous, no seam.
+    const origins = new Float32Array([100, 0, 0]); // one scan at +X
+    const up = computeMeshTriangleScalars(
+      makeMesh(upperEast, [0, 1, 2], {
+        triangleScanIds: new Uint32Array([0]), scanOrigins: origins,
+      }), 'azimuth')!.values[0];
+    const lo = computeMeshTriangleScalars(
+      makeMesh(lowerEast, [0, 1, 2], {
+        triangleScanIds: new Uint32Array([0]), scanOrigins: origins,
+      }), 'azimuth')!.values[0];
+    expect(up).toBeCloseTo(0, 2);
+    expect(lo).toBeCloseTo(0, 2);
+    expect(Math.abs(up - lo)).toBeLessThan(1);
+  });
+
+  it('inclination is unaffected by the scanner orientation', () => {
+    // |n.z| is orientation-independent: (1,0,±1) both give 45deg.
+    const origins = new Float32Array([100, 0, 0]);
+    const incl = computeMeshTriangleScalars(
+      makeMesh(lowerEast, [0, 1, 2], {
+        triangleScanIds: new Uint32Array([0]), scanOrigins: origins,
+      }), 'inclination')!.values[0];
+    expect(incl).toBeCloseTo(45, 3);
+  });
+});
+
 describe('buildMeshTriangleColorBuffers', () => {
   it('returns null for solid mode', () => {
     const mesh = makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]);

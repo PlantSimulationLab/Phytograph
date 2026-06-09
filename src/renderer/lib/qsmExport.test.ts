@@ -92,8 +92,11 @@ describe('qsmToCylinderCsv', () => {
   const lines = csv.trim().split('\n');
 
   it('emits the exact SimpleForest-compatible header', () => {
+    // Verified against rTwig's importer: ID/parentID/branchID/branchOrder gate
+    // detection; segmentID/parentSegmentID are required by its first mutate.
     expect(lines[0]).toBe(
-      'ID,parentID,branchID,branchOrder,startX,startY,startZ,endX,endY,endZ,' +
+      'ID,parentID,branchID,branchOrder,segmentID,parentSegmentID,' +
+        'startX,startY,startZ,endX,endY,endZ,' +
         'axisX,axisY,axisZ,radius,length,surfaceCoverage,meanAbsDeviation',
     );
   });
@@ -108,19 +111,28 @@ describe('qsmToCylinderCsv', () => {
     expect(root[1]).toBe('-1'); // parentID
   });
 
+  it('emits segmentID (= shoot) and parentSegmentID (= parent shoot, -1 for trunk)', () => {
+    const root = lines[1].split(','); // cyl 0: shoot 0, trunk shoot -> parent -1
+    expect(root[4]).toBe('0'); // segmentID
+    expect(root[5]).toBe('-1'); // parentSegmentID (trunk)
+    const branch = lines[3].split(','); // cyl 2: shoot 1, parent shoot 0
+    expect(branch[4]).toBe('1'); // segmentID
+    expect(branch[5]).toBe('0'); // parentSegmentID
+  });
+
   it('computes a unit axis and correct length', () => {
     // cyl 0: start (0,0,0) end (0,0,1) -> axis (0,0,1), length 1
     const row = lines[1].split(',');
-    expect(Number(row[10])).toBeCloseTo(0); // axisX
-    expect(Number(row[11])).toBeCloseTo(0); // axisY
-    expect(Number(row[12])).toBeCloseTo(1); // axisZ
-    expect(Number(row[14])).toBeCloseTo(1); // length
+    expect(Number(row[12])).toBeCloseTo(0); // axisX
+    expect(Number(row[13])).toBeCloseTo(0); // axisY
+    expect(Number(row[14])).toBeCloseTo(1); // axisZ
+    expect(Number(row[16])).toBeCloseTo(1); // length
   });
 
   it('renders null surf_cov / mad as empty fields', () => {
     const row = lines[3].split(','); // cyl 2 has null surf_cov + mad
-    expect(row[15]).toBe(''); // surfaceCoverage
-    expect(row[16]).toBe(''); // meanAbsDeviation
+    expect(row[17]).toBe(''); // surfaceCoverage
+    expect(row[18]).toBe(''); // meanAbsDeviation
   });
 
   it('maps shoot_id to branchID and rank to branchOrder', () => {

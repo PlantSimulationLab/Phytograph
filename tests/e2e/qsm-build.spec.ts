@@ -60,22 +60,12 @@ test('builds a QSM with shoot ranks from a plant cloud via the UI', async () => 
     expect(maxRadius).toBeLessThan(0.2);
     expect(maxRadius).toBeGreaterThan(minRadius);
 
-    // A trunk shoot row is present and labelled.
-    const trunkShoot = page.locator('[data-testid="qsm-shoot-row"][data-rank="0"]').first();
-    await expect(trunkShoot).toBeVisible();
-    await expect(trunkShoot).toContainText('Trunk');
-
     // Metrics block rendered with the trunk diameter.
     await expect(qsmRow.getByTestId('qsm-metrics')).toContainText('mm');
 
     // The color-mode control works (switch to per-shoot coloring).
     await page.getByTestId('qsm-color-mode').selectOption('shoot');
     await expect(page.getByTestId('qsm-color-mode')).toHaveValue('shoot');
-
-    // Selecting a shoot highlights it (the row gains the selected style); just
-    // assert the click is accepted and the row stays present.
-    await trunkShoot.click();
-    await expect(trunkShoot).toBeVisible();
 
     // --- Deleting the source scan must NOT bring back the import overlay ---
     // The QSM outlives its source scan; with the scan gone the scene is still

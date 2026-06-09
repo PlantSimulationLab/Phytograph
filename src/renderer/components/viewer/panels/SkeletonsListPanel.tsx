@@ -8,12 +8,19 @@ import type { SkeletonEntry, PointCloudEntry } from '../../../lib/pointCloudType
 interface SkeletonsListPanelProps {
   skeletons: SkeletonEntry[];
   clouds: PointCloudEntry[];
-  selectedSkeletonId: string | null;
+  selectedSkeletonIds: Set<string>;
+  // Header bulk actions: selected-row count, whether any bulk target is visible
+  // (drives the eye icon), and the section-or-selection handlers.
+  selectedCount: number;
+  anyTargetVisible: boolean;
   showAsCylinders: boolean;
   tubeRadius: number;
   colorByBranchOrder: boolean;
-  onSelect: (id: string) => void;
+  // Modifier-aware select: Ctrl/Cmd toggles, Shift selects a range.
+  onSelect: (id: string, additive: boolean, range: boolean) => void;
   onToggleVisibility: (id: string) => void;
+  onToggleVisibilityAll: () => void;
+  onDeleteAll: () => void;
   onRequestDelete: (id: string, name: string) => void;
   onShowAsCylindersChange: (v: boolean) => void;
   onTubeRadiusChange: (n: number) => void;
@@ -23,12 +30,16 @@ interface SkeletonsListPanelProps {
 export function SkeletonsListPanel({
   skeletons,
   clouds,
-  selectedSkeletonId,
+  selectedSkeletonIds,
+  selectedCount,
+  anyTargetVisible,
   showAsCylinders,
   tubeRadius,
   colorByBranchOrder,
   onSelect,
   onToggleVisibility,
+  onToggleVisibilityAll,
+  onDeleteAll,
   onRequestDelete,
   onShowAsCylindersChange,
   onTubeRadiusChange,
@@ -39,12 +50,30 @@ export function SkeletonsListPanel({
       <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
         <GitBranch className="w-4 h-4 text-neutral-400" />
         <span className="text-xs font-medium text-neutral-300 flex-1">Skeletons</span>
+        <button
+          data-testid="skeletons-bulk-hide"
+          onClick={onToggleVisibilityAll}
+          className="p-1 hover:bg-neutral-700 rounded"
+          title={selectedCount > 0 ? `Show/hide ${selectedCount} selected` : 'Show/hide all'}
+        >
+          {anyTargetVisible
+            ? <Eye className="w-3 h-3 text-neutral-400" />
+            : <EyeOff className="w-3 h-3 text-neutral-600" />}
+        </button>
+        <button
+          data-testid="skeletons-bulk-delete"
+          onClick={onDeleteAll}
+          className="p-1 hover:bg-red-600/30 rounded"
+          title={selectedCount > 0 ? `Delete ${selectedCount} selected` : 'Delete all'}
+        >
+          <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
+        </button>
       </div>
       <div className="overflow-y-auto flex-1 p-1">
         {skeletons.map(skeleton => {
           const sourceCloud = clouds.find(c => c.id === skeleton.sourceCloudId);
           const sourceName = sourceCloud?.data.fileName || 'Skeleton';
-          const isSelected = selectedSkeletonId === skeleton.id;
+          const isSelected = selectedSkeletonIds.has(skeleton.id);
           return (
             <div
               key={skeleton.id}
@@ -53,8 +82,9 @@ export function SkeletonsListPanel({
               data-total-length={skeleton.data.totalLength}
               data-point-count={skeleton.data.pointCount}
               data-selected={isSelected ? 'true' : 'false'}
-              onClick={() => onSelect(skeleton.id)}
-              className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
+              data-visible={skeleton.visible ? 'true' : 'false'}
+              onClick={(e) => onSelect(skeleton.id, e.ctrlKey || e.metaKey, e.shiftKey)}
+              className={`flex items-center gap-2 p-2 rounded cursor-pointer select-none transition-colors ${
                 isSelected ? 'bg-amber-600/30 border border-amber-500/50' : 'hover:bg-neutral-700/50'
               }`}
             >

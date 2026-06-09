@@ -15,9 +15,16 @@ export interface TriangleMeshProps {
   // non-indexed (3 unique vertices per triangle) so each face carries its own
   // color. positions/colors are both 9 floats per triangle.
   triangleColors?: { positions: Float32Array; colors: Float32Array } | null;
+  // Draw-order override for the transparent pass. three.js paints transparent
+  // objects back-to-front by camera distance, which mis-orders two co-located
+  // translucent surfaces (the green triangulated mesh and the 40%-opaque voxel
+  // box) from some view angles. Giving the box a higher renderOrder forces it
+  // to always blend ON TOP of the surface, so the volume tint is preserved
+  // regardless of viewing direction. Default 0 = normal distance sorting.
+  renderOrder?: number;
 }
 
-export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null }: TriangleMeshProps) {
+export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null, renderOrder = 0 }: TriangleMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const hasLoggedRef = useRef(false);
 
@@ -74,19 +81,30 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
 
   const useColorAttr = hasTriangleColors || hasVertexColors;
 
+  // A translucent surface must NOT write depth — otherwise a transparent mesh
+  // (e.g. the 40%-opaque voxel box) stamps the depth buffer and, because
+  // three.js sorts transparent objects by camera distance, can render before
+  // another transparent mesh (the triangulated surface) and occlude it from
+  // certain view angles. Only write depth when fully opaque. (See the matching
+  // pattern in LADVoxelGrid.) The `key` forces a fresh material when the
+  // transparent flag flips, since three.js needs a recompile for that change.
+  const isTranslucent = opacity < 1;
   const material = useMemo(() => {
     return new THREE.MeshStandardMaterial({
       color: useColorAttr ? 0xffffff : new THREE.Color(color),  // White when using a color attribute
-      transparent: true,
+      transparent: isTranslucent,
+      depthWrite: !isTranslucent,
       opacity,
       wireframe,
       side: THREE.DoubleSide,
       flatShading: hasTriangleColors,  // Flat per-face shading for pseudocolor
       vertexColors: useColorAttr,  // Enable the color attribute
     });
-  }, [color, opacity, wireframe, useColorAttr, hasTriangleColors]);
+  }, [color, isTranslucent, wireframe, useColorAttr, hasTriangleColors]);
 
-  // Update material properties when they change
+  // Update material properties when they change. opacity flows in here (not the
+  // memo) so dragging the slider doesn't rebuild the material; transparent /
+  // depthWrite track the opaque⇄translucent boundary and need needsUpdate.
   useEffect(() => {
     if (meshRef.current) {
       const mat = meshRef.current.material as THREE.MeshStandardMaterial;
@@ -95,11 +113,17 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
       }
       mat.opacity = opacity;
       mat.wireframe = wireframe;
+      const translucent = opacity < 1;
+      if (mat.transparent !== translucent || mat.depthWrite !== !translucent) {
+        mat.transparent = translucent;
+        mat.depthWrite = !translucent;
+        mat.needsUpdate = true;
+      }
     }
   }, [color, opacity, wireframe, useColorAttr]);
 
   useEffect(() => () => { geometry.dispose(); }, [geometry]);
   useEffect(() => () => { material.dispose(); }, [material]);
 
-  return <mesh ref={meshRef} geometry={geometry} material={material} />;
+  return <mesh ref={meshRef} geometry={geometry} material={material} renderOrder={renderOrder} />;
 }

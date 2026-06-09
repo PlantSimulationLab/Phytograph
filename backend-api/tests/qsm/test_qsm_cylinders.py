@@ -108,6 +108,52 @@ def test_occluded_cylinder_radius_within_10pct_and_low_surfcov_flagged():
     assert fit.surf_cov < 0.5, f"surf_cov {fit.surf_cov:.3f} should flag occlusion"
 
 
+def test_tight_one_sided_arc_balloon_is_rejected_at_qsm_level():
+    """Mode-A guard (the L1 child>parent balloon). A sparse, shallow one-sided arc
+    makes least-squares prefer a hugely inflated circle, yet the few points sit
+    TIGHTLY on that wrong circle (small mad) -- so the mad-based 'loose' runaway
+    test does NOT catch it. The angular-coverage / band-count guard must: the fit
+    is rejected and the cylinder keeps its (correct, thin) provisional radius.
+
+    This is asserted at the fit_qsm_cylinders level (where the guard lives), not on
+    fit_cylinder, because the guard is part of the driver's accept/reject decision.
+    """
+    from qsm.model import QSM, Cylinder, Shoot
+
+    # A thin provisional cylinder along +z. 120 raw points over a 15-deg half-arc
+    # leave ~8 on the arc, which fit a ~70 mm circle (3-4x the true 20 mm) with tiny
+    # mad -- a verified Mode-A balloon (deterministic for this seed/point count).
+    start, end, pts = _simulate_cylinder(
+        start=[0.0, 0.0, 0.0], axis=[0.0, 0.0, 1.0], length=0.4,
+        radius=0.02, n=120, noise=0.0008, seed=13, arc=np.radians(15.0), arc_center=0.0,
+    )
+    prov_r = 0.012  # the (correct, thin) provisional radius from the skeleton
+    raw = fit_cylinder(pts, start, end, seed_radius=prov_r)
+    # Guard against a brittle test: confirm the scenario really IS a tight balloon
+    # the old loose-only guard would have admitted (radius >> provisional, but mad
+    # tiny because the few points sit cleanly on the inflated arc).
+    assert raw is not None
+    assert raw.radius > 4.0 * prov_r, f"expected balloon, got r={raw.radius:.4f}"
+    assert raw.mad / raw.radius < 0.10, "expected a TIGHT (small-mad) balloon"
+    assert raw.angular_cov < 0.5, "expected a one-sided arc"
+    qsm = QSM(
+        cylinders=[Cylinder(
+            cyl_id=0, start=np.array(start, float), end=np.array(end, float),
+            radius=prov_r, parent_id=-1, shoot_id=0, rank=0,
+        )],
+        shoots=[Shoot(shoot_id=0, rank=0, cylinder_ids=[0], parent_shoot_id=-1)],
+    )
+    out = fit_qsm_cylinders(qsm, pts)
+    c = out.cylinder_by_id()[0]
+    # The balloon was rejected: the provisional radius is kept, NOT the inflated fit.
+    assert abs(c.radius - prov_r) < 1e-9, (
+        f"balloon not rejected: radius={c.radius:.4f} (raw fit was {raw.radius:.4f})"
+    )
+    assert out.meta["n_fitted"] == 0
+    # SurfCov is still recorded so Phase E can reason about coverage.
+    assert c.surf_cov is not None
+
+
 def test_fit_is_deterministic_single():
     start, end, pts = _simulate_cylinder(
         start=[0.0, 0.0, 0.0], axis=[0.1, 0.0, 1.0], length=0.4,

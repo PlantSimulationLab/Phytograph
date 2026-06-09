@@ -85,6 +85,11 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
 
     await expect(meshRow.getByTestId('mesh-row-count')).toContainText('triangles');
 
+    // The default name should mark this as a Helios *triangulation* (the word
+    // "triangulation" disambiguates it from a Helios plant model), not a bare
+    // "Mesh" (Helios meshes have no source-cloud filename to fall back to).
+    await expect(meshRow.getByTestId('mesh-row-name')).toHaveText('Helios triangulation');
+
     // --- Pseudocolor the triangulated mesh ---------------------------------
     // The "Color by" control lives inline on the mesh's own row: select the
     // mesh, then expand its row via the chevron. Color by each geometric scalar
@@ -92,6 +97,16 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
     await meshRow.click();
     await expect(meshRow).toHaveAttribute('data-selected', 'true');
     await meshRow.getByTestId('mesh-color-expand').click();
+
+    // Provenance readout: method + the parameters we ran with (lmax 0.5,
+    // aspect 5, four fused scans). The expanded panel renders as a SIBLING of
+    // mesh-row (inside the per-mesh wrapper), so scope to the page, not the row.
+    const info = page.getByTestId('mesh-triangulation-info');
+    await expect(info).toBeAttached();
+    await expect(info).toContainText('Helios triangulation');
+    await expect(info).toContainText('0.5');
+    await expect(info).toContainText('Max aspect ratio: 5');
+    await expect(info).toContainText('Scans fused: 4');
 
     const colorMode = page.getByTestId('mesh-color-mode');
     await expect(colorMode).toBeVisible();

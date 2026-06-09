@@ -8,6 +8,7 @@ import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
+import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
 import {
   ColormapName,
   COLORMAP_NAMES,
@@ -16,6 +17,7 @@ import {
 import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenerationPopup';
 import { HeliosTriangulationPopup, type GridOption } from './HeliosTriangulationPopup';
 import { LADPopup } from './LADPopup';
+import { LeafAnglePlotPopup } from './LeafAnglePlotPopup';
 import { MorphPopup } from './MorphPopup';
 import { ScanParametersPopup } from './ScanParametersPopup';
 import { ScannerMarker } from './ScannerMarker';
@@ -122,7 +124,7 @@ import type {
   FilterRange,
   CloudFilters,
 } from '../lib/pointCloudTypes';
-import { meshDisplayName } from '../lib/pointCloudTypes';
+import { meshDisplayNameFor } from '../lib/pointCloudTypes';
 export type {
   ScalarField,
   OctreeRef,
@@ -169,6 +171,10 @@ interface PointCloudViewerProps {
   scans: Scan[];
   selectedScanIds: Set<string>;
   onToggleVisibility: (id: string) => void;
+  // Bulk show/hide for the Scans panel header — acts on the selection when one
+  // exists, otherwise every scan. Visibility lives in App (setScans), so this
+  // is a prop rather than a local handler.
+  onToggleScansVisibility: () => void;
   // Force a scan hidden (idempotent — unlike onToggleVisibility). Used after a
   // QSM build to get the source scan's points out of the way so the new QSM
   // isn't obscured by the cloud it was derived from.
@@ -213,10 +219,45 @@ interface PointCloudViewerProps {
   onRequestImportWizard?: (inputs: WizardScanInput[]) => Promise<WizardResult[] | null>;
 }
 
+// Compute the next selection Set for a modifier-aware click, mirroring App's
+// handleToggleScanSelection so meshes/skeletons/QSMs behave identically:
+//   - Shift+click: select the range between the anchor and the clicked id
+//     (additive when ctrl/cmd is also held, else replacing the selection).
+//   - Ctrl/Cmd+click: toggle the clicked id in/out of the selection.
+//   - Plain click: select only the clicked id, unless it's already the sole
+//     selection (then deselect it).
+// `orderedIds` is the list in display order (for range math). Returns the new
+// Set; the caller updates the anchor ref for non-range clicks.
+function nextSelection(
+  prev: Set<string>,
+  id: string,
+  orderedIds: string[],
+  anchorId: string | null,
+  additive: boolean,
+  range: boolean,
+): Set<string> {
+  if (range && anchorId) {
+    const anchorIdx = orderedIds.indexOf(anchorId);
+    const clickedIdx = orderedIds.indexOf(id);
+    if (anchorIdx !== -1 && clickedIdx !== -1) {
+      const [lo, hi] = anchorIdx < clickedIdx ? [anchorIdx, clickedIdx] : [clickedIdx, anchorIdx];
+      const rangeIds = orderedIds.slice(lo, hi + 1);
+      return new Set(additive ? [...prev, ...rangeIds] : rangeIds);
+    }
+  }
+  const isSoleSelection = !additive && prev.size === 1 && prev.has(id);
+  if (isSoleSelection) return new Set();
+  const next = new Set(additive ? prev : []);
+  if (prev.has(id) && additive) next.delete(id);
+  else next.add(id);
+  return next;
+}
+
 export default function PointCloudViewer({
   scans,
   selectedScanIds,
   onToggleVisibility,
+  onToggleScansVisibility,
   onHideScan,
   onToggleMisses,
   onToggleSelection,
@@ -316,20 +357,27 @@ export default function PointCloudViewer({
   const octreePaintedRef = useRef<Set<string>>(new Set());
   // Fired (via OctreePointCloud.onFirstTilesReady) the first time an octree's
   // tiles paint. Forces a single fresh-material remount so a cloud that mounted
-  // directly into a gradient/scalar mode recompiles its shader with geometry
-  // present. rgb / per-scan / single render correctly on first paint, so they
-  // don't need it — and a later switch INTO a gradient mode is a colorMode
-  // change, which already remounts via the key. Guarded → fires once per
-  // cacheId, never loops.
+  // before its material effect could override potree-core's defaults recompiles
+  // its shader with geometry present — the same cure as a manual mode toggle.
+  //
+  // This used to be gated to gradient/scalar modes only, on the assumption that
+  // per-scan / single / rgb "render correctly on first paint." That assumption
+  // breaks under batch import: when several octrees mount at once, the first
+  // paint can land before the material effect runs, so a per-scan cloud renders
+  // with potree-core's DEFAULT pointColorType (elevation) instead of our COLOR
+  // material — the cloud shows a flat z-height/grey ramp until the user toggles
+  // color mode and back. Because per-scan was excluded here, nothing corrected
+  // it. We now fire for EVERY mode so the one-shot recompile always runs.
+  // Guarded → fires at most once per cacheId, never loops.
   const handleOctreeFirstTiles = useCallback((cacheId: string) => {
-    const needsRefresh =
-      colorMode === 'height' || colorMode === 'intensity' ||
-      colorMode === 'scalar' || colorMode === 'x' || colorMode === 'y';
-    if (!needsRefresh) return;
     if (octreePaintedRef.current.has(cacheId)) return;
     octreePaintedRef.current.add(cacheId);
+    // Test hook: E2E can't read WebGL pixels in the offscreen window, so it
+    // verifies the first-paint recompile by reading the set of cacheIds the
+    // one-shot fix fired for. See tests/e2e/import-multi-pointcloud.spec.ts.
+    (window as any).__octreeRepainted = Array.from(octreePaintedRef.current);
     setOctreePaintGen(prev => ({ ...prev, [cacheId]: (prev[cacheId] ?? 0) + 1 }));
-  }, [colorMode]);
+  }, []);
   // Custom min/max overrides keyed by `${colorMode}:${field?}`. Undefined entries
   // mean "use the data-derived range."
   const [colorRanges, setColorRanges] = useState<Record<string, { min?: number; max?: number }>>({});
@@ -436,16 +484,28 @@ export default function PointCloudViewer({
   const [selectedMeshIds, setSelectedMeshIds] = useState<Set<string>>(new Set());
   // Derived single mesh ID for backward compatibility (first selected mesh)
   const selectedMeshId = selectedMeshIds.size > 0 ? Array.from(selectedMeshIds)[0] : null;
-  const [selectedSkeletonId, setSelectedSkeletonId] = useState<string | null>(null);
+  // Skeletons are multi-selectable (Set) like meshes; selectedSkeletonId is the
+  // back-compat first-element derive that the translate gizmo / edit memos read
+  // as "the focused skeleton".
+  const [selectedSkeletonIds, setSelectedSkeletonIds] = useState<Set<string>>(new Set());
+  const selectedSkeletonId = useMemo(() => (selectedSkeletonIds.size > 0 ? Array.from(selectedSkeletonIds)[0] : null), [selectedSkeletonIds]);
+
+  // Range-select anchors (last plain/ctrl-clicked id) for Shift+click in each
+  // panel, mirroring the Scans panel's lastSelectedScanIdRef in App.
+  const lastSelectedMeshIdRef = useRef<string | null>(null);
+  const lastSelectedSkeletonIdRef = useRef<string | null>(null);
+  const lastSelectedQSMIdRef = useRef<string | null>(null);
 
   // Copy confirmation flash state
   const [coordsCopied, setCoordsCopied] = useState(false);
 
-  // Delete confirmation dialog state
+  // Delete confirmation dialog state. `ids` is a batch (length 1 for a single
+  // row's trash button, N for a header bulk delete); `label` is either the one
+  // item's name or a count like "3 scans".
   const [deleteConfirm, setDeleteConfirm] = useState<{
     type: 'mesh' | 'skeleton' | 'cloud' | 'qsm';
-    id: string;
-    name: string;
+    ids: string[];
+    label: string;
   } | null>(null);
 
   // Command palette state
@@ -484,6 +544,9 @@ export default function PointCloudViewer({
   const [qsmMultiMode, setQSMMultiMode] = useState<'aggregate' | 'per-scan'>('per-scan');
   const [qsms, setQSMs] = useState<QSMEntry[]>([]);
   const [qsmColorMode, setQSMColorMode] = useState<QSMColorMode>('rank');
+  // QSM-entry multi-selection (for the panel header bulk actions). Orthogonal to
+  // selectedQSMShootId below, which highlights a single shoot/axis WITHIN a QSM.
+  const [selectedQSMIds, setSelectedQSMIds] = useState<Set<string>>(new Set());
   const [selectedQSMShootId, setSelectedQSMShootId] = useState<number | null>(null);
   // QSM export dialog: format + per-QSM selection, then one file per QSM into a
   // user-picked folder. See handleExportQSMs below.
@@ -586,6 +649,8 @@ export default function PointCloudViewer({
   // Helios triangulation popup + background task state
   const [showHeliosPopup, setShowHeliosPopup] = useState(false);
   const [isHeliosRunning, setIsHeliosRunning] = useState(false);
+  // Which mesh's leaf-angle distribution plot is open (null = closed).
+  const [showLeafAngleMeshId, setShowLeafAngleMeshId] = useState<string | null>(null);
   const heliosAbortRef = useRef<AbortController | null>(null);
   // Leaf area density popup + results + background task state
   const [showLADPopup, setShowLADPopup] = useState(false);
@@ -1371,7 +1436,7 @@ export default function PointCloudViewer({
       }
 
       if (emptied.length > 0) {
-        setDeleteConfirm({ type: 'cloud', id: emptied[0].id, name: emptied[0].name });
+        setDeleteConfirm({ type: 'cloud', ids: [emptied[0].id], label: emptied[0].name });
       }
 
       // Clear the apply flag together with the crop region: the preview
@@ -1688,7 +1753,7 @@ export default function PointCloudViewer({
         const result = await deleteCloudRegion(sessionId, deleteRegion as CropOctreeRegion);
         if (result.remaining_count === 0) {
           // Every point erased → offer to delete the cloud, like the flat path.
-          setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+          setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
           setEditMode('none');
           return;
         }
@@ -1741,8 +1806,8 @@ export default function PointCloudViewer({
       // All points would be removed - trigger delete confirmation
       setDeleteConfirm({
         type: 'cloud',
-        id: cloud.id,
-        name: cloud.data.fileName || 'Unnamed'
+        ids: [cloud.id],
+        label: cloud.data.fileName || 'Unnamed'
       });
       setEditMode('none');
       return;
@@ -2112,7 +2177,7 @@ export default function PointCloudViewer({
           rebuild: true,
         });
         if (result.point_count === 0) {
-          setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+          setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
           return;
         }
         onUpdateCloud(cloud.id, buildSessionOctreeData(result, octreeInfo, cloud.data.fileName ?? cloud.id));
@@ -2134,7 +2199,7 @@ export default function PointCloudViewer({
     const newData = rebuildFlatCloudData(cloud, keep, state.translation);
     if (!newData) {
       // All points would be removed - trigger delete confirmation.
-      setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+      setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
       return;
     }
     onUpdateCloud(cloud.id, newData);
@@ -2176,7 +2241,7 @@ export default function PointCloudViewer({
           scalarFilters: args.scalarFilters ?? null,
         });
         if (result.kept.point_count === 0) {
-          setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+          setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
           return;
         }
         onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, cloud.data.fileName ?? cloud.id));
@@ -2204,7 +2269,7 @@ export default function PointCloudViewer({
     const keep = buildFlatKeepPredicate(cloud, filters, state.erasedIndices);
     const keptData = rebuildFlatCloudData(cloud, keep, state.translation);
     if (!keptData) {
-      setDeleteConfirm({ type: 'cloud', id: cloud.id, name: cloud.data.fileName || 'Unnamed' });
+      setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
       return;
     }
     // Leftover excludes erased points too (they're gone either way), so the
@@ -3709,6 +3774,17 @@ export default function PointCloudViewer({
     return clouds.some(c => c.id === mesh.sourceCloudId);
   }, [clouds]);
 
+  // Resolve a mesh's source-cloud filename, for meshDisplayNameFor. Shared by
+  // every call site so they all compute the same collision-deduped name.
+  const meshFileNameFor = useCallback(
+    (m: MeshEntry) => clouds.find(c => c.id === m.sourceCloudId)?.data.fileName,
+    [clouds],
+  );
+  const displayNameOfMesh = useCallback(
+    (mesh: MeshEntry) => meshDisplayNameFor(mesh, meshes, meshFileNameFor),
+    [meshes, meshFileNameFor],
+  );
+
   // Whether a mesh is a valid synthetic-scan TARGET: plant models and
   // imported-from-file meshes — but NOT triangulation results, the voxel grid,
   // or generated primitive shapes (those are derived geometry, not real scenes
@@ -4206,6 +4282,19 @@ export default function PointCloudViewer({
         surfaceArea: response.surface_area,
       };
 
+      // Capture the parameters actually used, for provenance + default naming.
+      // Only method-relevant fields are recorded (poisson→depth, alpha_shape→alpha).
+      const triangulationParams: NonNullable<MeshEntry['triangulationParams']> = {
+        normalRadius: request.normal_radius,
+        normalMaxNn: request.normal_max_nn,
+        pointsUsed: response.points_used,
+      };
+      if (triangulationMethod === 'poisson') {
+        triangulationParams.depth = poissonDepth;
+      } else if (triangulationMethod === 'alpha_shape' && alphaValue !== null) {
+        triangulationParams.alpha = alphaValue;
+      }
+
       // Create mesh entry
       const meshEntry: MeshEntry = {
         id: crypto.randomUUID(),
@@ -4214,6 +4303,7 @@ export default function PointCloudViewer({
         visible: true,
         color: cloud.color,
         method: triangulationMethod,
+        triangulationParams,
       };
 
       // Add to meshes
@@ -5776,78 +5866,139 @@ export default function PointCloudViewer({
   // Confirm and execute deletion
   const handleConfirmDelete = useCallback(() => {
     if (!deleteConfirm) return;
+    const { type, ids } = deleteConfirm;
 
-    if (deleteConfirm.type === 'mesh') {
-      handleRemoveMesh(deleteConfirm.id);
-      if (selectedMeshIds.has(deleteConfirm.id)) {
-        setSelectedMeshIds(prev => {
-          const newSet = new Set(prev);
-          newSet.delete(deleteConfirm.id);
-          return newSet;
-        });
-      }
-    } else if (deleteConfirm.type === 'skeleton') {
-      handleRemoveSkeleton(deleteConfirm.id);
-      if (selectedSkeletonId === deleteConfirm.id) {
-        setSelectedSkeletonId(null);
-      }
-    } else if (deleteConfirm.type === 'cloud') {
-      onRemoveCloud(deleteConfirm.id);
-    } else if (deleteConfirm.type === 'qsm') {
-      handleRemoveQSM(deleteConfirm.id);
+    if (type === 'mesh') {
+      ids.forEach(id => handleRemoveMesh(id));
+      setSelectedMeshIds(prev => {
+        const next = new Set(prev);
+        ids.forEach(id => next.delete(id));
+        return next;
+      });
+    } else if (type === 'skeleton') {
+      ids.forEach(id => handleRemoveSkeleton(id));
+      setSelectedSkeletonIds(prev => {
+        const next = new Set(prev);
+        ids.forEach(id => next.delete(id));
+        return next;
+      });
+    } else if (type === 'cloud') {
+      // onRemoveCloud === App's handleRemoveScan: it frees each scan's backend
+      // session and prunes selectedScanIds, so looping here frees every session.
+      ids.forEach(id => onRemoveCloud(id));
+    } else if (type === 'qsm') {
+      ids.forEach(id => handleRemoveQSM(id));
+      setSelectedQSMIds(prev => {
+        const next = new Set(prev);
+        ids.forEach(id => next.delete(id));
+        return next;
+      });
     }
 
     setDeleteConfirm(null);
-  }, [deleteConfirm, handleRemoveMesh, handleRemoveSkeleton, handleRemoveQSM, onRemoveCloud, selectedMeshId, selectedSkeletonId]);
+  }, [deleteConfirm, handleRemoveMesh, handleRemoveSkeleton, handleRemoveQSM, onRemoveCloud]);
 
   // Toggle skeleton visibility
   const handleToggleSkeletonVisibility = useCallback((skeletonId: string) => {
     setSkeletons(prev => prev.map(s => s.id === skeletonId ? { ...s, visible: !s.visible } : s));
   }, []);
 
-  // Select a mesh (shift-click for multi-select, clears skeleton selection)
-  const handleSelectMesh = useCallback((meshId: string) => {
-    setSelectedMeshIds(prev => {
-      const newSet = new Set(prev);
-      if (isShiftHeldRef.current) {
-        // Shift held: toggle mesh in selection (multi-select)
-        if (newSet.has(meshId)) {
-          newSet.delete(meshId);
-        } else {
-          newSet.add(meshId);
-        }
-      } else {
-        // No shift: single select (toggle or replace)
-        if (newSet.size === 1 && newSet.has(meshId)) {
-          // Clicking same mesh deselects it
-          newSet.clear();
-        } else {
-          // Select only this mesh
-          newSet.clear();
-          newSet.add(meshId);
-        }
-        // Only clear cloud selection when not holding shift
-        onDeselectAll();
-      }
-      return newSet;
-    });
-    setSelectedSkeletonId(null);
-  }, [onDeselectAll]);
+  // Select a mesh — Ctrl/Cmd toggles, Shift selects a range, plain click selects
+  // only this mesh (or deselects if already sole). A plain click also clears the
+  // skeleton + cloud selection (single-focus for the gizmo); additive clicks
+  // leave other panels alone so a multi-select can be built up.
+  const handleSelectMesh = useCallback((meshId: string, additive: boolean, range: boolean) => {
+    setSelectedMeshIds(prev => nextSelection(prev, meshId, meshes.map(m => m.id), lastSelectedMeshIdRef.current, additive, range));
+    if (!range) lastSelectedMeshIdRef.current = meshId;
+    if (!additive && !range) {
+      setSelectedSkeletonIds(new Set());
+      onDeselectAll();
+    }
+  }, [meshes, onDeselectAll]);
 
-  // Select a skeleton (clears point cloud and mesh selection)
-  const handleSelectSkeleton = useCallback((skeletonId: string) => {
-    setSelectedSkeletonId(prev => prev === skeletonId ? null : skeletonId);
-    setSelectedMeshIds(new Set());
-    onDeselectAll(); // Clear point cloud selection
-  }, [onDeselectAll]);
+  // Select a skeleton — same modifier semantics as meshes.
+  const handleSelectSkeleton = useCallback((skeletonId: string, additive: boolean, range: boolean) => {
+    setSelectedSkeletonIds(prev => nextSelection(prev, skeletonId, skeletons.map(s => s.id), lastSelectedSkeletonIdRef.current, additive, range));
+    if (!range) lastSelectedSkeletonIdRef.current = skeletonId;
+    if (!additive && !range) {
+      setSelectedMeshIds(new Set());
+      onDeselectAll();
+    }
+  }, [skeletons, onDeselectAll]);
+
+  // Select a QSM entry — same modifier semantics. QSM selection doesn't drive a
+  // gizmo, so it doesn't clear the other panels.
+  const handleToggleQSMSelection = useCallback((qsmId: string, additive: boolean, range: boolean) => {
+    setSelectedQSMIds(prev => nextSelection(prev, qsmId, qsms.map(q => q.id), lastSelectedQSMIdRef.current, additive, range));
+    if (!range) lastSelectedQSMIdRef.current = qsmId;
+  }, [qsms]);
 
   // Clear mesh/skeleton selection when point cloud is selected (unless shift held for mixed selection)
   useEffect(() => {
     if (selectedIds.size > 0 && !isShiftHeldRef.current) {
       setSelectedMeshIds(new Set());
-      setSelectedSkeletonId(null);
+      setSelectedSkeletonIds(new Set());
     }
   }, [selectedIds]);
+
+  // Display name for a skeleton row / delete dialog (source cloud filename).
+  const skeletonDisplayName = useCallback((s: SkeletonEntry): string =>
+    clouds.find(c => c.id === s.sourceCloudId)?.data.fileName || 'Skeleton', [clouds]);
+
+  // ----- Header bulk actions (Meshes / Skeletons / QSMs) -------------------
+  // Each acts on the selection when one exists, else the whole section.
+  // Visibility toggles land on a uniform state (hide if any visible, else show);
+  // delete opens the shared batched confirm dialog.
+
+  const handleToggleMeshesVisibility = useCallback(() => {
+    const { targetIds, nextVisible } = resolveTargets(meshes, selectedMeshIds);
+    const target = new Set(targetIds);
+    setMeshes(prev => prev.map(m => target.has(m.id) ? { ...m, visible: nextVisible } : m));
+  }, [meshes, selectedMeshIds]);
+
+  const handleDeleteMeshes = useCallback(() => {
+    const ids = resolveDeleteIds(meshes, selectedMeshIds);
+    if (ids.length === 0) return;
+    const single = displayNameOfMesh(meshes.find(m => m.id === ids[0])!);
+    setDeleteConfirm({ type: 'mesh', ids, label: buildDeleteLabel(ids, single, 'meshes') });
+  }, [meshes, selectedMeshIds, displayNameOfMesh]);
+
+  const handleToggleSkeletonsVisibility = useCallback(() => {
+    const { targetIds, nextVisible } = resolveTargets(skeletons, selectedSkeletonIds);
+    const target = new Set(targetIds);
+    setSkeletons(prev => prev.map(s => target.has(s.id) ? { ...s, visible: nextVisible } : s));
+  }, [skeletons, selectedSkeletonIds]);
+
+  const handleDeleteSkeletons = useCallback(() => {
+    const ids = resolveDeleteIds(skeletons, selectedSkeletonIds);
+    if (ids.length === 0) return;
+    const single = skeletonDisplayName(skeletons.find(s => s.id === ids[0])!);
+    setDeleteConfirm({ type: 'skeleton', ids, label: buildDeleteLabel(ids, single, 'skeletons') });
+  }, [skeletons, selectedSkeletonIds, skeletonDisplayName]);
+
+  const handleToggleQSMsVisibility = useCallback(() => {
+    const { targetIds, nextVisible } = resolveTargets(qsms, selectedQSMIds);
+    const target = new Set(targetIds);
+    setQSMs(prev => prev.map(q => target.has(q.id) ? { ...q, visible: nextVisible } : q));
+  }, [qsms, selectedQSMIds]);
+
+  const handleDeleteQSMs = useCallback(() => {
+    const ids = resolveDeleteIds(qsms, selectedQSMIds);
+    if (ids.length === 0) return;
+    const single = qsmDisplayLabel(qsms.find(q => q.id === ids[0])!);
+    setDeleteConfirm({ type: 'qsm', ids, label: buildDeleteLabel(ids, single, 'QSMs') });
+  }, [qsms, selectedQSMIds, qsmDisplayLabel]);
+
+  // Open the batched delete confirm for the Scans header. Visibility for scans
+  // lives in App (onToggleScansVisibility prop); deletion routes through the
+  // shared confirm here with type 'cloud'.
+  const handleDeleteScans = useCallback(() => {
+    const ids = resolveDeleteIds(scans, selectedScanIds);
+    if (ids.length === 0) return;
+    const first = scans.find(s => s.id === ids[0]);
+    const single = first ? scanDisplayName(first) : 'scan';
+    setDeleteConfirm({ type: 'cloud', ids, label: buildDeleteLabel(ids, single, 'scans') });
+  }, [scans, selectedScanIds]);
 
   // Get selected mesh and skeleton objects
   // For single mesh selection, get the first (or only) selected mesh
@@ -6689,7 +6840,7 @@ export default function PointCloudViewer({
 
     // Auto-select the new mesh and show resize panel.
     setSelectedMeshIds(new Set([newMeshId]));
-    setSelectedSkeletonId(null);
+    setSelectedSkeletonIds(new Set());
     // For a voxel grid, keep any scan selection so the resize panel's "Fit to
     // selected scan(s)" button is immediately usable (it fits the box to the
     // selected scans). Other shapes clear the point-cloud selection as before.
@@ -6718,14 +6869,15 @@ export default function PointCloudViewer({
       if (!grid) continue;
       const sx = grid.size[0], sy = grid.size[1], sz = grid.size[2];
       const fmt = (n: number) => Number(n.toFixed(2)).toString();
+      const name = displayNameOfMesh(m);
       options.push({
         id: m.id,
-        label: `Voxel box (${fmt(sx)}×${fmt(sy)}×${fmt(sz)} m, ${grid.nx}×${grid.ny}×${grid.nz})`,
+        label: `${name} (${fmt(sx)}×${fmt(sy)}×${fmt(sz)} m, ${grid.nx}×${grid.ny}×${grid.nz})`,
         grid,
       });
     }
     return options;
-  }, [meshes, meshPositions, meshScales]);
+  }, [meshes, meshPositions, meshScales, displayNameOfMesh]);
 
   // Per-triangle pseudocolor buffers for any mesh with a non-solid color mode.
   // Keyed by mesh id; entry is the non-indexed position/color buffers fed to
@@ -6865,6 +7017,31 @@ export default function PointCloudViewer({
         ? Uint32Array.from(response.triangle_scan_ids)
         : undefined;
 
+      // Per-scan sensor origins, keyed by scan index (same order as
+      // request.scans / scanColors). Lets the azimuth pseudocolor orient each
+      // facet normal toward the scanner that saw it, so closed scanned surfaces
+      // read a continuous outward bearing instead of a 180° hemisphere seam.
+      const scanOrigins = triangleScanIds
+        ? Float32Array.from(request.scans.flatMap(s => [s.origin[0], s.origin[1], s.origin[2]]))
+        : undefined;
+
+      // Per-triangle grid cell + the grid it was binned in, so the leaf-angle
+      // plot can split the distribution per voxel. The backend bins centroids
+      // into the request grid (or, when none was supplied, an auto 1×1×1 grid).
+      const triangleCellIds = response.triangle_cell_ids
+        && response.triangle_cell_ids.length === response.num_triangles
+        ? Uint32Array.from(response.triangle_cell_ids)
+        : undefined;
+      const grid = request.grid
+        ? {
+            center: request.grid.center as [number, number, number],
+            size: request.grid.size as [number, number, number],
+            nx: request.grid.nx,
+            ny: request.grid.ny,
+            nz: request.grid.nz,
+          }
+        : undefined;
+
       const meshData: MeshData = {
         vertices,
         indices,
@@ -6875,6 +7052,9 @@ export default function PointCloudViewer({
         surfaceArea: response.surface_area,
         triangleScanIds,
         scanColors: triangleScanIds && scanColors.length > 0 ? scanColors : undefined,
+        scanOrigins,
+        triangleCellIds,
+        grid,
       };
 
       const meshEntry: MeshEntry = {
@@ -6884,6 +7064,20 @@ export default function PointCloudViewer({
         visible: true,
         color: '#22c55e',
         method: 'helios',
+        // Provenance for the mesh list: the Helios triangulation parameters and
+        // (when the backend reported them) the filter breakdown, so the user can
+        // see how many candidate triangles Lmax/aspect removed.
+        triangulationParams: {
+          lmax: request.lmax,
+          maxAspectRatio: request.max_aspect_ratio,
+          scanCount: request.scans.length,
+          ...(response.diagnostics ? {
+            candidateTriangles: response.diagnostics.candidates,
+            droppedLmax: response.diagnostics.dropped_lmax,
+            droppedAspect: response.diagnostics.dropped_aspect,
+            droppedDegenerate: response.diagnostics.dropped_degenerate,
+          } : {}),
+        },
       };
 
       setMeshes(prev => [...prev, meshEntry]);
@@ -6892,11 +7086,26 @@ export default function PointCloudViewer({
       setMeshScales(prev => new Map(prev).set(meshEntry.id, { x: 1, y: 1, z: 1 }));
       setMeshRotations(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
       setShowTriangulationPanel(false);
+      // Include the filter breakdown in the success toast when available, so the
+      // user can see how many candidate triangles Lmax/aspect removed.
+      const d = response.diagnostics;
+      const breakdown = d
+        ? ` (${d.candidates.toLocaleString()} candidates: ${d.dropped_lmax.toLocaleString()} dropped by Lmax, ${d.dropped_aspect.toLocaleString()} by aspect)`
+        : '';
       showToast({
         type: 'success',
         title: 'Helios Triangulation Complete',
-        message: `Created mesh with ${meshData.triangleCount.toLocaleString()} triangles`,
+        message: `Created mesh with ${meshData.triangleCount.toLocaleString()} triangles${breakdown}`,
       });
+      // Mesh produced, but almost nothing was filtered → Lmax/aspect may be
+      // bridging real gaps; the mesh could contain spurious spanning triangles.
+      if (response.diagnostics_warning) {
+        showToast({
+          type: 'warning',
+          title: 'Triangulation filter may be too permissive',
+          message: response.diagnostics_warning,
+        });
+      }
       // No grid box was supplied: the backend fit one to all points. Warn so
       // the user knows ground/trunk should already be segmented or cropped.
       if (response.grid_warning) {
@@ -7162,7 +7371,7 @@ export default function PointCloudViewer({
 
       // Auto-select the new mesh
       setSelectedMeshIds(new Set([newMeshId]));
-      setSelectedSkeletonId(null);
+      setSelectedSkeletonIds(new Set());
       onDeselectAll();
 
       // Reset camera to fit the new plant mesh
@@ -8201,6 +8410,12 @@ export default function PointCloudViewer({
                   wireframe={meshWireframe}
                   useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
                   triangleColors={meshTriangleColors.get(mesh.id) ?? null}
+                  // The translucent voxel box must always blend over the
+                  // surface mesh it encloses, not be camera-distance-sorted
+                  // against it. A positive renderOrder forces it last in the
+                  // transparent pass so its volume tint survives every view
+                  // angle (fixes the +X-view "full green" bug).
+                  renderOrder={mesh.gridSubdivisions ? 1 : 0}
                 />
               )}
               {mesh.gridSubdivisions &&
@@ -8512,8 +8727,8 @@ export default function PointCloudViewer({
                         setGizmoDragging(false);
                         setDeleteConfirm({
                           type: 'cloud',
-                          id: firstSelectedCloud.id,
-                          name: firstSelectedCloud.data.fileName || 'Unnamed'
+                          ids: [firstSelectedCloud.id],
+                          label: firstSelectedCloud.data.fileName || 'Unnamed'
                         });
                         setEditMode('none');
                       }, 0);
@@ -9129,6 +9344,24 @@ export default function PointCloudViewer({
             <button onClick={onDeselectAll} className="p-1 hover:bg-neutral-700 rounded" title="Deselect All">
               <XSquare className="w-3 h-3 text-neutral-400" />
             </button>
+            <button
+              data-testid="scans-bulk-hide"
+              onClick={onToggleScansVisibility}
+              className="p-1 hover:bg-neutral-700 rounded"
+              title={selectedScanIds.size > 0 ? `Show/hide ${selectedScanIds.size} selected` : 'Show/hide all'}
+            >
+              {anyTargetVisible(scans, selectedScanIds)
+                ? <Eye className="w-3 h-3 text-neutral-400" />
+                : <EyeOff className="w-3 h-3 text-neutral-600" />}
+            </button>
+            <button
+              data-testid="scans-bulk-delete"
+              onClick={handleDeleteScans}
+              className="p-1 hover:bg-red-600/30 rounded"
+              title={selectedScanIds.size > 0 ? `Delete ${selectedScanIds.size} selected` : 'Delete all'}
+            >
+              <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
+            </button>
           </div>
           {/* Run a synthetic LiDAR scan from all visible scanners against all
               visible plant/imported geometry. Shown whenever any scanner exists
@@ -9206,12 +9439,13 @@ export default function PointCloudViewer({
                     data-has-params={scanHasParams ? 'true' : 'false'}
                     data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
                     data-selected={isSelected ? 'true' : 'false'}
+                    data-visible={scan.visible ? 'true' : 'false'}
                     onClick={(e) => {
                       // Only allow toggle-off when this scan is the WHOLE
                       // selection. If a mesh/skeleton is also selected (mixed
                       // mode, e.g. after creating a voxel box), the click should
                       // refocus this scan and clear the mesh — not deselect.
-                      const allowDeselect = selectedMeshIds.size === 0 && selectedSkeletonId === null;
+                      const allowDeselect = selectedMeshIds.size === 0 && selectedSkeletonIds.size === 0;
                       onToggleSelection(scan.id, e.ctrlKey || e.metaKey, e.shiftKey, allowDeselect);
                     }}
                     className={`flex items-center gap-1.5 p-2 rounded cursor-pointer select-none transition-colors ${
@@ -9351,7 +9585,7 @@ export default function PointCloudViewer({
                     )}
                     <button
                       data-testid={`scan-delete-${scan.id}`}
-                      onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'cloud', id: scan.id, name: displayName }); }}
+                      onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'cloud', ids: [scan.id], label: displayName }); }}
                       className="p-1 hover:bg-red-600/30 rounded"
                       title="Remove"
                     >
@@ -9411,9 +9645,13 @@ export default function PointCloudViewer({
             isTextured={isTexturedMesh}
             isTriangulated={isTriangulatedMesh}
             supportsOpacity={meshSupportsOpacity}
+            selectedCount={selectedMeshIds.size}
+            anyTargetVisible={anyTargetVisible(meshes, selectedMeshIds)}
+            onToggleVisibilityAll={handleToggleMeshesVisibility}
+            onDeleteAll={handleDeleteMeshes}
             onSelect={handleSelectMesh}
             onToggleVisibility={handleToggleMeshVisibility}
-            onRequestDelete={(id, name) => setDeleteConfirm({ type: 'mesh', id, name })}
+            onRequestDelete={(id, name) => setDeleteConfirm({ type: 'mesh', ids: [id], label: name })}
             onToggleExpanded={(id) => setExpandedMeshIds(prev => {
               const next = new Set(prev);
               if (next.has(id)) next.delete(id); else next.add(id);
@@ -9432,6 +9670,7 @@ export default function PointCloudViewer({
             onColormapChange={setColormap}
             onOpacityChange={(id, value) => setMeshOpacities(prev => new Map(prev).set(id, value))}
             onWireframeChange={setMeshWireframe}
+            onOpenLeafAngles={setShowLeafAngleMeshId}
           />
         )}
 
@@ -9440,13 +9679,17 @@ export default function PointCloudViewer({
           <SkeletonsListPanel
             skeletons={skeletons}
             clouds={clouds}
-            selectedSkeletonId={selectedSkeletonId}
+            selectedSkeletonIds={selectedSkeletonIds}
+            selectedCount={selectedSkeletonIds.size}
+            anyTargetVisible={anyTargetVisible(skeletons, selectedSkeletonIds)}
             showAsCylinders={skeletonShowAsCylinders}
             tubeRadius={skeletonTubeRadius}
             colorByBranchOrder={skeletonColorByBranchOrder}
             onSelect={handleSelectSkeleton}
             onToggleVisibility={handleToggleSkeletonVisibility}
-            onRequestDelete={(id, name) => setDeleteConfirm({ type: 'skeleton', id, name })}
+            onToggleVisibilityAll={handleToggleSkeletonsVisibility}
+            onDeleteAll={handleDeleteSkeletons}
+            onRequestDelete={(id, name) => setDeleteConfirm({ type: 'skeleton', ids: [id], label: name })}
             onShowAsCylindersChange={setSkeletonShowAsCylinders}
             onTubeRadiusChange={setSkeletonTubeRadius}
             onColorByBranchOrderChange={setSkeletonColorByBranchOrder}
@@ -9467,25 +9710,29 @@ export default function PointCloudViewer({
               >
                 <Download className="w-3.5 h-3.5 text-neutral-400" />
               </button>
+              <button
+                data-testid="qsm-bulk-hide"
+                onClick={handleToggleQSMsVisibility}
+                className="p-1 hover:bg-neutral-700 rounded"
+                title={selectedQSMIds.size > 0 ? `Show/hide ${selectedQSMIds.size} selected` : 'Show/hide all'}
+              >
+                {anyTargetVisible(qsms, selectedQSMIds)
+                  ? <Eye className="w-3 h-3 text-neutral-400" />
+                  : <EyeOff className="w-3 h-3 text-neutral-600" />}
+              </button>
+              <button
+                data-testid="qsm-bulk-delete"
+                onClick={handleDeleteQSMs}
+                className="p-1 hover:bg-red-600/30 rounded"
+                title={selectedQSMIds.size > 0 ? `Delete ${selectedQSMIds.size} selected` : 'Delete all'}
+              >
+                <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
+              </button>
             </div>
             <div className="overflow-y-auto flex-1 p-1">
               {qsms.map(qsm => {
                 const sourceCloud = clouds.find(c => c.id === qsm.sourceCloudId);
                 const m = qsm.metrics;
-                // Per-shoot length + length-weighted diameter, for the shoot list.
-                const cylById = new Map(qsm.cylinders.map(c => [c.cyl_id, c]));
-                const shootStats = qsm.shoots.map(s => {
-                  let len = 0, wdia = 0;
-                  for (const cid of s.cylinder_ids) {
-                    const c = cylById.get(cid);
-                    if (!c) continue;
-                    const dx = c.end[0] - c.start[0], dy = c.end[1] - c.start[1], dz = c.end[2] - c.start[2];
-                    const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
-                    len += l;
-                    wdia += 2 * c.radius * l;
-                  }
-                  return { shoot: s, length: len, diameterMm: len > 0 ? (wdia / len) * 1000 : 0 };
-                });
                 return (
                   <div
                     key={qsm.id}
@@ -9497,7 +9744,12 @@ export default function PointCloudViewer({
                     data-max-rank={m ? m.max_rank : 0}
                     data-min-radius={qsm.cylinders.length ? Math.min(...qsm.cylinders.map(c => c.radius)) : 0}
                     data-max-radius={qsm.cylinders.length ? Math.max(...qsm.cylinders.map(c => c.radius)) : 0}
-                    className="p-2 rounded hover:bg-neutral-700/40"
+                    data-selected={selectedQSMIds.has(qsm.id) ? 'true' : 'false'}
+                    data-visible={qsm.visible ? 'true' : 'false'}
+                    onClick={(e) => handleToggleQSMSelection(qsm.id, e.ctrlKey || e.metaKey, e.shiftKey)}
+                    className={`p-2 rounded cursor-pointer select-none transition-colors ${
+                      selectedQSMIds.has(qsm.id) ? 'bg-amber-600/30 border border-amber-500/50' : 'hover:bg-neutral-700/40'
+                    }`}
                   >
                     <div className="flex items-center gap-2">
                       <div className="flex-1 min-w-0">
@@ -9518,7 +9770,7 @@ export default function PointCloudViewer({
                       </button>
                       <button
                         data-testid={`qsm-delete-${qsm.id}`}
-                        onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'qsm', id: qsm.id, name: qsm.sourceLabel || sourceCloud?.data.fileName || 'QSM' }); }}
+                        onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'qsm', ids: [qsm.id], label: qsm.sourceLabel || sourceCloud?.data.fileName || 'QSM' }); }}
                         className="p-1 hover:bg-neutral-600 rounded"
                         title="Delete"
                       >
@@ -9535,32 +9787,6 @@ export default function PointCloudViewer({
                         <span>Max rank</span><span className="text-neutral-200 text-right">{m.max_rank}</span>
                       </div>
                     )}
-
-                    {/* Shoot list — click to highlight the whole continuous axis. */}
-                    <div className="mt-2 max-h-32 overflow-y-auto border-t border-neutral-700/50 pt-1">
-                      {shootStats.map(({ shoot, length, diameterMm }) => {
-                        const sel = selectedQSMShootId === shoot.shoot_id;
-                        return (
-                          <div
-                            key={shoot.shoot_id}
-                            data-testid="qsm-shoot-row"
-                            data-shoot-id={shoot.shoot_id}
-                            data-rank={shoot.rank}
-                            onClick={() => setSelectedQSMShootId(sel ? null : shoot.shoot_id)}
-                            className={`flex items-center justify-between gap-2 px-1 py-0.5 rounded cursor-pointer text-[10px] ${
-                              sel ? 'bg-amber-600/30' : 'hover:bg-neutral-700/50'
-                            }`}
-                          >
-                            <span className="text-neutral-300">
-                              {shoot.rank === 0 ? 'Trunk' : `Rank ${shoot.rank}`} #{shoot.shoot_id}
-                            </span>
-                            <span className="text-neutral-500">
-                              {length.toFixed(2)}m · {diameterMm.toFixed(1)}mm
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
                   </div>
                 );
               })}
@@ -10119,7 +10345,7 @@ export default function PointCloudViewer({
                         const cloudId = Array.from(selectedIds)[0];
                         const cloud = clouds.find(c => c.id === cloudId);
                         if (cloud) {
-                          setDeleteConfirm({ type: 'cloud', id: cloudId, name: cloud.data.fileName || 'Point Cloud' });
+                          setDeleteConfirm({ type: 'cloud', ids: [cloudId], label: cloud.data.fileName || 'Point Cloud' });
                         }
                       }}
                       className="p-2 rounded transition-colors hover:bg-red-600/30"
@@ -10240,8 +10466,8 @@ export default function PointCloudViewer({
               {selectionType === 'mesh' && selectedMesh && (
                 <button
                   onClick={() => {
-                    const sourceName = meshDisplayName(selectedMesh, clouds.find(c => c.id === selectedMesh.sourceCloudId)?.data.fileName);
-                    setDeleteConfirm({ type: 'mesh', id: selectedMesh.id, name: sourceName });
+                    const sourceName = displayNameOfMesh(selectedMesh);
+                    setDeleteConfirm({ type: 'mesh', ids: [selectedMesh.id], label: sourceName });
                   }}
                   className="p-2 rounded transition-colors hover:bg-red-600/30"
                   title="Delete Mesh"
@@ -10253,7 +10479,7 @@ export default function PointCloudViewer({
                 <button
                   onClick={() => {
                     const sourceName = clouds.find(c => c.id === selectedSkeleton.sourceCloudId)?.data.fileName || 'Skeleton';
-                    setDeleteConfirm({ type: 'skeleton', id: selectedSkeleton.id, name: sourceName });
+                    setDeleteConfirm({ type: 'skeleton', ids: [selectedSkeleton.id], label: sourceName });
                   }}
                   className="p-2 rounded transition-colors hover:bg-red-600/30"
                   title="Delete Skeleton"
@@ -11207,7 +11433,7 @@ export default function PointCloudViewer({
           singleCloudSelected={selectedIds.size === 1}
           cloudName={clouds.find(c => c.id === Array.from(selectedIds)[0])?.data.fileName || ''}
           meshSelected={!!selectedMesh}
-          meshName={selectedMesh ? meshDisplayName(selectedMesh, clouds.find(c => c.id === selectedMesh.sourceCloudId)?.data.fileName) : ''}
+          meshName={selectedMesh ? displayNameOfMesh(selectedMesh) : ''}
           meshTriangleCount={selectedMesh?.data.triangleCount ?? 0}
           isScanning={isScanning}
           skeletonSelected={!!selectedSkeleton}
@@ -11594,9 +11820,13 @@ export default function PointCloudViewer({
       {deleteConfirm && (
         <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-neutral-800 rounded-lg p-4 shadow-xl max-w-sm mx-4">
-            <div className="text-sm font-medium text-neutral-200 mb-2">Delete {deleteConfirm.type === 'qsm' ? 'QSM' : deleteConfirm.type}?</div>
+            <div className="text-sm font-medium text-neutral-200 mb-2" data-testid="delete-confirm-title">
+              Delete {deleteConfirm.ids.length > 1 ? deleteConfirm.label : (deleteConfirm.type === 'qsm' ? 'QSM' : deleteConfirm.type)}?
+            </div>
             <div className="text-xs text-neutral-400 mb-4">
-              Are you sure you want to delete "{deleteConfirm.name}"? This action cannot be undone.
+              {deleteConfirm.ids.length > 1
+                ? <>Are you sure you want to delete {deleteConfirm.label}? This action cannot be undone.</>
+                : <>Are you sure you want to delete "{deleteConfirm.label}"? This action cannot be undone.</>}
             </div>
             <div className="flex gap-2 justify-end">
               <button
@@ -11786,6 +12016,21 @@ export default function PointCloudViewer({
           setScanPopupState({ kind: 'edit', id });
         }}
       />
+
+      {/* Leaf Angle Distribution Popup */}
+      {(() => {
+        const lapMesh = showLeafAngleMeshId
+          ? meshes.find(m => m.id === showLeafAngleMeshId) ?? null
+          : null;
+        return (
+          <LeafAnglePlotPopup
+            isOpen={lapMesh !== null}
+            onClose={() => setShowLeafAngleMeshId(null)}
+            mesh={lapMesh}
+            meshName={lapMesh ? displayNameOfMesh(lapMesh) : ''}
+          />
+        );
+      })()}
 
       {/* Leaf Area Density Popup */}
       <LADPopup

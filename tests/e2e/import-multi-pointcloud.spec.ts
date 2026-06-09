@@ -55,6 +55,29 @@ test('imports multiple point clouds at once via Import → Point Cloud', async (
 
     // Viewer mounted.
     await expect(page.locator('canvas').first()).toBeAttached();
+
+    // Regression: per-scan (default) batch imports rendered as a flat z-height
+    // grey ramp until the user toggled colour mode and back. Cause: when several
+    // octrees mount at once, first paint can land before the material effect
+    // overrides potree-core's DEFAULT pointColorType (elevation), so the cloud
+    // shows the default elevation gradient instead of its per-scan swatch. The
+    // one-shot first-paint recompile that cures this was gated to gradient modes
+    // only, so per-scan clouds were never corrected.
+    //
+    // The offscreen E2E window returns a black WebGL buffer (pixel reads aren't
+    // possible — see plant-generate.spec.ts), so we assert the MECHANISM: the
+    // recompile must have fired once per octree cacheId, in the default
+    // (per-scan) colour mode, with no manual toggle. Before the fix this set
+    // was empty in per-scan mode.
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            () => ((window as any).__octreeRepainted as string[] | undefined)?.length ?? 0,
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe(2);
   } finally {
     await close();
   }

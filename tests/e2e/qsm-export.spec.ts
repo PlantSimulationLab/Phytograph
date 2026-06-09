@@ -9,7 +9,8 @@ const TREE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 
 // The SimpleForest-compatible header the CSV export must emit verbatim.
 const CSV_HEADER =
-  'ID,parentID,branchID,branchOrder,startX,startY,startZ,endX,endY,endZ,' +
+  'ID,parentID,branchID,branchOrder,segmentID,parentSegmentID,' +
+  'startX,startY,startZ,endX,endY,endZ,' +
   'axisX,axisY,axisZ,radius,length,surfaceCoverage,meanAbsDeviation';
 
 // Build a QSM through the real UI, then export it via the export dialog. Drives

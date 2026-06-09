@@ -77,6 +77,41 @@ class TestFileXyzBounds:
 
 
 # ---------------------------------------------------------------------------
+# _bin_points_to_cells
+# ---------------------------------------------------------------------------
+
+class TestBinPointsToCells:
+    def test_single_cell_grid_bins_everything_to_zero(self):
+        # The auto 1x1x1 grid: every in-bounds point lands in cell 0.
+        pts = [[0, 0, 0], [0.4, -0.4, 0.4], [-0.49, 0.49, -0.49]]
+        ids = main._bin_points_to_cells(pts, [0, 0, 0], [1, 1, 1], 1, 1, 1)
+        assert ids.tolist() == [0, 0, 0]
+
+    def test_row_major_index_ordering(self):
+        # 2x2x2 grid centered at origin, size 2 → cells are unit cubes spanning
+        # [-1,0] and [0,1] per axis. Index = i + nx*(j + ny*k).
+        # Point in the (i=1,j=0,k=0) cell → 1; (0,1,0) → 2; (0,0,1) → 4.
+        pts = [
+            [-0.5, -0.5, -0.5],  # (0,0,0) -> 0
+            [0.5, -0.5, -0.5],   # (1,0,0) -> 1
+            [-0.5, 0.5, -0.5],   # (0,1,0) -> 2
+            [-0.5, -0.5, 0.5],   # (0,0,1) -> 4
+            [0.5, 0.5, 0.5],     # (1,1,1) -> 7
+        ]
+        ids = main._bin_points_to_cells(pts, [0, 0, 0], [2, 2, 2], 2, 2, 2)
+        assert ids.tolist() == [0, 1, 2, 4, 7]
+
+    def test_points_outside_grid_get_negative_one(self):
+        pts = [[0, 0, 0], [100, 0, 0], [0, -100, 0]]
+        ids = main._bin_points_to_cells(pts, [0, 0, 0], [1, 1, 1], 1, 1, 1)
+        assert ids.tolist() == [0, -1, -1]
+
+    def test_empty_input_returns_empty(self):
+        ids = main._bin_points_to_cells([], [0, 0, 0], [1, 1, 1], 1, 1, 1)
+        assert ids.tolist() == []
+
+
+# ---------------------------------------------------------------------------
 # _generate_helios_xml
 # ---------------------------------------------------------------------------
 
@@ -177,6 +212,10 @@ class _FakeCloud:
     def getTriangleCount(self):
         return 0  # short-circuits before needing a real Context
 
+    def getTriangulationStats(self):
+        return {"candidates": 0, "dropped_lmax": 0,
+                "dropped_aspect": 0, "dropped_degenerate": 0}
+
 
 @pytest.fixture
 def captured_xml(monkeypatch):
@@ -227,8 +266,9 @@ class TestDoHeliosComputationShaping:
                 theta_min=15, theta_max=140, phi_min=5, phi_max=355,
             ),
         ])
-        result = main._do_helios_computation(req)
-        assert result["success"] is True
+        # The fake cloud reports zero triangles, so the run "fails"; this test
+        # only cares about what geometry was fed to _generate_helios_xml.
+        main._do_helios_computation(req)
         si = captured_xml["scans_info"][0]
         # The supplied values are used verbatim — not the count-based guess.
         assert si["n_theta"] == 33 and si["n_phi"] == 44
@@ -318,3 +358,99 @@ class TestSphereReproduction:
         # (per-scan triangulation tags each triangle with its origin scan).
         assert all(0 <= i < 4 for i in ids)
         assert set(ids) == {0, 1, 2, 3}
+
+    def test_triangle_cell_ids_align_and_route_to_grid(self):
+        pytest.importorskip("pyhelios")
+        # A 2x2x2 grid spanning the sphere: triangle centroids should spread
+        # across more than one cell, and every id must be a valid cell index
+        # (0..7) or -1, aligned 1:1 with the triangle list.
+        grid = main.HeliosGrid(center=[0, 0, 0.5], size=[3, 3, 3], nx=2, ny=2, nz=2)
+        result = main._do_helios_computation(self._request(grid=grid))
+        assert result["success"] is True, result.get("error")
+        cell_ids = result["triangle_cell_ids"]
+        assert len(cell_ids) == result["num_triangles"]
+        assert all(i == -1 or 0 <= i < 8 for i in cell_ids)
+        # The sphere is not confined to a single octant — multiple cells get hits.
+        assert len({i for i in cell_ids if i >= 0}) > 1
+
+
+# ---------------------------------------------------------------------------
+# Triangulation filter diagnostics (the candidate / dropped breakdown)
+# ---------------------------------------------------------------------------
+
+class TestTriangulationZeroMessage:
+    """Pure-function: the 0-triangle explanation derived from the breakdown."""
+
+    def test_no_candidates_blames_data(self):
+        diag = {"candidates": 0, "kept": 0, "dropped_lmax": 0,
+                "dropped_aspect": 0, "dropped_degenerate": 0}
+        msg = main._triangulation_zero_message(diag, 0.05, 4.0)
+        assert "no candidate triangles" in msg
+
+    def test_all_dropped_by_lmax_blames_lmax(self):
+        diag = {"candidates": 244, "kept": 0, "dropped_lmax": 244,
+                "dropped_aspect": 0, "dropped_degenerate": 0}
+        msg = main._triangulation_zero_message(diag, 0.01, 4.0)
+        assert "Lmax" in msg and "0.01" in msg
+        assert "244" in msg
+
+    def test_mostly_aspect_blames_aspect(self):
+        diag = {"candidates": 100, "kept": 0, "dropped_lmax": 10,
+                "dropped_aspect": 90, "dropped_degenerate": 0}
+        msg = main._triangulation_zero_message(diag, 0.5, 4.0)
+        assert "aspect" in msg.lower() and "4" in msg
+
+
+class TestTriangulationQualityWarning:
+    """Pure-function: warn when a mesh formed but almost nothing was filtered."""
+
+    def test_warns_when_under_one_percent_filtered(self):
+        diag = {"candidates": 1000, "kept": 995, "dropped_lmax": 3,
+                "dropped_aspect": 2, "dropped_degenerate": 0}
+        warn = main._triangulation_quality_warning(diag)
+        assert warn is not None and "bridge" in warn
+
+    def test_no_warning_when_healthy_fraction_filtered(self):
+        diag = {"candidates": 1000, "kept": 500, "dropped_lmax": 400,
+                "dropped_aspect": 100, "dropped_degenerate": 0}
+        assert main._triangulation_quality_warning(diag) is None
+
+    def test_no_warning_when_nothing_kept(self):
+        # A genuine zero is handled by the zero-message path, not this one.
+        diag = {"candidates": 100, "kept": 0, "dropped_lmax": 100,
+                "dropped_aspect": 0, "dropped_degenerate": 0}
+        assert main._triangulation_quality_warning(diag) is None
+
+
+class TestDiagnosticsEndToEnd(TestSphereReproduction):
+    """Real pyhelios: the breakdown must reconcile and drive the right verdict."""
+
+    def test_success_diagnostics_reconcile(self):
+        pytest.importorskip("pyhelios")
+        result = main._do_helios_computation(self._request())
+        assert result["success"] is True, result.get("error")
+        d = result["diagnostics"]
+        # candidates == kept + every drop bucket (single-reason attribution).
+        assert d["candidates"] == (
+            d["kept"] + d["dropped_lmax"] + d["dropped_aspect"]
+            + d["dropped_degenerate"])
+        assert d["kept"] == result["num_triangles"]
+        assert d["candidates"] > 0
+
+    def test_too_small_lmax_reports_failure_with_lmax_blame(self):
+        pytest.importorskip("pyhelios")
+        # The coarse sphere scans (~mm-cm spacing) at Lmax=0.001 m (1 mm) leave
+        # every candidate over-length: 0 triangles, all dropped by Lmax.
+        req = self._request()
+        req.lmax = 0.001
+        result = main._do_helios_computation(req)
+        assert result["success"] is False
+        assert result["num_triangles"] == 0
+        d = result["diagnostics"]
+        assert d["candidates"] > 0          # data DID form candidates...
+        assert d["kept"] == 0               # ...but none survived...
+        assert d["dropped_lmax"] > 0        # ...because of Lmax.
+        assert d["candidates"] == (
+            d["kept"] + d["dropped_lmax"] + d["dropped_aspect"]
+            + d["dropped_degenerate"])
+        assert "Lmax" in result["error"]

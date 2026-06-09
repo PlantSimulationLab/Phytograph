@@ -31,9 +31,21 @@ export function VoxelGridOverlay({ subdivisions, color = '#94a3b8' }: VoxelGridO
 
   useEffect(() => () => geometry.dispose(), [geometry]);
 
+  // This is a non-occluding overlay: it must draw on top of everything without
+  // hiding geometry behind it. `depthTest={false}` makes the lines always draw,
+  // but LineBasicMaterial defaults `depthWrite` to true — and with the test
+  // disabled, three.js would stamp the lines' (near-camera) depth across the
+  // grid volume. Transparent objects are sorted by camera distance, so from
+  // some view angles the grid renders before the triangulated mesh and that
+  // stamped depth then fails the mesh's depth test, making ALL its triangles
+  // vanish (the reported +X-view bug). Disabling depthWrite keeps the overlay
+  // purely additive and leaves the depth buffer untouched.
+  // renderOrder 2 keeps the grid lines drawing after the translucent voxel-box
+  // faces (renderOrder 1) and the surface mesh (0), so the wireframe stays
+  // crisply on top in the transparent pass.
   return (
-    <lineSegments geometry={geometry}>
-      <lineBasicMaterial color={color} transparent opacity={0.85} depthTest={false} />
+    <lineSegments geometry={geometry} renderOrder={2}>
+      <lineBasicMaterial color={color} transparent opacity={0.85} depthTest={false} depthWrite={false} />
     </lineSegments>
   );
 }

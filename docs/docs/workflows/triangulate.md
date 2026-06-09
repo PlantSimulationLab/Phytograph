@@ -42,9 +42,12 @@ Method-specific parameters:
     - **Trim threshold** — clips low-confidence triangles in sparsely
       sampled regions.
 
-The resulting mesh appears in the Scene panel's **Meshes** list. The
-original cloud stays in the scene; hide it (eye icon) to see the mesh
-alone.
+The resulting mesh appears in the Scene panel's **Meshes** list, named
+after the method and source cloud — e.g. *"Poisson triangulation
+(tree.xyz)"* — so triangulation results are distinguishable at a glance
+from imported meshes, plant models, and each other. If two share the same
+auto-name, the later one is numbered — *"… (2)"*, *"… (3)"*. The original
+cloud stays in the scene; hide it (eye icon) to see the mesh alone.
 
 ### Manage a mesh in the Meshes list
 
@@ -52,7 +55,16 @@ Each mesh row supports a few quick edits:
 
 - **Rename** — double-click the mesh name to edit it in place. Press
   <kbd>Enter</kbd> to commit or <kbd>Esc</kbd> to cancel; clearing the
-  field restores the default name (source filename, or plant type/age).
+  field restores the default name (method + source filename for a
+  triangulated mesh, with a *"(2)"*-style suffix if it would otherwise
+  duplicate another row; plant type/age for a plant).
+- **Inspect parameters** — expand the row (chevron ▸) to see how the mesh
+  was reconstructed: the triangulation method and its method-specific
+  parameters. For cloud methods that's the Poisson octree depth,
+  alpha-shape radius, or ball-pivoting radii, plus the normal-estimation
+  settings and the number of points used (which reflects any downsampling
+  of a large streamed cloud). For a **Helios mesh** it's L<sub>max</sub>,
+  the max aspect ratio, and how many scans were fused.
 - **Recolor** — click the color swatch to the left of the name to open a
   color picker. Pick a color or type a hex value. The color applies to the
   mesh surface; **texture-mapped meshes ignore it** and keep drawing their
@@ -109,6 +121,11 @@ disabled with an explanatory tooltip otherwise.
       position, size and Nx×Ny×Nz cell counts as the grid.
 6. Click **Triangulate**.
 
+The mesh lands in the **Meshes** list named *"Helios triangulation"* (the
+word *triangulation* keeps it distinct from a Helios **plant model**);
+expand its row to see the L<sub>max</sub>, aspect-ratio, and fused-scan
+count it was built with.
+
 For most TLS data of stone-fruit trees, defaults work; adjust **Lmax**
 down (to ~5–10 cm) for finer branch surfaces, or up if your scan is
 sparse.
@@ -134,9 +151,14 @@ triangulation-generated meshes, not plants, shapes, or imported meshes):
   0–90° (a horizontal facet reads 0°, a vertical one 90°). Up- and
   down-facing facets read the same.
 - **Azimuth** — compass bearing the triangle's normal points, 0–360°.
-  Triangulated surfaces have no consistent facet orientation, so each
-  normal is oriented into the upper hemisphere first (the standard
-  leaf-angle convention); a facet and its back read the same azimuth.
+  Triangulated surfaces have no consistent facet winding, so the outward
+  direction must be inferred. For **Helios meshes** each facet's normal is
+  oriented toward the scanner that saw it, giving the true outward bearing —
+  so a scanned closed surface (e.g. a sphere) reads a *continuous* azimuth
+  rather than flipping 180° between its upper and lower halves. For meshes
+  with no scan provenance the normal is folded into the upper hemisphere
+  instead (deterministic, but a closed surface will show a seam at its
+  equator).
 - **Triangle area** — surface area of each triangle.
 - **Source scan** — *(Helios meshes only)* colors each triangle by the
   scan it was reconstructed from, using that scan's swatch color. Helios
@@ -147,6 +169,45 @@ For the scalar modes, pick the gradient with the colormap dropdown that
 appears below; a colorbar in the bottom-right shows the value range. The
 **Source scan** mode shows a per-scan legend instead. Choose **Solid
 color** to go back to the flat mesh color.
+
+## Plot the leaf angle distribution
+
+For a **Helios mesh**, you can go beyond per-triangle coloring and plot the
+mesh's **leaf angle distribution function** — the statistical distribution of
+leaf orientations across the canopy. Expand the mesh's row in the **Meshes**
+panel and click **Leaf angles…** (offered on Helios meshes only). A plot
+window opens with:
+
+- **Inclination PDF** — the probability density of the leaf inclination
+  (zenith) angle over 0–90°. Each triangle contributes its inclination
+  **weighted by its area**, so a large leaf facet counts more than a sliver —
+  the curve reflects leaf *surface*, not triangle *count*. A point is drawn at
+  each bin center and joined by straight segments; the **Bins** dropdown
+  changes the histogram resolution (9–90 bins, i.e. 10°–1° wide).
+- **Azimuth distribution** — a polar (compass) rose of the area-weighted
+  azimuth, showing which directions the leaf surfaces face. North is up;
+  the petal radius is the density in each 10° sector.
+
+### Per-cell overlays
+
+If the mesh was triangulated inside a **voxel grid** (rather than the auto
+single-cell grid), the window splits the distribution **per grid cell**. Every
+cell's inclination curve is overlaid by default, each in its own color, with a
+checkbox list on the right. Untick a cell to drop it from both plots, or use
+**All / None** to toggle them in bulk — useful for comparing canopy layers
+(e.g. top vs. bottom voxels) or isolating one region. With the auto grid the
+list collapses to a single **Whole mesh** entry.
+
+### Canonical de Wit fit
+
+The window also fits the six canonical **de Wit** leaf-angle distributions —
+*planophile* (mostly horizontal), *erectophile* (mostly vertical),
+*plagiophile* (mostly ~45°), *extremophile* (horizontal **and** vertical),
+*spherical* (random, as on a sphere's surface), and *uniform* — to the visible
+data and labels the closest match with a goodness-of-fit score (e.g. *"Best
+fit: spherical (R²=0.94)"*). The chosen curve is overlaid as a dashed line so
+you can see how well the canopy matches the archetype. Hiding cells re-fits to
+just the visible ones.
 
 ## Produce a point cloud from a mesh
 

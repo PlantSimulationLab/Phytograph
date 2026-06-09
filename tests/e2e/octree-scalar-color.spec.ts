@@ -46,16 +46,26 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
     // value is the on-disk slug, text is the humanised header. Builtin LAS
     // attributes PotreeConverter also writes (return number, scan angle rank,
     // point source id, gps-time, …) must NOT appear in the Scalar fields group.
+    //
+    // Two of the three headers auto-detect into Helios per-pulse multi-return
+    // fields: 'Timestamp[s]' and 'Target Index[]' match the canonical
+    // _MULTI_RETURN_SLUGS ('timestamp', 'target_index'), so the importer pins
+    // them to those lowercase slugs and canonical labels ('Timestamp',
+    // 'Target Index') — dropping the '[s]' unit — so the LAD accessor can
+    // recover them by name. 'Deviation[]' isn't a multi-return field, so it
+    // takes the generic sanitised slug 'Deviation'. (When the user instead
+    // marks Target Index categorical in the wizard, it bypasses this and keeps
+    // the sanitised 'Target_Index' slug — see import-wizard.spec.ts.)
     const optionValues = await colorMode
       .locator('optgroup[label="Scalar fields"] option')
       .evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).value));
     const optionLabels = await colorMode
       .locator('optgroup[label="Scalar fields"] option')
       .evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).textContent));
-    expect(optionValues).toContain('scalar:Timestamp_s');
+    expect(optionValues).toContain('scalar:timestamp');
     expect(optionValues).toContain('scalar:Deviation');
-    expect(optionValues).toContain('scalar:Target_Index');
-    expect(optionLabels).toContain('Timestamp [s]');
+    expect(optionValues).toContain('scalar:target_index');
+    expect(optionLabels).toContain('Timestamp');
     expect(optionLabels).toContain('Target Index');
     // No builtin LAS attributes leaked into the picker.
     for (const v of optionValues) {
@@ -66,8 +76,8 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
     }
 
     // Select Timestamp and assert the picker drives scalar mode.
-    await colorMode.selectOption('scalar:Timestamp_s');
-    await expect(colorMode).toHaveValue('scalar:Timestamp_s');
+    await colorMode.selectOption('scalar:timestamp');
+    await expect(colorMode).toHaveValue('scalar:timestamp');
 
     // The colormap picker only renders for continuous scalar modes.
     await expect(page.getByTestId('display-colormap')).toBeVisible();
@@ -77,7 +87,7 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
     // — NOT the [0,1] intensity default, proving it reads the actual attribute.
     const colorbar = page.getByTestId('colorbar');
     await expect(colorbar).toBeVisible();
-    await expect(colorbar).toHaveAttribute('data-colorbar-label', 'Timestamp [s]');
+    await expect(colorbar).toHaveAttribute('data-colorbar-label', 'Timestamp');
     const cbMin = parseFloat((await colorbar.getAttribute('data-colorbar-min')) ?? 'NaN');
     const cbMax = parseFloat((await colorbar.getAttribute('data-colorbar-max')) ?? 'NaN');
     expect(cbMax).toBeGreaterThan(cbMin);
@@ -86,8 +96,8 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
 
     // Switching to another scalar re-captions the colorbar with its own range
     // (Target Index spans [1, 8]) — confirms field switching re-applies.
-    await colorMode.selectOption('scalar:Target_Index');
-    await expect(colorMode).toHaveValue('scalar:Target_Index');
+    await colorMode.selectOption('scalar:target_index');
+    await expect(colorMode).toHaveValue('scalar:target_index');
     await expect(colorbar).toHaveAttribute('data-colorbar-label', 'Target Index');
     const tgtMin = parseFloat((await colorbar.getAttribute('data-colorbar-min')) ?? 'NaN');
     const tgtMax = parseFloat((await colorbar.getAttribute('data-colorbar-max')) ?? 'NaN');

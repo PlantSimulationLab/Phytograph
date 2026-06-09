@@ -1,6 +1,6 @@
-import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette } from 'lucide-react';
+import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie } from 'lucide-react';
 import type { MeshEntry, MeshColorMode, PointCloudEntry } from '../../../lib/pointCloudTypes';
-import { meshDisplayName } from '../../../lib/pointCloudTypes';
+import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS } from '../../../lib/pointCloudTypes';
 import { meshHasScanColors } from '../../../lib/pointCloudHelpers';
 import { ColormapName, COLORMAP_NAMES } from '../../../lib/colormaps';
 
@@ -33,7 +33,15 @@ interface MeshesListPanelProps {
   isTextured: (mesh: MeshEntry) => boolean;
   isTriangulated: (mesh: MeshEntry) => boolean;
   supportsOpacity: (mesh: MeshEntry) => boolean;
-  onSelect: (id: string) => void;
+  // Header bulk actions: count of selected rows, whether any bulk target is
+  // currently visible (drives the eye icon), and the section-or-selection
+  // show/hide and delete handlers.
+  selectedCount: number;
+  anyTargetVisible: boolean;
+  onToggleVisibilityAll: () => void;
+  onDeleteAll: () => void;
+  // Modifier-aware select: Ctrl/Cmd toggles, Shift selects a range.
+  onSelect: (id: string, additive: boolean, range: boolean) => void;
   onToggleVisibility: (id: string) => void;
   onRequestDelete: (id: string, name: string) => void;
   onToggleExpanded: (id: string) => void;
@@ -46,6 +54,8 @@ interface MeshesListPanelProps {
   onColormapChange: (name: ColormapName) => void;
   onOpacityChange: (id: string, value: number) => void;
   onWireframeChange: (v: boolean) => void;
+  // Open the leaf-angle distribution plot for a Helios mesh.
+  onOpenLeafAngles: (id: string) => void;
 }
 
 export function MeshesListPanel({
@@ -67,6 +77,10 @@ export function MeshesListPanel({
   isTextured,
   isTriangulated,
   supportsOpacity,
+  selectedCount,
+  anyTargetVisible,
+  onToggleVisibilityAll,
+  onDeleteAll,
   onSelect,
   onToggleVisibility,
   onRequestDelete,
@@ -79,25 +93,51 @@ export function MeshesListPanel({
   onColormapChange,
   onOpacityChange,
   onWireframeChange,
+  onOpenLeafAngles,
 }: MeshesListPanelProps) {
   return (
     <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
       <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
         <Box className="w-4 h-4 text-neutral-400" />
         <span className="text-xs font-medium text-neutral-300 flex-1">Meshes</span>
+        <button
+          data-testid="meshes-bulk-hide"
+          onClick={onToggleVisibilityAll}
+          className="p-1 hover:bg-neutral-700 rounded"
+          title={selectedCount > 0 ? `Show/hide ${selectedCount} selected` : 'Show/hide all'}
+        >
+          {anyTargetVisible
+            ? <Eye className="w-3 h-3 text-neutral-400" />
+            : <EyeOff className="w-3 h-3 text-neutral-600" />}
+        </button>
+        <button
+          data-testid="meshes-bulk-delete"
+          onClick={onDeleteAll}
+          className="p-1 hover:bg-red-600/30 rounded"
+          title={selectedCount > 0 ? `Delete ${selectedCount} selected` : 'Delete all'}
+        >
+          <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
+        </button>
       </div>
       <div className="overflow-y-auto flex-1 p-1">
         {meshes.map(mesh => {
-          const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
           const isSelected = selectedMeshIds.has(mesh.id);
-          const displayName = meshDisplayName(mesh, sourceCloud?.data.fileName);
+          // Deduped against the full mesh list so two identical auto-names
+          // (e.g. a second "Helios triangulation") read "… (2)".
+          const displayName = meshDisplayNameFor(
+            mesh,
+            meshes,
+            (m) => clouds.find(c => c.id === m.sourceCloudId)?.data.fileName,
+          );
           const isRenaming = renamingMeshId === mesh.id;
           const isColorOpen = colorPopoverMeshId === mesh.id;
           const meshTextured = isTextured(mesh);
           const showColorSwatch = !mesh.isPlant && !meshTextured;
           const canColorByTriangle = isTriangulated(mesh);
           const canSetOpacity = supportsOpacity(mesh);
-          const canExpand = canColorByTriangle || canSetOpacity;
+          // Provenance is worth surfacing even when the source cloud is gone
+          // (which flips isTriangulated off), so expandability includes it.
+          const canExpand = canColorByTriangle || canSetOpacity || !!mesh.triangulationParams;
           const isExpanded = expandedMeshIds.has(mesh.id);
           const colorMode = meshColorModes.get(mesh.id) ?? 'solid';
           const meshOpacity = meshOpacities.get(mesh.id) ?? defaultOpacityFor(mesh);
@@ -110,12 +150,13 @@ export function MeshesListPanel({
               data-is-plant={mesh.isPlant ? 'true' : 'false'}
               data-textured-materials={mesh.plantMaterials?.filter(m => m.textureData).length ?? 0}
               data-selected={isSelected ? 'true' : 'false'}
+              data-visible={mesh.visible ? 'true' : 'false'}
               data-mesh-color={mesh.color}
               data-mesh-rotation={(() => { const r = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 }; return `${r.x.toFixed(1)},${r.y.toFixed(1)},${r.z.toFixed(1)}`; })()}
               data-mesh-position={(() => { const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 }; return `${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}`; })()}
               data-mesh-scale={(() => { const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 }; return `${s.x.toFixed(2)},${s.y.toFixed(2)},${s.z.toFixed(2)}`; })()}
-              onClick={() => onSelect(mesh.id)}
-              className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
+              onClick={(e) => onSelect(mesh.id, e.ctrlKey || e.metaKey, e.shiftKey)}
+              className={`flex items-center gap-2 p-2 rounded cursor-pointer select-none transition-colors ${
                 isSelected ? 'bg-green-600/30 border border-green-500/50' : 'hover:bg-neutral-700/50'
               }`}
             >
@@ -220,6 +261,47 @@ export function MeshesListPanel({
             {/* Inline per-mesh options, expanded from the chevron. */}
             {isExpanded && (
               <div className="ml-7 mr-2 mb-1 p-2 bg-neutral-900/50 rounded space-y-1.5">
+                {/* Triangulation provenance: how this mesh was reconstructed and
+                    with which parameters. Only present on triangulated meshes. */}
+                {mesh.triangulationParams && (
+                  <div className="text-[10px] text-neutral-400 space-y-0.5" data-testid="mesh-triangulation-info">
+                    <div className="text-neutral-300">
+                      {TRIANGULATION_METHOD_LABELS[mesh.method] ?? mesh.method} triangulation
+                    </div>
+                    {mesh.triangulationParams.depth !== undefined && (
+                      <div>Octree depth: {mesh.triangulationParams.depth}</div>
+                    )}
+                    {mesh.triangulationParams.alpha !== undefined && (
+                      <div>Alpha: {mesh.triangulationParams.alpha}</div>
+                    )}
+                    {mesh.triangulationParams.radii && mesh.triangulationParams.radii.length > 0 && (
+                      <div>Radii: {mesh.triangulationParams.radii.map(r => r.toFixed(3)).join(', ')}</div>
+                    )}
+                    {mesh.triangulationParams.lmax !== undefined && (
+                      <div>L<sub>max</sub>: {mesh.triangulationParams.lmax} m</div>
+                    )}
+                    {mesh.triangulationParams.maxAspectRatio !== undefined && (
+                      <div>Max aspect ratio: {mesh.triangulationParams.maxAspectRatio}</div>
+                    )}
+                    {mesh.triangulationParams.scanCount !== undefined && (
+                      <div>Scans fused: {mesh.triangulationParams.scanCount}</div>
+                    )}
+                    {mesh.triangulationParams.candidateTriangles !== undefined && (
+                      <div data-testid="mesh-triangulation-filter-stats" className="pt-0.5 border-t border-neutral-700/60 mt-0.5">
+                        <div className="text-neutral-300">Filter breakdown</div>
+                        <div>Candidates: {mesh.triangulationParams.candidateTriangles.toLocaleString()}</div>
+                        <div>Kept: {mesh.data.triangleCount.toLocaleString()}</div>
+                        <div>Dropped — L<sub>max</sub>: {(mesh.triangulationParams.droppedLmax ?? 0).toLocaleString()}, aspect: {(mesh.triangulationParams.droppedAspect ?? 0).toLocaleString()}{(mesh.triangulationParams.droppedDegenerate ?? 0) > 0 ? `, degenerate: ${(mesh.triangulationParams.droppedDegenerate ?? 0).toLocaleString()}` : ''}</div>
+                      </div>
+                    )}
+                    {mesh.triangulationParams.normalRadius !== undefined && (
+                      <div>Normal radius: {mesh.triangulationParams.normalRadius}, max nn: {mesh.triangulationParams.normalMaxNn}</div>
+                    )}
+                    {mesh.triangulationParams.pointsUsed !== undefined && (
+                      <div>Points used: {mesh.triangulationParams.pointsUsed.toLocaleString()}</div>
+                    )}
+                  </div>
+                )}
                 {canColorByTriangle && (
                 <div className="space-y-1.5">
                 <div className="text-[10px] text-neutral-400 flex items-center gap-1">
@@ -274,6 +356,19 @@ export function MeshesListPanel({
                       className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
                     />
                   </div>
+                )}
+                {/* Leaf-angle distribution — Helios meshes only (they carry the
+                    grid + scan provenance the plot reads). */}
+                {mesh.method === 'helios' && (
+                  <button
+                    data-testid="mesh-leaf-angles"
+                    onClick={(e) => { e.stopPropagation(); onOpenLeafAngles(mesh.id); }}
+                    className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
+                    title="Plot the leaf angle distribution (inclination PDF + azimuth)"
+                  >
+                    <ChartPie className="w-3 h-3" />
+                    Leaf angles…
+                  </button>
                 )}
               </div>
             )}

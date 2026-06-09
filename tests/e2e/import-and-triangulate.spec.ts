@@ -87,6 +87,18 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
 
     // Sanity: the visible row text should also report the triangle count.
     await expect(meshRow.getByTestId('mesh-row-count')).toContainText('triangles');
+
+    // The default mesh name should indicate the triangulation method and the
+    // source cloud, not a bare "Mesh".
+    await expect(meshRow.getByTestId('mesh-row-name')).toHaveText('Poisson triangulation (tiny.xyz)');
+
+    // Expand the row and assert the triangulation provenance readout shows the
+    // method and the non-default octree depth we set (7).
+    await meshRow.getByTestId('mesh-color-expand').click();
+    const info = meshRow.getByTestId('mesh-triangulation-info');
+    await expect(info).toBeVisible();
+    await expect(info).toContainText('Poisson triangulation');
+    await expect(info).toContainText('Octree depth: 7');
   } finally {
     await close();
   }

@@ -79,19 +79,12 @@ The results panel reports, per QSM:
 - **Height** — vertical extent of the woody structure, in m.
 - **Woody vol** — total woody volume, in cm³.
 - **Max rank** — the deepest branching order recovered.
-- A **shoot list** — every continuous shoot with its rank, length, and
-  length-weighted mean diameter. The trunk is labelled **Trunk #0**;
-  scaffolds are **Rank 1 #…**, and so on.
 
-### Inspect one shoot
-
-Click any row in the shoot list to **highlight that whole continuous
-axis** in the viewer (the rest dims). This is the most direct way to see
-what "shoot" means: a shoot follows one botanical axis straight through
-every fork where smaller branches peel off, keeping its rank, rather than
-restarting at each junction.
-
-![One shoot highlighted from the shoot list](../assets/screenshots/qsm-04-selected.png)
+Per-shoot detail (every continuous shoot with its rank, length, radius,
+and cylinder geometry) lives in the **exported file** — see
+[Export](#export) below. A shoot follows one botanical axis straight
+through every fork where smaller branches peel off, keeping its rank,
+rather than restarting at each junction.
 
 ### Switch the coloring
 
@@ -143,7 +136,7 @@ or take it into other tooling.
 
 | Format | What it is | Use it for |
 |---|---|---|
-| **CSV** | One row per cylinder — `ID, parentID, branchID, branchOrder`, start/end coordinates, axis, radius, length, plus surface-coverage and fit residual. Uses the **SimpleForest** column layout. | Analysis and round-tripping into the standard QSM ecosystem: it imports directly into [rTwig](https://aidanmorales.github.io/rTwig/) (`import_qsm`) and [aRchi](https://github.com/umr-amap/aRchi) (`read_QSM(model = "simpleforest")`) — the TreeQSM-compatible path. |
+| **CSV** | One row per cylinder — `ID, parentID, branchID, branchOrder, segmentID, parentSegmentID`, start/end coordinates, axis, radius, length, plus surface-coverage and fit residual. Uses the **SimpleForest** column layout. | Analysis and round-tripping into the standard QSM ecosystem: it follows the SimpleForest schema that [rTwig](https://aidanmorales.github.io/rTwig/) and [aRchi](https://github.com/umr-amap/aRchi) read (the TreeQSM-compatible path). The column set is validated against rTwig's importer. |
 | **OBJ** | Triangulated cylinder mesh. | Viewing the model anywhere — Blender, CloudCompare, MeshLab, Rhino. |
 | **PLY** | The same cylinder mesh, with each face tagged by **branch order** and **radius**. | Viewing with attribute-based coloring (color faces by branching order in CloudCompare/Blender). |
 
@@ -199,7 +192,7 @@ them, and the hard-coded parameters you can't see in the UI.
 
 4. **Radius correction.** Raw per-cylinder fits are locally noisy and, on
    occluded wood, biased. This stage turns them into a coherent radius
-   field with three principled ingredients:
+   field with four principled ingredients:
 
     - **Per-shoot monotone taper** — a shoot's radius must shrink from
       base to tip. An isotonic (PAVA) fit, weighted by surface coverage,
@@ -212,6 +205,11 @@ them, and the hard-coded parameters you can't see in the UI.
       of collapsing to the minimum radius.
     - **Twig anchor** — leaf cylinders are floored at the twig radius you
       set, so tips don't taper to zero.
+    - **Cross-fork cap** — a child branch cannot be fatter than the parent
+      it grows from. Applied last, this caps any child-shoot base that
+      still exceeds its parent at the junction (a sparse one-sided arc can
+      otherwise balloon a thin branch's base fit). It only ever *lowers*
+      the child, so a thin parent fit can never cascade outward.
 
     The correction **only changes radius** — topology, shoots, and ranks
     are never touched.

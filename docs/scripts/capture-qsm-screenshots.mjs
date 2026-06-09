@@ -3,7 +3,7 @@
 // Companion to capture-screenshots.mjs (the generic onboarding captures). This
 // one drives the actual Build-QSM workflow end-to-end against the live backend
 // and shoots the states a user sees: the build panel, the rank-colored model
-// with its results panel, the per-shoot coloring, and a selected shoot.
+// with its results panel, and the per-shoot coloring.
 //
 // Same launch path as capture-screenshots.mjs (visible window, NOT the hidden
 // E2E mode). Prereqs identical:
@@ -18,7 +18,6 @@
 //   qsm-01-panel.png        the Build QSM panel
 //   qsm-02-rank.png         built model colored by shoot rank + results panel
 //   qsm-03-shoot.png        the same model colored by shoot id
-//   qsm-04-selected.png     one shoot highlighted (trunk) via the shoot list
 
 import { _electron } from 'playwright';
 import { existsSync } from 'node:fs';
@@ -146,15 +145,7 @@ async function main() {
     await page.screenshot({ path: join(outDir, 'qsm-03-shoot.png') });
     console.log('Saved qsm-03-shoot.png');
 
-    // ── qsm-04: one shoot highlighted (click the trunk row) ─────────────────
     await page.getByTestId('qsm-color-mode').selectOption('rank').catch(() => {});
-    const trunkRow = page.locator('[data-testid="qsm-shoot-row"][data-rank="0"]').first();
-    if (await trunkRow.count().catch(() => 0)) {
-      await trunkRow.click();
-      await page.waitForTimeout(1200);
-      await page.screenshot({ path: join(outDir, 'qsm-04-selected.png') });
-      console.log('Saved qsm-04-selected.png');
-    }
   } finally {
     console.log('Closing app...');
     await app.close().catch(() => {});

@@ -207,6 +207,26 @@ export interface MeshData {
   // 'scan' pseudocolor mode. Absent for cloud-only / plant / shape meshes.
   triangleScanIds?: Uint32Array;
   scanColors?: string[];
+  // Helios-only: each source scan's sensor origin [x,y,z], flat-packed and keyed
+  // by scan index (so scan s is scanOrigins[s*3 .. s*3+2]). Used to orient each
+  // facet's normal toward the scanner that saw it before deriving azimuth, so a
+  // scanned closed surface (e.g. a sphere) reads a continuous outward bearing
+  // instead of a 180° seam. Aligned with `triangleScanIds`.
+  scanOrigins?: Float32Array;
+  // Helios-only: the grid cell index per triangle (row-major i + nx*(j + ny*k))
+  // its centroid fell in; 0xffffffff (-1 as uint32) means outside the grid.
+  // Paired with `grid` below, this lets the leaf-angle plot split the
+  // distribution per voxel. Present when a Helios mesh was built with a grid.
+  triangleCellIds?: Uint32Array;
+  // The Helios triangulation grid this mesh was built in (full extents +
+  // per-axis subdivisions). Lets the leaf-angle plot label and locate cells.
+  grid?: {
+    center: [number, number, number];
+    size: [number, number, number];
+    nx: number;
+    ny: number;
+    nz: number;
+  };
 }
 
 // Per-triangle pseudocolor modes for a triangulated mesh. 'solid' uses the
@@ -239,6 +259,33 @@ export interface MeshEntry {
   // User-assigned display name. When set, overrides the computed default name
   // (plant type/age, or source cloud filename). Cleared back to default when blank.
   name?: string;
+  // Triangulation provenance: the parameters actually used to reconstruct this
+  // mesh. Present on meshes produced by /api/triangulate (absent for imported
+  // OBJ meshes and Helios plants). Drives the default display name and the
+  // provenance readout in the mesh list. `pointsUsed` reflects any octree
+  // downsampling; the per-method fields are only set when relevant to `method`.
+  triangulationParams?: {
+    // Cloud-triangulation fields (ball_pivoting / poisson / alpha_shape / delaunay)
+    pointsUsed?: number;
+    normalRadius?: number;
+    normalMaxNn?: number;
+    depth?: number;        // poisson octree depth
+    alpha?: number;        // alpha-shape radius
+    radii?: number[];      // ball-pivoting radii (auto-computed when omitted)
+    // Helios-triangulation fields (method === 'helios')
+    lmax?: number;             // max triangle edge length (m)
+    maxAspectRatio?: number;   // max triangle aspect ratio
+    scanCount?: number;        // number of scans fused into the mesh
+    // Filter breakdown from the Helios run (method === 'helios'). Each dropped
+    // candidate is attributed to one primary reason, so
+    // candidates === kept + droppedLmax + droppedAspect + droppedDegenerate.
+    // Lets the mesh's provenance readout show whether Lmax/aspect did the
+    // pruning — and how much survived.
+    candidateTriangles?: number;
+    droppedLmax?: number;
+    droppedAspect?: number;
+    droppedDegenerate?: number;
+  };
   // Plant-specific fields (for Helios plants)
   isPlant?: boolean;
   plantType?: string;
@@ -257,9 +304,23 @@ export interface MeshEntry {
   gridSubdivisions?: { x: number; y: number; z: number };
 }
 
+// Human-readable label for a triangulation method, used in the default mesh
+// name and the provenance readout.
+export const TRIANGULATION_METHOD_LABELS: Record<TriangulationMethod, string> = {
+  ball_pivoting: 'Ball-pivoting',
+  poisson: 'Poisson',
+  alpha_shape: 'Alpha-shape',
+  delaunay: 'Delaunay',
+  helios: 'Helios',
+};
+
 // The label shown for a mesh in the scene list, delete confirm, and export panel.
 // A user-assigned `name` wins; otherwise plants show type/age (or canopy grid),
-// and every other mesh falls back to its source filename, then a generic "Mesh".
+// triangulated meshes show their method + "triangulation" + source filename
+// (e.g. "Poisson triangulation (tree.xyz)", "Helios triangulation") — the word
+// "triangulation" disambiguates a Helios *triangulation* mesh from a Helios
+// *plant model* — and any other mesh falls back to its source filename, then a
+// generic "Mesh".
 // `sourceFileName` is the imported/triangulated source cloud's filename when known.
 export function meshDisplayName(mesh: MeshEntry, sourceFileName?: string): string {
   if (mesh.name) return mesh.name;
@@ -268,7 +329,41 @@ export function meshDisplayName(mesh: MeshEntry, sourceFileName?: string): strin
       ? `${mesh.plantType} canopy ${mesh.plantCanopy.countX}×${mesh.plantCanopy.countY} (${mesh.plantAge}d)`
       : `${mesh.plantType} (${mesh.plantAge}d)`;
   }
+  // Meshes built by triangulation carry params; name them after the method so
+  // they're distinguishable from imported OBJ meshes, plant models, and each other.
+  if (mesh.triangulationParams) {
+    const label = TRIANGULATION_METHOD_LABELS[mesh.method] ?? 'Triangulated';
+    const base = `${label} triangulation`;
+    return sourceFileName ? `${base} (${sourceFileName})` : base;
+  }
   return sourceFileName || 'Mesh';
+}
+
+// Like meshDisplayName, but disambiguates auto-generated names that collide
+// across the scene by appending " (2)", " (3)", … in list order. Only
+// AUTO names participate: a user-renamed mesh (mesh.name set) keeps its exact
+// text and never gets a suffix, nor does it bump the counter for others. The
+// first mesh of a given auto-name stays bare; each later duplicate gets the
+// next ordinal. Numbering is positional, so deleting an earlier duplicate
+// renumbers the rest — acceptable since these are throwaway defaults the user
+// can rename. `allMeshes` must be the full scene list in display order;
+// `fileNameFor` resolves a mesh's source-cloud filename (or undefined).
+export function meshDisplayNameFor(
+  mesh: MeshEntry,
+  allMeshes: MeshEntry[],
+  fileNameFor: (m: MeshEntry) => string | undefined,
+): string {
+  const base = meshDisplayName(mesh, fileNameFor(mesh));
+  // A user-assigned name is taken verbatim — no collision numbering.
+  if (mesh.name) return base;
+  // Count how many earlier auto-named meshes share this exact base name.
+  let priorCollisions = 0;
+  for (const m of allMeshes) {
+    if (m.id === mesh.id) break;
+    if (m.name) continue;  // manual names don't collide with autos
+    if (meshDisplayName(m, fileNameFor(m)) === base) priorCollisions++;
+  }
+  return priorCollisions === 0 ? base : `${base} (${priorCollisions + 1})`;
 }
 
 // Skeleton data from extraction

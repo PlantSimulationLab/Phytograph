@@ -91,6 +91,18 @@ class RadiusCorrectionOptions:
     radius_min: float = 0.001
     # SurfCov assumed for a cylinder Phase D couldn't fit (None surf_cov).
     missing_surfcov: float = 0.0
+    # CROSS-FORK CAP. A child branch cannot be fatter than the parent it grows from.
+    # The within-shoot monotone taper does not see across forks, and the coverage-
+    # gated pipe-model + per-shoot PAVA can leave a child-shoot BASE wider than its
+    # parent cylinder at the junction. As a FINAL, LOCAL pass we cap each such base
+    # at cross_fork_ratio * parent_radius and re-flow the cap down the child shoot
+    # (cumulative-min base->tip) so the child stays monotone. It only ever LOWERS a
+    # child (never touches the parent), so a thin parent fit cannot cascade DOWN and
+    # re-inflation is impossible -- it is a one-directional structural ceiling, not a
+    # pipe-model. cross_fork_ratio slightly above 1.0 tolerates real junction bulge /
+    # fit noise so we don't shave physically-plausible bases.
+    cross_fork_cap: bool = True
+    cross_fork_ratio: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +355,59 @@ def _enforce_shoot_monotonicity(
             radius[c] = float(max(opts.radius_min, r_mono[i]))
 
 
+def _apply_cross_fork_cap(
+    radius: dict[int, float],
+    qsm: QSM,
+    by_id: dict,
+    dist: dict[int, float],
+    opts: RadiusCorrectionOptions,
+) -> int:
+    """In place: cap every child-shoot BASE cylinder at its parent's radius (times
+    cross_fork_ratio), then re-flow the cap down the child shoot so it stays
+    non-increasing base->tip. Returns the number of bases capped.
+
+    The within-shoot taper/monotonicity never compares ACROSS a fork, so a child
+    branch can end up fatter than the parent it grows from -- physically impossible.
+    This is the structural ceiling for that case. It is applied LAST (nothing after
+    re-introduces the violation) and is strictly ONE-DIRECTIONAL: it only lowers a
+    child, never raises a parent, so unlike a pipe-model bound a single thin parent
+    fit cannot cascade outward/downward -- the cap is bounded below by the child's
+    own taper, and a child already thinner than its parent is left untouched.
+
+    Shoots are processed in RANK order (root->leaf) so a parent shoot's radii are
+    final before its children are capped against them; a capped child then correctly
+    constrains its OWN children on the next rank. Same-shoot (continuation) parents
+    are skipped -- those joins are the monotone taper's job, not a fork."""
+    if not opts.cross_fork_cap:
+        return 0
+    n_capped = 0
+    # Child shoots in rank order; within a rank, deterministic by shoot_id.
+    shoots = sorted(qsm.shoots, key=lambda s: (s.rank, s.shoot_id))
+    for shoot in shoots:
+        cids = [c for c in shoot.cylinder_ids if c in by_id]
+        if not cids:
+            continue
+        cids.sort(key=lambda c: dist[c])  # base -> tip
+        base = cids[0]
+        p = by_id[base].parent_id
+        if p not in by_id or by_id[p].shoot_id == shoot.shoot_id:
+            continue  # root, or a within-shoot join (not a fork)
+        ceiling = opts.cross_fork_ratio * radius[p]
+        if radius[base] <= ceiling + 1e-12:
+            continue  # base already within its parent -- nothing to do
+        radius[base] = max(opts.radius_min, ceiling)
+        n_capped += 1
+        # Re-flow: each subsequent cylinder in this shoot is capped at the running
+        # min so the child stays non-increasing base->tip after lowering the base.
+        run = radius[base]
+        for cid in cids[1:]:
+            if radius[cid] > run:
+                radius[cid] = run
+            else:
+                run = radius[cid]
+    return n_capped
+
+
 # ---------------------------------------------------------------------------
 # Mechanism 3: twig anchor (tip boundary condition)
 # ---------------------------------------------------------------------------
@@ -400,11 +465,19 @@ def correct_radii(qsm: QSM, opts: RadiusCorrectionOptions | None = None) -> QSM:
     # 4) Restore per-shoot monotonicity (the gated pipe-model can leave bumps).
     _enforce_shoot_monotonicity(corrected, qsm, dist, surfcov, by_id, opts)
 
+    # 5) Cross-fork cap (FINAL): a child branch cannot be fatter than the parent it
+    #    grows from. Local + one-directional, so it cannot cascade a thin parent fit
+    #    downward. Runs last so the monotonicity step (which is shoot-local and can
+    #    re-lower a parent at a fork) does not re-introduce the violation.
+    n_capped = _apply_cross_fork_cap(corrected, qsm, by_id, dist, opts)
+
     # Final floor.
     for cid in corrected:
         corrected[cid] = max(corrected[cid], opts.radius_min)
 
-    return _rebuild(qsm, corrected, opts)
+    qsm_out = _rebuild(qsm, corrected, opts)
+    qsm_out.meta["cross_fork_capped"] = n_capped
+    return qsm_out
 
 
 def _rebuild(qsm: QSM, corrected: dict[int, float], opts: RadiusCorrectionOptions) -> QSM:

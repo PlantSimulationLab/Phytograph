@@ -135,9 +135,19 @@ export function cylinderTube(
 
 // --- CSV --------------------------------------------------------------------
 
-// SimpleForest core columns + two quality extras (surfaceCoverage, meanAbsDeviation).
+// SimpleForest column layout. Verified against rTwig's importer source
+// (standardise_qsm / update_cylinders, SimpleForest branch): its detection gate
+// needs ID/parentID/branchID/branchOrder, and its FIRST mutate unconditionally
+// references segmentID + parentSegmentID — so those two are REQUIRED, not
+// optional, for the file to load. segmentID maps to our continuous shoot, and
+// parentSegmentID to that shoot's parent shoot (-1 for the trunk), matching the
+// root convention in rTwig's bundled QSM.csv (root parentID = parentSegmentID =
+// -1). growthLength / reverseBranchOrder are derived by rTwig when absent, so we
+// leave them out. surfaceCoverage / meanAbsDeviation are our own quality extras
+// (readers ignore unknown trailing columns).
 const CSV_HEADER =
-  'ID,parentID,branchID,branchOrder,startX,startY,startZ,endX,endY,endZ,' +
+  'ID,parentID,branchID,branchOrder,segmentID,parentSegmentID,' +
+  'startX,startY,startZ,endX,endY,endZ,' +
   'axisX,axisY,axisZ,radius,length,surfaceCoverage,meanAbsDeviation';
 
 function num(x: number): string {
@@ -146,16 +156,26 @@ function num(x: number): string {
 }
 
 export function qsmToCylinderCsv(qsm: QSMEntry): string {
+  // Parent-shoot lookup for parentSegmentID: each cylinder's shoot -> its parent
+  // shoot id (-1 for the trunk / a root shoot).
+  const parentShootByShoot = new Map<number, number>();
+  for (const s of qsm.shoots) parentShootByShoot.set(s.shoot_id, s.parent_shoot_id);
+
   const lines: string[] = [CSV_HEADER];
   for (const c of qsm.cylinders) {
     const axis = cylinderAxis(c) ?? [0, 0, 0];
     const len = cylinderLength(c);
+    const parentSegment = parentShootByShoot.has(c.shoot_id)
+      ? parentShootByShoot.get(c.shoot_id)!
+      : -1;
     lines.push(
       [
         c.cyl_id,
         c.parent_id,
-        c.shoot_id,
-        c.rank,
+        c.shoot_id,        // branchID
+        c.rank,            // branchOrder
+        c.shoot_id,        // segmentID — our continuous shoot is the segment
+        parentSegment,     // parentSegmentID
         num(c.start[0]), num(c.start[1]), num(c.start[2]),
         num(c.end[0]), num(c.end[1]), num(c.end[2]),
         num(axis[0]), num(axis[1]), num(axis[2]),
