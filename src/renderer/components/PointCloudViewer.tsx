@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Copy} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Copy} from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -18,6 +18,7 @@ import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenera
 import { HeliosTriangulationPopup, type GridOption } from './HeliosTriangulationPopup';
 import { LADPopup } from './LADPopup';
 import { LeafAnglePlotPopup } from './LeafAnglePlotPopup';
+import { QSMResultsPopup } from './QSMResultsPopup';
 import { MorphPopup } from './MorphPopup';
 import { ScanParametersPopup } from './ScanParametersPopup';
 import { ScannerMarker } from './ScannerMarker';
@@ -650,6 +651,8 @@ export default function PointCloudViewer({
   const [isHeliosRunning, setIsHeliosRunning] = useState(false);
   // Which mesh's leaf-angle distribution plot is open (null = closed).
   const [showLeafAngleMeshId, setShowLeafAngleMeshId] = useState<string | null>(null);
+  // The QSM whose detailed-results window is open (null = closed).
+  const [showQSMResultsId, setShowQSMResultsId] = useState<string | null>(null);
   const heliosAbortRef = useRef<AbortController | null>(null);
   // Leaf area density popup + results + background task state
   const [showLADPopup, setShowLADPopup] = useState(false);
@@ -9822,6 +9825,14 @@ export default function PointCloudViewer({
                         {qsm.visible ? <Eye className="w-3 h-3 text-neutral-300" /> : <EyeOff className="w-3 h-3 text-neutral-500" />}
                       </button>
                       <button
+                        data-testid={`qsm-results-${qsm.id}`}
+                        onClick={(e) => { e.stopPropagation(); setShowQSMResultsId(qsm.id); }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title="View results"
+                      >
+                        <ChartColumn className="w-3 h-3 text-neutral-300" />
+                      </button>
+                      <button
                         data-testid={`qsm-delete-${qsm.id}`}
                         onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'qsm', ids: [qsm.id], label: qsm.sourceLabel || sourceCloud?.data.fileName || 'QSM' }); }}
                         className="p-1 hover:bg-neutral-600 rounded"
@@ -12081,6 +12092,24 @@ export default function PointCloudViewer({
             onClose={() => setShowLeafAngleMeshId(null)}
             mesh={lapMesh}
             meshName={lapMesh ? displayNameOfMesh(lapMesh) : ''}
+          />
+        );
+      })()}
+
+      {/* QSM detailed-results Popup */}
+      {(() => {
+        const rqsm = showQSMResultsId
+          ? qsms.find(q => q.id === showQSMResultsId) ?? null
+          : null;
+        const name = rqsm
+          ? (rqsm.sourceLabel || clouds.find(c => c.id === rqsm.sourceCloudId)?.data.fileName || 'QSM')
+          : '';
+        return (
+          <QSMResultsPopup
+            isOpen={rqsm !== null}
+            onClose={() => setShowQSMResultsId(null)}
+            qsm={rqsm}
+            qsmName={name}
           />
         );
       })()}

@@ -80,11 +80,49 @@ The results panel reports, per QSM:
 - **Woody vol** — total woody volume, in cm³.
 - **Max rank** — the deepest branching order recovered.
 
-Per-shoot detail (every continuous shoot with its rank, length, radius,
-and cylinder geometry) lives in the **exported file** — see
-[Export](#export) below. A shoot follows one botanical axis straight
-through every fork where smaller branches peel off, keeping its rank,
-rather than restarting at each junction.
+A shoot follows one botanical axis straight through every fork where
+smaller branches peel off, keeping its rank, rather than restarting at
+each junction.
+
+### View detailed results
+
+For finer-grained analytics on a single tree, click the **chart icon**
+("View results") on the QSM's row. This opens a results window with the
+per-tree detail that the row's four headline numbers summarize — no
+re-computation, it reads the model already in memory:
+
+- **Scan-coverage badge** — an at-a-glance **HIGH / MODERATE / LOW** grade for
+  how completely the scan saw the woody surface, **weighted by volume** so the
+  trunk and scaffolds dominate. This is an *occlusion diagnostic, not a
+  pass/fail*: terrestrial LiDAR only sees one side of each branch, so even an
+  excellent model has modest raw coverage — the build's radius correction is
+  designed to fill in the occluded wood from the taper and pipe-model. A **LOW**
+  grade means the structure is largely one-sided and the model is inferring more
+  than it measures (add more scan positions), not that the fit is wrong.
+- **Whole-tree summary** — TCSA, trunk diameter, height, canopy extent,
+  total/stem/branch volume, total length, scaffold and shoot counts, plus
+  a **reconstructed DBH** interpolated from the trunk taper at 1.3 m.
+- **Stem taper** — trunk diameter narrowing with height; one-sided
+  (under-covered) trunk cylinders are tinted amber.
+- **Branch-order distribution** — shoot count, total length, or woody
+  volume per rank (trunk, scaffold, order 2, …).
+- **Branch-angle distribution** — a histogram of each shoot's fork angle
+  against its parent axis (narrow angles flag included-bark risk).
+- **Scan coverage & fit** — a surface-coverage histogram (one-sided bins
+  tinted amber) and an absolute fit-residual (MAD) histogram, shown for
+  information.
+- **Vertical profile** — woody volume (or length) binned by height, reading
+  as a tree silhouette — useful for biomass partitioning.
+- **Per-shoot table** — every shoot with its rank, length, base diameter,
+  fork angle, child count, and volume-weighted surface coverage; click a
+  column header to sort. One-sided shoots are tinted so you can see which
+  parts of the model are inferred rather than measured.
+
+The right column has controls for the branch-angle bin width and the
+branch-order / vertical-profile metric.
+
+Full per-cylinder geometry for downstream tooling lives in the **exported
+file** — see [Export](#export) below.
 
 ### Switch the coloring
 
