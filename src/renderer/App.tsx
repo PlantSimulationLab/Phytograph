@@ -563,7 +563,16 @@ function App() {
     }
 
     if (errors.length > 0) {
-      showToast({ title: `Failed to load ${errors.length} file(s)`, type: 'error' });
+      // Surface the actual per-file reasons, not just a count. Each entry is
+      // `filename: reason` (the reason is the backend's error detail). The
+      // toast body is selectable + copyable and error toasts persist, so the
+      // user can read why each file failed and act on it (e.g. re-run those
+      // files with a column format that matches their layout).
+      showToast({
+        title: `Failed to load ${errors.length} file(s)`,
+        message: errors.join('\n'),
+        type: 'error',
+      });
     }
 
     setImportProgress(null);
@@ -613,6 +622,14 @@ function App() {
   const handleToggleScanVisibility = useCallback((id: string) => {
     setScans(prev => prev.map(s =>
       s.id === id ? { ...s, visible: !s.visible } : s
+    ));
+  }, []);
+
+  // Force a scan hidden (idempotent). Used after a QSM build so the source
+  // scan's points don't obscure the newly created QSM.
+  const handleHideScan = useCallback((id: string) => {
+    setScans(prev => prev.map(s =>
+      s.id === id ? { ...s, visible: false } : s
     ));
   }, []);
 
@@ -1051,6 +1068,7 @@ function App() {
           scans={scans}
           selectedScanIds={selectedScanIds}
           onToggleVisibility={handleToggleScanVisibility}
+          onHideScan={handleHideScan}
           onToggleMisses={handleToggleScanMisses}
           onToggleSelection={handleToggleScanSelection}
           onRemoveScan={handleRemoveScan}

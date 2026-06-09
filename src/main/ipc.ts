@@ -30,7 +30,11 @@ export function registerIpc(): void {
       title: opts.title,
       defaultPath: opts.defaultPath,
       filters: opts.filters,
-      properties: opts.multi ? ['openFile', 'multiSelections'] : ['openFile'],
+      properties: opts.directory
+        ? ['openDirectory', 'createDirectory']
+        : opts.multi
+        ? ['openFile', 'multiSelections']
+        : ['openFile'],
     });
     if (result.canceled) return null;
     return opts.multi ? result.filePaths : result.filePaths[0];

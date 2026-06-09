@@ -94,6 +94,58 @@ def test_build_qsm_radii_corrected_and_quality_populated(client, cloud_points):
     assert all(0.0 <= c["surf_cov"] <= 1.0 for c in with_cov)
 
 
+def _write_xyz(path, pts) -> str:
+    """Write an [N,3] array to a plain XYZ file and return its path."""
+    arr = np.asarray(pts, dtype=np.float64)
+    np.savetxt(path, arr, fmt="%.6f")
+    return str(path)
+
+
+def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_path):
+    """Aggregate mode: two file `sources` (two halves of ONE tree, the multi-view
+    case) fuse into a SINGLE QSM whose points_used equals the combined count and
+    whose structure matches a single-cloud build (one trunk, scaffolds present).
+
+    This exercises the `sources` server-side read+concatenate path that octree
+    clouds depend on (their display points are empty client-side)."""
+    pts = np.asarray(cloud_points, dtype=np.float64)
+    half = len(pts) // 2
+    a = _write_xyz(tmp_path / "view_a.xyz", pts[:half])
+    b = _write_xyz(tmp_path / "view_b.xyz", pts[half:])
+
+    resp = client.post(
+        "/api/qsm/build",
+        json={"sources": [{"source_path": a}, {"source_path": b}]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True, body.get("error")
+    # Every point from BOTH files was used — nothing dropped.
+    assert body["points_used"] == len(pts)
+    # One fused tree: exactly one rank-0 trunk shoot, at least one scaffold.
+    rank0 = [s for s in body["shoots"] if s["rank"] == 0]
+    assert len(rank0) == 1, f"expected one trunk shoot, got {len(rank0)}"
+    assert any(s["rank"] == 1 for s in body["shoots"]), "no scaffold shoot"
+    assert body["n_cylinders"] > 0
+
+
+def test_build_qsm_aggregate_sources_plus_inline_points(client, cloud_points, tmp_path):
+    """A mixed selection (one file `source` + one flat cloud's inline `points`)
+    fuses both: points_used is the sum, proving inline points aren't dropped when
+    `sources` is also present."""
+    pts = np.asarray(cloud_points, dtype=np.float64)
+    half = len(pts) // 2
+    a = _write_xyz(tmp_path / "octree_view.xyz", pts[:half])
+    inline = pts[half:].tolist()
+
+    body = client.post(
+        "/api/qsm/build",
+        json={"sources": [{"source_path": a}], "points": inline},
+    ).json()
+    assert body["success"] is True, body.get("error")
+    assert body["points_used"] == len(pts)
+
+
 def test_build_qsm_too_few_points(client):
     resp = client.post("/api/qsm/build", json={"points": [[0, 0, 0], [0, 0, 1]]})
     assert resp.status_code == 200

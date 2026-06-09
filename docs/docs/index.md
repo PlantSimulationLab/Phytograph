@@ -32,6 +32,12 @@ point clouds, meshes, and procedural plant models.
     Pull topological skeletons out of woody scans, with branch order
     colored by Strahler number and total length reported.
 
+- :phytograph-qsm: **Build QSMs**
+
+    Reconstruct dormant trees as connected cylinders with fitted radii,
+    segment continuous shoots, and classify them by shoot rank — with
+    woody volume, trunk diameter, and per-rank metrics.
+
 - :material-sprout: **Generate procedural plants**
 
     Grow Helios plant models — trees, vines, cereals, vegetables — to a

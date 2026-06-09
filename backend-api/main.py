@@ -5514,9 +5514,16 @@ class PlantSessionStatusResponse(BaseModel):
 
 class QSMBuildRequest(BaseModel):
     """Request for a full QSM build. Points come inline (`points`) or from a
-    file/octree cloud (`source`), mirroring /api/skeleton/extract."""
+    file/octree cloud (`source`), mirroring /api/skeleton/extract.
+
+    For an AGGREGATE build (several pre-registered multi-view scans of ONE
+    tree fused into a single QSM), pass `sources`: each is read and the points
+    concatenated in world space (each source's own translation applied). This
+    is the only way to fuse octree-backed clouds, whose display positions are
+    empty client-side. `sources` takes precedence over `points`/`source`."""
     points: Optional[List[List[float]]] = None
     source: Optional[PointSource] = None
+    sources: Optional[List[PointSource]] = None
     # Per-species measured twig radius (mm) the radius taper is anchored to as
     # growth length -> 0. Orchard cultivars are absent from rTwig's DB, so this is
     # user-supplied; default 4.23 mm is rTwig's published example.
@@ -5606,7 +5613,17 @@ async def build_qsm(request: QSMBuildRequest):
     from qsm.metrics import compute_metrics
 
     try:
-        if request.source is not None:
+        if request.sources:
+            # Aggregate: read each source and concatenate in world space, plus any
+            # inline `points` (a mixed selection of octree-backed and flat clouds
+            # sends both). Each source carries its own translation, so the merged
+            # cloud is already registered if the caller aligned the scans first.
+            parts = [_read_points_from_source(s)[0] for s in request.sources]
+            if request.points:
+                parts.append(np.array(request.points, dtype=np.float64))
+            parts = [p for p in parts if len(p) > 0]
+            points = np.concatenate(parts, axis=0) if parts else np.empty((0, 3), dtype=np.float64)
+        elif request.source is not None:
             points, _, _ = _read_points_from_source(request.source)
         else:
             points = np.array(request.points or [], dtype=np.float64)
@@ -8233,6 +8250,43 @@ def _first_data_row_has_letters(file_path: str) -> bool:
     return any(re.search(r'[a-zA-Z]', tok) for tok in line.split())
 
 
+def _ascii_skiprows(file_path: str) -> int:
+    """How many leading lines pandas must be told to skip explicitly.
+
+    Every ASCII reader here passes `comment='#'` to pandas, which drops blank
+    lines and any line starting with '#' on its own — so a '#'-commented header
+    needs no `skiprows`. Two cases pandas WON'T handle and we must:
+
+      1. An uncommented text header ('X Y Z R G B') — `comment='#'` doesn't
+         touch it, so it would be read as a data row and crash the float cast.
+      2. A '//'-commented header ('//X //Y //Z ...', CloudCompare's convention).
+         pandas's comment char is a single character; we pass '#', not '//', so
+         the line survives and pandas tries to parse '//X' as a float. Counting
+         it here is what keeps those exports importable.
+
+    Returns the count of such leading lines (currently 0 or 1 — these exporters
+    write a single legend row). A '#'-commented header returns 0 because pandas
+    already drops it; double-counting would eat the first real data row.
+    """
+    first = _first_nonblank_ascii_line(file_path)
+    if first is None:
+        return 0
+    line, was_commented = first
+    if was_commented:
+        # '#' headers are dropped by pandas's comment='#'; only '//' ones (which
+        # pandas keeps) need an explicit skip. Re-read the raw first non-blank
+        # line to tell the two markers apart — `line` here is already stripped.
+        with open(file_path) as f:
+            for raw in f:
+                stripped = raw.strip()
+                if not stripped:
+                    continue
+                return 1 if stripped.startswith('//') else 0
+        return 0
+    # Bare (uncommented) line: skip it only if it's a text header, not data.
+    return 1 if any(re.search(r'[a-zA-Z]', tok) for tok in line.split()) else 0
+
+
 # Roles that already map to a dedicated LAS field — never carried as extra
 # dimensions (they'd duplicate position/rgb/intensity in the octree).
 _XYZ_RESERVED_ROLES = {
@@ -8634,7 +8688,7 @@ def _load_xyz_arrays(
     usecols = [idx for _, idx in sorted_roles]
     names = [role for role, _ in sorted_roles]
 
-    skiprows = 1 if _first_data_row_has_letters(file_path) else 0
+    skiprows = _ascii_skiprows(file_path)
 
     try:
         df = pd.read_csv(
@@ -9079,7 +9133,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
-    skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
+    skiprows = _ascii_skiprows(str(source_path))
 
     chunk_rows = 2_000_000
 
@@ -11850,7 +11904,7 @@ def _load_cloud_for_segmentation(
                 status_code=400,
                 detail=f"ASCII format must include x/y/z. Got columns: {names}",
             )
-        skiprows = 1 if _first_data_row_has_letters(str(source_path)) else 0
+        skiprows = _ascii_skiprows(str(source_path))
         df = pd.read_csv(
             source_path, sep=r"\s+", header=None, names=names,
             usecols=[i for i, c in enumerate(names) if not _is_skip_name(c)],

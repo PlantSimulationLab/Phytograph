@@ -65,12 +65,36 @@ async function runOnce(cmd, args) {
     // --reload-dir restricts watching to backend-api/ so edits under node_modules
     // or resources/ don't trigger restarts. uvicorn uses watchfiles when
     // available; it's installed in backend-api/venv.
+    // Pipe stderr (rather than inherit) so we can drop the benign macOS objc
+    // duplicate-class warnings: pyhelios's libhelios (visualizer plugin) and
+    // open3d's pybind module each statically link GLFW, so loading both into the
+    // backend process makes the Obj-C runtime warn that GLFWWindow et al. are
+    // "implemented in both". The backend is headless and never opens a GLFW
+    // window, so these are pure console noise. Match the specific pattern only —
+    // genuine objc warnings (anything not a GLFW duplicate-class line) still pass
+    // through. stdout stays inherited; everything else on stderr is re-emitted.
+    const GLFW_DUP_WARNING = /^objc\[\d+\]: Class GLFW\w+ is implemented in both /;
     uvicorn = spawn(
       venvPython,
       ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8008',
        '--reload', '--reload-dir', '.'],
-      { stdio: 'inherit', cwd: backendDir, env: process.env },
+      { stdio: ['inherit', 'inherit', 'pipe'], cwd: backendDir, env: process.env },
     );
+    let stderrTail = '';
+    uvicorn.stderr.on('data', (chunk) => {
+      // Buffer partial lines so a warning split across two chunks still matches.
+      const text = stderrTail + chunk.toString();
+      const lines = text.split('\n');
+      stderrTail = lines.pop(); // last element is the incomplete trailing line
+      for (const line of lines) {
+        if (!GLFW_DUP_WARNING.test(line)) process.stderr.write(line + '\n');
+      }
+    });
+    uvicorn.stderr.on('end', () => {
+      if (stderrTail && !GLFW_DUP_WARNING.test(stderrTail)) {
+        process.stderr.write(stderrTail);
+      }
+    });
     uvicorn.on('exit', (code, signal) => {
       console.log(`[dev] uvicorn exited (code=${code}, signal=${signal})`);
     });

@@ -99,6 +99,34 @@ scan's swatch color and shows a per-scan legend instead of a colorbar.
 | **Length** | Color edges by their length | Spotting unusually short or long segments. |
 | **Single Color** | Flat color | When you want the skeleton out of the way visually. |
 
+## QSM color modes
+
+A [QSM](../concepts/qsm.md) is colored from the **Color by** dropdown at
+the bottom of the **QSM** results panel. It applies to every QSM in the
+scene.
+
+| Mode | What it shows | When to use |
+|---|---|---|
+| **Shoot rank** | Color by branching order (trunk = 0, scaffolds = 1, …) | Default. Reading structure — which axis is the trunk vs. a scaffold. |
+| **Shoot id** | A distinct color per shoot, so each continuous axis reads as one object | Seeing the shoots themselves, independent of rank. |
+
+The **Shoot rank** palette is fixed and chosen so adjacent ranks stay
+clearly distinguishable:
+
+| Rank | Color |
+|---|---|
+| **0** (trunk) | Wood tan |
+| **1** (scaffolds) | Red-orange |
+| **2** | Blue |
+| **3** | Green |
+| **4** | Violet |
+| **5+** | Pink |
+
+In **Shoot id** mode each shoot's color comes from a perceptually-spaced
+hue rotation, so neighbouring shoots don't collide. In either mode,
+clicking a shoot in the results list **highlights that whole axis** and
+dims the rest.
+
 ## Leaf area density voxels
 
 A [leaf area density](../concepts/leaf-area-density.md) result is a grid

@@ -219,3 +219,70 @@ def test_ply_to_las_db_intensity_not_clamped(tmp_path):
     inten = np.asarray(laspy.read(str(out)).intensity)
     assert inten.min() == 0 and inten.max() == 65535
     assert len(np.unique(inten)) == 3
+
+
+# --- '//'-commented (CloudCompare) header handling -------------------------
+
+def test_ascii_skiprows_double_slash_header():
+    """The reported bug: a '//X //Y //Z' header (CloudCompare's convention)
+    survives pandas's comment='#' and would be parsed as a data row, crashing
+    the float cast with `could not convert string to float: '//X'`. It must be
+    counted as a skip. A '#'-commented header must NOT (pandas drops it), and a
+    bare uncommented text header must be skipped exactly once."""
+    import tempfile, os
+
+    def _skiprows(text: str) -> int:
+        fd, path = tempfile.mkstemp(suffix=".xyz")
+        os.write(fd, text.encode())
+        os.close(fd)
+        try:
+            return main._ascii_skiprows(path)
+        finally:
+            os.unlink(path)
+
+    assert _skiprows("//X //Y //Z\n0 0 0\n1 1 1\n") == 1   # '//' header: skip
+    assert _skiprows("# x y z\n0 0 0\n1 1 1\n") == 0       # '#' header: pandas drops
+    assert _skiprows("X Y Z\n0 0 0\n1 1 1\n") == 1         # bare header: skip
+    assert _skiprows("0 0 0\n1 1 1\n") == 0                # no header: skip nothing
+
+
+def test_xyz_to_las_double_slash_header_imports(tmp_path):
+    """End-to-end through `_xyz_to_las`: a '//'-headered CloudCompare export
+    must import cleanly (header dropped, every data row kept) rather than
+    crashing on the '//X' token. Regression for the 'N of M imports failed'
+    bulk-import report."""
+    src = tmp_path / "cc.xyz"
+    src.write_text("//X //Y //Z\n0 0 0\n1 2 3\n4 5 6\n")
+    out = tmp_path / "cc.las"
+    n, _ = main._xyz_to_las(main._Path(str(src)), None, main._Path(str(out)))
+    assert n == 3
+    las = laspy.read(str(out))
+    # Coordinates round-trip (0.001 LAS scale → mm precision is ample here).
+    np.testing.assert_allclose(np.asarray(las.x), [0, 1, 4], atol=1e-3)
+    np.testing.assert_allclose(np.asarray(las.y), [0, 2, 5], atol=1e-3)
+    np.testing.assert_allclose(np.asarray(las.z), [0, 3, 6], atol=1e-3)
+
+
+def test_xyz_to_las_format_mismatch_raises_actionable_400(tmp_path):
+    """When the chosen column format doesn't match the file (a non-numeric token
+    reaches the x/y/z cast — exactly what a bulk import that applies one file's
+    layout to another produces), the failure must be a clean 400 naming the file
+    and the chosen columns, not an uncaught 500."""
+    from fastapi import HTTPException
+
+    src = tmp_path / "labels.xyz"
+    # A stray non-numeric token in the x column on a DATA row (not the first
+    # line, which would be skipped as a header). This is the shape of a
+    # genuine format mismatch the skiprows heuristic can't rescue.
+    src.write_text("0 0 0\ntree_alpha 2 3\n")
+    out = tmp_path / "out.las"
+    cp = main.ColumnPlan(columns=[
+        main.ColumnPlanEntry(index=0, role='x'),
+        main.ColumnPlanEntry(index=1, role='y'),
+        main.ColumnPlanEntry(index=2, role='z'),
+    ], rgb_is_255=True)
+    with pytest.raises(HTTPException) as exc:
+        main._xyz_to_las(main._Path(str(src)), None, main._Path(str(out)), cp)
+    assert exc.value.status_code == 400
+    assert "labels.xyz" in exc.value.detail
+    assert "column format" in exc.value.detail

@@ -37,6 +37,8 @@ export interface OpenDialogOptions {
   defaultPath?: string;
   filters?: { name: string; extensions: string[] }[];
   multi?: boolean;
+  // Pick a directory instead of file(s). Returns the chosen folder path string.
+  directory?: boolean;
 }
 
 export interface SaveDialogOptions {

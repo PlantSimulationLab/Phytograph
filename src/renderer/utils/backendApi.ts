@@ -2402,6 +2402,11 @@ export async function deleteCloudSession(sessionId: string): Promise<void> {
 export interface QSMBuildRequest {
   points?: number[][];          // [[x, y, z], ...] — omit when `source` is set
   source?: BackendPointSource;  // octree-backed clouds read from disk
+  // Aggregate build: several pre-registered scans fused into ONE QSM. Each is
+  // read and concatenated server-side (the only way to fuse octree clouds,
+  // whose display positions are empty client-side). Takes precedence over
+  // points/source.
+  sources?: BackendPointSource[];
   twig_radius_mm?: number;      // tip radius anchor, default 4.23 mm
   w_growthlength?: number;      // continuation weights; default (1, 0, 0)
   w_area?: number;

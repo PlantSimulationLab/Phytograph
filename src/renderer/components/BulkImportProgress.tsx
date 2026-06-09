@@ -18,6 +18,11 @@ interface Props {
   // not via mount/unmount, so animations could be added later without
   // re-architecting.
   progress: BulkImportProgressState | null;
+  // Header text. Defaults to the import wording; batch QSM passes
+  // "Building QSMs…" to reuse the same modal for a different operation.
+  title?: string;
+  // Bottom-left hint text. Defaults to the import wording.
+  hint?: string;
 }
 
 // Modal shown while a Helios XML bulk import is loading point data. The
@@ -25,7 +30,11 @@ interface Props {
 // user sees nothing for as long as the backend takes to parse — could be
 // 30s+ on multi-GB scans. Renders above the rest of the UI but below the
 // backend splash (z-90 vs z-100) so a backend restart still wins.
-export function BulkImportProgress({ progress }: Props) {
+export function BulkImportProgress({
+  progress,
+  title = 'Importing scans…',
+  hint = 'Reading from disk — large scans can take 30s+',
+}: Props) {
   if (!progress) return null;
 
   // Fill to *completed* scans, not the in-flight one: while scan 1/2 is
@@ -45,7 +54,7 @@ export function BulkImportProgress({ progress }: Props) {
       <div className="bg-neutral-800 rounded-xl border border-neutral-700 shadow-2xl p-6 min-w-[360px] max-w-md">
         <div className="flex items-center gap-3 mb-4">
           <Loader2 className="h-5 w-5 animate-spin text-blue-400 shrink-0" />
-          <span className="text-sm font-medium text-white">Importing scans…</span>
+          <span className="text-sm font-medium text-white">{title}</span>
         </div>
         {progress.label && (
           <div
@@ -64,7 +73,7 @@ export function BulkImportProgress({ progress }: Props) {
         </div>
         <div className="flex items-center justify-between mt-2">
           <span className="text-[10px] text-neutral-500">
-            Reading from disk — large scans can take 30s+
+            {hint}
           </span>
           <span
             data-testid="bulk-import-progress-count"

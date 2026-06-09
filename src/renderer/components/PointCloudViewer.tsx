@@ -22,6 +22,7 @@ import { ScannerMarker } from './ScannerMarker';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import { type ScanParameters } from '../lib/scanParameters';
+import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
@@ -63,6 +64,7 @@ import { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
 export { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
 import { Skeleton3D } from './viewer/renderers/Skeleton3D';
 import { QSM3D, type QSMColorMode } from './viewer/renderers/QSM3D';
+import { QsmIcon } from './icons/QsmIcon';
 import { SkeletonPoints } from './viewer/renderers/SkeletonPoints';
 import { CameraController } from './viewer/scene/CameraController';
 import { ViewportAxesGizmo } from './viewer/scene/ViewportAxesGizmo';
@@ -82,6 +84,7 @@ import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
 import { ExportPanel } from './viewer/panels/ExportPanel';
+import { QSMExportPanel } from './viewer/panels/QSMExportPanel';
 import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
 import { TranslatePanel } from './viewer/panels/TranslatePanel';
@@ -133,6 +136,7 @@ export type {
   SkeletonEntry,
 } from '../lib/pointCloudTypes';
 import { plantResponseToMeshData } from '../lib/plantMeshData';
+import { serializeQsm, sanitizeQsmFilename, qsmExtForFormat, type QSMExportFormat } from '../lib/qsmExport';
 
 // Grid plane options
 type GridPlane = 'z-up' | 'y-up';
@@ -165,6 +169,10 @@ interface PointCloudViewerProps {
   scans: Scan[];
   selectedScanIds: Set<string>;
   onToggleVisibility: (id: string) => void;
+  // Force a scan hidden (idempotent — unlike onToggleVisibility). Used after a
+  // QSM build to get the source scan's points out of the way so the new QSM
+  // isn't obscured by the cloud it was derived from.
+  onHideScan: (id: string) => void;
   // Toggle the sky/miss overlay for a scan (hidden by default). Offered only on
   // scans whose cloud carries miss info (octree.hasMisses).
   onToggleMisses?: (id: string) => void;
@@ -209,6 +217,7 @@ export default function PointCloudViewer({
   scans,
   selectedScanIds,
   onToggleVisibility,
+  onHideScan,
   onToggleMisses,
   onToggleSelection,
   onRemoveScan,
@@ -470,9 +479,23 @@ export default function PointCloudViewer({
   const [qsmInProgress, setQSMInProgress] = useState(false);
   const [qsmError, setQSMError] = useState<string | null>(null);
   const [qsmTwigRadiusMm, setQSMTwigRadiusMm] = useState(4.23); // tip radius anchor
+  // When >1 scan is selected: fuse them into one QSM ('aggregate', for multi-view
+  // scans of a single tree) or build one QSM per scan ('per-scan', separate trees).
+  const [qsmMultiMode, setQSMMultiMode] = useState<'aggregate' | 'per-scan'>('per-scan');
   const [qsms, setQSMs] = useState<QSMEntry[]>([]);
   const [qsmColorMode, setQSMColorMode] = useState<QSMColorMode>('rank');
   const [selectedQSMShootId, setSelectedQSMShootId] = useState<number | null>(null);
+  // QSM export dialog: format + per-QSM selection, then one file per QSM into a
+  // user-picked folder. See handleExportQSMs below.
+  const [showQSMExportPanel, setShowQSMExportPanel] = useState(false);
+  const [qsmExporting, setQSMExporting] = useState(false);
+
+  // Clear any stale QSM error when the panel opens, so a failure from a previous
+  // attempt doesn't linger after the user closes and re-opens the panel (e.g.
+  // after re-importing a scan that had failed).
+  useEffect(() => {
+    if (showQSMPanel) setQSMError(null);
+  }, [showQSMPanel]);
 
   // Import functions for external use
   const importMesh = useCallback((
@@ -637,6 +660,8 @@ export default function PointCloudViewer({
   // Progress for a Helios XML bulk import in flight. The launching popup
   // closes immediately so the user sees this modal instead of an idle popup.
   const [bulkImportProgress, setBulkImportProgress] = useState<BulkImportProgressState | null>(null);
+  // Progress for a batch QSM build (one QSM per selected scan, in sequence).
+  const [qsmBatchProgress, setQSMBatchProgress] = useState<BulkImportProgressState | null>(null);
   // Per-row expansion state for the scans panel. Held in-memory only; resets
   // on app reload.
   const [expandedScanIds, setExpandedScanIds] = useState<Set<string>>(new Set());
@@ -798,17 +823,26 @@ export default function PointCloudViewer({
     const newCloudIds = [...currentIds].filter(id => !prevIds.has(id));
 
     if (newCloudIds.length > 0) {
-      // Get the first new cloud
-      const newCloud = clouds.find(c => c.id === newCloudIds[0]);
-      if (newCloud && newCloud.data.bounds) {
+      // Frame *all* newly added clouds, not just the first — importing several
+      // at once should fit the camera to their union, not whichever loaded
+      // first. Accumulate min/max over every new cloud with bounds (same union
+      // pattern as the combinedBounds useMemo below).
+      const newIdSet = new Set(newCloudIds);
+      const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+      const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+      for (const cloud of clouds) {
+        if (!newIdSet.has(cloud.id) || !cloud.data.bounds) continue;
+        min.min(cloud.data.bounds.min);
+        max.max(cloud.data.bounds.max);
+      }
+      if (isFinite(min.x)) {
+        const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+        const size = new THREE.Vector3().subVectors(max, min);
         // Small delay to ensure camera controller is ready
         setTimeout(() => {
           const snapToView = (window as any).__snapToView;
           if (snapToView) {
-            snapToView('iso', {
-              center: newCloud.data.bounds.center,
-              size: newCloud.data.bounds.size,
-            });
+            snapToView('iso', { center, size });
           }
         }, 50);
       }
@@ -5458,16 +5492,25 @@ export default function PointCloudViewer({
   // backend source for octree clouds, inline+downsampled for flat clouds, same as
   // the skeleton path).
   const handleBuildQSM = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
+    if (selectedIds.size === 0) return;
+    const targets = Array.from(selectedIds)
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => !!c);
+    if (targets.length === 0) return;
+
+    const MAX_QSM_POINTS = 60000; // dormant trees are sparse; this is plenty
+    // 'aggregate' fuses several multi-view scans of ONE tree into a single QSM;
+    // 'per-scan' builds one QSM per scan (separate trees). Only meaningful for
+    // >1 scan — a single selection always builds one QSM regardless.
+    const aggregate = targets.length > 1 && qsmMultiMode === 'aggregate';
+    const batch = targets.length > 1 && !aggregate;
 
     setQSMInProgress(true);
     setQSMError(null);
 
-    try {
-      const MAX_QSM_POINTS = 60000; // dormant trees are sparse; this is plenty
+    // Builds one QSM for a single scan, returning the raw backend response or
+    // throwing on failure. The caller turns it into a QSMEntry.
+    const buildOne = async (cloud: PointCloudEntry) => {
       const ps = buildPointSource(cloud);
       let points: number[][] | undefined;
       let source: BackendPointSource | undefined;
@@ -5495,35 +5538,160 @@ export default function PointCloudViewer({
       });
 
       if (!response.success) {
-        setQSMError(response.error || 'QSM build failed');
+        throw new Error(response.error || 'QSM build failed');
+      }
+      return response;
+    };
+
+    try {
+      // === Aggregate: fuse all selected scans into ONE QSM ===
+      if (aggregate) {
+        setQSMBatchProgress({ current: 1, total: 1, label: 'Building fused QSM…' });
+
+        // Resolve each scan to a point source. Octree-backed clouds carry a
+        // backend source (their in-RAM display buffer is empty, so they MUST be
+        // read server-side); flat clouds carry inline display points. The two
+        // resolve through the same buildPointSource the per-scan path uses.
+        const resolved = targets.map(c => ({ cloud: c, ps: buildPointSource(c) }));
+        const sources: BackendPointSource[] = [];
+        const inlineParts: number[][] = [];
+        for (const { cloud, ps } of resolved) {
+          if (ps.kind === 'source') {
+            sources.push({ ...ps.source, max_points: MAX_QSM_POINTS });
+          } else {
+            // Flat cloud: concatenate its display points in WORLD space
+            // (translation applied here — getDisplayData leaves it to the parent
+            // group). Scans are assumed pre-registered (e.g. ICP-aligned).
+            const d = ps.data;
+            const t = getEditState(cloud.id).translation;
+            for (let i = 0; i < d.pointCount; i++) {
+              inlineParts.push([
+                d.positions[i * 3] + t.x,
+                d.positions[i * 3 + 1] + t.y,
+                d.positions[i * 3 + 2] + t.z,
+              ]);
+            }
+          }
+        }
+
+        // Send both: the backend reads every `source` and concatenates the
+        // inline `points`, so a mixed octree+flat selection fuses correctly.
+        // Downsample the flat inline points to the budget (sources are capped
+        // server-side via max_points). When there are no sources, `sources` is
+        // omitted and this is a pure inline build.
+        const skip = inlineParts.length > MAX_QSM_POINTS ? Math.ceil(inlineParts.length / MAX_QSM_POINTS) : 1;
+        const points = skip > 1 ? inlineParts.filter((_, i) => i % skip === 0) : inlineParts;
+        let response;
+        try {
+          response = await buildQSM({
+            sources: sources.length > 0 ? sources : undefined,
+            points: points.length > 0 ? points : undefined,
+            twig_radius_mm: qsmTwigRadiusMm,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'QSM build failed';
+          setQSMError(prettifyQSMError(msg));
+          showToast({ title: 'Aggregate QSM build failed', type: 'error' });
+          return;
+        }
+        if (!response.success) {
+          setQSMError(prettifyQSMError(response.error || 'QSM build failed'));
+          showToast({ title: 'Aggregate QSM build failed', type: 'error' });
+          return;
+        }
+
+        const firstName = targets[0].data.fileName ?? 'Scan';
+        const entry: QSMEntry = {
+          id: crypto.randomUUID(),
+          sourceCloudId: targets[0].id,
+          sourceLabel: `${firstName} + ${targets.length - 1} more`,
+          cylinders: response.cylinders,
+          shoots: response.shoots,
+          metrics: response.metrics,
+          visible: true,
+        };
+        setQSMs(prev => [...prev, entry]);
+        // Hide every contributing scan so the new QSM isn't obscured by the
+        // dense point cloud it was fused from.
+        for (const t of targets) onHideScan(t.id);
+        setSelectedQSMShootId(null);
+        setShowQSMPanel(false);
+
+        const m = response.metrics;
+        showToast({
+          title:
+            `Fused QSM from ${targets.length} scans: ${response.n_cylinders} cylinders, ${response.n_shoots} shoots` +
+            (m ? ` (${m.n_scaffolds} scaffolds, trunk ${m.trunk_diameter_mm.toFixed(0)}mm)` : ''),
+          type: 'success',
+        });
         return;
       }
 
-      const entry: QSMEntry = {
-        id: crypto.randomUUID(),
-        sourceCloudId: cloud.id,
-        cylinders: response.cylinders,
-        shoots: response.shoots,
-        metrics: response.metrics,
-        visible: true,
-      };
-      setQSMs(prev => [...prev, entry]);
+      // === Per-scan: one QSM per selected scan, in sequence ===
+      const failures: string[] = [];
+      // Kept for the single-scan toast, which preserves the original detailed wording.
+      let lastResponse: Awaited<ReturnType<typeof buildOne>> | null = null;
+      let succeeded = 0;
+
+      for (let i = 0; i < targets.length; i++) {
+        const cloud = targets[i];
+        const cloudName = cloud.data.fileName ?? 'Scan';
+        if (batch) {
+          setQSMBatchProgress({ current: i + 1, total: targets.length, label: cloudName });
+        }
+        try {
+          const response = await buildOne(cloud);
+          lastResponse = response;
+          const entry: QSMEntry = {
+            id: crypto.randomUUID(),
+            sourceCloudId: cloud.id,
+            cylinders: response.cylinders,
+            shoots: response.shoots,
+            metrics: response.metrics,
+            visible: true,
+          };
+          setQSMs(prev => [...prev, entry]);
+          // Hide the source scan so its points don't obscure the new QSM.
+          onHideScan(cloud.id);
+          succeeded++;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'build failed';
+          failures.push(`${cloudName}: ${prettifyQSMError(msg)}`);
+        }
+      }
+
       setSelectedQSMShootId(null);
+
+      if (succeeded === 0) {
+        // All failed — keep the panel open and surface the error inline.
+        setQSMError(failures[0] || 'QSM build failed');
+        showToast({ title: `QSM build failed for all ${targets.length} scan(s)`, type: 'error' });
+        return;
+      }
+
       setShowQSMPanel(false);
 
-      const m = response.metrics;
-      showToast({
-        title:
-          `QSM built: ${response.n_cylinders} cylinders, ${response.n_shoots} shoots` +
-          (m ? ` (${m.n_scaffolds} scaffolds, trunk ${m.trunk_diameter_mm.toFixed(0)}mm)` : ''),
-        type: 'success',
-      });
-    } catch (err) {
-      setQSMError(err instanceof Error ? err.message : 'QSM build failed');
+      if (!batch && lastResponse) {
+        const m = lastResponse.metrics;
+        showToast({
+          title:
+            `QSM built: ${lastResponse.n_cylinders} cylinders, ${lastResponse.n_shoots} shoots` +
+            (m ? ` (${m.n_scaffolds} scaffolds, trunk ${m.trunk_diameter_mm.toFixed(0)}mm)` : ''),
+          type: 'success',
+        });
+      } else if (failures.length === 0) {
+        showToast({ title: `QSM built for ${succeeded} scans`, type: 'success' });
+      } else {
+        showToast({
+          title: `Built ${succeeded} of ${targets.length} QSMs (${failures.length} failed)`,
+          type: 'error',
+        });
+      }
     } finally {
+      setQSMBatchProgress(null);
       setQSMInProgress(false);
     }
-  }, [selectedIds, clouds, buildPointSource, qsmTwigRadiusMm, showToast]);
+  }, [selectedIds, clouds, buildPointSource, getEditState, qsmTwigRadiusMm, qsmMultiMode, showToast, onHideScan]);
 
   // Remove a QSM.
   const handleRemoveQSM = useCallback((qsmId: string) => {
@@ -5533,6 +5701,72 @@ export default function PointCloudViewer({
   const handleToggleQSMVisibility = useCallback((qsmId: string) => {
     setQSMs(prev => prev.map(q => (q.id === qsmId ? { ...q, visible: !q.visible } : q)));
   }, []);
+
+  // Display label for a QSM, matching the results panel + delete dialog:
+  // sourceLabel override (aggregate) → source scan fileName → 'QSM'.
+  const qsmDisplayLabel = useCallback((qsm: QSMEntry): string => {
+    return qsm.sourceLabel || clouds.find(c => c.id === qsm.sourceCloudId)?.data.fileName || 'QSM';
+  }, [clouds]);
+
+  // Export the selected QSMs, one file per QSM, into a user-picked folder.
+  const handleExportQSMs = useCallback(async (qsmIds: string[], format: QSMExportFormat) => {
+    const targets = qsms.filter(q => qsmIds.includes(q.id));
+    if (targets.length === 0) return;
+
+    // Pick the output folder. Falls back to a single save dialog when running
+    // outside Electron (e.g. vite dev in a plain browser) — there we can only
+    // export one file, so require a single selection.
+    let dir: string | null = null;
+    if (window.electronAPI) {
+      // directory:true returns a single folder path (or null when cancelled).
+      const picked = await window.electronAPI.dialog.open({ directory: true, title: 'Choose export folder' });
+      dir = typeof picked === 'string' ? picked : null;
+      if (!dir) return; // cancelled
+    } else if (targets.length > 1) {
+      showToast({ type: 'error', title: 'Export', message: 'Select a single QSM to export in browser mode.' });
+      return;
+    }
+
+    setQSMExporting(true);
+    try {
+      const ext = qsmExtForFormat(format);
+      const usedNames = new Set<string>();
+      let written = 0;
+      for (const qsm of targets) {
+        // De-dup filenames within this batch (two scans can share a fileName).
+        let base = sanitizeQsmFilename(qsmDisplayLabel(qsm));
+        let name = `${base}.${ext}`;
+        let n = 2;
+        while (usedNames.has(name)) name = `${base}_${n++}.${ext}`;
+        usedNames.add(name);
+
+        const content = serializeQsm(qsm, format);
+        if (window.electronAPI && dir) {
+          const sep = dir.includes('\\') ? '\\' : '/';
+          const path = dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
+          await window.electronAPI.fs.writeText(path, content);
+        } else {
+          // Browser fallback: anchor-download a single file.
+          const blob = new Blob([content], { type: 'text/plain;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = name;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }
+        written++;
+      }
+      showToast({ type: 'success', title: 'Export complete', message: `Exported ${written} QSM${written === 1 ? '' : 's'} (${format.toUpperCase()})` });
+      setShowQSMExportPanel(false);
+    } catch (err) {
+      showToast({ type: 'error', title: 'Export failed', message: (err as Error)?.message ?? String(err) });
+    } finally {
+      setQSMExporting(false);
+    }
+  }, [qsms, qsmDisplayLabel, showToast]);
 
   // Remove a skeleton
   const handleRemoveSkeleton = useCallback((skeletonId: string) => {
@@ -9223,8 +9457,16 @@ export default function PointCloudViewer({
         {qsms.length > 0 && (
           <div data-testid="qsm-results-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[50vh] flex flex-col">
             <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
-              <Dna className="w-4 h-4 text-neutral-400" />
+              <QsmIcon className="w-4 h-4 text-neutral-400" />
               <span className="text-xs font-medium text-neutral-300 flex-1">QSM</span>
+              <button
+                data-testid="qsm-export-open"
+                onClick={() => setShowQSMExportPanel(true)}
+                title="Export QSMs"
+                className="p-1 hover:bg-neutral-700 rounded"
+              >
+                <Download className="w-3.5 h-3.5 text-neutral-400" />
+              </button>
             </div>
             <div className="overflow-y-auto flex-1 p-1">
               {qsms.map(qsm => {
@@ -9260,7 +9502,7 @@ export default function PointCloudViewer({
                     <div className="flex items-center gap-2">
                       <div className="flex-1 min-w-0">
                         <div className="text-xs text-neutral-200 truncate" data-testid="qsm-row-name">
-                          {sourceCloud?.data.fileName || 'QSM'}
+                          {qsm.sourceLabel || sourceCloud?.data.fileName || 'QSM'}
                         </div>
                         <div className="text-[10px] text-neutral-500" data-testid="qsm-row-stats">
                           {qsm.cylinders.length} cyl · {qsm.shoots.length} shoots
@@ -9276,7 +9518,7 @@ export default function PointCloudViewer({
                       </button>
                       <button
                         data-testid={`qsm-delete-${qsm.id}`}
-                        onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'qsm', id: qsm.id, name: sourceCloud?.data.fileName || 'QSM' }); }}
+                        onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'qsm', id: qsm.id, name: qsm.sourceLabel || sourceCloud?.data.fileName || 'QSM' }); }}
                         className="p-1 hover:bg-neutral-600 rounded"
                         title="Delete"
                       >
@@ -9549,6 +9791,22 @@ export default function PointCloudViewer({
                       </button>
                     );
                   })()}
+                  {/* Build QSM — batch: one QSM per selected scan, in sequence. */}
+                  <button
+                    data-testid="tool-qsm"
+                    onClick={() => {
+                      if (showQSMPanel) {
+                        setShowQSMPanel(false);
+                      } else {
+                        closeAllToolPanels('qsm');
+                        setShowQSMPanel(true);
+                      }
+                    }}
+                    className={`p-2 rounded transition-colors ${showQSMPanel ? 'bg-amber-600 text-white' : 'hover:bg-neutral-700'}`}
+                    title={`Build QSM for ${selectedIds.size} scans`}
+                  >
+                    <QsmIcon className={`w-4 h-4 ${showQSMPanel ? 'text-white' : 'text-neutral-300'}`} />
+                  </button>
                   {/* Segment Wood / Leaf — together (one segmentation, labels
                       scattered back) or per-scan. */}
                   <button
@@ -9735,8 +9993,9 @@ export default function PointCloudViewer({
                   >
                     <GitBranch className={`w-4 h-4 ${showSkeletonPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
                   </button>
-                  {/* 8b. Build QSM (single cloud only) — cylinders + radii +
-                       shoot rank. */}
+                  {/* 8b. Build QSM (single cloud) — cylinders + radii + shoot
+                       rank. The batch (one QSM per scan) variant lives in the
+                       multiCloud toolbar above. */}
                   <button
                     data-testid="tool-qsm"
                     onClick={() => {
@@ -9751,7 +10010,7 @@ export default function PointCloudViewer({
                     title="Build QSM (cylinders + shoot rank)"
                     disabled={selectedIds.size !== 1}
                   >
-                    <Dna className={`w-4 h-4 ${showQSMPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
+                    <QsmIcon className={`w-4 h-4 ${showQSMPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
                   </button>
                   {/* 8a. Leaf Area Density (single cloud). Needs scan params +
                        an explicit voxel grid (LAD is per-voxel). */}
@@ -10661,11 +10920,11 @@ export default function PointCloudViewer({
       )}
 
       {/* QSM Build Panel */}
-      {showQSMPanel && selectedIds.size === 1 && (
+      {showQSMPanel && selectedIds.size >= 1 && (
         <div data-testid="qsm-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto">
           <div className="flex items-center justify-between mb-3">
             <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-              <Dna className="w-3 h-3" />
+              <QsmIcon className="w-3 h-3" />
               Build QSM
             </div>
             <button onClick={() => setShowQSMPanel(false)} className="p-1 hover:bg-neutral-700 rounded">
@@ -10678,6 +10937,50 @@ export default function PointCloudViewer({
             shoots, and classify them by shoot rank (trunk = 0, scaffolds = 1, …).
             Best on dormant (leaf-off) scans.
           </div>
+
+          {/* Multi-scan mode: fuse multi-view scans of one tree, or one QSM
+              per scan. Only shown when >1 scan is selected. */}
+          {selectedIds.size > 1 && (
+            <div data-testid="qsm-multi-mode" className="mb-3">
+              <div className="text-[10px] text-neutral-400 mb-1">
+                {selectedIds.size} scans selected
+              </div>
+              <label className="flex items-start gap-2 mb-1.5 cursor-pointer">
+                <input
+                  data-testid="qsm-mode-aggregate"
+                  type="radio"
+                  name="qsm-multi-mode"
+                  checked={qsmMultiMode === 'aggregate'}
+                  onChange={() => setQSMMultiMode('aggregate')}
+                  disabled={qsmInProgress}
+                  className="mt-0.5 accent-amber-500"
+                />
+                <span className="text-[10px] text-neutral-300 leading-snug">
+                  One QSM from all scans
+                  <span className="block text-neutral-500">
+                    Fuse multiple views of a single tree (must be pre-aligned).
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  data-testid="qsm-mode-per-scan"
+                  type="radio"
+                  name="qsm-multi-mode"
+                  checked={qsmMultiMode === 'per-scan'}
+                  onChange={() => setQSMMultiMode('per-scan')}
+                  disabled={qsmInProgress}
+                  className="mt-0.5 accent-amber-500"
+                />
+                <span className="text-[10px] text-neutral-300 leading-snug">
+                  One QSM per scan
+                  <span className="block text-neutral-500">
+                    Build a separate QSM for each scan, in sequence.
+                  </span>
+                </span>
+              </label>
+            </div>
+          )}
 
           {/* Twig radius anchor */}
           <div className="mb-3">
@@ -10701,7 +11004,7 @@ export default function PointCloudViewer({
           </div>
 
           {qsmError && (
-            <div className="mb-3 p-2 bg-red-900/40 border border-red-700/50 rounded text-[10px] text-red-300">
+            <div data-testid="qsm-error" className="mb-3 p-2 bg-red-900/40 border border-red-700/50 rounded text-[10px] text-red-300">
               {qsmError}
             </div>
           )}
@@ -10723,8 +11026,12 @@ export default function PointCloudViewer({
               </>
             ) : (
               <>
-                <Dna className="w-3 h-3" />
-                Build QSM
+                <QsmIcon className="w-3 h-3" />
+                {selectedIds.size > 1
+                  ? (qsmMultiMode === 'aggregate'
+                      ? `Build 1 QSM from ${selectedIds.size} scans`
+                      : `Build QSM (${selectedIds.size} scans)`)
+                  : 'Build QSM'}
               </>
             )}
           </button>
@@ -11035,8 +11342,10 @@ export default function PointCloudViewer({
         </div>
       )}
 
-      {/* Display Settings Panel */}
-      <div className="absolute bottom-4 right-4 bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-48 overflow-hidden">
+      {/* Display Settings Panel — z-[55] keeps it (and its minimize header)
+          above the workflow side panels (scan/LAD/QSM, z-40/z-50), which can
+          extend far enough down the right edge to otherwise occlude it. */}
+      <div className="absolute bottom-4 right-4 z-[55] bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-48 overflow-hidden">
         {/* Collapsible Header */}
         <button
           onClick={() => setDisplayPanelCollapsed(!displayPanelCollapsed)}
@@ -11273,6 +11582,15 @@ export default function PointCloudViewer({
       </div>
 
       {/* Delete Confirmation Dialog */}
+      {showQSMExportPanel && (
+        <QSMExportPanel
+          qsms={qsms.map(q => ({ id: q.id, label: qsmDisplayLabel(q), cylinderCount: q.cylinders.length }))}
+          exporting={qsmExporting}
+          onClose={() => setShowQSMExportPanel(false)}
+          onExport={handleExportQSMs}
+        />
+      )}
+
       {deleteConfirm && (
         <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-neutral-800 rounded-lg p-4 shadow-xl max-w-sm mx-4">
@@ -11722,6 +12040,11 @@ export default function PointCloudViewer({
       />
 
       <BulkImportProgress progress={bulkImportProgress} />
+      <BulkImportProgress
+        progress={qsmBatchProgress}
+        title="Building QSMs…"
+        hint="Reconstructing cylinders — each scan can take a while"
+      />
 
       {/* Overwrite / duplicate / cancel prompt when a scan already has point data (#3) */}
       {scanOverwriteConfirm && (

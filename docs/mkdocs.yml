@@ -9,6 +9,9 @@ docs_dir: docs
 
 theme:
   name: material
+  # Custom theme dir — holds .icons/phytograph/*.svg so docs can use the same
+  # glyphs as the app (e.g. :phytograph-qsm: for the QSM branching-tree icon).
+  custom_dir: overrides
   logo: assets/logo.png
   favicon: assets/logo.png
   features:
@@ -78,6 +81,11 @@ markdown_extensions:
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
+      options:
+        # Register the custom icon dir so :phytograph-qsm: (overrides/.icons/
+        # phytograph/qsm.svg) resolves alongside the bundled Material icons.
+        custom_icons:
+          - overrides/.icons
 
 nav:
   - Home: index.md
@@ -92,6 +100,7 @@ nav:
       - Point clouds: concepts/point-clouds.md
       - Meshes: concepts/meshes.md
       - Skeletons: concepts/skeletons.md
+      - QSM (Quantitative Structure Model): concepts/qsm.md
       - Plant models: concepts/plant-models.md
       - Leaf area density: concepts/leaf-area-density.md
   - Workflows:
@@ -101,9 +110,11 @@ nav:
       - Clean a point cloud: workflows/clean-point-cloud.md
       - Segment ground points: workflows/segment-ground.md
       - Separate leaf and wood: workflows/segment-wood.md
+      - Segment individual trees: workflows/segment-trees.md
       - Triangulate a mesh: workflows/triangulate.md
       - Estimate leaf area density: workflows/estimate-leaf-area-density.md
       - Extract a skeleton: workflows/extract-skeleton.md
+      - Build a QSM: workflows/build-qsm.md
       - Generate a plant: workflows/generate-plant.md
       - Morph a plant: workflows/morph-plant.md
       - Register & compare: workflows/register-compare.md

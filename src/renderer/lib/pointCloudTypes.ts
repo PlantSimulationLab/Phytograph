@@ -296,7 +296,14 @@ export interface SkeletonEntry {
 // mirror the backend response types in utils/backendApi.ts.
 export interface QSMEntry {
   id: string;
+  // The scan this QSM is anchored to. For an aggregate QSM (fused from several
+  // multi-view scans of one tree) this is the FIRST contributing scan, and
+  // sourceLabel overrides the displayed name; visibility/lookup still resolve
+  // through this id.
   sourceCloudId: string;
+  // Display name override. Set for aggregate QSMs ("scanA + N more"); when
+  // absent the results panel falls back to the source scan's fileName.
+  sourceLabel?: string;
   // Raw backend response payload (cylinders, shoots, metrics, counts).
   cylinders: import('../utils/backendApi').QSMCylinder[];
   shoots: import('../utils/backendApi').QSMShoot[];
