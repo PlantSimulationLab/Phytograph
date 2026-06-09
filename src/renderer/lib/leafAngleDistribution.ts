@@ -219,3 +219,111 @@ export function fitDeWit(hist: Histogram): DeWitFit | null {
 export function deWitLabel(model: DeWitModel): string {
   return model.charAt(0).toUpperCase() + model.slice(1);
 }
+
+// ---------------------------------------------------------------------------
+// Beta-distribution fit (Goel & Strebel 1984)
+// ---------------------------------------------------------------------------
+
+// A two-parameter Beta distribution is the standard continuous model for a leaf
+// inclination distribution (Goel & Strebel 1984): inclination is normalized to
+// t = theta/90 in [0,1], and a Beta(alpha,beta) density on t describes the
+// canopy. The shape parameters are estimated by MOMENT MATCHING — the closed
+// form that maps the mean and variance of t to (alpha,beta), no optimizer:
+//   nu = tbar(1 - tbar)/var - 1,  alpha = tbar*nu,  beta = (1 - tbar)*nu
+// This is the Goel-Strebel estimator and the one the literature reports.
+//
+// SOLID-ANGLE CONVENTION (same as de Wit above): the empirical `density` is
+// g(theta) — leaf area per unit inclination angle, with the sin theta Jacobian
+// already baked in. We fit the Beta DIRECTLY to g(theta), exactly as the de Wit
+// archetypes are fit; we do NOT divide the histogram by sin theta. The mean and
+// variance below are therefore the moments of the area-weighted g(theta), which
+// is what we plot — so the fitted Beta overlays the empirical curve like-for-like.
+
+// Natural log of the Gamma function (Lanczos approximation, g=7, n=9). Accurate
+// to ~1e-15 for x > 0, which is all we need (alpha,beta are positive).
+function lgamma(x: number): number {
+  const G = 7;
+  const C = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+  ];
+  if (x < 0.5) {
+    // Reflection formula: Gamma(x)Gamma(1-x) = pi / sin(pi x).
+    return Math.log(Math.PI / Math.sin(Math.PI * x)) - lgamma(1 - x);
+  }
+  x -= 1;
+  let a = C[0];
+  const tmp = x + G + 0.5;
+  for (let i = 1; i < G + 2; i++) a += C[i] / (x + i);
+  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(tmp) - tmp + Math.log(a);
+}
+
+// Beta(alpha,beta) probability density at t in [0,1]. Uses lgamma for the
+// normalizing 1/B(alpha,beta); t is clamped off the exact endpoints so a shape
+// parameter < 1 (a density that diverges at an edge) yields a large-but-finite
+// value rather than 0^(negative) = Infinity/NaN.
+function betaPdfUnit(t: number, alpha: number, beta: number): number {
+  const eps = 1e-9;
+  const tc = Math.min(1 - eps, Math.max(eps, t));
+  const logB = lgamma(alpha) + lgamma(beta) - lgamma(alpha + beta);
+  const logPdf = (alpha - 1) * Math.log(tc) + (beta - 1) * Math.log(1 - tc) - logB;
+  return Math.exp(logPdf);
+}
+
+// Sample a fitted Beta on the same bin centers as an empirical inclination
+// histogram, returning a per-DEGREE density so it overlays the empirical density
+// curve. The Beta is defined on t = deg/90, so the change of variable adds the
+// Jacobian dt/dtheta = 1/90.
+export function betaCurve(alpha: number, beta: number, binCenters: number[]): number[] {
+  return binCenters.map(deg => betaPdfUnit(deg / 90, alpha, beta) / 90);
+}
+
+export interface BetaFit {
+  alpha: number;
+  beta: number;
+  // Area-weighted mean inclination in DEGREES (= tbar * 90), for display.
+  meanIncl: number;
+  // Goodness vs the empirical per-degree density, computed like fitDeWit's:
+  // `sse` is the sum of squared residuals, `r2` the coefficient of determination.
+  sse: number;
+  r2: number;
+}
+
+// Estimate Beta(alpha,beta) from an empirical inclination histogram by
+// Goel-Strebel moment matching. Returns null when the fit is undefined:
+//   - empty histogram (no area),
+//   - zero variance (all mass in one bin — a Beta needs spread), or
+//   - over-dispersed: var >= tbar(1 - tbar), where the moment estimator gives a
+//     non-positive nu (no valid unimodal Beta matches those moments).
+export function fitBeta(hist: Histogram): BetaFit | null {
+  if (hist.totalArea <= 0) return null;
+  const { binCenters, binWidth, density } = hist;
+
+  // Moments of t = theta/90, weighted by the (already-normalized) density.
+  let tbar = 0;
+  for (let b = 0; b < density.length; b++) {
+    const t = binCenters[b] / 90;
+    tbar += density[b] * binWidth * t;
+  }
+  let variance = 0;
+  for (let b = 0; b < density.length; b++) {
+    const t = binCenters[b] / 90;
+    variance += density[b] * binWidth * (t - tbar) ** 2;
+  }
+  if (variance <= 0) return null;
+
+  const nu = (tbar * (1 - tbar)) / variance - 1;
+  if (nu <= 0) return null;
+  const alpha = tbar * nu;
+  const beta = (1 - tbar) * nu;
+
+  // Goodness of fit on the per-degree density, identical convention to fitDeWit.
+  const mean = density.reduce((s, d) => s + d, 0) / density.length;
+  const ssTot = density.reduce((s, d) => s + (d - mean) ** 2, 0) || 1e-30;
+  const curve = betaCurve(alpha, beta, binCenters);
+  let sse = 0;
+  for (let b = 0; b < density.length; b++) sse += (density[b] - curve[b]) ** 2;
+
+  return { alpha, beta, meanIncl: tbar * 90, sse, r2: 1 - sse / ssTot };
+}

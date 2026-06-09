@@ -7,6 +7,8 @@ import {
   fitDeWit,
   deWitDensityRad,
   deWitCurve,
+  fitBeta,
+  betaCurve,
   meshCellIds,
   triangleCountByCell,
   DE_WIT_MODELS,
@@ -290,5 +292,119 @@ describe('deWitCurve overlays on the empirical density scale', () => {
     const curve = deWitCurve('uniform', [45]);
     // Uniform per-radian density is 2/π; per-degree is (2/π)·(π/180) = 1/90.
     expect(curve[0]).toBeCloseTo(1 / 90, 8);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Beta-distribution fit (Goel & Strebel moment matching)
+// ---------------------------------------------------------------------------
+
+describe('fitBeta (Goel-Strebel moment matching)', () => {
+  it('recovers the shape parameters of a mesh sampled from a known Beta', () => {
+    // Build a mesh whose inclination density follows Beta(2, 4) on t=θ/90, using
+    // the same per-degree density the fit will compare against (betaCurve).
+    const data = meshSampledFromDensity(deg => betaCurve(2, 4, [deg])[0]);
+    const pdf = computeInclinationPdf(data, { binCount: 18 });
+    const fit = fitBeta(pdf)!;
+    expect(fit).not.toBeNull();
+    // 5° bins + integer-count sampling blur the moments a little; ±0.3 is ample.
+    expect(Math.abs(fit.alpha - 2)).toBeLessThan(0.3);
+    expect(Math.abs(fit.beta - 4)).toBeLessThan(0.3);
+    expect(fit.r2).toBeGreaterThan(0.9);
+  });
+
+  it('planophile (mostly-horizontal) mesh → small mean, α<β (mass near 0)', () => {
+    // A planophile g(θ) — most leaf area at low inclination — gives a left-
+    // skewed Beta. (A single-inclination mesh has zero variance and no Beta;
+    // a realistic distribution does.)
+    const k = Math.PI / 180;
+    const data = meshSampledFromDensity(deg => deWitDensityRad('planophile', deg) * k);
+    const fit = fitBeta(computeInclinationPdf(data))!;
+    expect(fit.meanIncl).toBeLessThan(35);
+    expect(fit.alpha).toBeLessThan(fit.beta);
+  });
+
+  it('erectophile (mostly-vertical) mesh → large mean, α>β (mass near 1)', () => {
+    const k = Math.PI / 180;
+    const data = meshSampledFromDensity(deg => deWitDensityRad('erectophile', deg) * k);
+    const fit = fitBeta(computeInclinationPdf(data))!;
+    expect(fit.meanIncl).toBeGreaterThan(55);
+    expect(fit.alpha).toBeGreaterThan(fit.beta);
+  });
+
+  it('meanIncl is the area-weighted mean inclination in degrees', () => {
+    // Two triangles: incl 20° area 3, incl 60° area 1. Area-weighted mean =
+    // (20·3 + 60·1)/4 = 30°. (Binned at 18 bins → 5° wide; 20° and 60° fall at
+    // bin centers 22.5° and 62.5°, weighted-mean 32.5° — assert against the
+    // binned value the histogram actually carries.)
+    const data = meshFromTris([triFromNormal(20, 0, 3), triFromNormal(60, 90, 1)]);
+    const pdf = computeInclinationPdf(data, { binCount: 18 });
+    const fit = fitBeta(pdf)!;
+    // Recompute the expected binned mean directly from the histogram density.
+    const expected = pdf.binCenters.reduce(
+      (s, c, b) => s + pdf.density[b] * pdf.binWidth * c, 0);
+    expect(fit.meanIncl).toBeCloseTo(expected, 6);
+  });
+
+  it('returns null for an empty histogram', () => {
+    expect(fitBeta(computeInclinationPdf(meshFromTris([])))).toBeNull();
+  });
+
+  // For the variance-degeneracy guards we build the Histogram directly: binning a
+  // mesh always smears a little mass across adjacent bins (45° straddles a bin
+  // edge), so a hand-built single-mass / extreme-bimodal histogram is the
+  // unambiguous way to hit var=0 and var≥tbar(1-tbar).
+  function histFrom(binCount: number, mass: number[]): {
+    binCenters: number[]; binWidth: number; density: number[]; totalArea: number;
+  } {
+    const binWidth = 90 / binCount;
+    const binCenters = Array.from({ length: binCount }, (_, b) => (b + 0.5) * binWidth);
+    const total = mass.reduce((s, m) => s + m, 0);
+    const density = mass.map(m => m / (total * binWidth));
+    return { binCenters, binWidth, density, totalArea: total };
+  }
+
+  it('returns null when all mass is in one bin (zero variance)', () => {
+    const hist = histFrom(18, Array.from({ length: 18 }, (_, b) => (b === 4 ? 1 : 0)));
+    expect(fitBeta(hist)).toBeNull();
+  });
+
+  it('returns null at the variance bound (var = tbar(1−tbar) → nu ≤ 0)', () => {
+    // The moment estimator is only valid for var < tbar(1−tbar). Equality is the
+    // Bernoulli extreme — all mass at t=0 and t=1 (θ=0° and 90°). A real binned
+    // histogram never quite reaches it (interior bin centers), but the guard must
+    // hold at the boundary, so we build that degenerate histogram explicitly.
+    const hist = {
+      binCenters: [0, 90], binWidth: 90,
+      // density on [0,90]: equal mass at the two endpoints, ∫density·binWidth=1.
+      density: [1 / 180, 1 / 180], totalArea: 2,
+    };
+    expect(fitBeta(hist)).toBeNull();
+  });
+
+  it('produces no NaNs for a valid fit', () => {
+    const data = meshSampledFromDensity(deg => betaCurve(3, 2, [deg])[0]);
+    const fit = fitBeta(computeInclinationPdf(data))!;
+    for (const v of [fit.alpha, fit.beta, fit.meanIncl, fit.sse, fit.r2]) {
+      expect(Number.isFinite(v)).toBe(true);
+    }
+  });
+});
+
+describe('betaCurve overlays on the empirical density scale', () => {
+  it('integrates to ~1 over [0,90] for valid shape parameters', () => {
+    const binCount = 90;
+    const binWidth = 90 / binCount;
+    const centers = Array.from({ length: binCount }, (_, b) => (b + 0.5) * binWidth);
+    const curve = betaCurve(2.5, 3.5, centers);
+    const integral = curve.reduce((s, d) => s + d * binWidth, 0);
+    expect(integral).toBeCloseTo(1, 2);
+  });
+
+  it('is symmetric for α=β (peak at 45°)', () => {
+    const curve = betaCurve(3, 3, [10, 45, 80]);
+    expect(curve[1]).toBeGreaterThan(curve[0]);
+    expect(curve[1]).toBeGreaterThan(curve[2]);
+    expect(curve[0]).toBeCloseTo(curve[2], 6);
   });
 });

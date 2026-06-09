@@ -209,6 +209,21 @@ fit: spherical (R²=0.94)"*). The chosen curve is overlaid as a dashed line so
 you can see how well the canopy matches the archetype. Hiding cells re-fits to
 just the visible ones.
 
+### Beta-distribution fit (Goel–Strebel)
+
+Below the inclination chart a **fitted distribution parameters** table reports,
+**per cell**, a continuous two-parameter **Beta** distribution fit to that cell's
+leaf inclination — the standard Goel & Strebel (1984) model. The shape
+parameters **α** and **β** are estimated by moment matching (the mean and
+variance of the normalized inclination *t = θ/90*), alongside the mean
+inclination **mean θ** in degrees, the fit **R²**, and that cell's best de Wit
+archetype, so you can read every visible curve's parameters at a glance. A cell
+with no usable spread (all triangles coplanar) shows **—**.
+
+Tick **Show Beta fit** above the chart to overlay each cell's fitted Beta curve
+as a dashed line in the cell's color. It's off by default to keep the plot
+readable when many cells are visible.
+
 ## Produce a point cloud from a mesh
 
 The inverse operation — turning a mesh or plant model back into a point

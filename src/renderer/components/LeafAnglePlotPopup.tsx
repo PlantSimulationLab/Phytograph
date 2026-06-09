@@ -6,7 +6,7 @@ import {
 import type { MeshEntry } from '../lib/pointCloudTypes';
 import {
   computeInclinationPdf, computeAzimuthHistogram, fitDeWit, deWitCurve, deWitLabel,
-  meshCellIds, triangleCountByCell,
+  fitBeta, betaCurve, meshCellIds, triangleCountByCell,
 } from '../lib/leafAngleDistribution';
 import { buildRoseGeometry, polarToXY } from '../lib/azimuthRose';
 
@@ -76,6 +76,10 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
   // Number of inclination PDF bins (user-configurable in the window).
   const [inclBins, setInclBins] = useState(DEFAULT_INCL_BINS);
 
+  // Overlay the fitted Beta curves on the inclination chart (off by default to
+  // keep the plot readable when many cells are visible).
+  const [showBeta, setShowBeta] = useState(false);
+
   const visibleCells = useMemo(() => cells.filter(c => !hidden.has(c.id)), [cells, hidden]);
 
   // Per-cell inclination PDFs (only the visible ones) for the overlaid lines.
@@ -108,19 +112,35 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
 
   const deWit = useMemo(() => (combinedPdf ? fitDeWit(combinedPdf) : null), [combinedPdf]);
 
-  // Recharts data: one row per inclination bin, a key per visible cell + the
-  // best-fit de Wit curve.
+  // Per-cell fits for the parameters table: each visible cell's own de Wit
+  // archetype and Beta(alpha,beta). Both can be null for a degenerate cell
+  // (e.g. all triangles coplanar) — the table shows "—" then.
+  const cellFits = useMemo(
+    () => inclPdfs.map(({ cell, pdf }) => ({
+      cell,
+      deWit: fitDeWit(pdf),
+      beta: fitBeta(pdf),
+    })),
+    [inclPdfs],
+  );
+
+  // Recharts data: one row per inclination bin, a key per visible cell, the
+  // combined best-fit de Wit curve, and (when toggled on) a per-cell Beta curve.
   const chartData = useMemo(() => {
     if (inclPdfs.length === 0) return [];
     const centers = inclPdfs[0].pdf.binCenters;
     const fitCurve = deWit && combinedPdf ? deWitCurve(deWit.best, centers) : null;
+    const betaCurves = showBeta
+      ? cellFits.map(f => ({ id: f.cell.id, curve: f.beta ? betaCurve(f.beta.alpha, f.beta.beta, centers) : null }))
+      : [];
     return centers.map((angle, b) => {
       const row: Record<string, number> = { angle: Math.round(angle) };
       for (const { cell, pdf } of inclPdfs) row[`c${cell.id}`] = pdf.density[b];
       if (fitCurve) row.fit = fitCurve[b];
+      for (const bc of betaCurves) if (bc.curve) row[`bf${bc.id}`] = bc.curve[b];
       return row;
     });
-  }, [inclPdfs, deWit, combinedPdf]);
+  }, [inclPdfs, deWit, combinedPdf, showBeta, cellFits]);
 
   // Azimuth rose: per-cell petals sharing one radial scale so cells compare.
   const azHists = useMemo(() => {
@@ -190,18 +210,32 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-2 mb-1">
-                  <label className="text-[10px] text-neutral-400">Bins</label>
-                  <select
-                    data-testid="incl-bins"
-                    value={inclBins}
-                    onChange={(e) => setInclBins(parseInt(e.target.value, 10))}
-                    className="bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                <div className="flex items-center gap-3 mb-1">
+                  <div className="flex items-center gap-2">
+                    <label className="text-[10px] text-neutral-400">Bins</label>
+                    <select
+                      data-testid="incl-bins"
+                      value={inclBins}
+                      onChange={(e) => setInclBins(parseInt(e.target.value, 10))}
+                      className="bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-0.5 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                    >
+                      {INCL_BIN_OPTIONS.map(n => (
+                        <option key={n} value={n}>{n} ({(90 / n).toFixed(n >= 90 ? 0 : 1)}° wide)</option>
+                      ))}
+                    </select>
+                  </div>
+                  <label
+                    className="flex items-center gap-1.5 text-[10px] text-neutral-400 cursor-pointer select-none"
+                    title="Overlay each visible cell's fitted Beta curve (dashed)"
                   >
-                    {INCL_BIN_OPTIONS.map(n => (
-                      <option key={n} value={n}>{n} ({(90 / n).toFixed(n >= 90 ? 0 : 1)}° wide)</option>
-                    ))}
-                  </select>
+                    <input
+                      type="checkbox"
+                      data-testid="show-beta-fit"
+                      checked={showBeta}
+                      onChange={(e) => setShowBeta(e.target.checked)}
+                    />
+                    Show Beta fit
+                  </label>
                 </div>
                 <div style={{ width: '100%', height: 260 }} data-testid="incl-chart">
                   <ResponsiveContainer>
@@ -238,11 +272,70 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                           isAnimationActive={false}
                         />
                       )}
+                      {showBeta && cellFits.map(({ cell, beta }) => (
+                        beta && (
+                          <Line
+                            key={`bf${cell.id}`} type="linear" dataKey={`bf${cell.id}`}
+                            name={`Beta: ${cell.label}`}
+                            stroke={cell.color} strokeWidth={1.5} strokeDasharray="4 3" dot={false}
+                            isAnimationActive={false}
+                          />
+                        )
+                      ))}
                       {/* Anchor so an empty chart still renders axes. */}
                       <ReferenceLine x={0} stroke="transparent" />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
+
+                {/* Per-cell fitted-distribution parameters */}
+                {cellFits.length > 0 && (
+                  <div className="mt-2">
+                    <h4 className="text-[11px] font-medium text-neutral-300 mb-1">
+                      Fitted distribution parameters
+                    </h4>
+                    <table
+                      data-testid="beta-fit-table"
+                      className="w-full text-[11px] text-neutral-300 border-collapse"
+                    >
+                      <thead>
+                        <tr className="text-neutral-500 text-left">
+                          <th className="font-medium py-0.5 pr-2">Cell</th>
+                          <th className="font-medium py-0.5 px-2 text-right" title="Beta shape parameter α">α</th>
+                          <th className="font-medium py-0.5 px-2 text-right" title="Beta shape parameter β">β</th>
+                          <th className="font-medium py-0.5 px-2 text-right" title="Mean inclination">mean θ (°)</th>
+                          <th className="font-medium py-0.5 px-2 text-right" title="Beta fit R²">R²</th>
+                          <th className="font-medium py-0.5 pl-2">de Wit</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cellFits.map(({ cell, deWit: cd, beta }) => (
+                          <tr
+                            key={cell.id}
+                            data-testid="beta-fit-row"
+                            data-cell-id={cell.id}
+                            className="border-t border-neutral-700/60"
+                          >
+                            <td className="py-0.5 pr-2">
+                              <span className="inline-flex items-center gap-1.5 min-w-0">
+                                <span
+                                  className="inline-block w-2.5 h-2.5 rounded-sm border border-neutral-600 shrink-0"
+                                  style={{ backgroundColor: cell.color }}
+                                />
+                                <span className="truncate">{cell.label}</span>
+                              </span>
+                            </td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.alpha.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.beta.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.meanIncl.toFixed(1) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.r2.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 pl-2">{cd ? deWitLabel(cd.best) : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
               {/* Azimuth rose */}
