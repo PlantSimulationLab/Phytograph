@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.9.1"
+BACKEND_VERSION = "0.9.2"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -11849,6 +11849,29 @@ async def session_extract(session_id: str, request: SessionExtractRequest):
     return {
         "session_id": session_id,
         "extracted": {"session_id": child.session_id, "point_count": int(len(child.positions)),
+                      "cache_id": ck, "cache_dir": str(ccd), **cmeta},
+    }
+
+
+@app.post("/api/cloud/session/{session_id}/duplicate")
+async def session_duplicate(session_id: str):
+    """Copy a session's SURVIVING points into a NEW independent session (parent
+    untouched) and build its octree. This is the keep-everything degenerate case
+    of `extract`: a pure array copy via `_session_subset` — NO source file read,
+    so every wizard customization (column plan, custom labels, categorical
+    slugs, dropped/renamed extras) is preserved on the copy. The new session is
+    fully independent: later edits to either side don't affect the other.
+    Returns {session_id, duplicate: {session_id, point_count, ...octree}}."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        # `_session_subset_locked` keeps `surv[keep]`; an all-true keep over the
+        # survivors copies the whole surviving cloud.
+        keep = np.ones(int((~sess.deleted).sum()), dtype=bool)
+        child = _session_subset_locked(sess, keep)
+    ck, ccd, cmeta = _session_rebuild(child)
+    return {
+        "session_id": session_id,
+        "duplicate": {"session_id": child.session_id, "point_count": int(len(child.positions)),
                       "cache_id": ck, "cache_dir": str(ccd), **cmeta},
     }
 

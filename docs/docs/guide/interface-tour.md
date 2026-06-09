@@ -58,10 +58,17 @@ Each scan entry shows:
 - a color dot (also acts as a selection indicator); click it to pick a
   custom per-scan color, which drives the **Per-scan color** mode
 - the scan label and a subtitle (point count, scanner origin, or both)
-- visibility and remove controls
+- visibility, duplicate, and remove controls
 - a paperclip to attach point data (if the scan only has parameters)
 - a radio icon to add scan parameters (if the scan only has data)
 - an expand chevron that reveals the full parameter readout
+
+The **duplicate** button (a copy icon) makes an independent copy of the
+scan — its point data *and* any scan-parameter metadata — named
+`… (copy)` (then `… (copy 2)`, and so on). The copy is fully separate:
+editing, cropping, or deleting one never affects the other. It's handy
+for branching experiments — run two different crops or segmentations off
+the same import, or place a second scanner with the same sweep settings.
 
 A scan can hold point data, scan parameters (origin, sweep, return type),
 or both — see [Scans](../concepts/scans.md) for details.

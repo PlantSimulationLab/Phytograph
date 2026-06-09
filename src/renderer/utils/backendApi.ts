@@ -2309,6 +2309,35 @@ export async function sessionExtract(
   }
 }
 
+/** Copy a session's surviving points into a NEW independent session (parent
+ * untouched) and build its octree. The keep-everything case of extract — a pure
+ * array copy, no source file read, so wizard customizations are preserved.
+ * Returns the copy's octree metadata. */
+export async function duplicateCloudSession(
+  sessionId: string,
+): Promise<{ session_id: string; duplicate: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/duplicate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('duplicate_cloud_session failed:', error);
+    throw error;
+  }
+}
+
 /** Run CSF ground segmentation on the session's in-RAM points, append a
  * `ground_class` column, and rebuild the octree from the arrays (no file read). */
 export async function sessionSegmentGround(

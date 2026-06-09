@@ -3,9 +3,9 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Copy} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -25,7 +25,7 @@ import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import { type ScanParameters } from '../lib/scanParameters';
 import { prettifyQSMError } from '../lib/qsmErrors';
-import { type Scan, hasData, hasParams, scanDisplayName } from '../lib/scan';
+import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -51,6 +51,7 @@ import {
   ladRange,
   roundCoord3,
   resampleCloud,
+  cloneFlatPointCloudData,
 } from '../lib/pointCloudHelpers';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
@@ -544,10 +545,8 @@ export default function PointCloudViewer({
   const [qsmMultiMode, setQSMMultiMode] = useState<'aggregate' | 'per-scan'>('per-scan');
   const [qsms, setQSMs] = useState<QSMEntry[]>([]);
   const [qsmColorMode, setQSMColorMode] = useState<QSMColorMode>('rank');
-  // QSM-entry multi-selection (for the panel header bulk actions). Orthogonal to
-  // selectedQSMShootId below, which highlights a single shoot/axis WITHIN a QSM.
+  // QSM-entry multi-selection (for the panel header bulk actions).
   const [selectedQSMIds, setSelectedQSMIds] = useState<Set<string>>(new Set());
-  const [selectedQSMShootId, setSelectedQSMShootId] = useState<number | null>(null);
   // QSM export dialog: format + per-QSM selection, then one file per QSM into a
   // user-picked folder. See handleExportQSMs below.
   const [showQSMExportPanel, setShowQSMExportPanel] = useState(false);
@@ -727,6 +726,7 @@ export default function PointCloudViewer({
   const [bulkImportProgress, setBulkImportProgress] = useState<BulkImportProgressState | null>(null);
   // Progress for a batch QSM build (one QSM per selected scan, in sequence).
   const [qsmBatchProgress, setQSMBatchProgress] = useState<BulkImportProgressState | null>(null);
+  const [duplicateProgress, setDuplicateProgress] = useState<BulkImportProgressState | null>(null);
   // Per-row expansion state for the scans panel. Held in-memory only; resets
   // on app reload.
   const [expandedScanIds, setExpandedScanIds] = useState<Set<string>>(new Set());
@@ -1343,6 +1343,53 @@ export default function PointCloudViewer({
     octreeInfo.categoricalAttributes,
     sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
   ), []);
+
+  // Duplicate a scan — its point data AND any scan-parameter metadata — into a
+  // fully independent copy. Three flavors:
+  //   • params-only scanner → structural clone of the params (no data).
+  //   • flat (in-RAM) data → deep-copy every typed array (cloneFlatPointCloudData)
+  //     so the copy shares no buffers with the source.
+  //   • octree-backed data → the points live in a backend session; copy them
+  //     server-side (duplicateCloudSession: a pure array copy, no file re-read)
+  //     so wizard customizations survive and edits to one copy never touch the
+  //     other.
+  // The new label enumerates "(copy)" / "(copy N)". A fresh id gives the copy
+  // independent edit state (editStates is keyed by id), so nothing else to do.
+  const handleDuplicateScan = useCallback(async (id: string) => {
+    if (!onAddScan) return;
+    const src = scans.find(s => s.id === id);
+    if (!src) return;
+
+    const newId = crypto.randomUUID();
+    const label = duplicateScanName(scanDisplayName(src), scans.map(scanDisplayName));
+    const params = src.params
+      ? { ...src.params, origin: { ...src.params.origin } }
+      : undefined;
+
+    // Octree-backed cloud: copy the backend session, build the copy from arrays.
+    if (hasData(src) && src.data.octree?.sessionId) {
+      const octreeInfo = src.data.octree;
+      const baseName = src.data.fileName ?? label;
+      setDuplicateProgress({ current: 1, total: 1, label: scanDisplayName(src) });
+      try {
+        const res = await duplicateCloudSession(octreeInfo.sessionId!);
+        if (!res.duplicate) throw new Error('Duplicate returned no points.');
+        const data = buildSessionOctreeData(res.duplicate, octreeInfo, baseName, res.duplicate.session_id);
+        onAddScan({ id: newId, label, visible: true, color: src.color, data, params });
+        showToast({ title: `Duplicated ${data.pointCount.toLocaleString()} points to ${label}`, type: 'success' });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to duplicate scan';
+        showToast({ title: `Could not duplicate scan: ${msg}`, type: 'error' });
+      } finally {
+        setDuplicateProgress(null);
+      }
+      return;
+    }
+
+    // Flat data and/or params-only: clone in RAM (no backend round-trip).
+    const data = hasData(src) ? cloneFlatPointCloudData(src.data) : undefined;
+    onAddScan({ id: newId, label, visible: true, color: src.color, data, params });
+  }, [onAddScan, scans, buildSessionOctreeData]);
 
   const handleApplyCrop = useCallback(() => {
     if (editMode !== 'crop' || selectedIds.size === 0) return;
@@ -5704,7 +5751,6 @@ export default function PointCloudViewer({
         // Hide every contributing scan so the new QSM isn't obscured by the
         // dense point cloud it was fused from.
         for (const t of targets) onHideScan(t.id);
-        setSelectedQSMShootId(null);
         setShowQSMPanel(false);
 
         const m = response.metrics;
@@ -5749,8 +5795,6 @@ export default function PointCloudViewer({
           failures.push(`${cloudName}: ${prettifyQSMError(msg)}`);
         }
       }
-
-      setSelectedQSMShootId(null);
 
       if (succeeded === 0) {
         // All failed — keep the panel open and surface the error inline.
@@ -8471,7 +8515,6 @@ export default function PointCloudViewer({
                 cylinders={qsm.cylinders}
                 shoots={qsm.shoots}
                 colorMode={qsmColorMode}
-                selectedShootId={selectedQSMShootId}
               />
             </group>
           );
@@ -9581,6 +9624,16 @@ export default function PointCloudViewer({
                         title="Edit scan parameters"
                       >
                         <Pencil className="w-3 h-3 text-neutral-400" />
+                      </button>
+                    )}
+                    {onAddScan && (
+                      <button
+                        data-testid={`scan-duplicate-${scan.id}`}
+                        onClick={(e) => { e.stopPropagation(); handleDuplicateScan(scan.id); }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title="Duplicate scan"
+                      >
+                        <Copy className="w-3 h-3 text-neutral-400" />
                       </button>
                     )}
                     <button
@@ -12289,6 +12342,11 @@ export default function PointCloudViewer({
         progress={qsmBatchProgress}
         title="Building QSMs…"
         hint="Reconstructing cylinders — each scan can take a while"
+      />
+      <BulkImportProgress
+        progress={duplicateProgress}
+        title="Duplicating scan…"
+        hint="Copying points in memory — no file is re-read"
       />
 
       {/* Overwrite / duplicate / cancel prompt when a scan already has point data (#3) */}

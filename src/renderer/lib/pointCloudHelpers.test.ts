@@ -15,6 +15,7 @@ import {
   roundCoord,
   roundCoord3,
   resampleCloud,
+  cloneFlatPointCloudData,
 } from './pointCloudHelpers';
 import type { MeshData, PointCloudData } from './pointCloudTypes';
 import * as THREE from 'three';
@@ -621,5 +622,59 @@ describe('resampleCloud', () => {
     resampleCloud(src, 0.3, 10);
     expect(src.pointCount).toBe(10);
     expect(Array.from(src.positions)).toEqual(Array.from(before));
+  });
+});
+
+describe('cloneFlatPointCloudData', () => {
+  function makeFlat(): PointCloudData {
+    return {
+      positions: new Float32Array([0, 0, 0, 1, 1, 1]),
+      colors: new Float32Array([1, 0, 0, 0, 1, 0]),
+      intensities: new Float32Array([0.2, 0.8]),
+      scalarFields: { refl: { values: new Float32Array([3, 4]), min: 3, max: 4 } },
+      pointCount: 2,
+      bounds: {
+        min: new THREE.Vector3(0, 0, 0),
+        max: new THREE.Vector3(1, 1, 1),
+        center: new THREE.Vector3(0.5, 0.5, 0.5),
+        size: new THREE.Vector3(1, 1, 1),
+      },
+      fileName: 'cloud.xyz',
+    };
+  }
+
+  it('copies values faithfully', () => {
+    const src = makeFlat();
+    const copy = cloneFlatPointCloudData(src);
+    expect(Array.from(copy.positions)).toEqual(Array.from(src.positions));
+    expect(Array.from(copy.colors!)).toEqual(Array.from(src.colors!));
+    expect(Array.from(copy.intensities!)).toEqual(Array.from(src.intensities!));
+    expect(Array.from(copy.scalarFields!.refl.values)).toEqual([3, 4]);
+    expect(copy.pointCount).toBe(2);
+    expect(copy.fileName).toBe('cloud.xyz');
+  });
+
+  it('uses distinct buffers so mutating the copy never touches the source', () => {
+    const src = makeFlat();
+    const copy = cloneFlatPointCloudData(src);
+    expect(copy.positions).not.toBe(src.positions);
+    expect(copy.scalarFields!.refl.values).not.toBe(src.scalarFields!.refl.values);
+    copy.positions[0] = 99;
+    copy.scalarFields!.refl.values[0] = 99;
+    copy.bounds.min.x = 99;
+    expect(src.positions[0]).toBe(0);
+    expect(src.scalarFields!.refl.values[0]).toBe(3);
+    expect(src.bounds.min.x).toBe(0);
+  });
+
+  it('omits optional arrays that are absent on the source', () => {
+    const src = makeFlat();
+    delete src.colors;
+    delete src.intensities;
+    delete src.scalarFields;
+    const copy = cloneFlatPointCloudData(src);
+    expect(copy.colors).toBeUndefined();
+    expect(copy.intensities).toBeUndefined();
+    expect(copy.scalarFields).toBeUndefined();
   });
 });

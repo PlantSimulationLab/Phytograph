@@ -58,6 +58,38 @@ export function computeBoundsFromPositions(positions: Float32Array, count: numbe
   return { center, size };
 }
 
+// Deep-copy a FLAT (in-RAM) point cloud so the copy shares no typed-array
+// buffers with the source — mutating one must never corrupt the other. Every
+// position/color/intensity array and each scalar field gets a fresh
+// Float32Array; the bounds Vector3s are cloned. Callers pass only flat clouds:
+// octree-backed clouds carry no points here (they live in a backend session and
+// are duplicated server-side), so any `octree` ref is intentionally NOT carried
+// over — duplicating that path goes through the backend, not this helper.
+export function cloneFlatPointCloudData(data: PointCloudData): PointCloudData {
+  const scalarFields = data.scalarFields
+    ? Object.fromEntries(
+        Object.entries(data.scalarFields).map(([name, f]) => [
+          name,
+          { ...f, values: new Float32Array(f.values) },
+        ]),
+      )
+    : undefined;
+  return {
+    positions: new Float32Array(data.positions),
+    colors: data.colors ? new Float32Array(data.colors) : undefined,
+    intensities: data.intensities ? new Float32Array(data.intensities) : undefined,
+    scalarFields,
+    pointCount: data.pointCount,
+    bounds: {
+      min: data.bounds.min.clone(),
+      max: data.bounds.max.clone(),
+      center: data.bounds.center.clone(),
+      size: data.bounds.size.clone(),
+    },
+    fileName: data.fileName,
+  };
+}
+
 // Fit a voxel box to a set of world-space axis-aligned bounding boxes (one per
 // selected scan, already translation-baked). Returns the center/size a voxel
 // mesh needs — a voxel's base geometry is a unit cube (±0.5), so mesh position

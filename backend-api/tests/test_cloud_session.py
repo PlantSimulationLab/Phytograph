@@ -236,6 +236,52 @@ def test_session_extract_creates_child_leaves_parent_untouched(client, cache_roo
     assert called["loaded"] is False
 
 
+def test_session_duplicate_copies_all_points_independent_of_parent(
+    client, cache_root, grid_xyz, monkeypatch
+):
+    """duplicate spins off a full copy of the parent's SURVIVING points into a
+    new independent session — from the arrays (no source file read). After a
+    prior deletion the copy carries exactly the survivors, gets a fresh session
+    id, and a later deletion on the parent leaves the copy untouched."""
+    sid = client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).json()["session_id"]
+
+    # Delete a region first so "surviving" is a strict subset of the original.
+    deleted = client.post(
+        f"/api/cloud/session/{sid}/delete_region", json={"region": BOX}
+    ).json()["deleted_count"]
+    surviving = 1000 - deleted
+    assert deleted > 0 and surviving > 0
+
+    # Trip a guard if any source-file loader runs during the duplicate.
+    called = {"loaded": False}
+    orig = main._load_pointcloud_arrays
+    monkeypatch.setattr(
+        main, "_load_pointcloud_arrays",
+        lambda *a, **k: (called.__setitem__("loaded", True), orig(*a, **k))[1],
+    )
+
+    res = client.post(f"/api/cloud/session/{sid}/duplicate")
+    assert res.status_code == 200, res.text
+    dup = res.json()["duplicate"]
+    assert dup is not None
+    assert dup["point_count"] == surviving
+    assert called["loaded"] is False
+
+    child_sid = dup["session_id"]
+    assert child_sid in main._cloud_sessions and child_sid != sid
+    assert len(main._cloud_sessions[child_sid].positions) == surviving
+
+    # Independence: deleting from the parent must not touch the copy.
+    box2 = {"kind": "box", "min": [0.7, 0.0, 0.0], "max": [0.9, 0.9, 0.9], "invert": False}
+    client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": box2})
+    child = main._cloud_sessions[child_sid]
+    assert int(child.deleted.sum()) == 0
+    assert len(child.positions) == surviving
+
+
 def test_session_segment_trees_appends_instance_column(client, cache_root, tmp_path):
     """TreeIso on the in-RAM points appends a tree_instance column and rebuilds
     from the arrays. Smoke test on a tiny two-cluster cloud."""

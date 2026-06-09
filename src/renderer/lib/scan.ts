@@ -45,4 +45,17 @@ export function scanDisplayName(scan: Scan): string {
   return 'Untitled scan';
 }
 
+// Generate a unique label for a duplicated scan. A trailing "(copy)" / "(copy N)"
+// on the source is stripped first so duplicating a copy reads "… (copy 2)" rather
+// than "… (copy) (copy)". The result is the first of "{base} (copy)",
+// "{base} (copy 2)", "{base} (copy 3)", … not already present in `existing`.
+export function duplicateScanName(sourceLabel: string, existing: Iterable<string>): string {
+  const taken = new Set(existing);
+  const base = sourceLabel.replace(/\s*\(copy(?: \d+)?\)\s*$/, '').trim() || sourceLabel.trim();
+  for (let i = 1; ; i++) {
+    const candidate = i === 1 ? `${base} (copy)` : `${base} (copy ${i})`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 export type { ScanParameters } from './scanParameters';
