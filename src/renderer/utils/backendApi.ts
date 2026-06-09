@@ -181,6 +181,71 @@ export async function segmentGround(
   }
 }
 
+// ==================== WOOD/LEAF SEGMENTATION API ====================
+
+/**
+ * Classify a point cloud into wood (1, trunk/branches) and leaf (2) points from
+ * XYZ geometry alone (verticality + low-sphericity; non-ML). Send inline
+ * `points` for flat clouds or a `source` descriptor for octree-backed clouds
+ * (the backend re-reads the file at full resolution; labels align 1:1 with the
+ * resolved point order). `wood_bias` is the wood-vs-leaf sensitivity (lower →
+ * more wood); `reg_iters` the smoothing strength; `voxel_size` (>0) enables
+ * downsample-classify-propagate for very large clouds.
+ */
+export interface WoodSegmentationRequest {
+  points?: number[][];          // [[x, y, z], ...] — omit when `source` is set
+  source?: BackendPointSource;  // octree-backed clouds read from disk
+  // Aggregate: several pre-registered scans segmented TOGETHER. Read and
+  // concatenated in order; `source_counts` in the response lets the caller
+  // slice the labels back per scan. Takes precedence over points/source.
+  sources?: BackendPointSource[];
+  k_min?: number;
+  k_max?: number;
+  k_step?: number;
+  wood_bias?: number;
+  reg_k?: number;
+  reg_iters?: number;
+  min_speckle?: number;
+  voxel_size?: number;
+}
+
+export interface WoodSegmentationResponse {
+  success: boolean;
+  labels: number[];   // 1=wood, 2=leaf, aligned to resolved point order
+  num_wood: number;
+  num_leaf: number;
+  num_points: number;
+  source_counts: number[];  // per-source point counts (aggregate); else []
+  error?: string;
+}
+
+export async function segmentWood(
+  request: WoodSegmentationRequest
+): Promise<WoodSegmentationResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+
+  try {
+    const response = await fetch(`${baseUrl}/api/segment/wood`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Wood/leaf segmentation failed:', error);
+    throw error;
+  }
+}
+
 // ==================== TREE INSTANCE SEGMENTATION API ====================
 
 /**
@@ -2248,6 +2313,36 @@ export async function sessionSegmentGround(
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('session_segment_ground failed:', error);
+    throw error;
+  }
+}
+
+/** Run wood/leaf segmentation on the session's in-RAM points, append a
+ * `wood_class` column (1=wood, 2=leaf), and rebuild the octree from the arrays
+ * (no file read). Pass segment_wood tuning params. */
+export async function sessionSegmentWood(
+  sessionId: string,
+  params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number },
+): Promise<CloudSessionBakeResult> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 600000);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/segment_wood`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionBakeResult;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('session_segment_wood failed:', error);
     throw error;
   }
 }

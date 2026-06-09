@@ -100,6 +100,7 @@ nav:
       - Viewer navigation: workflows/viewer-navigation.md
       - Clean a point cloud: workflows/clean-point-cloud.md
       - Segment ground points: workflows/segment-ground.md
+      - Separate leaf and wood: workflows/segment-wood.md
       - Triangulate a mesh: workflows/triangulate.md
       - Estimate leaf area density: workflows/estimate-leaf-area-density.md
       - Extract a skeleton: workflows/extract-skeleton.md

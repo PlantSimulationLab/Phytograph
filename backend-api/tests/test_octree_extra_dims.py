@@ -135,6 +135,30 @@ def test_xyz_to_las_db_intensity_not_clamped_to_zero(tmp_path):
     assert len(np.unique(inten)) == 4                     # every distinct dB kept
 
 
+def test_xyz_to_las_large_utm_coordinates_survive(tmp_path):
+    """Regression: clouds in a projected CRS (UTM northings ~5.4e6 m) used to
+    overflow the LAS writer — a coordinate is stored as a 32-bit int
+    (value-offset)/scale, and with offset 0 + 1 mm scale only ±2.1 km fits.
+    The writer must offset to the data min so the absolute magnitude doesn't
+    matter; laspy re-applies the offset on read, so coordinates round-trip."""
+    src = tmp_path / "utm.xyz"
+    # A few points at a realistic UTM easting/northing (well beyond ±2.1 km).
+    pts = [
+        (476769.123, 5429145.250, 250.0),
+        (476772.456, 5429147.880, 258.4),
+        (476775.001, 5429149.500, 265.5),
+    ]
+    src.write_text("".join(f"{x:.4f} {y:.4f} {z:.4f}\n" for x, y, z in pts))
+    out = tmp_path / "utm.las"
+    n, _ = main._xyz_to_las(main._Path(src), "x y z", main._Path(out))
+    assert n == len(pts)
+    las = laspy.read(str(out))
+    # Coordinates come back at full magnitude, within the 1 mm scale tolerance.
+    np.testing.assert_allclose(np.asarray(las.x), [p[0] for p in pts], atol=1e-3)
+    np.testing.assert_allclose(np.asarray(las.y), [p[1] for p in pts], atol=1e-3)
+    np.testing.assert_allclose(np.asarray(las.z), [p[2] for p in pts], atol=1e-3)
+
+
 def test_xyz_to_las_keeps_reflectance_when_intensity_present(tmp_path):
     """With BOTH intensity and reflectance, intensity claims the LAS field and
     reflectance must be carried as an extra dim with its RAW dB values — not

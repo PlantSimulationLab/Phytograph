@@ -39,6 +39,20 @@ const GROUND_SCHEME: CategoricalScheme = {
   ],
 };
 
+// Wood/leaf classification (segment_wood writes `wood_class`): 1 = wood
+// (trunk/branches), 2 = leaf. Dark woody brown for wood, leaf green for leaf —
+// distinct from the ground scheme's lighter earth/green so the two are not
+// confused when both are present.
+export const WOOD_CLASS_ATTRIBUTE = 'wood_class';
+
+const WOOD_SCHEME: CategoricalScheme = {
+  attribute: WOOD_CLASS_ATTRIBUTE,
+  classes: [
+    { value: 1, label: 'Wood', color: [0.40, 0.26, 0.13] },
+    { value: 2, label: 'Leaf', color: [0.30, 0.69, 0.31] },
+  ],
+};
+
 // Tree instance segmentation (TreeIso) writes a `tree_instance` attribute:
 // 0 = unassigned, 1..N = individual trees. Unlike ground_class, N is unbounded
 // and only known at runtime, so this scheme is GENERATED from the data's id
@@ -144,6 +158,7 @@ const MISS_SCHEME: CategoricalScheme = {
 // discrete coloring + a legend for free.
 const SCHEMES: Record<string, CategoricalScheme> = {
   [GROUND_CLASS_ATTRIBUTE]: GROUND_SCHEME,
+  [WOOD_CLASS_ATTRIBUTE]: WOOD_SCHEME,
   [MISS_ATTRIBUTE]: MISS_SCHEME,
 };
 

@@ -52,6 +52,11 @@ than a continuous measurement. The **Ground Class** attribute produced by
 non-ground in green) instead of a continuous colormap and colorbar, so each
 class reads as a distinct category rather than a position along a ramp.
 
+The **Wood Class** attribute produced by
+[Separate leaf and wood](../workflows/segment-wood.md)
+(1 = wood, 2 = leaf) is categorical the same way: wood renders in dark brown
+and leaf in green, each with its own legend entry.
+
 The **`tree_instance`** attribute produced by
 [Segment individual trees](../workflows/segment-trees.md) (`0` = unassigned,
 `1..N` = individual trees) is also categorical, but its class count isn't fixed:

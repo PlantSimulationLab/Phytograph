@@ -3,9 +3,9 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, segmentGround, segmentTrees, buildQSM, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import {
@@ -51,7 +51,7 @@ import {
 } from '../lib/pointCloudHelpers';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
-import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, GROUND_CLASS_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { MissOverlay } from './viewer/renderers/MissOverlay';
@@ -77,6 +77,7 @@ import { EraseBrush } from './viewer/gizmos/EraseBrush';
 import { EraseBrushOctree, type EraseSquareFrame } from './viewer/gizmos/EraseBrushOctree';
 import { TriangulationPanel } from './viewer/panels/TriangulationPanel';
 import { GroundSegmentPanel } from './viewer/panels/GroundSegmentPanel';
+import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode } from './viewer/panels/WoodSegmentPanel';
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
@@ -387,6 +388,19 @@ export default function PointCloudViewer({
   const [groundClassThreshold, setGroundClassThreshold] = useState(0.02);
   const [groundRigidness, setGroundRigidness] = useState(3);
   const [groundSplitClouds, setGroundSplitClouds] = useState(false);
+  // Wood/leaf segmentation state (geometric, non-ML).
+  const [showWoodSegmentPanel, setShowWoodSegmentPanel] = useState(false);
+  const [woodSegmentInProgress, setWoodSegmentInProgress] = useState(false);
+  const [woodSegmentError, setWoodSegmentError] = useState<string | null>(null);
+  const [woodBias, setWoodBias] = useState(0.6);
+  const [woodKMax, setWoodKMax] = useState(100);
+  const [woodRegIters, setWoodRegIters] = useState(3);
+  const [woodMode, setWoodMode] = useState<WoodSegmentMode>('label');
+  // >1 scan: 'aggregate' segments them together (denser geometry) then writes
+  // labels back to each; 'per-scan' segments each independently.
+  const [woodMultiMode, setWoodMultiMode] = useState<WoodMultiMode>('per-scan');
+  // Holds the latest single-cloud wood segmenter; see segmentOneWoodCloud below.
+  const segmentOneWoodCloudRef = useRef<(cloud: PointCloudEntry, WOOD: number, LEAF: number, woodParams: { wood_bias: number; k_max: number; reg_iters: number }) => Promise<void>>(async () => {});
   // Tree (individual-tree) segmentation via TreeIso.
   const [showTreeSegmentPanel, setShowTreeSegmentPanel] = useState(false);
   const [treeSegmentInProgress, setTreeSegmentInProgress] = useState(false);
@@ -908,6 +922,7 @@ export default function PointCloudViewer({
     }
     if (except !== 'triangulation') setShowTriangulationPanel(false);
     if (except !== 'ground-segment') setShowGroundSegmentPanel(false);
+    if (except !== 'wood-segment') setShowWoodSegmentPanel(false);
     if (except !== 'tree-segment') { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }
     if (except !== 'skeleton') setShowSkeletonPanel(false);
     if (except !== 'qsm') setShowQSMPanel(false);
@@ -2526,6 +2541,7 @@ export default function PointCloudViewer({
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPanel(!showTriangulationPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
+      { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud' },
       { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPanel(!showQSMPanel); }, category: 'Point Cloud', requires: 'cloud' },
@@ -2555,7 +2571,7 @@ export default function PointCloudViewer({
     ];
 
     return cmds;
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, onSelectAll, onDeselectAll, onStitchClouds, selectedIds, handleUndo, handleRedo]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, onSelectAll, onDeselectAll, onStitchClouds, selectedIds, handleUndo, handleRedo]);
 
   // Filter and sort commands based on search
   const filteredCommands = useMemo(() => {
@@ -4370,6 +4386,274 @@ export default function PointCloudViewer({
       setGroundSegmentInProgress(false);
     }
   }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSplitClouds]);
+
+  // Segment wood vs leaf points (geometric, non-ML: verticality + low-sphericity).
+  // Writes a `wood_class` scalar attribute (1=wood, 2=leaf) and colours by it.
+  // Mirrors handleGroundSegment: session (octree) clouds run on the in-RAM array
+  // and append the column (sessionSegmentWood) — no file re-read; flat clouds get
+  // labels written into scalarFields. `woodMode` selects the output:
+  //  - 'label':  keep all points, classified + coloured.
+  //  - 'split':  additionally emit wood-only and leaf-only child clouds.
+  //  - 'remove': drop the wood points, leaving a leaf-only cloud (wood removal).
+  const handleWoodSegment = useCallback(async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const targets = ids
+      .map(tid => clouds.find(c => c.id === tid))
+      .filter((c): c is PointCloudEntry => !!c);
+    if (targets.length === 0) return;
+
+    const WOOD = 1, LEAF = 2;
+    const woodParams = { wood_bias: woodBias, k_max: woodKMax, reg_iters: woodRegIters };
+    const aggregate = targets.length > 1 && woodMultiMode === 'aggregate';
+
+    setWoodSegmentInProgress(true);
+    setWoodSegmentError(null);
+
+    try {
+      // === Aggregate: segment all selected scans TOGETHER (denser local
+      // geometry), then scatter the labels back to each scan in place as a
+      // wood_class scalar field. Assumes the scans are pre-registered (a common
+      // coordinate frame). Works on flat (in-RAM) clouds: their world-space
+      // points are concatenated IN ORDER, segmented once, then sliced back.
+      // Octree-backed clouds can't take an externally-computed label array
+      // (no apply-labels endpoint), so a selection containing any octree cloud
+      // falls back to per-scan. ===
+      if (aggregate) {
+        const resolved = targets.map(c => ({ cloud: c, ps: buildPointSource(c) }));
+        const anyOctree = resolved.some(r => r.ps.kind === 'source');
+        if (anyOctree) {
+          showToast({
+            type: 'info',
+            title: 'Segmenting scans separately',
+            message: 'Together-mode needs in-memory clouds; one or more selections stream from an octree, so each is segmented on its own.',
+          });
+        } else {
+          // Concatenate every cloud's world-space points in selection order,
+          // tracking each run so labels can be sliced back.
+          const inlineParts: number[][] = [];
+          const order: { id: string; count: number; displayData: PointCloudData }[] = [];
+          for (const { cloud, ps } of resolved) {
+            const d = (ps as { data: PointCloudData }).data;
+            const t = getEditState(cloud.id).translation;
+            for (let i = 0; i < d.pointCount; i++) {
+              inlineParts.push([
+                d.positions[i * 3] + t.x,
+                d.positions[i * 3 + 1] + t.y,
+                d.positions[i * 3 + 2] + t.z,
+              ]);
+            }
+            order.push({ id: cloud.id, count: d.pointCount, displayData: d });
+          }
+
+          const response = await segmentWood({ points: inlineParts, ...woodParams });
+          if (!response.success) {
+            throw new Error(response.error || 'Wood/leaf segmentation failed');
+          }
+          const labels = response.labels;
+
+          let cursor = 0;
+          for (const o of order) {
+            const slice = labels.slice(cursor, cursor + o.count);
+            cursor += o.count;
+            const cd = o.displayData;
+            onUpdateCloud(o.id, {
+              ...cd,
+              scalarFields: { ...(cd.scalarFields ?? {}), [WOOD_CLASS_ATTRIBUTE]: { values: Float32Array.from(slice), min: 1, max: 2 } },
+            });
+          }
+
+          setColorMode('scalar');
+          setSelectedScalarField(WOOD_CLASS_ATTRIBUTE);
+          setShowWoodSegmentPanel(false);
+          showToast({
+            type: 'success',
+            title: 'Wood/Leaf Segmentation Complete',
+            message: `Segmented ${targets.length} scans together (${response.num_wood.toLocaleString()} wood, ${response.num_leaf.toLocaleString()} leaf).`,
+          });
+          return;
+        }
+      }
+
+      // === Per-scan (and the single-selection case): segment each cloud
+      // independently, in sequence. Call through the ref so the LATEST worker
+      // (capturing the current woodMode) is used — handleWoodSegment is memoised
+      // and would otherwise close over a stale worker. ===
+      for (const cloud of targets) {
+        await segmentOneWoodCloudRef.current(cloud, WOOD, LEAF, woodParams);
+      }
+      setShowWoodSegmentPanel(false);
+    } catch (error) {
+      console.error('Wood/leaf segmentation error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Wood/leaf segmentation failed';
+      setWoodSegmentError(errorMessage);
+      showToast({ type: 'error', title: 'Wood/Leaf Segmentation Failed', message: errorMessage });
+    } finally {
+      setWoodSegmentInProgress(false);
+    }
+  }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode]);
+
+  // Segment a single cloud and apply the result per `woodMode` (label / split /
+  // remove). Used by the per-scan path (and single selection).
+  const segmentOneWoodCloud = useCallback(async (
+    cloud: PointCloudEntry,
+    WOOD: number,
+    LEAF: number,
+    woodParams: { wood_bias: number; k_max: number; reg_iters: number },
+  ) => {
+    const id = cloud.id;
+    {
+      const ps = buildPointSource(cloud);
+
+      // --- Session-backed octree cloud: classify the in-RAM array, append
+      // wood_class, rebuild from arrays (no file re-read). ---
+      if (ps.kind === 'source') {
+        const octreeInfo = cloud.data.octree;
+        if (!octreeInfo?.sessionId) {
+          throw new Error('Octree cloud is missing its editable session.');
+        }
+        const baseName = cloud.data.fileName ?? id;
+        const sessionId = octreeInfo.sessionId;
+        const meta = await sessionSegmentWood(sessionId, woodParams);
+
+        if (woodMode === 'remove') {
+          // Keep only leaf points (delete wood) on the same session.
+          const r = await sessionFilter(sessionId, {
+            scalarFilters: [{ slug: WOOD_CLASS_ATTRIBUTE, min: LEAF, max: LEAF, values: [LEAF] }],
+            rebuild: true,
+          });
+          onUpdateCloud(id, buildSessionOctreeData(r, octreeInfo, baseName));
+        } else {
+          // Label in place; the parent keeps ALL points, coloured by wood_class.
+          onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
+          setColorMode('scalar');
+          setSelectedScalarField(WOOD_CLASS_ATTRIBUTE);
+        }
+        setShowWoodSegmentPanel(false);
+
+        // Optional split: extract each class into its own child session.
+        if (woodMode === 'split' && onAddCloud) {
+          const addClassCloud = async (cls: number, suffix: string, color: string) => {
+            const r = await sessionExtract(sessionId, {
+              scalarFilters: [{ slug: WOOD_CLASS_ATTRIBUTE, min: cls, max: cls, values: [cls] }],
+            });
+            if (r.extracted) {
+              onAddCloud({
+                id: crypto.randomUUID(),
+                data: buildSessionOctreeData(
+                  r.extracted, octreeInfo, `${baseName} (${suffix})`, r.extracted.session_id,
+                ),
+                visible: true,
+                color,
+              });
+            }
+          };
+          await addClassCloud(WOOD, 'wood', '#67421f');
+          await addClassCloud(LEAF, 'leaf', '#4caf50');
+        }
+
+        showToast({
+          type: 'success',
+          title: 'Wood/Leaf Segmentation Complete',
+          message: woodMode === 'remove'
+            ? `Removed wood; kept leaf points.`
+            : `Classified ${meta.point_count.toLocaleString()} points (wood vs leaf).`,
+        });
+        return;
+      }
+
+      // --- Flat cloud: classify in memory, write scalarFields. ---
+      const displayData = ps.data;
+      const count = displayData.pointCount;
+      const points: number[][] = new Array(count);
+      for (let i = 0; i < count; i++) {
+        points[i] = [
+          displayData.positions[i * 3],
+          displayData.positions[i * 3 + 1],
+          displayData.positions[i * 3 + 2],
+        ];
+      }
+
+      const response = await segmentWood({ points, ...woodParams });
+      if (!response.success) {
+        throw new Error(response.error || 'Wood/leaf segmentation failed');
+      }
+
+      // Build a child cloud holding only the points of `classValue` (used by
+      // both split and remove modes — remove keeps just the leaf class).
+      const makeChild = (classValue: number, suffix: string, color: string, replaceParent: boolean) => {
+        const idxs: number[] = [];
+        for (let i = 0; i < count; i++) {
+          if (Math.round(response.labels[i]) === classValue) idxs.push(i);
+        }
+        if (idxs.length === 0) return;
+        const pos = new Float32Array(idxs.length * 3);
+        let col: Float32Array | undefined;
+        if (displayData.colors && displayData.colors.length >= count * 3) {
+          col = new Float32Array(idxs.length * 3);
+        }
+        idxs.forEach((srcIdx, k) => {
+          pos[k * 3] = displayData.positions[srcIdx * 3];
+          pos[k * 3 + 1] = displayData.positions[srcIdx * 3 + 1];
+          pos[k * 3 + 2] = displayData.positions[srcIdx * 3 + 2];
+          if (col && displayData.colors) {
+            col[k * 3] = displayData.colors[srcIdx * 3];
+            col[k * 3 + 1] = displayData.colors[srcIdx * 3 + 1];
+            col[k * 3 + 2] = displayData.colors[srcIdx * 3 + 2];
+          }
+        });
+        const baseName = displayData.fileName ?? 'cloud';
+        const bmin = new THREE.Vector3(Infinity, Infinity, Infinity);
+        const bmax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+        for (let k = 0; k < idxs.length; k++) {
+          bmin.x = Math.min(bmin.x, pos[k * 3]); bmax.x = Math.max(bmax.x, pos[k * 3]);
+          bmin.y = Math.min(bmin.y, pos[k * 3 + 1]); bmax.y = Math.max(bmax.y, pos[k * 3 + 1]);
+          bmin.z = Math.min(bmin.z, pos[k * 3 + 2]); bmax.z = Math.max(bmax.z, pos[k * 3 + 2]);
+        }
+        const { center, size } = computeBoundsFromPositions(pos, idxs.length);
+        const childData = {
+          positions: pos,
+          colors: col,
+          pointCount: idxs.length,
+          bounds: { min: bmin, max: bmax, center, size },
+          fileName: replaceParent ? baseName : `${baseName} (${suffix})`,
+        };
+        if (replaceParent) {
+          onUpdateCloud(id, childData);
+        } else if (onAddCloud) {
+          onAddCloud({ id: crypto.randomUUID(), data: childData, visible: true, color });
+        }
+      };
+
+      if (woodMode === 'remove') {
+        // Replace the cloud in place with just the leaf points.
+        makeChild(LEAF, 'leaf', '#4caf50', true);
+      } else {
+        const labels = Float32Array.from(response.labels);
+        const newScalarFields = {
+          ...(displayData.scalarFields ?? {}),
+          [WOOD_CLASS_ATTRIBUTE]: { values: labels, min: 1, max: 2 },
+        };
+        onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
+        setColorMode('scalar');
+        setSelectedScalarField(WOOD_CLASS_ATTRIBUTE);
+        if (woodMode === 'split') {
+          makeChild(WOOD, 'wood', '#67421f', false);
+          makeChild(LEAF, 'leaf', '#4caf50', false);
+        }
+      }
+
+      showToast({
+        type: 'success',
+        title: 'Wood/Leaf Segmentation Complete',
+        message: `${response.num_wood.toLocaleString()} wood, ${response.num_leaf.toLocaleString()} leaf`,
+      });
+    }
+  }, [buildPointSource, onUpdateCloud, onAddCloud, woodMode]);
+  // Keep a ref to the latest worker so the memoised handleWoodSegment dispatcher
+  // (which excludes it from deps to avoid a use-before-declaration cycle) always
+  // invokes the current-woodMode version.
+  segmentOneWoodCloudRef.current = segmentOneWoodCloud;
 
   // Segment individual trees (TreeIso cut-pursuit). Writes a `tree_instance`
   // scalar attribute (0=unassigned, 1..N=trees) and colors by it. Mirrors
@@ -9265,6 +9549,23 @@ export default function PointCloudViewer({
                       </button>
                     );
                   })()}
+                  {/* Segment Wood / Leaf — together (one segmentation, labels
+                      scattered back) or per-scan. */}
+                  <button
+                    data-testid="tool-wood-segment"
+                    onClick={() => {
+                      if (showWoodSegmentPanel) {
+                        setShowWoodSegmentPanel(false);
+                      } else {
+                        closeAllToolPanels('wood-segment');
+                        setShowWoodSegmentPanel(true);
+                      }
+                    }}
+                    className={`p-2 rounded transition-colors ${showWoodSegmentPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
+                    title={`Segment wood vs leaf for ${selectedIds.size} scans`}
+                  >
+                    <Trees className={`w-4 h-4 ${showWoodSegmentPanel ? 'text-white' : 'text-neutral-300'}`} />
+                  </button>
                 </>
               )}
               {/* Multi-Mesh Tools (2+ meshes selected) */}
@@ -9500,6 +9801,23 @@ export default function PointCloudViewer({
                     disabled={selectedIds.size !== 1}
                   >
                     <Layers className={`w-4 h-4 ${showGroundSegmentPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
+                  </button>
+                  {/* 8b2. Segment Wood / Leaf (single cloud only) */}
+                  <button
+                    data-testid="tool-wood-segment"
+                    onClick={() => {
+                      if (showWoodSegmentPanel) {
+                        setShowWoodSegmentPanel(false);
+                      } else {
+                        closeAllToolPanels('wood-segment');
+                        setShowWoodSegmentPanel(true);
+                      }
+                    }}
+                    className={`p-2 rounded transition-colors ${showWoodSegmentPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
+                    title="Segment wood vs leaf points"
+                    disabled={selectedIds.size < 1}
+                  >
+                    <Trees className={`w-4 h-4 ${showWoodSegmentPanel ? 'text-white' : selectedIds.size < 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
                   </button>
                   {/* 8c. Segment Trees (single cloud only) */}
                   <button
@@ -10257,6 +10575,27 @@ export default function PointCloudViewer({
           onRigidnessChange={setGroundRigidness}
           onSplitCloudsChange={setGroundSplitClouds}
           onSegment={handleGroundSegment}
+        />
+      )}
+
+      {/* Wood/Leaf Segmentation Panel */}
+      {showWoodSegmentPanel && selectedIds.size >= 1 && (
+        <WoodSegmentPanel
+          woodBias={woodBias}
+          kMax={woodKMax}
+          regIters={woodRegIters}
+          mode={woodMode}
+          multiMode={woodMultiMode}
+          selectedCount={selectedIds.size}
+          inProgress={woodSegmentInProgress}
+          error={woodSegmentError}
+          onClose={() => setShowWoodSegmentPanel(false)}
+          onWoodBiasChange={setWoodBias}
+          onKMaxChange={setWoodKMax}
+          onRegItersChange={setWoodRegIters}
+          onModeChange={setWoodMode}
+          onMultiModeChange={setWoodMultiMode}
+          onSegment={handleWoodSegment}
         />
       )}
 

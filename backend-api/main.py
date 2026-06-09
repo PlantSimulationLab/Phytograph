@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.7.0"
+BACKEND_VERSION = "0.8.0"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1717,6 +1717,123 @@ async def segment_ground_points(request: GroundSegmentationRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Ground segmentation failed: {str(e)}")
+
+
+# ==================== WOOD/LEAF SEGMENTATION ====================
+# `wood_class` per-point scalar: 1=wood (trunk/branches), 2=leaf. Geometric,
+# non-ML (verticality + low-sphericity); see segment_wood(). Mirrors the
+# ground-segment endpoints (inline `points` or `source`; full-resolution; the
+# returned `labels` align 1:1 so the renderer can attach them as a scalar).
+
+class WoodSegmentationRequest(BaseModel):
+    """Per-point wood/leaf segmentation from XYZ geometry.
+
+    Provide inline `points` (flat clouds) or a `source` descriptor (octree-backed
+    clouds — the backend re-reads the file at full resolution). Like ground
+    segmentation the result must NOT be downsampled, so `labels` align 1:1 with
+    the resolved point order. The tuning fields map onto segment_wood():
+    `wood_bias` is the wood-vs-leaf sensitivity (lower → more wood), the `k_*`
+    fields set the neighbourhood-scale search, `reg_iters` the smoothing
+    strength, and `voxel_size` (>0) enables downsample-classify-propagate for
+    very large clouds."""
+    points: Optional[List[List[float]]] = None
+    source: Optional[PointSource] = None
+    # AGGREGATE: several pre-registered scans segmented TOGETHER (denser local
+    # neighbourhoods → better wood/leaf geometry). Each source is read and its
+    # points concatenated in order; `source_counts` in the response gives each
+    # source's point count so the caller can scatter the labels back per scan.
+    # `sources` takes precedence over `points`/`source`.
+    sources: Optional[List[PointSource]] = None
+    k_min: int = 10
+    k_max: int = 100
+    k_step: int = 10
+    wood_bias: float = 0.6
+    reg_k: int = 20
+    reg_iters: int = 3
+    min_speckle: int = 0
+    branch_grow_sph: float = 0.02
+    voxel_size: float = 0.0
+
+
+class WoodSegmentationResponse(BaseModel):
+    """Per-point wood/leaf labels aligned to the resolved point order."""
+    success: bool
+    labels: List[int] = []          # 1=wood, 2=leaf
+    num_wood: int = 0
+    num_leaf: int = 0
+    num_points: int = 0
+    # For an aggregate (multi-source) request: the point count of each source in
+    # the order given, so the caller can slice `labels` back per scan. Empty for
+    # a single-source / inline request.
+    source_counts: List[int] = []
+    error: Optional[str] = None
+
+
+def _wood_segment_kwargs(request: "WoodSegmentationRequest") -> dict:
+    """Extract segment_wood() tuning kwargs from a request (shared by the
+    stateless and session endpoints)."""
+    return dict(
+        k_min=request.k_min,
+        k_max=request.k_max,
+        k_step=request.k_step,
+        wood_bias=request.wood_bias,
+        reg_k=request.reg_k,
+        reg_iters=request.reg_iters,
+        min_speckle=request.min_speckle,
+        branch_grow_sph=request.branch_grow_sph,
+        voxel_size=request.voxel_size,
+    )
+
+
+@app.post("/api/segment/wood", response_model=WoodSegmentationResponse)
+async def segment_wood_points(request: WoodSegmentationRequest):
+    """Classify a point cloud into wood (1) and leaf (2) points from geometry.
+    Returns per-point labels aligned to input order; persisting the result onto
+    an octree-backed cloud is done by
+    `/api/cloud/session/{session_id}/segment_wood`."""
+    try:
+        # AGGREGATE: read each source full-resolution and concatenate IN ORDER so
+        # the labels can be sliced back per source. The combined cloud is denser,
+        # which is exactly the point — better local neighbourhoods. Assumes the
+        # sources are pre-registered (a common coordinate frame).
+        source_counts: List[int] = []
+        if request.sources:
+            parts = []
+            for s in request.sources:
+                full = s.model_copy(update={"max_points": None})  # full resolution
+                pts, _, _ = _read_points_from_source(full)
+                parts.append(np.asarray(pts, dtype=np.float64))
+                source_counts.append(len(pts))
+            points = np.concatenate(parts, axis=0) if parts else np.empty((0, 3))
+        else:
+            # _resolve_segmentation_points reads `.points` / `.source`, both of
+            # which WoodSegmentationRequest shares with GroundSegmentationRequest.
+            points = _resolve_segmentation_points(request)  # type: ignore[arg-type]
+
+        if len(points) < 3:
+            return WoodSegmentationResponse(
+                success=False,
+                num_points=len(points),
+                error="Need at least 3 points for wood/leaf segmentation",
+            )
+
+        labels = segment_wood(points, **_wood_segment_kwargs(request))
+        num_wood = int(np.count_nonzero(labels == WOOD_CLASS_WOOD))
+        return WoodSegmentationResponse(
+            success=True,
+            labels=labels.tolist(),
+            num_wood=num_wood,
+            num_leaf=len(labels) - num_wood,
+            num_points=len(labels),
+            source_counts=source_counts,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Wood/leaf segmentation failed: {str(e)}")
 
 
 # ==================== TREE INSTANCE SEGMENTATION (TreeIso) ====================
@@ -3470,6 +3587,437 @@ def segment_ground(
     if gi.size:
         labels[gi] = GROUND_CLASS_GROUND
     return labels
+
+
+# ==================== WOOD/LEAF SEGMENTATION HELPER (geometric, non-ML) ====================
+
+# Wood/leaf class labels. Mirrors the ground convention (small ints, comparable
+# to a ground-truth annotation column): 1=wood (trunk/branches), 2=leaf.
+WOOD_CLASS_WOOD = 1
+WOOD_CLASS_LEAF = 2
+
+WOOD_CLASS_SLUG = "wood_class"
+WOOD_CLASS_LABEL = "Wood Class"
+
+# Above this many points, segment_wood auto-downsamples (voxel) the geometry
+# step and propagates labels back to full resolution — the per-point k-NN
+# feature extraction is O(N·k_max) in memory and a multi-million-point cloud at
+# full res can OOM the machine. ~1.5M keeps peak RAM ~3-4 GB. Env-overridable
+# for big-memory machines; the result is always full-length regardless.
+try:
+    _WOOD_SEGMENT_MAX_POINTS = int(os.environ.get("PHYTOGRAPH_WOOD_MAX_POINTS", "1500000"))
+except (ValueError, TypeError):
+    _WOOD_SEGMENT_MAX_POINTS = 1_500_000
+
+
+def _wood_local_pca_features(
+    points: np.ndarray,
+    k_min: int,
+    k_max: int,
+    k_step: int,
+    chunk: int = 50_000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-point geometric features at an eigen-entropy-optimal neighbourhood
+    scale (Demantke 2011 / Weinmann 2015 dimensionality).
+
+    Returns (features, nbr_idx):
+      features: (N,3) = [linearity, verticality, sphericity]
+      nbr_idx:  (N, k_max) int32 sorted neighbour indices (reused by the
+                regularisation pass — query the KD-tree only once).
+
+    For each point we pick the k in [k_min..k_max] (step k_step) that minimises
+    the eigen-entropy E = -Σ αᵢ ln αᵢ, αᵢ = λᵢ/Σλ, then derive features from the
+    eigenvalues/eigenvectors at that winning scale. The wood/leaf discriminators
+    are verticality (wood upright) and sphericity (foliage scatters in 3D);
+    linearity is returned for completeness but is not used by segment_wood
+    (branches are linear too). See segment_wood for the scoring rationale.
+    """
+    from scipy.spatial import cKDTree
+
+    n = len(points)
+    pts = np.ascontiguousarray(points[:, :3], dtype=np.float64)
+    # k can't exceed the cloud size; the self-point is included at column 0.
+    k_max_eff = int(min(k_max, n))
+    k_candidates = [k for k in range(k_min, k_max_eff + 1, k_step)]
+    if not k_candidates or k_candidates[-1] != k_max_eff:
+        # always include the largest usable scale
+        k_candidates.append(k_max_eff)
+    k_candidates = sorted({k for k in k_candidates if k >= 3})
+    if not k_candidates:
+        k_candidates = [min(3, n)]
+
+    tree = cKDTree(pts)
+    # Query at the largest scale; smaller scales are prefixes of the sorted
+    # neighbour list (cKDTree returns neighbours in increasing distance). Query
+    # in CHUNKS and keep only int32 indices: a single full query allocates the
+    # (N,k) float64 distances AND int64 indices at once (~10 GB at N=6M, k=100),
+    # which OOMs a 16 GB machine. Chunking caps that transient to one block, and
+    # we discard distances immediately.
+    nbr_idx = np.empty((n, k_max_eff), dtype=np.int32)
+    q_chunk = max(1, min(chunk, n))
+    for start in range(0, n, q_chunk):
+        end = min(start + q_chunk, n)
+        _, idx_block = tree.query(pts[start:end], k=k_max_eff, workers=-1)
+        if idx_block.ndim == 1:  # k==1 edge case
+            idx_block = idx_block[:, None]
+        nbr_idx[start:end] = idx_block.astype(np.int32, copy=False)
+        del idx_block
+
+    best_E = np.full(n, np.inf, dtype=np.float64)
+    best_lin = np.zeros(n, dtype=np.float64)
+    best_sph = np.zeros(n, dtype=np.float64)
+    best_vert = np.zeros(n, dtype=np.float64)
+
+    eps = 1e-12
+    for start in range(0, n, chunk):
+        end = min(start + chunk, n)
+        idx_chunk = nbr_idx[start:end]  # (m, k_max_eff)
+        m = end - start
+        c_best_E = np.full(m, np.inf)
+        c_lin = np.zeros(m)
+        c_sph = np.zeros(m)
+        c_vert = np.zeros(m)
+        for k in k_candidates:
+            nb = pts[idx_chunk[:, :k]]               # (m, k, 3)
+            mu = nb.mean(axis=1, keepdims=True)
+            d = nb - mu
+            cov = np.einsum("mki,mkj->mij", d, d) / float(k - 1)  # (m,3,3)
+            # eigh: ascending eigenvalues w0<=w1<=w2, columns are eigenvectors.
+            w, v = np.linalg.eigh(cov)
+            lam = np.clip(w[:, ::-1], eps, None)     # λ1>=λ2>=λ3
+            s = lam.sum(axis=1)
+            a = lam / s[:, None]
+            E = -(a * np.log(a)).sum(axis=1)
+            better = E < c_best_E
+            if better.any():
+                l1 = lam[:, 0]
+                l2 = lam[:, 1]
+                l3 = lam[:, 2]
+                lin = (l1 - l2) / l1
+                sph = l3 / l1
+                # normal = eigenvector of smallest eigenvalue = column 0 of v.
+                nz = np.abs(v[:, 2, 0])
+                vert = 1.0 - nz
+                c_best_E = np.where(better, E, c_best_E)
+                c_lin = np.where(better, lin, c_lin)
+                c_sph = np.where(better, sph, c_sph)
+                c_vert = np.where(better, vert, c_vert)
+        best_E[start:end] = c_best_E
+        best_lin[start:end] = c_lin
+        best_sph[start:end] = c_sph
+        best_vert[start:end] = c_vert
+
+    features = np.column_stack([best_lin, best_vert, best_sph]).astype(np.float64)
+    features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+    return features, nbr_idx
+
+
+def _wood_regularize(
+    labels: np.ndarray,
+    nbr_idx: np.ndarray,
+    reg_k: int,
+    iters: int,
+    weights: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """LeWoS-style label smoothing: iterated k-NN majority vote over the graph
+    already built for feature extraction. Cleans isolated misclassifications
+    (a stray "wood" point inside a leaf cluster flips to leaf, and vice versa)
+    without eroding genuine thin branches at low iteration counts.
+
+    `weights` (optional, per-point in [0,1]) up-weights confident neighbours so
+    high-certainty points dominate the vote near wood/leaf boundaries.
+    """
+    if iters <= 0:
+        return labels.astype(np.int32, copy=True)
+    k = int(min(reg_k, nbr_idx.shape[1]))
+    if k < 2:
+        return labels.astype(np.int32, copy=True)
+    idx = nbr_idx[:, :k]
+    w_is_wood = (labels == WOOD_CLASS_WOOD).astype(np.float64)
+    nbr_w = weights[idx] if weights is not None else None
+    denom = nbr_w.sum(axis=1) if nbr_w is not None else float(k)
+    denom = np.where(np.asarray(denom) == 0, 1.0, denom)
+    for _ in range(int(iters)):
+        gathered = w_is_wood[idx]                      # (N, k)
+        if nbr_w is not None:
+            frac = (gathered * nbr_w).sum(axis=1) / denom
+        else:
+            frac = gathered.mean(axis=1)
+        w_is_wood = (frac >= 0.5).astype(np.float64)
+    out = np.where(w_is_wood >= 0.5, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF)
+    return out.astype(np.int32)
+
+
+def _wood_grow_branches(
+    wood_seed: np.ndarray,
+    sphericity: np.ndarray,
+    nbr_idx: np.ndarray,
+    sph_thresh: float,
+    grow_k: int = 10,
+    max_iters: int = 30,
+) -> np.ndarray:
+    """Region-grow the wood label along CONNECTED woody geometry.
+
+    The verticality-weighted seed has high precision but misses HORIZONTAL
+    scaffold branches: they're geometrically woody (compact, low sphericity) but
+    not vertical, so the score drops them. They ARE connected to the trunk,
+    though — so flood the wood label outward from the seed into any point that
+    (a) has low sphericity (`sphericity < sph_thresh`, i.e. locally compact like
+    a branch, not a scattered leaf) AND (b) touches a current wood point via its
+    k-NN. Iterated to BFS along the branch network. Leaf clusters that are
+    coincidentally low-sphericity (e.g. synthetic narrow leaves) are mostly NOT
+    connected to the trunk, so they don't get swept in.
+
+    Returns a boolean wood mask (seed ∪ grown).
+    """
+    if sph_thresh <= 0:
+        return wood_seed.copy()
+    woody = sphericity < float(sph_thresh)
+    k = int(min(grow_k, nbr_idx.shape[1]))
+    if k < 2:
+        return wood_seed.copy()
+    idx = nbr_idx[:, :k]
+    wood = wood_seed.copy()
+    prev = int(wood.sum())
+    for _ in range(int(max_iters)):
+        # A woody candidate flips to wood if any of its k-NN is already wood.
+        wood = wood | (woody & wood[idx].any(axis=1))
+        cur = int(wood.sum())
+        if cur == prev:
+            break
+        prev = cur
+    return wood
+
+
+def _wood_prune_speckle(
+    points: np.ndarray,
+    wood_mask: np.ndarray,
+    nbr_idx: np.ndarray,
+    k: int = 8,
+    min_size: int = 10,
+) -> np.ndarray:
+    """Drop tiny isolated wood connected-components (speckle): build a graph
+    among candidate-wood points via their mutual k-NN, then flip components
+    smaller than `min_size` back to leaf. Wood is a connected skeleton, so real
+    branches survive; scattered single-point false-wood in foliage does not.
+    Conservative by design (small `min_size`) so it never erodes thin branches.
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    wi = np.where(wood_mask)[0]
+    if len(wi) < max(3, min_size):
+        return wood_mask
+    kk = int(min(k, nbr_idx.shape[1]))
+    sub_nbr = nbr_idx[wi, :kk]
+    wood_set = np.zeros(len(points), dtype=bool)
+    wood_set[wi] = True
+    remap = -np.ones(len(points), dtype=np.int64)
+    remap[wi] = np.arange(len(wi))
+    keep_edge = wood_set[sub_nbr]                       # (m, kk) neighbour is wood
+    rows = np.repeat(np.arange(len(wi)), kk)[keep_edge.ravel()]
+    cols = remap[sub_nbr.ravel()[keep_edge.ravel()]]
+    if rows.size == 0:
+        return wood_mask
+    adj = csr_matrix((np.ones(rows.size), (rows, cols)), shape=(len(wi), len(wi)))
+    adj = adj + adj.T
+    _, comp = connected_components(adj, directed=False)
+    counts = np.bincount(comp)
+    keep_local = counts[comp] >= min_size
+    out = wood_mask.copy()
+    out[wi] = keep_local
+    return out
+
+
+def segment_wood(
+    points: np.ndarray,
+    k_min: int = 10,
+    k_max: int = 100,
+    k_step: int = 10,
+    wood_bias: float = 0.6,
+    reg_k: int = 20,
+    reg_iters: int = 3,
+    min_speckle: int = 0,
+    branch_grow_sph: float = 0.02,
+    voxel_size: float = 0.0,
+    max_points: Optional[int] = None,
+) -> np.ndarray:
+    """Classify each point as wood (1) or leaf (2) from XYZ geometry alone.
+
+    Pipeline (classical / non-ML, runs on CPU in seconds-to-minutes):
+      1. Per-point local-PCA features at an eigen-entropy-optimal scale
+         (verticality, sphericity — Demantke 2011 / Weinmann 2015).
+      2. A wood saliency score = verticality + (1 − sphericity): wood is
+         vertical (trunk/branches) and locally COMPACT (low sphericity), while
+         foliage scatters the neighbourhood in 3D (high sphericity) and hangs at
+         varied non-vertical angles. A 2-component 1-D Gaussian Mixture splits
+         the score; the higher-mean component is wood and `wood_bias` is its
+         posterior threshold (0.5 = argmax; higher → stricter / less wood; lower
+         → more wood).
+      3. Branch recovery (`branch_grow_sph` > 0): the verticality-weighted seed
+         is high-precision but misses HORIZONTAL scaffold branches (low
+         verticality → low score) even though they're woody (compact/low
+         sphericity). Region-grow the wood label from the seed into CONNECTED
+         low-sphericity points (`sphericity < branch_grow_sph`) to recover them
+         (`_wood_grow_branches`). This is what makes thick crown branches read
+         as wood rather than leaf.
+      4. Optional speckle pruning (`min_speckle` > 1): flip tiny isolated wood
+         components back to leaf.
+      5. LeWoS-style graph regularisation (iterated k-NN majority vote).
+
+    Linearity is deliberately NOT used: branches are linear (cylinders) and so
+    are needles / narrow leaves, so linearity cannot separate the two. This was
+    validated across two benchmark families — real TLS trees (Weiser et al.
+    heiDATA: oak/beech/maple/pine/spruce, where neighbourhood sphericity carries
+    the signal, mean OA ≈ 0.85) and synthetic almond scans (narrow flat leaves,
+    where verticality carries it, mean OA ≈ 0.80). The additive blend handles
+    both; the one weak case is densely-scattered-leaf forms (e.g. the synthetic
+    central-leader archetype) where only linearity/planarity separate — a trade
+    accepted because production input is real TLS.
+
+    Very large clouds are handled automatically: above `max_points`
+    (default `_WOOD_SEGMENT_MAX_POINTS` ≈ 1.5M, env-overridable) the geometry
+    step runs on a voxel-downsampled subset and labels propagate back to full
+    resolution by nearest neighbour — the per-point k-NN feature extraction is
+    O(N·k_max) in memory and a multi-million-point cloud at full res can OOM the
+    machine. Set `voxel_size` > 0 to choose the downsample resolution explicitly
+    instead. Either way the returned labels are full-length.
+
+    Returns an int32 array length len(points), aligned to input order, with
+    values WOOD_CLASS_WOOD / WOOD_CLASS_LEAF.
+    """
+    from sklearn.mixture import GaussianMixture
+
+    pts_full = np.ascontiguousarray(points[:, :3], dtype=np.float64)
+    n_full = len(pts_full)
+    if n_full == 0:
+        return np.zeros(0, dtype=np.int32)
+
+    cap = int(max_points) if max_points is not None else _WOOD_SEGMENT_MAX_POINTS
+
+    # AUTO safety downsample: the per-point k-NN feature extraction allocates an
+    # (N, k_max) int32 neighbour array plus transient query buffers, so a
+    # multi-million-point cloud at full resolution can exhaust RAM (a 6.4M-point
+    # tree peaked ~13 GB and hard-crashed a 16 GB machine). When the cloud is
+    # over the cap and the caller hasn't picked a `voxel_size`, derive one that
+    # targets ~`cap` points from the cloud's bounding volume, classify the
+    # reduced set, and propagate labels back to full resolution by nearest
+    # neighbour. Result stays full-length; only the heavy geometry step shrinks.
+    if (not voxel_size or voxel_size <= 0) and cap > 0 and n_full > cap:
+        span = pts_full.max(axis=0) - pts_full.min(axis=0)
+        vol = float(np.prod(np.clip(span, 1e-6, None)))
+        # voxel edge so that vol / edge^3 ≈ cap (one survivor per occupied voxel
+        # is optimistic, so this overshoots the target — fine, it's a safety net).
+        voxel_size = float((vol / cap) ** (1.0 / 3.0))
+
+    # Voxel downsample (explicit or auto) → classify reduced set → propagate.
+    if voxel_size and voxel_size > 0 and n_full > 0:
+        import open3d as o3d
+        from scipy.spatial import cKDTree
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts_full)
+        down = pcd.voxel_down_sample(float(voxel_size))
+        pts = np.asarray(down.points, dtype=np.float64)
+        if len(pts) < 3:
+            pts = pts_full  # downsample collapsed the cloud; fall back
+    else:
+        pts = pts_full
+
+    n = len(pts)
+    if n < 3:
+        # Too few points to estimate local geometry — call everything leaf
+        # (the conservative default; "wood removal" then keeps all points).
+        labels_small = np.full(n_full, WOOD_CLASS_LEAF, dtype=np.int32)
+        return labels_small
+
+    features, nbr_idx = _wood_local_pca_features(pts, k_min, k_max, k_step)
+    verticality = features[:, 1]
+    sphericity = features[:, 2]
+
+    # Wood saliency = verticality + (1 - sphericity). Wood is vertical (trunk +
+    # branches) and locally COMPACT (low sphericity); foliage scatters the local
+    # neighbourhood in 3D (high sphericity) and hangs at varied non-vertical
+    # angles. Validated to generalise across real broadleaf + conifer TLS
+    # (sphericity carries the signal) AND narrow-flat-leaf species like almond
+    # (verticality carries it) — see segment_wood docstring. Linearity is
+    # deliberately unused: branches are linear too, so it cannot separate them
+    # from leaves. Sphericity is normalised by its 99th percentile (a long-tailed
+    # ratio) so the additive blend with verticality∈[0,1] is balanced.
+    sph_n = np.clip(sphericity / (np.quantile(sphericity, 0.99) + 1e-9), 0.0, 1.0)
+    score = 0.5 * verticality + 0.5 * (1.0 - sph_n)
+
+    raw = None
+    if n >= 50:
+        try:
+            gmm = GaussianMixture(
+                n_components=2,
+                n_init=3,
+                reg_covar=1e-6,
+                random_state=0,
+            )
+            s = score.reshape(-1, 1)
+            gmm.fit(s)
+            comp = gmm.predict(s)
+            means = [score[comp == c].mean() if np.any(comp == c) else -np.inf
+                     for c in (0, 1)]
+            wood_comp = int(np.argmax(means))
+            # Degeneracy guard: if the two component means are essentially equal
+            # the score is unimodal (single population) — don't split it.
+            spread = float(np.std(score)) + 1e-9
+            separation = abs(means[0] - means[1]) / spread
+            if np.isfinite(separation) and separation >= 0.25:
+                proba = gmm.predict_proba(s)[:, wood_comp]
+                raw = np.where(proba >= wood_bias, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF)
+        except Exception:
+            raw = None
+
+    if raw is None:
+        # Degenerate / tiny / single-population cloud: decide globally by the
+        # mean saliency. High overall score → predominantly woody.
+        if float(np.mean(score)) >= 0.5:
+            raw = np.full(n, WOOD_CLASS_WOOD, dtype=np.int32)
+        else:
+            raw = np.full(n, WOOD_CLASS_LEAF, dtype=np.int32)
+    raw = raw.astype(np.int32)
+
+    # Branch recovery: the verticality-weighted GMM seed catches the trunk and
+    # vertical wood but misses HORIZONTAL scaffold branches (low verticality →
+    # low score, even though they're compact/low-sphericity like the trunk).
+    # Region-grow the wood label from the seed into connected low-sphericity
+    # points to recover them. Tuned (sph<0.02) for real TLS trees; raise toward
+    # 0 to disable. (On synthetic narrow-leaf scans this can over-grow slightly,
+    # an accepted trade since production input is real TLS.)
+    if branch_grow_sph and branch_grow_sph > 0:
+        grown = _wood_grow_branches(
+            raw == WOOD_CLASS_WOOD, sphericity, nbr_idx, float(branch_grow_sph),
+        )
+        raw = np.where(grown, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
+
+    # Drop tiny isolated wood blobs (scattered false-wood in foliage).
+    if min_speckle and min_speckle > 1:
+        wood_mask = _wood_prune_speckle(pts, raw == WOOD_CLASS_WOOD, nbr_idx,
+                                        min_size=int(min_speckle))
+        raw = np.where(wood_mask, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
+
+    labels_down = _wood_regularize(raw, nbr_idx, reg_k, reg_iters)
+
+    if n == n_full:
+        return labels_down
+
+    # Propagate downsampled labels back to full resolution by nearest neighbour,
+    # then regularise once more at full resolution to smooth voxel seams.
+    from scipy.spatial import cKDTree
+
+    nn_tree = cKDTree(pts)
+    _, nn = nn_tree.query(pts_full, k=1, workers=-1)
+    labels_full = labels_down[nn].astype(np.int32)
+    full_tree = cKDTree(pts_full)
+    _, full_idx = full_tree.query(pts_full, k=int(min(reg_k, n_full)), workers=-1)
+    if full_idx.ndim == 1:
+        full_idx = full_idx[:, None]
+    labels_full = _wood_regularize(labels_full, full_idx.astype(np.int32), reg_k, max(1, reg_iters))
+    return labels_full
 
 
 # ==================== BFS SKELETON HELPER FUNCTIONS (Li et al. 2017) ====================
@@ -8528,7 +9076,6 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     # potree-core 2.0 loader.
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
@@ -8559,6 +9106,58 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                 gmax = max(gmax, float(vals.max()))
         if np.isfinite(gmin) and np.isfinite(gmax):
             intensity_lo, intensity_hi = gmin, gmax
+    try:
+        # Offset the LAS to the data's MIN coordinate so projected clouds (UTM
+        # northings ~5.4e6 m) fit the 32-bit int range — with offset 0 and 1 mm
+        # scale only ±2.1 km is representable. Cheap pre-pass over just x/y/z
+        # (laspy re-applies the offset on read, so coordinates are unchanged
+        # downstream). Inside the try so a column-format mismatch here raises the
+        # same actionable 400 as the main stream below, not a raw ValueError.
+        xyz_pos = [names.index(r) for r in ("x", "y", "z")]
+        order = np.argsort(np.argsort(xyz_pos))  # usecols sorts by position; map back to x,y,z
+        xyz_min = np.array([np.inf, np.inf, np.inf])
+        for col_chunk in pd.read_csv(
+            source_path, sep=r"\s+", header=None,
+            usecols=xyz_pos, comment="#",
+            skiprows=skiprows, chunksize=chunk_rows, engine="c",
+        ):
+            arr = col_chunk.to_numpy(dtype=np.float64)[:, order]
+            arr = arr[np.isfinite(arr).all(axis=1)]
+            if arr.size:
+                xyz_min = np.minimum(xyz_min, arr.min(axis=0))
+        header.offsets = np.floor(np.where(np.isfinite(xyz_min), xyz_min, 0.0))
+
+        total_points = _xyz_to_las_stream(
+            source_path, out_las, header, names, skiprows, chunk_rows,
+            rgb_cols, rgb_is_255, intensity_role, intensity_lo, intensity_hi,
+            extra_dims,
+        )
+    except (ValueError, KeyError) as e:
+        # A non-numeric value reaching the x/y/z/RGB float cast almost always
+        # means the chosen column format doesn't match THIS file — e.g. a bulk
+        # import applied one file's layout to another with different columns or
+        # a stray header row. Turn the cryptic pandas/numpy error into an
+        # actionable 400 naming the file and the chosen columns, instead of an
+        # uncaught 500 the UI can only report as "Internal Server Error".
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Could not read {source_path.name} with the selected column "
+                f"format ({', '.join(names)}): {e}. The file's actual columns "
+                f"likely differ — re-import it on its own and pick a matching "
+                f"format."
+            ),
+        ) from e
+    return total_points, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
+
+
+def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, chunk_rows,
+                       rgb_cols, rgb_is_255, intensity_role, intensity_lo,
+                       intensity_hi, extra_dims) -> int:
+    """Inner streaming loop for `_xyz_to_las`, split out so the caller can wrap
+    column-mismatch errors (raised here from the float casts) into a clean 400.
+    Returns the total points written."""
+    import laspy
     total_points = 0
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         reader = pd.read_csv(
@@ -8616,8 +9215,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                 record[ed["slug"]] = chunk[ed["col"]].to_numpy(dtype=np.float32)
             writer.write_points(record)
             total_points += n
-
-    return total_points, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
+    return total_points
 
 
 def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
@@ -8729,13 +9327,15 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         # `is_miss` rides along as a normal extra dim through octree/session/LAD.
         extra_dims.append({"col": None, "slug": _MISS_SLUG, "label": _MISS_LABEL})
 
+    n = int(keep.sum())
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    # Offset to the data min so projected (e.g. UTM) coordinates fit the LAS
+    # 32-bit int range — see _session_to_las for the full rationale.
+    header.offsets = (np.floor([x[keep].min(), y[keep].min(), z[keep].min()]) if n else np.zeros(3))
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
-    n = int(keep.sum())
     record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
     record.x = x[keep]
     record.y = y[keep]
@@ -8811,11 +9411,13 @@ def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
 
     positions, colors, _ = _load_ply_pcd_arrays(str(source_path))
 
+    n = len(positions)
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    # Offset to the data min so projected (e.g. UTM) coordinates fit the LAS
+    # 32-bit int range — see _session_to_las for the full rationale.
+    header.offsets = (np.floor(positions[:, :3].min(axis=0)) if n else np.zeros(3))
 
-    n = len(positions)
     record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
     record.x = positions[:, 0].astype(np.float64)
     record.y = positions[:, 1].astype(np.float64)
@@ -9150,7 +9752,9 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
 
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    # Offset to the data min so projected (e.g. UTM) coordinates fit the LAS
+    # 32-bit int range — see _session_to_las for the full rationale.
+    header.offsets = (np.floor(xyz[:, :3].min(axis=0)) if n > 0 else np.zeros(3))
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
@@ -10463,13 +11067,19 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
         keep = keep & (sess.extras[_MISS_SLUG] == 0)
     n = int(keep.sum())
 
+    pos = sess.positions[keep]
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    # Offset to the data minimum, NOT [0,0,0]: a LAS coordinate is stored as a
+    # 32-bit int (value - offset) / scale, so with offset 0 and 1 mm scale the
+    # representable range is only ±2.1 km. Real-world projected clouds (UTM
+    # northings ~5.4e6 m) overflow that. Subtracting the per-axis minimum keeps
+    # the stored ints small for any CRS; laspy re-applies offset on read, so
+    # downstream coordinates are unchanged.
+    header.offsets = (np.floor(pos.min(axis=0)) if n else np.zeros(3, dtype=np.float64))
     for ed in sess.extra_dims_meta:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
-    pos = sess.positions[keep]
     record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
     record.x = pos[:, 0]
     record.y = pos[:, 1]
@@ -11087,6 +11697,30 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
         raise HTTPException(status_code=500, detail="CSF (cloth-simulation-filter) not installed.")
     with _cloud_session_lock:
         _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
+    cache_key, cache_dir, meta = _session_rebuild(sess)
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+
+
+class SessionWoodSegmentRequest(WoodSegmentationRequest):
+    """Run wood/leaf segmentation on the session's in-RAM points and append a
+    `wood_class` column (1=wood, 2=leaf). Inherits the segment_wood tuning
+    fields; `points`/`source` are ignored (the session's arrays are the source
+    of truth)."""
+    pass
+
+
+@app.post("/api/cloud/session/{session_id}/segment_wood")
+async def session_segment_wood(session_id: str, request: SessionWoodSegmentRequest):
+    """Wood/leaf segmentation on the in-RAM survivors → append `wood_class` →
+    rebuild octree from the arrays. No source file read."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        pts = sess.positions[~sess.deleted].copy()
+    if len(pts) < 3:
+        raise HTTPException(status_code=400, detail="Need at least 3 points for wood/leaf segmentation.")
+    labels = segment_wood(pts, **_wood_segment_kwargs(request))
+    with _cloud_session_lock:
+        _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
     cache_key, cache_dir, meta = _session_rebuild(sess)
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
 
