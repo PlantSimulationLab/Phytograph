@@ -24,8 +24,6 @@ export interface QSM3DProps {
   /** Shoots (ordered cylinder chains) -- used to build one continuous tube each. */
   shoots: QSMShoot[];
   colorMode?: QSMColorMode;
-  /** shoot_id to highlight (the whole continuous axis), or null. */
-  selectedShootId?: number | null;
   opacity?: number;
   /** number of sides of each cross-section ring (more = rounder, costlier). */
   radialSegments?: number;
@@ -55,11 +53,6 @@ export function rankColor(rank: number): THREE.Color {
   const idx = Math.min(Math.max(rank, 0), RANK_COLORS.length - 1);
   return RANK_COLORS[idx];
 }
-
-// Reused (not re-allocated per cylinder) for the selected-shoot highlight/dim
-// lerp in the geometry hot loop.
-const HIGHLIGHT_COLOR = new THREE.Color('#ffffff');
-const DIM_COLOR = new THREE.Color('#000000');
 
 // Deterministic distinct color per shoot id via the golden-ratio hue rotation
 // (so adjacent shoot ids look clearly different, and the same id always maps to
@@ -147,21 +140,15 @@ export function buildShootPolylines(
 }
 
 // The per-node color for one shoot. Color is constant along the shoot (rank or
-// shoot-id hue), with the exact selection highlight/dim the per-cylinder renderer
-// used. Returned as a length-M array so future per-node coloring is a drop-in.
+// shoot-id hue). Returned as a length-M array so future per-node coloring is a
+// drop-in.
 function shootNodeColors(
   poly: ShootPolyline,
   colorMode: QSMColorMode,
-  selectedShootId: number | null,
   m: number
 ): THREE.Color[] {
-  const base =
+  const col =
     colorMode === 'shoot' ? shootColor(poly.shootId) : rankColor(poly.rank);
-  const col = base.clone();
-  if (selectedShootId != null) {
-    if (poly.shootId === selectedShootId) col.lerp(HIGHLIGHT_COLOR, 0.35);
-    else col.lerp(DIM_COLOR, 0.55);
-  }
   return Array.from({ length: m }, () => col);
 }
 
@@ -279,7 +266,6 @@ export function QSM3D({
   cylinders,
   shoots,
   colorMode = 'rank',
-  selectedShootId = null,
   opacity = 1.0,
   radialSegments = 8,
 }: QSM3DProps) {
@@ -303,7 +289,7 @@ export function QSM3D({
     for (const poly of polylines) {
       const m = poly.nodes.length;
       if (m < 2) continue; // a 1-cylinder shoot still yields M=2
-      const colorPerNode = shootNodeColors(poly, colorMode, selectedShootId, m);
+      const colorPerNode = shootNodeColors(poly, colorMode, m);
       appendTube(arrays, poly.nodes, poly.radii, colorPerNode, n);
     }
 
@@ -317,7 +303,7 @@ export function QSM3D({
     return geo;
     // opacity is intentionally NOT a dep: it affects only the material (its own
     // useMemo), so including it would force a needless geometry rebuild.
-  }, [cylinders, shoots, colorMode, selectedShootId, radialSegments]);
+  }, [cylinders, shoots, colorMode, radialSegments]);
 
   const material = useMemo(() => {
     const mat = new THREE.MeshStandardMaterial({
