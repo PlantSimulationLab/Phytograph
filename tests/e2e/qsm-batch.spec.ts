@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const TREE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
@@ -17,7 +18,7 @@ const TREE_VIEW2 = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree-view2.xyz');
 // rendered QSM result rows. Asserts TWO separate QSMs land, each named after
 // its own source scan with a real (non-zero) cylinder count.
 test('batch-builds one QSM per selected scan via the UI', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     // The renderer keeps a full-screen splash up (intercepting all pointer
@@ -27,12 +28,7 @@ test('batch-builds one QSM per selected scan via the UI', async () => {
     await expect(page.getByTestId('backend-splash')).toHaveCount(0, { timeout: 60_000 });
 
     // Import both fixtures at once (drives handleMultipleFiles).
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles([TREE, TREE2]);
+    await importFiles(app, page, 'import-point-cloud', [TREE, TREE2]);
     await completeImportWizard(page);
 
     const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
@@ -106,17 +102,12 @@ test('batch-builds one QSM per selected scan via the UI', async () => {
 // all scans", build. Asserts exactly ONE QSM row lands, labelled as fused, with
 // a clean 1-trunk structure — proving the points were merged, not built apart.
 test('aggregates multiple scans into a single fused QSM via the UI', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     await expect(page.getByTestId('backend-splash')).toHaveCount(0, { timeout: 60_000 });
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles([TREE_VIEW1, TREE_VIEW2]);
+    await importFiles(app, page, 'import-point-cloud', [TREE_VIEW1, TREE_VIEW2]);
     await completeImportWizard(page);
 
     const view1Row = page.locator('[data-testid="scan-row"][data-scan-name="tree-view1.xyz"]');

@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'scalars.xyz');
@@ -25,13 +26,8 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'scalars.xyz');
  *   - Deviation in [0, 2] keeps 36; the complement is 24. 36 + 24 == 60.
  */
 
-async function importAndSelect(page: import('@playwright/test').Page) {
-  await page.getByTestId('import-menu-button').click();
-  const [chooser] = await Promise.all([
-    page.waitForEvent('filechooser'),
-    page.getByTestId('import-menu-pointcloud').click(),
-  ]);
-  await chooser.setFiles(FIXTURE);
+async function importAndSelect(app: import('@playwright/test').ElectronApplication, page: import('@playwright/test').Page) {
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
   const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
@@ -42,9 +38,9 @@ async function importAndSelect(page: import('@playwright/test').Page) {
 }
 
 test('filters an octree-backed cloud by an imported scalar attribute', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    const cloudRow = await importAndSelect(page);
+    const cloudRow = await importAndSelect(app, page);
     expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
 
     await page.getByTestId('tool-filter').click();
@@ -79,9 +75,9 @@ test('filters an octree-backed cloud by an imported scalar attribute', async () 
 });
 
 test('segments an octree cloud into in-range + out-of-range clouds', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    const cloudRow = await importAndSelect(page);
+    const cloudRow = await importAndSelect(app, page);
 
     await page.getByTestId('tool-filter').click();
     const fieldSelect = page.getByTestId('filter-field-select');
@@ -125,9 +121,9 @@ test('a second filter composes on the first result, not the original source', as
   // [3,4]. Those two windows are disjoint, so a correctly-chained second filter
   // keeps NOTHING (→ delete dialog). If it re-read the original it would wrongly
   // keep the 24 points with dev∈{3,4}.
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    const cloudRow = await importAndSelect(page);
+    const cloudRow = await importAndSelect(app, page);
 
     await page.getByTestId('tool-filter').click();
     const fieldSelect = page.getByTestId('filter-field-select');
@@ -162,9 +158,9 @@ test('a second filter composes on the first result, not the original source', as
 });
 
 test('offers to delete when a scalar filter excludes every point', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    const cloudRow = await importAndSelect(page);
+    const cloudRow = await importAndSelect(app, page);
 
     await page.getByTestId('tool-filter').click();
     const fieldSelect = page.getByTestId('filter-field-select');

@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 // Every supported point-cloud format imports through the UI as a streaming
@@ -24,14 +25,9 @@ const CASES = [
 
 for (const { file, name } of CASES) {
   test(`imports ${file} as an octree-backed cloud`, async () => {
-    const { page, close } = await launchApp();
+    const { app, page, close } = await launchApp();
     try {
-      await page.getByTestId('import-menu-button').click();
-      const [chooser] = await Promise.all([
-        page.waitForEvent('filechooser'),
-        page.getByTestId('import-menu-pointcloud').click(),
-      ]);
-      await chooser.setFiles([join(FIXTURES, file)]);
+      await importFiles(app, page, 'import-point-cloud', [join(FIXTURES, file)]);
       await completeImportWizard(page);
 
       const row = page.locator(`[data-testid="scan-row"][data-scan-name="${name}"]`);

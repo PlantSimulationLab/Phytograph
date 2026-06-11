@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 
 // A textured OBJ (with its sibling MTL + PNG) imported through the real
 // dropzone must route through the backend's /api/mesh/import endpoint and come
@@ -11,19 +12,14 @@ import { launchApp, repoRoot } from './helpers/launchApp';
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'quad.obj');
 
 test('imports a textured OBJ+MTL and renders it textured', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
     // Auto-detect import (OBJ → mesh). The handler opens a real OS file
     // chooser, so intercept it before clicking.
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-auto', FIXTURE);
 
     // The textured quad becomes a mesh row.
     const meshRow = page.getByTestId('mesh-row').first();

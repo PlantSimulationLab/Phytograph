@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
@@ -12,16 +13,11 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 // plant the build test uses, which yields a clean 1-trunk + 2-scaffold model
 // (the two scaffolds are terminal shoots, so leaves are placed on them).
 test('adds procedural leaves to a QSM via the UI', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     // Import the cloud (intercept the OS file chooser).
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');

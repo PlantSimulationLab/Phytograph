@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 // sparse.xyz has 30 points — below the QSM 50-point floor — so the live backend
@@ -12,17 +13,12 @@ const SPARSE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sparse.xyz');
 // a stale failure message survived a close/re-open even after re-importing).
 // Drives the LIVE backend (the 50-point floor is a real backend check).
 test('shows a QSM build error and clears it when the panel re-opens', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     await expect(page.getByTestId('backend-splash')).toHaveCount(0, { timeout: 60_000 });
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(SPARSE);
+    await importFiles(app, page, 'import-point-cloud', SPARSE);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="sparse.xyz"]');

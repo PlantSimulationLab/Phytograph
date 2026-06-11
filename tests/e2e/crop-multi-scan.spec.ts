@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -28,17 +29,12 @@ const TINY_OFFSET = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-offset.xyz'
 //   3. Correctness — read each row's `data-point-count` attribute after
 //      apply; assert the exact post-crop count, not just "didn't throw".
 test('multi-scan crop applies one world-space box across two selected scans', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
     // ── Import tiny.xyz ────────────────────────────────────────────────────
-    await page.getByTestId('import-menu-button').click();
-    const [chooser1] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser1.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -46,12 +42,7 @@ test('multi-scan crop applies one world-space box across two selected scans', as
     await expect(tinyRow).toHaveAttribute('data-point-count', '60');
 
     // ── Import tiny-offset.xyz ─────────────────────────────────────────────
-    await page.getByTestId('import-menu-button').click();
-    const [chooser2] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser2.setFiles(TINY_OFFSET);
+    await importFiles(app, page, 'import-auto', TINY_OFFSET);
     await completeImportWizard(page);
 
     const offsetRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset.xyz"]');
@@ -146,16 +137,11 @@ test('multi-scan crop applies one world-space box across two selected scans', as
 // must NOT also apply the crop. Apply is bound exclusively to the
 // explicit Apply button.
 test('Enter inside a dim input commits the value without applying the crop', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -195,16 +181,11 @@ test('Enter inside a dim input commits the value without applying the crop', asy
 // must have an explicit close button so a user who entered crop mode by
 // mistake can back out without applying.
 test('crop panel × button dismisses without applying', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');

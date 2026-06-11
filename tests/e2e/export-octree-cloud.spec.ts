@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -13,7 +14,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // blob download. We capture the blob and assert it contains the right number
 // of points, proving the octree export round-trips real bytes (not "no error").
 test('exports an octree-backed cloud to XYZ via the backend', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     // Capture the downloaded blob. Key by the object URL (not a sequence
@@ -45,12 +46,7 @@ test('exports an octree-backed cloud to XYZ via the backend', async () => {
       };
     });
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');

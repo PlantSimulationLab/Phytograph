@@ -24,13 +24,12 @@ You have three ways to import:
     Drag the file from your file manager anywhere onto the Phytograph
     window. Phytograph auto-detects the format.
 
-=== "Import button"
+=== "File menu"
 
-    Click the **Import** button in the toolbar. Use the dropdown chevron
-    next to it to force a specific format (Point Cloud, Mesh, Skeleton)
-    if auto-detection picks the wrong one.
-
-    ![Import dropdown](../assets/screenshots/02-import-dropdown.png){ width="320" }
+    Open **File → Import** and pick **Auto-detect** to let Phytograph
+    choose the format, or force a specific one (**Point Cloud**, **Mesh**,
+    **Skeleton**) when auto-detection picks the wrong type for an
+    ambiguous format like `.ply`.
 
 === "Command palette"
 

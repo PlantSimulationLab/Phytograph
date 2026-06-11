@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -17,18 +18,13 @@ const TREE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 // Per CLAUDE.md Testing rules: live backend, drive the real UI via the file
 // chooser, assert concrete point counts read from the rendered scan rows.
 test('imports multiple point clouds at once via Import → Point Cloud', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
     // Open Import menu, pick "Point Cloud", and feed the OS chooser BOTH
     // fixtures in one selection — this drives handleMultipleFiles.
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles([TINY, TREE]);
+    await importFiles(app, page, 'import-point-cloud', [TINY, TREE]);
     await completeImportWizard(page);
 
     // Both clouds must appear as scan rows with their exact point counts.

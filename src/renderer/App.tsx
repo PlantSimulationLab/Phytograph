@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Upload, Box, Layers, FileUp, ChevronDown, Sparkles, GitBranch } from "lucide-react";
+import { Box, FileUp } from "lucide-react";
 import * as THREE from 'three';
 import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
@@ -50,14 +50,12 @@ function App() {
   const [activeNav, setActiveNav] = useState<NavItem>('viewer');
   const [scans, setScans] = useState<Scan[]>([]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
-  // Progress shown over the viewer while an import triggered from the viewer
-  // header (Import menu / File menu) is in flight. Reuses BulkImportProgress
-  // so every import pathway shows the same spinner + bar + filename modal.
+  // Progress shown over the viewer while an import (drag-drop or the
+  // File → Import menu) is in flight. Reuses BulkImportProgress so every
+  // import pathway shows the same spinner + bar + filename modal.
   const [importProgress, setImportProgress] = useState<BulkImportProgressState | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [showImportMenu, setShowImportMenu] = useState(false);
   const pendingImportTypeRef = useRef<ImportType>('auto');
-  const importMenuRef = useRef<HTMLDivElement>(null);
 
   // Import refs from PointCloudViewer for mesh/skeleton imports
   const importRefsRef = useRef<ImportRefs | null>(null);
@@ -100,19 +98,6 @@ function App() {
     stitchedScanId: string;
   }
   const stitchHistoryRef = useRef<StitchHistoryEntry[]>([]);
-
-  // Close import menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (importMenuRef.current && !importMenuRef.current.contains(e.target as Node)) {
-        setShowImportMenu(false);
-      }
-    };
-    if (showImportMenu) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
-    }
-  }, [showImportMenu]);
 
   // Auto-select the current value when any numeric input gains focus so
   // the user can type to replace it. Paired with the
@@ -599,11 +584,6 @@ function App() {
     multiple: true, // Allow multiple files
   });
 
-  const handleClearAllScans = () => {
-    setScans([]);
-    setSelectedScanIds(new Set());
-  };
-
   const handleRemoveScan = useCallback((id: string) => {
     setScans(prev => {
       // Free the cloud's backend session (release its in-RAM array) when it's
@@ -919,11 +899,16 @@ function App() {
   }, []);
 
   // Subscribe to application-menu commands dispatched from main (src/main/menu.ts).
-  // Most menu items map to existing handlers; import re-uses the dropzone's
-  // open() with pendingImportTypeRef set, exactly like the in-window import menu.
+  // Most menu items map to existing handlers; File → Import sets
+  // pendingImportTypeRef and re-uses the dropzone's open() to pick files.
   useEffect(() => {
     const unsubscribe = window.electronAPI.onMenuCommand((payload) => {
       switch (payload.kind) {
+        case 'import-auto':
+          pendingImportTypeRef.current = 'auto';
+          setActiveNav('viewer');
+          open();
+          break;
         case 'import-point-cloud':
           pendingImportTypeRef.current = 'pointcloud';
           setActiveNav('viewer');
@@ -974,9 +959,9 @@ function App() {
   const totalPoints = scans.reduce((sum, s) => sum + (s.data?.pointCount ?? 0), 0);
 
   // Empty-state hint shown over the viewer canvas when no scans are loaded
-  // (fresh launch or after Close All). Faint and click-through so it never
-  // blocks canvas interaction or the drag-drop overlay; the global dropzone
-  // and the toolbar Import menu remain the actual entry points.
+  // (fresh launch, or after the scans are removed). Faint and click-through so
+  // it never blocks canvas interaction or the drag-drop overlay; the global
+  // dropzone and the File → Import menu remain the actual entry points.
   const renderEmptyHint = () => (
     <div data-testid="empty-viewer-hint" className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
       <div className="text-center px-8">
@@ -1021,62 +1006,6 @@ function App() {
             ({totalPoints.toLocaleString()} total points)
           </span>
         </div>
-        <div className="flex-1" />
-        <div className="relative" ref={importMenuRef}>
-          <button
-            data-testid="import-menu-button"
-            onClick={() => setShowImportMenu(!showImportMenu)}
-            className="px-3 py-1.5 text-sm bg-neutral-700 text-neutral-200 rounded hover:bg-neutral-600 transition-colors flex items-center gap-1"
-          >
-            <Upload className="w-4 h-4" />
-            Import
-            <ChevronDown className="w-3 h-3" />
-          </button>
-          {showImportMenu && (
-            <div data-testid="import-menu" className="absolute top-full right-0 mt-1 bg-neutral-800 border border-neutral-700 rounded-lg shadow-lg py-1 min-w-[180px] z-50">
-              <button
-                data-testid="import-menu-auto"
-                onClick={() => { pendingImportTypeRef.current = 'auto'; setShowImportMenu(false); open(); }}
-                className="w-full px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-700 flex items-center gap-2 text-left"
-              >
-                <Sparkles className="w-4 h-4 text-neutral-400" />
-                Auto-detect
-              </button>
-              <div className="border-t border-neutral-700 my-1" />
-              <button
-                data-testid="import-menu-pointcloud"
-                onClick={() => { pendingImportTypeRef.current = 'pointcloud'; setShowImportMenu(false); open(); }}
-                className="w-full px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-700 flex items-center gap-2 text-left"
-              >
-                <Layers className="w-4 h-4 text-blue-400" />
-                Point Cloud
-              </button>
-              <button
-                data-testid="import-menu-mesh"
-                onClick={() => { pendingImportTypeRef.current = 'mesh'; setShowImportMenu(false); open(); }}
-                className="w-full px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-700 flex items-center gap-2 text-left"
-              >
-                <Box className="w-4 h-4 text-green-400" />
-                Mesh
-              </button>
-              <button
-                data-testid="import-menu-skeleton"
-                onClick={() => { pendingImportTypeRef.current = 'skeleton'; setShowImportMenu(false); open(); }}
-                className="w-full px-3 py-2 text-sm text-neutral-200 hover:bg-neutral-700 flex items-center gap-2 text-left"
-              >
-                <GitBranch className="w-4 h-4 text-amber-400" />
-                Skeleton
-              </button>
-            </div>
-          )}
-        </div>
-        <button
-          data-testid="close-all-scans"
-          onClick={handleClearAllScans}
-          className="px-3 py-1.5 text-sm text-neutral-400 hover:text-neutral-200 hover:bg-neutral-700 rounded transition-colors"
-        >
-          Close All
-        </button>
       </div>
 
       {/* 3D Viewer */}
@@ -1201,8 +1130,8 @@ function App() {
         </div>
       </div>
 
-      {/* Import progress modal for imports triggered from the viewer header
-          (Import menu / File menu). Reuses the same BulkImportProgress
+      {/* Import progress modal for imports (drag-drop or File → Import).
+          Reuses the same BulkImportProgress
           component as the Helios XML and per-scan attach pathways so every
           import shows an identical modal. */}
       <BulkImportProgress progress={importProgress} />

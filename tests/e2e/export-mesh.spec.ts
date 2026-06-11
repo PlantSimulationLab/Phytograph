@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -15,7 +16,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // renderer-side pipeline (selection → exportMesh → OBJ string assembly
 // → blob construction) and asserts on the real bytes a user would save.
 test('exports a generated mesh to OBJ via the Export panel', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     // Patch URL.createObjectURL BEFORE the click so we capture the blob
@@ -61,12 +62,7 @@ test('exports a generated mesh to OBJ via the Export panel', async () => {
     // Import the cylinder fixture. The Auto-detect menu item calls
     // react-dropzone's open() under the hood, which fires a real OS file
     // chooser; intercept it before the click so it never surfaces.
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-auto', FIXTURE);
     await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');

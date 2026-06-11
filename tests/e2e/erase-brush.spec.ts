@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -27,15 +28,10 @@ const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // point count drops. "Didn't throw" is not the bar.
 
 test('erase brush: painting square stamps and applying removes points (octree)', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -125,15 +121,10 @@ test('erase brush: painting square stamps and applying removes points (octree)',
 // Clear Strokes discards the painted preview without touching the cloud — the
 // stamp counter returns to 0 and the point count is unchanged.
 test('erase brush: Clear Strokes discards the preview without erasing', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -176,15 +167,10 @@ test('erase brush: Clear Strokes discards the preview without erasing', async ()
 // toggles erase MODE within the open tool (not the tool itself): ON freezes the
 // view and clicks stamp; OFF leaves the panel open so the user can reframe.
 test('erase brush: E toggles erase mode within the open tool', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -232,15 +218,10 @@ test('erase brush: E toggles erase mode within the open tool', async () => {
 // previously-erased points reappear. Stamps live in the parent across the
 // brush component's unmount/remount and resume because the camera matches.
 test('erase brush: toggling mode off and on accumulates stamps (no reset)', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');

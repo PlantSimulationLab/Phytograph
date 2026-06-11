@@ -133,7 +133,7 @@ clouds (vertices only) and polygon meshes (vertices **and** faces). On import,
 Phytograph reads the PLY header and routes automatically: if it declares
 `element face` with at least one face, the file imports as a **mesh**;
 otherwise it imports as a **point cloud**. You can override this with the
-import menu's explicit **Point cloud** / **Mesh** choices. A PLY mesh imported
+**File → Import** menu's explicit **Point cloud** / **Mesh** choices. A PLY mesh imported
 this way keeps its geometry, normals, and per-vertex color, but (unlike PLY
 point clouds) does not carry arbitrary per-vertex scalar fields.
 

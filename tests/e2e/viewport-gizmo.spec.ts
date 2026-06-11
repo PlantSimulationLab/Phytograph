@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -18,16 +19,11 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // what this test drives — through the real OrbitControls + camera — asserting
 // a correct Z-up basis and an unchanged camera-to-target distance.
 test('viewport gizmo orients down a world axis with Z-up and no zoom change', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     // Import a cloud so the viewer mounts with real content and a framed camera.
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-auto', FIXTURE);
     await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');

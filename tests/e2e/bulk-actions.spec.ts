@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const fixture = (name: string) => join(repoRoot, 'tests', 'e2e', 'fixtures', name);
@@ -17,13 +18,8 @@ const TREE2 = fixture('tree2.xyz');
 // buttons, modifier clicks), assert concrete DOM state (data-visible counts,
 // exactly one confirm dialog, row count after delete).
 
-async function importThreeScans(page: import('@playwright/test').Page) {
-  await page.getByTestId('import-menu-button').click();
-  const [chooser] = await Promise.all([
-    page.waitForEvent('filechooser'),
-    page.getByTestId('import-menu-pointcloud').click(),
-  ]);
-  await chooser.setFiles([TINY, TREE, TREE2]);
+async function importThreeScans(app: import('@playwright/test').ElectronApplication, page: import('@playwright/test').Page) {
+  await importFiles(app, page, 'import-point-cloud', [TINY, TREE, TREE2]);
   await completeImportWizard(page);
 
   const rows = page.locator('[data-testid="scan-row"]');
@@ -35,9 +31,9 @@ function rowByName(page: import('@playwright/test').Page, name: string) {
 }
 
 test('header hide acts only on the selection, leaving unselected scans visible', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await importThreeScans(page);
+    await importThreeScans(app, page);
 
     const tiny = rowByName(page, 'tiny.xyz');
     const tree = rowByName(page, 'tree.xyz');
@@ -66,9 +62,9 @@ test('header hide acts only on the selection, leaving unselected scans visible',
 });
 
 test('header hide with no selection toggles the whole section', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await importThreeScans(page);
+    await importThreeScans(app, page);
     const rows = page.locator('[data-testid="scan-row"]');
 
     // Nothing selected (deselect any auto-selection from import).
@@ -92,9 +88,9 @@ test('header hide with no selection toggles the whole section', async () => {
 });
 
 test('header delete removes the selection behind a single confirmation', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await importThreeScans(page);
+    await importThreeScans(app, page);
 
     const tiny = rowByName(page, 'tiny.xyz');
     const tree = rowByName(page, 'tree.xyz');
@@ -122,9 +118,9 @@ test('header delete removes the selection behind a single confirmation', async (
 });
 
 test('a single-row trash still confirms with the scan name, not a count', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await importThreeScans(page);
+    await importThreeScans(app, page);
 
     // Click the per-row trash on tree.xyz (unchanged single-delete path).
     const tree = rowByName(page, 'tree.xyz');

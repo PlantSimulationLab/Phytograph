@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 // PLY is an ambiguous container: it may hold a point cloud (vertices only) or a
@@ -15,17 +16,12 @@ const MESH_PLY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'cube-mesh.ply');
 const CLOUD_PLY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.ply');
 
 test('auto-detects a PLY polygon mesh and imports it as a mesh', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(MESH_PLY);
+    await importFiles(app, page, 'import-auto', MESH_PLY);
 
     // The cube becomes a mesh row (not a scan/point-cloud row).
     const meshRow = page.getByTestId('mesh-row').first();
@@ -44,17 +40,12 @@ test('auto-detects a PLY polygon mesh and imports it as a mesh', async () => {
 });
 
 test('auto-detects a vertices-only PLY and imports it as a point cloud', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(CLOUD_PLY);
+    await importFiles(app, page, 'import-auto', CLOUD_PLY);
 
     // A path-backed point cloud routes through the import wizard; complete it.
     await completeImportWizard(page);

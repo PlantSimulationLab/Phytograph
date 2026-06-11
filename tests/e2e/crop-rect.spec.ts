@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -26,15 +27,10 @@ const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 //      pixel space and the crop projection's pixel space diverged.
 
 test('rect crop: full-viewport drag keeps all enclosed points', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -109,15 +105,10 @@ test('rect crop: full-viewport drag keeps all enclosed points', async () => {
 // separate trapezoid from rectangle reliably, but the projection matrix is
 // exact.
 test('rect crop: committed region uses an orthographic projection (no perspective trapezoid)', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -183,15 +174,10 @@ test('rect crop: committed region uses an orthographic projection (no perspectiv
 // viewport centre, so a half-cut splits it. This is what would fail if the
 // rect's pixel space and the crop projection's pixel space diverged.
 test('rect crop: half-viewport drag keeps a strict subset of points', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');

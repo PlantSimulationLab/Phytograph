@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
 import { completeImportWizard } from './helpers/importWizard';
 
@@ -79,13 +80,8 @@ test('adjusts QSM leaf angles to a measured distribution via the UI', async () =
     expect(parseInt((await meshRow.getAttribute('data-triangle-count'))!, 10)).toBeGreaterThan(0);
 
     // --- Import the same scan as a point cloud and build a QSM -------------
-    await page.getByTestId('import-menu-button').click();
     const cloudXyz = join(repoRoot, 'tests', 'e2e', 'fixtures', 'lad-leafcube', 'leafcube.xyz');
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(cloudXyz);
+    await importFiles(app, page, 'import-point-cloud', cloudXyz);
     await completeImportWizard(page);
 
     // The freshly imported cloud is auto-selected and is the last row; make sure

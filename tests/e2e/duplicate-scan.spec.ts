@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const fixture = (name: string) => join(repoRoot, 'tests', 'e2e', 'fixtures', name);
@@ -24,13 +25,8 @@ function rowByName(page: import('@playwright/test').Page, name: string) {
   return page.locator(`[data-testid="scan-row"][data-scan-name="${name}"]`);
 }
 
-async function importTree(page: import('@playwright/test').Page) {
-  await page.getByTestId('import-menu-button').click();
-  const [chooser] = await Promise.all([
-    page.waitForEvent('filechooser'),
-    page.getByTestId('import-menu-pointcloud').click(),
-  ]);
-  await chooser.setFiles([TREE]);
+async function importTree(app: import('@playwright/test').ElectronApplication, page: import('@playwright/test').Page) {
+  await importFiles(app, page, 'import-point-cloud', [TREE]);
   await completeImportWizard(page);
   const original = rowByName(page, 'tree.xyz');
   await expect(original).toHaveCount(1, { timeout: 20_000 });
@@ -39,9 +35,9 @@ async function importTree(page: import('@playwright/test').Page) {
 }
 
 test('duplicating a scan creates an independent "(copy)" with the same point count', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    const original = await importTree(page);
+    const original = await importTree(app, page);
     const originalId = await original.getAttribute('data-scan-id');
     const originalCount = await original.getAttribute('data-point-count');
     expect(parseInt(originalCount ?? '0', 10)).toBeGreaterThan(0);
@@ -66,9 +62,9 @@ test('duplicating a scan creates an independent "(copy)" with the same point cou
 });
 
 test('duplicating the copy enumerates to "(copy 2)"', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    const original = await importTree(page);
+    const original = await importTree(app, page);
     const originalId = await original.getAttribute('data-scan-id');
 
     await page.getByTestId(`scan-duplicate-${originalId}`).click();

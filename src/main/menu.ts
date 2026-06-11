@@ -63,6 +63,8 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
         {
           label: 'Import',
           submenu: [
+            { label: 'Auto-detect…', click: () => send({ kind: 'import-auto' }) },
+            { type: 'separator' },
             { label: 'Point Cloud…', click: () => send({ kind: 'import-point-cloud' }) },
             { label: 'Mesh…', click: () => send({ kind: 'import-mesh' }) },
             { label: 'Skeleton…', click: () => send({ kind: 'import-skeleton' }) },

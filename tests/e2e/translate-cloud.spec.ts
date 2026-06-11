@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -16,16 +17,11 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // asserts on the LIVE three.js object position (window.__octreePositions), which
 // is exactly the surface the bug lived on — React state was already correct.
 test('T-modal translate moves an octree cloud in the rendered scene', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     // Import a cloud through the real file picker + wizard.
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-auto', FIXTURE);
     await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');

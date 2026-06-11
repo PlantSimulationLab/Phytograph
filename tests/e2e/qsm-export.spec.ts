@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const TREE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
@@ -34,12 +35,7 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
     }, outDir);
 
     // Import a tree and build a QSM through the real UI.
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles([TREE]);
+    await importFiles(app, page, 'import-point-cloud', [TREE]);
     await completeImportWizard(page);
 
     const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');

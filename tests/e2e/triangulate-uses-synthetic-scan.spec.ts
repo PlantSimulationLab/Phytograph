@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
 import { completeImportWizard } from './helpers/importWizard';
 
@@ -65,14 +66,7 @@ test('triangulation uses overwritten synthetic data, not the stale source file',
     // scan origins (±2 on each axis at z=0.5) look at. Use the explicit "Mesh"
     // import (not auto-detect) so the faces-bearing PLY routes straight to a mesh
     // row instead of the point-cloud import wizard.
-    await page.getByTestId('import-menu-button').click();
-    const meshImportItem = page.getByTestId('import-menu-mesh');
-    await expect(meshImportItem).toBeVisible();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      meshImportItem.click(),
-    ]);
-    await chooser.setFiles(join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-mesh.ply'));
+    await importFiles(app, page, 'import-mesh', join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-mesh.ply'));
     const meshRows = page.getByTestId('mesh-row');
     await expect(meshRows).toHaveCount(1, { timeout: 30_000 });
 

@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -20,17 +21,12 @@ const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // counts of BOTH resulting clouds — kept (24) + segment (36) = original (60),
 // so no points are lost.
 test('crop Segment splits a scan in two without losing points', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
     // ── Import tiny.xyz ────────────────────────────────────────────────────
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -97,16 +93,11 @@ test('crop Segment splits a scan in two without losing points', async () => {
 // Regression: with Segment OFF, crop behaves exactly as before — the
 // cropped-out points are discarded and no extra cloud is added.
 test('crop without Segment discards cropped-out points (no new cloud)', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');

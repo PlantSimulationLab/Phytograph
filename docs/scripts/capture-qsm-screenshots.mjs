@@ -78,16 +78,20 @@ async function main() {
     console.log('Backend ready.');
     // Wait for the renderer shell to actually mount before driving it (the
     // visible-window launch can take a beat longer than the hidden E2E mode).
-    await page.getByTestId('import-menu-button').waitFor({ timeout: 60_000 });
+    await page.getByTestId('app-dropzone-input').waitFor({ state: 'attached', timeout: 60_000 });
     await page.waitForTimeout(1000);
 
-    // ── Import the fixture as a point cloud (intercept the OS file chooser) ──
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    // ── Import the fixture as a point cloud ──
+    // E2E mode disables the native menu chrome and the in-window import
+    // dropdown was removed, so fire the File → Import menu command over IPC
+    // (exactly what a native menu click does) to set the import type, then
+    // feed the dropzone's hidden input directly — the menu command arrives
+    // without user activation, so react-dropzone's open() can't surface a
+    // native chooser here. Mirrors tests/e2e/helpers/importFiles.ts.
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: 'import-point-cloud' });
+    });
+    await page.getByTestId('app-dropzone-input').setInputFiles(FIXTURE);
 
     // Complete the import wizard (mirrors tests/e2e/helpers/importWizard.ts):
     // step to the last scan, then click Import once it enables.

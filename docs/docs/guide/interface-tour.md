@@ -12,13 +12,12 @@ memorize anything.
 |---|---|
 | Top-left | Phytograph logo and the current scene summary ("N Clouds, M Meshes…") |
 | Top-center | The active mode label |
-| Top-right | **Import** button (with a chevron for the format dropdown), **Close All** |
 
-Hover the **Import** chevron to choose **Auto-detect**, **Point Cloud**,
-**Mesh**, or **Skeleton** — useful when auto-detection picks the wrong
-type for ambiguous formats like `.ply`.
-
-![Import dropdown open](../assets/screenshots/02-import-dropdown.png){ width="900" }
+Import is via **drag-and-drop** onto the window or the **File → Import**
+menu — choose **Auto-detect**, or an explicit **Point Cloud**, **Mesh**,
+or **Skeleton** when auto-detection picks the wrong type for an ambiguous
+format like `.ply`. To remove scans, select them in the **Scans** panel
+and delete.
 
 ## Left tool column
 

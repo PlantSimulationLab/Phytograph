@@ -21,7 +21,6 @@
 //
 // Output:
 //   docs/docs/assets/screenshots/01-empty-viewer.png
-//   docs/docs/assets/screenshots/02-import-dropdown.png
 //   docs/docs/assets/screenshots/03-first-scan.png
 //   docs/docs/assets/screenshots/05-command-palette.png
 
@@ -99,34 +98,10 @@ async function main() {
     await page.screenshot({ path: join(outDir, '01-empty-viewer.png') });
     console.log('Saved 01-empty-viewer.png');
 
-    // ── 02: Import dropdown open ────────────────────────────────────────
-    await page.waitForTimeout(600);
-    // The chevron toggle next to Import opens the dropdown. The main
-    // import-menu-button click opens the file picker, which we don't want
-    // here — we want the menu. Look for the chevron toggle.
-    const chevron = page.locator('[data-testid="import-menu-toggle"], button:has-text("Import") + button').first();
-    const chevronCount = await chevron.count();
-    if (chevronCount > 0) {
-      await chevron.click();
-    } else {
-      // Fallback: click the import button itself and immediately screenshot
-      // before the file picker steals focus.
-      await page.getByTestId('import-menu-button').click({ noWaitAfter: true });
-    }
-    await page.waitForTimeout(400);
-    await page.screenshot({ path: join(outDir, '02-import-dropdown.png') });
-    console.log('Saved 02-import-dropdown.png');
-    // Dismiss any open menu/picker.
-    await page.keyboard.press('Escape');
-    await page.waitForTimeout(400);
-
     // ── 03: Viewer with the fixture cloud loaded ───────────────────────
-    await page.getByTestId('import-menu-button').click();
-    await page.waitForTimeout(200);
-    const autoBtn = page.getByTestId('import-menu-auto');
-    if (await autoBtn.count() > 0) {
-      await autoBtn.click();
-    }
+    // Import via the dropzone's hidden file input directly (auto-detect is
+    // the default). The in-window import dropdown was removed; the live
+    // import paths are drag-and-drop and the File → Import menu.
     await page.getByTestId('app-dropzone-input').setInputFiles(FIXTURE);
     // Wait for the cloud to appear in the scene panel. The row testid is
     // "scan-row" (matches tests/e2e). Allow a generous timeout — a real TLS

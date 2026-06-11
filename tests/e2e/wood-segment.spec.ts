@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf.xyz');
@@ -18,15 +19,10 @@ const FIXTURE2 = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf2.xyz
 // modes produce the expected child cloud / reduced point count.
 
 test('segments wood vs leaf and colours by the wood_class attribute', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz"]');
@@ -71,15 +67,10 @@ test('segments wood vs leaf and colours by the wood_class attribute', async () =
 });
 
 test('removes wood, leaving a leaf-only cloud', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz"]');
@@ -105,16 +96,11 @@ test('removes wood, leaving a leaf-only cloud', async () => {
 });
 
 test('segments two selected scans together and labels both', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     // Import two distinct tree scans at once.
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles([FIXTURE, FIXTURE2]);
+    await importFiles(app, page, 'import-point-cloud', [FIXTURE, FIXTURE2]);
     await completeImportWizard(page);
 
     const row1 = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz"]');

@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 // E57 is a structured scan format. Phytograph recovers sky/miss points from the
@@ -15,17 +16,12 @@ import { completeImportWizard } from './helpers/importWizard';
 const E57 = join(repoRoot, 'tests', 'e2e', 'fixtures', 'structured-scan.e57');
 
 test('imports an E57, excludes misses from the octree, and toggles the miss overlay', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(E57);
+    await importFiles(app, page, 'import-auto', E57);
 
     // Path-backed import routes through the wizard; E57 columns are fixed, so
     // auto-detect assigns x/y/z and Import enables immediately.

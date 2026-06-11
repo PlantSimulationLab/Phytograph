@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURES = join(repoRoot, 'tests', 'e2e', 'fixtures');
@@ -11,14 +12,9 @@ const FIXTURES = join(repoRoot, 'tests', 'e2e', 'fixtures');
 // the choices (categorical legend vs. continuous colorbar, expected counts).
 
 test('wizard previews columns and imports with auto-detect', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(join(FIXTURES, 'scalars.xyz'));
+    await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
 
     // The wizard appears with a column-mapping table. scalars.xyz has 6
     // columns (X, Y, Z, Timestamp, Deviation, Target Index).
@@ -47,14 +43,9 @@ test('wizard previews columns and imports with auto-detect', async () => {
 });
 
 test('marking a column as a Label in the wizard yields a class legend', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(join(FIXTURES, 'scalars.xyz'));
+    await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
 
     const wizard = page.getByTestId('import-wizard');
     await expect(wizard).toBeVisible({ timeout: 30_000 });
@@ -103,14 +94,9 @@ test('mapping columns to Scan Row/Column Index carries the raster grid', async (
   // must be carried under the CANONICAL slugs (row_index/column_index) so the
   // gap-filling miss-recovery path finds the raster by name — we assert that by
   // colouring the scan by each slug.
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(join(FIXTURES, 'raster-grid.xyz'));
+    await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'raster-grid.xyz'));
 
     const wizard = page.getByTestId('import-wizard');
     await expect(wizard).toBeVisible({ timeout: 30_000 });
@@ -152,14 +138,9 @@ test('E57 fixed columns display their real roles, not a Scalar fallback', async 
   // Intensity) — previously the non-remappable dropdown was filtered to only
   // Scalar/Label options, so x/y/z fell back to displaying the first option
   // ("Scalar"). structured-scan.e57 carries x/y/z + intensity.
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(join(FIXTURES, 'structured-scan.e57'));
+    await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'structured-scan.e57'));
 
     const wizard = page.getByTestId('import-wizard');
     await expect(wizard).toBeVisible({ timeout: 30_000 });
@@ -196,14 +177,9 @@ test('E57 with colour shows RGB columns but hides the 0-255/0-1 toggle', async (
   // the converter already normalises it — the toggle would be misleading dead UI
   // (buildColumnPlan returns null for non-remappable scans, so it has no effect).
   // structured-scan-color.e57 carries x/y/z + intensity + RGB.
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(join(FIXTURES, 'structured-scan-color.e57'));
+    await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'structured-scan-color.e57'));
 
     const wizard = page.getByTestId('import-wizard');
     await expect(wizard).toBeVisible({ timeout: 30_000 });
@@ -230,15 +206,10 @@ test('E57 with colour shows RGB columns but hides the 0-255/0-1 toggle', async (
 });
 
 test('wizard steps through a multi-file import', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
     // Two distinct point clouds at once → one wizard stepping through both.
-    await chooser.setFiles([join(FIXTURES, 'tiny.xyz'), join(FIXTURES, 'scalars.xyz')]);
+    await importFiles(app, page, 'import-point-cloud', [join(FIXTURES, 'tiny.xyz'), join(FIXTURES, 'scalars.xyz')]);
 
     const wizard = page.getByTestId('import-wizard');
     await expect(wizard).toBeVisible({ timeout: 30_000 });
@@ -269,15 +240,10 @@ test('wizard steps through a multi-file import', async () => {
 });
 
 test('apply-to-all enables import without stepping through every scan', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
     // Two clouds with the SAME column layout so "apply to all" is meaningful.
-    await chooser.setFiles([join(FIXTURES, 'scalars.xyz'), join(FIXTURES, 'scalars.xyz')]);
+    await importFiles(app, page, 'import-point-cloud', [join(FIXTURES, 'scalars.xyz'), join(FIXTURES, 'scalars.xyz')]);
 
     const wizard = page.getByTestId('import-wizard');
     await expect(wizard).toBeVisible({ timeout: 30_000 });
@@ -298,14 +264,9 @@ test('apply-to-all enables import without stepping through every scan', async ()
 });
 
 test('mesh import does not open the wizard', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
   try {
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-mesh').click(),
-    ]);
-    await chooser.setFiles(join(FIXTURES, 'quad.obj'));
+    await importFiles(app, page, 'import-mesh', join(FIXTURES, 'quad.obj'));
     // The wizard must NOT appear for a mesh import.
     await expect(page.getByTestId('import-wizard')).toBeHidden();
     // The mesh loads directly.

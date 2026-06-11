@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -28,17 +29,12 @@ const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // that silently dropped the projection or the predicate would change the
 // surviving count and fail here.
 test('polygon lasso crop: clicks add vertices, Enter closes, Apply keeps enclosed points', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
     // ── Import tiny.xyz ────────────────────────────────────────────────────
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -121,16 +117,11 @@ test('polygon lasso crop: clicks add vertices, Enter closes, Apply keeps enclose
 // This proves the invert path + projection predicate actually discriminate
 // (the Keep-Inside test alone could pass for a trivial keep-all reason).
 test('polygon lasso crop: Keep Outside enclosing all points empties the cloud (delete-confirm)', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
@@ -195,16 +186,11 @@ test('polygon lasso crop: Keep Outside enclosing all points empties the cloud (d
 // space diverged again (the original bug): the surviving count would jump
 // to 0 or 60 instead of landing in between.
 test('polygon lasso crop: half-viewport lasso keeps a strict subset of points', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(TINY);
+    await importFiles(app, page, 'import-auto', TINY);
     await completeImportWizard(page);
 
     const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');

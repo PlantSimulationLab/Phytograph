@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -18,7 +19,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 //   3. Real assertions — read num_triangles from the mesh row, not from
 //      a network spy.
 test('imports a point cloud, then triangulates via the UI with non-default options', async () => {
-  const { page, backendVersion, close } = await launchApp();
+  const { app, page, backendVersion, close } = await launchApp();
 
   try {
     expect(backendVersion).toMatch(/^\d+\.\d+\.\d+/);
@@ -27,12 +28,7 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
     // react-dropzone's open() which fires a real OS file chooser, so we
     // intercept via filechooser BEFORE the click (otherwise the dialog
     // appears on screen and the click hangs waiting for it to close).
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-auto', FIXTURE);
     await completeImportWizard(page);
 
     // Confirm the cloud appeared in the cloud list with the right point

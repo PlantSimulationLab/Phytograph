@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
@@ -11,19 +12,14 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 // skeleton, which lets us assert on metrics that prove the algorithm
 // actually ran (not just "no error").
 test('extracts a skeleton from a Y-shaped plant cloud via the UI', async () => {
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   try {
 
     // Import as point cloud (not auto) — exercises the non-default menu item.
     // The handler calls react-dropzone's open() which fires a real OS file
     // chooser; intercept it before the click so it never surfaces.
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-pointcloud').click(),
-    ]);
-    await chooser.setFiles(FIXTURE);
+    await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');

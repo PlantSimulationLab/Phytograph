@@ -55,6 +55,7 @@ export type FileDropPayload =
 export type SnapViewDirection = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso';
 
 export type MenuCommandPayload =
+  | { kind: 'import-auto' }
   | { kind: 'import-point-cloud' }
   | { kind: 'import-mesh' }
   | { kind: 'import-skeleton' }

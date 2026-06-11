@@ -14,17 +14,17 @@ Two entry points. Both accept the same set of formats — see
     [import wizard](#the-import-wizard) so you can confirm or adjust the
     column mapping before loading.
 
-=== "Import button"
+=== "File menu"
 
-    The **Import** button in the toolbar opens a file picker. The
-    chevron next to it opens a dropdown for forcing a specific format:
+    **File → Import** opens a file picker. Choose an entry to set the
+    format:
 
     - **Auto-detect** (default)
     - **Point Cloud** — force, e.g., a `.ply` to be read as a cloud
     - **Mesh** — force, e.g., a vertex-only `.obj` to be read as a mesh
     - **Skeleton** — for `.json` skeleton graphs
 
-    Use this when auto-detection picks the wrong type.
+    Use a specific format when auto-detection picks the wrong type.
 
 ### The import wizard
 

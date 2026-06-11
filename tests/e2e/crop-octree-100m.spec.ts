@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { launchApp, repoRoot } from './helpers/launchApp';
+import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 // M3 success-metric test.
@@ -84,7 +85,7 @@ test.beforeAll(async () => {
 test(`crop on ${FIXTURE_N.toLocaleString()}-point octree keeps heap under ${HEAP_BUDGET_BYTES / 1024 / 1024} MB`, async () => {
   test.setTimeout(600_000);  // apply on 100M can take a minute end-to-end
 
-  const { page, close } = await launchApp();
+  const { app, page, close } = await launchApp();
 
   // Capture renderer pageerrors so a backend failure surfaces in test
   // output instead of stalling on the row-visible wait.
@@ -101,12 +102,7 @@ test(`crop on ${FIXTURE_N.toLocaleString()}-point octree keeps heap under ${HEAP
     // Goes through the Electron file-dialog → renderer
     // parsePointCloudFromPath → convert_to_octree pipeline. Picker auto-
     // mode routes XYZ files to the octree path.
-    await page.getByTestId('import-menu-button').click();
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.getByTestId('import-menu-auto').click(),
-    ]);
-    await chooser.setFiles(FIXTURE_PATH);
+    await importFiles(app, page, 'import-auto', FIXTURE_PATH);
     await completeImportWizard(page);
 
     // Wait for the cloud to land in app state. Conversion on N points
