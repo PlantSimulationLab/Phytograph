@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.9.2"
+BACKEND_VERSION = "0.12.0"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -2380,8 +2380,15 @@ def _triangulation_quality_warning(diag: dict):
     return None
 
 
-def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
+def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool = False) -> dict:
     """Run Helios triangulation synchronously. Returns a result dict.
+
+    When `edges_only` is True (the Lmax-suggestion path), skip the vertex dedup,
+    index/area/cell building, and Python-list serialization entirely — the
+    suggestion only needs the per-triangle edge-length distribution, so we
+    return the raw edge lengths + scan ids as numpy arrays straight from the
+    triangulator. On large clouds the dedup + `.tolist()` round-trips dominate
+    that path, so this is the bulk of the suggest cost, not the triangulation.
 
     Supports two modes:
     - **File-path mode** (preferred): scans provide `file_path` pointing to scan
@@ -2597,6 +2604,26 @@ def _do_helios_computation(request: HeliosTriangulationRequest) -> dict:
                 "grid_message": grid_message,
             }
 
+        # Edges-only fast path (Lmax suggestion): compute per-triangle max edge
+        # length directly from the raw flat (T*9) vertex blocks — no dedup, no
+        # index/area/cell building, no Python-list/JSON round-trip. Each block is
+        # 9 floats per triangle (3 vertices x xyz), so reshape to (T,3,3).
+        if edges_only:
+            flat = np.concatenate(scan_vert_blocks).reshape(-1, 3, 3)
+            scan_ids = np.concatenate(scan_id_blocks)
+            a, b, c = flat[:, 0], flat[:, 1], flat[:, 2]
+            edges = np.maximum.reduce([
+                np.linalg.norm(a - b, axis=1),
+                np.linalg.norm(b - c, axis=1),
+                np.linalg.norm(c - a, axis=1),
+            ])
+            return {
+                "success": True,
+                "edges": edges,
+                "scan_ids": scan_ids,
+                "diagnostics": diag,
+            }
+
         # Dedup vertices in numpy. Round to 5 dp first to match the old hash-dedup
         # (100 µm), so shared edges/vertices collapse to one index. np.unique
         # returns the inverse map, which becomes the (T,3) triangle index list.
@@ -2693,6 +2720,152 @@ async def helios_triangulate(request: HeliosTriangulationRequest):
             yield " "
             await asyncio.sleep(5)
 
+        yield await future
+
+    return StreamingResponse(stream_result(), media_type="application/json")
+
+
+# ==================== HELIOS Lmax SUGGESTION ====================
+# Suggest a triangulation Lmax + a separation-confidence from the candidate
+# triangle edge-length distribution, without any ground-truth labels. Premise:
+# valid triangles connect adjacent points on one leaf surface (edge ~ point
+# spacing); erroneous triangles bridge different leaves (edge ~ inter-leaf gap).
+# When those scales separate, the log edge-length histogram is bimodal and Otsu's
+# threshold sits in the valley. The between-class/total variance ratio (eta) is
+# the separability — high when the two scales are cleanly split, low when they
+# overlap (leaves close relative to scan resolution). This was validated against
+# labelled synthetic scans + real redbud TLS (see backend-api/research/).
+
+class HeliosSuggestResponse(BaseModel):
+    """Suggested Lmax + separation confidence for Helios triangulation."""
+    success: bool
+    suggested_lmax: float = 0.0       # meters, Otsu threshold on log edge lengths
+    confidence: float = 0.0           # separability eta in [0,1]
+    confidence_label: str = "n/a"     # High / Medium / Low
+    candidate_count: int = 0          # unfiltered candidate triangles analysed
+    drop_fraction: float = 0.0        # fraction of candidates above suggested_lmax
+    point_spacing: float = 0.0        # meters, 5th-pct candidate edge (~point spacing)
+    # Merged-cloud guard: a single Helios scan that is actually a registered merge
+    # of multiple scan positions confounds the single-origin angular Delaunay (it
+    # bridges points seen from different real scanners). Flagged when a scan's bulk
+    # edge scale dwarfs its finest spacing.
+    merged_warning: bool = False
+    merged_message: Optional[str] = None
+    error: Optional[str] = None
+
+
+# A scan looks like a merged multi-scan cloud when its median candidate edge is
+# this many times its 5th-percentile edge (the finest true spacing). Single-
+# viewpoint scans triangulate true neighbours so the bulk stays close to the
+# spacing; merged clouds connect across surfaces from different origins and run
+# far higher. Measured on real redbud TLS: single scan positions ~4-5x, a 17-
+# position merged cloud ~16x — so 10 separates them with margin both ways. This
+# is an advisory heuristic, not a hard gate.
+_SUGGEST_MERGED_RATIO = 10.0
+
+
+def _otsu_threshold_eta(log_vals, nbins: int = 256):
+    """Otsu's threshold + separability eta on 1-D values (here log edge lengths).
+    eta = max between-class variance / total variance, in [0, 1] (1 = cleanly
+    bimodal, 0 = unimodal). Pure numpy; mirrors research/leaf_triangulation_separation."""
+    import numpy as np
+    if len(log_vals) < 8 or np.allclose(log_vals, log_vals[0]):
+        return float("nan"), 0.0
+    hist, bin_edges = np.histogram(log_vals, bins=nbins)
+    centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    p = hist.astype(np.float64) / max(hist.sum(), 1)
+    omega = np.cumsum(p)
+    mu = np.cumsum(p * centers)
+    mu_t = mu[-1]
+    denom = omega * (1.0 - omega)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sigma_b2 = np.where(denom > 1e-12, (mu_t * omega - mu) ** 2 / denom, 0.0)
+    idx = int(np.argmax(sigma_b2))
+    total_var = float((p * (centers - mu_t) ** 2).sum())
+    eta = float(sigma_b2[idx] / (total_var + 1e-12))
+    return float(centers[idx]), max(0.0, min(1.0, eta))
+
+
+def _do_helios_suggest(request: "HeliosTriangulationRequest") -> dict:
+    """Run the unfiltered candidate triangulation and derive a suggested Lmax +
+    separation confidence + merged-cloud flag. Reuses the exact shipping
+    triangulation path so the suggestion reflects what the real run will produce."""
+    import numpy as np
+
+    # Same triangulation users hit, but keep every candidate (only NaN-degenerate
+    # dropped) so we see the full edge-length distribution. `edges_only` returns
+    # the raw per-triangle edge lengths as numpy, skipping the dedup + Python-list
+    # serialization that dominates the suggest cost on large clouds.
+    keep_all = request.model_copy(update={"lmax": 1.0e9, "max_aspect_ratio": 1.0e9})
+    res = _do_helios_computation(keep_all, edges_only=True)
+    if not res.get("success"):
+        return {"success": False,
+                "error": res.get("error") or "No candidate triangles to analyze."}
+
+    edges = np.asarray(res["edges"], dtype=np.float64)
+    scan_ids = np.asarray(res["scan_ids"], dtype=np.int64)
+    keep = edges > 0
+    edges, scan_ids = edges[keep], scan_ids[keep]
+    if len(edges) < 16:
+        return {"success": False, "error": "Too few candidate triangles to analyze."}
+
+    thr_log, eta = _otsu_threshold_eta(np.log(edges))
+    if not math.isfinite(thr_log):
+        return {"success": False, "error": "Candidate edges are degenerate (no spread)."}
+    suggested = float(np.exp(thr_log))
+    drop_fraction = float((edges > suggested).mean())
+    point_spacing = float(np.percentile(edges, 5))
+
+    # Merged-cloud guard, evaluated PER scan (each is triangulated independently),
+    # so one merged scan in a multi-scan selection is still caught.
+    merged_scan_ids = []
+    for s in np.unique(scan_ids):
+        e = edges[scan_ids == s]
+        if len(e) < 64:
+            continue
+        ratio = float(np.median(e)) / max(float(np.percentile(e, 5)), 1e-9)
+        if ratio > _SUGGEST_MERGED_RATIO:
+            merged_scan_ids.append(int(s))
+    merged = len(merged_scan_ids) > 0
+    merged_message = (
+        "These points look like a merged multi-scan cloud — candidate edges are far "
+        "larger than the point spacing, which happens when a single scan actually "
+        "combines several scanner positions. Helios triangulation assumes single-scan-"
+        "position data, so it bridges surfaces seen from different origins. Triangulate "
+        "each scan position separately for a clean result."
+    ) if merged else None
+
+    label = "High" if eta >= 0.7 else ("Medium" if eta >= 0.5 else "Low")
+    return {
+        "success": True,
+        "suggested_lmax": suggested,
+        "confidence": eta,
+        "confidence_label": label,
+        "candidate_count": int(len(edges)),
+        "drop_fraction": drop_fraction,
+        "point_spacing": point_spacing,
+        "merged_warning": merged,
+        "merged_message": merged_message,
+    }
+
+
+@app.post("/api/triangulate/helios/suggest")
+async def helios_suggest(request: HeliosTriangulationRequest):
+    """Suggest a triangulation Lmax + separation confidence (+ merged-cloud guard)
+    from the candidate edge-length distribution. Streams keepalive whitespace like
+    /api/triangulate/helios so the (full unfiltered) triangulation doesn't stall
+    WebKit's ~60s timeout."""
+    import asyncio
+
+    def compute_and_serialize():
+        return json.dumps(_do_helios_suggest(request))
+
+    async def stream_result():
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, compute_and_serialize)
+        while not future.done():
+            yield " "
+            await asyncio.sleep(5)
         yield await future
 
     return StreamingResponse(stream_result(), media_type="application/json")
@@ -3233,36 +3406,13 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
 
 
 def _bin_points_to_cells(points, grid_center, grid_size, nx: int, ny: int, nz: int):
-    """Assign each point to a grid cell, returning a flat (N,) int array of cell
-    indices (row-major i + nx*(j + ny*k)); points outside the grid get -1.
-
-    The grid is the explicit request grid (center/size are full extents,
-    nx/ny/nz the per-axis subdivisions) — a regular axis-aligned lattice, so the
-    cell of a point is a direct floor-divide. This is the binning shared by the
-    per-voxel hit count and the per-triangle cell assignment; the row-major
-    ordering here is the convention the frontend reconstructs cells with.
+    """Assign each point to a grid cell (row-major ``i + nx*(j + ny*k)``; outside
+    -> -1). Thin wrapper over :func:`qsm.grid.bin_points_to_cells`, which is the
+    single shared implementation used by both the LAD/triangulation pipeline and
+    the QSM leaf-angle adjustment.
     """
-    import numpy as np
-
-    pts = np.asarray(points, dtype=np.float64)
-    n = pts.shape[0] if pts.ndim == 2 else 0
-    if n == 0:
-        return np.empty(0, dtype=np.int64)
-
-    center = np.asarray(grid_center, dtype=np.float64)
-    size = np.asarray(grid_size, dtype=np.float64)
-    ndiv = np.array([max(1, int(nx)), max(1, int(ny)), max(1, int(nz))], dtype=np.int64)
-
-    lo = center - size / 2.0
-    step = np.where(ndiv > 0, size / ndiv, 1.0)
-    safe_step = np.where(step > 0, step, 1.0)
-
-    ijk = np.floor((pts - lo) / safe_step).astype(np.int64)
-    inside = np.all((ijk >= 0) & (ijk < ndiv), axis=1)
-    flat = np.full(n, -1, dtype=np.int64)
-    ii = ijk[inside]
-    flat[inside] = ii[:, 0] + ndiv[0] * (ii[:, 1] + ndiv[1] * ii[:, 2])
-    return flat
+    from qsm.grid import bin_points_to_cells
+    return bin_points_to_cells(points, grid_center, grid_size, nx, ny, nz)
 
 
 def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: list):
@@ -5822,6 +5972,334 @@ async def build_qsm(request: QSMBuildRequest):
         return QSMBuildResponse(success=False, error=f"QSM build failed: {e}")
 
 
+# ==================== QSM LEAF RECONSTRUCTION (Phase 1) ====================
+# Procedurally add leaves to a built QSM: place leaves on terminal shoots
+# following the (auto-detected) phyllotaxis, returning a textured mesh that the
+# existing TexturedPlantMesh renderer draws. Pure-Python/numpy -- no PyHelios.
+
+class QSMPhyllotaxisRequest(BaseModel):
+    """Round-tripped QSM topology for phyllotaxis auto-detection. Only the
+    cylinders + shoots are needed (radii/metrics are irrelevant here)."""
+    cylinders: List[QSMCylinder]
+    shoots: List[QSMShoot]
+
+
+class QSMPhyllotaxisResponse(BaseModel):
+    success: bool
+    angle_deg: float = 137.5
+    pattern: str = "spiral"          # opposite | spiral | decussate | alternate
+    leaves_per_node: int = 1
+    confidence: float = 0.0          # [0,1]; 0 when no multi-child parent exists
+    n_parents_sampled: int = 0
+    error: Optional[str] = None
+
+
+class QSMLeavesRequest(BaseModel):
+    """Add leaves to an existing QSM (cylinders + shoots round-tripped from the
+    renderer). Exactly one texture source is used, in precedence order
+    obj_path > texture_path > builtin_texture_name."""
+    cylinders: List[QSMCylinder]
+    shoots: List[QSMShoot]
+    leaf_spacing: float = 0.05       # m between nodes along a shoot
+    leaf_pitch_deg: float = 45.0     # leaf angle from the shoot axis
+    leaf_size_m: float = 0.08        # leaf length
+    phyllotaxis_deg: float = 137.5   # azimuth increment between nodes
+    leaves_per_node: int = 1
+    builtin_texture_name: Optional[str] = None  # e.g. "AlmondLeaf.png"
+    texture_path: Optional[str] = None          # uploaded PNG path
+    obj_path: Optional[str] = None              # uploaded OBJ path
+    max_leaves: int = 200000
+
+
+class QSMLeavesResponse(BaseModel):
+    """Textured leaf mesh. Field names mirror PlantGenerationResponse so the
+    frontend's plantResponseToMeshData() consumes it unchanged."""
+    success: bool
+    vertices: List[List[float]] = []
+    indices: List[List[int]] = []
+    normals: Optional[List[List[float]]] = None
+    uv_coordinates: Optional[List[List[float]]] = None
+    materials: Optional[List[PlantMaterial]] = None
+    material_groups: Optional[List[PlantMaterialGroup]] = None
+    textures: Optional[Dict[str, str]] = None
+    vertex_count: int = 0
+    triangle_count: int = 0
+    leaf_count: int = 0
+    error: Optional[str] = None
+
+
+def _qsm_from_request(cylinders: List[QSMCylinder], shoots: List[QSMShoot]):
+    """Rebuild a qsm.model.QSM dataclass from round-tripped request models."""
+    from qsm.model import QSM as _QSM, Cylinder as _Cyl, Shoot as _Shoot
+
+    cyls = [
+        _Cyl(
+            cyl_id=c.cyl_id, start=c.start, end=c.end, radius=c.radius,
+            parent_id=c.parent_id, shoot_id=c.shoot_id, rank=c.rank,
+            surf_cov=c.surf_cov, mad=c.mad,
+        )
+        for c in cylinders
+    ]
+    sh = [
+        _Shoot(
+            shoot_id=s.shoot_id, rank=s.rank, cylinder_ids=list(s.cylinder_ids),
+            parent_shoot_id=s.parent_shoot_id, parent_cyl_id=s.parent_cyl_id,
+            child_shoot_ids=list(s.child_shoot_ids),
+        )
+        for s in shoots
+    ]
+    return _QSM(cylinders=cyls, shoots=sh)
+
+
+@app.post("/api/qsm/phyllotaxis", response_model=QSMPhyllotaxisResponse)
+async def detect_qsm_phyllotaxis(request: QSMPhyllotaxisRequest):
+    """Auto-detect the phyllotactic angle from the QSM's branching geometry.
+
+    Branches follow the phyllotaxis of leaves (modulo unbroken buds), so the
+    azimuths of child shoots around each parent reveal the angle. Returns a
+    canonical angle + pattern + leaves-per-node + a confidence; used to pre-fill
+    the Add Leaves modal."""
+    from qsm.leaves import detect_phyllotaxis
+
+    try:
+        qsm = _qsm_from_request(request.cylinders, request.shoots)
+        d = detect_phyllotaxis(qsm)
+        return QSMPhyllotaxisResponse(success=True, **d)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return QSMPhyllotaxisResponse(success=False, error=f"Phyllotaxis detection failed: {e}")
+
+
+def _resolve_leaf_texture(request):
+    """Resolve a leaf request's texture/OBJ source.
+
+    Returns ``(obj_template, texture_name, texture_b64, texture_aspect)`` where
+    exactly one of obj_template / (texture_name, texture_b64) is populated.
+    Precedence: obj_path > texture_path > builtin_texture_name. Raises
+    ``ValueError`` if none is specified. Shared by the place-leaves and
+    adjust-leaf-angles endpoints so the two never drift.
+    """
+    from qsm.leaves import resolve_builtin_texture, read_texture_file
+    from qsm.obj_loader import load_obj_template
+
+    if request.obj_path:
+        return load_obj_template(Path(request.obj_path)), None, None, 0.6
+    if request.texture_path:
+        name, b64, aspect = read_texture_file(Path(request.texture_path))
+        return None, name, b64, aspect
+    if request.builtin_texture_name:
+        name, b64, aspect = resolve_builtin_texture(request.builtin_texture_name)
+        return None, name, b64, aspect
+    raise ValueError("No leaf texture or OBJ specified")
+
+
+def _leaf_geometry_to_response(geo, placements) -> QSMLeavesResponse:
+    """Map a leaf-geometry dict to a QSMLeavesResponse (shared by both endpoints)."""
+    if geo.get("error"):
+        return QSMLeavesResponse(success=False, error=geo["error"])
+    materials = (
+        [PlantMaterial(**m) for m in geo["materials"]] if geo.get("materials") else None
+    )
+    material_groups = (
+        [PlantMaterialGroup(**g) for g in geo["material_groups"]]
+        if geo.get("material_groups") else None
+    )
+    return QSMLeavesResponse(
+        success=True,
+        vertices=geo["vertices"],
+        indices=geo["indices"],
+        normals=geo.get("normals"),
+        uv_coordinates=geo.get("uv_coordinates"),
+        materials=materials,
+        material_groups=material_groups,
+        textures=geo.get("textures"),
+        vertex_count=len(geo["vertices"]),
+        triangle_count=len(geo["indices"]),
+        leaf_count=geo.get("leaf_count", len(placements)),
+    )
+
+
+def _build_leaf_geometry(placements, obj_template, texture_name, texture_b64):
+    """Rebuild merged leaf geometry from placements (OBJ instancing or quads)."""
+    from qsm.leaves import build_leaf_quad_geometry, build_leaf_obj_geometry
+
+    if obj_template is not None:
+        return build_leaf_obj_geometry(placements, obj_template)
+    return build_leaf_quad_geometry(placements, texture_name, texture_b64, has_alpha=True)
+
+
+@app.post("/api/qsm/leaves", response_model=QSMLeavesResponse)
+async def add_qsm_leaves(request: QSMLeavesRequest):
+    """Place leaves on the terminal shoots of a QSM and return a textured mesh."""
+    from qsm.leaves import LeafPlacementOptions, place_leaves
+
+    try:
+        qsm = _qsm_from_request(request.cylinders, request.shoots)
+        obj_template, texture_name, texture_b64, texture_aspect = _resolve_leaf_texture(request)
+
+        opts = LeafPlacementOptions(
+            leaf_spacing=request.leaf_spacing,
+            leaf_pitch_deg=request.leaf_pitch_deg,
+            leaf_size_m=request.leaf_size_m,
+            phyllotaxis_deg=request.phyllotaxis_deg,
+            leaves_per_node=request.leaves_per_node,
+            texture_aspect=texture_aspect,
+            max_leaves=request.max_leaves,
+        )
+        placements = place_leaves(qsm, opts)
+        if not placements:
+            return QSMLeavesResponse(
+                success=False,
+                error="No terminal shoots found to place leaves on",
+            )
+
+        geo = _build_leaf_geometry(placements, obj_template, texture_name, texture_b64)
+        return _leaf_geometry_to_response(geo, placements)
+    except ValueError as e:
+        return QSMLeavesResponse(success=False, error=str(e))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return QSMLeavesResponse(success=False, error=f"Leaf placement failed: {e}")
+
+
+@app.get("/api/qsm/leaf-textures")
+async def get_qsm_leaf_textures():
+    """List the curated built-in leaf textures available for QSM leaf placement."""
+    from qsm.leaves import CURATED_LEAF_TEXTURES
+
+    return {"textures": CURATED_LEAF_TEXTURES}
+
+
+# ==================== QSM LEAF-ANGLE ADJUSTMENT (Phase 2) ====================
+# Rotate procedurally-placed leaves so each voxel cell's leaf-angle distribution
+# matches a target measured from a leaf-on Helios triangulation, via per-cell
+# optimal assignment (Helios setPlantLeafAngleDistribution port). Pure numpy.
+
+class QSMGrid(BaseModel):
+    """The voxel grid the triangulation was built in (full extents + subdivisions)."""
+    center: List[float]  # [x, y, z]
+    size: List[float]    # [x, y, z] full extents
+    nx: int = 1
+    ny: int = 1
+    nz: int = 1
+
+
+class QSMTriangulationInput(BaseModel):
+    """A leaf-on Helios triangulation overlapping the QSM, from the renderer."""
+    vertices: List[float]            # flat x,y,z
+    indices: List[int]               # flat triangle vertex indices
+    triangle_cell_ids: List[int]     # per-triangle grid cell (row-major; -1/0xffffffff = outside)
+    triangle_scan_ids: Optional[List[int]] = None  # per-triangle source scan (azimuth orientation)
+    scan_origins: Optional[List[float]] = None      # flat per-scan x,y,z origins
+    grid: QSMGrid
+
+
+class QSMCellTarget(BaseModel):
+    """A precomputed per-cell leaf-angle target (escape hatch / test injection)."""
+    cell_id: int
+    beta_mu: float
+    beta_nu: float
+    ecc: float
+    phi0_deg: float
+    n_measured: int = 0
+
+
+class QSMAdjustLeafAnglesRequest(QSMLeavesRequest):
+    """Re-place the QSM's leaves (same Phase-1 params) then adjust their angles to
+    a measured per-cell distribution. Exactly one of `triangulation` / `cell_targets`
+    must be present (with `grid` when using `cell_targets`)."""
+    triangulation: Optional[QSMTriangulationInput] = None
+    cell_targets: Optional[List[QSMCellTarget]] = None
+    grid: Optional[QSMGrid] = None
+    seed: int = 0
+    max_cell_leaves: Optional[int] = None
+
+
+@app.post("/api/qsm/adjust-leaf-angles", response_model=QSMLeavesResponse)
+async def adjust_qsm_leaf_angles(request: QSMAdjustLeafAnglesRequest):
+    """Adjust a QSM's leaf angles to match a measured per-cell distribution."""
+    import numpy as np
+    from qsm.leaves import LeafPlacementOptions, place_leaves
+    from qsm.leaf_angles import CellTarget, adjust_placements_to_distribution
+    from qsm.leaf_distribution import compute_cell_targets
+
+    try:
+        if request.triangulation is None and not request.cell_targets:
+            return QSMLeavesResponse(
+                success=False,
+                error="Provide either a triangulation or precomputed cell_targets",
+            )
+
+        qsm = _qsm_from_request(request.cylinders, request.shoots)
+        obj_template, texture_name, texture_b64, texture_aspect = _resolve_leaf_texture(request)
+
+        # Re-place leaves identically to Phase 1 so bases/orientations match.
+        opts = LeafPlacementOptions(
+            leaf_spacing=request.leaf_spacing,
+            leaf_pitch_deg=request.leaf_pitch_deg,
+            leaf_size_m=request.leaf_size_m,
+            phyllotaxis_deg=request.phyllotaxis_deg,
+            leaves_per_node=request.leaves_per_node,
+            texture_aspect=texture_aspect,
+            max_leaves=request.max_leaves,
+        )
+        placements = place_leaves(qsm, opts)
+        if not placements:
+            return QSMLeavesResponse(
+                success=False,
+                error="No leaves to adjust — add leaves to this QSM first",
+            )
+
+        # Resolve the grid + per-cell targets.
+        if request.triangulation is not None:
+            tin = request.triangulation
+            g = tin.grid
+            grid = (np.array(g.center, dtype=np.float64), np.array(g.size, dtype=np.float64),
+                    g.nx, g.ny, g.nz)
+            verts = np.array(tin.vertices, dtype=np.float64).reshape(-1, 3)
+            tris = np.array(tin.indices, dtype=np.int64).reshape(-1, 3)
+            cell_ids = np.array(tin.triangle_cell_ids, dtype=np.int64)
+            scan_ids = (np.array(tin.triangle_scan_ids, dtype=np.int64)
+                        if tin.triangle_scan_ids else None)
+            scan_origins = (np.array(tin.scan_origins, dtype=np.float64).reshape(-1, 3)
+                            if tin.scan_origins else None)
+            cell_targets = compute_cell_targets(
+                verts, tris, cell_ids, grid,
+                triangle_scan_ids=scan_ids, scan_origins=scan_origins,
+            )
+        else:
+            if request.grid is None:
+                return QSMLeavesResponse(
+                    success=False, error="cell_targets requires a grid",
+                )
+            g = request.grid
+            grid = (np.array(g.center, dtype=np.float64), np.array(g.size, dtype=np.float64),
+                    g.nx, g.ny, g.nz)
+            cell_targets = {
+                ct.cell_id: CellTarget(
+                    beta_mu=ct.beta_mu, beta_nu=ct.beta_nu, ecc=ct.ecc,
+                    phi0_deg=ct.phi0_deg, n_measured=ct.n_measured,
+                )
+                for ct in request.cell_targets
+            }
+
+        adjusted = adjust_placements_to_distribution(
+            placements, cell_targets, grid,
+            seed=request.seed, max_cell_leaves=request.max_cell_leaves,
+        )
+
+        geo = _build_leaf_geometry(adjusted, obj_template, texture_name, texture_b64)
+        return _leaf_geometry_to_response(geo, adjusted)
+    except ValueError as e:
+        return QSMLeavesResponse(success=False, error=str(e))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return QSMLeavesResponse(success=False, error=f"Leaf-angle adjustment failed: {e}")
+
+
 @app.get("/api/plant/models")
 async def get_available_plant_models():
     """Get list of available plant models from pyhelios library"""
@@ -7446,35 +7924,6 @@ class MeshImportResponse(BaseModel):
     error: Optional[str] = None
 
 
-def _parse_mtl(mtl_path: Path) -> Dict[str, dict]:
-    """Parse a .mtl file into {material_name: {"Kd": [r,g,b], "map_Kd": str}}.
-
-    `map_Kd` keeps the raw token as written in the MTL (may be relative); the
-    caller resolves it against the MTL's directory."""
-    materials: Dict[str, dict] = {}
-    current = None
-    try:
-        with open(mtl_path, 'r', errors='ignore') as f:
-            for line in f:
-                parts = line.split()
-                if not parts:
-                    continue
-                key = parts[0]
-                if key == 'newmtl' and len(parts) >= 2:
-                    current = parts[1]
-                    materials[current] = {}
-                elif current is None:
-                    continue
-                elif key == 'Kd' and len(parts) >= 4:
-                    materials[current]['Kd'] = [float(parts[1]), float(parts[2]), float(parts[3])]
-                elif key == 'map_Kd' and len(parts) >= 2:
-                    # The texture path is the last token (skip any options like -s).
-                    materials[current]['map_Kd'] = parts[-1]
-    except FileNotFoundError:
-        pass
-    return materials
-
-
 def _import_ply_mesh(ply_path: Path) -> MeshImportResponse:
     """Read a polygon-mesh PLY (ASCII or binary) into MeshImportResponse geometry.
 
@@ -7528,7 +7977,7 @@ def _import_ply_mesh(ply_path: Path) -> MeshImportResponse:
 @app.post("/api/mesh/import", response_model=MeshImportResponse)
 async def import_textured_mesh(request: MeshImportRequest):
     """Parse an OBJ (+ MTL + texture images) from disk into textured geometry."""
-    import base64
+    from qsm.obj_loader import load_obj_template
 
     obj_path = Path(request.path)
     if not obj_path.is_file():
@@ -7540,130 +7989,25 @@ async def import_textured_mesh(request: MeshImportRequest):
     if ext != '.obj':
         raise HTTPException(status_code=400, detail="Only .obj and .ply files are supported for mesh import")
 
-    base_dir = obj_path.parent
-
-    # Pass 1: collect raw vertex / uv / normal tables and material library refs.
-    positions: List[List[float]] = []   # v
-    tex_coords: List[List[float]] = []  # vt
-    vert_normals: List[List[float]] = []  # vn
-    mtl_libs: List[str] = []
-
-    # Expanded (non-indexed) output, grouped per active material.
-    out_vertices: List[List[float]] = []
-    out_normals: List[List[float]] = []
-    out_uvs: List[List[float]] = []
-    out_faces: List[List[int]] = []
-    tri_material: List[Optional[str]] = []  # material name active for each triangle
-
-    current_material: Optional[str] = None
-    vertex_index = 0
-
-    def _idx(token: str, table_len: int) -> Optional[int]:
-        """Resolve an OBJ index token (1-based, negatives relative to end)."""
-        if token == '' or token is None:
-            return None
-        i = int(token)
-        if i < 0:
-            return table_len + i
-        return i - 1
-
+    # Parse the OBJ (+ MTL + textures) via the shared loader. It returns expanded
+    # (non-indexed) triangle geometry with V-flipped UVs and base64 textures.
     try:
-        with open(obj_path, 'r', errors='ignore') as f:
-            for line in f:
-                parts = line.split()
-                if not parts:
-                    continue
-                cmd = parts[0]
-                if cmd == 'v' and len(parts) >= 4:
-                    positions.append([float(parts[1]), float(parts[2]), float(parts[3])])
-                elif cmd == 'vt' and len(parts) >= 3:
-                    tex_coords.append([float(parts[1]), float(parts[2])])
-                elif cmd == 'vn' and len(parts) >= 4:
-                    vert_normals.append([float(parts[1]), float(parts[2]), float(parts[3])])
-                elif cmd == 'mtllib' and len(parts) >= 2:
-                    mtl_libs.append(' '.join(parts[1:]))
-                elif cmd == 'usemtl' and len(parts) >= 2:
-                    current_material = parts[1]
-                elif cmd == 'f' and len(parts) >= 4:
-                    # Resolve each corner to (pos, vt, vn) indices.
-                    corners = []
-                    for tok in parts[1:]:
-                        comp = tok.split('/')
-                        pi = _idx(comp[0], len(positions)) if len(comp) >= 1 else None
-                        ti = _idx(comp[1], len(tex_coords)) if len(comp) >= 2 and comp[1] != '' else None
-                        ni = _idx(comp[2], len(vert_normals)) if len(comp) >= 3 and comp[2] != '' else None
-                        corners.append((pi, ti, ni))
-                    # Fan-triangulate polygons.
-                    for k in range(1, len(corners) - 1):
-                        tri = [corners[0], corners[k], corners[k + 1]]
-                        face_idx = []
-                        for (pi, ti, ni) in tri:
-                            if pi is None or pi < 0 or pi >= len(positions):
-                                # Malformed corner; skip the whole triangle.
-                                face_idx = []
-                                break
-                            out_vertices.append(positions[pi])
-                            if ni is not None and 0 <= ni < len(vert_normals):
-                                out_normals.append(vert_normals[ni])
-                            else:
-                                out_normals.append([0.0, 0.0, 0.0])  # filled below
-                            if ti is not None and 0 <= ti < len(tex_coords):
-                                u, v = tex_coords[ti]
-                                out_uvs.append([u, 1.0 - v])  # V-flip for three.js
-                            else:
-                                out_uvs.append([0.0, 0.0])
-                            face_idx.append(vertex_index)
-                            vertex_index += 1
-                        if not face_idx:
-                            continue
-                        out_faces.append(face_idx)
-                        tri_material.append(current_material)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse OBJ: {e}")
+        tpl = load_obj_template(obj_path)
+    except ValueError as e:
+        # No triangles is a 400 (bad input); anything else is a parse failure.
+        if "No triangles" in str(e):
+            raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-    if not out_faces:
-        raise HTTPException(status_code=400, detail="No triangles found in OBJ file")
-
-    # Compute flat normals for any triangle that had no vn.
-    has_any_normals = any(n != [0.0, 0.0, 0.0] for n in out_normals)
-    for ti, face in enumerate(out_faces):
-        if all(out_normals[i] == [0.0, 0.0, 0.0] for i in face):
-            a = np.array(out_vertices[face[0]])
-            b = np.array(out_vertices[face[1]])
-            c = np.array(out_vertices[face[2]])
-            n = np.cross(b - a, c - a)
-            ln = np.linalg.norm(n)
-            n = (n / ln).tolist() if ln > 1e-12 else [0.0, 0.0, 1.0]
-            for i in face:
-                out_normals[i] = n
-            has_any_normals = True
-
-    # Parse all referenced MTL files; first definition of a name wins.
-    mtl_materials: Dict[str, dict] = {}
-    for lib in mtl_libs:
-        for name, props in _parse_mtl(base_dir / lib).items():
-            mtl_materials.setdefault(name, props)
-
-    # Load textures (resolved relative to the OBJ dir) as base64, keyed by basename.
-    textures_data: Dict[str, str] = {}
-    material_texture_name: Dict[str, str] = {}  # material -> texture basename
-    for name, props in mtl_materials.items():
-        tex_token = props.get('map_Kd')
-        if not tex_token:
-            continue
-        tex_path = (base_dir / tex_token)
-        if not tex_path.is_file():
-            # Try just the basename in the OBJ directory.
-            tex_path = base_dir / os.path.basename(tex_token)
-        if tex_path.is_file():
-            tex_name = tex_path.name
-            material_texture_name[name] = tex_name
-            if tex_name not in textures_data:
-                try:
-                    with open(tex_path, 'rb') as tf:
-                        textures_data[tex_name] = base64.b64encode(tf.read()).decode('utf-8')
-                except Exception:
-                    pass
+    out_vertices: List[List[float]] = tpl["vertices"]
+    out_normals: List[List[float]] = tpl["normals"]
+    out_uvs: List[List[float]] = tpl["uvs"]
+    out_faces: List[List[int]] = tpl["faces"]
+    tri_material: List[Optional[str]] = tpl["tri_material"]
+    mtl_materials: Dict[str, dict] = tpl["mtl_materials"]
+    textures_data: Dict[str, str] = tpl["textures"]
+    material_texture_name: Dict[str, str] = tpl["material_texture_name"]
+    has_any_normals = True  # loader always populates normals (flat-filled where absent)
 
     # Build per-vertex colors from each triangle's material Kd (fallback grey).
     out_colors: List[List[float]] = [[0.8, 0.8, 0.8]] * len(out_vertices)

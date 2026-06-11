@@ -58,6 +58,22 @@ trunks stay realistically thick.
 The full algorithm, design decisions, and hard-coded parameters are
 documented in the workflow: [Build a QSM → How it works](../workflows/build-qsm.md#how-it-works).
 
+## Adding leaves (procedural, Phase 1)
+
+A QSM models only the **woody** structure. You can foliate it by placing
+leaves on its **terminal shoots** (shoots with no children — the tips of
+last year's growth) following the tree's phyllotaxis. The phyllotactic
+angle is auto-detected from the branching geometry, since branches emerge
+in the same pattern as leaves. This is a forward, procedural step — it adds
+biologically plausible foliage from the topology and a few parameters
+(spacing, size, pitch), rendered from a leaf texture or 3D model.
+
+That first step places the leaves geometrically. You can then
+[adjust their angles](../workflows/adjust-leaf-angles.md) to match the
+**measured leaf-angle distribution** from a leaf-on Helios triangulation,
+per voxel cell, via optimal assignment.
+See [Add leaves to a QSM](../workflows/add-leaves.md).
+
 ## QSM vs. skeleton vs. mesh
 
 All three describe a plant's structure, but they answer different

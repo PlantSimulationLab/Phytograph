@@ -115,6 +115,8 @@ nav:
       - Estimate leaf area density: workflows/estimate-leaf-area-density.md
       - Extract a skeleton: workflows/extract-skeleton.md
       - Build a QSM: workflows/build-qsm.md
+      - Add leaves to a QSM: workflows/add-leaves.md
+      - Adjust leaf angles: workflows/adjust-leaf-angles.md
       - Generate a plant: workflows/generate-plant.md
       - Morph a plant: workflows/morph-plant.md
       - Register & compare: workflows/register-compare.md

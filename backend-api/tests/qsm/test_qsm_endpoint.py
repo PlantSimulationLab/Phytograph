@@ -168,3 +168,179 @@ def test_build_qsm_twig_radius_option(client, cloud_points):
         large["metrics"]["total_woody_volume_m3"]
         >= small["metrics"]["total_woody_volume_m3"]
     )
+
+
+# ==================== QSM LEAF ENDPOINTS (Phase 1) ====================
+# Drive /api/qsm/leaves and /api/qsm/phyllotaxis against the REAL app. The QSM
+# topology is built once from the live /api/qsm/build response, then round-tripped
+# back into the leaf endpoints exactly as the renderer does.
+
+@pytest.fixture(scope="module")
+def built_qsm(client, cloud_points):
+    resp = client.post("/api/qsm/build", json={"points": cloud_points})
+    body = resp.json()
+    assert body["success"] is True, body.get("error")
+    return {"cylinders": body["cylinders"], "shoots": body["shoots"]}
+
+
+def test_phyllotaxis_endpoint_returns_canonical_angle(client, built_qsm):
+    resp = client.post("/api/qsm/phyllotaxis", json=built_qsm)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True, body.get("error")
+    assert body["angle_deg"] in (180.0, 137.5, 144.0, 150.0, 90.0)
+    assert body["pattern"] in ("opposite", "spiral", "decussate", "alternate")
+    assert body["leaves_per_node"] >= 1
+    assert 0.0 <= body["confidence"] <= 1.0
+
+
+def test_leaves_endpoint_builtin_texture(client, built_qsm):
+    req = {
+        **built_qsm,
+        "leaf_spacing": 0.08,
+        "leaf_pitch_deg": 45.0,
+        "leaf_size_m": 0.06,
+        "phyllotaxis_deg": 137.5,
+        "leaves_per_node": 1,
+        "builtin_texture_name": "AlmondLeaf.png",
+    }
+    resp = client.post("/api/qsm/leaves", json=req)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True, body.get("error")
+    assert body["leaf_count"] > 0
+    assert body["triangle_count"] > 0
+    assert body["vertex_count"] == body["triangle_count"] * 3  # non-indexed quads
+    # One textured leaf material with alpha cutout, and the PNG travels along.
+    assert body["materials"] and body["materials"][0]["has_alpha"] is True
+    assert "AlmondLeaf.png" in (body["textures"] or {})
+    assert len(body["uv_coordinates"]) == body["vertex_count"]
+
+
+def test_leaves_endpoint_rejects_unknown_builtin(client, built_qsm):
+    req = {**built_qsm, "builtin_texture_name": "SoybeanLeaf.png"}
+    resp = client.post("/api/qsm/leaves", json=req)
+    body = resp.json()
+    assert body["success"] is False
+    assert "Unknown builtin leaf texture" in body["error"]
+
+
+def test_leaves_endpoint_requires_texture(client, built_qsm):
+    resp = client.post("/api/qsm/leaves", json=built_qsm)
+    body = resp.json()
+    assert body["success"] is False
+    assert "No leaf texture" in body["error"]
+
+
+def test_leaf_textures_endpoint_lists_curated(client):
+    resp = client.get("/api/qsm/leaf-textures")
+    assert resp.status_code == 200
+    textures = resp.json()["textures"]
+    assert "AlmondLeaf.png" in textures
+    assert "SoybeanLeaf.png" not in textures  # crop leaf excluded from the curated set
+
+
+# ==================== QSM ADJUST-LEAF-ANGLES ENDPOINT (Phase 2) ====================
+# Build a QSM -> place leaves -> adjust their angles to an injected per-cell target
+# and to a synthetic triangulation, asserting the inclination shifts toward target.
+
+import math as _math
+import numpy as _np
+
+
+def _leaf_request(built_qsm):
+    return {
+        **built_qsm,
+        "leaf_spacing": 0.06,
+        "leaf_size_m": 0.05,
+        "phyllotaxis_deg": 137.5,
+        "leaves_per_node": 1,
+        "builtin_texture_name": "AlmondLeaf.png",
+    }
+
+
+def _covering_grid(cylinders):
+    pts = _np.array([c["start"] for c in cylinders] + [c["end"] for c in cylinders])
+    lo = pts.min(0) - 0.2
+    hi = pts.max(0) + 0.2
+    return {"center": ((lo + hi) / 2).tolist(), "size": (hi - lo).tolist(),
+            "nx": 1, "ny": 1, "nz": 1}
+
+
+def _mean_leaf_inclination(resp):
+    """Mean inclination (deg) of leaf normals from a leaf response (quad mesh:
+    6 verts per leaf, constant normal)."""
+    n = _np.array(resp["normals"])
+    zs = []
+    for i in range(0, len(n), 6):
+        nn = n[i] / (_np.linalg.norm(n[i]) + 1e-12)
+        zs.append(_math.degrees(_math.acos(min(1.0, abs(nn[2])))))
+    return float(_np.mean(zs))
+
+
+def test_adjust_leaf_angles_with_cell_targets(client, built_qsm):
+    leaf_req = _leaf_request(built_qsm)
+    placed = client.post("/api/qsm/leaves", json=leaf_req).json()
+    assert placed["success"], placed.get("error")
+
+    adj_req = {
+        **leaf_req,
+        "grid": _covering_grid(built_qsm["cylinders"]),
+        "cell_targets": [{"cell_id": 0, "beta_mu": 1.0, "beta_nu": 8.0,
+                          "ecc": 0.0, "phi0_deg": 0.0, "n_measured": 100}],
+        "seed": 1,
+    }
+    resp = client.post("/api/qsm/adjust-leaf-angles", json=adj_req)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"], body.get("error")
+    assert body["leaf_count"] == placed["leaf_count"]      # count preserved
+    assert body["triangle_count"] > 0
+    # Erectophile target (sampler mean ~80 deg) pulls the inclination up from the
+    # phyllotaxis default.
+    before = _mean_leaf_inclination(placed)
+    after = _mean_leaf_inclination(body)
+    assert after > before + 5.0
+    assert after > 65.0
+
+
+def test_adjust_leaf_angles_with_triangulation(client, built_qsm):
+    from qsm import leaf_angles as _A
+    leaf_req = _leaf_request(built_qsm)
+    placed = client.post("/api/qsm/leaves", json=leaf_req).json()
+    grid = _covering_grid(built_qsm["cylinders"])
+    center = _np.array(grid["center"])
+
+    # Synthetic near-vertical (erectophile) triangulation in cell 0.
+    rng = _np.random.default_rng(0)
+    verts = []
+    tris = []
+    cids = []
+    for _ in range(400):
+        zen = float(_np.clip(rng.normal(82, 5), 0, 90))
+        az = rng.uniform(0, 360)
+        nrm = _A.sphere2cart(1.0, _math.pi / 2 - _math.radians(zen), _math.radians(az))
+        t1 = _A._orthonormal_axis(nrm)
+        t2 = _np.cross(nrm, t1)
+        i0 = len(verts)
+        verts += [center.tolist(), (center + 0.01 * t1).tolist(), (center + 0.01 * t2).tolist()]
+        tris += [i0, i0 + 1, i0 + 2]
+        cids.append(0)
+
+    adj_req = {
+        **leaf_req,
+        "triangulation": {"vertices": list(_np.array(verts).ravel()),
+                          "indices": tris, "triangle_cell_ids": cids, "grid": grid},
+        "seed": 2,
+    }
+    body = client.post("/api/qsm/adjust-leaf-angles", json=adj_req).json()
+    assert body["success"], body.get("error")
+    after = _mean_leaf_inclination(body)
+    before = _mean_leaf_inclination(placed)
+    assert after > before + 5.0  # shifted toward the measured ~82 deg distribution
+
+
+def test_adjust_leaf_angles_requires_a_target(client, built_qsm):
+    body = client.post("/api/qsm/adjust-leaf-angles", json=_leaf_request(built_qsm)).json()
+    assert body["success"] is False
+    assert "triangulation or precomputed cell_targets" in body["error"]

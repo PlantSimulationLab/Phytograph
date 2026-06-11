@@ -9,6 +9,9 @@ import {
   voxelMeshToHeliosGrid,
   computeMeshTriangleScalars,
   buildMeshTriangleColorBuffers,
+  buildMeshNonIndexedPositions,
+  buildMeshTriangleColors,
+  buildMeshScanColors,
   buildMeshScanColorBuffers,
   meshHasScanColors,
   meshColorModeLabel,
@@ -183,6 +186,40 @@ describe('buildMeshTriangleColorBuffers', () => {
   });
 });
 
+// The viewer builds positions and colors separately (positions are cached and
+// reused across recolors); these must reproduce exactly what the combined
+// buffer builder produces, so the fast path stays bit-identical to the old one.
+describe('buildMeshNonIndexedPositions / buildMeshTriangleColors (split builders)', () => {
+  const twoTri = () => makeMesh(
+    [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0],
+    [0, 1, 2, 1, 3, 2],
+  );
+
+  it('positions match the combined builder and are mode-independent', () => {
+    const mesh = twoTri();
+    const combined = buildMeshTriangleColorBuffers(mesh, 'area', 'viridis')!;
+    const positions = buildMeshNonIndexedPositions(mesh);
+    expect(Array.from(positions)).toEqual(Array.from(combined.positions));
+    // Same positions regardless of which scalar mode the colors use.
+    const combinedIncl = buildMeshTriangleColorBuffers(mesh, 'inclination', 'magma')!;
+    expect(Array.from(positions)).toEqual(Array.from(combinedIncl.positions));
+  });
+
+  it('colors and range match the combined builder', () => {
+    const mesh = twoTri();
+    const combined = buildMeshTriangleColorBuffers(mesh, 'inclination', 'viridis', { min: 0, max: 90 })!;
+    const split = buildMeshTriangleColors(mesh, 'inclination', 'viridis', { min: 0, max: 90 })!;
+    expect(Array.from(split.colors)).toEqual(Array.from(combined.colors));
+    expect(split.min).toBe(combined.min);
+    expect(split.max).toBe(combined.max);
+  });
+
+  it('returns null for solid mode', () => {
+    const mesh = twoTri();
+    expect(buildMeshTriangleColors(mesh, 'solid', 'viridis')).toBeNull();
+  });
+});
+
 describe('meshColorModeLabel', () => {
   it('labels each gradient mode and leaves solid blank', () => {
     expect(meshColorModeLabel('inclination')).toMatch(/inclination/i);
@@ -234,6 +271,14 @@ describe('meshHasScanColors / buildMeshScanColorBuffers', () => {
       expect(out.colors[k * 3 + 1]).toBeCloseTo(0, 5);
       expect(out.colors[k * 3 + 2]).toBeCloseTo(1, 5);
     }
+  });
+
+  it('buildMeshScanColors (color-only split) matches the combined builder', () => {
+    const mesh = twoScanMesh();
+    const combined = buildMeshScanColorBuffers(mesh)!;
+    const colors = buildMeshScanColors(mesh)!;
+    expect(Array.from(colors)).toEqual(Array.from(combined.colors));
+    expect(buildMeshScanColors(makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]))).toBeNull();
   });
 });
 

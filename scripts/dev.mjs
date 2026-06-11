@@ -134,7 +134,12 @@ async function runOnce(cmd, args) {
   }
 
   console.log('[dev] launching Electron...');
-  const electron = spawn(electronBin, ['.'], { stdio: 'inherit', cwd: root, shell: isWin, env: electronEnv });
+  // [DIAG — TEMPORARY] Raise the renderer V8 old-space cap so the color-by-
+  // inclination freeze can run to completion (~4 GB) instead of OOM-crashing at
+  // the default cap, enabling an Allocation-sampling memory profile. Passing
+  // --js-flags as an Electron launch arg applies it to the renderer isolates
+  // (app.commandLine in main.ts does not). REMOVE once the OOM is fixed.
+  const electron = spawn(electronBin, ['--js-flags=--max-old-space-size=8192', '.'], { stdio: 'inherit', cwd: root, shell: isWin, env: electronEnv });
 
   const shutdown = () => {
     try { electron.kill('SIGTERM'); } catch {}

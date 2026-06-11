@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData } from './pointCloudTypes';
 import type { HeliosGrid, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
-import { sampleColormap, type ColormapName } from './colormaps';
+import { sampleColormapInto, type ColormapName } from './colormaps';
 
 // Format a numeric range tick so the colorbar labels stay readable across
 // many orders of magnitude.
@@ -166,6 +166,23 @@ export function triangleGeometry(
   t: number,
   outwardRef?: { x: number; y: number; z: number } | null,
 ): { inclination: number; azimuth: number; area: number } {
+  const out = { inclination: 0, azimuth: 0, area: 0 };
+  triangleGeometryInto(vertices, indices, t, outwardRef ?? null, out);
+  return out;
+}
+
+// Allocation-free variant of `triangleGeometry`: writes the result into the
+// caller-supplied `out` object instead of returning a fresh one. Hot per-
+// triangle loops (millions of facets) reuse a single scratch object so they
+// don't spawn millions of throwaway objects — the GC churn that otherwise
+// freezes the UI and OOMs the renderer when coloring a large mesh.
+export function triangleGeometryInto(
+  vertices: Float32Array | number[],
+  indices: Uint32Array | number[],
+  t: number,
+  outwardRef: { x: number; y: number; z: number } | null,
+  out: { inclination: number; azimuth: number; area: number },
+): void {
   const i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
   const ax = vertices[i0 * 3], ay = vertices[i0 * 3 + 1], az = vertices[i0 * 3 + 2];
   const bx = vertices[i1 * 3], by = vertices[i1 * 3 + 1], bz = vertices[i1 * 3 + 2];
@@ -178,12 +195,15 @@ export function triangleGeometry(
   const nz = e1x * e2y - e1y * e2x;
   const len = Math.hypot(nx, ny, nz);
   const area = 0.5 * len;
+  out.area = area;
 
   if (len < 1e-20) {
-    return { inclination: NaN, azimuth: NaN, area };
+    out.inclination = NaN;
+    out.azimuth = NaN;
+    return;
   }
   // Inclination folds up/down faces together via |n.z|.
-  const inclination = Math.acos(Math.min(1, Math.abs(nz / len))) * (180 / Math.PI);
+  out.inclination = Math.acos(Math.min(1, Math.abs(nz / len))) * (180 / Math.PI);
 
   // Orient the normal before reading its bearing.
   let ox = nx, oy = ny, oz = nz;
@@ -201,15 +221,13 @@ export function triangleGeometry(
 
   // Azimuth: compass bearing of the oriented normal's horizontal projection.
   const h = Math.hypot(ox, oy);
-  let azimuth: number;
   if (h < 1e-12) {
-    azimuth = NaN;  // (near-)horizontal face has no meaningful azimuth
+    out.azimuth = NaN;  // (near-)horizontal face has no meaningful azimuth
   } else {
     let deg = Math.atan2(oy, ox) * (180 / Math.PI);
     if (deg < 0) deg += 360;
-    azimuth = deg;
+    out.azimuth = deg;
   }
-  return { inclination, azimuth, area };
 }
 
 // Resolve the per-triangle outward reference (the scanner origin that saw
@@ -262,8 +280,12 @@ export function computeMeshTriangleScalars(
   // Only azimuth needs the outward reference; skip the lookup for other modes.
   const refFor = mode === 'azimuth' ? outwardRefForMesh(data) : null;
 
+  // Reused scratch — see `triangleGeometryInto`. Allocating one object per
+  // triangle here (millions of them) is what flooded the GC and OOM'd the
+  // renderer on large meshes.
+  const g = { inclination: 0, azimuth: 0, area: 0 };
   for (let t = 0; t < triangleCount; t++) {
-    const g = triangleGeometry(vertices, indices, t, refFor ? refFor(t) : null);
+    triangleGeometryInto(vertices, indices, t, refFor ? refFor(t) : null, g);
     const v = mode === 'area' ? g.area
       : mode === 'inclination' ? g.inclination
       : g.azimuth;
@@ -281,46 +303,85 @@ export function computeMeshTriangleScalars(
   return { values, min, max };
 }
 
-// Build non-indexed geometry buffers that color each triangle by a per-triangle
-// scalar. Per-triangle coloring can't use shared (indexed) vertices, so we
-// expand to 3 unique vertices per triangle and give all three the triangle's
-// color. Returns flat position + color arrays (9 floats per triangle each) plus
-// the scalar range used, or null for 'solid'. `rangeOverride` pins the colorbar
-// scale; otherwise the data's own min/max is used.
-export function buildMeshTriangleColorBuffers(
-  data: MeshData,
-  mode: MeshColorMode,
-  colormap: ColormapName,
-  rangeOverride?: { min: number; max: number },
-): { positions: Float32Array; colors: Float32Array; min: number; max: number } | null {
-  const scalars = computeMeshTriangleScalars(data, mode);
-  if (!scalars) return null;
-
+// Expand a mesh's indexed vertices into the non-indexed position buffer that
+// per-triangle coloring requires (3 unique vertices per triangle, 9 floats per
+// triangle). This depends ONLY on the geometry, not the color mode or colormap,
+// so callers cache it once per mesh and reuse it across color-mode changes —
+// re-expanding it on every recolor wastes a 100+ MB allocation and GPU upload
+// on multi-million-triangle meshes.
+export function buildMeshNonIndexedPositions(data: MeshData): Float32Array {
   const { vertices, indices, triangleCount } = data;
   const positions = new Float32Array(triangleCount * 9);
-  const colors = new Float32Array(triangleCount * 9);
-
-  const min = rangeOverride?.min ?? scalars.min;
-  const max = rangeOverride?.max ?? scalars.max;
-  const span = (max - min) || 1;
-
   for (let t = 0; t < triangleCount; t++) {
-    const value = scalars.values[t];
-    const tNorm = Number.isFinite(value) ? (value - min) / span : 0;
-    const [r, g, b] = sampleColormap(colormap, tNorm);
     for (let k = 0; k < 3; k++) {
       const src = indices[t * 3 + k] * 3;
       const dst = (t * 3 + k) * 3;
       positions[dst] = vertices[src];
       positions[dst + 1] = vertices[src + 1];
       positions[dst + 2] = vertices[src + 2];
-      colors[dst] = r;
-      colors[dst + 1] = g;
-      colors[dst + 2] = b;
+    }
+  }
+  return positions;
+}
+
+// Build just the non-indexed per-triangle color buffer for a scalar mode (9
+// floats per triangle, all three vertices of a face share the face's color),
+// plus the scalar range used. Separate from the positions so a recolor only
+// rebuilds/uploads the colors. `rangeOverride` pins the colorbar scale;
+// otherwise the data's own min/max is used. Returns null for 'solid'.
+export function buildMeshTriangleColors(
+  data: MeshData,
+  mode: MeshColorMode,
+  colormap: ColormapName,
+  rangeOverride?: { min: number; max: number },
+): { colors: Float32Array; min: number; max: number } | null {
+  const scalars = computeMeshTriangleScalars(data, mode);
+  if (!scalars) return null;
+
+  const { triangleCount } = data;
+  const colors = new Float32Array(triangleCount * 9);
+
+  const min = rangeOverride?.min ?? scalars.min;
+  const max = rangeOverride?.max ?? scalars.max;
+  const span = (max - min) || 1;
+
+  // Reused 3-slot scratch so the colormap lookup doesn't allocate per triangle.
+  const rgb = new Float32Array(3);
+  for (let t = 0; t < triangleCount; t++) {
+    const value = scalars.values[t];
+    const tNorm = Number.isFinite(value) ? (value - min) / span : 0;
+    sampleColormapInto(colormap, tNorm, rgb, 0);
+    const base = t * 9;
+    for (let k = 0; k < 3; k++) {
+      const dst = base + k * 3;
+      colors[dst] = rgb[0];
+      colors[dst + 1] = rgb[1];
+      colors[dst + 2] = rgb[2];
     }
   }
 
-  return { positions, colors, min, max };
+  return { colors, min, max };
+}
+
+// Build non-indexed geometry buffers that color each triangle by a per-triangle
+// scalar (positions + colors together). Thin wrapper over
+// `buildMeshNonIndexedPositions` + `buildMeshTriangleColors`; the viewer caches
+// those two halves separately, but this combined form is convenient for tests
+// and one-shot callers. Returns null for 'solid'.
+export function buildMeshTriangleColorBuffers(
+  data: MeshData,
+  mode: MeshColorMode,
+  colormap: ColormapName,
+  rangeOverride?: { min: number; max: number },
+): { positions: Float32Array; colors: Float32Array; min: number; max: number } | null {
+  const built = buildMeshTriangleColors(data, mode, colormap, rangeOverride);
+  if (!built) return null;
+  return {
+    positions: buildMeshNonIndexedPositions(data),
+    colors: built.colors,
+    min: built.min,
+    max: built.max,
+  };
 }
 
 // Human-readable colorbar label for a mesh pseudocolor mode.
@@ -351,12 +412,22 @@ export function meshHasScanColors(data: MeshData): boolean {
 export function buildMeshScanColorBuffers(
   data: MeshData,
 ): { positions: Float32Array; colors: Float32Array } | null {
+  const colors = buildMeshScanColors(data);
+  if (!colors) return null;
+  return { positions: buildMeshNonIndexedPositions(data), colors };
+}
+
+// Build just the non-indexed per-triangle scan-color buffer (9 floats per
+// triangle). Like `buildMeshTriangleColors` but categorical: each triangle's
+// scan index looks up a hex color in `data.scanColors`. Separate from the
+// positions so the viewer caches them independently. Returns null with no scan
+// provenance.
+export function buildMeshScanColors(data: MeshData): Float32Array | null {
   if (!meshHasScanColors(data)) return null;
 
-  const { vertices, indices, triangleCount, triangleScanIds, scanColors } = data;
+  const { triangleCount, triangleScanIds, scanColors } = data;
   const ids = triangleScanIds!;
   const palette = scanColors!;
-  const positions = new Float32Array(triangleCount * 9);
   const colors = new Float32Array(triangleCount * 9);
 
   // Pre-parse each scan's hex color to linear-ish RGB once.
@@ -369,19 +440,16 @@ export function buildMeshScanColorBuffers(
   for (let t = 0; t < triangleCount; t++) {
     const sid = ids[t];
     const [r, g, b] = (sid >= 0 && sid < rgb.length) ? rgb[sid] : fallback;
+    const base = t * 9;
     for (let k = 0; k < 3; k++) {
-      const src = indices[t * 3 + k] * 3;
-      const dst = (t * 3 + k) * 3;
-      positions[dst] = vertices[src];
-      positions[dst + 1] = vertices[src + 1];
-      positions[dst + 2] = vertices[src + 2];
+      const dst = base + k * 3;
       colors[dst] = r;
       colors[dst + 1] = g;
       colors[dst + 2] = b;
     }
   }
 
-  return { positions, colors };
+  return colors;
 }
 
 // Fuzzy search helper. Returns 2 for an exact substring match, 1 for an

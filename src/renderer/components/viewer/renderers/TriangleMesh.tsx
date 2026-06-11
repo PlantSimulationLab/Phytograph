@@ -49,16 +49,30 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
     }
   }, [data, hasVertexColors, useVertexColors, color, opacity]);
 
+  // Geometry is keyed on the POSITIONS, not the colors: the non-indexed
+  // positions are mode-independent (the viewer caches and reuses them across
+  // color-mode changes), so switching inclination↔azimuth↔area or the colormap
+  // doesn't rebuild the geometry — only the color attribute is swapped in place
+  // (see the effect below). On multi-million-triangle meshes this is the
+  // difference between a long freeze (rebuild + re-upload positions + normals)
+  // and a near-instant recolor.
+  const trianglePositions = hasTriangleColors && triangleColors ? triangleColors.positions : null;
   const geometry = useMemo(() => {
     const geo = new THREE.BufferGeometry();
 
-    if (hasTriangleColors && triangleColors) {
+    if (trianglePositions) {
       // Non-indexed: one set of 3 vertices per triangle, each carrying the
-      // triangle's pseudocolor. Normals are recomputed flat per face so
-      // shading doesn't smear across the per-triangle color boundaries.
-      geo.setAttribute('position', new THREE.BufferAttribute(triangleColors.positions, 3));
-      geo.setAttribute('color', new THREE.BufferAttribute(triangleColors.colors, 3));
-      geo.computeVertexNormals();
+      // triangle's pseudocolor. No normal attribute — the material uses
+      // flatShading, which derives the face normal in the fragment shader from
+      // screen-space position derivatives, so an explicit normal buffer would
+      // be unused dead weight (another full-size buffer + GPU upload, ~100+ MB
+      // at multi-million-triangle counts). The color attribute is seeded here
+      // for a correct first paint; subsequent color-only changes (which don't
+      // rebuild this geometry) are swapped in by the effect below.
+      geo.setAttribute('position', new THREE.BufferAttribute(trianglePositions, 3));
+      if (triangleColors) {
+        geo.setAttribute('color', new THREE.BufferAttribute(triangleColors.colors, 3));
+      }
       return geo;
     }
 
@@ -77,7 +91,32 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
     }
 
     return geo;
-  }, [data, hasVertexColors, hasTriangleColors, triangleColors]);
+  }, [data, hasVertexColors, trianglePositions]);
+
+  // Per-triangle colors: update the color attribute on the (stable) non-indexed
+  // geometry without rebuilding it. Runs on mount and whenever the color buffer
+  // changes (mode or colormap switch).
+  //
+  // CRITICAL for large meshes: when the new colors are the same length as the
+  // current ones (always true for a mode/colormap switch on the same mesh — the
+  // triangle count is unchanged), copy them INTO the existing buffer and flag it
+  // for re-upload, rather than `setAttribute`-ing a fresh BufferAttribute.
+  // three.js does NOT free the GPU buffer of a replaced attribute, so swapping a
+  // new ~100 MB color buffer on every recolor leaks one buffer per switch and
+  // marches the process toward the renderer's ~4 GB heap cap (OOM after enough
+  // switches). In-place reuse keeps exactly one color buffer for the mesh's life.
+  const triangleColorBuffer = hasTriangleColors && triangleColors ? triangleColors.colors : null;
+  useEffect(() => {
+    if (!triangleColorBuffer) return;
+    const existing = geometry.getAttribute('color') as THREE.BufferAttribute | undefined;
+    if (existing && existing.array.length === triangleColorBuffer.length) {
+      // Same size → overwrite in place and re-upload. No new GPU buffer.
+      (existing.array as Float32Array).set(triangleColorBuffer);
+      existing.needsUpdate = true;
+    } else if (!existing || existing.array !== triangleColorBuffer) {
+      geometry.setAttribute('color', new THREE.BufferAttribute(triangleColorBuffer, 3));
+    }
+  }, [geometry, triangleColorBuffer]);
 
   const useColorAttr = hasTriangleColors || hasVertexColors;
 

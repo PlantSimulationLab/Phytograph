@@ -11,6 +11,9 @@ backend-api/venv/
 *.log
 .vite/
 
+# Research harness outputs (generated; not shipped)
+backend-api/research/out/
+
 # Test artifacts
 backend-api/.coverage
 backend-api/tests/qsm/_artifacts/

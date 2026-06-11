@@ -46,6 +46,24 @@ still hold port 8008:
 kill $(lsof -ti :8008)
 ```
 
+## Dev renderer disables React's performance track
+
+`src/renderer/disableReactDevPerfTrack.ts` (the first import of `main.tsx`)
+stubs out `console.timeStamp` in dev so React's development build skips its
+"Components ⚛" DevTools performance track. That instrumentation deep-diffs a
+component's previous and next props on every re-render and `for...in`s over
+any object in changed props — including TypedArrays, whose indices are all
+enumerable. With multi-million-element buffers as props (point cloud
+positions, per-triangle color buffers), one re-render allocates gigabytes of
+key/value strings and OOM-crashes the renderer at V8's ~4 GB
+pointer-compression cap (verified against react-dom 19.2.6; production React
+builds don't contain the instrumentation, so packaged apps were never
+affected).
+
+Consequences: no "Components ⚛" lane in the Performance panel during dev
+profiling, and `console.timeStamp` is unavailable in the dev renderer. Don't
+move that import — it must evaluate before anything that pulls in React.
+
 ## Iterating on Python
 
 For tight Python iteration, run uvicorn directly so the supervisor reuses

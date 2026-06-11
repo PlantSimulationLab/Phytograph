@@ -404,6 +404,19 @@ export interface QSMEntry {
   shoots: import('../utils/backendApi').QSMShoot[];
   metrics: import('../utils/backendApi').QSMMetrics | null;
   visible: boolean;
+  // Phase-1 procedural foliage: leaves placed on the terminal shoots, as a
+  // pre-flattened textured mesh (rendered via TexturedPlantMesh). Set once the
+  // Add Leaves tool runs; absent until then.
+  leaves?: {
+    data: MeshData;
+    plantMaterials?: PlantMaterialDef[];
+    leafCount: number;
+    // The originating Phase-1 placement request, kept so Phase 2 ("Adjust Leaf
+    // Angles") can re-place the leaves identically before matching their angles
+    // to a measured distribution. Absent for leaves placed before this field existed.
+    request?: import('../utils/backendApi').QSMLeavesRequest;
+  };
+  leavesVisible?: boolean;
 }
 
 // A single voxel of a leaf-area-density result. center/size are world-space;

@@ -146,6 +146,33 @@ export function sampleColormap(name: ColormapName, t: number): RGB {
   ];
 }
 
+// Like `sampleColormap` but writes the RGB triplet into `out` at offset `off`,
+// avoiding a per-call array allocation. Use this in hot per-element loops
+// (e.g. coloring millions of triangles), where the array churn from
+// `sampleColormap` floods the GC and can OOM the renderer.
+export function sampleColormapInto(
+  name: ColormapName,
+  t: number,
+  out: Float32Array,
+  off: number,
+): void {
+  const stops = STOPS[name] ?? STOPS.viridis;
+  if (!isFinite(t)) {
+    out[off] = stops[0][0]; out[off + 1] = stops[0][1]; out[off + 2] = stops[0][2];
+    return;
+  }
+  const clamped = t <= 0 ? 0 : t >= 1 ? 1 : t;
+  const n = stops.length - 1;
+  const f = clamped * n;
+  const i = Math.min(Math.floor(f), n - 1);
+  const u = f - i;
+  const a = stops[i];
+  const b = stops[i + 1];
+  out[off] = a[0] + (b[0] - a[0]) * u;
+  out[off + 1] = a[1] + (b[1] - a[1]) * u;
+  out[off + 2] = a[2] + (b[2] - a[2]) * u;
+}
+
 // CSS linear-gradient string sampled at evenly-spaced stops. Used by the
 // colorbar overlay so the swatch stays in sync with the renderer.
 export function colormapToCssGradient(name: ColormapName, samples = 16, direction = 'to top'): string {

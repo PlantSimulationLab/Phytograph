@@ -3,9 +3,9 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Copy} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Copy, Compass} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -19,6 +19,8 @@ import { HeliosTriangulationPopup, type GridOption } from './HeliosTriangulation
 import { LADPopup } from './LADPopup';
 import { LeafAnglePlotPopup } from './LeafAnglePlotPopup';
 import { QSMResultsPopup } from './QSMResultsPopup';
+import { AddLeavesPopup } from './AddLeavesPopup';
+import { AdjustLeafAnglesPopup } from './AdjustLeafAnglesPopup';
 import { MorphPopup } from './MorphPopup';
 import { ScanParametersPopup } from './ScanParametersPopup';
 import { ScannerMarker } from './ScannerMarker';
@@ -45,9 +47,9 @@ import {
   generateShapeMesh,
   octreeScalarFieldOptions,
   voxelMeshToHeliosGrid,
-  buildMeshTriangleColorBuffers,
-  buildMeshScanColorBuffers,
-  computeMeshTriangleScalars,
+  buildMeshNonIndexedPositions,
+  buildMeshTriangleColors,
+  buildMeshScanColors,
   meshColorModeLabel,
   ladRange,
   roundCoord3,
@@ -127,6 +129,7 @@ import type {
   CloudFilters,
 } from '../lib/pointCloudTypes';
 import { meshDisplayNameFor } from '../lib/pointCloudTypes';
+import { eligibleLeafAngleMeshes, meanLeafInclination } from '../lib/adjustLeafAngles';
 export type {
   ScalarField,
   OctreeRef,
@@ -545,6 +548,10 @@ export default function PointCloudViewer({
   // scans of a single tree) or build one QSM per scan ('per-scan', separate trees).
   const [qsmMultiMode, setQSMMultiMode] = useState<'aggregate' | 'per-scan'>('per-scan');
   const [qsms, setQSMs] = useState<QSMEntry[]>([]);
+  // The QSM id whose Add-Leaves modal is open (null = closed).
+  const [addLeavesQSMId, setAddLeavesQSMId] = useState<string | null>(null);
+  // The QSM id whose Adjust-Leaf-Angles modal is open (null = closed).
+  const [adjustLeavesQSMId, setAdjustLeavesQSMId] = useState<string | null>(null);
   const [qsmColorMode, setQSMColorMode] = useState<QSMColorMode>('rank');
   // QSM-entry multi-selection (for the panel header bulk actions).
   const [selectedQSMIds, setSelectedQSMIds] = useState<Set<string>>(new Set());
@@ -5839,6 +5846,57 @@ export default function PointCloudViewer({
     setQSMs(prev => prev.map(q => (q.id === qsmId ? { ...q, visible: !q.visible } : q)));
   }, []);
 
+  // Show/hide the procedural leaves of a single QSM (independent of the woody
+  // QSM's own visibility).
+  const handleToggleLeavesVisibility = useCallback((qsmId: string) => {
+    setQSMs(prev => prev.map(q =>
+      q.id === qsmId ? { ...q, leavesVisible: q.leavesVisible === false } : q));
+  }, []);
+
+  // Phase-1 leaf reconstruction: place leaves on the QSM's terminal shoots and
+  // store the resulting textured mesh on the QSM entry (rendered via
+  // TexturedPlantMesh). The QSM topology is round-tripped to the backend.
+  const handleAddLeaves = useCallback(async (qsmId: string, request: QSMLeavesRequest) => {
+    try {
+      const resp = await addQSMLeaves(request);
+      if (!resp.success || resp.triangle_count === 0) {
+        showToast({ title: resp.error || 'Leaf placement produced no geometry', type: 'error' });
+        return;
+      }
+      const { data, plantMaterials } = plantResponseToMeshData(resp);
+      // Keep the originating request so "Adjust Leaf Angles" (Phase 2) can
+      // re-place these leaves identically before matching their angles.
+      setQSMs(prev => prev.map(q =>
+        q.id === qsmId
+          ? { ...q, leaves: { data, plantMaterials, leafCount: resp.leaf_count, request }, leavesVisible: true }
+          : q));
+      showToast({ title: `Added ${resp.leaf_count.toLocaleString()} leaves`, type: 'success' });
+    } catch (err) {
+      showToast({ title: err instanceof Error ? err.message : 'Failed to add leaves', type: 'error' });
+    }
+  }, [showToast]);
+
+  // Phase 2: adjust a QSM's leaves to match a measured per-cell leaf-angle
+  // distribution (from a leaf-on Helios triangulation). Replaces the leaf mesh
+  // in place, keeping its visibility.
+  const handleAdjustLeafAngles = useCallback(async (qsmId: string, request: QSMAdjustLeafAnglesRequest) => {
+    try {
+      const resp = await adjustQSMLeafAngles(request);
+      if (!resp.success || resp.triangle_count === 0) {
+        showToast({ title: resp.error || 'Leaf-angle adjustment produced no geometry', type: 'error' });
+        return;
+      }
+      const { data, plantMaterials } = plantResponseToMeshData(resp);
+      setQSMs(prev => prev.map(q =>
+        q.id === qsmId && q.leaves
+          ? { ...q, leaves: { ...q.leaves, data, plantMaterials, leafCount: resp.leaf_count } }
+          : q));
+      showToast({ title: `Adjusted ${resp.leaf_count.toLocaleString()} leaf angles`, type: 'success' });
+    } catch (err) {
+      showToast({ title: err instanceof Error ? err.message : 'Failed to adjust leaf angles', type: 'error' });
+    }
+  }, [showToast]);
+
   // Display label for a QSM, matching the results panel + delete dialog:
   // sourceLabel override (aggregate) → source scan fileName → 'QSM'.
   const qsmDisplayLabel = useCallback((qsm: QSMEntry): string => {
@@ -6926,20 +6984,73 @@ export default function PointCloudViewer({
     return options;
   }, [meshes, meshPositions, meshScales, displayNameOfMesh]);
 
+  // Cache of the non-indexed POSITIONS buffer per mesh, keyed by mesh id and
+  // pinned to the mesh's data identity. Positions are mode-independent, so we
+  // build them once and reuse the same Float32Array across every color-mode /
+  // colormap switch. Keeping a stable positions reference also lets TriangleMesh
+  // recolor in place (it keys its geometry on positions identity) instead of
+  // rebuilding + re-uploading the whole geometry — the key to fast recolors and
+  // to not OOM'ing on multi-million-triangle meshes.
+  // Cache of the fully-built per-mesh pseudocolor result, keyed by mesh id and
+  // pinned to (data, mode, colormap). When none of those changed we return the
+  // EXACT SAME result object (same positions AND colors Float32Arrays) so a
+  // re-render — even a burst of them — reuses the existing buffers instead of
+  // reallocating ~150 MB and forcing the geometry to re-upload. This is what
+  // keeps a re-render storm from marching the heap to the ~4 GB cap.
+  const meshColorCache = useRef<Map<string, {
+    data: MeshData;
+    mode: MeshColorMode;
+    colormap: ColormapName;
+    result: { positions: Float32Array; colors: Float32Array; min?: number; max?: number };
+  }>>(new Map());
+
   // Per-triangle pseudocolor buffers for any mesh with a non-solid color mode.
-  // Keyed by mesh id; entry is the non-indexed position/color buffers fed to
-  // TriangleMesh. Recomputed only when the mesh set, its modes, or the shared
-  // colormap change — the per-triangle scalar pass is O(triangles).
+  // Keyed by mesh id; entry carries the (cached, stable) non-indexed positions
+  // and a freshly-built color buffer fed to TriangleMesh, plus the scalar range
+  // (reused by the colorbar so it doesn't re-run the scalar pass). Recomputed
+  // when the mesh set, its modes, or the shared colormap change — only the
+  // O(triangles) COLOR pass re-runs; positions come from the cache.
   const meshTriangleColors = useMemo(() => {
-    const out = new Map<string, { positions: Float32Array; colors: Float32Array }>();
+    const out = new Map<string, { positions: Float32Array; colors: Float32Array; min?: number; max?: number }>();
+    const cache = meshColorCache.current;
+    const liveIds = new Set<string>();
     for (const mesh of meshes) {
       const mode = meshColorModes.get(mesh.id);
       if (!mode || mode === 'solid') continue;
-      // 'scan' is categorical (per-scan swatch); the rest are scalar gradients.
-      const built = mode === 'scan'
-        ? buildMeshScanColorBuffers(mesh.data)
-        : buildMeshTriangleColorBuffers(mesh.data, mode, colormap);
-      if (built) out.set(mesh.id, { positions: built.positions, colors: built.colors });
+      liveIds.add(mesh.id);
+
+      // Full cache hit: same geometry, mode, and colormap → return the exact
+      // same result object. No allocation, and downstream identity is stable so
+      // the geometry/color buffers are not rebuilt or re-uploaded.
+      const cached = cache.get(mesh.id);
+      if (cached && cached.data === mesh.data && cached.mode === mode && cached.colormap === colormap) {
+        out.set(mesh.id, cached.result);
+        continue;
+      }
+
+      // Reuse positions when only the mode/colormap changed (data unchanged).
+      const positions = cached && cached.data === mesh.data
+        ? cached.result.positions
+        : buildMeshNonIndexedPositions(mesh.data);
+
+      let result: { positions: Float32Array; colors: Float32Array; min?: number; max?: number } | null = null;
+      if (mode === 'scan') {
+        const colors = buildMeshScanColors(mesh.data);
+        if (colors) result = { positions, colors };
+      } else {
+        const built = buildMeshTriangleColors(mesh.data, mode, colormap);
+        if (built) result = { positions, colors: built.colors, min: built.min, max: built.max };
+      }
+
+      if (result) {
+        cache.set(mesh.id, { data: mesh.data, mode, colormap, result });
+        out.set(mesh.id, result);
+      }
+    }
+    // Evict cache entries for meshes that no longer carry a color mode (deleted,
+    // or reverted to solid) so the cache doesn't pin freed geometry buffers.
+    for (const id of Array.from(cache.keys())) {
+      if (!liveIds.has(id)) cache.delete(id);
     }
     return out;
   }, [meshes, meshColorModes, colormap]);
@@ -6967,10 +7078,13 @@ export default function PointCloudViewer({
     if (!activeColorMesh) return null;
     const mode = meshColorModes.get(activeColorMesh.id);
     if (!mode || mode === 'solid' || mode === 'scan') return null;
-    const scalars = computeMeshTriangleScalars(activeColorMesh.data, mode);
-    if (!scalars) return null;
-    return { mode, min: scalars.min, max: scalars.max, label: meshColorModeLabel(mode) };
-  }, [activeColorMesh, meshColorModes]);
+    // Reuse the range already computed while building the color buffer, rather
+    // than running the O(triangles) scalar pass a second time just for the
+    // colorbar (a needless full pass that doubled the freeze on large meshes).
+    const built = meshTriangleColors.get(activeColorMesh.id);
+    if (!built || built.min === undefined || built.max === undefined) return null;
+    return { mode, min: built.min, max: built.max, label: meshColorModeLabel(mode) };
+  }, [activeColorMesh, meshColorModes, meshTriangleColors]);
 
   // The LAD result whose colorbar is shown: the explicitly-selected one, else
   // the most recent visible result. Its LAD range (override-aware) drives the
@@ -8519,6 +8633,12 @@ export default function PointCloudViewer({
                 shoots={qsm.shoots}
                 colorMode={qsmColorMode}
               />
+              {qsm.leaves && qsm.leavesVisible !== false && (
+                <TexturedPlantMesh
+                  data={qsm.leaves.data}
+                  plantMaterials={qsm.leaves.plantMaterials ?? []}
+                />
+              )}
             </group>
           );
         })}
@@ -9815,8 +9935,47 @@ export default function PointCloudViewer({
                         <div className="text-[10px] text-neutral-500" data-testid="qsm-row-stats">
                           {qsm.cylinders.length} cyl · {qsm.shoots.length} shoots
                           {m ? ` · ${m.n_scaffolds} scaffolds` : ''}
+                          {qsm.leaves ? (
+                            <span
+                              data-testid={`qsm-leaf-count-${qsm.id}`}
+                              data-leaf-count={qsm.leaves.leafCount}
+                              data-leaf-incl-mean={meanLeafInclination(qsm.leaves.data).toFixed(1)}
+                            >
+                              {` · ${qsm.leaves.leafCount.toLocaleString()} leaves`}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
+                      {qsm.leaves && (
+                        <button
+                          data-testid={`qsm-leaves-toggle-${qsm.id}`}
+                          onClick={(e) => { e.stopPropagation(); handleToggleLeavesVisibility(qsm.id); }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title={qsm.leavesVisible === false ? 'Show leaves' : 'Hide leaves'}
+                        >
+                          {qsm.leavesVisible === false
+                            ? <Sprout className="w-3 h-3 text-neutral-500" />
+                            : <Sprout className="w-3 h-3 text-green-400" />}
+                        </button>
+                      )}
+                      {qsm.leaves?.request && eligibleLeafAngleMeshes(meshes, qsm).length > 0 && (
+                        <button
+                          data-testid={`qsm-adjust-leaves-${qsm.id}`}
+                          onClick={(e) => { e.stopPropagation(); setAdjustLeavesQSMId(qsm.id); }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title="Adjust leaf angles to a measured distribution"
+                        >
+                          <Compass className="w-3 h-3 text-green-400" />
+                        </button>
+                      )}
+                      <button
+                        data-testid={`qsm-add-leaves-${qsm.id}`}
+                        onClick={(e) => { e.stopPropagation(); setAddLeavesQSMId(qsm.id); }}
+                        className="p-1 hover:bg-neutral-600 rounded"
+                        title="Add leaves"
+                      >
+                        <Plus className="w-3 h-3 text-green-400" />
+                      </button>
                       <button
                         onClick={(e) => { e.stopPropagation(); handleToggleQSMVisibility(qsm.id); }}
                         className="p-1 hover:bg-neutral-600 rounded"
@@ -12113,6 +12272,24 @@ export default function PointCloudViewer({
           />
         );
       })()}
+
+      {/* Add Leaves to QSM (Phase-1 procedural leaf reconstruction) */}
+      <AddLeavesPopup
+        isOpen={addLeavesQSMId !== null}
+        onClose={() => setAddLeavesQSMId(null)}
+        qsm={addLeavesQSMId ? qsms.find(q => q.id === addLeavesQSMId) ?? null : null}
+        onAddLeaves={handleAddLeaves}
+      />
+
+      {/* Adjust Leaf Angles to a measured distribution (Phase-2) */}
+      <AdjustLeafAnglesPopup
+        isOpen={adjustLeavesQSMId !== null}
+        onClose={() => setAdjustLeavesQSMId(null)}
+        qsm={adjustLeavesQSMId ? qsms.find(q => q.id === adjustLeavesQSMId) ?? null : null}
+        meshes={meshes}
+        onAdjust={handleAdjustLeafAngles}
+        meshLabel={displayNameOfMesh}
+      />
 
       {/* Leaf Area Density Popup */}
       <LADPopup

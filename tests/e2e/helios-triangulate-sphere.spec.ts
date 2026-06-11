@@ -63,6 +63,20 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
     // points) option and shows the all-points warning.
     await expect(page.getByTestId('helios-grid-allpoints-warning')).toBeVisible();
 
+    // --- Lmax suggestion (Otsu separability) + merged-cloud guard ----------
+    // Exercise the Suggest button against the live backend: it runs an
+    // unfiltered triangulation, fills Lmax from the candidate edge-length split,
+    // and reports a separation confidence. The four sphere scans are each
+    // single-viewpoint, so the merged-cloud guard must NOT fire.
+    await page.getByTestId('helios-suggest-button').click();
+    const suggestion = page.getByTestId('helios-suggestion-result');
+    await expect(suggestion).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('helios-suggestion-confidence')).toContainText(/Separation/);
+    await expect(page.getByTestId('helios-merged-warning')).toHaveCount(0);
+    // Suggest populated the Lmax field with a positive value.
+    const suggested = parseFloat(await page.getByTestId('helios-input-lmax').inputValue());
+    expect(suggested).toBeGreaterThan(0);
+
     // Mirror the C++ self-test parameters: lmax=0.5, max_aspect_ratio=5.
     await page.getByTestId('helios-input-lmax').fill('0.5');
     await page.getByTestId('helios-input-aspect').fill('5');

@@ -64,4 +64,30 @@ describe('plantResponseToMeshData', () => {
     });
     expect(plantMaterials![0].textureData).toBeUndefined();
   });
+
+  it('consumes a QSMLeavesResponse-shaped object (extra success/leaf_count fields)', () => {
+    // The /api/qsm/leaves response carries success/leaf_count/error on top of the
+    // plant-mesh fields. Those extras must not interfere with the flatten step —
+    // this is the contract the AddLeaves wiring relies on.
+    const leavesResp = {
+      success: true,
+      leaf_count: 2,
+      error: undefined,
+      vertices: [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+      indices: [[0, 1, 2]],
+      uv_coordinates: [[0, 1], [1, 1], [1, 0]],
+      materials: [{ name: 'leaf', color: [0.3, 0.5, 0.1], texture_name: 'AlmondLeaf.png', has_alpha: true }],
+      material_groups: [{ material_name: 'leaf', triangle_indices: [0] }],
+      textures: { 'AlmondLeaf.png': 'PNGDATA' },
+      vertex_count: 3,
+      triangle_count: 1,
+    } as unknown as PlantMeshResponseLike;
+    const { data, plantMaterials } = plantResponseToMeshData(leavesResp);
+    expect(data.triangleCount).toBe(1);
+    expect(plantMaterials![0]).toMatchObject({
+      textureData: 'PNGDATA',
+      hasAlpha: true,
+      triangleIndices: [0],
+    });
+  });
 });

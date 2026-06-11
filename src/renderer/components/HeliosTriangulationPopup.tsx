@@ -1,6 +1,12 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
-import { X, Triangle } from 'lucide-react';
-import { HeliosTriangulationRequest, HeliosGrid } from '../utils/backendApi';
+import { X, Triangle, Wand2, Loader2, AlertTriangle } from 'lucide-react';
+import {
+  HeliosTriangulationRequest,
+  HeliosScanEntry,
+  HeliosGrid,
+  HeliosSuggestResponse,
+  suggestHeliosLmax,
+} from '../utils/backendApi';
 import type { Scan } from '../lib/scan';
 import { hasData, hasParams } from '../lib/scan';
 
@@ -76,6 +82,10 @@ export function HeliosTriangulationPopup({
   const [lmaxStr, setLmaxStr] = useState('0.1');
   const [maxAspectRatioStr, setMaxAspectRatioStr] = useState('4.0');
   const [error, setError] = useState<string | null>(null);
+  // Lmax suggestion (Otsu separability) state. Cleared whenever the scan
+  // selection or grid changes, since the suggestion is specific to that input.
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestion, setSuggestion] = useState<HeliosSuggestResponse | null>(null);
 
   const toggleScan = useCallback((scanId: string) => {
     setSelectedScanIds(prev => {
@@ -98,20 +108,13 @@ export function HeliosTriangulationPopup({
     [eligible, selectedScanIds],
   );
 
-  const handleTriangulate = useCallback(() => {
-    setError(null);
-
-    if (selectedScans.length === 0) {
-      setError('Select at least one scan');
-      return;
-    }
-
-    // Assemble HeliosScanEntry[] directly from each scan's data + params.
-    // Prefer sending the source file path so the backend reads bytes from
-    // disk; fall back to serialising every point if the path wasn't tracked.
-    // Each scan carries its own acquisition geometry (Ntheta/Nphi + angular
-    // bounds) so Helios triangulates it in the grid it was actually sampled in.
-    const requestScans = selectedScans.map(scan => {
+  // Assemble the HeliosTriangulationRequest from the current selection + grid.
+  // Shared by Triangulate and the Lmax suggestion so both analyse identical input.
+  // Prefer the source file path (backend reads bytes from disk); fall back to
+  // serialising every point. Each scan carries its own acquisition geometry so
+  // Helios triangulates it in the grid it was actually sampled in.
+  const buildRequest = useCallback((lmax: number, maxAspectRatio: number): HeliosTriangulationRequest => {
+    const requestScans: HeliosScanEntry[] = selectedScans.map(scan => {
       const p = scan.params;
       const angular = {
         origin: [p.origin.x, p.origin.y, p.origin.z],
@@ -123,9 +126,6 @@ export function HeliosTriangulationPopup({
         phi_max: p.azimuthMaxDeg,
       };
       if (scan.sourcePath) {
-        // Pass the known column format so the backend uses it instead of the
-        // column-count heuristic, which can mis-map e.g. reflectance vs
-        // intensity or RGB ordering. Octree scans always have a sourcePath.
         return { file_path: scan.sourcePath, ascii_format: scan.asciiFormat ?? null, ...angular };
       }
       const points: number[][] = [];
@@ -140,29 +140,67 @@ export function HeliosTriangulationPopup({
       return { points, ...angular };
     });
 
-    const lmax = parseFloat(lmaxStr) || 0.1;
-    const maxAspectRatio = parseFloat(maxAspectRatioStr) || 4.0;
-
-    const request: HeliosTriangulationRequest = {
+    return {
       scans: requestScans,
       lmax,
       max_aspect_ratio: maxAspectRatio,
-      // Request-level angles are backend-only fallbacks now; per-scan values
-      // above take precedence. Keep sensible defaults for any scan that
-      // somehow lacks its own.
+      // Request-level angles are backend-only fallbacks; per-scan values above
+      // take precedence. Sensible defaults for any scan lacking its own.
       theta_min: 30,
       theta_max: 130,
       phi_min: 0,
       phi_max: 360,
       ...(selectedGrid ? { grid: selectedGrid.grid } : {}),
     };
+  }, [selectedScans, selectedGrid]);
 
+  // Ask the backend to suggest Lmax from the candidate edge-length distribution
+  // (Otsu separability) and flag merged multi-scan clouds. Applies the suggestion
+  // to the Lmax field and surfaces the confidence + any warning.
+  const handleSuggest = useCallback(async () => {
+    setError(null);
+    if (selectedScans.length === 0) {
+      setError('Select at least one scan');
+      return;
+    }
+    setSuggesting(true);
+    setSuggestion(null);
+    try {
+      // lmax / aspect are ignored by the suggest endpoint (placeholders).
+      const result = await suggestHeliosLmax(buildRequest(0.1, 4.0));
+      if (!result.success) {
+        setError(result.error || 'Could not compute a suggestion for this data.');
+        return;
+      }
+      setSuggestion(result);
+      setLmaxStr(result.suggested_lmax.toPrecision(3));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Suggestion request failed.');
+    } finally {
+      setSuggesting(false);
+    }
+  }, [selectedScans, buildRequest]);
+
+  const handleTriangulate = useCallback(() => {
+    setError(null);
+    if (selectedScans.length === 0) {
+      setError('Select at least one scan');
+      return;
+    }
+    const lmax = parseFloat(lmaxStr) || 0.1;
+    const maxAspectRatio = parseFloat(maxAspectRatioStr) || 4.0;
+    const request = buildRequest(lmax, maxAspectRatio);
     // Scan colors in the same order as request.scans, so triangle_scan_ids
     // (which index into request.scans) map straight to a display color.
     const scanColors = selectedScans.map(s => s.color);
     onStartTriangulate(request, scanColors);
     onClose();
-  }, [selectedScans, lmaxStr, maxAspectRatioStr, selectedGrid, onStartTriangulate, onClose]);
+  }, [selectedScans, lmaxStr, maxAspectRatioStr, buildRequest, onStartTriangulate, onClose]);
+
+  // The suggestion is specific to the selected scans + grid; drop it when those change.
+  useEffect(() => {
+    setSuggestion(null);
+  }, [selectedScanIds, selectedGridId]);
 
   if (!isOpen) return null;
 
@@ -296,9 +334,26 @@ export function HeliosTriangulationPopup({
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">
-                  Max Edge Length (Lmax)
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[10px] text-neutral-400">
+                    Max Edge Length (Lmax)
+                  </label>
+                  <button
+                    data-testid="helios-suggest-button"
+                    onClick={handleSuggest}
+                    disabled={suggesting || selectedScans.length === 0}
+                    title="Estimate Lmax from the candidate edge-length distribution"
+                    className={`flex items-center gap-1 text-[10px] transition-colors ${
+                      suggesting || selectedScans.length === 0
+                        ? 'text-neutral-600 cursor-not-allowed'
+                        : 'text-green-400 hover:text-green-300'
+                    }`}
+                  >
+                    {suggesting
+                      ? <><Loader2 className="w-3 h-3 animate-spin" /> Analyzing…</>
+                      : <><Wand2 className="w-3 h-3" /> Suggest</>}
+                  </button>
+                </div>
                 <input
                   data-testid="helios-input-lmax"
                   type="number"
@@ -327,6 +382,48 @@ export function HeliosTriangulationPopup({
                 <p className="text-[9px] text-neutral-500 mt-0.5">Filters skinny triangles</p>
               </div>
             </div>
+
+            {/* Lmax suggestion result: confidence (Otsu separability) + the merged-
+                multi-scan-cloud guard. Confidence reflects how cleanly the intra-leaf
+                and inter-leaf edge scales separate; it is independent of the merged
+                warning (a merged cloud can still score high). */}
+            {suggestion && (
+              <div data-testid="helios-suggestion-result" className="mt-3 space-y-2">
+                <div
+                  className={`rounded px-2.5 py-2 border text-[10px] ${
+                    suggestion.confidence_label === 'High'
+                      ? 'bg-green-500/5 border-green-500/30 text-green-200'
+                      : suggestion.confidence_label === 'Medium'
+                      ? 'bg-amber-500/5 border-amber-500/30 text-amber-200'
+                      : 'bg-red-500/5 border-red-500/30 text-red-200'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium">
+                      Applied Lmax {(suggestion.suggested_lmax * 100).toFixed(1)} cm
+                    </span>
+                    <span data-testid="helios-suggestion-confidence">
+                      Separation: {suggestion.confidence_label} (η {suggestion.confidence.toFixed(2)})
+                    </span>
+                  </div>
+                  <p className="text-neutral-400 mt-1">
+                    From {suggestion.candidate_count.toLocaleString()} candidate triangles;
+                    {' '}{Math.round(suggestion.drop_fraction * 100)}% filtered at this Lmax.
+                    {suggestion.confidence_label !== 'High' &&
+                      ' Low separation — the leaf and gap scales overlap, so the result is sensitive to Lmax; review the mesh.'}
+                  </p>
+                </div>
+                {suggestion.merged_warning && (
+                  <div
+                    data-testid="helios-merged-warning"
+                    className="flex gap-1.5 rounded px-2.5 py-2 border bg-amber-500/10 border-amber-500/40 text-[10px] text-amber-200"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                    <span>{suggestion.merged_message}</span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Per-scan angular bounds (Ntheta/Nphi, theta/phi) come from each
                 scan's own parameters — edit them per scan via the Scans panel,

@@ -310,6 +310,8 @@ boundaries.
 
 ## What's next
 
+- [Add leaves to the QSM](add-leaves.md) to build a foliated reconstruction
+  from the woody model.
 - Compare the QSM's metrics to a [generated plant model](generate-plant.md)
   of the same species.
 - Read the [QSM concept page](../concepts/qsm.md) for how cylinders,

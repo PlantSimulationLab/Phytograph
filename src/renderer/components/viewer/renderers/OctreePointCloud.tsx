@@ -18,6 +18,26 @@ import { getPotreeManager, OctreeRequestManager } from '../potreeManager';
 // limit — the renderer never holds more than the visible point set
 // (capped by pointBudget).
 
+// Silence potree-core's "loaded node with 0 bytes: rN" console.warn.
+// PotreeConverter legitimately writes zero-byte hierarchy entries (octants
+// whose points all landed in children after subsampling, or empty leaves
+// kept for structure — a 13 M-point scan has hundreds of them), and
+// potree-core handles them correctly (empty geometry, renders nothing) but
+// warns unconditionally for each one, flooding the dev console on import.
+// The warn is buried in its bundle with no opt-out, so filter that exact
+// message and pass everything else through untouched. The marker keeps the
+// wrapper from stacking when Vite HMR re-evaluates this module.
+const POTREE_WARN_FILTER = Symbol.for('phytograph.potreeWarnFilter');
+if (!(console.warn as unknown as Record<symbol, boolean>)[POTREE_WARN_FILTER]) {
+  const originalWarn = console.warn.bind(console);
+  const filtered = (...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].startsWith('loaded node with 0 bytes:')) return;
+    originalWarn(...args);
+  };
+  (filtered as unknown as Record<symbol, boolean>)[POTREE_WARN_FILTER] = true;
+  console.warn = filtered;
+}
+
 export interface OctreePointCloudProps {
   data: PointCloudData;  // must have data.octree set
   pointSize?: number;

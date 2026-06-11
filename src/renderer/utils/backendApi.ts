@@ -442,6 +442,59 @@ export async function heliosTriangulate(
   }
 }
 
+// Suggested Lmax + separation confidence from the candidate edge-length
+// distribution (label-free). High eta = the intra-leaf and inter-leaf edge
+// scales separate cleanly; low = they overlap (leaves close vs scan resolution).
+export interface HeliosSuggestResponse {
+  success: boolean;
+  suggested_lmax: number;        // meters (Otsu threshold on log edge lengths)
+  confidence: number;            // separability eta in [0,1]
+  confidence_label: string;      // "High" | "Medium" | "Low"
+  candidate_count: number;       // unfiltered candidate triangles analysed
+  drop_fraction: number;         // fraction of candidates above suggested_lmax
+  point_spacing: number;         // meters (~point spacing; 5th-pct candidate edge)
+  // True when a scan looks like a merged multi-scan cloud, where the single-origin
+  // triangulation bridges surfaces from different scanner positions. Advisory.
+  merged_warning: boolean;
+  merged_message?: string | null;
+  error?: string;
+}
+
+/**
+ * Ask the backend to suggest a Helios triangulation Lmax + separation confidence.
+ * Runs the same (unfiltered) triangulation as a real run, so it's not instant —
+ * the caller should show a spinner. Reuses the HeliosTriangulationRequest shape;
+ * lmax / max_aspect_ratio in the request are ignored by the suggest endpoint.
+ */
+export async function suggestHeliosLmax(
+  request: HeliosTriangulationRequest,
+  signal?: AbortSignal,
+): Promise<HeliosSuggestResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
+  if (signal) signal.addEventListener('abort', () => controller.abort());
+
+  try {
+    const response = await fetch(`${baseUrl}/api/triangulate/helios/suggest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Helios Lmax suggestion failed:', error);
+    throw error;
+  }
+}
+
 // ==================== LEAF AREA DENSITY (LAD) API ====================
 // Per-voxel leaf area density (m²/m³). The triangulation (Lmax/aspect) only
 // supplies the G-function; Helios traces beam paths through the voxel grid and
@@ -2545,6 +2598,196 @@ export async function buildQSM(request: QSMBuildRequest): Promise<QSMBuildRespon
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('QSM build request failed:', error);
+    throw error;
+  }
+}
+
+// ==================== QSM LEAF RECONSTRUCTION (Phase 1) ====================
+// Procedurally add leaves to a built QSM. The response mirrors the plant/mesh
+// shape (PlantMeshResponseLike) so plantResponseToMeshData() consumes it and
+// TexturedPlantMesh renders the leaves with alpha-cutout textures.
+
+// Curated tree-leaf subset of the Helios plantarchitecture textures, surfaced in
+// the Add Leaves picker. Authoritative list comes from GET /api/qsm/leaf-textures;
+// this is the fallback / default ordering. (No annual-crop leaves.)
+export const CURATED_LEAF_TEXTURES: string[] = [
+  'AlmondLeaf.png',
+  'AppleLeaf.png',
+  'WalnutLeaf.png',
+  'PistachioLeaf.png',
+  'OliveLeaf_upper.png',
+  'GrapeLeaf.png',
+  'RedbudLeaf.png',
+];
+
+export interface QSMPhyllotaxisResponse {
+  success: boolean;
+  angle_deg: number;
+  pattern: string;            // opposite | spiral | decussate | alternate
+  leaves_per_node: number;
+  confidence: number;         // [0,1]; 0 when no multi-child parent exists
+  n_parents_sampled: number;
+  error?: string;
+}
+
+export interface QSMLeavesRequest {
+  cylinders: QSMCylinder[];   // round-tripped from the QSMEntry
+  shoots: QSMShoot[];
+  leaf_spacing: number;       // m between nodes along a shoot
+  leaf_pitch_deg: number;     // leaf angle from the shoot axis
+  leaf_size_m: number;        // leaf length
+  phyllotaxis_deg: number;    // azimuth increment between nodes
+  leaves_per_node: number;
+  builtin_texture_name?: string;  // e.g. "AlmondLeaf.png"
+  texture_path?: string;          // uploaded PNG path
+  obj_path?: string;              // uploaded OBJ path
+  max_leaves?: number;
+}
+
+// Mirrors PlantMeshResponseLike (+ leaf_count/success/error) so it flows straight
+// into plantResponseToMeshData().
+export interface QSMLeavesResponse {
+  success: boolean;
+  vertices: number[][];
+  indices: number[][];
+  normals?: number[][] | null;
+  uv_coordinates?: number[][] | null;
+  materials?: { name: string; color?: number[]; texture_name?: string; has_alpha: boolean }[] | null;
+  material_groups?: { material_name: string; triangle_indices: number[] }[] | null;
+  textures?: Record<string, string> | null;
+  vertex_count: number;
+  triangle_count: number;
+  leaf_count: number;
+  error?: string;
+}
+
+export async function detectPhyllotaxis(
+  cylinders: QSMCylinder[],
+  shoots: QSMShoot[],
+): Promise<QSMPhyllotaxisResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000); // 1 minute
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/phyllotaxis`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cylinders, shoots }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Phyllotaxis detection failed:', error);
+    throw error;
+  }
+}
+
+export async function addQSMLeaves(request: QSMLeavesRequest): Promise<QSMLeavesResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/leaves`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Add QSM leaves request failed:', error);
+    throw error;
+  }
+}
+
+export async function getLeafTextures(): Promise<string[]> {
+  const baseUrl = getBackendUrl();
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/leaf-textures`);
+    if (!response.ok) return CURATED_LEAF_TEXTURES;
+    const body = await response.json();
+    return Array.isArray(body.textures) && body.textures.length ? body.textures : CURATED_LEAF_TEXTURES;
+  } catch {
+    return CURATED_LEAF_TEXTURES;
+  }
+}
+
+// ==================== QSM LEAF-ANGLE ADJUSTMENT (Phase 2) ====================
+// Rotate a QSM's procedurally-placed leaves so each voxel cell's leaf-angle
+// distribution matches a target measured from a leaf-on Helios triangulation.
+
+export interface QSMGrid {
+  center: [number, number, number];
+  size: [number, number, number];
+  nx: number;
+  ny: number;
+  nz: number;
+}
+
+// A leaf-on Helios triangulation overlapping the QSM (flat arrays from MeshData).
+export interface QSMTriangulationInput {
+  vertices: number[];            // flat x,y,z
+  indices: number[];             // flat triangle vertex indices
+  triangle_cell_ids: number[];   // per-triangle grid cell (-1/0xffffffff = outside)
+  triangle_scan_ids?: number[];  // per-triangle source scan (azimuth orientation)
+  scan_origins?: number[];       // flat per-scan x,y,z origins
+  grid: QSMGrid;
+}
+
+// A precomputed per-cell target (escape hatch; the backend normally fits these).
+export interface QSMCellTarget {
+  cell_id: number;
+  beta_mu: number;
+  beta_nu: number;
+  ecc: number;
+  phi0_deg: number;
+  n_measured?: number;
+}
+
+// Extends the Phase-1 leaf request (so leaves regenerate identically) with the
+// measured-distribution inputs. Exactly one of triangulation / cell_targets.
+export interface QSMAdjustLeafAnglesRequest extends QSMLeavesRequest {
+  triangulation?: QSMTriangulationInput;
+  cell_targets?: QSMCellTarget[];
+  grid?: QSMGrid;       // required when using cell_targets
+  seed?: number;
+  max_cell_leaves?: number;
+}
+
+export async function adjustQSMLeafAngles(
+  request: QSMAdjustLeafAnglesRequest,
+): Promise<QSMLeavesResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/adjust-leaf-angles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Adjust QSM leaf angles request failed:', error);
     throw error;
   }
 }

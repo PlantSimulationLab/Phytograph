@@ -109,6 +109,26 @@ disabled with an explanatory tooltip otherwise.
 4. **Parameters**:
     - **Lmax** — maximum allowed edge length in the mesh (meters)
     - **Max Aspect Ratio** — drops triangles with bad shape (default 4)
+
+    Not sure what Lmax to use? Click **Suggest** (next to the Lmax field).
+    Phytograph runs an unfiltered triangulation and inspects the spread of
+    candidate edge lengths: valid triangles connect adjacent points on the
+    same leaf or branch (short edges), while erroneous ones bridge separate
+    surfaces (long edges). It sets Lmax at the natural split between those two
+    scales and reports a **separation confidence** — *High* when the scales are
+    cleanly separated (the result is insensitive to Lmax), *Medium*/*Low* when
+    they overlap (leaves close together relative to scan resolution), in which
+    case the mesh is sensitive to Lmax and worth reviewing. The suggestion only
+    fills the field — you can still edit it.
+
+    !!! warning "Merged multi-scan clouds"
+
+        Helios triangulation assumes **single-scan-position** data — it uses one
+        scanner origin per scan to reconstruct ray directions. If a scan is
+        actually a registered *merge* of several scanner positions, Suggest will
+        flag it: the triangulation would bridge surfaces seen from different
+        origins, producing spurious triangles. Triangulate each scan position
+        separately instead of meshing the merged cloud.
 5. **Grid** — the triangulation grid bounds the region that gets meshed:
     - **Auto — fit to all points** (default when you haven't made a
       box): Phytograph fits a single-cell grid around every point. A

@@ -183,7 +183,12 @@ export function QSMResultsPopup({ isOpen, onClose, qsm, qsmName }: QSMResultsPop
               <div>
                 <h3 className="text-xs font-medium text-neutral-300 mb-1">Stem taper (trunk diameter vs height)</h3>
                 <div style={{ width: '100%', height: 260 }} data-testid="qsm-taper-chart">
-                  <ResponsiveContainer>
+                  {/* Explicit numeric height avoids Recharts' first-render
+                      "width/height should be > 0" warning: a default
+                      height="100%" measures as -1 before the post-mount resize
+                      effect runs. Parent box is already fixed-height, so height
+                      was never responsive; width stays fluid. */}
+                  <ResponsiveContainer width="100%" height={260}>
                     <ComposedChart data={taperData} margin={{ top: 8, right: 12, bottom: 18, left: 4 }}>
                       <CartesianGrid stroke="#3f3f46" strokeDasharray="3 3" />
                       <XAxis
@@ -215,7 +220,7 @@ export function QSMResultsPopup({ isOpen, onClose, qsm, qsmName }: QSMResultsPop
                   Branch-order distribution ({rankMetric === 'count' ? 'shoot count' : rankMetric === 'length' ? 'total length' : 'woody volume'})
                 </h3>
                 <div style={{ width: '100%', height: 220 }} data-testid="qsm-rank-chart">
-                  <ResponsiveContainer>
+                  <ResponsiveContainer width="100%" height={220}>
                     <BarChart data={rankData} margin={{ top: 8, right: 12, bottom: 18, left: 4 }}>
                       <CartesianGrid stroke="#3f3f46" strokeDasharray="3 3" />
                       <XAxis dataKey="label" tick={AXIS_TICK} />
@@ -233,7 +238,7 @@ export function QSMResultsPopup({ isOpen, onClose, qsm, qsmName }: QSMResultsPop
                   Branch-angle distribution ({angleHist.total} branches)
                 </h3>
                 <div style={{ width: '100%', height: 220 }} data-testid="qsm-angle-chart">
-                  <ResponsiveContainer>
+                  <ResponsiveContainer width="100%" height={220}>
                     <BarChart data={angleData} margin={{ top: 8, right: 12, bottom: 18, left: 4 }}>
                       <CartesianGrid stroke="#3f3f46" strokeDasharray="3 3" />
                       <XAxis
@@ -280,7 +285,7 @@ export function QSMResultsPopup({ isOpen, onClose, qsm, qsmName }: QSMResultsPop
                   Vertical profile ({profileMetric === 'volume' ? 'woody volume' : 'length'} by height)
                 </h3>
                 <div style={{ width: '100%', height: 300 }} data-testid="qsm-profile-chart">
-                  <ResponsiveContainer>
+                  <ResponsiveContainer width="100%" height={300}>
                     <BarChart layout="vertical" data={profileData} margin={{ top: 8, right: 12, bottom: 18, left: 4 }}>
                       <CartesianGrid stroke="#3f3f46" strokeDasharray="3 3" />
                       <XAxis type="number" tick={AXIS_TICK} label={{ value: profileUnit, position: 'insideBottom', offset: -8, fill: '#a1a1aa', fontSize: 11 }} />
@@ -406,7 +411,7 @@ function QAHist({
         )}
       </div>
       <div style={{ width: '100%', height: 180 }}>
-        <ResponsiveContainer>
+        <ResponsiveContainer width="100%" height={180}>
           <BarChart data={data} margin={{ top: 4, right: 8, bottom: 14, left: 0 }}>
             <CartesianGrid stroke="#3f3f46" strokeDasharray="3 3" />
             <XAxis dataKey="x" tick={{ fill: '#a1a1aa', fontSize: 9 }} />

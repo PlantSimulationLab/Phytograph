@@ -238,7 +238,15 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                   </label>
                 </div>
                 <div style={{ width: '100%', height: 260 }} data-testid="incl-chart">
-                  <ResponsiveContainer>
+                  {/* Explicit numeric height (not the default height="100%"):
+                      ResponsiveContainer seeds its size state to -1×-1 and only
+                      measures the real box in a post-mount effect, so a
+                      percent height computes as -1 on first render and trips
+                      Recharts' "width/height should be > 0" warning every time
+                      the popup opens. A fixed height short-circuits that path
+                      (the parent box is already a fixed 260px, so height was
+                      never actually responsive); width stays fluid. */}
+                  <ResponsiveContainer width="100%" height={260}>
                     <LineChart data={chartData} margin={{ top: 8, right: 12, bottom: 18, left: 4 }}>
                       <CartesianGrid stroke="#3f3f46" strokeDasharray="3 3" />
                       <XAxis
