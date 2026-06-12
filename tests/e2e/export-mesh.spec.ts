@@ -89,9 +89,9 @@ test('exports a generated mesh to OBJ via the Export panel', async () => {
     await expect(meshRow).toHaveAttribute('data-selected', 'true');
     await expect(cloudRow).toHaveAttribute('data-selected', 'false');
 
-    // Open mesh export panel and click OBJ.
+    // Open the export modal and click OBJ (mesh export).
     await page.getByTestId('tool-export-mesh').click();
-    await expect(page.getByTestId('export-panel')).toBeVisible();
+    await expect(page.getByTestId('export-modal')).toBeVisible();
     await page.getByTestId('export-mesh-obj').click();
 
     // Wait for the blob (both name + text) to surface.

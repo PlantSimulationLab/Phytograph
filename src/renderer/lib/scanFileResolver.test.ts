@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { resolveAttachedScanFile } from './scanFileResolver';
+import { electronAPIMock } from '../../../tests/setup/electronAPI.mock';
 
 describe('resolveAttachedScanFile', () => {
   it('returns absolute path when the file exists', async () => {
@@ -24,7 +25,9 @@ describe('resolveAttachedScanFile', () => {
       promptForPath,
     });
     expect(result).toBe('/picked/scan.xyz');
-    expect(promptForPath).toHaveBeenCalledWith('scan.xyz');
+    // promptForPath receives the full referenced path so the warning dialog can
+    // show the user exactly what the XML pointed at.
+    expect(promptForPath).toHaveBeenCalledWith('/missing/scan.xyz');
   });
 
   it('tries xml-dir before cwd, and prefers xml-dir when both exist', async () => {
@@ -85,5 +88,42 @@ describe('resolveAttachedScanFile', () => {
     });
     // Absolute Windows path short-circuits to the input.
     expect(result).toBe('C:\\data\\scan.xyz');
+  });
+
+  describe('default prompt (message box before file picker)', () => {
+    it('warns the user (naming the missing file) before opening the picker', async () => {
+      // No promptForPath injected — exercise the real defaultPromptForPath.
+      electronAPIMock.setDialogMessageBoxResponse(0); // "Locate…"
+      electronAPIMock.setDialogOpenResult('/picked/scan.xyz');
+      const messageBox = window.electronAPI.dialog.messageBox as ReturnType<typeof vi.fn>;
+      const open = window.electronAPI.dialog.open as ReturnType<typeof vi.fn>;
+
+      const result = await resolveAttachedScanFile('../data/scan.xyz', '/project/xml', {
+        fsExists: async () => false,
+        getCwd: async () => '/cwd',
+      });
+
+      expect(result).toBe('/picked/scan.xyz');
+      // The warning must appear BEFORE the picker, and must name the file.
+      expect(messageBox).toHaveBeenCalledTimes(1);
+      const mbArg = messageBox.mock.calls[0][0];
+      expect(mbArg.message).toContain('scan.xyz');
+      expect(mbArg.detail).toContain('../data/scan.xyz'); // the referenced path
+      expect(messageBox.mock.invocationCallOrder[0]).toBeLessThan(open.mock.invocationCallOrder[0]);
+    });
+
+    it('returns null and never opens the picker when the user chooses Skip', async () => {
+      electronAPIMock.setDialogMessageBoxResponse(1); // "Skip" / cancelId
+      electronAPIMock.setDialogOpenResult('/should/not/be/used.xyz');
+      const open = window.electronAPI.dialog.open as ReturnType<typeof vi.fn>;
+
+      const result = await resolveAttachedScanFile('scan.xyz', '/project/xml', {
+        fsExists: async () => false,
+        getCwd: async () => '/cwd',
+      });
+
+      expect(result).toBeNull();
+      expect(open).not.toHaveBeenCalled();
+    });
   });
 });

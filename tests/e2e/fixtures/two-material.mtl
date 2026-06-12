@@ -1,0 +1,6 @@
+# Two solid-color materials, no textures (riegl-style OBJ livery).
+newmtl red
+Kd 0.800000 0.100000 0.100000
+
+newmtl blue
+Kd 0.100000 0.200000 0.800000

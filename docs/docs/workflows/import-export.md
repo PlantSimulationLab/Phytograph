@@ -14,6 +14,15 @@ Two entry points. Both accept the same set of formats — see
     [import wizard](#the-import-wizard) so you can confirm or adjust the
     column mapping before loading.
 
+    Dropping a **Helios scan XML** (`.xml`) loads its scans and grids the
+    same way the **Add Scan** popup's *Import from XML file* does — see
+    [Import scan positions from a real campaign](simulate-scan.md#import-scan-positions-from-a-real-campaign).
+    Any point-cloud files the XML references are located relative to the
+    XML and stepped through the import wizard. If a referenced data file
+    can't be found (moved or renamed), Phytograph warns you by name and
+    offers to **Locate…** it — pick the file and the import continues — or
+    **Skip** to cancel.
+
 === "File menu"
 
     **File → Import** has an entry per format; each opens a file picker
@@ -21,9 +30,11 @@ Two entry points. Both accept the same set of formats — see
     them as that format:
 
     - **Auto-detect** (default) — type chosen from extension + contents
+      (recognizes `.xml` scan files too)
     - **Point Cloud** — force, e.g., a `.ply` to be read as a cloud
     - **Mesh** — force, e.g., a vertex-only `.obj` to be read as a mesh
     - **Skeleton** — for `.json` skeleton graphs
+    - **Scan XML** — for Helios `.xml` scan/grid definitions
 
     Use a specific format when auto-detection picks the wrong type. As with
     drag-and-drop, point clouds open the [import wizard](#the-import-wizard)
@@ -98,12 +109,15 @@ manual setup. A grid-only XML (no `<scan>`) imports just the grids.
 
 ### Importing textured meshes
 
-A `.obj` that references a `.mtl` material library is imported with its image
-textures applied, as long as the `.mtl` and the image files it names sit in the
+A `.obj` that references a `.mtl` material library is imported with its
+materials applied, as long as the `.mtl` and any image files it names sit in the
 same folder as the `.obj`. Phytograph reads the diffuse texture (`map_Kd`) and
-diffuse color (`Kd`) for each material; faces with no image fall back to that
-material's color. Untextured `.obj` files (and `.stl`) import as plain geometry
-as before. See [Meshes: Textures](../concepts/meshes.md#textures).
+diffuse color (`Kd`) for each material: textured faces get the image, and faces
+with only a `Kd` color get that color (so a multi-material livery with no
+textures imports with each part's color, not flat). An `.obj` with no `.mtl`
+(and `.stl`, which has no materials) imports as plain geometry. See
+[Meshes: Textures](../concepts/meshes.md#textures). Meshes imported from a file
+default to fully opaque.
 
 A `.ply` is imported as a mesh when its header declares faces (otherwise it
 imports as a point cloud — see
@@ -144,11 +158,21 @@ Helios XML still takes precedence — its `<scan>` definitions win.) See
 
 ## Export
 
-Each kind of scene object exports independently. Select the object in
-the Scene panel and click the purple **Export** button in the toolbar
-(or use the per-entry export action).
+Select an object in the Scene panel and click the purple **Export** button
+in the toolbar (or **File → Export…**) to open the **Export** window. It is
+context-sensitive: a point cloud shows the format chooser + column picker, a
+mesh or skeleton shows its formats, and any scans in the scene show the scan
+export section. You pick the destination in a native file dialog after setting
+the options.
 
 ### Point cloud formats
+
+Pick a **Format** in the Export window, then click **Export**. For the text
+formats (XYZ / TXT / CSV) a **column picker** appears: check which fields to
+write (x, y, z, colour, intensity, scalars, labels) and **drag the rows to
+reorder** them — the chosen order becomes the file's column order. The binary /
+structured formats (LAS / LAZ / PLY / OBJ) use their own fixed schema, so the
+column picker is hidden for them.
 
 | Format | Carries |
 |---|---|
@@ -167,40 +191,46 @@ ASCII readers (CloudCompare included) skip the `#` line as a comment.
 If you need to round-trip with full fidelity, use `.ply` — it preserves
 everything Phytograph knows about the cloud.
 
-### Scan XML (re-loadable scan)
+### Exporting scans
 
 Whenever the scene holds **scans** — clouds that carry scanner parameters
-(origin, field of view, beam optics) — the Export panel shows a **Scan info
-(XML + per-scan data)** section. It lists every scan with a checkbox, so you
-can write one, several, or all of them into a **single** Helios scan bundle:
-an `.xml` metadata file plus **one ASCII data file per scan**, named
-`<base>_<scanID>.xyz` alongside the XML. Pick the `.xml` location and the data
-files are written into the same folder.
+(origin, field of view, beam optics) — the Export window shows a **Scan export**
+section. It lists every scan with a checkbox, so you can export one, several,
+or all of them at once. The checklist is pre-checked to match the scans
+currently selected in the Scans panel, but you can check or uncheck any scan
+without changing the viewport selection. The export always writes **one data
+file per scan** (named `<base>_<scanID>.<ext>`); you pick the destination
+folder in the file dialog after setting the options.
 
-The checklist is pre-checked to match the scans currently selected in the
-Scans panel — so importing a multi-scan XML and clicking **Write scan XML**
-re-exports all of them by default — but you can check or uncheck any scan
-without changing the viewport selection.
+**Output mode** — the two toggles at the top:
 
-Unlike the point-cloud formats above, this bundle is **re-loadable as a
-scan** — re-importing the XML restores the scanner parameters and the
-[sky/miss points](../reference/file-formats.md#skymiss-points), so the
-imported clouds can drive parameter-dependent analyses (leaf area density,
-Helios triangulation) again. It is the round-trip-faithful path for synthetic
-scans and edited scans.
+- **XML + data** (default) — writes a Helios scan bundle: an `.xml` metadata
+  file plus one `.xyz` data file per scan. This bundle is **re-loadable as a
+  scan** — re-importing the XML restores the scanner parameters and the
+  [sky/miss points](../reference/file-formats.md#skymiss-points), so the
+  imported clouds can drive parameter-dependent analyses (leaf area density,
+  Helios triangulation) again. It is the round-trip-faithful path for synthetic
+  and edited scans.
+- **Data only** — writes just the per-scan data files, no XML, and reveals a
+  **Format** chooser: `LAS`, `LAZ`, `PLY`, `XYZ`, `CSV`, `TXT`, `OBJ`, or
+  `E57`. Use this to round-trip a scan into any supported format for another
+  tool.
 
-- **Include miss points** — when on (default), the sky/miss points and the
-  `is_miss` column are written, so misses survive the round-trip. Turn it off
-  for a returns-only export. The option is available only when at least one
-  checked scan actually carries misses.
-- The per-scan file split is required: the XML references each data file by
-  scan, so a single merged file could not be re-associated with its scanner
-  parameters.
-- Edits (crop, translation, filtering) are baked into the exported
-  coordinates — what you see is what gets written.
+**Columns** — for the text formats (XYZ / CSV / TXT, and the XML bundle's
+`.xyz` data), a column picker lets you check which fields to write and **drag to
+reorder** them. `x`, `y`, `z` are required and locked on. Binary / structured
+formats (LAS / LAZ / PLY / OBJ / E57) use their own fixed schema, so the column
+picker is hidden for them.
 
-If the scene holds no scans with parameters, the section does not appear (add
-parameters from the Scans panel to enable it).
+**Include miss points** — when on (default), the sky/miss points and the
+`is_miss` flag are written, so misses survive the round-trip. Turn it off for a
+returns-only export. Available only when at least one checked scan carries
+misses.
+
+The per-scan file split is always kept (the XML metadata references each data
+file by scan). Edits (crop, translation, filtering) are baked into the exported
+coordinates — what you see is what gets written. If the scene holds no scans
+with parameters, the section does not appear.
 
 ### Mesh formats
 

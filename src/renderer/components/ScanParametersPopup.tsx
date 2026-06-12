@@ -155,6 +155,13 @@ export function ScanParametersPopup({
     setParams(p => ({ ...p, origin: { ...p.origin, [axis]: Number.isFinite(v) ? v : 0 } }));
   };
 
+  // Tilt roll/pitch are signed angles (a scanner can lean either way), so unlike
+  // setNum they're not clamped to a non-negative minimum.
+  const setTilt = (key: 'tiltRollDeg' | 'tiltPitchDeg') => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = parseFloat(e.target.value);
+    setParams(p => ({ ...p, [key]: Number.isFinite(v) ? v : 0 }));
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSubmit(label, params);
@@ -319,6 +326,38 @@ export function ScanParametersPopup({
                 </div>
               </div>
             </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scanner tilt (degrees)</label>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-xs text-neutral-500 mb-1">Roll</label>
+                <input
+                  data-testid="scan-tilt-roll"
+                  type="number"
+                  step="any"
+                  value={params.tiltRollDeg}
+                  onChange={setTilt('tiltRollDeg')}
+                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-neutral-500 mb-1">Pitch</label>
+                <input
+                  data-testid="scan-tilt-pitch"
+                  type="number"
+                  step="any"
+                  value={params.tiltPitchDeg}
+                  onChange={setTilt('tiltPitchDeg')}
+                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                />
+              </div>
+            </div>
+            <p className="mt-1 text-[11px] text-neutral-500">
+              Residual tilt of the scanner away from level. Roll is applied first (about the
+              scanner's lateral axis), then pitch (about its forward axis). 0 / 0 is perfectly level.
+            </p>
           </div>
 
           <div>

@@ -5,7 +5,7 @@ import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Copy, Compass} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings, updateSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -23,6 +23,9 @@ import { AddLeavesPopup } from './AddLeavesPopup';
 import { AdjustLeafAnglesPopup } from './AdjustLeafAnglesPopup';
 import { MorphPopup } from './MorphPopup';
 import { ScanParametersPopup } from './ScanParametersPopup';
+import { type HeliosXmlScan, type HeliosXmlGrid } from '../lib/heliosScanXml';
+import { SyntheticScanOptionsPopup } from './SyntheticScanOptionsPopup';
+import { type SyntheticScanOptions } from '../lib/syntheticScanOptions';
 import { ScannerMarker } from './ScannerMarker';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
@@ -92,7 +95,8 @@ import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode } from './vi
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
-import { ExportPanel } from './viewer/panels/ExportPanel';
+import { ExportModal } from './ExportModal';
+import { defaultExportColumns, buildAsciiExport } from '../lib/exportColumns';
 import { QSMExportPanel } from './viewer/panels/QSMExportPanel';
 import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
@@ -168,11 +172,26 @@ const MESH_DEFAULT_OPACITY = 0.7;
 // mesh carrying `gridSubdivisions`.
 const GRID_MESH_DEFAULT_OPACITY = 0.4;
 
+// Default opacity for a mesh with no explicit per-mesh override. Kept as a
+// single source of truth so the render path and the meshes-panel slider agree.
+//  - voxel-grid boxes      -> GRID_MESH_DEFAULT_OPACITY (0.4): see the box's contents
+//  - file-imported meshes  -> 1.0: no underlying cloud to see through
+//  - in-app triangulations -> MESH_DEFAULT_OPACITY (0.7): let the source cloud show through
+const defaultMeshOpacity = (mesh: MeshEntry): number => {
+  if (mesh.gridSubdivisions) return GRID_MESH_DEFAULT_OPACITY;
+  if (mesh.sourceCloudId === 'imported') return 1.0;
+  return MESH_DEFAULT_OPACITY;
+};
+
 
 // Import function refs for mesh/skeleton
 export interface ImportRefs {
   importMesh: (mesh: Omit<MeshEntry, 'id'>) => void;
   importSkeleton: (skeleton: Omit<SkeletonEntry, 'id'>) => void;
+  // Import scans + grids parsed from a Helios scan XML (File → Import / drop
+  // zone reach the same flow the Add-Scan popup uses). xmlPath is the on-disk
+  // path of the XML so relative <filename> references resolve; null when none.
+  bulkImportScans: (heliosScans: HeliosXmlScan[], grids: HeliosXmlGrid[], xmlPath: string | null) => Promise<void>;
 }
 
 interface PointCloudViewerProps {
@@ -626,12 +645,194 @@ export default function PointCloudViewer({
     setSkeletons(prev => [...prev, newSkeleton]);
   }, []);
 
+  // Bulk-import scans + grids parsed from a Helios scan XML. This is the shared
+  // workhorse behind every XML entry point: the Add-Scan popup's "Import from
+  // XML file" button, the File → Import menu, and the viewport drop zone (the
+  // latter two reach it via importRefsCallback below). It owns its own progress
+  // modal and success/failure toasts. xmlPath is the on-disk path of the XML so
+  // relative <filename> references can be resolved; null when unavailable.
+  const bulkImportScans = useCallback(async (
+    heliosScans: HeliosXmlScan[],
+    grids: HeliosXmlGrid[],
+    xmlPath: string | null,
+  ): Promise<void> => {
+    if (heliosScans.length === 0 && grids.length === 0) return;
+    // Create voxel-grid meshes from any <grid> blocks first — they're
+    // independent of scans (top-level siblings) and need no wizard, so a
+    // grid-only XML still produces objects. Each grid maps onto a voxel
+    // box: center → position, size → scale, Nx/Ny/Nz → gridSubdivisions,
+    // rotation (deg about z) → mesh z-rotation.
+    grids.forEach((g, i) => {
+      importMesh(
+        {
+          sourceCloudId: `helios-grid-${i}`,
+          data: generateShapeMesh('voxel'),
+          visible: true,
+          color: '#60a5fa', // same blue as Create Voxel
+          method: 'delaunay', // placeholder, matches handleCreateShape
+          name: g.label,
+          gridSubdivisions: { ...g.subdivisions },
+        },
+        {
+          position: { ...g.center },
+          scale: { ...g.size },
+          rotation: { x: 0, y: 0, z: g.rotationDeg },
+        },
+      );
+    });
+    if (heliosScans.length === 0) {
+      showToast({ title: `Imported ${grids.length} grid(s)`, type: 'success' });
+      return;
+    }
+    const xmlDir = xmlPath ? dirname(xmlPath) : '';
+    const used = new Set(scans.map(s => s.color));
+    const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+    const allocateColor = () => {
+      const free = PALETTE.find(c => !used.has(c));
+      const chosen = free ?? PALETTE[(scans.length + used.size) % PALETTE.length];
+      used.add(chosen);
+      return chosen;
+    };
+    // Renumber labels off the current count so an import after manual
+    // adds doesn't collide with existing "Scan N" names.
+    const offset = scans.length;
+    // Failures attaching point data are fatal to the whole import:
+    // committing scans without points leaves the user with empty,
+    // useless entries (e.g. when the backend is down). We collect
+    // failures here and, if any occurred, abort without adding any
+    // scans so the user can fix the cause and re-import.
+    const failures: { label: string; reason: string }[] = [];
+    // Show the progress modal immediately so the user knows the import
+    // is in flight — backend parsing of a multi-GB scan can take 30s+
+    // and the launching popup has already closed.
+    setBulkImportProgress({
+      current: 0,
+      total: heliosScans.length,
+      label: 'Preparing…',
+    });
+    try {
+      // Phase 1: resolve every referenced file FIRST (keeps the existing
+      // missing-file prompt), and split scans into those with data
+      // (→ wizard) and params-only scans. A scan whose file can't be
+      // located is a hard failure (all-or-nothing, as before).
+      type Pending = { label: string; color: string; params: typeof heliosScans[number]['params'];
+                       resolved: string | null; asciiFormat: string | null };
+      const pending: Pending[] = [];
+      for (let i = 0; i < heliosScans.length; i++) {
+        const h = heliosScans[i];
+        const label = `Scan ${offset + i + 1}`;
+        setBulkImportProgress({
+          current: i + 1,
+          total: heliosScans.length,
+          label: h.filename ? `Locating ${h.filename.split(/[\\/]/).pop()}` : `Preparing ${label}`,
+        });
+        let resolved: string | null = null;
+        if (h.filename) {
+          try {
+            resolved = await resolveAttachedScanFile(h.filename, xmlDir);
+            if (!resolved) throw new Error(`could not locate file "${h.filename}"`);
+          } catch (err) {
+            failures.push({ label, reason: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        pending.push({ label, color: allocateColor(), params: h.params, resolved, asciiFormat: h.asciiFormat });
+      }
+      if (failures.length > 0) {
+        const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
+        const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
+        throw new Error(
+          `${failures.length} of ${heliosScans.length} scan(s) could not load point data — ${detail}${more}. ` +
+            `No scans were imported; fix the issue and re-import.`,
+        );
+      }
+
+      // Phase 2: walk the scans that carry a file through the import
+      // wizard (one stepper for all of them), carrying their Helios
+      // params + ASCII_format hint. Params-only scans skip the wizard.
+      const wizardPending = pending.filter(p => p.resolved);
+      const inputs: WizardScanInput[] = wizardPending.map(p => ({
+        path: p.resolved!,
+        fileName: p.resolved!.split(/[\\/]/).pop() ?? p.label,
+        asciiFormatHint: p.asciiFormat,
+        params: p.params,
+        label: p.label,
+        color: p.color,
+      }));
+
+      let results: WizardResult[] | null = inputs.length === 0 ? [] : null;
+      if (inputs.length > 0) {
+        // Hide the progress modal while the wizard is up.
+        setBulkImportProgress(null);
+        results = onRequestImportWizard
+          ? await onRequestImportWizard(inputs)
+          : // No wizard host (defensive): import with auto-detect.
+            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [] }));
+        if (!results) return; // user cancelled the wizard
+      }
+
+      // Phase 3: build the Scans. Wizard results carry data; params-only
+      // scans are added as-is.
+      const newScans: Scan[] = [];
+      let attachedCount = 0;
+      const byPath = new Map(results!.map(r => [r.input.path, r]));
+      for (const p of pending) {
+        const scan: Scan = {
+          id: crypto.randomUUID(),
+          label: p.label,
+          visible: true,
+          color: p.color,
+          params: p.params,
+        };
+        if (p.resolved) {
+          const r = byPath.get(p.resolved);
+          if (r) {
+            setBulkImportProgress({ current: attachedCount + 1, total: wizardPending.length, label: `Loading ${r.input.fileName}` });
+            try {
+              const data = await parsePointCloudFromPath(p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs);
+              for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
+              scan.data = data;
+              scan.sourcePath = p.resolved;
+              scan.asciiFormat = r.asciiFormat;
+              attachedCount += 1;
+            } catch (err) {
+              failures.push({ label: p.label, reason: err instanceof Error ? err.message : String(err) });
+            }
+          }
+        }
+        newScans.push(scan);
+      }
+      if (failures.length > 0) {
+        const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
+        const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
+        throw new Error(
+          `${failures.length} of ${heliosScans.length} scan(s) could not load point data — ${detail}${more}. ` +
+            `No scans were imported; fix the issue and re-import.`,
+        );
+      }
+
+      onAddScans?.(newScans);
+      const parts = [`${newScans.length} scan(s)`];
+      if (attachedCount > 0) parts.push(`${attachedCount} with data`);
+      if (grids.length > 0) parts.push(`${grids.length} grid(s)`);
+      showToast({ title: `Imported ${parts.join(', ')}`, type: 'success' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Bulk import failed:', err);
+      // Persist (duration 0): a hard "nothing was imported" failure must
+      // not flash away in 3s — the user needs to read it and act.
+      showToast({ title: `Import failed: ${msg}`, type: 'error', duration: 0 });
+    } finally {
+      // Always clear the modal — leaving it up would lock the UI.
+      setBulkImportProgress(null);
+    }
+  }, [importMesh, onRequestImportWizard, onAddScans, scans]);
+
   // Expose import functions to parent
   useEffect(() => {
     if (importRefsCallback) {
-      importRefsCallback({ importMesh, importSkeleton });
+      importRefsCallback({ importMesh, importSkeleton, bulkImportScans });
     }
-  }, [importRefsCallback, importMesh, importSkeleton]);
+  }, [importRefsCallback, importMesh, importSkeleton, bulkImportScans]);
 
   // Report whether the viewer holds any non-scan content (meshes, skeletons, or
   // QSMs) so App can dismiss the empty-state hint when e.g. a plant is generated
@@ -706,10 +907,19 @@ export default function PointCloudViewer({
   const [isScanning, setIsScanning] = useState(false);
   // Pending scan awaiting the user's choice when ≥1 target scanner already holds
   // point data (overwrite / duplicate / cancel). Null when no prompt is open.
+  // Carries the chosen synthetic-scan options so the run proceeds with them.
   const [scanOverwriteConfirm, setScanOverwriteConfirm] = useState<{
     targetMeshes: MeshEntry[];
     activeScanners: Scan[];
     count: number;
+    options: SyntheticScanOptions;
+  } | null>(null);
+  // Validated scan targets awaiting the Synthetic Scan Options popup. The popup
+  // sits between "Run Synthetic LiDAR Scan" and the actual run so the user picks
+  // noise / misses / waveform / crop-to-grid each run. Null when closed.
+  const [pendingScan, setPendingScan] = useState<{
+    targetMeshes: MeshEntry[];
+    activeScanners: Scan[];
   } | null>(null);
   // Plant age stepping state (stateless regeneration approach)
   const [isAdvancingAge, setIsAdvancingAge] = useState(false);
@@ -3417,7 +3627,9 @@ export default function PointCloudViewer({
   }, []);
 
   // Export point cloud in various formats
-  const exportPointCloud = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz') => {
+  // `columns` is the ordered ASCII column slug list (xyz/txt/csv) chosen in the
+  // export modal, or null for binary/structured formats (fixed schema).
+  const exportPointCloud = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null = null) => {
     if (selectedIds.size !== 1) return;
     const id = Array.from(selectedIds)[0];
     const cloud = clouds.find(c => c.id === id);
@@ -3524,75 +3736,26 @@ export default function PointCloudViewer({
       return;
     }
 
-    if (format === 'xyz') {
-      // Bare coordinates, but with a '#'-prefixed column header (CloudCompare
-      // convention, matching Helios's exportPointCloud(write_header=True)). The
-      // loader skips '#' lines so the file still round-trips, while ASCII readers
-      // can map columns by name. Richer per-point fields go to TXT/CSV.
-      const lines: string[] = ['# x y z'];
-      for (let i = 0; i < data.pointCount; i++) {
-        const x = data.positions[i * 3].toFixed(6);
-        const y = data.positions[i * 3 + 1].toFixed(6);
-        const z = data.positions[i * 3 + 2].toFixed(6);
-        lines.push(`${x} ${y} ${z}`);
+    if (format === 'xyz' || format === 'txt' || format === 'csv') {
+      // ASCII export: honor the column list + order chosen in the export modal.
+      // Fall back to a sensible default when none was passed (xyz; plus rgb /
+      // intensity / scalars for txt/csv). CSV uses a plain header row + commas;
+      // xyz/txt use a '#'-prefixed header (CloudCompare convention) + spaces.
+      let slugs = columns ?? [];
+      if (slugs.length === 0) {
+        slugs = ['x', 'y', 'z'];
+        if (format !== 'xyz') {
+          if (data.colors) slugs.push('r', 'g', 'b');
+          if (data.intensities) slugs.push('intensity');
+          for (const f of Object.keys(data.scalarFields ?? {})) {
+            if (f !== 'x' && f !== 'y' && f !== 'z' && f !== 'intensity') slugs.push(f);
+          }
+        }
       }
-      downloadFile(lines.join('\n'), `${baseName}.xyz`);
-    } else if (format === 'txt') {
-      // TXT format: space-delimited with a '#'-prefixed header (CloudCompare
-      // convention), includes all fields.
-      const scalarFieldNames = data.scalarFields ? Object.keys(data.scalarFields) : [];
-      let header = '# x y z';
-      if (data.colors) header += ' r255 g255 b255';
-      if (data.intensities) header += ' intensity';
-      for (const fieldName of scalarFieldNames) {
-        // Replace spaces with underscores in field names for TXT format
-        header += ` ${fieldName.replace(/\s+/g, '_')}`;
-      }
-      const lines: string[] = [header];
-
-      for (let i = 0; i < data.pointCount; i++) {
-        let line = `${data.positions[i * 3].toFixed(6)} ${data.positions[i * 3 + 1].toFixed(6)} ${data.positions[i * 3 + 2].toFixed(6)}`;
-        if (data.colors) {
-          line += ` ${Math.round(data.colors[i * 3] * 255)} ${Math.round(data.colors[i * 3 + 1] * 255)} ${Math.round(data.colors[i * 3 + 2] * 255)}`;
-        }
-        if (data.intensities) {
-          line += ` ${data.intensities[i].toFixed(4)}`;
-        }
-        // Add scalar field values
-        for (const fieldName of scalarFieldNames) {
-          const field = data.scalarFields![fieldName];
-          line += ` ${field.values[i]}`;
-        }
-        lines.push(line);
-      }
-      downloadFile(lines.join('\n'), `${baseName}.txt`);
-    } else if (format === 'csv') {
-      // Build header with all available fields
-      const scalarFieldNames = data.scalarFields ? Object.keys(data.scalarFields) : [];
-      let header = 'X,Y,Z';
-      if (data.colors) header += ',R,G,B';
-      if (data.intensities) header += ',Intensity';
-      for (const fieldName of scalarFieldNames) {
-        header += `,${fieldName}`;
-      }
-      const lines: string[] = [header];
-
-      for (let i = 0; i < data.pointCount; i++) {
-        let line = `${data.positions[i * 3].toFixed(6)},${data.positions[i * 3 + 1].toFixed(6)},${data.positions[i * 3 + 2].toFixed(6)}`;
-        if (data.colors) {
-          line += `,${Math.round(data.colors[i * 3] * 255)},${Math.round(data.colors[i * 3 + 1] * 255)},${Math.round(data.colors[i * 3 + 2] * 255)}`;
-        }
-        if (data.intensities) {
-          line += `,${data.intensities[i].toFixed(4)}`;
-        }
-        // Add scalar field values
-        for (const fieldName of scalarFieldNames) {
-          const field = data.scalarFields![fieldName];
-          line += `,${field.values[i]}`;
-        }
-        lines.push(line);
-      }
-      downloadFile(lines.join('\n'), `${baseName}.csv`);
+      const delimiter = format === 'csv' ? ',' : ' ';
+      const headerPrefix = format === 'csv' ? '' : '# ';
+      const text = buildAsciiExport(data, slugs, delimiter, headerPrefix);
+      downloadFile(text, `${baseName}.${format}`);
     } else if (format === 'ply') {
       const hasColors = !!data.colors;
       const lines: string[] = [
@@ -3810,12 +3973,16 @@ export default function PointCloudViewer({
     return entry;
   }, [clouds, getEditState]);
 
-  // Export one or more selected scans as a single Helios XML + per-scan ASCII
-  // bundle. `scanIds` are the user-chosen scans (from the panel's scan list).
-  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean) => {
+  // Export one or more selected scans, either as a Helios XML + per-scan ASCII
+  // bundle (writeXml=true) or as the per-scan ASCII data files only
+  // (writeXml=false). `scanIds` are the user-chosen scans (from the panel's list).
+  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz') => {
     const entries: ScanExportEntry[] = [];
     for (const id of scanIds) {
       const e = buildScanExportEntry(id);
+      // Apply the chosen column order to every scan (the picker offers a shared
+      // column set; scans that don't carry a given column just skip it backend-side).
+      if (e && columns && columns.length) e.columns = columns;
       if (e) entries.push(e);
     }
     if (entries.length === 0) {
@@ -3824,31 +3991,39 @@ export default function PointCloudViewer({
       return;
     }
 
-    // Default base name: the single scan's name, or a generic bundle name.
-    const firstCloud = clouds.find(c => c.id === scanIds[0]);
+    // Effective per-scan file extension: XML mode always writes Helios .xyz data;
+    // data-only writes the chosen format. The save picker fixes the folder + base
+    // name only — the actual per-scan files are named <base>_<id>.<ext> by the backend.
+    const ext = writeXml ? 'xml' : dataFormat;
+    // Default save name: the single scan's label (filesystem-sanitised), matching
+    // the Scans panel; a generic name for a multi-scan bundle.
+    const firstScan = scans.find(s => s.id === scanIds[0]);
+    const firstLabel = firstScan
+      ? scanDisplayName(firstScan).replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '_').trim()
+      : '';
     const baseName = entries.length === 1
-      ? (firstCloud?.data.fileName?.replace(/\.[^.]+$/, '') || 'scan')
+      ? (firstLabel || 'scan')
       : 'scans';
-    const xmlPath = await window.electronAPI?.dialog.save({
-      defaultPath: `${baseName}.xml`,
-      title: 'Export Scan (XML + per-scan data)',
-      filters: [{ name: 'Helios scan XML', extensions: ['xml'] }],
+    const savePath = await window.electronAPI?.dialog.save({
+      defaultPath: `${baseName}.${ext}`,
+      title: writeXml ? 'Export Scan (XML + per-scan data)' : `Export Scan Data (${dataFormat.toUpperCase()})`,
+      filters: writeXml
+        ? [{ name: 'Helios scan XML', extensions: ['xml'] }]
+        : [{ name: `Scan data (${dataFormat.toUpperCase()})`, extensions: [dataFormat] }],
     });
-    if (!xmlPath) { setShowExportPanel(false); return; }
+    if (!savePath) { setShowExportPanel(false); return; }
 
-    // Derive the chosen folder + base name so the backend names match the files
-    // we write (the XML's <filename> references stay valid). Strip ANY trailing
-    // extension the user may have typed (e.g. a stray .las / .xyz): the data files
-    // are always Helios .xyz and the metadata file is always <base>.xml — the data
-    // format is fixed by exportScans(), not chosen here, so we never let a foreign
-    // extension leak into the base name and produce an unloadable <filename>.
-    const sep = xmlPath.includes('\\') ? '\\' : '/';
-    const dir = xmlPath.slice(0, xmlPath.lastIndexOf(sep));
-    const chosenBase = xmlPath.slice(xmlPath.lastIndexOf(sep) + 1).replace(/\.[^.]+$/, '') || 'scan';
+    // Derive the chosen folder + base name so the backend names match the files we
+    // write. Strip ANY trailing extension the user may have typed — the per-scan
+    // files are named by the backend in the chosen format.
+    const sep = savePath.includes('\\') ? '\\' : '/';
+    const dir = savePath.slice(0, savePath.lastIndexOf(sep));
+    const chosenBase = savePath.slice(savePath.lastIndexOf(sep) + 1).replace(/\.[^.]+$/, '') || 'scan';
 
     try {
       const resp = await exportScanXml({
         scans: entries, base_name: chosenBase, include_misses: includeMisses,
+        write_xml: writeXml, data_format: dataFormat,
       });
       if (!resp.success || !resp.files) {
         showToast({ title: 'Export Failed', type: 'error', message: resp.error || 'Unknown error' });
@@ -4110,6 +4285,24 @@ export default function PointCloudViewer({
       }
     }
 
+    // When the backend recorded misses it routed this scan through a cloud
+    // session; attach a minimal octree ref carrying the session id + miss flag so
+    // the existing MissOverlay (auto sphere-projection) and session-backed ops
+    // (LAD, crop) work. Unlike imported octree clouds, the synthetic cloud still
+    // renders from its in-memory `positions` above — the session is only the
+    // source of truth for misses/LAD, not the primary render.
+    let octree: PointCloudData['octree'];
+    const session = result.session;
+    if (session?.session_id) {
+      octree = {
+        cacheId: session.cache_id ?? session.session_id,
+        sourceXyzPath: session.cache_dir ?? '',
+        sessionId: session.session_id,
+        hasMisses: Boolean(session.has_misses),
+        scanOrigin: session.scan_origin ?? null,
+      };
+    }
+
     return {
       positions,
       colors,
@@ -4123,6 +4316,7 @@ export default function PointCloudViewer({
         size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
       },
       fileName,
+      octree,
     };
   }, []);
 
@@ -4135,6 +4329,7 @@ export default function PointCloudViewer({
     targetMeshes: MeshEntry[],
     activeScanners: Scan[],
     overwriteMode: 'overwrite' | 'duplicate',
+    options: SyntheticScanOptions,
   ) => {
     setIsScanning(true);
     try {
@@ -4153,10 +4348,38 @@ export default function PointCloudViewer({
           return_type: p.returnType,
           exit_diameter_m: p.beamExitDiameterM,
           beam_divergence_mrad: p.beamDivergenceMrad,
+          // Tilt is a per-scan property; noise is a per-run simulation option
+          // applied uniformly to every scanner this run.
+          tilt_roll_deg: p.tiltRollDeg,
+          tilt_pitch_deg: p.tiltPitchDeg,
+          range_noise_m: options.rangeNoiseMm / 1000,  // mm → m
+          angle_noise_mrad: options.angleNoiseMrad,
         };
       });
 
-      const response = await runLidarScan({ meshes: requestMeshes, scanners: requestScanners });
+      // Crop-to-grid: send the single visible voxel grid (the popup only enabled
+      // the toggle when exactly one is available).
+      let grid: HeliosGrid | undefined;
+      if (options.cropToGrid) {
+        const gridMesh = meshes.find(m => m.visible && m.gridSubdivisions);
+        if (gridMesh) {
+          grid = voxelMeshToHeliosGrid(
+            meshPositions.get(gridMesh.id),
+            meshScales.get(gridMesh.id),
+            gridMesh.gridSubdivisions,
+          ) ?? undefined;
+        }
+      }
+
+      const response = await runLidarScan({
+        meshes: requestMeshes,
+        scanners: requestScanners,
+        rays_per_pulse: options.raysPerPulse,
+        pulse_distance_threshold: options.pulseDistanceThresholdM,
+        record_misses: options.includeMisses,
+        scan_grid_only: grid !== undefined,
+        grid,
+      });
       if (!response.success) {
         showToast({ title: response.error || 'Scan failed', type: 'error' });
         return;
@@ -4209,10 +4432,10 @@ export default function PointCloudViewer({
     } finally {
       setIsScanning(false);
     }
-  }, [extractMeshWorldGeometry, buildScanCloudData, onUpdateScanData, onAddScan]);
+  }, [extractMeshWorldGeometry, buildScanCloudData, onUpdateScanData, onAddScan, meshes, meshPositions, meshScales]);
 
-  // Entry point: validate, then either scan immediately or prompt about scanners
-  // that already hold point data (overwrite / duplicate / cancel).
+  // Entry point: validate the targets, then open the Synthetic Scan Options popup
+  // (the actual run happens from handleScanOptionsRun once the user confirms).
   const handleRunScan = useCallback(async () => {
     const targetMeshes = meshes.filter(m => m.visible && isScannableMesh(m));
     if (targetMeshes.length === 0) {
@@ -4224,16 +4447,38 @@ export default function PointCloudViewer({
       showToast({ title: 'No active scanner — place a scanner marker and make it visible', type: 'error' });
       return;
     }
+    setPendingScan({ targetMeshes, activeScanners });
+  }, [meshes, scans, isScannableMesh]);
 
-    // If any participating scanner already has point data, ask first (#3).
+  // After the options popup confirms: either scan immediately or prompt about
+  // scanners that already hold point data (overwrite / duplicate / cancel).
+  const handleScanOptionsRun = useCallback(async (options: SyntheticScanOptions) => {
+    const pending = pendingScan;
+    setPendingScan(null);
+    if (!pending) return;
+    const { targetMeshes, activeScanners } = pending;
+
+    // If any participating scanner already has point data, ask first.
     const withData = activeScanners.filter(hasData);
     if (withData.length > 0) {
-      setScanOverwriteConfirm({ targetMeshes, activeScanners, count: withData.length });
+      setScanOverwriteConfirm({ targetMeshes, activeScanners, count: withData.length, options });
       return;
     }
 
-    await executeScan(targetMeshes, activeScanners, 'overwrite');
-  }, [meshes, scans, isScannableMesh, executeScan]);
+    await executeScan(targetMeshes, activeScanners, 'overwrite', options);
+  }, [pendingScan, executeScan]);
+
+  // Whether the pending scan has any multi-return scanner (gates the popup's
+  // full-waveform fields) and whether exactly one voxel grid is visible (gates
+  // crop-to-grid).
+  const pendingHasMultiReturn = useMemo(
+    () => (pendingScan?.activeScanners ?? []).some(s => s.params?.returnType === 'multi'),
+    [pendingScan],
+  );
+  const pendingGridAvailable = useMemo(
+    () => meshes.filter(m => m.visible && m.gridSubdivisions).length === 1,
+    [meshes],
+  );
 
   // Export skeleton in various formats
   const exportSkeleton = useCallback((skeletonId: string, format: 'obj' | 'ply' | 'json') => {
@@ -8778,7 +9023,7 @@ export default function PointCloudViewer({
                   key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
                   data={mesh.data}
                   color={mesh.color}
-                  opacity={meshOpacities.get(mesh.id) ?? (mesh.gridSubdivisions ? GRID_MESH_DEFAULT_OPACITY : MESH_DEFAULT_OPACITY)}
+                  opacity={meshOpacities.get(mesh.id) ?? defaultMeshOpacity(mesh)}
                   wireframe={meshWireframe}
                   useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
                   triangleColors={meshTriangleColors.get(mesh.id) ?? null}
@@ -8892,6 +9137,9 @@ export default function PointCloudViewer({
               heightMeters={scannerHeight}
               color={scan.color}
               selected={isMarkerSelected}
+              tiltRollDeg={scan.params.tiltRollDeg}
+              tiltPitchDeg={scan.params.tiltPitchDeg}
+              azimuthZeroDeg={scan.params.azimuthMinDeg}
             />
           );
         })}
@@ -10003,6 +10251,11 @@ export default function PointCloudViewer({
                           </>
                         )}
                       </div>
+                      {(scan.params.tiltRollDeg !== 0 || scan.params.tiltPitchDeg !== 0) && (
+                        <div>
+                          tilt: <span className="font-mono text-neutral-300">roll {scan.params.tiltRollDeg}° · pitch {scan.params.tiltPitchDeg}°</span>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -10028,7 +10281,7 @@ export default function PointCloudViewer({
             meshScales={meshScales}
             colormap={colormap}
             meshWireframe={meshWireframe}
-            defaultOpacityFor={(mesh) => mesh.gridSubdivisions ? GRID_MESH_DEFAULT_OPACITY : MESH_DEFAULT_OPACITY}
+            defaultOpacityFor={defaultMeshOpacity}
             isTextured={isTexturedMesh}
             isTriangulated={isTriangulatedMesh}
             supportsOpacity={meshSupportsOpacity}
@@ -11861,23 +12114,47 @@ export default function PointCloudViewer({
         />
       )}
 
-      {/* Export Panel - context-sensitive based on selection */}
+      {/* Export modal - context-sensitive based on selection */}
       {showExportPanel && (
-        <ExportPanel
+        <ExportModal
           selectionType={selectionType}
           singleCloudSelected={selectedIds.size === 1}
+          cloudIsScan={selectedIds.size === 1 && !!clouds.find(c => c.id === Array.from(selectedIds)[0])?.params}
           cloudName={clouds.find(c => c.id === Array.from(selectedIds)[0])?.data.fileName || ''}
+          // Available ASCII export columns, in default order. For a single
+          // selected cloud, from that cloud; otherwise from a representative
+          // selected scan (so the column picker works for multi-scan export too).
+          cloudColumns={(() => {
+            const ids = Array.from(selectedIds);
+            const c = ids.length === 1
+              ? clouds.find(c => c.id === ids[0])
+              : clouds.find(c => selectedIds.has(c.id) && !!c.params)
+                ?? clouds.find(c => !!c.params);
+            if (!c) return [];
+            return defaultExportColumns(c.data, {
+              isLabel: (slug) => isCategoricalAttribute(slug),
+              labelFor: (slug) => c.data.octree?.attributeLabels?.[slug] ?? slug,
+              // Octree/session clouds keep their points (and scalar columns) on
+              // disk, so recover the available columns from the ASCII_format hint.
+              asciiFormat: c.data.octree?.asciiFormat ?? c.asciiFormat ?? null,
+            });
+          })()}
           // Every scan that carries scanner parameters (so it can be written as a
           // scan XML), with whether it currently holds misses and is selected. The
-          // panel renders these as a checkbox list, pre-checked to the selection.
+          // modal renders these as a checkbox list, pre-checked to the selection.
           scanExportList={clouds
             .filter(c => !!c.params)
-            .map(c => ({
-              id: c.id,
-              name: c.data.fileName || c.id,
-              hasMisses: !!(c.data.octree?.hasMisses || c.data.scalarFields?.[MISS_ATTRIBUTE]),
-              selected: selectedIds.has(c.id),
-            }))}
+            .map(c => {
+              // Show the scan's user-configurable label (falling back to filename),
+              // matching how the Scans panel names the row.
+              const scan = scans.find(s => s.id === c.id);
+              return {
+                id: c.id,
+                name: scan ? scanDisplayName(scan) : (c.data.fileName || c.id),
+                hasMisses: !!(c.data.octree?.hasMisses || c.data.scalarFields?.[MISS_ATTRIBUTE]),
+                selected: selectedIds.has(c.id),
+              };
+            })}
           onExportScanXml={exportScanXmlBundle}
           meshSelected={!!selectedMesh}
           meshName={selectedMesh ? displayNameOfMesh(selectedMesh) : ''}
@@ -12598,177 +12875,19 @@ export default function PointCloudViewer({
           }
           setScanPopupState({ kind: 'closed' });
         }}
-        onBulkImport={async (heliosScans, grids, xmlPath) => {
-          if (heliosScans.length === 0 && grids.length === 0) return;
-          // Create voxel-grid meshes from any <grid> blocks first — they're
-          // independent of scans (top-level siblings) and need no wizard, so a
-          // grid-only XML still produces objects. Each grid maps onto a voxel
-          // box: center → position, size → scale, Nx/Ny/Nz → gridSubdivisions,
-          // rotation (deg about z) → mesh z-rotation.
-          grids.forEach((g, i) => {
-            importMesh(
-              {
-                sourceCloudId: `helios-grid-${i}`,
-                data: generateShapeMesh('voxel'),
-                visible: true,
-                color: '#60a5fa', // same blue as Create Voxel
-                method: 'delaunay', // placeholder, matches handleCreateShape
-                name: g.label,
-                gridSubdivisions: { ...g.subdivisions },
-              },
-              {
-                position: { ...g.center },
-                scale: { ...g.size },
-                rotation: { x: 0, y: 0, z: g.rotationDeg },
-              },
-            );
-          });
-          if (heliosScans.length === 0) {
-            showToast({ title: `Imported ${grids.length} grid(s)`, type: 'success' });
-            return;
-          }
-          const xmlDir = xmlPath ? dirname(xmlPath) : '';
-          const used = new Set(scans.map(s => s.color));
-          const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
-          const allocateColor = () => {
-            const free = PALETTE.find(c => !used.has(c));
-            const chosen = free ?? PALETTE[(scans.length + used.size) % PALETTE.length];
-            used.add(chosen);
-            return chosen;
-          };
-          // Renumber labels off the current count so an import after manual
-          // adds doesn't collide with existing "Scan N" names.
-          const offset = scans.length;
-          // Failures attaching point data are fatal to the whole import:
-          // committing scans without points leaves the user with empty,
-          // useless entries (e.g. when the backend is down). We collect
-          // failures here and, if any occurred, abort without adding any
-          // scans so the user can fix the cause and re-import.
-          const failures: { label: string; reason: string }[] = [];
-          // Show the progress modal immediately so the user knows the import
-          // is in flight — backend parsing of a multi-GB scan can take 30s+
-          // and the launching popup has already closed.
-          setBulkImportProgress({
-            current: 0,
-            total: heliosScans.length,
-            label: 'Preparing…',
-          });
-          try {
-            // Phase 1: resolve every referenced file FIRST (keeps the existing
-            // missing-file prompt), and split scans into those with data
-            // (→ wizard) and params-only scans. A scan whose file can't be
-            // located is a hard failure (all-or-nothing, as before).
-            type Pending = { label: string; color: string; params: typeof heliosScans[number]['params'];
-                             resolved: string | null; asciiFormat: string | null };
-            const pending: Pending[] = [];
-            for (let i = 0; i < heliosScans.length; i++) {
-              const h = heliosScans[i];
-              const label = `Scan ${offset + i + 1}`;
-              setBulkImportProgress({
-                current: i + 1,
-                total: heliosScans.length,
-                label: h.filename ? `Locating ${h.filename.split(/[\\/]/).pop()}` : `Preparing ${label}`,
-              });
-              let resolved: string | null = null;
-              if (h.filename) {
-                try {
-                  resolved = await resolveAttachedScanFile(h.filename, xmlDir);
-                  if (!resolved) throw new Error(`could not locate file "${h.filename}"`);
-                } catch (err) {
-                  failures.push({ label, reason: err instanceof Error ? err.message : String(err) });
-                }
-              }
-              pending.push({ label, color: allocateColor(), params: h.params, resolved, asciiFormat: h.asciiFormat });
-            }
-            if (failures.length > 0) {
-              const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
-              const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
-              throw new Error(
-                `${failures.length} of ${heliosScans.length} scan(s) could not load point data — ${detail}${more}. ` +
-                  `No scans were imported; fix the issue and re-import.`,
-              );
-            }
+        onBulkImport={bulkImportScans}
+      />
 
-            // Phase 2: walk the scans that carry a file through the import
-            // wizard (one stepper for all of them), carrying their Helios
-            // params + ASCII_format hint. Params-only scans skip the wizard.
-            const wizardPending = pending.filter(p => p.resolved);
-            const inputs: WizardScanInput[] = wizardPending.map(p => ({
-              path: p.resolved!,
-              fileName: p.resolved!.split(/[\\/]/).pop() ?? p.label,
-              asciiFormatHint: p.asciiFormat,
-              params: p.params,
-              label: p.label,
-              color: p.color,
-            }));
-
-            let results: WizardResult[] | null = inputs.length === 0 ? [] : null;
-            if (inputs.length > 0) {
-              // Hide the progress modal while the wizard is up.
-              setBulkImportProgress(null);
-              results = onRequestImportWizard
-                ? await onRequestImportWizard(inputs)
-                : // No wizard host (defensive): import with auto-detect.
-                  inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [] }));
-              if (!results) return; // user cancelled the wizard
-            }
-
-            // Phase 3: build the Scans. Wizard results carry data; params-only
-            // scans are added as-is.
-            const newScans: Scan[] = [];
-            let attachedCount = 0;
-            const byPath = new Map(results!.map(r => [r.input.path, r]));
-            for (const p of pending) {
-              const scan: Scan = {
-                id: crypto.randomUUID(),
-                label: p.label,
-                visible: true,
-                color: p.color,
-                params: p.params,
-              };
-              if (p.resolved) {
-                const r = byPath.get(p.resolved);
-                if (r) {
-                  setBulkImportProgress({ current: attachedCount + 1, total: wizardPending.length, label: `Loading ${r.input.fileName}` });
-                  try {
-                    const data = await parsePointCloudFromPath(p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs);
-                    for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
-                    scan.data = data;
-                    scan.sourcePath = p.resolved;
-                    scan.asciiFormat = r.asciiFormat;
-                    attachedCount += 1;
-                  } catch (err) {
-                    failures.push({ label: p.label, reason: err instanceof Error ? err.message : String(err) });
-                  }
-                }
-              }
-              newScans.push(scan);
-            }
-            if (failures.length > 0) {
-              const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
-              const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
-              throw new Error(
-                `${failures.length} of ${heliosScans.length} scan(s) could not load point data — ${detail}${more}. ` +
-                  `No scans were imported; fix the issue and re-import.`,
-              );
-            }
-
-            onAddScans?.(newScans);
-            const parts = [`${newScans.length} scan(s)`];
-            if (attachedCount > 0) parts.push(`${attachedCount} with data`);
-            if (grids.length > 0) parts.push(`${grids.length} grid(s)`);
-            showToast({ title: `Imported ${parts.join(', ')}`, type: 'success' });
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.error('Bulk import failed:', err);
-            // Persist (duration 0): a hard "nothing was imported" failure must
-            // not flash away in 3s — the user needs to read it and act.
-            showToast({ title: `Import failed: ${msg}`, type: 'error', duration: 0 });
-          } finally {
-            // Always clear the modal — leaving it up would lock the UI.
-            setBulkImportProgress(null);
-          }
-        }}
+      {/* Synthetic Scan Options — shown after the user clicks "Run Synthetic
+          LiDAR Scan" and the targets validate, before the scan runs. Picks
+          per-run noise / misses / full-waveform tuning / crop-to-grid; the
+          chosen options are remembered for next time. */}
+      <SyntheticScanOptionsPopup
+        isOpen={pendingScan !== null}
+        onClose={() => setPendingScan(null)}
+        onRun={(options) => { void handleScanOptionsRun(options); }}
+        hasMultiReturn={pendingHasMultiReturn}
+        gridAvailable={pendingGridAvailable}
       />
 
       <BulkImportProgress progress={bulkImportProgress} />
@@ -12808,7 +12927,7 @@ export default function PointCloudViewer({
                   onClick={() => {
                     const c = scanOverwriteConfirm;
                     setScanOverwriteConfirm(null);
-                    void executeScan(c.targetMeshes, c.activeScanners, 'duplicate');
+                    void executeScan(c.targetMeshes, c.activeScanners, 'duplicate', c.options);
                   }}
                   className="w-full px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm text-white text-left"
                 >
@@ -12820,7 +12939,7 @@ export default function PointCloudViewer({
                   onClick={() => {
                     const c = scanOverwriteConfirm;
                     setScanOverwriteConfirm(null);
-                    void executeScan(c.targetMeshes, c.activeScanners, 'overwrite');
+                    void executeScan(c.targetMeshes, c.activeScanners, 'overwrite', c.options);
                   }}
                   className="w-full px-3 py-2 bg-neutral-700 hover:bg-neutral-600 rounded text-sm text-white text-left"
                 >

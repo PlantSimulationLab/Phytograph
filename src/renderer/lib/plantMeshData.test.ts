@@ -37,6 +37,25 @@ describe('plantResponseToMeshData', () => {
     expect(Array.from(data.uvCoordinates!)).toEqual([0, 1, 1, 1, 1, 0]);
   });
 
+  it('maps per-material Kd colors (no UVs/textures) into vertexColors only', () => {
+    // A multi-material OBJ with solid Kd colors and no textures — the backend
+    // bakes each material's Kd into per-vertex colors and returns no UVs and no
+    // material groups. This must surface as vertexColors with uvCoordinates and
+    // plantMaterials both undefined, so the mesh renders vertex-colored rather
+    // than flat (the riegl_vz.obj regression: imported flat blue).
+    // Three distinct materials → three distinct per-vertex colors (values
+    // chosen to be exactly representable in Float32 so equality is exact).
+    const { data, plantMaterials } = plantResponseToMeshData({
+      ...base,
+      colors: [[0.75, 0.5, 0.25], [0.5, 0.25, 0.125], [0.125, 0.25, 0.5]],
+    });
+    expect(Array.from(data.vertexColors!)).toEqual([
+      0.75, 0.5, 0.25, 0.5, 0.25, 0.125, 0.125, 0.25, 0.5,
+    ]);
+    expect(data.uvCoordinates).toBeUndefined();
+    expect(plantMaterials).toBeUndefined();
+  });
+
   it('builds plantMaterials with texture data and triangle groups', () => {
     const { plantMaterials } = plantResponseToMeshData({
       ...base,

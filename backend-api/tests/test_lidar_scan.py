@@ -145,3 +145,86 @@ class TestRealScan:
         assert by_id["B"]["num_points"] > 0
         # Independent hit sets (not the same merged cloud copied twice).
         assert not np.array_equal(by_id["A"]["points"], by_id["B"]["points"])
+
+
+class TestScanOptions:
+    """Noise, tilt, and miss-recording run-options against the compiled plugin."""
+
+    def _scan_full(self, client, scanners, **req_opts):
+        """POST a full request (so we can set per-scanner noise/tilt + request-level
+        record_misses) and return the decoded per-scanner result."""
+        pytest.importorskip("pyhelios")
+        resp = client.post("/api/lidar/scan", json={
+            "meshes": [{"vertices": _PYRAMID_VERTS, "triangles": _PYRAMID_TRIS}],
+            "scanners": scanners,
+            **req_opts,
+        })
+        assert resp.status_code == 200, resp.text
+        body = decode_lidar_scan(resp.content)
+        assert body["success"] is True, body.get("error")
+        return body
+
+    def test_range_noise_perturbs_along_beam_distance(self, client):
+        # Same scanner + identical grid → the same beams fire in the same order, so
+        # we can pair each noised hit's range against its noise-free counterpart.
+        # The per-ray DIFFERENCE isolates the injected noise from the geometry's
+        # own distance spread; its std should land near the 50 mm we asked for
+        # (statistical check — not asserting any single ray).
+        SIGMA = 0.05
+        clean = self._scan_full(client, [_scanner("c")])["results"][0]
+        noisy = self._scan_full(client, [{**_scanner("c"), "range_noise_m": SIGMA}])["results"][0]
+
+        assert clean["num_points"] > 50
+        # Misses are off, so both scans hit the same surface points in the same
+        # order; require the counts to match before pairing.
+        assert noisy["num_points"] == clean["num_points"]
+        clean_d = np.asarray(clean["scalars"]["distance"], dtype=np.float64)
+        noisy_d = np.asarray(noisy["scalars"]["distance"], dtype=np.float64)
+        diff = noisy_d - clean_d
+        # The noise is zero-mean and ~SIGMA wide. With dozens of hits the sample
+        # std lands in a generous band around SIGMA; the clean-vs-clean diff is 0.
+        assert diff.std() > SIGMA * 0.5
+        assert diff.std() < SIGMA * 2.0
+        assert abs(diff.mean()) < SIGMA  # zero-mean perturbation
+
+    def test_tilt_rotates_the_hit_pattern(self, client):
+        # A level scan vs a 20° rolled scan from the same origin must produce a
+        # different hit cloud (the beams point elsewhere). Compare the hit
+        # centroids: tilting the scanner shifts where the swept cone lands.
+        level = self._scan_full(client, [_scanner("t")])["results"][0]
+        tilted_scanner = {**_scanner("t"), "tilt_roll_deg": 20.0}
+        tilted = self._scan_full(client, [tilted_scanner])["results"][0]
+
+        assert level["num_points"] > 0 and tilted["num_points"] > 0
+        lc = np.asarray(level["points"], dtype=np.float64).mean(axis=0)
+        tc = np.asarray(tilted["points"], dtype=np.float64).mean(axis=0)
+        # Centroid moves by a non-trivial amount once the scanner is tilted 20°.
+        assert np.linalg.norm(lc - tc) > 1e-2
+
+    def test_record_misses_builds_a_session_with_is_miss(self, client):
+        # A scanner sweeping the full sphere from above mostly misses the small
+        # pyramid. With record_misses on, those rays are kept, flagged is_miss,
+        # and the scan is routed through a cloud session so the overlay/LAD work.
+        body = self._scan_full(client, [_scanner("m")], record_misses=True)
+        res = body["results"][0]
+        assert res["num_points"] > 0
+        session = res["session"]
+        assert session is not None, "record_misses should create a cloud session"
+        assert session["has_misses"] is True
+        assert session["miss_count"] > 0
+        sid = session["session_id"]
+
+        # The session-based miss overlay endpoint must find those misses and
+        # project them onto the bounding sphere around the scanner origin.
+        r = client.get(f"/api/cloud/session/{sid}/misses",
+                       params={"origin_x": 0.0, "origin_y": 0.0, "origin_z": 3.0})
+        assert r.status_code == 200, r.text
+        misses = r.json()
+        assert misses["total"] > 0
+        assert misses["count"] > 0  # placeable (have a beam direction from origin)
+        assert len(misses["positions"]) == misses["count"] * 3
+
+    def test_no_session_when_misses_not_recorded(self, client):
+        # Default (record_misses off): plain in-memory cloud, no session created.
+        body = self._scan_full(client, [_scanner("n")])
+        assert body["results"][0]["session"] is None

@@ -58,14 +58,30 @@ You need geometry in the scene to scan: typically a generated
         Slower but produces realistic returns from leaves and porous
         canopy.
 
-7. Click **Add Scan** to place the scanner. A radio-tower marker
+7. **Scanner tilt** — residual lean of the scanner away from level, in
+   degrees. Real terrestrial scanners are never perfectly plumb; a
+   dual-axis inclinometer reports the lean as two angles:
+    - **Roll** — applied first, about the scanner's lateral axis
+    - **Pitch** — applied second, about its forward axis
+
+    Leave both at `0` for a perfectly level scanner. Tilt is a property
+    of the scan (it describes the instrument), so it's stored on the scan
+    and editable later — useful even for documenting a real scan's pose.
+
+8. Click **Add Scan** to place the scanner. A radio-tower marker
    appears in the 3D view at the origin.
 
 ## Import scan positions from a real campaign
 
-If you already have scanner positions from field data, click **Import
-from XML file** in the Add Scan popup. This reads the same format the
-Helios scan simulator uses; one scan is created per `<scan>` element.
+If you already have scanner positions from field data, import a Helios
+scan XML any of three ways: click **Import from XML file** in the Add
+Scan popup, choose **File → Import → Scan XML…** (or **Auto-detect…**),
+or drag the `.xml` onto the viewport. All three run the same import.
+This reads the same format the Helios scan simulator uses; one scan is
+created per `<scan>` element, and any top-level `<grid>` blocks become
+voxel-grid boxes.
+A `<scanTilt>` tag (two numbers, `roll pitch` in degrees) populates the
+scanner tilt; absent, the scan imports level.
 If a `<scan>` carries a `<filename>` tag and that file is on disk
 alongside the XML (or in the current working directory), Phytograph
 auto-loads the point data and attaches it to the new scan. Otherwise
@@ -100,6 +116,30 @@ of points over the surface.
    panel** (this button appears as soon as one scanner exists). The same
    action is also available on a selected mesh's toolbar and from the
    command palette (search "scan").
+
+### Synthetic scan options
+
+Running opens the **Synthetic Scan Options** dialog. Unlike a scan's
+properties (origin, sweep, tilt — set per scan), these are simulation
+settings chosen per run; your last-used values are remembered and
+pre-filled next time:
+
+- **Measurement noise** — Gaussian noise added during ray-tracing, to
+  mimic a real instrument's error. **Range** (mm) displaces each hit
+  along its beam; **angle** (mrad) jitters the beam direction. `0`
+  disables each (a perfect scan).
+- **Include sky / miss points** — keep the rays that hit nothing (the
+  "sky"). When on, the scan is routed through a session so the misses
+  show up under the row's **sky/miss** toggle (projected onto a sphere
+  just past the farthest hit) and feed leaf-area-density. On by default.
+- **Crop scan to grid** — restrict ray-tracing to the cells of a voxel
+  grid. Enabled only when exactly one voxel grid is visible; the scan
+  then ignores geometry outside that grid.
+- **Full-waveform** (multi-return scanners only) — **rays per pulse**
+  (sub-rays fired per beam) and **pulse distance threshold** (m, how
+  close hits must be to merge into one return).
+
+Click **Run scan** to proceed.
 
 Phytograph loads all visible scannable geometry into one Helios scene,
 ray-traces it once from every visible scanner, then writes each

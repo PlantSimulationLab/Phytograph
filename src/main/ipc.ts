@@ -7,6 +7,7 @@ import Store from 'electron-store';
 import {
   IPC,
   type BackendInfo,
+  type MessageBoxOptions,
   type OpenDialogOptions,
   type SaveDialogOptions,
 } from '../shared/ipc.js';
@@ -62,6 +63,20 @@ export function registerIpc(): void {
       filters: opts.filters,
     });
     return result.canceled ? null : result.filePath ?? null;
+  });
+
+  ipcMain.handle(IPC.DialogMessageBox, async (_e, opts: MessageBoxOptions) => {
+    const win = BrowserWindow.getFocusedWindow();
+    const result = await dialog.showMessageBox(win ?? undefined!, {
+      type: opts.type ?? 'none',
+      title: opts.title,
+      message: opts.message,
+      detail: opts.detail,
+      buttons: opts.buttons ?? ['OK'],
+      defaultId: opts.defaultId,
+      cancelId: opts.cancelId,
+    });
+    return { response: result.response };
   });
 
   ipcMain.handle(IPC.FsReadText, async (_e, path: string) => {

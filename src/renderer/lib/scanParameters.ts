@@ -26,6 +26,14 @@ export interface ScanParameters {
   // milliradians (the units pyhelios uses).
   beamExitDiameterM: number;
   beamDivergenceMrad: number;
+  // Residual scanner tilt away from plumb, in degrees — a real property of the
+  // physical instrument (a dual-axis inclinometer reports two angles), not a
+  // synthetic-only knob. Roll is applied first (about the body lateral axis),
+  // then pitch (about the forward / azimuth-zero axis). 0/0 = perfectly level.
+  // Maps to Helios <scanTilt> "roll pitch" (degrees) and pyhelios
+  // scan_tilt_roll/scan_tilt_pitch (radians).
+  tiltRollDeg: number;
+  tiltPitchDeg: number;
 }
 
 export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
@@ -39,6 +47,8 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   returnType: 'single',
   beamExitDiameterM: 0.01,
   beamDivergenceMrad: 0.5,
+  tiltRollDeg: 0,
+  tiltPitchDeg: 0,
 };
 
 export function makeDefaultScanParameters(
@@ -64,6 +74,8 @@ export interface ScanParamsFromFile {
   theta_max?: number;
   phi_min?: number;
   phi_max?: number;
+  tilt_roll_deg?: number;
+  tilt_pitch_deg?: number;
 }
 
 // Build ScanParameters from the partial set a file header carried, filling any
@@ -83,5 +95,7 @@ export function scanParametersFromFile(src: ScanParamsFromFile): ScanParameters 
   if (typeof src.theta_max === 'number') p.zenithMaxDeg = src.theta_max;
   if (typeof src.phi_min === 'number') p.azimuthMinDeg = src.phi_min;
   if (typeof src.phi_max === 'number') p.azimuthMaxDeg = src.phi_max;
+  if (typeof src.tilt_roll_deg === 'number') p.tiltRollDeg = src.tilt_roll_deg;
+  if (typeof src.tilt_pitch_deg === 'number') p.tiltPitchDeg = src.tilt_pitch_deg;
   return p;
 }

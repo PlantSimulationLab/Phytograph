@@ -13,6 +13,7 @@ interface MockState {
   fileDropHandlers: Set<FileDropHandler>;
   dialogOpenResult: string | string[] | null;
   dialogSaveResult: string | null;
+  dialogMessageBoxResponse: number;
 }
 
 const state: MockState = {
@@ -21,6 +22,8 @@ const state: MockState = {
   fileDropHandlers: new Set(),
   dialogOpenResult: null,
   dialogSaveResult: null,
+  // Default: the first button (e.g. "Locate…" / "OK").
+  dialogMessageBoxResponse: 0,
 };
 
 export const electronAPIMock = {
@@ -30,6 +33,9 @@ export const electronAPIMock = {
   },
   setDialogSaveResult(value: string | null) {
     state.dialogSaveResult = value;
+  },
+  setDialogMessageBoxResponse(value: number) {
+    state.dialogMessageBoxResponse = value;
   },
   seedFile(path: string, contents: string | ArrayBuffer) {
     state.files.set(path, contents);
@@ -54,6 +60,7 @@ function makeApi() {
     dialog: {
       open: vi.fn(async () => state.dialogOpenResult),
       save: vi.fn(async () => state.dialogSaveResult),
+      messageBox: vi.fn(async () => ({ response: state.dialogMessageBoxResponse })),
     },
     fs: {
       readText: vi.fn(async (path: string) => {
@@ -96,6 +103,7 @@ function resetState() {
   state.fileDropHandlers.clear();
   state.dialogOpenResult = null;
   state.dialogSaveResult = null;
+  state.dialogMessageBoxResponse = 0;
 }
 
 beforeEach(() => {

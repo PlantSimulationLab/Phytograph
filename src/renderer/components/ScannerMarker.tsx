@@ -11,6 +11,39 @@ interface ScannerMarkerProps {
   heightMeters: number;
   color: string;
   selected?: boolean;
+  // Residual scanner tilt away from plumb, in degrees (a dual-axis
+  // inclinometer's two angles). Roll is applied first (about the body lateral
+  // axis), then pitch (about the body forward / azimuth-zero axis). Both default
+  // to 0 (level). Derived from the scan's params at render time, so editing tilt
+  // in the scan panel re-orients the marker live.
+  tiltRollDeg?: number;
+  tiltPitchDeg?: number;
+  // Azimuth-zero direction (phiMin), in degrees, defining the body forward axis
+  // in the world XY plane. The tilt axes are built relative to it so a tilted
+  // scanner leans in the right world direction regardless of its azimuth sweep.
+  azimuthZeroDeg?: number;
+}
+
+// Build the marker's orientation quaternion from the tilt convention: with world
+// +Z up, the forward (azimuth-zero) axis is (cos φ₀, sin φ₀, 0) and the lateral
+// axis is forward × up = (sin φ₀, -cos φ₀, 0). Roll rotates about lateral first,
+// then pitch about forward (right-hand). Composing q = pitch ∘ roll applies roll
+// first. Returns null when level so the common case stays identity.
+function tiltQuaternion(
+  rollDeg: number,
+  pitchDeg: number,
+  azimuthZeroDeg: number,
+): THREE.Quaternion {
+  // Identity when level — always return a concrete quaternion (never null) so
+  // that editing tilt back to 0/0 actively resets the group's orientation
+  // rather than leaving the previous tilt baked in.
+  if (rollDeg === 0 && pitchDeg === 0) return new THREE.Quaternion();
+  const phi0 = (azimuthZeroDeg * Math.PI) / 180;
+  const forward = new THREE.Vector3(Math.cos(phi0), Math.sin(phi0), 0);
+  const lateral = new THREE.Vector3(Math.sin(phi0), -Math.cos(phi0), 0);
+  const qRoll = new THREE.Quaternion().setFromAxisAngle(lateral, (rollDeg * Math.PI) / 180);
+  const qPitch = new THREE.Quaternion().setFromAxisAngle(forward, (pitchDeg * Math.PI) / 180);
+  return qPitch.multiply(qRoll);
 }
 
 function ScannerObject({ color, selected }: { color: string; selected: boolean }) {
@@ -60,9 +93,27 @@ function ScannerObject({ color, selected }: { color: string; selected: boolean }
   return <primitive object={scene} />;
 }
 
-export function ScannerMarker({ origin, heightMeters, color, selected = false }: ScannerMarkerProps) {
+export function ScannerMarker({
+  origin,
+  heightMeters,
+  color,
+  selected = false,
+  tiltRollDeg = 0,
+  tiltPitchDeg = 0,
+  azimuthZeroDeg = 0,
+}: ScannerMarkerProps) {
+  // Recompute only when the tilt inputs change. A null quaternion (level) leaves
+  // the group at identity orientation.
+  const quaternion = useMemo(
+    () => tiltQuaternion(tiltRollDeg, tiltPitchDeg, azimuthZeroDeg),
+    [tiltRollDeg, tiltPitchDeg, azimuthZeroDeg],
+  );
   return (
-    <group position={[origin.x, origin.y, origin.z]} scale={heightMeters}>
+    <group
+      position={[origin.x, origin.y, origin.z]}
+      quaternion={quaternion}
+      scale={heightMeters}
+    >
       <Suspense fallback={null}>
         <ScannerObject color={color} selected={selected} />
       </Suspense>

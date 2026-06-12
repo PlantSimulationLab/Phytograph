@@ -1,0 +1,12 @@
+# Two triangles, two solid-color materials (red + blue), NO textures / NO UVs.
+# Exercises the MTL-Kd -> per-vertex color import path (no texture fallback).
+mtllib two-material.mtl
+v 0.0 0.0 0.0
+v 1.0 0.0 0.0
+v 1.0 1.0 0.0
+v 0.0 1.0 0.0
+vn 0.0 0.0 1.0
+usemtl red
+f 1//1 2//1 3//1
+usemtl blue
+f 1//1 3//1 4//1

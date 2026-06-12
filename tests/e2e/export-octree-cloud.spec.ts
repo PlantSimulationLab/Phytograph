@@ -59,10 +59,12 @@ test('exports an octree-backed cloud to XYZ via the backend', async () => {
     // Freshly imported scan is auto-selected (no re-click — that would toggle off).
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
-    // Open the cloud export panel and export XYZ (backend path for octree).
+    // Open the export modal, pick the XYZ format, and export (backend path for
+    // octree). The modal separates format choice from the Export action.
     await page.getByTestId('tool-export-cloud').click();
-    await expect(page.getByTestId('export-panel')).toBeVisible();
-    await page.getByTestId('export-cloud-xyz').click();
+    await expect(page.getByTestId('export-modal')).toBeVisible();
+    await page.getByTestId('export-format-xyz').click();
+    await page.getByTestId('export-cloud-go').click();
 
     await expect.poll(
       async () =>

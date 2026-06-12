@@ -13,6 +13,7 @@ import { importTexturedMesh, deleteCloudSession, type MeshImportResponse } from 
 import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
 import { registerCategoricalSlug } from "./lib/classification";
+import { parseHeliosScanXml, HeliosXmlParseError } from "./lib/heliosScanXml";
 import { resolveTargets } from "./lib/bulkActions";
 import { FeedbackDialog } from "./components/FeedbackDialog";
 import { AboutDialog } from "./components/AboutDialog";
@@ -26,7 +27,7 @@ const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply'
 import logoImage from "./assets/logo.png";
 
 type NavItem = 'viewer' | 'options';
-type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton';
+type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton' | 'scanxml';
 
 // Optional overrides for an import. Menu-driven imports (which go through the
 // native Electron dialog, not the renderer dropzone) pass the import type and
@@ -202,6 +203,46 @@ function App() {
     };
   }, []);
 
+  // Import a Helios scan XML (scans + grids) from disk, routing into the same
+  // bulk-import flow the Add-Scan popup uses (PointCloudViewer owns the progress
+  // modal + success/failure toasts). Needs the on-disk `path` so the XML's
+  // relative <filename> references can be resolved; a path-less Blob/fixture
+  // can't be resolved, so we surface a clear error instead of importing scans
+  // that would all fail file resolution.
+  const importScanXml = useCallback(async (file: File, path: string | undefined) => {
+    if (!importRefsRef.current) {
+      showToast({ title: 'Viewer not ready for scan XML import', type: 'error' });
+      return;
+    }
+    if (!path) {
+      showToast({
+        title: `Can't import ${file.name}: no file path available. Scan XML must be ` +
+          `opened from disk so its referenced point-cloud files can be located.`,
+        type: 'error',
+        duration: 0,
+      });
+      return;
+    }
+    // Parse first so XML errors surface clearly (the popup shows them inline; we
+    // have no popup, so toast a persistent error). Mirrors ScanParametersPopup.
+    let parsed;
+    try {
+      const text = await window.electronAPI.fs.readText(path);
+      parsed = parseHeliosScanXml(text);
+    } catch (err) {
+      const msg = err instanceof HeliosXmlParseError
+        ? err.message
+        : err instanceof Error ? err.message : String(err);
+      showToast({ title: `Import failed: ${msg}`, type: 'error', duration: 0 });
+      return;
+    }
+    // Clear App's progress modal before handing off — bulkImportScans drives its
+    // own (the same BulkImportProgress component), so they'd otherwise stack.
+    setImportProgress(null);
+    setActiveNav('viewer');
+    await importRefsRef.current.bulkImportScans(parsed.scans, parsed.grids, path);
+  }, []);
+
   const handleFileUpload = useCallback(async (file: File, opts?: ImportOptions) => {
     setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
 
@@ -211,6 +252,23 @@ function App() {
     const explicitPath = opts?.path;
 
     try {
+      // Helios scan XML short-circuit: a forced 'scanxml' import, or an
+      // auto-detected `.xml`, routes into the shared bulk-import flow (which
+      // owns its own progress modal + toasts) rather than the cloud/mesh/skeleton
+      // parsers. Get the on-disk path from the explicit dialog path or the
+      // dropped File's webUtils path.
+      const xmlExt = file.name.toLowerCase().split('.').pop() ?? '';
+      if (importType === 'scanxml' || (importType === 'auto' && xmlExt === 'xml')) {
+        setImportProgress(null);
+        let xmlPath: string | undefined = explicitPath;
+        if (!xmlPath) {
+          try { xmlPath = window.electronAPI?.getPathForFile?.(file) || undefined; }
+          catch { xmlPath = undefined; }
+        }
+        await importScanXml(file, xmlPath);
+        return; // handled — the finally{} below still resets pendingImportTypeRef
+      }
+
       // Determine how to import based on user selection or auto-detect
       let shouldImportAsMesh = false;
       let shouldImportAsSkeleton = false;
@@ -257,16 +315,22 @@ function App() {
           }
 
           let backendMesh: MeshImportResponse | null = null;
+          // True when the backend importer was attempted for a materials-capable
+          // file (OBJ/PLY with a disk path) but threw, so the local fallback
+          // below will produce geometry without the embedded materials.
+          let materialsDropped = false;
           if ((ext === 'obj' || ext === 'ply') && objPath) {
             try {
               const resp = await importTexturedMesh(objPath);
-              // OBJ is only worth the backend path when it actually has textures
-              // (otherwise the local parser is equivalent and avoids the round
-              // trip). PLY backend import is always preferred — it's the only
-              // path that handles binary PLY and per-vertex color.
-              if (resp.success && (ext === 'ply' || resp.has_textures)) backendMesh = resp;
+              // The backend is the only path that applies a mesh's embedded
+              // materials: MTL `Kd` → per-vertex colors and textures for OBJ,
+              // and per-vertex color + binary support for PLY. The local
+              // parser ignores the MTL entirely, so prefer the backend result
+              // whenever it succeeds; fall back locally only on error.
+              if (resp.success) backendMesh = resp;
             } catch (e) {
               console.warn('Backend mesh import failed, falling back to local parse:', e);
+              materialsDropped = true;
             }
           }
 
@@ -302,7 +366,15 @@ function App() {
               name: baseNameForLabel(file.name),
             });
             setActiveNav('viewer');
-            showToast({ title: `Loaded mesh with ${meshData.triangleCount.toLocaleString()} triangles from ${file.name}`, type: 'success' });
+            if (materialsDropped) {
+              showToast({
+                title: `Imported geometry from ${file.name}, but couldn't load its materials — the backend was unavailable. Re-import to apply colors/textures.`,
+                type: 'warning',
+                duration: 0,
+              });
+            } else {
+              showToast({ title: `Loaded mesh with ${meshData.triangleCount.toLocaleString()} triangles from ${file.name}`, type: 'success' });
+            }
           }
         }
       } else if (shouldImportAsSkeleton) {
@@ -381,13 +453,16 @@ function App() {
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
     }
-  }, [getNextColor, openImportWizard, buildScanFromWizardResult]);
+  }, [getNextColor, openImportWizard, buildScanFromWizardResult, importScanXml]);
 
   // Handle multiple files
   const handleMultipleFiles = useCallback(async (files: File[], opts?: ImportOptions) => {
     setImportProgress({ current: 0, total: files.length, label: 'Preparing…' });
     const newScans: Scan[] = [];
     const errors: string[] = [];
+    // Names of OBJ/PLY files whose embedded materials were dropped because the
+    // backend importer threw and the local fallback (geometry only) was used.
+    const materialsDroppedFiles: string[] = [];
     let meshCount = 0;
     let skeletonCount = 0;
     let colorIndex = 0;
@@ -416,6 +491,23 @@ function App() {
       const file = files[fileIdx];
       setImportProgress({ current: fileIdx + 1, total: files.length, label: `Loading ${file.name}` });
       try {
+        // Helios scan XML (forced 'scanxml' or auto-detected `.xml`) is imported
+        // immediately via the shared bulk-import flow, which owns its own progress
+        // modal + toasts and is NOT counted in this loop's tally. A mixed drop
+        // (XML + clouds) therefore shows two sequential wizards — PointCloudViewer's
+        // for the XML's referenced clouds, then App's for the loose clouds below.
+        const xmlExt = file.name.toLowerCase().split('.').pop() ?? '';
+        if (importType === 'scanxml' || (importType === 'auto' && xmlExt === 'xml')) {
+          setImportProgress(null); // hand the modal off to bulkImportScans
+          let xmlPath: string | undefined = explicitPaths?.[fileIdx];
+          if (!xmlPath) {
+            try { xmlPath = window.electronAPI?.getPathForFile?.(file) || undefined; }
+            catch { xmlPath = undefined; }
+          }
+          await importScanXml(file, xmlPath);
+          continue;
+        }
+
         // Determine how to import based on user selection or auto-detect
         let shouldImportAsMesh = false;
         let shouldImportAsSkeleton = false;
@@ -455,9 +547,13 @@ function App() {
           if ((ext === 'obj' || ext === 'ply') && meshPath) {
             try {
               const resp = await importTexturedMesh(meshPath);
-              if (resp.success && (ext === 'ply' || resp.has_textures)) backendMesh = resp;
+              // Prefer the backend result whenever it succeeds — it's the only
+              // path that applies embedded materials (MTL Kd → per-vertex
+              // colors, textures, binary PLY). Local parse is the fallback.
+              if (resp.success) backendMesh = resp;
             } catch (e) {
               console.warn('Backend mesh import failed, falling back to local parse:', e);
+              materialsDroppedFiles.push(file.name);
             }
           }
 
@@ -579,6 +675,18 @@ function App() {
       showToast({ title: `Loaded ${parts.join(', ')}`, type: 'success' });
     }
 
+    if (materialsDroppedFiles.length > 0) {
+      // The geometry imported, but the backend (the only path that reads MTL
+      // colors/textures and per-vertex PLY color) was unavailable, so these
+      // came in without their materials. Warn so the user knows to re-import.
+      showToast({
+        title: `Imported ${materialsDroppedFiles.length} mesh(es) without materials — the backend was unavailable. Re-import to apply colors/textures.`,
+        message: materialsDroppedFiles.join('\n'),
+        type: 'warning',
+        duration: 0,
+      });
+    }
+
     if (errors.length > 0) {
       // Surface the actual per-file reasons, not just a count. Each entry is
       // `filename: reason` (the reason is the backend's error detail). The
@@ -595,7 +703,7 @@ function App() {
     setImportProgress(null);
     // Reset import type to auto after import
     pendingImportTypeRef.current = 'auto';
-  }, [scans, openImportWizard, buildScanFromWizardResult]);
+  }, [scans, openImportWizard, buildScanFromWizardResult, importScanXml]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setIsDragOver(false);
@@ -954,8 +1062,10 @@ function App() {
           return [{ name: 'Meshes', extensions: mesh }];
         case 'skeleton':
           return [{ name: 'Skeletons', extensions: skel }];
+        case 'scanxml':
+          return [{ name: 'Helios Scan XML', extensions: ['xml'] }];
         default:
-          return [{ name: 'Supported Files', extensions: [...new Set([...pc, ...mesh, ...skel])] }];
+          return [{ name: 'Supported Files', extensions: [...new Set([...pc, ...mesh, ...skel, 'xml'])] }];
       }
     };
 
@@ -1016,6 +1126,9 @@ function App() {
           break;
         case 'import-skeleton':
           void handleMenuImport('skeleton');
+          break;
+        case 'import-scan-xml':
+          void handleMenuImport('scanxml');
           break;
         case 'save':
         case 'export':

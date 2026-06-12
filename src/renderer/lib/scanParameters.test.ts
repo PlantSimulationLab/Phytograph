@@ -72,4 +72,18 @@ describe('scanParametersFromFile', () => {
     p.zenithPoints = 1;
     expect(JSON.stringify(DEFAULT_SCAN_PARAMETERS)).toBe(before);
   });
+
+  it('defaults tilt to level (0/0) and honors a file-carried tilt', () => {
+    // Tilt is a scan property: absent → level; present → carried through.
+    expect(DEFAULT_SCAN_PARAMETERS.tiltRollDeg).toBe(0);
+    expect(DEFAULT_SCAN_PARAMETERS.tiltPitchDeg).toBe(0);
+
+    const level = scanParametersFromFile({ origin: [0, 0, 0] });
+    expect(level.tiltRollDeg).toBe(0);
+    expect(level.tiltPitchDeg).toBe(0);
+
+    const tilted = scanParametersFromFile({ origin: [0, 0, 0], tilt_roll_deg: 5, tilt_pitch_deg: -3 });
+    expect(tilted.tiltRollDeg).toBe(5);
+    expect(tilted.tiltPitchDeg).toBe(-3);
+  });
 });

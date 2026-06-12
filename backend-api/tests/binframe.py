@@ -40,5 +40,6 @@ def decode_lidar_scan(content: bytes) -> dict:
         cols = cols.reshape(-1, 3) if (s.get("has_colors") and cols is not None) else None
         scalars = {name: buffers[f"s{i}.scalar{j}"] for j, name in enumerate(s["scalar_fields"])}
         results.append({"scanner_id": s["scanner_id"], "num_points": n,
-                        "points": pts, "colors": cols, "scalars": scalars})
+                        "points": pts, "colors": cols, "scalars": scalars,
+                        "session": s.get("session")})
     return {"success": True, "results": results}

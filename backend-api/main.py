@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.13.1"
+BACKEND_VERSION = "0.13.3"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -3609,6 +3609,10 @@ class ScanExportEntry(BaseModel):
     ascii_format: Optional[str] = None
     # World-space offset applied to the points (viewer translation), or null.
     translation: Optional[List[float]] = None
+    # Ordered ASCII column slugs chosen in the export modal (includes x y z plus
+    # any scalar columns the user kept, in their chosen order). When given, it
+    # overrides the default column set/order; x/y/z are always written regardless.
+    columns: Optional[List[str]] = None
 
 
 class ScanExportRequest(BaseModel):
@@ -3616,6 +3620,13 @@ class ScanExportRequest(BaseModel):
     scans: List[ScanExportEntry]
     base_name: Optional[str] = None              # output base (→ <base>.xml, <base>_<id>.xyz)
     include_misses: bool = True                  # write miss points (+ is_miss column)
+    # When True (default), write the Helios scan XML alongside the per-scan data
+    # files (re-loadable bundle, data always .xyz). When False, write ONLY the
+    # per-scan data files (no XML) in `data_format` — one file per scan.
+    write_xml: bool = True
+    # Data-only output format (write_xml=False). One of las/laz/ply/xyz/csv/txt/
+    # obj/e57. Ignored when write_xml=True (the Helios bundle is always .xyz).
+    data_format: str = "xyz"
 
 
 # Standard scalar columns we try to preserve on export, in a stable order. Any of
@@ -3688,10 +3699,18 @@ def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
             raise ValueError(f"translation must be [tx, ty, tz]; got {t!r}")
         xyz = xyz + tt
 
-    # Collect the scalar columns this scan actually carries, in stable order.
+    # Decide which scalar columns to emit, and in what order. When the caller
+    # supplied an explicit `columns` list (from the export modal), honor it (minus
+    # x/y/z, which are written as geometry); otherwise fall back to every standard
+    # scalar column the scan carries, in canonical order.
+    chosen = getattr(scan_entry, 'columns', None)
+    if chosen:
+        wanted = [s for s in chosen if s not in ('x', 'y', 'z')]
+    else:
+        wanted = list(_SCAN_EXPORT_SCALAR_COLUMNS)
     labels: List[str] = []
     cols: list = []
-    for slug in _SCAN_EXPORT_SCALAR_COLUMNS:
+    for slug in wanted:
         col = _get(slug)
         if col is not None and len(col) == xyz.shape[0]:
             labels.append(slug)
@@ -3711,15 +3730,271 @@ def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
     return xyz, labels, vals
 
 
+# The geometry / colour slugs handled specially by the multi-format writer; all
+# other requested slugs are treated as named scalar columns.
+_DATA_GEOMETRY_SLUGS = ('x', 'y', 'z')
+_DATA_COLOR_SLUGS = ('r', 'g', 'b')
+
+
+def _resolve_scan_for_format(scan_entry, include_misses: bool):
+    """Resolve a scan entry to the channels a per-format writer needs:
+    {positions (N,3), colors (N,3 0-1)|None, intensity (N,)|None,
+     scalars: {slug: (N,)}, ordered: [slugs]}. Translation applied, edits honored,
+     miss rows optionally dropped (applied uniformly to every channel).
+
+    `ordered` is the export column order (from the modal's `columns`, minus x/y/z),
+    used by the ASCII writer; binary writers ignore it and use their fixed schema.
+    """
+    import numpy as np
+
+    origin = scan_entry.origin
+    if len(origin) != 3:
+        raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
+
+    sess = None
+    if scan_entry.session_id:
+        with _cloud_session_lock:
+            sess = _cloud_sessions.get(scan_entry.session_id)
+        if sess is None and not (scan_entry.points or scan_entry.file_path):
+            raise ValueError(
+                f"Cloud session not found: {scan_entry.session_id}. The backend "
+                "may have restarted since import. Re-import the scan and try again.")
+
+    colors = None
+    intensity = None
+    if sess is not None:
+        with _cloud_session_lock:
+            keep = ~sess.deleted
+            xyz = np.ascontiguousarray(sess.positions[keep], dtype=np.float64)
+            extras = {k: np.asarray(v[keep]) for k, v in sess.extras.items()}
+            if getattr(sess, 'colors', None) is not None:
+                colors = np.ascontiguousarray(sess.colors[keep], dtype=np.float64)
+        def _get(slug):
+            return extras.get(slug)
+    elif scan_entry.points:
+        xyz = np.ascontiguousarray(np.asarray(scan_entry.points, dtype=np.float64)[:, :3])
+        _inline = scan_entry.scalar_columns or {}
+        _n = xyz.shape[0]
+        def _get(slug):
+            return (np.asarray(_inline[slug])
+                    if slug in _inline and len(_inline[slug]) == _n else None)
+    elif scan_entry.file_path:
+        if not os.path.isfile(scan_entry.file_path):
+            raise ValueError(f"Scan file not found: {scan_entry.file_path}")
+        xyz, fcolors, fintensity = _load_pointcloud_arrays(
+            scan_entry.file_path, scan_entry.ascii_format)
+        xyz = np.ascontiguousarray(np.asarray(xyz, dtype=np.float64)[:, :3])
+        colors = np.asarray(fcolors, dtype=np.float64) if fcolors is not None else None
+        intensity = np.asarray(fintensity, dtype=np.float64) if fintensity is not None else None
+        _col_map = _read_scan_columns_from_file(scan_entry.file_path, scan_entry.ascii_format)
+        def _get(slug):
+            return _col_map.get(slug)
+    else:
+        raise ValueError("Scan entry has no points, file_path, or session_id")
+
+    # Translation.
+    t = getattr(scan_entry, 'translation', None)
+    if t is not None:
+        tt = np.asarray(t, dtype=np.float64)
+        if tt.shape != (3,):
+            raise ValueError(f"translation must be [tx, ty, tz]; got {t!r}")
+        xyz = xyz + tt
+
+    n = xyz.shape[0]
+    # Intensity: prefer the channel resolved above, else an 'intensity' column.
+    if intensity is None:
+        icol = _get('intensity')
+        if icol is not None and len(icol) == n:
+            intensity = np.asarray(icol, dtype=np.float64)
+    # Colour: prefer the resolved channel, else r/g/b columns if the scan has them.
+    if colors is None:
+        rgb = [_get(s) for s in _DATA_COLOR_SLUGS]
+        if all(c is not None and len(c) == n for c in rgb):
+            colors = np.column_stack(rgb).astype(np.float64)
+
+    # The ordered scalar columns the user kept (everything that isn't geometry/
+    # colour/intensity handled above). Honor the chosen order when given.
+    chosen = getattr(scan_entry, 'columns', None)
+    wanted = ([s for s in chosen if s not in _DATA_GEOMETRY_SLUGS + _DATA_COLOR_SLUGS]
+              if chosen else list(_SCAN_EXPORT_SCALAR_COLUMNS))
+    scalars: dict = {}
+    ordered: list = []
+    for slug in wanted:
+        if slug == 'intensity':
+            continue  # intensity is its own channel
+        col = _get(slug)
+        if col is not None and len(col) == n:
+            scalars[slug] = np.asarray(col, dtype=np.float64)
+            ordered.append(slug)
+
+    # Drop miss rows uniformly across every channel.
+    if not include_misses:
+        miss = _get('is_miss')
+        if miss is not None and len(miss) == n:
+            mask = np.asarray(miss) == 0
+            xyz = xyz[mask]
+            colors = colors[mask] if colors is not None else None
+            intensity = intensity[mask] if intensity is not None else None
+            scalars = {k: v[mask] for k, v in scalars.items() if k != 'is_miss'}
+            ordered = [s for s in ordered if s != 'is_miss']
+
+    return {"positions": xyz, "colors": colors, "intensity": intensity,
+            "scalars": scalars, "ordered": ordered}
+
+
+def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
+    """Write one resolved scan (from _resolve_scan_for_format) to the requested
+    format. Returns (filename, raw_bytes). ASCII formats honor the chosen column
+    order; binary/structured formats use their fixed schema (xyz + colour +
+    intensity + scalars where the format supports them).
+    """
+    import numpy as np
+    import tempfile
+
+    xyz = resolved["positions"]
+    colors = resolved["colors"]          # (N,3) 0-1 or None
+    intensity = resolved["intensity"]    # (N,) or None
+    scalars = resolved["scalars"]        # {slug: (N,)}
+    ordered = resolved["ordered"]        # ordered scalar slugs
+    n = xyz.shape[0]
+    fmt = fmt.lower()
+
+    # ---- ASCII text (xyz / txt / csv) — full column control ----
+    if fmt in ("xyz", "txt", "csv"):
+        delim = "," if fmt == "csv" else " "
+        prefix = "" if fmt == "csv" else "# "
+        # Column order: x y z, then colour (if present), then the ordered scalars.
+        cols = ["x", "y", "z"]
+        if colors is not None:
+            cols += ["r255", "g255", "b255"]
+        if intensity is not None:
+            cols += ["intensity"]
+        cols += ordered
+        rgb = (np.clip(np.rint(colors * 255.0), 0, 255).astype(int)
+               if colors is not None else None)
+        lines = [f"{prefix}{delim.join(cols)}"]
+        for i in range(n):
+            row = [f"{xyz[i,0]:.6f}", f"{xyz[i,1]:.6f}", f"{xyz[i,2]:.6f}"]
+            if colors is not None:
+                row += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
+            if intensity is not None:
+                row += [f"{float(intensity[i]):.4f}"]
+            for s in ordered:
+                row.append(str(scalars[s][i]))
+            lines.append(delim.join(row))
+        return f"{base}.{fmt}", ("\n".join(lines)).encode("utf-8")
+
+    # ---- OBJ (vertices only) ----
+    if fmt == "obj":
+        lines = [f"# Scan exported from Phytograph", f"# {n} points"]
+        for i in range(n):
+            lines.append(f"v {xyz[i,0]:.6f} {xyz[i,1]:.6f} {xyz[i,2]:.6f}")
+        return f"{base}.obj", ("\n".join(lines)).encode("utf-8")
+
+    # ---- PLY (ascii; preserves colour + scalar fields) ----
+    if fmt == "ply":
+        header = ["ply", "format ascii 1.0", f"element vertex {n}",
+                  "property float x", "property float y", "property float z"]
+        if colors is not None:
+            header += ["property uchar red", "property uchar green", "property uchar blue"]
+        if intensity is not None:
+            header += ["property float intensity"]
+        for s in ordered:
+            header += [f"property float {s}"]
+        header.append("end_header")
+        rgb = (np.clip(np.rint(colors * 255.0), 0, 255).astype(int)
+               if colors is not None else None)
+        lines = header
+        for i in range(n):
+            row = f"{xyz[i,0]:.6f} {xyz[i,1]:.6f} {xyz[i,2]:.6f}"
+            if colors is not None:
+                row += f" {rgb[i,0]} {rgb[i,1]} {rgb[i,2]}"
+            if intensity is not None:
+                row += f" {float(intensity[i]):.6f}"
+            for s in ordered:
+                row += f" {float(scalars[s][i]):.6f}"
+            lines.append(row)
+        return f"{base}.ply", ("\n".join(lines)).encode("utf-8")
+
+    # ---- LAS / LAZ (laspy) ----
+    if fmt in ("las", "laz"):
+        import laspy
+        point_format = 3 if (colors is not None) else 1  # 1/3 carry intensity; 3 adds RGB
+        header = laspy.LasHeader(point_format=point_format, version="1.4")
+        # Extra dimensions for any scalar columns (incl is_miss) so nothing is lost.
+        for s in ordered:
+            header.add_extra_dim(laspy.ExtraBytesParams(name=s, type=np.float32))
+        las = laspy.LasData(header)
+        las.header.offsets = np.floor(xyz.min(axis=0)) if n else [0, 0, 0]
+        las.header.scales = [0.001, 0.001, 0.001]
+        las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+        if intensity is not None:
+            iv = np.asarray(intensity, dtype=np.float64)
+            rng = iv.max() - iv.min() if n else 0
+            las.intensity = (((iv - iv.min()) / rng * 65535).astype(np.uint16)
+                             if rng > 0 else np.zeros(n, dtype=np.uint16))
+        if colors is not None:
+            c = np.clip(colors, 0, 1)
+            las.red = (c[:, 0] * 65535).astype(np.uint16)
+            las.green = (c[:, 1] * 65535).astype(np.uint16)
+            las.blue = (c[:, 2] * 65535).astype(np.uint16)
+        for s in ordered:
+            las[s] = np.asarray(scalars[s], dtype=np.float32)
+        ext = ".laz" if fmt == "laz" else ".las"
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tpath = tmp.name
+        try:
+            las.write(tpath)
+            with open(tpath, "rb") as fh:
+                return f"{base}{ext}", fh.read()
+        finally:
+            os.remove(tpath)
+
+    # ---- E57 (pye57) ----
+    if fmt == "e57":
+        import pye57
+        with tempfile.NamedTemporaryFile(suffix=".e57", delete=False) as tmp:
+            tpath = tmp.name
+        try:
+            e = pye57.E57(tpath, mode="w")
+            data = {
+                "cartesianX": np.ascontiguousarray(xyz[:, 0]),
+                "cartesianY": np.ascontiguousarray(xyz[:, 1]),
+                "cartesianZ": np.ascontiguousarray(xyz[:, 2]),
+            }
+            if intensity is not None:
+                data["intensity"] = np.ascontiguousarray(intensity.astype(np.float64))
+            if colors is not None:
+                c = np.clip(colors, 0, 1) * 255.0
+                data["colorRed"] = np.ascontiguousarray(c[:, 0])
+                data["colorGreen"] = np.ascontiguousarray(c[:, 1])
+                data["colorBlue"] = np.ascontiguousarray(c[:, 2])
+            e.write_scan_raw(data, name=base)
+            e.close()
+            with open(tpath, "rb") as fh:
+                return f"{base}.e57", fh.read()
+        finally:
+            os.remove(tpath)
+
+    raise ValueError(f"Unsupported scan export format: {fmt}")
+
+
 def _read_scan_columns_from_file(file_path: str, ascii_format: Optional[str]) -> dict:
-    """Read every recognised scalar column from an ASCII scan file into a
-    slug -> (N,) float array dict (parallel to _file_to_lad_arrays but for the
-    full export column set). Used only for the file-fallback export path."""
+    """Read every NON-geometry column the ASCII_format declares into a
+    slug -> (N,) float array dict. The export column picker may request any
+    column the file carries (reflectance, row, column, r/g/b, …), so we read all
+    of them — not just the LAD subset — keyed by their format token."""
     import numpy as np
 
     fmt = ascii_format or _detect_ascii_format(file_path)
     tokens = fmt.split()
-    col_idx = {c: tokens.index(c) for c in _SCAN_EXPORT_SCALAR_COLUMNS if c in tokens}
+    # Read every token that names a real column (skip x/y/z geometry and the
+    # 'skip' placeholder). First occurrence of a repeated token wins.
+    col_idx: dict = {}
+    for i, tok in enumerate(tokens):
+        if tok in ('x', 'y', 'z', 'skip') or tok in col_idx:
+            continue
+        col_idx[tok] = i
     if not col_idx:
         return {}
     need = max(col_idx.values()) + 1
@@ -3742,12 +4017,36 @@ def _read_scan_columns_from_file(file_path: str, ascii_format: Optional[str]) ->
 
 
 def _do_scan_export(request: "ScanExportRequest") -> dict:
-    """Export the request's scans to Helios XML + one ASCII data file per scan.
+    """Export the request's scans, one data file per scan. Two modes:
+
+    * write_xml=True  → a Helios scan bundle: <base>.xml + <base>_<id>.xyz, via
+      PyHelios exportScans() (re-loadable as scans; data always Helios ASCII).
+    * write_xml=False → one <base>_<id>.<fmt> per scan in `data_format`
+      (las/laz/ply/xyz/csv/txt/obj/e57), written directly — no XML, no PyHelios.
 
     Returns {"success", "files": [{"name", "data"(base64), "is_xml"}], ...}. The
-    renderer writes every returned file into the user-chosen folder, keeping the
-    XML's relative `<filename>` references valid.
+    renderer writes every returned file into the user-chosen folder.
     """
+    import base64
+
+    if not request.scans:
+        return {"success": False, "error": "No scans to export"}
+
+    raw = request.base_name or "scans"
+    base = os.path.splitext(os.path.basename(raw))[0] or "scans"
+
+    try:
+        if request.write_xml:
+            return _do_scan_export_xml(request, base)
+        return _do_scan_export_data(request, base)
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": f"Scan export failed: {e}"}
+
+
+def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
+    """XML+data mode: Helios scan bundle via PyHelios exportScans()."""
     import base64
     import tempfile
     import math as _math
@@ -3757,72 +4056,76 @@ def _do_scan_export(request: "ScanExportRequest") -> dict:
     except ImportError as e:
         return {"success": False, "error": f"PyHelios not installed: {e}"}
 
-    if not request.scans:
-        return {"success": False, "error": "No scans to export"}
+    cloud = LiDARCloud()
+    cloud.disableMessages()
+    total_points = 0
+    for scan_entry in request.scans:
+        xyz, labels, vals = _resolve_scan_export_arrays(
+            scan_entry, request.include_misses)
+        origin = scan_entry.origin
+        theta_min, theta_max = scan_entry.theta_min, scan_entry.theta_max
+        phi_min, phi_max = scan_entry.phi_min, scan_entry.phi_max
+        if scan_entry.n_theta and scan_entry.n_phi:
+            n_theta, n_phi = int(scan_entry.n_theta), int(scan_entry.n_phi)
+        else:
+            aspect = (theta_max - theta_min) / max(phi_max - phi_min, 1e-10)
+            n_phi = max(int(_math.sqrt(xyz.shape[0] / max(aspect, 0.01))), 10)
+            n_theta = max(int(xyz.shape[0] / n_phi), 10)
+        column_format = ['x', 'y', 'z'] + labels
+        cloud.addScan(
+            origin=[float(origin[0]), float(origin[1]), float(origin[2])],
+            Ntheta=int(n_theta),
+            theta_range=(_math.radians(theta_min), _math.radians(theta_max)),
+            Nphi=int(n_phi),
+            phi_range=(_math.radians(phi_min), _math.radians(phi_max)),
+            exit_diameter=float(scan_entry.beam_exit_diameter or 0.0),
+            beam_divergence=float(scan_entry.beam_divergence or 0.0) / 1000.0,
+            column_format=column_format,
+        )
+        sid = cloud.getScanCount() - 1
+        if xyz.shape[0] > 0:
+            dirs = _directions_from_origin(xyz, origin)
+            cloud.addHitPointsWithData(sid, xyz, dirs, labels, vals)
+        total_points += int(xyz.shape[0])
 
-    try:
-        cloud = LiDARCloud()
-        cloud.disableMessages()
-        total_points = 0
-        for scan_entry in request.scans:
-            xyz, labels, vals = _resolve_scan_export_arrays(
-                scan_entry, request.include_misses)
-            origin = scan_entry.origin
-            theta_min, theta_max = scan_entry.theta_min, scan_entry.theta_max
-            phi_min, phi_max = scan_entry.phi_min, scan_entry.phi_max
-            # Resolution: use the scan's own raster when present, else estimate a
-            # plausible grid from the point count and angular aspect ratio.
-            if scan_entry.n_theta and scan_entry.n_phi:
-                n_theta, n_phi = int(scan_entry.n_theta), int(scan_entry.n_phi)
-            else:
-                aspect = (theta_max - theta_min) / max(phi_max - phi_min, 1e-10)
-                n_phi = max(int(_math.sqrt(xyz.shape[0] / max(aspect, 0.01))), 10)
-                n_theta = max(int(xyz.shape[0] / n_phi), 10)
-            # column_format drives what exportScans() writes — xyz plus every
-            # preserved scalar, so the miss flag and friends round-trip.
-            column_format = ['x', 'y', 'z'] + labels
-            cloud.addScan(
-                origin=[float(origin[0]), float(origin[1]), float(origin[2])],
-                Ntheta=int(n_theta),
-                theta_range=(_math.radians(theta_min), _math.radians(theta_max)),
-                Nphi=int(n_phi),
-                phi_range=(_math.radians(phi_min), _math.radians(phi_max)),
-                exit_diameter=float(scan_entry.beam_exit_diameter or 0.0),
-                beam_divergence=float(scan_entry.beam_divergence or 0.0) / 1000.0,
-                column_format=column_format,
-            )
-            sid = cloud.getScanCount() - 1
-            if xyz.shape[0] > 0:
-                dirs = _directions_from_origin(xyz, origin)
-                cloud.addHitPointsWithData(sid, xyz, dirs, labels, vals)
-            total_points += int(xyz.shape[0])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        xml_path = os.path.join(tmpdir, f"{base}.xml")
+        cloud.exportScans(xml_path)
+        files = []
+        for name in sorted(os.listdir(tmpdir)):
+            with open(os.path.join(tmpdir, name), "rb") as fh:
+                files.append({
+                    "name": name,
+                    "data": base64.b64encode(fh.read()).decode("ascii"),
+                    "is_xml": name.lower().endswith(".xml"),
+                })
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Sanitise the base name: drop any directory components and any trailing
-            # extension a caller may have sent (e.g. "myscan.las"). The data files
-            # exportScans() writes are always Helios ASCII (.xyz) and the metadata
-            # file is always <base>.xml — so a foreign extension must never leak into
-            # the <filename> the XML references, or the bundle would not re-load.
-            raw = request.base_name or "scans"
-            base = os.path.splitext(os.path.basename(raw))[0] or "scans"
-            xml_path = os.path.join(tmpdir, f"{base}.xml")
-            cloud.exportScans(xml_path)
-            files = []
-            for name in sorted(os.listdir(tmpdir)):
-                with open(os.path.join(tmpdir, name), "rb") as fh:
-                    files.append({
-                        "name": name,
-                        "data": base64.b64encode(fh.read()).decode("ascii"),
-                        "is_xml": name.lower().endswith(".xml"),
-                    })
+    return {"success": True, "files": files, "point_count": total_points,
+            "scan_count": len(request.scans)}
 
-        return {"success": True, "files": files, "point_count": total_points,
-                "scan_count": len(request.scans)}
 
-    except Exception as e:  # noqa: BLE001
-        import traceback
-        traceback.print_exc()
-        return {"success": False, "error": f"Scan export failed: {e}"}
+def _do_scan_export_data(request: "ScanExportRequest", base: str) -> dict:
+    """Data-only mode: one <base>_<id>.<fmt> per scan in `data_format`."""
+    import base64
+
+    fmt = (request.data_format or "xyz").lower()
+    if fmt not in ("las", "laz", "ply", "xyz", "csv", "txt", "obj", "e57"):
+        return {"success": False, "error": f"Unsupported data format: {fmt}"}
+
+    files = []
+    total_points = 0
+    for i, scan_entry in enumerate(request.scans):
+        resolved = _resolve_scan_for_format(scan_entry, request.include_misses)
+        total_points += int(resolved["positions"].shape[0])
+        name, raw_bytes = _write_scan_to_bytes(resolved, fmt, f"{base}_{i}")
+        files.append({
+            "name": name,
+            "data": base64.b64encode(raw_bytes).decode("ascii"),
+            "is_xml": False,
+        })
+
+    return {"success": True, "files": files, "point_count": total_points,
+            "scan_count": len(request.scans)}
 
 
 @app.post("/api/scan/export-xml")
@@ -3882,6 +4185,15 @@ class LidarScanRequest(BaseModel):
     # Full-waveform tuning (used only when a scanner has return_type == "multi").
     rays_per_pulse: int = 100
     pulse_distance_threshold: float = 0.02
+    # Synthetic-scan run options (Synthetic Scan Options popup):
+    #   record_misses  — include sky/miss points (rays that hit nothing). When on,
+    #                     the result is routed through a cloud session so the
+    #                     existing miss overlay + LAD work.
+    #   scan_grid_only — restrict ray-tracing to the cells of `grid`.
+    #   grid           — voxel grid to crop to (required when scan_grid_only).
+    record_misses: bool = False
+    scan_grid_only: bool = False
+    grid: Optional[HeliosGrid] = None
 
 
 class LidarScanResult(BaseModel):
@@ -3964,6 +4276,8 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                 lidar.disableMessages()
 
                 # Add scans in request order so Helios scanID == request index.
+                # Tilt (deg→rad) and noise (range in m verbatim, angle mrad→rad)
+                # are passed per-scan; 0 leaves them disabled.
                 for s in request.scanners:
                     lidar.addScan(
                         origin=[float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
@@ -3974,33 +4288,56 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                         exit_diameter=float(s.exit_diameter_m),
                         beam_divergence=float(s.beam_divergence_mrad) * 1e-3,
                         column_format=column_format,
+                        range_noise_stddev=float(s.range_noise_m),
+                        angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
+                        scan_tilt_roll=math.radians(s.tilt_roll_deg),
+                        scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
+                    )
+
+                # Crop-to-grid: scan_grid_only restricts ray-tracing to the cells
+                # of a grid, which must be defined on the cloud first via addGrid.
+                scan_grid_only = bool(request.scan_grid_only and request.grid is not None)
+                if scan_grid_only:
+                    g = request.grid
+                    lidar.addGrid(
+                        center=[float(g.center[0]), float(g.center[1]), float(g.center[2])],
+                        size=[float(g.size[0]), float(g.size[1]), float(g.size[2])],
+                        ndiv=[int(g.nx), int(g.ny), int(g.nz)],
                     )
 
                 # One ray pass for all scanners (one BVH build). append=False clears
                 # once, then every scan contributes; hits carry their scanID.
+                # record_misses is user-controlled now: when on, rays that hit
+                # nothing are kept (far-field placeholder points flagged via
+                # isHitMiss below) so the miss overlay + LAD can use them.
+                record_misses = bool(request.record_misses)
                 if want_waveform:
                     lidar.syntheticScan(
                         ctx,
                         rays_per_pulse=int(request.rays_per_pulse),
                         pulse_distance_threshold=float(request.pulse_distance_threshold),
-                        record_misses=False,
+                        scan_grid_only=scan_grid_only,
+                        record_misses=record_misses,
                         append=False,
                     )
                 else:
-                    # Discrete-return: only real surface hits, no miss points.
-                    # record_misses defaults to True in the wrapper, so pass it
-                    # explicitly — otherwise rays that miss the geometry come back
-                    # as far placeholder points (e.g. z≈-1000) and pollute the cloud.
-                    lidar.syntheticScan(ctx, record_misses=False)
+                    lidar.syntheticScan(
+                        ctx,
+                        scan_grid_only=scan_grid_only,
+                        record_misses=record_misses,
+                        append=False,
+                    )
 
                 # Prepare per-scanner accumulators keyed by Helios scanID (= index).
                 fields_to_read = _LIDAR_STANDARD_HIT_FIELDS + extra_fields
                 results = [
                     {
                         "scanner_id": s.id,
+                        "origin": [float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
                         "points": [],
                         "colors": [],
                         "scalars": {f: [] for f in fields_to_read},
+                        "is_miss": [],  # 1.0 == sky/miss, 0.0 == real return
                     }
                     for s in request.scanners
                 ]
@@ -4015,6 +4352,9 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                     bucket["points"].append([float(xyz.x), float(xyz.y), float(xyz.z)])
                     c = lidar.getHitColor(i)
                     bucket["colors"].append([float(c.r), float(c.g), float(c.b)])
+                    # When misses are recorded, flag each hit so the renderer/LAD
+                    # can separate sky returns from real surface hits.
+                    bucket["is_miss"].append(1.0 if (record_misses and lidar.isHitMiss(i)) else 0.0)
                     for f in fields_to_read:
                         if lidar.doesHitDataExist(i, f):
                             v = float(lidar.getHitData(i, f))
@@ -4032,13 +4372,25 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                 k: v for k, v in r["scalars"].items()
                 if any(val == val for val in v)  # any non-NaN
             }
-            out.append({
+            entry = {
                 "scanner_id": r["scanner_id"],
                 "points": r["points"],
                 "colors": r["colors"] if npts else None,
                 "scalars": scalars,
                 "num_points": npts,
-            })
+            }
+            # When this scan recorded any miss, build a cloud session for it so the
+            # existing session-based miss overlay + LAD work. The session holds the
+            # full points + an is_miss extra dim; its octree is built hits-only.
+            if record_misses and npts and any(v != 0 for v in r["is_miss"]):
+                try:
+                    entry["session"] = _create_lidar_scan_session(r)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    # A session failure must not lose the scan — fall back to a
+                    # plain in-memory cloud (misses still present as points).
+            out.append(entry)
 
         return {"success": True, "results": out}
 
@@ -4046,6 +4398,106 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
         import traceback
         traceback.print_exc()
         return {"success": False, "error": f"Synthetic LiDAR scan failed: {str(e)}"}
+
+
+def _create_lidar_scan_session(r: dict) -> dict:
+    """Build a CloudSession from one synthetic scanner's in-memory hits and return
+    the create_cloud_session-style metadata (session_id + octree cache + miss
+    summary). Routing a miss-recording scan through a session lets the existing
+    session-based miss overlay + LAD consume it, exactly like an imported cloud.
+
+    `r` carries `points` (list of [x,y,z]), optional `colors`, the per-hit
+    `scalars` dict, an `is_miss` list (1==sky), and the scanner `origin`. The
+    octree is built hits-only (far-field misses would poison its bbox); misses
+    live in the session's is_miss extra dim for the overlay + LAD.
+    """
+    import time
+    import tempfile
+    from pathlib import Path as _PathLocal
+
+    positions = np.asarray(r["points"], dtype=np.float64)
+    n = int(positions.shape[0])
+
+    # Colors: scan colors are 0..1 floats; LAS sessions store uint16 (0..65535).
+    colors = None
+    if r.get("colors"):
+        c = np.asarray(r["colors"], dtype=np.float64)
+        if c.shape == (n, 3):
+            colors = np.clip(c * 65535.0, 0, 65535).astype(np.uint16)
+
+    # Extra dims: every per-hit scalar field, plus the canonical is_miss flag.
+    # `intensity` is a STANDARD LAS dimension (it maps onto the session's
+    # intensity field below), so it must NOT also be added as an extra dim — that
+    # would make laspy's record dtype carry two `intensity` fields and blow up.
+    intensity = None
+    extras: Dict[str, np.ndarray] = {}
+    extra_dims_meta: List[dict] = []
+    for name, vals in r.get("scalars", {}).items():
+        arr = np.asarray(vals, dtype=np.float32)
+        if arr.shape[0] != n:
+            continue
+        if name == "intensity":
+            # Session intensity is uint16 (0..65535 LAS scale); the scan surfaces
+            # intensity as a 0..1 magnitude. Scale and clamp.
+            intensity = np.clip(arr * 65535.0, 0, 65535).astype(np.uint16)
+            continue
+        extras[name] = arr
+        extra_dims_meta.append({"slug": name, "label": name})
+    miss = np.asarray(r["is_miss"], dtype=np.float32)
+    extras[_MISS_SLUG] = miss
+    extra_dims_meta.append({"slug": _MISS_SLUG, "label": _MISS_LABEL})
+
+    session_id = uuid.uuid4().hex[:8]
+    sess = CloudSession(
+        session_id=session_id,
+        source_path="<synthetic-scan>",
+        ascii_format=None,
+        column_plan=None,
+        positions=positions,
+        colors=colors,
+        intensity=intensity,
+        extras=extras,
+        extra_dims_meta=extra_dims_meta,
+        deleted=np.zeros(n, dtype=bool),
+        deleted_history=[],
+        octree_cache_id=None,
+        created_at=time.time(),
+    )
+
+    # Register the session FIRST — it (positions + is_miss) is what powers the
+    # miss overlay and LAD, neither of which reads the octree. The Potree octree
+    # is a best-effort extra: a synthetic cloud renders from its in-memory points,
+    # not the octree, so if PotreeConverter is unavailable we still return a
+    # usable session (just without octree metadata).
+    with _cloud_session_lock:
+        _cloud_sessions[session_id] = sess
+
+    miss_count = int(np.count_nonzero(miss != 0))
+    out = {
+        "session_id": session_id,
+        "point_count": n,
+        "has_misses": miss_count > 0,
+        "miss_slug": _MISS_SLUG,
+        "miss_count": miss_count,
+        "scan_origin": r.get("origin"),
+    }
+
+    # Build the octree from a hits-only LAS (drop ~20 km misses so the bbox /
+    # camera framing stay tight), mirroring create_cloud_session. Best-effort.
+    try:
+        with tempfile.TemporaryDirectory() as _tmp:
+            hits_las = _PathLocal(_tmp) / "octree_hits.las"
+            _session_to_las(sess, hits_las, exclude_misses=True)
+            cache_key, cache_dir, meta = _build_octree_from_las(hits_las, extra_dims_meta)
+        sess.octree_cache_id = cache_key
+        out["cache_id"] = cache_key
+        out["cache_dir"] = str(cache_dir)
+        out.update(meta)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+    return out
 
 
 def _pack_lidar_scan(result: dict) -> bytes:
@@ -4061,10 +4513,15 @@ def _pack_lidar_scan(result: dict) -> bytes:
         npts = int(r["num_points"])
         fields = list(r["scalars"].keys())
         has_colors = r["colors"] is not None and npts > 0
-        scanners_meta.append({
+        entry_meta = {
             "scanner_id": r["scanner_id"], "num_points": npts,
             "has_colors": has_colors, "scalar_fields": fields,
-        })
+        }
+        # When a session was created (misses recorded), forward its metadata so
+        # the renderer wires sessionId/hasMisses onto the cloud's octree.
+        if r.get("session"):
+            entry_meta["session"] = r["session"]
+        scanners_meta.append(entry_meta)
         pts = np.asarray(r["points"], dtype=np.float32).reshape(-1) if npts else np.empty(0, np.float32)
         buffers.append((f"s{i}.points", pts, "f32"))
         if has_colors:

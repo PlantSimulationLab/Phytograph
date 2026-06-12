@@ -353,6 +353,8 @@ export function MeshesListPanel({
               data-triangle-count={mesh.data.triangleCount}
               data-is-plant={mesh.isPlant ? 'true' : 'false'}
               data-textured-materials={mesh.plantMaterials?.filter(m => m.textureData).length ?? 0}
+              data-has-vertex-colors={mesh.data.vertexColors && mesh.data.vertexColors.length > 0 ? 'true' : 'false'}
+              data-opacity={meshOpacity}
               data-selected={isSelected ? 'true' : 'false'}
               data-visible={mesh.visible ? 'true' : 'false'}
               data-mesh-color={mesh.color}

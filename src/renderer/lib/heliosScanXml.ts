@@ -150,6 +150,11 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
   const beamDivergenceRad = parseNumberTag(el, 'beamDivergence');
   const isMulti = exitDiameterM !== null || beamDivergenceRad !== null;
 
+  // <scanTilt> is "roll pitch" in degrees (helios-core lidar fileIO.cpp converts
+  // to radians on load). Maps directly onto our degree-based tilt fields. Absent
+  // tag → level (0/0).
+  const tilt = parseFloatPairTag(el, 'scanTilt');
+
   const filenameRaw = tagText(el, 'filename');
   const asciiFormatRaw = tagText(el, 'ASCII_format');
 
@@ -166,6 +171,8 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
     beamDivergenceMrad: beamDivergenceRad !== null
       ? beamDivergenceRad * 1000
       : DEFAULT_SCAN_PARAMETERS.beamDivergenceMrad,
+    tiltRollDeg: tilt ? tilt[0] : DEFAULT_SCAN_PARAMETERS.tiltRollDeg,
+    tiltPitchDeg: tilt ? tilt[1] : DEFAULT_SCAN_PARAMETERS.tiltPitchDeg,
   };
 
   return {
@@ -207,6 +214,14 @@ function parseIntPairTag(parent: Element, tag: string): [number, number] | null 
   const text = tagText(parent, tag);
   if (text === null) return null;
   const parts = text.split(/\s+/).filter(Boolean).map(s => parseInt(s, 10));
+  if (parts.length < 2 || parts.some(n => !Number.isFinite(n))) return null;
+  return [parts[0], parts[1]];
+}
+
+function parseFloatPairTag(parent: Element, tag: string): [number, number] | null {
+  const text = tagText(parent, tag);
+  if (text === null) return null;
+  const parts = text.split(/\s+/).filter(Boolean).map(Number);
   if (parts.length < 2 || parts.some(n => !Number.isFinite(n))) return null;
   return [parts[0], parts[1]];
 }

@@ -6,6 +6,7 @@ export const IPC = {
   // File dialogs
   DialogOpen: 'dialog:open',
   DialogSave: 'dialog:save',
+  DialogMessageBox: 'dialog:messageBox',
   // Filesystem (user-selected paths only)
   FsReadText: 'fs:readText',
   FsReadBinary: 'fs:readBinary',
@@ -57,6 +58,24 @@ export interface SaveDialogOptions {
   filters?: { name: string; extensions: string[] }[];
 }
 
+export interface MessageBoxOptions {
+  type?: 'none' | 'info' | 'error' | 'question' | 'warning';
+  title?: string;
+  message: string;
+  detail?: string;
+  /** Button labels, left-to-right. Defaults to ['OK']. */
+  buttons?: string[];
+  /** Index of the default (Enter) button. */
+  defaultId?: number;
+  /** Index of the button selected when the dialog is dismissed (Esc / close). */
+  cancelId?: number;
+}
+
+export interface MessageBoxResult {
+  /** Index into `buttons` of the button the user clicked. */
+  response: number;
+}
+
 export type FileDropPayload =
   | { kind: 'hover'; paths: string[] }
   | { kind: 'drop'; paths: string[] }
@@ -69,6 +88,7 @@ export type MenuCommandPayload =
   | { kind: 'import-point-cloud' }
   | { kind: 'import-mesh' }
   | { kind: 'import-skeleton' }
+  | { kind: 'import-scan-xml' }
   | { kind: 'save' }
   | { kind: 'export' }
   | { kind: 'undo' }

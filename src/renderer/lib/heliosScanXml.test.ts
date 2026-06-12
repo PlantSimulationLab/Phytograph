@@ -65,6 +65,28 @@ describe('parseHeliosScanXml', () => {
     expect(scans[0].params.beamDivergenceMrad).toBeCloseTo(1.0, 6);
   });
 
+  it('parses <scanTilt> "roll pitch" (degrees) and defaults to level when absent', () => {
+    const xml = `
+      <scan>
+        <origin>0 0 1</origin>
+        <size>10 20</size>
+        <scanTilt>5 -3</scanTilt>
+      </scan>
+      <scan>
+        <origin>1 1 1</origin>
+        <size>10 10</size>
+      </scan>
+    `;
+    const { scans } = parseHeliosScanXml(xml);
+    expect(scans).toHaveLength(2);
+    // Degrees stored verbatim (helios-core converts to radians on its own load).
+    expect(scans[0].params.tiltRollDeg).toBeCloseTo(5, 6);
+    expect(scans[0].params.tiltPitchDeg).toBeCloseTo(-3, 6);
+    // Absent tag → level (0/0).
+    expect(scans[1].params.tiltRollDeg).toBe(0);
+    expect(scans[1].params.tiltPitchDeg).toBe(0);
+  });
+
   it('parses <filename> and <ASCII_format> (trimmed) and reports null when absent', () => {
     const xml = `
       <scan>

@@ -70,6 +70,7 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
             { label: 'Point Cloud…', click: () => send({ kind: 'import-point-cloud' }) },
             { label: 'Mesh…', click: () => send({ kind: 'import-mesh' }) },
             { label: 'Skeleton…', click: () => send({ kind: 'import-skeleton' }) },
+            { label: 'Scan XML…', click: () => send({ kind: 'import-scan-xml' }) },
           ],
         },
         { type: 'separator' },

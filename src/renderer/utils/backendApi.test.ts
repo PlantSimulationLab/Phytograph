@@ -536,6 +536,8 @@ describe('runLidarScan', () => {
         phi_min_deg: 0, phi_max_deg: 360,
         return_type: 'single' as const,
         exit_diameter_m: 0, beam_divergence_mrad: 0,
+        tilt_roll_deg: 0, tilt_pitch_deg: 0,
+        range_noise_m: 0, angle_noise_mrad: 0,
       }],
     };
     const spy = mockFetchBinaryFrame(
@@ -609,6 +611,7 @@ describe('point cloud LAS/LAZ import/export', () => {
       }],
       base_name: 'myscan',
       include_misses: false,
+      write_xml: true,
     };
     const spy = mockFetchOk({
       success: true,
@@ -624,10 +627,23 @@ describe('point cloud LAS/LAZ import/export', () => {
     expect(resp.files?.[0].name).toBe('myscan.xml');
   });
 
+  it('exportScanXml forwards data_format for the data-only path', async () => {
+    const req = {
+      scans: [{ origin: [0, 0, 3] as [number, number, number], session_id: 's' }],
+      base_name: 'out',
+      include_misses: true,
+      write_xml: false,
+      data_format: 'e57',
+    };
+    const spy = mockFetchOk({ success: true, files: [{ name: 'out_0.e57', data: 'eA==', is_xml: false }] });
+    await exportScanXml(req);
+    expect(JSON.parse(spy.mock.calls[0][1]?.body as string)).toEqual(req);
+  });
+
   it('exportScanXml surfaces error', async () => {
     mockFetchError(500, { detail: 'export boom' });
     await expect(
-      exportScanXml({ scans: [], include_misses: true }),
+      exportScanXml({ scans: [], include_misses: true, write_xml: true }),
     ).rejects.toThrow('export boom');
   });
 

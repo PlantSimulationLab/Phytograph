@@ -6,7 +6,7 @@
 |---|---|---|---|
 | `.las` | ✅ | ✅ | LAS 1.2/1.4. Standard fields only on export (x, y, z, intensity, RGB, classification). |
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
-| `.e57` | ✅ | — | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid (see below). Import only. |
+| `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-scan (one `.e57` per scan) via the scan export's **Data only** mode, carrying x/y/z, intensity, and colour. |
 | `.ply` | ✅ | ✅ | Preserves all scalar fields. Best for full-fidelity round-trips. Structured/organized PLYs recover sky/miss points (see below). |
 | `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL). |
 | `.xyz` / `.txt` | ✅ | ✅ | Whitespace-separated. First three columns = x, y, z. |
@@ -177,10 +177,18 @@ workflow and bulk scan import:
 | Helios XML | Single file with many scan definitions | The format Helios scan simulator uses |
 
 A Helios XML file describes scan *parameters* and references separate point
-cloud files — it holds no coordinates itself. Load it through the **Add Scan**
-tool's **Import from XML file** action, not by dropping it into the viewer.
-Dropping an XML file directly is rejected with a message pointing you to the
-right place.
+cloud files — it holds no coordinates itself. Load it any of three ways: the
+**Add Scan** tool's **Import from XML file** action, **File → Import →
+Scan XML…** (or **Auto-detect…**), or by dragging the `.xml` onto the viewer.
+All three run the same import; the XML's relative `<filename>` references are
+resolved next to the XML on disk.
+
+Per `<scan>`, Phytograph reads `<origin>`, `<size>` (theta/phi point counts),
+the `<thetaMin>`/`<thetaMax>`/`<phiMin>`/`<phiMax>` sweep bounds,
+`<exitDiameter>`/`<beamDivergence>` (multi-return optics), and `<scanTilt>` —
+two numbers, `roll pitch` in degrees, giving the scanner's residual tilt away
+from level (absent → level). `<filename>` and `<ASCII_format>` auto-attach the
+referenced point data.
 
 A Helios XML may also contain top-level `<grid>` blocks (siblings of `<scan>`),
 which describe the voxel grid Helios uses for leaf-area-density. On import,

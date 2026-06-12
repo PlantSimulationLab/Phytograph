@@ -83,6 +83,21 @@ class TestScanExportShape:
         assert len(data) == 4
         assert data[-1].split()[-1] == "1"
 
+    def test_data_only_mode_writes_no_xml(self):
+        # write_xml=False → only the per-scan .xyz data files, no XML metadata.
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS), _inline_entry(_PTS, _MISS)],
+            base_name="bundle", include_misses=True, write_xml=False))
+        assert res["success"] is True, res.get("error")
+        names = sorted(f["name"] for f in res["files"])
+        # Two data files, no XML, still one file per scan.
+        assert names == ["bundle_0.xyz", "bundle_1.xyz"]
+        assert not any(f["is_xml"] for f in res["files"])
+        # The data still carries the header + is_miss column (only the XML is gone).
+        data = _decode(res["files"], "_0.xyz")
+        assert data.splitlines()[0].startswith("# x y z is_miss")
+
     def test_exclude_misses_drops_rows_and_column(self):
         pytest.importorskip("pyhelios")
         res = main._do_scan_export(main.ScanExportRequest(
@@ -95,6 +110,21 @@ class TestScanExportShape:
         data = [l for l in _decode(res["files"], ".xyz").splitlines() if l and l[0] != "#"]
         assert len(data) == 3  # the one miss row was dropped
 
+    def test_columns_override_controls_order(self):
+        # An explicit `columns` list sets the ASCII_format order; x/y/z are always
+        # written, and only the listed scalar columns (here is_miss) are included.
+        pytest.importorskip("pyhelios")
+        entry = main.ScanExportEntry(
+            origin=[0.0, 0.0, 3.0], n_theta=20, n_phi=20,
+            theta_min=0, theta_max=180, phi_min=0, phi_max=360,
+            points=[list(p) for p in _PTS], scalar_columns={"is_miss": list(_MISS)},
+            columns=["x", "y", "z", "is_miss"])
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="s", include_misses=True))
+        assert res["success"] is True, res.get("error")
+        fmt = re.search(r"<ASCII_format>(.*?)</ASCII_format>", _decode(res["files"], ".xml")).group(1)
+        assert fmt.split() == ["x", "y", "z", "is_miss"]
+
     def test_translation_is_applied(self):
         pytest.importorskip("pyhelios")
         res = main._do_scan_export(main.ScanExportRequest(
@@ -105,6 +135,70 @@ class TestScanExportShape:
         x, y, z = (float(v) for v in data[0].split()[:3])
         # First point [0.1, 0.1, 0.5] + [10, 20, 30].
         assert abs(x - 10.1) < 1e-3 and abs(y - 20.1) < 1e-3 and abs(z - 30.5) < 1e-3
+
+
+class TestScanExportDataFormats:
+    """Data-only mode (write_xml=False): one file per scan in the chosen format."""
+
+    @pytest.mark.parametrize("fmt", ["xyz", "csv", "txt", "ply", "obj", "las", "laz", "e57"])
+    def test_each_format_writes_one_file_per_scan(self, fmt):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS), _inline_entry(_PTS, _MISS)],
+            base_name="b", include_misses=True, write_xml=False, data_format=fmt))
+        assert res["success"] is True, res.get("error")
+        names = sorted(f["name"] for f in res["files"])
+        assert names == [f"b_0.{fmt}", f"b_1.{fmt}"]
+        assert not any(f["is_xml"] for f in res["files"])
+
+    def test_ascii_data_honors_column_order(self):
+        pytest.importorskip("pyhelios")
+        entry = main.ScanExportEntry(
+            origin=[0, 0, 3], n_theta=20, n_phi=20,
+            points=[list(p) for p in _PTS],
+            scalar_columns={"is_miss": list(_MISS), "reflectance": [0.1, 0.2, 0.3, 0.4]},
+            columns=["x", "y", "z", "reflectance"])
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="b", include_misses=True,
+            write_xml=False, data_format="csv"))
+        head = base64.b64decode(res["files"][0]["data"]).decode().splitlines()[0]
+        assert head == "x,y,z,reflectance"
+
+    def test_e57_round_trips(self, tmp_path):
+        pytest.importorskip("pyhelios")
+        import pye57
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="b",
+            include_misses=True, write_xml=False, data_format="e57"))
+        p = tmp_path / res["files"][0]["name"]
+        p.write_bytes(base64.b64decode(res["files"][0]["data"]))
+        rd = pye57.E57(str(p))
+        assert rd.scan_count == 1
+        sc = rd.read_scan_raw(0)
+        assert len(sc["cartesianX"]) == 4
+
+    def test_las_preserves_scalar_as_extra_dim(self, tmp_path):
+        pytest.importorskip("pyhelios")
+        import laspy
+        entry = main.ScanExportEntry(
+            origin=[0, 0, 3], n_theta=20, n_phi=20,
+            points=[list(p) for p in _PTS],
+            scalar_columns={"reflectance": [0.1, 0.2, 0.3, 0.4]},
+            columns=["x", "y", "z", "reflectance"])
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="b", include_misses=True,
+            write_xml=False, data_format="las"))
+        p = tmp_path / res["files"][0]["name"]
+        p.write_bytes(base64.b64decode(res["files"][0]["data"]))
+        las = laspy.read(str(p))
+        assert "reflectance" in las.point_format.dimension_names
+
+    def test_unknown_format_fails(self):
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS)], base_name="b",
+            include_misses=True, write_xml=False, data_format="bogus"))
+        assert res["success"] is False
+        assert "format" in res["error"].lower()
 
 
 class TestScanExportRoundTrip:

@@ -4,6 +4,8 @@ import {
   type BackendInfo,
   type FileDropPayload,
   type MenuCommandPayload,
+  type MessageBoxOptions,
+  type MessageBoxResult,
   type OpenDialogOptions,
   type SaveDialogOptions,
 } from '../shared/ipc.js';
@@ -17,6 +19,8 @@ const api = {
       ipcRenderer.invoke(IPC.DialogOpen, opts),
     save: (opts?: SaveDialogOptions): Promise<string | null> =>
       ipcRenderer.invoke(IPC.DialogSave, opts),
+    messageBox: (opts: MessageBoxOptions): Promise<MessageBoxResult> =>
+      ipcRenderer.invoke(IPC.DialogMessageBox, opts),
   },
   fs: {
     readText: (path: string): Promise<string> => ipcRenderer.invoke(IPC.FsReadText, path),

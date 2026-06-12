@@ -1258,6 +1258,13 @@ export interface LidarScanScanner {
   return_type: 'single' | 'multi';
   exit_diameter_m: number;
   beam_divergence_mrad: number;
+  // Scanner tilt (degrees; backend converts to radians). A scan property, so
+  // it's sent for every scan regardless of return type. 0/0 = level.
+  tilt_roll_deg: number;
+  tilt_pitch_deg: number;
+  // Synthetic measurement-error model (0 disables). Applies to single + multi.
+  range_noise_m: number;       // Gaussian along-beam range noise stddev (meters)
+  angle_noise_mrad: number;    // Gaussian beam-pointing jitter stddev (mrad)
 }
 
 export interface LidarScanRequest {
@@ -1268,6 +1275,10 @@ export interface LidarScanRequest {
   extra_fields?: string[];
   rays_per_pulse?: number;  // full-waveform only (return_type === 'multi')
   pulse_distance_threshold?: number;  // full-waveform only (meters)
+  // Synthetic-scan run options (from the Synthetic Scan Options popup):
+  record_misses?: boolean;  // include sky/miss points (default backend = false)
+  scan_grid_only?: boolean; // restrict ray-tracing to the supplied grid's cells
+  grid?: HeliosGrid;        // voxel grid to crop to when scan_grid_only is set
 }
 
 // Per-scanner scan result, decoded from the binary frame as zero-copy typed
@@ -1280,6 +1291,18 @@ export interface LidarScanResult {
   colors?: Float32Array;       // flat rgb (numPoints*3)
   scalars: Record<string, Float32Array>;
   numPoints: number;
+  // When the scan recorded misses, the backend builds a cloud session (one per
+  // scanner) so the existing session-based miss overlay + LAD work. Carries the
+  // session id and miss summary; octree cache metadata is best-effort (absent if
+  // PotreeConverter is unavailable — the synthetic cloud renders from its
+  // in-memory points, so the octree isn't required for misses/LAD). Absent when
+  // no session was created.
+  session?: Partial<CloudSessionMetadata> & {
+    session_id: string;
+    has_misses?: boolean;
+    miss_count?: number;
+    scan_origin?: [number, number, number] | null;
+  };
 }
 
 export interface LidarScanResponse {
@@ -1308,6 +1331,7 @@ export async function runLidarScan(
   }
   const scanners = (meta.scanners as Array<{
     scanner_id: string; num_points: number; has_colors: boolean; scalar_fields: string[];
+    session?: LidarScanResult['session'];
   }>) ?? [];
   const results: LidarScanResult[] = scanners.map((s, i) => {
     const scalars: Record<string, Float32Array> = {};
@@ -1321,6 +1345,7 @@ export async function runLidarScan(
       colors: s.has_colors ? (buffers[`s${i}.colors`] as Float32Array) : undefined,
       scalars,
       numPoints: s.num_points,
+      session: s.session,
     };
   });
   return { success: true, results };
@@ -1416,12 +1441,19 @@ export interface ScanExportEntry {
   ascii_format?: string | null;
   // World-space offset applied to the points (viewer translation), or omitted.
   translation?: [number, number, number];
+  // Ordered ASCII column slugs (x y z + kept scalars, in the chosen order).
+  columns?: string[];
 }
 
 export interface ScanExportRequest {
   scans: ScanExportEntry[];
   base_name?: string;
   include_misses: boolean;
+  // true → write the Helios XML + per-scan data (re-loadable bundle);
+  // false → write only the per-scan data files (no XML), in `data_format`.
+  write_xml: boolean;
+  // Data-only output format (write_xml=false): las/laz/ply/xyz/csv/txt/obj/e57.
+  data_format?: string;
 }
 
 export interface ScanExportFile {
