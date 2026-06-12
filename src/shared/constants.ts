@@ -1,6 +1,6 @@
 // Keep BACKEND_VERSION in sync with backend-api/main.py BACKEND_VERSION.
 // Bump when backend changes require users to receive a new build.
-export const EXPECTED_BACKEND_VERSION = '0.13.3';
+export const EXPECTED_BACKEND_VERSION = '0.13.4';
 
 // Backend port. Historically fixed; now chosen dynamically per app instance by
 // the main process (src/main/backend.ts findFreePort/resolvePort) so concurrent

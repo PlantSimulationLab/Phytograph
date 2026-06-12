@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.13.3"
+BACKEND_VERSION = "0.13.4"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -10286,6 +10286,27 @@ from pathlib import Path as _Path
 
 _OCTREE_CACHE_VERSION = 1  # bump if cache layout changes (forces re-conversion)
 
+# Per-cache-key build locks. Octrees are keyed by the LAS bytes' hash, so a
+# batch import of N scans whose hits-LAS bytes collide (identical/empty/synthetic
+# scans) would otherwise run N concurrent builds against the SAME staging dir —
+# and one request's rmtree (initial-clean or except-cleanup) deletes another's
+# in-flight staging dir, crashing the second with FileNotFoundError while it
+# writes attribute_labels.json. Serializing per key makes the first build win and
+# every later one a cache hit; distinct keys still build in parallel. The registry
+# lock guards only the dict lookup, never the (slow) build itself.
+_octree_build_locks: dict[str, threading.Lock] = {}
+_octree_build_locks_guard = threading.Lock()
+
+
+def _octree_build_lock(cache_key: str) -> threading.Lock:
+    """Return the process-wide build lock for a given octree cache key."""
+    with _octree_build_locks_guard:
+        lock = _octree_build_locks.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _octree_build_locks[cache_key] = lock
+        return lock
+
 # Default cache cap. Overridable via PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES.
 # A typical 28 M-point cloud is ~340 MB on disk; 20 GB holds ~60 such clouds.
 _DEFAULT_OCTREE_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024
@@ -12559,24 +12580,28 @@ def _build_octree_from_las(las_path: _Path, extra_dims_meta: List[dict]) -> tupl
     cache_key = h.hexdigest()
     cache_dir = _octree_cache_root() / cache_key
 
-    if not (cache_dir / "metadata.json").is_file():
-        cache_dir.parent.mkdir(parents=True, exist_ok=True)
-        staging_dir = cache_dir.parent / (cache_key + ".staging")
-        if staging_dir.exists():
-            _shutil.rmtree(staging_dir)
-        staging_dir.mkdir(parents=True)
-        try:
-            _run_potree_converter(las_path, staging_dir)
-            _write_octree_labels(staging_dir, extra_dims_meta)
-            if cache_dir.exists():
-                _shutil.rmtree(cache_dir)
-            staging_dir.rename(cache_dir)
-        except Exception:
-            try:
+    # Serialize builds of THIS key so a batch import of identical-hash scans
+    # can't trample a shared staging dir (see _octree_build_lock). The cache is
+    # re-checked inside the lock so the first builder wins and the rest no-op.
+    with _octree_build_lock(cache_key):
+        if not (cache_dir / "metadata.json").is_file():
+            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            staging_dir = cache_dir.parent / (cache_key + ".staging")
+            if staging_dir.exists():
                 _shutil.rmtree(staging_dir)
-            except (FileNotFoundError, OSError):
-                pass
-            raise
+            staging_dir.mkdir(parents=True)
+            try:
+                _run_potree_converter(las_path, staging_dir)
+                _write_octree_labels(staging_dir, extra_dims_meta)
+                if cache_dir.exists():
+                    _shutil.rmtree(cache_dir)
+                staging_dir.rename(cache_dir)
+            except Exception:
+                try:
+                    _shutil.rmtree(staging_dir)
+                except (FileNotFoundError, OSError):
+                    pass
+                raise
 
     meta = _read_octree_metadata(cache_dir)
     return cache_key, cache_dir, meta
