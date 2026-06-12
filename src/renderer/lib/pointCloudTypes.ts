@@ -227,6 +227,14 @@ export interface MeshData {
     ny: number;
     nz: number;
   };
+  // Helios-only: per-triangle filter metrics (aligned 1:1 with `indices`/3),
+  // computed by the backend at full precision so the front-end can apply the
+  // Lmax / aspect filter interactively and reproduce the C++ filter exactly
+  // (see lib/heliosFilter.ts). triEdgeMax = max of the triangle's three 3-D
+  // edge lengths (m); triAspect = maxEdge / minEdge. Present on an unfiltered
+  // Helios triangulation mesh and on the filtered views derived from it.
+  triEdgeMax?: Float32Array;
+  triAspect?: Float32Array;
 }
 
 // Per-triangle pseudocolor modes for a triangulated mesh. 'solid' uses the
@@ -286,6 +294,22 @@ export interface MeshEntry {
     droppedAspect?: number;
     droppedDegenerate?: number;
   };
+  // Interactive Helios filtering (method === 'helios'). `heliosUnfiltered.data`
+  // holds the returned (auto-estimated, payload-bounded) mesh with per-triangle
+  // metrics computed from its geometry; `cap` is the loosening limit of that set
+  // (the front-end can filter down to it but not past it without a re-run);
+  // `estimate` is the backend auto-estimate (seeds the default + separation /
+  // merged-cloud readout). `heliosFilter` is the Lmax / aspect the user has
+  // dialed in. `data` is always the FILTERED view derived from
+  // heliosUnfiltered.data via applyHeliosFilter, so every consumer of `mesh.data`
+  // (rendering, leaf angles, exports) sees the chosen filter — and that chosen
+  // lmax/maxAspectRatio is what gets carried into the LAD inversion.
+  heliosUnfiltered?: {
+    data: MeshData;
+    estimate: import('./heliosFilter').HeliosFilterEstimate;
+    cap: { lmax: number; maxAspectRatio: number };
+  };
+  heliosFilter?: { lmax: number; maxAspectRatio: number };
   // Plant-specific fields (for Helios plants)
   isPlant?: boolean;
   plantType?: string;

@@ -47,18 +47,23 @@ test('leaf angle distribution: inclination PDF, azimuth rose, de Wit fit', async
     const heliosPopup = page.getByTestId('helios-triangulation-popup');
     await expect(heliosPopup).toBeVisible();
     await expect(page.getByTestId('helios-grid-allpoints-warning')).toBeVisible();
-    await page.getByTestId('helios-input-lmax').fill('0.5');
-    await page.getByTestId('helios-input-aspect').fill('5');
+    // Triangulation runs unfiltered; the Lmax/aspect filter is applied in the
+    // mesh panel afterwards.
     await page.getByTestId('helios-triangulate-button').click();
 
     const meshRow = page.getByTestId('mesh-row').first();
     await expect(meshRow).toBeVisible({ timeout: 60_000 });
-    const triangles = parseInt((await meshRow.getAttribute('data-triangle-count'))!, 10);
-    expect(triangles).toBeGreaterThan(300);
 
-    // --- Open the leaf-angle window ----------------------------------------
+    // --- Filter the mesh, then open the leaf-angle window ------------------
     await meshRow.click();
     await meshRow.getByTestId('mesh-color-expand').click();
+    await page.getByTestId('mesh-helios-lmax').fill('0.5');
+    await page.getByTestId('mesh-helios-aspect').fill('5');
+    await expect.poll(async () => {
+      const s = await meshRow.getAttribute('data-triangle-count');
+      return s ? parseInt(s, 10) : 0;
+    }, { timeout: 10_000 }).toBeGreaterThan(300);
+
     await page.getByTestId('mesh-leaf-angles').click();
 
     const popup = page.getByTestId('leaf-angle-popup');

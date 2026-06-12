@@ -99,32 +99,33 @@ test('triangulation uses overwritten synthetic data, not the stale source file',
     await page.getByTestId('tool-triangulate-helios').click();
     const heliosPopup = page.getByTestId('helios-triangulation-popup');
     await expect(heliosPopup).toBeVisible();
-    await page.getByTestId('helios-input-lmax').fill('0.05');
-    await page.getByTestId('helios-input-aspect').fill('4');
+    // Triangulation runs unfiltered; the Lmax/aspect filter is applied in the
+    // mesh panel afterwards.
     await page.getByTestId('helios-triangulate-button').click();
 
     // A second mesh row (the triangulation result) is appended after the
-    // imported sphere mesh. The stale-file bug would triangulate the coarse
-    // file → 0 triangles at Lmax=0.05; the fine synthetic data yields thousands.
+    // imported sphere mesh.
     await expect(meshRows).toHaveCount(2, { timeout: 60_000 });
     const triMeshRow = meshRows.last();
-    const triStr = await triMeshRow.getAttribute('data-triangle-count');
-    expect(triStr).not.toBeNull();
-    const triangles = parseInt(triStr!, 10);
-    // Fine 400x400 yields ~3k triangles at Lmax=0.05; coarse file yields 0.
-    // Assert well above zero to prove the synthetic data was triangulated.
-    expect(triangles).toBeGreaterThan(500);
 
-    // The filter breakdown is shown persistently in the mesh's provenance panel.
-    // Expand the row (the chevron's stopPropagation means no row selection is
-    // needed) and read the rendered breakdown: its "Kept" must match the mesh's
-    // triangle count and there must be more candidates than kept (filtering
-    // happened). We read textContent rather than asserting on-screen visibility —
-    // the breakdown's data is what this test verifies, not the panel's layout.
-    // The expanded panel renders as a SIBLING of mesh-row (inside the per-mesh
-    // wrapper), not a descendant — so scope the stats query to the page, not the
-    // row. Only one mesh is expanded, so this is unambiguous.
+    // Expand the row and apply a small Lmax. The stale-file bug would triangulate
+    // the coarse file → 0 triangles at Lmax=0.05; the fine synthetic data yields
+    // thousands. (The chevron's stopPropagation means no row selection is needed.)
     await triMeshRow.getByTestId('mesh-color-expand').click();
+    await page.getByTestId('mesh-helios-lmax').fill('0.05');
+    await page.getByTestId('mesh-helios-aspect').fill('4');
+    await expect.poll(async () => {
+      const s = await triMeshRow.getAttribute('data-triangle-count');
+      return s ? parseInt(s, 10) : 0;
+    }, { timeout: 10_000 }).toBeGreaterThan(500);
+    const triangles = parseInt((await triMeshRow.getAttribute('data-triangle-count'))!, 10);
+
+    // The filter breakdown is shown persistently in the mesh's provenance panel:
+    // its "Kept" must match the mesh's triangle count and there must be more
+    // candidates than kept (filtering happened). We read textContent rather than
+    // asserting on-screen visibility — the breakdown's data is what this test
+    // verifies. The expanded panel renders as a SIBLING of mesh-row, so scope the
+    // stats query to the page, not the row. Only one mesh is expanded.
     const stats = page.getByTestId('mesh-triangulation-filter-stats');
     await expect(stats).toBeAttached({ timeout: 10_000 });
     const statsText = (await stats.textContent()) ?? '';

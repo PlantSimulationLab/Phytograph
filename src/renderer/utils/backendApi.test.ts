@@ -51,6 +51,35 @@ function mockFetchError(status: number, body: unknown) {
     );
 }
 
+// Build a PHB1 binary frame (matching _bin_frame_bytes / decodeBinaryFrame) and
+// mock fetch to return it, for endpoints that use the binary transport.
+function mockFetchBinaryFrame(
+  meta: Record<string, unknown>,
+  buffers: Array<{ name: string; dtype: 'f32' | 'u32'; data: number[] }>,
+) {
+  const enc = new TextEncoder();
+  const descs = buffers.map(b => ({ name: b.name, dtype: b.dtype, length: b.data.length }));
+  let headerBytes = enc.encode(JSON.stringify({ meta, buffers: descs }));
+  const pad = (4 - (headerBytes.length % 4)) % 4;
+  if (pad) headerBytes = enc.encode(JSON.stringify({ meta, buffers: descs }) + ' '.repeat(pad));
+  const payloadLen = buffers.reduce((n, b) => n + b.data.length * 4, 0);
+  const buf = new ArrayBuffer(8 + headerBytes.length + payloadLen);
+  const u8 = new Uint8Array(buf);
+  const dv = new DataView(buf);
+  u8[0] = 0x50; u8[1] = 0x48; u8[2] = 0x42; u8[3] = 0x31; // 'PHB1'
+  dv.setUint32(4, headerBytes.length, true);
+  u8.set(headerBytes, 8);
+  let off = 8 + headerBytes.length;
+  for (const b of buffers) {
+    if (b.dtype === 'f32') new Float32Array(buf, off, b.data.length).set(b.data);
+    else new Uint32Array(buf, off, b.data.length).set(b.data);
+    off += b.data.length * 4;
+  }
+  return vi.spyOn(global, 'fetch').mockResolvedValue(
+    new Response(buf, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }),
+  );
+}
+
 describe('getBackendUrl', () => {
   it('always returns the production backend URL', () => {
     expect(getBackendUrl()).toBe('http://127.0.0.1:8008');
@@ -74,16 +103,24 @@ describe('triangulatePointCloud', () => {
     parameters: { radii: [0.1] },
   };
 
-  it('POSTs to /api/triangulate and returns parsed body', async () => {
-    const expected = { success: true, num_vertices: 4, num_triangles: 4, vertices: [], triangles: [], method_used: 'ball_pivoting' };
-    const spy = mockFetchOk(expected);
+  it('POSTs to /api/triangulate and decodes the binary frame', async () => {
+    const spy = mockFetchBinaryFrame(
+      { success: true, num_vertices: 3, num_triangles: 1, method_used: 'ball_pivoting', surface_area: 0.5 },
+      [
+        { name: 'vertices', dtype: 'f32', data: [0, 0, 0, 1, 0, 0, 0, 1, 0] },
+        { name: 'indices', dtype: 'u32', data: [0, 1, 2] },
+      ],
+    );
     const result = await triangulatePointCloud(req);
     expect(spy).toHaveBeenCalledOnce();
     const [url, init] = spy.mock.calls[0];
     expect(url).toBe('http://127.0.0.1:8008/api/triangulate');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual(req);
-    expect(result).toEqual(expected);
+    expect(result.success).toBe(true);
+    expect(result.numTriangles).toBe(1);
+    expect(Array.from(result.triangles)).toEqual([0, 1, 2]);
+    expect(result.methodUsed).toBe('ball_pivoting');
   });
 
   it('surfaces server detail on non-2xx', async () => {
@@ -110,15 +147,26 @@ describe('heliosTriangulate', () => {
     phi_max: 360,
   };
 
-  it('POSTs to /api/triangulate/helios and returns parsed body', async () => {
-    const expected = { success: true, vertices: [], triangles: [], num_vertices: 0, num_triangles: 0, method_used: 'helios' };
-    const spy = mockFetchOk(expected);
+  it('POSTs to /api/triangulate/helios and decodes the binary frame', async () => {
+    const spy = mockFetchBinaryFrame(
+      { success: true, num_triangles: 1, num_vertices: 3, cap_lmax: 1, cap_aspect: 1e9, candidate_count: 1 },
+      [
+        { name: 'vertices', dtype: 'f32', data: [0, 0, 0, 1, 0, 0, 0, 1, 0] },
+        { name: 'triangles', dtype: 'u32', data: [0, 1, 2] },
+        { name: 'triangle_scan_ids', dtype: 'u32', data: [0] },
+        { name: 'triangle_cell_ids', dtype: 'u32', data: [0] },
+      ],
+    );
     const result = await heliosTriangulate(req);
     const [url, init] = spy.mock.calls[0];
     expect(url).toBe('http://127.0.0.1:8008/api/triangulate/helios');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual(req);
-    expect(result).toEqual(expected);
+    expect(result.success).toBe(true);
+    expect(result.numTriangles).toBe(1);
+    expect(Array.from(result.triangles)).toEqual([0, 1, 2]);
+    expect(result.vertices.length).toBe(9);
+    expect(result.capLmax).toBe(1);
   });
 
   it('honors an external AbortSignal', async () => {
@@ -489,25 +537,29 @@ describe('runLidarScan', () => {
         exit_diameter_m: 0, beam_divergence_mrad: 0,
       }],
     };
-    const spy = mockFetchOk({
-      success: true,
-      results: [{
-        scanner_id: 'scanner-1',
-        points: [[0.1, 0.1, 0]],
-        colors: [[1, 1, 1]],
-        scalars: { intensity: [0.9] },
-        num_points: 1,
-      }],
-    });
+    const spy = mockFetchBinaryFrame(
+      {
+        success: true,
+        scanners: [{
+          scanner_id: 'scanner-1', num_points: 1, has_colors: true,
+          scalar_fields: ['intensity'],
+        }],
+      },
+      [
+        { name: 's0.points', dtype: 'f32', data: [0.1, 0.1, 0] },
+        { name: 's0.colors', dtype: 'f32', data: [1, 1, 1] },
+        { name: 's0.scalar0', dtype: 'f32', data: [0.9] },
+      ],
+    );
     const res = await runLidarScan(req);
     const [url, init] = spy.mock.calls[0];
     expect(url).toBe('http://127.0.0.1:8008/api/lidar/scan');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual(req);
     expect(res.results).toHaveLength(1);
-    expect(res.results[0].scanner_id).toBe('scanner-1');
-    expect(res.results[0].num_points).toBe(1);
-    expect(res.results[0].scalars.intensity).toEqual([0.9]);
+    expect(res.results[0].scannerId).toBe('scanner-1');
+    expect(res.results[0].numPoints).toBe(1);
+    expect(Array.from(res.results[0].scalars.intensity)).toEqual([expect.closeTo(0.9, 5)]);
   });
 
   it('surfaces error', async () => {

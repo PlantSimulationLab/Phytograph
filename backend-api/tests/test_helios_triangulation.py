@@ -10,6 +10,7 @@ fed to Helios, which is exactly the integration this change fixes.
 
 import os
 import re
+from collections import Counter
 
 import pytest
 
@@ -372,6 +373,66 @@ class TestSphereReproduction:
         assert all(i == -1 or 0 <= i < 8 for i in cell_ids)
         # The sphere is not confined to a single octant — multiple cells get hits.
         assert len({i for i in cell_ids if i >= 0}) > 1
+
+    def test_frontend_filter_reproduces_cpp_kept_set(self):
+        """The interactive front-end filter (lib/heliosFilter.ts) must reproduce
+        the C++ triangulateHitPoints output. The backend no longer sends
+        per-triangle metrics — the front-end recomputes max-edge / aspect from the
+        returned geometry (computeHeliosMetrics) and applies the keep rule. We
+        mirror that here: run unfiltered (every candidate), recompute the metrics
+        from the returned vertices, apply the keep rule at lmax=0.1 / aspect=5,
+        and require the same triangle set as a direct C++ run at those values."""
+        pytest.importorskip("pyhelios")
+        lmax, aspect = 0.1, 5.0
+
+        base = self._request()
+        full = main._do_helios_computation(
+            base.model_copy(update={"lmax": 1.0e9, "max_aspect_ratio": 1.0e9}))
+        filtered = main._do_helios_computation(
+            base.model_copy(update={"lmax": lmax, "max_aspect_ratio": aspect}))
+        assert full["success"] and filtered["success"]
+
+        def canon(verts, tris):
+            """Multiset of triangles as sorted, rounded vertex-coordinate tuples,
+            so two runs with different vertex dedup/order compare equal."""
+            c = Counter()
+            for a, b, cc in tris:
+                tri = tuple(sorted(
+                    tuple(round(verts[i][k], 4) for k in range(3)) for i in (a, b, cc)))
+                c[tri] += 1
+            return c
+
+        def edge(verts, i, j):
+            return sum((verts[i][k] - verts[j][k]) ** 2 for k in range(3)) ** 0.5
+
+        # Recompute metrics from geometry (as computeHeliosMetrics does) and apply
+        # the keep rule: KEEP iff maxEdge <= lmax && maxEdge/minEdge <= aspect.
+        fv, ft = full["vertices"], full["triangles"]
+        py_kept = Counter()
+        for a, b, cc in ft:
+            e = [edge(fv, a, b), edge(fv, b, cc), edge(fv, a, cc)]
+            mx, mn = max(e), min(e)
+            asp = mx / mn if mn > 0 else 1e9
+            if mx <= lmax and asp <= aspect:
+                tri = tuple(sorted(
+                    tuple(round(fv[i][k], 4) for k in range(3)) for i in (a, b, cc)))
+                py_kept[tri] += 1
+
+        cpp_kept = canon(filtered["vertices"], filtered["triangles"])
+
+        # Equivalence modulo the 5-dp vertex dedup + float32/float64 differences,
+        # which can flip a vanishing number of triangles right at the Lmax boundary.
+        tol = max(8, round(0.02 * full["num_triangles"]))
+        sym_diff = sum((py_kept - cpp_kept).values()) + sum((cpp_kept - py_kept).values())
+        assert sym_diff <= tol, (
+            f"front-end filter diverged from C++ on {sym_diff} triangles "
+            f"(py kept {sum(py_kept.values())}, C++ kept {filtered['num_triangles']})")
+        assert abs(sum(py_kept.values()) - filtered["num_triangles"]) <= tol
+
+        # The filter genuinely dropped triangles at this Lmax (exercises the logic).
+        kept = sum(py_kept.values())
+        assert full["num_triangles"] - kept > 0
+        assert kept > 0
 
 
 # ---------------------------------------------------------------------------

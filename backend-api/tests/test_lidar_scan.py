@@ -18,6 +18,8 @@ to zero hits. We use a 3-D tetrahedron to exercise the true code path.
 import numpy as np
 import pytest
 
+from tests.binframe import decode_bin_frame, decode_lidar_scan
+
 
 # A small solid pyramid (tetrahedron): base near z=0, apex at z=0.6.
 _PYRAMID_VERTS = [
@@ -50,7 +52,7 @@ def _scanner(scanner_id="s0", origin=(0.0, 0.0, 3.0), return_type="single",
 def test_no_meshes_returns_failure(client):
     resp = client.post("/api/lidar/scan", json={"meshes": [], "scanners": [_scanner()]})
     assert resp.status_code == 200
-    body = resp.json()
+    body, _ = decode_bin_frame(resp.content)
     assert body["success"] is False
     assert "geometry" in body["error"].lower()
 
@@ -61,7 +63,7 @@ def test_no_scanners_returns_failure(client):
         "scanners": [],
     })
     assert resp.status_code == 200
-    body = resp.json()
+    body, _ = decode_bin_frame(resp.content)
     assert body["success"] is False
     assert "scanner" in body["error"].lower()
 
@@ -80,7 +82,7 @@ class TestRealScan:
             "scanners": scanners,
         })
         assert resp.status_code == 200, resp.text
-        body = resp.json()
+        body = decode_lidar_scan(resp.content)
         assert body["success"] is True, body.get("error")
         return body
 
@@ -142,4 +144,4 @@ class TestRealScan:
         assert by_id["A"]["num_points"] > 0
         assert by_id["B"]["num_points"] > 0
         # Independent hit sets (not the same merged cloud copied twice).
-        assert by_id["A"]["points"] != by_id["B"]["points"]
+        assert not np.array_equal(by_id["A"]["points"], by_id["B"]["points"])

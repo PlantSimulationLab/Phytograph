@@ -50,8 +50,9 @@ The inversion differs by return type, and Phytograph detects it from each
 scan's parameters:
 
 - **Single-return (discrete):** one return per pulse. The gap fraction is
-  estimated directly from hit/miss classification. This works with any
-  imported XYZ point cloud.
+  estimated directly from hit/miss classification, so the scan still needs
+  miss information — either imported miss points or a `timestamp` column to
+  gapfill from (see [Sky/miss points](#skymiss-points-and-gapfilling) below).
 - **Multi-return (full-waveform):** several returns per pulse. The beams
   are grouped by pulse and weighted equally, and sky/miss rays are
   gap-filled before the inversion. This needs per-return metadata —
@@ -82,9 +83,11 @@ preference:
    reconstructs the scan grid from the pulse timestamps and fills the gaps. It
    reports how many misses it recovered.
 3. **No miss information.** A scan with neither miss points nor a timestamp can't
-   account for the gaps, so the inversion **warns that the result is likely
-   inaccurate**. Re-import the scan from a format that carries misses, or one with
-   a timestamp column, for a trustworthy estimate.
+   account for the gaps, so the inversion **cannot run** — it would have no valid
+   denominator and would only produce a biased number. Phytograph stops with a
+   clear message asking you to re-import the scan from a format that carries misses
+   (E57 / structured PLY) or one with a `timestamp` column so misses can be
+   gapfilled.
 
 ## Reading the result
 

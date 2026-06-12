@@ -66,6 +66,28 @@ version matches `EXPECTED_BACKEND_VERSION`. See
 | Dev (manual uvicorn) | `http://127.0.0.1:8008` | Reuses your uvicorn |
 | Packaged build | `http://127.0.0.1:8008` | Bundled binary alongside the app |
 
+## Wire format: JSON vs binary frames
+
+Most endpoints exchange JSON. The **large array responses** — Helios + Open3D
+triangulation (`/api/triangulate*`) and synthetic LiDAR scans (`/api/lidar/scan`)
+— instead return a compact **PHB1 binary frame** (`application/octet-stream`):
+
+```
+magic 'PHB1' | uint32 header_len | JSON header (space-padded to 4 bytes) | buffers…
+```
+
+The JSON header carries the scalar metadata (`meta`) plus a descriptor list for
+the buffers (name, `f32`/`u32`, length); the buffers (vertices, indices,
+points, scalars…) follow concatenated, 4-byte aligned. The renderer reads them
+as **zero-copy `Float32Array`/`Uint32Array` views** — no `JSON.parse`, no
+`.flat()`, and no V8 ~512 MB string-length ceiling (a full-resolution tree
+triangulation is hundreds of MB). Long computations stream 4-byte whitespace
+keepalives ahead of the frame so WebKit's stall timeout doesn't fire; the
+decoder skips them. Helpers: `_bin_frame_bytes` / `_bin_frame_streaming_response`
+(backend) and `decodeBinaryFrame` / `fetchBinaryFrame` (renderer). The older
+point-cloud import path uses a similar fixed `PHX1` layout. Other endpoints
+(LAD, plant, QSM) stay JSON — their payloads are small or texture-dominated.
+
 ## When to rebuild
 
 - After any change to `backend-api/main.py` that you want reflected in `npm run dev` (unless you run uvicorn manually).

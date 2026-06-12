@@ -18,6 +18,8 @@ import math
 import numpy as np
 import pytest
 
+from tests.binframe import decode_bin_frame
+
 
 GRID_FORMAT = "x y z r255 g255 b255 reflectance"
 
@@ -70,13 +72,13 @@ def tree_points(tree_xyz):
 # ---------------------------------------------------------------------------
 
 def test_triangulate_source_matches_inline(client, tree_xyz, tree_points):
-    inline = client.post("/api/triangulate", json={
+    inline, _ = decode_bin_frame(client.post("/api/triangulate", json={
         "points": tree_points.tolist(), "method": "alpha_shape", "alpha": 0.2,
-    }).json()
-    src = client.post("/api/triangulate", json={
+    }).content)
+    src, _ = decode_bin_frame(client.post("/api/triangulate", json={
         "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
         "method": "alpha_shape", "alpha": 0.2,
-    }).json()
+    }).content)
 
     assert inline["success"] and src["success"]
     # Same input points → same mesh.
@@ -90,11 +92,11 @@ def test_triangulate_source_matches_inline(client, tree_xyz, tree_points):
 def test_triangulate_source_cap_downsamples(client, tree_xyz, tree_points):
     n = len(tree_points)
     cap = n // 4
-    src = client.post("/api/triangulate", json={
+    src, _ = decode_bin_frame(client.post("/api/triangulate", json={
         "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT,
                    "max_points": cap},
         "method": "alpha_shape", "alpha": 0.2,
-    }).json()
+    }).content)
     assert src["success"]
     assert src["points_used"] <= cap
     assert src["points_used"] < n  # actually downsampled

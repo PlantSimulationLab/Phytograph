@@ -41,17 +41,19 @@ export interface TriangulationRequest {
   normal_max_nn?: number;
 }
 
-export interface TriangulationResponse {
+// Decoded Open3D triangulation result — big arrays are zero-copy typed-array
+// views over the PHB1 binary frame.
+export interface TriangulationResult {
   success: boolean;
-  vertices: number[][];
-  triangles: number[][];
-  normals?: number[][];
-  surface_area?: number;
-  num_triangles: number;
-  num_vertices: number;
-  method_used: string;
   error?: string;
-  points_used?: number;  // input points actually triangulated (octree cap may downsample)
+  vertices: Float32Array;   // flat xyz (numVertices*3)
+  triangles: Uint32Array;   // flat indices (numTriangles*3)
+  normals?: Float32Array;   // flat per-vertex xyz
+  surfaceArea?: number;
+  numTriangles: number;
+  numVertices: number;
+  methodUsed: string;
+  pointsUsed?: number;      // input points actually triangulated (octree cap may downsample)
 }
 
 import { BACKEND_PORT_PROD } from '../../shared/constants';
@@ -101,29 +103,33 @@ export function describeBackendError(error: unknown, action: string): Error {
  * Send triangulation request to backend API
  */
 export async function triangulatePointCloud(
-  request: TriangulationRequest
-): Promise<TriangulationResponse> {
-  const baseUrl = getBackendUrl();
-
-  try {
-    const response = await fetch(`${baseUrl}/api/triangulate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    console.error('Triangulation request failed:', error);
-    throw error;
+  request: TriangulationRequest,
+  signal?: AbortSignal,
+): Promise<TriangulationResult> {
+  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate', request, signal);
+  if (!meta.success) {
+    return {
+      success: false,
+      error: (meta.error as string) ?? 'Triangulation failed',
+      vertices: new Float32Array(0),
+      triangles: new Uint32Array(0),
+      numTriangles: 0,
+      numVertices: 0,
+      methodUsed: (meta.method_used as string) ?? request.method,
+      pointsUsed: meta.points_used as number | undefined,
+    };
   }
+  return {
+    success: true,
+    vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
+    triangles: (buffers.indices as Uint32Array) ?? new Uint32Array(0),
+    normals: buffers.normals as Float32Array | undefined,
+    surfaceArea: meta.surface_area as number | undefined,
+    numTriangles: meta.num_triangles as number,
+    numVertices: meta.num_vertices as number,
+    methodUsed: meta.method_used as string,
+    pointsUsed: meta.points_used as number | undefined,
+  };
 }
 
 // ==================== GROUND SEGMENTATION API ====================
@@ -357,37 +363,15 @@ export interface HeliosTriangulationRequest {
   grid?: HeliosGrid;
 }
 
-export interface HeliosTriangulationResponse {
-  success: boolean;
-  vertices: number[][];
-  triangles: number[][];
-  colors?: number[][];      // Per-vertex RGB colors (0-1 range)
-  normals?: number[][];
-  surface_area?: number;
-  num_triangles: number;
-  num_vertices: number;
-  method_used: string;
-  error?: string;
-  // Source scan index for each triangle (aligned 1:1 with `triangles`), so the
-  // viewer can color triangles by the scan they came from.
-  triangle_scan_ids?: number[];
-  // Grid cell index (into the request grid, row-major i + nx*(j + ny*k)) for
-  // each triangle's centroid, aligned 1:1 with `triangles`; -1 = outside the
-  // grid. With the auto 1×1×1 grid every triangle is 0. Drives per-cell
-  // leaf-angle distributions.
-  triangle_cell_ids?: number[];
-  // Set when no grid box was supplied and all points were triangulated within
-  // their bounding box; grid_message is the human-readable warning to surface.
-  grid_warning?: boolean;
-  grid_message?: string | null;
-  // Triangulation filter breakdown. Helios attributes each dropped candidate to
-  // one primary reason, so candidates === kept + dropped_lmax + dropped_aspect
-  // + dropped_degenerate. Lets the UI tell a data problem (most candidates
-  // dropped by Lmax, or zero candidates) from a too-aggressive shape filter.
-  diagnostics?: HeliosTriangulationDiagnostics;
-  // Present on a successful run when almost nothing was filtered (Lmax/aspect
-  // large enough to bridge real gaps) — the mesh may contain spurious triangles.
-  diagnostics_warning?: string | null;
+// Auto-estimate fields as returned by the backend.
+export interface HeliosFilterEstimateDTO {
+  lmax: number | null;
+  eta: number;
+  label: string;
+  sep_ratio?: number | null;
+  sep_label?: string;
+  merged: boolean;
+  merged_message?: string | null;
 }
 
 export interface HeliosTriangulationDiagnostics {
@@ -398,102 +382,76 @@ export interface HeliosTriangulationDiagnostics {
   dropped_degenerate: number;  // dropped: degenerate (NaN) area
 }
 
+// Decoded Helios triangulation result. The big arrays arrive as zero-copy
+// typed-array views over the PHB1 binary frame (no .flat()/JSON.parse).
+export interface HeliosTriangulationResult {
+  success: boolean;
+  error?: string;
+  vertices: Float32Array;          // flat xyz (numVertices*3)
+  triangles: Uint32Array;          // flat indices (numTriangles*3)
+  triangleScanIds?: Uint32Array;   // source scan per triangle
+  triangleCellIds?: Uint32Array;   // grid cell per triangle (0xffffffff = outside)
+  numTriangles: number;
+  numVertices: number;
+  surfaceArea?: number;
+  // Interactive-filter support — see lib/heliosFilter.ts.
+  capLmax: number;
+  capAspect: number;
+  candidateCount: number;
+  estimate?: HeliosFilterEstimateDTO | null;
+  diagnostics?: HeliosTriangulationDiagnostics;
+  gridWarning?: boolean;
+  gridMessage?: string | null;
+}
+
 /**
- * Send Helios triangulation request to backend API.
- * Uses PyHelios LiDARCloud spherical hull triangulation.
+ * Send Helios triangulation request to the backend (PyHelios spherical hull
+ * triangulation). The response is a PHB1 binary frame decoded to typed arrays.
  */
 export async function heliosTriangulate(
   request: HeliosTriangulationRequest,
   signal?: AbortSignal,
-): Promise<HeliosTriangulationResponse> {
-  const baseUrl = getBackendUrl();
-  console.log('Helios triangulation - scans:', request.scans.length, 'Lmax:', request.lmax);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
-
-  // Forward external abort signal to our controller
-  if (signal) {
-    signal.addEventListener('abort', () => controller.abort());
+): Promise<HeliosTriangulationResult> {
+  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate/helios', request, signal);
+  if (!meta.success) {
+    return {
+      success: false,
+      error: (meta.error as string) ?? 'Triangulation failed',
+      vertices: new Float32Array(0),
+      triangles: new Uint32Array(0),
+      numTriangles: 0,
+      numVertices: 0,
+      capLmax: 0,
+      capAspect: 0,
+      candidateCount: 0,
+      diagnostics: meta.diagnostics as HeliosTriangulationDiagnostics | undefined,
+      gridWarning: meta.grid_warning as boolean | undefined,
+      gridMessage: meta.grid_message as string | null | undefined,
+    };
   }
-
-  try {
-    const response = await fetch(`${baseUrl}/api/triangulate/helios`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Helios triangulation failed:', error);
-    throw error;
-  }
+  return {
+    success: true,
+    vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
+    triangles: (buffers.triangles as Uint32Array) ?? new Uint32Array(0),
+    triangleScanIds: buffers.triangle_scan_ids as Uint32Array | undefined,
+    triangleCellIds: buffers.triangle_cell_ids as Uint32Array | undefined,
+    numTriangles: meta.num_triangles as number,
+    numVertices: meta.num_vertices as number,
+    surfaceArea: meta.surface_area as number | undefined,
+    capLmax: meta.cap_lmax as number,
+    capAspect: meta.cap_aspect as number,
+    candidateCount: meta.candidate_count as number,
+    estimate: meta.estimate as HeliosFilterEstimateDTO | null | undefined,
+    diagnostics: meta.diagnostics as HeliosTriangulationDiagnostics | undefined,
+    gridWarning: meta.grid_warning as boolean | undefined,
+    gridMessage: meta.grid_message as string | null | undefined,
+  };
 }
 
-// Suggested Lmax + separation confidence from the candidate edge-length
-// distribution (label-free). High eta = the intra-leaf and inter-leaf edge
-// scales separate cleanly; low = they overlap (leaves close vs scan resolution).
-export interface HeliosSuggestResponse {
-  success: boolean;
-  suggested_lmax: number;        // meters (Otsu threshold on log edge lengths)
-  confidence: number;            // separability eta in [0,1]
-  confidence_label: string;      // "High" | "Medium" | "Low"
-  candidate_count: number;       // unfiltered candidate triangles analysed
-  drop_fraction: number;         // fraction of candidates above suggested_lmax
-  point_spacing: number;         // meters (~point spacing; 5th-pct candidate edge)
-  // True when a scan looks like a merged multi-scan cloud, where the single-origin
-  // triangulation bridges surfaces from different scanner positions. Advisory.
-  merged_warning: boolean;
-  merged_message?: string | null;
-  error?: string;
-}
-
-/**
- * Ask the backend to suggest a Helios triangulation Lmax + separation confidence.
- * Runs the same (unfiltered) triangulation as a real run, so it's not instant —
- * the caller should show a spinner. Reuses the HeliosTriangulationRequest shape;
- * lmax / max_aspect_ratio in the request are ignored by the suggest endpoint.
- */
-export async function suggestHeliosLmax(
-  request: HeliosTriangulationRequest,
-  signal?: AbortSignal,
-): Promise<HeliosSuggestResponse> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
-  if (signal) signal.addEventListener('abort', () => controller.abort());
-
-  try {
-    const response = await fetch(`${baseUrl}/api/triangulate/helios/suggest`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Helios Lmax suggestion failed:', error);
-    throw error;
-  }
-}
+// Lmax is no longer suggested by a separate (slow) backend endpoint: the
+// triangulation now returns every candidate triangle plus per-triangle metrics,
+// so the auto-estimate (Otsu separability + merged-cloud guard) runs instantly
+// once during the main triangulation run and returned in `estimate`.
 
 // ==================== LEAF AREA DENSITY (LAD) API ====================
 // Per-voxel leaf area density (m²/m³). The triangulation (Lmax/aspect) only
@@ -1288,15 +1246,16 @@ export interface LidarScanRequest {
   pulse_distance_threshold?: number;  // full-waveform only (meters)
 }
 
-// Per-scanner scan result. `scalars` maps a field name (intensity, distance,
-// timestamp, target_index, target_count, plus any extra_fields the engine
-// recorded) to per-point values aligned 1:1 with `points`.
+// Per-scanner scan result, decoded from the binary frame as zero-copy typed
+// arrays. `points`/`colors` are flat (xyz / rgb); `scalars` maps a field name
+// (intensity, distance, timestamp, target_index, target_count, plus any
+// extra_fields the engine recorded) to per-point values aligned with `points`.
 export interface LidarScanResult {
-  scanner_id: string;
-  points: number[][];  // [[x, y, z], ...]
-  colors?: number[][] | null;  // [[r, g, b], ...] (0-1) or null when empty
-  scalars: Record<string, number[]>;
-  num_points: number;
+  scannerId: string;
+  points: Float32Array;        // flat xyz (numPoints*3)
+  colors?: Float32Array;       // flat rgb (numPoints*3)
+  scalars: Record<string, Float32Array>;
+  numPoints: number;
 }
 
 export interface LidarScanResponse {
@@ -1314,38 +1273,33 @@ export interface LidarScanResponse {
  * position, field of view, and resolution.
  */
 export async function runLidarScan(
-  request: LidarScanRequest
+  request: LidarScanRequest,
+  signal?: AbortSignal,
 ): Promise<LidarScanResponse> {
-  const baseUrl = getBackendUrl();
-  console.log('LiDAR scan - meshes:', request.meshes.length, 'scanners:', request.scanners.length);
-
-  // A high-resolution scan ray-traces Ntheta×Nphi rays per scanner; allow time.
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
-
-  try {
-    const response = await fetch(`${baseUrl}/api/lidar/scan`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('LiDAR scan failed:', error);
-    throw error;
+  // A high-resolution scan ray-traces Ntheta×Nphi rays per scanner; the points +
+  // scalars come back as a PHB1 binary frame (5-min allowance for big scans).
+  const { meta, buffers } = await fetchBinaryFrame('/api/lidar/scan', request, signal, 300000);
+  if (!meta.success) {
+    return { success: false, error: (meta.error as string) ?? 'LiDAR scan failed', results: [] };
   }
+  const scanners = (meta.scanners as Array<{
+    scanner_id: string; num_points: number; has_colors: boolean; scalar_fields: string[];
+  }>) ?? [];
+  const results: LidarScanResult[] = scanners.map((s, i) => {
+    const scalars: Record<string, Float32Array> = {};
+    s.scalar_fields.forEach((name, j) => {
+      const buf = buffers[`s${i}.scalar${j}`];
+      if (buf) scalars[name] = buf as Float32Array;
+    });
+    return {
+      scannerId: s.scanner_id,
+      points: (buffers[`s${i}.points`] as Float32Array) ?? new Float32Array(0),
+      colors: s.has_colors ? (buffers[`s${i}.colors`] as Float32Array) : undefined,
+      scalars,
+      numPoints: s.num_points,
+    };
+  });
+  return { success: true, results };
 }
 
 // ==================== POINT CLOUD LAS/LAZ IMPORT/EXPORT API ====================
@@ -1656,6 +1610,88 @@ function decodePointCloudBinary(buf: ArrayBuffer): ImportPointCloudByPathResult 
   }
 
   return { pointCount, positions, colors, intensity };
+}
+
+// ==================== GENERIC BINARY FRAME (PHB1) ====================
+// Decoder for the backend's PHB1 frame (see _bin_frame_bytes in main.py): a
+// small JSON header (scalar metadata + buffer descriptors) followed by the
+// typed-array buffers, concatenated. Large array responses use this instead of
+// JSON — ~3-4x smaller, parsed as zero-copy typed-array views (no .flat() /
+// JSON.parse), and immune to V8's ~512 MB string-length limit.
+
+export type BinBuffer = Float32Array | Uint32Array;
+export interface BinaryFrame {
+  meta: Record<string, unknown>;
+  buffers: Record<string, BinBuffer>;
+}
+const BIN_FRAME_MAGIC = 'PHB1';
+
+function isWhitespaceByte(b: number): boolean {
+  return b === 0x20 || b === 0x09 || b === 0x0a || b === 0x0d;
+}
+
+export function decodeBinaryFrame(buf: ArrayBuffer): BinaryFrame {
+  const bytes = new Uint8Array(buf);
+  // Skip the streaming keepalive (4-byte whitespace chunks) that precede the
+  // frame on long-compute endpoints.
+  let start = 0;
+  while (start < bytes.length && isWhitespaceByte(bytes[start])) start++;
+  if (bytes.length - start < 8) throw new Error('Binary frame too short');
+  const magic = String.fromCharCode(bytes[start], bytes[start + 1], bytes[start + 2], bytes[start + 3]);
+  if (magic !== BIN_FRAME_MAGIC) throw new Error(`Unexpected binary magic "${magic}"`);
+
+  const dv = new DataView(buf);
+  const headerLen = dv.getUint32(start + 4, true);
+  const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, start + 8, headerLen)));
+
+  let payloadStart = start + 8 + headerLen;
+  let src = buf;
+  // Zero-copy views need a 4-byte-aligned offset; the protocol guarantees it
+  // (8 + padded header, after a 4-byte-multiple of keepalive), but fall back to
+  // a single aligned copy if anything upstream injected odd padding.
+  if (payloadStart % 4 !== 0) { src = buf.slice(payloadStart); payloadStart = 0; }
+
+  const buffers: Record<string, BinBuffer> = {};
+  let o = payloadStart;
+  for (const d of header.buffers as Array<{ name: string; dtype: string; length: number }>) {
+    buffers[d.name] = d.dtype === 'f32'
+      ? new Float32Array(src, o, d.length)
+      : new Uint32Array(src, o, d.length);
+    o += d.length * 4;
+  }
+  if (o > src.byteLength) throw new Error('Binary frame shorter than declared');
+  return { meta: header.meta, buffers };
+}
+
+// POST a JSON request and decode a PHB1 binary-frame response. Mirrors the JSON
+// fetch helpers (10-min timeout, forwards an external abort signal).
+export async function fetchBinaryFrame(
+  path: string,
+  request: unknown,
+  signal?: AbortSignal,
+  timeoutMs = 600000,
+): Promise<BinaryFrame> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  if (signal) signal.addEventListener('abort', () => controller.abort());
+  try {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return decodeBinaryFrame(await response.arrayBuffer());
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
 }
 
 /**

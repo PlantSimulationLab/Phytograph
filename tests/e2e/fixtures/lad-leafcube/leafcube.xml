@@ -12,7 +12,7 @@
 
 <scan>
   <filename> leafcube.xyz </filename>
-  <ASCII_format> x y z </ASCII_format>
+  <ASCII_format> x y z is_miss </ASCII_format>
   <origin> -5.000000 0.000000 0.500000 </origin>
   <size> 2600 5200 </size>
 </scan>

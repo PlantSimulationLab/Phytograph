@@ -42,7 +42,10 @@ surface.
 3. **In the dialog:**
     - Pick the **voxel grid** to use (required — no auto-grid).
     - **Max Edge Length (Lmax)** and **Max Aspect Ratio** control the
-      triangulation that estimates the G-function (not the final mesh).
+      triangulation that estimates the G-function (not the final mesh). If you
+      already dialed in a filter on a [Helios triangulation](triangulate.md)
+      mesh, these fields are **pre-filled** with that Lmax / aspect so the
+      inversion bakes in the same filtering — still editable here.
     - **Min Voxel Hits** skips voxels with too few returns to solve
       reliably.
     - The **return type** is shown read-only; it follows each scan's own

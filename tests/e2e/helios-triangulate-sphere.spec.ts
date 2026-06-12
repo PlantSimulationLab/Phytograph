@@ -60,43 +60,19 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
     await expect(heliosPopup).toBeVisible();
 
     // No voxel box exists, so the grid selector defaults to the auto (all
-    // points) option and shows the all-points warning.
+    // points) option and shows the all-points warning. Triangulation now runs
+    // unfiltered — there are no Lmax/aspect inputs in the popup, just the note
+    // that the filter is applied (and auto-estimated) afterwards in the panel.
     await expect(page.getByTestId('helios-grid-allpoints-warning')).toBeVisible();
-
-    // --- Lmax suggestion (Otsu separability) + merged-cloud guard ----------
-    // Exercise the Suggest button against the live backend: it runs an
-    // unfiltered triangulation, fills Lmax from the candidate edge-length split,
-    // and reports a separation confidence. The four sphere scans are each
-    // single-viewpoint, so the merged-cloud guard must NOT fire.
-    await page.getByTestId('helios-suggest-button').click();
-    const suggestion = page.getByTestId('helios-suggestion-result');
-    await expect(suggestion).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByTestId('helios-suggestion-confidence')).toContainText(/Separation/);
-    await expect(page.getByTestId('helios-merged-warning')).toHaveCount(0);
-    // Suggest populated the Lmax field with a positive value.
-    const suggested = parseFloat(await page.getByTestId('helios-input-lmax').inputValue());
-    expect(suggested).toBeGreaterThan(0);
-
-    // Mirror the C++ self-test parameters: lmax=0.5, max_aspect_ratio=5.
-    await page.getByTestId('helios-input-lmax').fill('0.5');
-    await page.getByTestId('helios-input-aspect').fill('5');
+    await expect(page.getByTestId('helios-filter-note')).toBeVisible();
 
     await page.getByTestId('helios-triangulate-button').click();
 
     // The mesh row appears once the live backend returns. Sphere fixture is
-    // small (a few hundred points/scan) so this is quick.
+    // small (a few hundred points/scan) so this is quick. The displayed count is
+    // the auto-estimated filter applied to the full candidate set.
     const meshRow = page.getByTestId('mesh-row').first();
     await expect(meshRow).toBeVisible({ timeout: 60_000 });
-
-    const trianglesStr = await meshRow.getAttribute('data-triangle-count');
-    expect(trianglesStr).not.toBeNull();
-    const triangles = parseInt(trianglesStr!, 10);
-    // C++ reference is 383 primitives; our auto-grid run reproduces it exactly
-    // (383). Allow a small band for cross-platform Delaunay/float variance
-    // while still excluding a degenerate (near-empty or runaway) result.
-    expect(triangles).toBeGreaterThan(340);
-    expect(triangles).toBeLessThan(430);
-
     await expect(meshRow.getByTestId('mesh-row-count')).toContainText('triangles');
 
     // The default name should mark this as a Helios *triangulation* (the word
@@ -104,23 +80,61 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
     // "Mesh" (Helios meshes have no source-cloud filename to fall back to).
     await expect(meshRow.getByTestId('mesh-row-name')).toHaveText('Helios triangulation');
 
-    // --- Pseudocolor the triangulated mesh ---------------------------------
-    // The "Color by" control lives inline on the mesh's own row: select the
-    // mesh, then expand its row via the chevron. Color by each geometric scalar
-    // and confirm the matching colorbar appears with a sane range.
+    // Expand the row to reach the interactive filter + color controls.
     await meshRow.click();
     await expect(meshRow).toHaveAttribute('data-selected', 'true');
     await meshRow.getByTestId('mesh-color-expand').click();
 
-    // Provenance readout: method + the parameters we ran with (lmax 0.5,
-    // aspect 5, four fused scans). The expanded panel renders as a SIBLING of
-    // mesh-row (inside the per-mesh wrapper), so scope to the page, not the row.
+    // --- Interactive Lmax filter (replaces the old pre-run inputs) ----------
+    // The auto-estimate reports a separation confidence; the four sphere scans
+    // are each single-viewpoint, so the merged-cloud guard must NOT fire.
+    const separation = page.getByTestId('mesh-helios-separation');
+    await expect(separation).toContainText(/Separation/);
+    // The coarse sphere is the canonical "clean Otsu split, but the two modes
+    // are barely apart" case: eta reads High while the mode-separation ratio is
+    // small (~1.4x) and labels Low — surface anisotropy, not gap bridges. The
+    // ratio readout must surface that low label alongside the high eta.
+    await expect(separation).toContainText(/Modes \d/);
+    await expect(separation).toContainText(/Low/);
+
+    // Open the whole mesh up: a large Lmax (clamped to the candidate set's max
+    // edge — the sphere has no triangles longer than ~0.2 m) + aspect 5 keeps
+    // every candidate, reproducing the C++ self-test (~383 primitives).
+    await page.getByTestId('mesh-helios-lmax').fill('1.0');
+    await page.getByTestId('mesh-helios-aspect').fill('5');
+
+    await expect.poll(async () => {
+      const s = await meshRow.getAttribute('data-triangle-count');
+      return s ? parseInt(s, 10) : 0;
+    }, { timeout: 10_000 }).toBeGreaterThan(340);
+    const triangles = parseInt((await meshRow.getAttribute('data-triangle-count'))!, 10);
+    // C++ reference is 383 primitives; the full (aspect-5) sphere mesh reproduces
+    // it. Allow a small band for cross-platform Delaunay/float variance.
+    expect(triangles).toBeGreaterThan(340);
+    expect(triangles).toBeLessThan(430);
+
+    // Provenance readout (the expanded panel renders as a SIBLING of mesh-row,
+    // so scope to the page) — method, the aspect we set, the fused-scan count,
+    // and the live filter breakdown.
     const info = page.getByTestId('mesh-triangulation-info');
     await expect(info).toBeAttached();
     await expect(info).toContainText('Helios triangulation');
-    await expect(info).toContainText('0.5');
     await expect(info).toContainText('Max aspect ratio: 5');
     await expect(info).toContainText('Scans fused: 4');
+    await expect(info).toContainText('Kept:');
+
+    // Tightening the filter live drops triangles (no re-triangulation) — proves
+    // the interactive filter works — then loosen back to the full mesh.
+    await page.getByTestId('mesh-helios-lmax').fill('0.02');
+    await expect.poll(async () => {
+      const s = await meshRow.getAttribute('data-triangle-count');
+      return s ? parseInt(s, 10) : 0;
+    }, { timeout: 10_000 }).toBeLessThan(triangles);
+    await page.getByTestId('mesh-helios-lmax').fill('1.0');
+    await expect.poll(async () => {
+      const s = await meshRow.getAttribute('data-triangle-count');
+      return s ? parseInt(s, 10) : 0;
+    }, { timeout: 10_000 }).toBeGreaterThan(340);
 
     const colorMode = page.getByTestId('mesh-color-mode');
     await expect(colorMode).toBeVisible();

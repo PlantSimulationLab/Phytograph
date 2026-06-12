@@ -91,7 +91,9 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
     // Expand the row and assert the triangulation provenance readout shows the
     // method and the non-default octree depth we set (7).
     await meshRow.getByTestId('mesh-color-expand').click();
-    const info = meshRow.getByTestId('mesh-triangulation-info');
+    // The expanded panel renders as a SIBLING of mesh-row (inside the per-mesh
+    // wrapper), so scope to the page, not the row.
+    const info = page.getByTestId('mesh-triangulation-info');
     await expect(info).toBeVisible();
     await expect(info).toContainText('Poisson triangulation');
     await expect(info).toContainText('Octree depth: 7');

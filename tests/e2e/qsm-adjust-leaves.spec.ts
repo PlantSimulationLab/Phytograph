@@ -71,13 +71,23 @@ test('adjusts QSM leaf angles to a measured distribution via the UI', async () =
     const heliosPopup = page.getByTestId('helios-triangulation-popup');
     await expect(heliosPopup).toBeVisible();
     // A grid box exists, so a real grid (not the all-points auto grid) is used.
-    await page.getByTestId('helios-input-lmax').fill('0.04');
-    await page.getByTestId('helios-input-aspect').fill('10');
+    // Triangulation runs unfiltered; the Lmax/aspect filter is applied in the
+    // mesh panel afterwards.
     await page.getByTestId('helios-triangulate-button').click();
 
-    const meshRow = page.getByTestId('mesh-row').first();
+    // Target the Helios mesh specifically — the voxel box created above is also
+    // a mesh row (and sorts first), so `.first()` would grab the box.
+    const meshRow = page.locator('[data-testid="mesh-row"][data-mesh-name="Helios triangulation"]');
     await expect(meshRow).toBeVisible({ timeout: 120_000 });
-    expect(parseInt((await meshRow.getAttribute('data-triangle-count'))!, 10)).toBeGreaterThan(0);
+    // Apply the filter via the mesh panel (expand with the chevron — its
+    // stopPropagation means no row selection is needed).
+    await meshRow.getByTestId('mesh-color-expand').click();
+    await page.getByTestId('mesh-helios-lmax').fill('0.04');
+    await page.getByTestId('mesh-helios-aspect').fill('10');
+    await expect.poll(async () => {
+      const s = await meshRow.getAttribute('data-triangle-count');
+      return s ? parseInt(s, 10) : 0;
+    }, { timeout: 10_000 }).toBeGreaterThan(0);
 
     // --- Import the same scan as a point cloud and build a QSM -------------
     const cloudXyz = join(repoRoot, 'tests', 'e2e', 'fixtures', 'lad-leafcube', 'leafcube.xyz');

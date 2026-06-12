@@ -20,6 +20,11 @@ interface LADPopupProps {
   // Voxel boxes available as the LAD grid. LAD REQUIRES one — when empty the
   // compute button is disabled and the user is told to create a voxel box.
   gridOptions?: GridOption[];
+  // Pre-fill Lmax / max aspect ratio from the filter the user dialed in on a
+  // Helios triangulation mesh, so the inversion bakes in that filtering. Still
+  // editable here. Omitted → fall back to the standard defaults.
+  defaultLmax?: number;
+  defaultMaxAspectRatio?: number;
 }
 
 // Per-voxel leaf area density setup. Models HeliosTriangulationPopup but the
@@ -35,6 +40,8 @@ export function LADPopup({
   initialSelectedIds,
   onOpenScanParams,
   gridOptions = [],
+  defaultLmax,
+  defaultMaxAspectRatio,
 }: LADPopupProps) {
   const eligible = useMemo(() => scans.filter(s => hasData(s) && hasParams(s)), [scans]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
@@ -73,6 +80,20 @@ export function LADPopup({
   const [maxAspectRatioStr, setMaxAspectRatioStr] = useState('4.0');
   const [minVoxelHitsStr, setMinVoxelHitsStr] = useState('5');
   const [error, setError] = useState<string | null>(null);
+
+  // Seed Lmax / aspect from the mesh filter the user dialed in (when provided)
+  // each time the dialog opens, so the inversion reproduces that filtering. The
+  // user can still override before computing.
+  useEffect(() => {
+    if (!isOpen) return;
+    if (defaultLmax !== undefined && Number.isFinite(defaultLmax)) {
+      setLmaxStr(Number(defaultLmax.toPrecision(4)).toString());
+    }
+    if (defaultMaxAspectRatio !== undefined && Number.isFinite(defaultMaxAspectRatio)) {
+      setMaxAspectRatioStr(String(defaultMaxAspectRatio));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   const toggleScan = useCallback((scanId: string) => {
     setSelectedScanIds(prev => {

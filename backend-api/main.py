@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.12.0"
+BACKEND_VERSION = "0.13.1"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -1412,8 +1412,7 @@ class TriangulationResponse(BaseModel):
     points_used: Optional[int] = None
 
 
-@app.post("/api/triangulate", response_model=TriangulationResponse)
-async def triangulate_point_cloud(request: TriangulationRequest):
+def _do_open3d_triangulation(request: TriangulationRequest) -> dict:
     """
     Triangulate a point cloud to create a mesh surface.
 
@@ -1435,16 +1434,9 @@ async def triangulate_point_cloud(request: TriangulationRequest):
         points_used = int(len(points))
 
         if len(points) < 3:
-            return TriangulationResponse(
-                success=False,
-                vertices=[],
-                triangles=[],
-                num_triangles=0,
-                num_vertices=0,
-                method_used=request.method,
-                points_used=points_used,
-                error="Need at least 3 points for triangulation"
-            )
+            return {"success": False, "method_used": request.method,
+                    "num_triangles": 0, "num_vertices": 0, "points_used": points_used,
+                    "error": "Need at least 3 points for triangulation"}
 
         # Create Open3D point cloud
         pcd = o3d.geometry.PointCloud()
@@ -1553,36 +1545,19 @@ async def triangulate_point_cloud(request: TriangulationRequest):
                 mesh.triangles = o3d.utility.Vector3iVector(triangles)
                 mesh.compute_vertex_normals()
             except Exception as e:
-                return TriangulationResponse(
-                    success=False,
-                    vertices=[],
-                    triangles=[],
-                    num_triangles=0,
-                    num_vertices=0,
-                    method_used=method_used,
-                    error=f"Delaunay triangulation failed: {str(e)}"
-                )
+                return {"success": False, "method_used": method_used,
+                        "num_triangles": 0, "num_vertices": 0,
+                        "error": f"Delaunay triangulation failed: {str(e)}"}
         else:
-            return TriangulationResponse(
-                success=False,
-                vertices=[],
-                triangles=[],
-                num_triangles=0,
-                num_vertices=0,
-                method_used=method_used,
-                error=f"Unknown method: {request.method}. Use 'ball_pivoting', 'poisson', 'alpha_shape', or 'delaunay'"
-            )
+            return {"success": False, "method_used": method_used,
+                    "num_triangles": 0, "num_vertices": 0,
+                    "error": f"Unknown method: {request.method}. Use 'ball_pivoting', 'poisson', 'alpha_shape', or 'delaunay'"}
 
         if mesh is None or len(mesh.triangles) == 0:
-            return TriangulationResponse(
-                success=False,
-                vertices=np.asarray(pcd.points).tolist() if pcd.has_points() else [],
-                triangles=[],
-                num_triangles=0,
-                num_vertices=len(points),
-                method_used=method_used,
-                error="Triangulation produced no triangles. Try adjusting parameters or using a different method."
-            )
+            return {"success": False, "method_used": method_used,
+                    "num_triangles": 0, "num_vertices": len(points),
+                    "points_used": points_used,
+                    "error": "Triangulation produced no triangles. Try adjusting parameters or using a different method."}
 
         # Clean up mesh
         mesh.remove_degenerate_triangles()
@@ -1597,32 +1572,58 @@ async def triangulate_point_cloud(request: TriangulationRequest):
         # Calculate surface area
         surface_area = mesh.get_surface_area()
 
-        # Extract results
-        vertices = np.asarray(mesh.vertices).tolist()
-        triangles = np.asarray(mesh.triangles).tolist()
-        normals = np.asarray(mesh.vertex_normals).tolist() if mesh.has_vertex_normals() else None
+        # Extract results as numpy (the endpoint packs them straight to binary).
+        vertices = np.asarray(mesh.vertices)
+        triangles = np.asarray(mesh.triangles)
+        normals = np.asarray(mesh.vertex_normals) if mesh.has_vertex_normals() else None
 
-        return TriangulationResponse(
-            success=True,
-            vertices=vertices,
-            triangles=triangles,
-            normals=normals,
-            surface_area=float(surface_area),
-            num_triangles=len(triangles),
-            num_vertices=len(vertices),
-            method_used=method_used,
-            points_used=points_used
-        )
+        return {
+            "success": True,
+            "vertices": vertices,
+            "triangles": triangles,
+            "normals": normals,
+            "surface_area": float(surface_area),
+            "num_triangles": int(triangles.shape[0]),
+            "num_vertices": int(vertices.shape[0]),
+            "method_used": method_used,
+            "points_used": points_used,
+        }
 
     except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="Open3D not installed. Run: pip install open3d"
-        )
+        return {"success": False, "method_used": request.method,
+                "num_triangles": 0, "num_vertices": 0,
+                "error": "Open3D not installed. Run: pip install open3d"}
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Triangulation failed: {str(e)}")
+        return {"success": False, "method_used": request.method,
+                "num_triangles": 0, "num_vertices": 0,
+                "error": f"Triangulation failed: {str(e)}"}
+
+
+def _pack_mesh_frame(result: dict, *, index_key: str = "triangles") -> bytes:
+    """Pack a mesh result dict (vertices + index array + optional normals/colors/
+    uv) into a PHB1 binary frame. Non-array fields (counts, surface_area,
+    method, textures, materials, error, …) go in meta. `index_key` is the dict
+    key holding the triangle index array (open3d uses 'triangles', plant/QSM
+    'indices'); it's always sent as the buffer named 'indices'."""
+    if not result.get("success"):
+        meta = {k: v for k, v in result.items()
+                if k not in ("vertices", "triangles", "indices", "normals", "colors", "uv_coordinates")}
+        return _bin_frame_bytes(meta, [])
+    array_keys = {"vertices", "triangles", "indices", "normals", "colors", "uv_coordinates"}
+    meta = {k: v for k, v in result.items() if k not in array_keys}
+    buffers = [("vertices", result["vertices"], "f32"), ("indices", result[index_key], "u32")]
+    for opt in ("normals", "colors", "uv_coordinates"):
+        if result.get(opt) is not None:
+            buffers.append((opt, result[opt], "f32"))
+    return _bin_frame_bytes(meta, buffers)
+
+
+@app.post("/api/triangulate")
+async def triangulate_point_cloud(request: TriangulationRequest):
+    """Triangulate a point cloud (Open3D). Returns a PHB1 binary frame."""
+    return _bin_frame_streaming_response(lambda: _pack_mesh_frame(_do_open3d_triangulation(request)))
 
 
 # ==================== GROUND SEGMENTATION ====================
@@ -2122,6 +2123,17 @@ class HeliosTriangulationRequest(BaseModel):
     # grid_warning on the response.
     grid: Optional[HeliosGrid] = None
 
+class HeliosFilterEstimate(BaseModel):
+    """Auto-estimated triangulation filter, derived from the candidate edge-length
+    distribution (Otsu separability) + a merged-multi-scan-cloud guard."""
+    lmax: Optional[float] = None      # suggested Lmax (m); None when too little spread
+    eta: float = 0.0                  # separation confidence in [0,1]
+    label: str = "n/a"                # High / Medium / Low / n/a
+    sep_ratio: Optional[float] = None # upper-mode / lower-mode median edge ratio
+    sep_label: str = "n/a"            # mode separation: High (≥4x) / Medium (≥2x) / Low
+    merged: bool = False
+    merged_message: Optional[str] = None
+
 class HeliosTriangulationResponse(BaseModel):
     """Response model for Helios triangulation"""
     success: bool
@@ -2150,6 +2162,16 @@ class HeliosTriangulationResponse(BaseModel):
     # already segmented or cropped). Carries a human-readable companion message.
     grid_warning: bool = False
     grid_message: Optional[str] = None
+    # Interactive-filter support. The returned mesh is the auto-estimated default
+    # (small candidate sets are returned whole). The front-end recomputes the
+    # per-triangle edge metrics from the returned geometry and filters within
+    # these loosening limits; `estimate` seeds the default filter and reports the
+    # separation confidence + merged-cloud guard. `candidate_count` is the total
+    # number of Delaunay candidates before the payload cap.
+    cap_lmax: float = 0.0      # max Lmax (m) the returned set supports without a re-run
+    cap_aspect: float = 1.0e9  # max aspect the returned set supports without a re-run
+    candidate_count: int = 0
+    estimate: Optional["HeliosFilterEstimate"] = None
 
 
 # ==================== LEAF AREA DENSITY (LAD) ====================
@@ -2378,6 +2400,105 @@ def _triangulation_quality_warning(diag: dict):
                 f"gaps in the point cloud — inspect the mesh for triangles spanning "
                 f"unsampled regions, and lower Lmax if so.")
     return None
+
+
+# A full-resolution TLS tree easily yields several million candidate triangles;
+# the unfiltered set (every Delaunay candidate) can exceed V8's ~512 MB max
+# string length when serialized to JSON, which the renderer then can't parse
+# ("Unexpected end of JSON input"). So the triangulation response is bounded:
+# small candidate sets are returned whole (the front-end can filter freely in
+# both directions), while large ones are pre-filtered to the default aspect and
+# the densest this-many triangles by edge length (the front-end can then tighten
+# the filter, but loosening past the cap needs a re-run). The binary PHB1
+# transport removes the JSON string-length ceiling, so this is a render/memory
+# safety cap (12M ≈ a full-resolution tree) rather than a transport limit.
+_HELIOS_MAX_RETURN_TRIANGLES = 12_000_000
+# A scan looks like a merged multi-scan cloud when its median candidate edge is
+# this many times its 5th-percentile edge (the finest true spacing).
+_HELIOS_MERGED_RATIO = 10.0
+_HELIOS_MERGED_MESSAGE = (
+    "These points look like a merged multi-scan cloud — candidate edges are far "
+    "larger than the point spacing, which happens when a single scan actually "
+    "combines several scanner positions. Helios triangulation assumes single-scan-"
+    "position data, so it bridges surfaces seen from different origins. Triangulate "
+    "each scan position separately for a clean result."
+)
+
+
+def _otsu_threshold_eta(log_vals, nbins: int = 256):
+    """Otsu's threshold + separability eta on 1-D values (here log edge lengths).
+    eta = max between-class variance / total variance, in [0, 1] (1 = cleanly
+    bimodal, 0 = unimodal). Returns (threshold_log, eta); threshold_log is NaN
+    when there's too little spread to threshold."""
+    import numpy as np
+    if len(log_vals) < 8 or np.allclose(log_vals, log_vals[0]):
+        return float("nan"), 0.0
+    hist, bin_edges = np.histogram(log_vals, bins=nbins)
+    centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    p = hist.astype(np.float64) / max(hist.sum(), 1)
+    omega = np.cumsum(p)
+    mu = np.cumsum(p * centers)
+    mu_t = mu[-1]
+    denom = omega * (1.0 - omega)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sigma_b2 = np.where(denom > 1e-12, (mu_t * omega - mu) ** 2 / denom, 0.0)
+    idx = int(np.argmax(sigma_b2))
+    total_var = float((p * (centers - mu_t) ** 2).sum())
+    eta = float(sigma_b2[idx] / (total_var + 1e-12))
+    return float(centers[idx]), max(0.0, min(1.0, eta))
+
+
+def _helios_filter_estimate(edge_max, scan_ids) -> dict:
+    """Auto-estimate the triangulation Lmax + separation confidence (+ merged-
+    cloud guard) from the candidate per-triangle max-edge lengths. Returns
+    {lmax, eta, label, merged, merged_message}; lmax is None when the spread is
+    too small to threshold. Folds the (retired) /suggest logic into the main run
+    so estimation is instant — no second triangulation."""
+    import numpy as np
+    e = np.asarray(edge_max, dtype=np.float64)
+    e = e[e > 0]
+    if e.size < 16:
+        return {"lmax": None, "eta": 0.0, "label": "n/a",
+                "sep_ratio": None, "sep_label": "n/a",
+                "merged": False, "merged_message": None}
+    thr_log, eta = _otsu_threshold_eta(np.log(e))
+    lmax = float(np.exp(thr_log)) if math.isfinite(thr_log) else None
+    # Merged-cloud guard, per scan (each is triangulated independently).
+    merged = False
+    sids = np.asarray(scan_ids, dtype=np.int64)
+    pos = np.asarray(edge_max, dtype=np.float64) > 0
+    sids = sids[pos]
+    for s in np.unique(sids):
+        es = e[sids == s]
+        if es.size < 64:
+            continue
+        ratio = float(np.median(es)) / max(float(np.percentile(es, 5)), 1e-9)
+        if ratio > _HELIOS_MERGED_RATIO:
+            merged = True
+            break
+    label = "High" if eta >= 0.7 else ("Medium" if eta >= 0.5 else "Low")
+    # Mode-separation ratio: median edge of the upper Otsu class / median edge of
+    # the lower class. eta says the two classes separate *cleanly*; this says how
+    # far *apart* they are. A genuine gap-bridge population sits many times above
+    # the surface-triangle spacing, so the threshold trims bridges. Two families
+    # of merely anisotropic but equally-valid surface triangles (e.g. a coarse
+    # convex scan) sit close together (~1.5x), so a clean split (high eta) at a
+    # small ratio is a sign the cut is slicing one surface rather than trimming
+    # bridges. Reported next to eta so the user can spot that case.
+    sep_ratio = None
+    sep_label = "n/a"
+    if lmax is not None and math.isfinite(thr_log):
+        lower = e[e <= lmax]
+        upper = e[e > lmax]
+        if lower.size and upper.size:
+            med_lo = float(np.median(lower))
+            if med_lo > 0:
+                sep_ratio = float(np.median(upper)) / med_lo
+                sep_label = ("High" if sep_ratio >= 4.0
+                             else "Medium" if sep_ratio >= 2.0 else "Low")
+    return {"lmax": lmax, "eta": eta, "label": label,
+            "sep_ratio": sep_ratio, "sep_label": sep_label,
+            "merged": merged, "merged_message": _HELIOS_MERGED_MESSAGE if merged else None}
 
 
 def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool = False) -> dict:
@@ -2624,18 +2745,73 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 "diagnostics": diag,
             }
 
+        # Per-triangle filter metrics over ALL candidates, computed from the RAW
+        # (pre-dedup) flat vertex blocks. Order matches the concatenation order
+        # (and thus the per-scan ids). These drive the auto-estimate and the
+        # server-side payload cap; they are NOT sent to the front-end (which
+        # recomputes them from the returned geometry) — serializing two float
+        # arrays per million triangles is what pushes a big mesh past the JSON
+        # string limit.
+        tri_v = np.concatenate(scan_vert_blocks).reshape(-1, 3, 3)
+        _e = np.stack([
+            np.linalg.norm(tri_v[:, 0] - tri_v[:, 1], axis=1),
+            np.linalg.norm(tri_v[:, 1] - tri_v[:, 2], axis=1),
+            np.linalg.norm(tri_v[:, 0] - tri_v[:, 2], axis=1),
+        ], axis=1)
+        tri_edge_max = _e.max(axis=1)
+        tri_edge_min = _e.min(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            tri_aspect = np.where(tri_edge_min > 0, tri_edge_max / tri_edge_min, 1.0e9)
+        scan_ids_all = np.concatenate(scan_id_blocks)
+
+        # Auto-estimate Lmax + separation confidence from the full candidate
+        # distribution (instant — no second triangulation), and flag merged
+        # multi-scan clouds.
+        estimate = _helios_filter_estimate(tri_edge_max, scan_ids_all)
+
+        # Bound the returned payload. Small candidate sets go back whole (the
+        # front-end can then filter in either direction); large ones are
+        # pre-filtered to the default aspect and capped at the densest
+        # _HELIOS_MAX_RETURN_TRIANGLES by edge length, so the JSON stays
+        # parseable. cap_lmax / cap_aspect tell the front-end the loosening
+        # limits of the returned set.
+        n_cand = int(tri_edge_max.shape[0])
+        if n_cand <= _HELIOS_MAX_RETURN_TRIANGLES:
+            keep = np.ones(n_cand, dtype=bool)
+            cap_lmax = float(tri_edge_max.max()) if n_cand else 0.0
+            cap_aspect = 1.0e9
+        else:
+            cap_aspect = 4.0
+            asp_ok = tri_aspect <= cap_aspect
+            edges_ok = tri_edge_max[asp_ok]
+            if edges_ok.size > _HELIOS_MAX_RETURN_TRIANGLES:
+                # Lmax of the Nth-smallest aspect-passing edge → keeps ~N triangles.
+                cap_lmax = float(np.partition(edges_ok, _HELIOS_MAX_RETURN_TRIANGLES)[_HELIOS_MAX_RETURN_TRIANGLES])
+            else:
+                cap_lmax = float(edges_ok.max()) if edges_ok.size else 0.0
+            keep = asp_ok & (tri_edge_max <= cap_lmax)
+
+        tri_v = tri_v[keep]
+        kept_scan_ids = scan_ids_all[keep]
+        if tri_v.shape[0] == 0:
+            return {
+                "success": False, "vertices": [], "triangles": [],
+                "num_triangles": 0, "num_vertices": 0, "method_used": "helios",
+                "error": "No triangles survived the payload cap.",
+                "diagnostics": diag, "grid_warning": grid_warning,
+                "grid_message": grid_message,
+            }
+
         # Dedup vertices in numpy. Round to 5 dp first to match the old hash-dedup
         # (100 µm), so shared edges/vertices collapse to one index. np.unique
         # returns the inverse map, which becomes the (T,3) triangle index list.
-        all_verts = np.concatenate(scan_vert_blocks).reshape(-1, 3)
-        triangle_scan_ids = np.concatenate(scan_id_blocks).tolist()
+        # The big arrays are kept as numpy (not .tolist()) — the endpoint packs
+        # them straight into the binary frame, skipping the list/JSON round-trip.
+        all_verts = tri_v.reshape(-1, 3)
         rounded = np.round(all_verts, 5)
         unique_arr, inverse = np.unique(rounded, axis=0, return_inverse=True)
         # ravel() guards against numpy versions that return inverse as (N,1).
         triangles_arr = inverse.ravel().reshape(-1, 3)
-
-        unique_vertices = unique_arr.tolist()
-        triangles_list = triangles_arr.tolist()
 
         # Surface area from deduplicated data.
         v0 = unique_arr[triangles_arr[:, 0]]
@@ -2646,24 +2822,30 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         # Per-triangle grid cell: bin each triangle's centroid into the request
         # grid (the same grid Helios triangulated within). Lets the UI split the
         # leaf-angle distribution per voxel. With the auto 1x1x1 grid this is all
-        # zeros.
+        # zeros. -1 (outside) is preserved; the binary packer casts it to the
+        # uint32 sentinel 0xffffffff the renderer already treats as "outside".
         centroids = (v0 + v1 + v2) / 3.0
         triangle_cell_ids = _bin_points_to_cells(
             centroids, grid_center, grid_size, grid_nx, grid_ny, grid_nz
-        ).tolist()
+        )
 
         return {
             "success": True,
-            "vertices": unique_vertices,
-            "triangles": triangles_list,
+            "vertices": unique_arr,
+            "triangles": triangles_arr,
             "surface_area": total_area,
-            "num_triangles": len(triangles_list),
-            "num_vertices": len(unique_vertices),
+            "num_triangles": int(triangles_arr.shape[0]),
+            "num_vertices": int(unique_arr.shape[0]),
             "method_used": "helios",
-            "triangle_scan_ids": triangle_scan_ids,
+            "triangle_scan_ids": kept_scan_ids,
             "triangle_cell_ids": triangle_cell_ids,
+            # Loosening limits of the returned set + the auto-estimate, so the
+            # front-end can seed and bound its interactive filter.
+            "cap_lmax": cap_lmax,
+            "cap_aspect": cap_aspect,
+            "candidate_count": n_cand,
+            "estimate": estimate,
             "diagnostics": diag,
-            "diagnostics_warning": _triangulation_quality_warning(diag),
             "grid_warning": grid_warning,
             "grid_message": grid_message,
         }
@@ -2695,180 +2877,53 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _pack_helios_triangulation(result: dict) -> bytes:
+    """Pack a _do_helios_computation result dict into a PHB1 binary frame: the
+    big arrays (vertices, triangles, per-triangle scan/cell ids) become buffers,
+    everything else (counts, estimate, cap, diagnostics, warnings) goes in meta."""
+    if not result.get("success"):
+        return _bin_frame_bytes({
+            "success": False,
+            "error": result.get("error"),
+            "diagnostics": result.get("diagnostics"),
+            "grid_warning": result.get("grid_warning", False),
+            "grid_message": result.get("grid_message"),
+        }, [])
+
+    meta = {
+        "success": True,
+        "method_used": result.get("method_used", "helios"),
+        "num_triangles": result["num_triangles"],
+        "num_vertices": result["num_vertices"],
+        "surface_area": result.get("surface_area"),
+        "cap_lmax": result.get("cap_lmax"),
+        "cap_aspect": result.get("cap_aspect"),
+        "candidate_count": result.get("candidate_count"),
+        "estimate": result.get("estimate"),
+        "diagnostics": result.get("diagnostics"),
+        "grid_warning": result.get("grid_warning", False),
+        "grid_message": result.get("grid_message"),
+    }
+    buffers = [
+        ("vertices", result["vertices"], "f32"),
+        ("triangles", result["triangles"], "u32"),
+        # -1 (outside grid) wraps to the 0xffffffff sentinel the renderer expects.
+        ("triangle_scan_ids", result["triangle_scan_ids"], "u32"),
+        ("triangle_cell_ids", np.asarray(result["triangle_cell_ids"]).astype(np.int64) & 0xFFFFFFFF, "u32"),
+    ]
+    return _bin_frame_bytes(meta, buffers)
+
+
 @app.post("/api/triangulate/helios")
 async def helios_triangulate(request: HeliosTriangulationRequest):
     """Triangulate point cloud data using PyHelios spherical Delaunay triangulation.
 
-    Uses StreamingResponse with periodic keepalive whitespace to prevent
-    WebKit's ~60s stall timeout on long-running computations.
-    JSON parsers ignore leading whitespace, so " {...}" parses identically to "{...}".
+    Returns a PHB1 binary frame (see _bin_frame_bytes) so multi-million-triangle
+    meshes transfer compactly and parse as zero-copy typed arrays. Keepalive
+    chunks during the (long) computation keep WebKit's stall timeout at bay.
     """
-    import asyncio
+    return _bin_frame_streaming_response(lambda: _pack_helios_triangulation(_do_helios_computation(request)))
 
-    def compute_and_serialize():
-        """Run computation + JSON serialization together in one thread."""
-        result = _do_helios_computation(request)
-        return json.dumps(result)
-
-    async def stream_result():
-        loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(None, compute_and_serialize)
-
-        # Send keepalive whitespace every 5s while computation + serialization runs.
-        # This prevents WebKit from killing the connection due to stall timeout.
-        while not future.done():
-            yield " "
-            await asyncio.sleep(5)
-
-        yield await future
-
-    return StreamingResponse(stream_result(), media_type="application/json")
-
-
-# ==================== HELIOS Lmax SUGGESTION ====================
-# Suggest a triangulation Lmax + a separation-confidence from the candidate
-# triangle edge-length distribution, without any ground-truth labels. Premise:
-# valid triangles connect adjacent points on one leaf surface (edge ~ point
-# spacing); erroneous triangles bridge different leaves (edge ~ inter-leaf gap).
-# When those scales separate, the log edge-length histogram is bimodal and Otsu's
-# threshold sits in the valley. The between-class/total variance ratio (eta) is
-# the separability — high when the two scales are cleanly split, low when they
-# overlap (leaves close relative to scan resolution). This was validated against
-# labelled synthetic scans + real redbud TLS (see backend-api/research/).
-
-class HeliosSuggestResponse(BaseModel):
-    """Suggested Lmax + separation confidence for Helios triangulation."""
-    success: bool
-    suggested_lmax: float = 0.0       # meters, Otsu threshold on log edge lengths
-    confidence: float = 0.0           # separability eta in [0,1]
-    confidence_label: str = "n/a"     # High / Medium / Low
-    candidate_count: int = 0          # unfiltered candidate triangles analysed
-    drop_fraction: float = 0.0        # fraction of candidates above suggested_lmax
-    point_spacing: float = 0.0        # meters, 5th-pct candidate edge (~point spacing)
-    # Merged-cloud guard: a single Helios scan that is actually a registered merge
-    # of multiple scan positions confounds the single-origin angular Delaunay (it
-    # bridges points seen from different real scanners). Flagged when a scan's bulk
-    # edge scale dwarfs its finest spacing.
-    merged_warning: bool = False
-    merged_message: Optional[str] = None
-    error: Optional[str] = None
-
-
-# A scan looks like a merged multi-scan cloud when its median candidate edge is
-# this many times its 5th-percentile edge (the finest true spacing). Single-
-# viewpoint scans triangulate true neighbours so the bulk stays close to the
-# spacing; merged clouds connect across surfaces from different origins and run
-# far higher. Measured on real redbud TLS: single scan positions ~4-5x, a 17-
-# position merged cloud ~16x — so 10 separates them with margin both ways. This
-# is an advisory heuristic, not a hard gate.
-_SUGGEST_MERGED_RATIO = 10.0
-
-
-def _otsu_threshold_eta(log_vals, nbins: int = 256):
-    """Otsu's threshold + separability eta on 1-D values (here log edge lengths).
-    eta = max between-class variance / total variance, in [0, 1] (1 = cleanly
-    bimodal, 0 = unimodal). Pure numpy; mirrors research/leaf_triangulation_separation."""
-    import numpy as np
-    if len(log_vals) < 8 or np.allclose(log_vals, log_vals[0]):
-        return float("nan"), 0.0
-    hist, bin_edges = np.histogram(log_vals, bins=nbins)
-    centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    p = hist.astype(np.float64) / max(hist.sum(), 1)
-    omega = np.cumsum(p)
-    mu = np.cumsum(p * centers)
-    mu_t = mu[-1]
-    denom = omega * (1.0 - omega)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        sigma_b2 = np.where(denom > 1e-12, (mu_t * omega - mu) ** 2 / denom, 0.0)
-    idx = int(np.argmax(sigma_b2))
-    total_var = float((p * (centers - mu_t) ** 2).sum())
-    eta = float(sigma_b2[idx] / (total_var + 1e-12))
-    return float(centers[idx]), max(0.0, min(1.0, eta))
-
-
-def _do_helios_suggest(request: "HeliosTriangulationRequest") -> dict:
-    """Run the unfiltered candidate triangulation and derive a suggested Lmax +
-    separation confidence + merged-cloud flag. Reuses the exact shipping
-    triangulation path so the suggestion reflects what the real run will produce."""
-    import numpy as np
-
-    # Same triangulation users hit, but keep every candidate (only NaN-degenerate
-    # dropped) so we see the full edge-length distribution. `edges_only` returns
-    # the raw per-triangle edge lengths as numpy, skipping the dedup + Python-list
-    # serialization that dominates the suggest cost on large clouds.
-    keep_all = request.model_copy(update={"lmax": 1.0e9, "max_aspect_ratio": 1.0e9})
-    res = _do_helios_computation(keep_all, edges_only=True)
-    if not res.get("success"):
-        return {"success": False,
-                "error": res.get("error") or "No candidate triangles to analyze."}
-
-    edges = np.asarray(res["edges"], dtype=np.float64)
-    scan_ids = np.asarray(res["scan_ids"], dtype=np.int64)
-    keep = edges > 0
-    edges, scan_ids = edges[keep], scan_ids[keep]
-    if len(edges) < 16:
-        return {"success": False, "error": "Too few candidate triangles to analyze."}
-
-    thr_log, eta = _otsu_threshold_eta(np.log(edges))
-    if not math.isfinite(thr_log):
-        return {"success": False, "error": "Candidate edges are degenerate (no spread)."}
-    suggested = float(np.exp(thr_log))
-    drop_fraction = float((edges > suggested).mean())
-    point_spacing = float(np.percentile(edges, 5))
-
-    # Merged-cloud guard, evaluated PER scan (each is triangulated independently),
-    # so one merged scan in a multi-scan selection is still caught.
-    merged_scan_ids = []
-    for s in np.unique(scan_ids):
-        e = edges[scan_ids == s]
-        if len(e) < 64:
-            continue
-        ratio = float(np.median(e)) / max(float(np.percentile(e, 5)), 1e-9)
-        if ratio > _SUGGEST_MERGED_RATIO:
-            merged_scan_ids.append(int(s))
-    merged = len(merged_scan_ids) > 0
-    merged_message = (
-        "These points look like a merged multi-scan cloud — candidate edges are far "
-        "larger than the point spacing, which happens when a single scan actually "
-        "combines several scanner positions. Helios triangulation assumes single-scan-"
-        "position data, so it bridges surfaces seen from different origins. Triangulate "
-        "each scan position separately for a clean result."
-    ) if merged else None
-
-    label = "High" if eta >= 0.7 else ("Medium" if eta >= 0.5 else "Low")
-    return {
-        "success": True,
-        "suggested_lmax": suggested,
-        "confidence": eta,
-        "confidence_label": label,
-        "candidate_count": int(len(edges)),
-        "drop_fraction": drop_fraction,
-        "point_spacing": point_spacing,
-        "merged_warning": merged,
-        "merged_message": merged_message,
-    }
-
-
-@app.post("/api/triangulate/helios/suggest")
-async def helios_suggest(request: HeliosTriangulationRequest):
-    """Suggest a triangulation Lmax + separation confidence (+ merged-cloud guard)
-    from the candidate edge-length distribution. Streams keepalive whitespace like
-    /api/triangulate/helios so the (full unfiltered) triangulation doesn't stall
-    WebKit's ~60s timeout."""
-    import asyncio
-
-    def compute_and_serialize():
-        return json.dumps(_do_helios_suggest(request))
-
-    async def stream_result():
-        loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(None, compute_and_serialize)
-        while not future.done():
-            yield " "
-            await asyncio.sleep(5)
-        yield await future
-
-    return StreamingResponse(stream_result(), media_type="application/json")
 
 
 # Tokens the Helios ASCII loader stores into a hit's data map (the `else` branch
@@ -3327,6 +3382,25 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
                     "(no miss points were present, but a timestamp column was)."
                 )
 
+        # calculateLeafArea() needs miss points (transmitted beams) for the
+        # Beer's-law denominator and fail-fasts without them. If the cloud carried
+        # no misses AND gapfilling couldn't run (no timestamp to gap-fill from),
+        # there is no way to obtain them — surface a clear, actionable error here
+        # rather than letting the raw Helios exception bubble up through the generic
+        # handler below. (When gapfill did run, trust it; the C++ check still backstops.)
+        if not any_has_misses and not do_gapfill:
+            return {
+                "success": False,
+                "cells": [],
+                "method_used": "helios",
+                "error": "This scan has no sky/miss points, so leaf area density "
+                         "cannot be computed — the inversion needs beams that passed "
+                         "through the canopy without returning. Re-import a scan that "
+                         "retains misses (E57 / structured PLY) or carries a timestamp "
+                         "column so misses can be recovered by gapfilling.",
+                "warnings": warnings,
+            }
+
         with Context() as ctx:
             cloud.calculateLeafArea(ctx, request.min_voxel_hits)
 
@@ -3560,8 +3634,7 @@ class LidarScanResponse(BaseModel):
 _LIDAR_STANDARD_HIT_FIELDS = ["intensity", "distance", "timestamp", "target_index", "target_count"]
 
 
-@app.post("/api/lidar/scan", response_model=LidarScanResponse)
-async def lidar_scan(request: LidarScanRequest):
+def _do_lidar_scan(request: LidarScanRequest) -> dict:
     """
     Perform a true ray-traced synthetic LiDAR scan of the supplied geometry.
 
@@ -3581,14 +3654,14 @@ async def lidar_scan(request: LidarScanRequest):
     """
     try:
         if not request.meshes:
-            return LidarScanResponse(success=False, error="No geometry to scan")
+            return {"success": False, "error": "No geometry to scan"}
         if not request.scanners:
-            return LidarScanResponse(success=False, error="No scanners defined")
+            return {"success": False, "error": "No scanners defined"}
 
         # Total triangle count guards against accidentally feeding a huge mesh.
         total_tris = sum(len(m.triangles) for m in request.meshes)
         if total_tris < 1:
-            return LidarScanResponse(success=False, error="Geometry has no triangles")
+            return {"success": False, "error": "Geometry has no triangles"}
 
         from pyhelios import LiDARCloud, Context
 
@@ -3639,8 +3712,11 @@ async def lidar_scan(request: LidarScanRequest):
                         append=False,
                     )
                 else:
-                    # Discrete-return: never records misses, so only real hits return.
-                    lidar.syntheticScan(ctx)
+                    # Discrete-return: only real surface hits, no miss points.
+                    # record_misses defaults to True in the wrapper, so pass it
+                    # explicitly — otherwise rays that miss the geometry come back
+                    # as far placeholder points (e.g. z≈-1000) and pollute the cloud.
+                    lidar.syntheticScan(ctx, record_misses=False)
 
                 # Prepare per-scanner accumulators keyed by Helios scanID (= index).
                 fields_to_read = _LIDAR_STANDARD_HIT_FIELDS + extra_fields
@@ -3672,7 +3748,7 @@ async def lidar_scan(request: LidarScanRequest):
                         else:
                             bucket["scalars"][f].append(float("nan"))
 
-        out: List[LidarScanResult] = []
+        out = []
         for r in results:
             npts = len(r["points"])
             # Drop scalar fields that never resolved (all-NaN) so the renderer
@@ -3681,20 +3757,53 @@ async def lidar_scan(request: LidarScanRequest):
                 k: v for k, v in r["scalars"].items()
                 if any(val == val for val in v)  # any non-NaN
             }
-            out.append(LidarScanResult(
-                scanner_id=r["scanner_id"],
-                points=r["points"],
-                colors=r["colors"] if npts else None,
-                scalars=scalars,
-                num_points=npts,
-            ))
+            out.append({
+                "scanner_id": r["scanner_id"],
+                "points": r["points"],
+                "colors": r["colors"] if npts else None,
+                "scalars": scalars,
+                "num_points": npts,
+            })
 
-        return LidarScanResponse(success=True, results=out)
+        return {"success": True, "results": out}
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Synthetic LiDAR scan failed: {str(e)}")
+        return {"success": False, "error": f"Synthetic LiDAR scan failed: {str(e)}"}
+
+
+def _pack_lidar_scan(result: dict) -> bytes:
+    """Pack a _do_lidar_scan result into a PHB1 frame: per-scanner points / colors
+    / scalar fields become buffers (named s{i}.points, s{i}.colors, s{i}.scalar{j}),
+    and meta carries the per-scanner descriptors (id, count, has_colors, the
+    ordered scalar field names)."""
+    if not result.get("success"):
+        return _bin_frame_bytes({"success": False, "error": result.get("error")}, [])
+    scanners_meta = []
+    buffers = []
+    for i, r in enumerate(result["results"]):
+        npts = int(r["num_points"])
+        fields = list(r["scalars"].keys())
+        has_colors = r["colors"] is not None and npts > 0
+        scanners_meta.append({
+            "scanner_id": r["scanner_id"], "num_points": npts,
+            "has_colors": has_colors, "scalar_fields": fields,
+        })
+        pts = np.asarray(r["points"], dtype=np.float32).reshape(-1) if npts else np.empty(0, np.float32)
+        buffers.append((f"s{i}.points", pts, "f32"))
+        if has_colors:
+            buffers.append((f"s{i}.colors", np.asarray(r["colors"], dtype=np.float32).reshape(-1), "f32"))
+        for j, f in enumerate(fields):
+            buffers.append((f"s{i}.scalar{j}", np.asarray(r["scalars"][f], dtype=np.float32).reshape(-1), "f32"))
+    return _bin_frame_bytes({"success": True, "scanners": scanners_meta}, buffers)
+
+
+@app.post("/api/lidar/scan")
+async def lidar_scan(request: LidarScanRequest):
+    """Ray-traced synthetic LiDAR scan. Returns a PHB1 binary frame (points +
+    scalars per scanner can be millions of values)."""
+    return _bin_frame_streaming_response(lambda: _pack_lidar_scan(_do_lidar_scan(request)))
 
 
 # ==================== TREE SKELETON EXTRACTION (BFS Graph-Based Algorithm) ====================
@@ -8436,8 +8545,15 @@ _GRID_INDEX_LABELS = {
     'row_index': 'Row Index',
     'column_index': 'Column Index',
 }
+# 'is_miss' is the canonical sky/miss slug (`_MISS_SLUG`, defined below). It's
+# spelled literally here because `_MISS_SLUG` is declared after this set; keeping
+# it in the known-roles set lets `_tokenize_ascii_format` preserve an
+# `<ASCII_format>x y z is_miss</ASCII_format>` token instead of dropping it to
+# 'skip' — which previously zeroed the miss column on import and broke LAD's
+# Beer's-law inversion (it needs through-canopy miss rays).
 _XYZ_KNOWN_ROLES = (
-    _XYZ_DATA_ROLES | set(_MULTI_RETURN_SLUGS) | set(_GRID_INDEX_SLUGS) | {'deviation'}
+    _XYZ_DATA_ROLES | set(_MULTI_RETURN_SLUGS) | set(_GRID_INDEX_SLUGS)
+    | {'deviation', 'is_miss'}
 )
 
 # Per-point sky/miss flag carried as a LAS extra dimension (0.0 = hit, 1.0 =
@@ -9120,6 +9236,72 @@ def _pack_pointcloud_response(positions: np.ndarray,
             yield np.ascontiguousarray(intensity, dtype=np.float32).tobytes()
 
     return StreamingResponse(chunks(), media_type='application/octet-stream')
+
+
+# ==================== GENERIC BINARY FRAME (PHB1) ====================
+# Large array responses (meshes, scans, voxel grids) are sent as a binary frame
+# instead of JSON: ~3-4x smaller, no per-number text parsing, and no V8 ~512 MB
+# string-length ceiling (which broke big triangulations). Layout (little-endian):
+#   0            4         magic 'PHB1'
+#   4            4         uint32 header_len
+#   8            header_len JSON header, space-padded to a multiple of 4:
+#                            {"meta": {...small scalars/lists...},
+#                             "buffers": [{"name","dtype":"f32"|"u32","length"}]}
+#   8+header_len ...        the buffers, concatenated in header order
+# magic+len (8) + padded header keep every buffer at a 4-byte-aligned offset, so
+# the renderer makes zero-copy Float32Array/Uint32Array views. `meta` carries
+# everything that isn't a big array (counts, estimate, grid, warnings, errors).
+_BIN_FRAME_MAGIC = b"PHB1"
+
+
+def _json_safe(o):
+    """json.dumps default= for stray numpy scalars in `meta`."""
+    if hasattr(o, "item"):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    raise TypeError(f"not JSON-serializable: {type(o)}")
+
+
+def _bin_frame_bytes(meta: dict, buffers: "list[tuple]") -> bytes:
+    """Pack a PHB1 frame. `buffers` is a list of (name, array, dtype) where dtype
+    is 'f32' or 'u32'; arrays are raveled to little-endian contiguous bytes."""
+    import struct
+    descs = []
+    payloads = []
+    for name, arr, dtype in buffers:
+        np_dtype = np.float32 if dtype == "f32" else np.uint32
+        a = np.ascontiguousarray(arr, dtype=np_dtype).ravel()
+        payloads.append(a.tobytes())
+        descs.append({"name": name, "dtype": dtype, "length": int(a.size)})
+    header = json.dumps({"meta": meta, "buffers": descs}, default=_json_safe).encode("utf-8")
+    header += b" " * ((-len(header)) % 4)  # pad so buffers land on 4-byte offsets
+    out = bytearray()
+    out += _BIN_FRAME_MAGIC
+    out += struct.pack("<I", len(header))
+    out += header
+    for p in payloads:
+        out += p
+    return bytes(out)
+
+
+def _bin_frame_streaming_response(build_frame) -> StreamingResponse:
+    """Run build_frame() (returns PHB1 bytes) off-thread, emitting 4-byte
+    whitespace keepalives every 5s until it's done (so WebKit's ~60s stall
+    timeout doesn't fire on long computations), then the frame. The keepalive is
+    4 bytes so the total leading padding stays a multiple of 4 — the renderer
+    skips it and the frame's buffers remain 4-byte aligned for zero-copy decode."""
+    import asyncio
+
+    async def stream():
+        loop = asyncio.get_event_loop()
+        fut = loop.run_in_executor(None, build_frame)
+        while not fut.done():
+            yield b"    "
+            await asyncio.sleep(5)
+        yield await fut
+
+    return StreamingResponse(stream(), media_type="application/octet-stream")
 
 
 def _load_xyz_arrays(

@@ -239,7 +239,10 @@ def scan_plant(ctx, scanners: List[Scanner], n_theta: int, n_phi: int,
                 range_noise_stddev=float(range_noise),
                 angle_noise_stddev=float(angle_noise),
             )
-        lidar.syntheticScan(ctx)
+        # Discrete-return: only real surface hits. record_misses defaults to True
+        # in the wrapper, so pass it explicitly — otherwise missed rays return as
+        # far placeholder points with no organ_id and pollute the candidate set.
+        lidar.syntheticScan(ctx, record_misses=False)
         n = lidar.getHitCount()
         if n == 0:
             return np.empty((0, 3)), np.empty((0,)), np.empty((0,), dtype=np.int64)
@@ -291,7 +294,8 @@ def triangulate_candidates(xyz: np.ndarray, organ: np.ndarray, sid: np.ndarray,
 
     res = _do_helios_computation(HeliosTriangulationRequest(
         scans=entries, lmax=_KEEP_ALL, max_aspect_ratio=_KEEP_ALL))
-    if not res.get("success") or not res.get("triangles"):
+    tris = res.get("triangles")
+    if not res.get("success") or tris is None or len(tris) == 0:
         return np.empty((0,)), np.empty((0,), dtype=bool), 0
 
     V = np.asarray(res["vertices"], dtype=np.float64)

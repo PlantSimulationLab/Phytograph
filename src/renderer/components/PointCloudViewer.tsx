@@ -56,6 +56,8 @@ import {
   resampleCloud,
   cloneFlatPointCloudData,
 } from '../lib/pointCloudHelpers';
+import { applyHeliosFilter, computeHeliosMetrics, heliosFilterCounts } from '../lib/heliosFilter';
+import type { HeliosFilterEstimate } from '../lib/heliosFilter';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
 import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, GROUND_CLASS_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
@@ -256,6 +258,31 @@ function nextSelection(
   if (prev.has(id) && additive) next.delete(id);
   else next.add(id);
   return next;
+}
+
+// Build the `triangulationParams` provenance block for a Helios mesh under a
+// given interactive filter. The kept/dropped counts come from the unfiltered
+// candidate metrics (heliosFilterCounts), so the mesh-list breakdown updates
+// live as the user adjusts Lmax/aspect. `candidateTriangles` includes the
+// degenerate triangles the backend already excluded, so the displayed total
+// reconciles: candidates === kept + droppedLmax + droppedAspect + degenerate.
+function buildHeliosTriParams(
+  unfilteredData: MeshData,
+  lmax: number,
+  maxAspectRatio: number,
+  scanCount: number,
+  droppedDegenerate: number,
+): NonNullable<MeshEntry['triangulationParams']> {
+  const c = heliosFilterCounts(unfilteredData, lmax, maxAspectRatio);
+  return {
+    lmax,
+    maxAspectRatio,
+    scanCount,
+    candidateTriangles: c.candidates + droppedDegenerate,
+    droppedLmax: c.droppedLmax,
+    droppedAspect: c.droppedAspect,
+    droppedDegenerate,
+  };
 }
 
 export default function PointCloudViewer({
@@ -3931,38 +3958,29 @@ export default function PointCloudViewer({
   // a dedicated `intensities` array (so "color by intensity" works), and the rest
   // of the per-hit scalars as named scalarFields (each with min/max), plus bounds.
   const buildScanCloudData = useCallback((result: LidarScanResult, fileName: string): PointCloudData | null => {
-    const n = result.num_points;
+    const n = result.numPoints;
     if (n === 0) return null;
 
-    const positions = new Float32Array(n * 3);
+    // Points arrive as a flat xyz Float32Array (zero-copy from the binary frame).
+    const positions = result.points;
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let i = 0; i < n; i++) {
-      const x = result.points[i][0], y = result.points[i][1], z = result.points[i][2];
-      positions[i * 3] = x; positions[i * 3 + 1] = y; positions[i * 3 + 2] = z;
+      const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
       if (x < minX) minX = x; if (x > maxX) maxX = x;
       if (y < minY) minY = y; if (y > maxY) maxY = y;
       if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
     }
 
-    let colors: Float32Array | undefined;
-    if (result.colors && result.colors.length === n) {
-      colors = new Float32Array(n * 3);
-      for (let i = 0; i < n; i++) {
-        colors[i * 3] = result.colors[i][0];
-        colors[i * 3 + 1] = result.colors[i][1];
-        colors[i * 3 + 2] = result.colors[i][2];
-      }
-    }
+    const colors = result.colors && result.colors.length === n * 3 ? result.colors : undefined;
 
     // Turn each returned scalar list into a ScalarField (min/max, variance-checked).
     // `intensity` also populates the dedicated `intensities` array used by the
     // intensity color mode + filter.
     let intensities: Float32Array | undefined;
     const scalarFields: Record<string, ScalarField> = {};
-    for (const [name, values] of Object.entries(result.scalars)) {
-      if (!values || values.length !== n) continue;
-      const arr = new Float32Array(values);
+    for (const [name, arr] of Object.entries(result.scalars)) {
+      if (!arr || arr.length !== n) continue;
       let mn = Infinity, mx = -Infinity;
       for (const v of arr) { if (Number.isFinite(v)) { if (v < mn) mn = v; if (v > mx) mx = v; } }
       if (name === 'intensity') intensities = arr;
@@ -4030,15 +4048,15 @@ export default function PointCloudViewer({
       let scannersWithHits = 0;
 
       for (const result of response.results) {
-        const scanner = scannerById.get(result.scanner_id);
+        const scanner = scannerById.get(result.scannerId);
         if (!scanner) continue;
-        if (result.num_points === 0) continue;
+        if (result.numPoints === 0) continue;
 
         const baseName = `${scanDisplayName(scanner)}_scan`;
         const data = buildScanCloudData(result, baseName);
         if (!data) continue;
 
-        totalPoints += result.num_points;
+        totalPoints += result.numPoints;
         scannersWithHits++;
 
         const alreadyHasData = hasData(scanner);
@@ -4313,30 +4331,20 @@ export default function PointCloudViewer({
       }
 
       const response = await triangulatePointCloud(request);
-      console.log('Triangulation response:', response);
 
       if (!response.success) {
         throw new Error(response.error || 'Triangulation failed');
       }
 
-      console.log('Converting response data...');
-      console.log('Vertices count:', response.vertices?.length, 'sample:', response.vertices?.[0]);
-      console.log('Triangles count:', response.triangles?.length, 'sample:', response.triangles?.[0]);
-
-      // Convert response to MeshData
-      const vertices = new Float32Array(response.vertices.flat());
-      const indices = new Uint32Array(response.triangles.flat());
-      const normals = response.normals ? new Float32Array(response.normals.flat()) : undefined;
-
-      console.log('Converted - vertices:', vertices.length, 'indices:', indices.length);
-
+      // The big arrays arrive as zero-copy typed-array views over the binary
+      // frame — used directly (no .flat()).
       const meshData: MeshData = {
-        vertices,
-        indices,
-        normals,
-        vertexCount: response.num_vertices,
-        triangleCount: response.num_triangles,
-        surfaceArea: response.surface_area,
+        vertices: response.vertices,
+        indices: response.triangles,
+        normals: response.normals,
+        vertexCount: response.numVertices,
+        triangleCount: response.numTriangles,
+        surfaceArea: response.surfaceArea,
       };
 
       // Capture the parameters actually used, for provenance + default naming.
@@ -4344,7 +4352,7 @@ export default function PointCloudViewer({
       const triangulationParams: NonNullable<MeshEntry['triangulationParams']> = {
         normalRadius: request.normal_radius,
         normalMaxNn: request.normal_max_nn,
-        pointsUsed: response.points_used,
+        pointsUsed: response.pointsUsed,
       };
       if (triangulationMethod === 'poisson') {
         triangulationParams.depth = poissonDepth;
@@ -4371,18 +4379,21 @@ export default function PointCloudViewer({
       setMeshScales(prev => new Map(prev).set(meshEntry.id, { x: 1, y: 1, z: 1 }));
       setMeshRotations(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
       setShowTriangulationPanel(false);
+      // Hide the source scan so its points don't obscure the new mesh (mirrors
+      // the QSM build). The cloud stays in the list and can be re-shown.
+      onHideScan(cloud.id);
       console.log('Triangulation completed successfully!');
 
       // Warn when the global triangulate cap downsampled a streamed cloud.
       if (
         ps.kind === 'source' &&
-        typeof response.points_used === 'number' &&
-        response.points_used < cloud.data.pointCount
+        typeof response.pointsUsed === 'number' &&
+        response.pointsUsed < cloud.data.pointCount
       ) {
         showToast({
           type: 'warning',
           title: 'Cloud downsampled for triangulation',
-          message: `Triangulated ${response.points_used.toLocaleString()} of ${cloud.data.pointCount.toLocaleString()} points (Settings → Triangulate max points). Raise the cap for more detail.`,
+          message: `Triangulated ${response.pointsUsed.toLocaleString()} of ${cloud.data.pointCount.toLocaleString()} points (Settings → Triangulate max points). Raise the cap for more detail.`,
         });
       }
 
@@ -4404,7 +4415,7 @@ export default function PointCloudViewer({
     } finally {
       setTriangulationInProgress(false);
     }
-  }, [selectedIds, clouds, buildPointSource, triangulationMethod, poissonDepth, alphaValue, triangulateMaxPoints]);
+  }, [selectedIds, clouds, buildPointSource, triangulationMethod, poissonDepth, alphaValue, triangulateMaxPoints, onHideScan]);
 
   // Segment ground vs plant points (Cloth Simulation Filter). Writes a
   // `ground_class` scalar attribute (1=ground, 2=plant) and colors by it.
@@ -7120,7 +7131,7 @@ export default function PointCloudViewer({
   // Handle Helios triangulation as a background task with cancel support.
   // `scanColors` is aligned 1:1 with request.scans so we can stash per-triangle
   // scan provenance (and the matching colors) on the resulting mesh.
-  const handleHeliosTriangulate = useCallback(async (request: HeliosTriangulationRequest, scanColors: string[] = []) => {
+  const handleHeliosTriangulate = useCallback(async (request: HeliosTriangulationRequest, scanColors: string[] = [], sourceScanIds: string[] = []) => {
     if (isHeliosRunning) return;
 
     const abort = new AbortController();
@@ -7137,18 +7148,17 @@ export default function PointCloudViewer({
         return;
       }
 
-      // Process result into mesh
-      const vertices = new Float32Array(response.vertices.flat());
-      const indices = new Uint32Array(response.triangles.flat());
-      const vertexColors = response.colors ? new Float32Array(response.colors.flat()) : undefined;
+      // The big arrays arrive as zero-copy typed-array views over the binary
+      // frame — used directly (no .flat()/JSON.parse). Helios sends no per-vertex
+      // colors or normals, so colors are absent and normals are computed here.
+      const vertices = response.vertices;
+      const indices = response.triangles;
+      const vertexColors: Float32Array | undefined = undefined;
 
-      // Compute per-vertex normals from indexed mesh geometry
-      let normals: Float32Array | undefined;
-      if (response.normals && response.normals.length === response.num_vertices) {
-        normals = new Float32Array(response.normals.flat());
-      } else {
-        normals = new Float32Array(response.num_vertices * 3);
-        for (let t = 0; t < response.num_triangles; t++) {
+      // Compute per-vertex normals from indexed mesh geometry.
+      const normals = new Float32Array(response.numVertices * 3);
+      {
+        for (let t = 0; t < response.numTriangles; t++) {
           const i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
           const ax = vertices[i1 * 3] - vertices[i0 * 3];
           const ay = vertices[i1 * 3 + 1] - vertices[i0 * 3 + 1];
@@ -7163,19 +7173,17 @@ export default function PointCloudViewer({
             normals[vi * 3 + 2] += nz;
           }
         }
-        for (let i = 0; i < response.num_vertices; i++) {
+        for (let i = 0; i < response.numVertices; i++) {
           const vi = i * 3;
           const len = Math.sqrt(normals[vi] ** 2 + normals[vi + 1] ** 2 + normals[vi + 2] ** 2);
           if (len > 1e-10) { normals[vi] /= len; normals[vi + 1] /= len; normals[vi + 2] /= len; }
         }
       }
 
-      // Per-triangle scan provenance + the matching scan colors, so the mesh
-      // can be colored by source scan. Only attach when the backend returned
-      // ids aligned with the triangle list and we have colors for them.
-      const triangleScanIds = response.triangle_scan_ids
-        && response.triangle_scan_ids.length === response.num_triangles
-        ? Uint32Array.from(response.triangle_scan_ids)
+      // Per-triangle scan provenance (already a typed-array view from the frame).
+      const triangleScanIds = response.triangleScanIds
+        && response.triangleScanIds.length === response.numTriangles
+        ? response.triangleScanIds
         : undefined;
 
       // Per-scan sensor origins, keyed by scan index (same order as
@@ -7189,9 +7197,9 @@ export default function PointCloudViewer({
       // Per-triangle grid cell + the grid it was binned in, so the leaf-angle
       // plot can split the distribution per voxel. The backend bins centroids
       // into the request grid (or, when none was supplied, an auto 1×1×1 grid).
-      const triangleCellIds = response.triangle_cell_ids
-        && response.triangle_cell_ids.length === response.num_triangles
-        ? Uint32Array.from(response.triangle_cell_ids)
+      const triangleCellIds = response.triangleCellIds
+        && response.triangleCellIds.length === response.numTriangles
+        ? response.triangleCellIds
         : undefined;
       const grid = request.grid
         ? {
@@ -7203,42 +7211,79 @@ export default function PointCloudViewer({
           }
         : undefined;
 
-      const meshData: MeshData = {
+      // The backend returns a bounded mesh (auto-estimated default; small
+      // candidate sets whole) WITHOUT per-triangle metrics — recompute those
+      // from the returned geometry so the filter can run client-side. This
+      // "returned" mesh is the baseline the interactive filter narrows from.
+      const returnedData: MeshData = {
         vertices,
         indices,
         normals,
         vertexColors,
-        vertexCount: response.num_vertices,
-        triangleCount: response.num_triangles,
-        surfaceArea: response.surface_area,
+        vertexCount: response.numVertices,
+        triangleCount: response.numTriangles,
+        surfaceArea: response.surfaceArea,
         triangleScanIds,
         scanColors: triangleScanIds && scanColors.length > 0 ? scanColors : undefined,
         scanOrigins,
         triangleCellIds,
         grid,
       };
+      const metrics = computeHeliosMetrics(returnedData);
+      returnedData.triEdgeMax = metrics.triEdgeMax;
+      returnedData.triAspect = metrics.triAspect;
+
+      // The backend auto-estimate (Otsu separability + merged-cloud guard),
+      // computed over the FULL candidate distribution. Seeds the default filter.
+      const dto = response.estimate;
+      const estimate: HeliosFilterEstimate = {
+        lmax: dto?.lmax ?? null,
+        eta: dto?.eta ?? 0,
+        label: (dto?.label as HeliosFilterEstimate['label']) ?? 'n/a',
+        sepRatio: dto?.sep_ratio ?? null,
+        sepLabel: (dto?.sep_label as HeliosFilterEstimate['sepLabel']) ?? 'n/a',
+        merged: dto?.merged ?? false,
+        mergedMessage: dto?.merged_message ?? null,
+      };
+      // Loosening limits of the returned set (filter can narrow to these, not
+      // past them, without a re-run).
+      let capLmax = response.capLmax;
+      if (capLmax === undefined || !Number.isFinite(capLmax)) {
+        let m = 0;
+        for (let i = 0; i < metrics.triEdgeMax.length; i++) if (metrics.triEdgeMax[i] > m) m = metrics.triEdgeMax[i];
+        capLmax = m || 1.0;
+      }
+      const capAspect = (response.capAspect !== undefined && Number.isFinite(response.capAspect))
+        ? response.capAspect : 1.0e9;
+
+      // Seed the default filter at the auto-estimate, clamped to the returned
+      // set's cap (so a tighter-than-estimate cap on huge meshes still shows the
+      // full returned mesh). Fall back to the cap when no estimate.
+      const seedLmax = (estimate.lmax != null && Number.isFinite(estimate.lmax))
+        ? Math.min(estimate.lmax, capLmax) : capLmax;
+      const seedAspect = Math.min(4.0, capAspect);
+
+      // The displayed mesh is the filtered view; all consumers of `mesh.data`
+      // (rendering, leaf angles, exports, LAD) see the chosen filter.
+      const filteredData = applyHeliosFilter(returnedData, seedLmax, seedAspect);
 
       const meshEntry: MeshEntry = {
         id: crypto.randomUUID(),
         sourceCloudId: 'helios',
-        data: meshData,
+        data: filteredData,
         visible: true,
         color: '#22c55e',
         method: 'helios',
-        // Provenance for the mesh list: the Helios triangulation parameters and
-        // (when the backend reported them) the filter breakdown, so the user can
-        // see how many candidate triangles Lmax/aspect removed.
-        triangulationParams: {
-          lmax: request.lmax,
-          maxAspectRatio: request.max_aspect_ratio,
-          scanCount: request.scans.length,
-          ...(response.diagnostics ? {
-            candidateTriangles: response.diagnostics.candidates,
-            droppedLmax: response.diagnostics.dropped_lmax,
-            droppedAspect: response.diagnostics.dropped_aspect,
-            droppedDegenerate: response.diagnostics.dropped_degenerate,
-          } : {}),
+        heliosUnfiltered: {
+          data: returnedData,
+          estimate,
+          cap: { lmax: capLmax, maxAspectRatio: capAspect },
         },
+        heliosFilter: { lmax: seedLmax, maxAspectRatio: seedAspect },
+        // Provenance for the mesh list — the filter breakdown updates live as the
+        // user adjusts Lmax/aspect (counts derived from the returned set).
+        triangulationParams: buildHeliosTriParams(
+          returnedData, seedLmax, seedAspect, request.scans.length, 0),
       };
 
       setMeshes(prev => [...prev, meshEntry]);
@@ -7247,33 +7292,51 @@ export default function PointCloudViewer({
       setMeshScales(prev => new Map(prev).set(meshEntry.id, { x: 1, y: 1, z: 1 }));
       setMeshRotations(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
       setShowTriangulationPanel(false);
-      // Include the filter breakdown in the success toast when available, so the
-      // user can see how many candidate triangles Lmax/aspect removed.
-      const d = response.diagnostics;
-      const breakdown = d
-        ? ` (${d.candidates.toLocaleString()} candidates: ${d.dropped_lmax.toLocaleString()} dropped by Lmax, ${d.dropped_aspect.toLocaleString()} by aspect)`
-        : '';
+      // Hide the contributing scans so their points don't obscure the new mesh
+      // (mirrors the QSM build). The scans stay in the list and can be re-shown.
+      for (const id of sourceScanIds) onHideScan(id);
+      // Report the kept count at the seeded auto-estimate; the user refines the
+      // filter live in the Meshes panel without re-triangulating.
+      const lmaxNote = ` (kept at auto Lmax ${(seedLmax * 100).toFixed(1)} cm — adjust in the Meshes panel)`;
       showToast({
         type: 'success',
         title: 'Helios Triangulation Complete',
-        message: `Created mesh with ${meshData.triangleCount.toLocaleString()} triangles${breakdown}`,
+        message: `Created mesh with ${filteredData.triangleCount.toLocaleString()} triangles${lmaxNote}`,
       });
-      // Mesh produced, but almost nothing was filtered → Lmax/aspect may be
-      // bridging real gaps; the mesh could contain spurious spanning triangles.
-      if (response.diagnostics_warning) {
+      // Large datasets are bounded server-side: the returned set is capped, so
+      // the filter can be tightened but not loosened past the cap without a re-run.
+      if (response.candidateCount && response.candidateCount > returnedData.triangleCount) {
+        showToast({
+          type: 'info',
+          title: 'Large mesh — filter bounded',
+          message: `Returned the densest ${returnedData.triangleCount.toLocaleString()} of ${response.candidateCount.toLocaleString()} candidate triangles. You can tighten the filter in the Meshes panel; loosening beyond this needs a re-run.`,
+        });
+      }
+      // Low separation between the intra-leaf and inter-leaf edge scales → the
+      // filter result is sensitive to Lmax; nudge the user to review the mesh.
+      if (estimate.label === 'Low') {
         showToast({
           type: 'warning',
-          title: 'Triangulation filter may be too permissive',
-          message: response.diagnostics_warning,
+          title: 'Low edge-length separation',
+          message: 'The leaf and gap edge scales overlap, so the mesh is sensitive to Lmax — review it and adjust the filter in the Meshes panel.',
+        });
+      }
+      // The points look like a merged multi-scan cloud (single-origin Delaunay
+      // bridges surfaces seen from different scanner positions).
+      if (estimate.merged && estimate.mergedMessage) {
+        showToast({
+          type: 'warning',
+          title: 'Possible merged multi-scan cloud',
+          message: estimate.mergedMessage,
         });
       }
       // No grid box was supplied: the backend fit one to all points. Warn so
       // the user knows ground/trunk should already be segmented or cropped.
-      if (response.grid_warning) {
+      if (response.gridWarning) {
         showToast({
           type: 'warning',
           title: 'No grid box specified',
-          message: response.grid_message
+          message: response.gridMessage
             || 'Triangulated all points within their bounding box. This assumes ground and trunk are already segmented or cropped.',
         });
       }
@@ -7288,13 +7351,42 @@ export default function PointCloudViewer({
       setIsHeliosRunning(false);
       heliosAbortRef.current = null;
     }
-  }, [isHeliosRunning]);
+  }, [isHeliosRunning, onHideScan]);
 
   const cancelHeliosTriangulation = useCallback(() => {
     heliosAbortRef.current?.abort();
     setIsHeliosRunning(false);
     heliosAbortRef.current = null;
   }, []);
+
+  // Re-apply the interactive Helios filter (Lmax / aspect) to a mesh, deriving a
+  // fresh filtered view from its stored unfiltered candidate set. Cheap — it only
+  // rebuilds the index + per-triangle arrays (vertices are shared) — so it runs
+  // synchronously per change. Updates the provenance breakdown so the mesh list
+  // reflects the new filter, and the chosen values flow into the LAD inversion.
+  const handleHeliosFilterChange = useCallback(
+    (meshId: string, next: { lmax: number; maxAspectRatio: number }) => {
+      setMeshes(prev => prev.map(m => {
+        if (m.id !== meshId || !m.heliosUnfiltered) return m;
+        // Clamp to the returned set's loosening cap — triangles past it weren't
+        // returned (would need a re-run), so a larger Lmax/aspect can't add them.
+        const cap = m.heliosUnfiltered.cap;
+        const lmax = Math.min(next.lmax, cap.lmax);
+        const maxAspectRatio = Math.min(next.maxAspectRatio, cap.maxAspectRatio);
+        const data = applyHeliosFilter(m.heliosUnfiltered.data, lmax, maxAspectRatio);
+        return {
+          ...m,
+          data,
+          heliosFilter: { lmax, maxAspectRatio },
+          triangulationParams: buildHeliosTriParams(
+            m.heliosUnfiltered.data, lmax, maxAspectRatio,
+            m.triangulationParams?.scanCount ?? 0,
+            m.triangulationParams?.droppedDegenerate ?? 0),
+        };
+      }));
+    },
+    [],
+  );
 
   // Compute per-voxel leaf area density. Mirrors handleHeliosTriangulate: run
   // against the live backend, then add the result as an LADResultEntry the
@@ -9847,6 +9939,7 @@ export default function PointCloudViewer({
             onOpacityChange={(id, value) => setMeshOpacities(prev => new Map(prev).set(id, value))}
             onWireframeChange={setMeshWireframe}
             onOpenLeafAngles={setShowLeafAngleMeshId}
+            onHeliosFilterChange={handleHeliosFilterChange}
           />
         )}
 
@@ -12291,7 +12384,9 @@ export default function PointCloudViewer({
         meshLabel={displayNameOfMesh}
       />
 
-      {/* Leaf Area Density Popup */}
+      {/* Leaf Area Density Popup. Pre-fill Lmax/aspect from the most-recently
+          adjusted Helios triangulation mesh, so the inversion bakes in the
+          filtering the user dialed in on the mesh (still editable here). */}
       <LADPopup
         isOpen={showLADPopup}
         onClose={() => setShowLADPopup(false)}
@@ -12299,6 +12394,8 @@ export default function PointCloudViewer({
         gridOptions={heliosGridOptions}
         onStartLAD={handleComputeLAD}
         initialSelectedIds={selectedScanIds}
+        defaultLmax={[...meshes].reverse().find(m => m.heliosFilter)?.heliosFilter?.lmax}
+        defaultMaxAspectRatio={[...meshes].reverse().find(m => m.heliosFilter)?.heliosFilter?.maxAspectRatio}
         onOpenScanParams={(id) => {
           setShowLADPopup(false);
           setScanPopupState({ kind: 'edit', id });

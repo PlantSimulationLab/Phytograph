@@ -48,7 +48,12 @@ test('Computes per-voxel leaf area density for the leaf-cube fixture', async () 
     // in mixed mode a plain click keeps the scan and clears the box selection
     // (it does NOT toggle the scan off — that only happens when the scan is the
     // entire selection).
-    await scanRows.nth(0).click();
+    // Click the row's NAME, not the row center: the row packs action buttons
+    // (eye / misses / edit) on the right, each stopping propagation, and a
+    // center click can land on one of those instead of the row's select
+    // handler. The name label has no such child, matching how a user clicks a
+    // scan to focus it.
+    await scanRows.nth(0).getByTestId('scan-row-name').click();
     await expect(scanRows.nth(0)).toHaveAttribute('data-selected', 'true');
 
     await page.getByTestId('tool-compute-lad').click();

@@ -13,6 +13,8 @@ output and dense surface coverage on planar input.
 import numpy as np
 import open3d as o3d
 
+from tests.binframe import decode_bin_frame
+
 
 def _planar_grid(n: int = 30) -> list[list[float]]:
     """An n×n grid on z=0 with a handful of points nudged off-plane — the
@@ -36,7 +38,7 @@ def test_alpha_shape_planar_grid_is_densely_covered(client):
     points = _planar_grid(30)
     res = client.post("/api/triangulate", json={"method": "alpha_shape", "points": points})
     assert res.status_code == 200
-    body = res.json()
+    body, _ = decode_bin_frame(res.content)
 
     assert body["success"] is True
     assert body["method_used"] == "alpha_shape"
@@ -64,7 +66,7 @@ def test_alpha_shape_emits_no_invalid_tetra_warnings(client, capfd):
         json={"method": "alpha_shape", "points": _planar_grid(30)},
     )
     assert res.status_code == 200
-    assert res.json()["success"] is True
+    assert decode_bin_frame(res.content)[0]["success"] is True
 
     out, err = capfd.readouterr()
     assert "invalid tetra" not in out
@@ -76,8 +78,8 @@ def test_alpha_shape_is_deterministic(client):
     identical triangle count — no run-to-run drift from the perturbation."""
     points = _planar_grid(24)
     payload = {"method": "alpha_shape", "points": points}
-    a = client.post("/api/triangulate", json=payload).json()
-    b = client.post("/api/triangulate", json=payload).json()
+    a, _ = decode_bin_frame(client.post("/api/triangulate", json=payload).content)
+    b, _ = decode_bin_frame(client.post("/api/triangulate", json=payload).content)
     assert a["success"] and b["success"]
     assert a["num_triangles"] == b["num_triangles"]
     assert a["num_vertices"] == b["num_vertices"]

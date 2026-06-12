@@ -36,7 +36,9 @@ NTHETA, NPHI = 2600, 5200            # reduced from the C++ 6000x12000
 GRID_CENTER = [0.0, 0.0, 0.5]
 GRID_SIZE = [1.0, 1.0, 1.0]
 
-OUT_DIR = os.path.join(_HERE, "lad-leafcube")
+# Override with LAD_LEAFCUBE_OUT to regenerate the E2E copy
+# (tests/e2e/fixtures/lad-leafcube), which is the same scan.
+OUT_DIR = os.environ.get("LAD_LEAFCUBE_OUT", os.path.join(_HERE, "lad-leafcube"))
 
 
 def main():
@@ -57,18 +59,23 @@ def main():
 
     with Context() as ctx:
         ctx.loadXML(GEOM, True)
-        cloud.syntheticScan(ctx)
+        # Record misses: calculateLeafArea() fail-fasts on a cloud with no miss
+        # points (it needs the transmitted-beam population for the Beer's-law
+        # denominator). Helios tags every hit with is_miss (0.0 return / 1.0 miss);
+        # we persist it as a 4th column so the importer carries misses too.
+        cloud.syntheticScan(ctx, record_misses=True)
         n = cloud.getHitCount()
         cloud.triangulateHitPoints(0.04, 10)
         cloud.calculateLeafArea(ctx)
         lad = cloud.getCellLeafAreaDensity(0)
         gtheta = cloud.getCellGtheta(0)
         positions, _ = cloud.getHitsXYZRGB()
+        is_miss = cloud.getHitDataAll("is_miss")
 
     xyz_path = os.path.join(OUT_DIR, "leafcube.xyz")
     with open(xyz_path, "w") as f:
-        for p in positions:
-            f.write(f"{p.x:.4f} {p.y:.4f} {p.z:.4f}\n")
+        for p, m in zip(positions, is_miss):
+            f.write(f"{p.x:.4f} {p.y:.4f} {p.z:.4f} {1.0 if m else 0.0:.1f}\n")
 
     # XML wrapper so the Phytograph importer attaches the scan params
     # (origin + Ntheta/Nphi) when imported via Add Scan -> Import from XML.
@@ -86,7 +93,7 @@ def main():
             '<helios>\n\n'
             '<scan>\n'
             '  <filename> leafcube.xyz </filename>\n'
-            '  <ASCII_format> x y z </ASCII_format>\n'
+            '  <ASCII_format> x y z is_miss </ASCII_format>\n'
             f'  <origin> {ORIGIN[0]:.6f} {ORIGIN[1]:.6f} {ORIGIN[2]:.6f} </origin>\n'
             f'  <size> {NTHETA} {NPHI} </size>\n'
             '</scan>\n\n'

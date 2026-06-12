@@ -1,8 +1,209 @@
-import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle } from 'lucide-react';
 import type { MeshEntry, MeshColorMode, PointCloudEntry } from '../../../lib/pointCloudTypes';
 import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS } from '../../../lib/pointCloudTypes';
 import { meshHasScanColors } from '../../../lib/pointCloudHelpers';
 import { ColormapName, COLORMAP_NAMES } from '../../../lib/colormaps';
+
+// How long to wait after the last keystroke before re-deriving the filtered
+// mesh. Re-filtering walks every candidate triangle, so firing on each
+// keystroke janks while typing "0.15"; debouncing lets the user finish.
+const FILTER_DEBOUNCE_MS = 350;
+
+// Interactive Lmax / aspect filter for an unfiltered Helios triangulation mesh.
+// Holds its own input state so typing partial numbers doesn't jank, committing
+// each valid change up to the parent (which re-derives the filtered view from
+// the stored candidate set). Commits are debounced so the re-filter only runs
+// once the user pauses typing; Enter/blur commit immediately. The "Auto" button
+// re-applies the Otsu estimate.
+function HeliosFilterControls({
+  mesh,
+  onChange,
+}: {
+  mesh: MeshEntry;
+  onChange: (id: string, next: { lmax: number; maxAspectRatio: number }) => void;
+}) {
+  const filter = mesh.heliosFilter!;
+  const estimate = mesh.heliosUnfiltered!.estimate;
+  const cap = mesh.heliosUnfiltered!.cap;
+  const estLmax = estimate.lmax;
+  const hasEst = estLmax != null && Number.isFinite(estLmax);
+  const [lmaxStr, setLmaxStr] = useState(String(filter.lmax));
+  const [aspectStr, setAspectStr] = useState(String(filter.maxAspectRatio));
+  // Toggles the "how to read these" popover next to the separation readout.
+  const [showHelp, setShowHelp] = useState(false);
+
+  // Resync the inputs when the filter is changed elsewhere (e.g. the Auto button
+  // or a fresh estimate), so the displayed values track the mesh's actual filter.
+  useEffect(() => { setLmaxStr(formatLmax(filter.lmax)); }, [filter.lmax]);
+  useEffect(() => { setAspectStr(String(filter.maxAspectRatio)); }, [filter.maxAspectRatio]);
+
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearPending = () => {
+    if (debounceRef.current !== null) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+  };
+  // Cancel any pending commit on unmount so it can't fire against a stale mesh.
+  useEffect(() => clearPending, []);
+
+  const commitNow = (lmaxValue: string, aspectValue: string) => {
+    clearPending();
+    const lmax = parseFloat(lmaxValue);
+    const maxAspectRatio = parseFloat(aspectValue);
+    if (!(lmax > 0) || !(maxAspectRatio > 0)) return; // ignore empty / partial input
+    onChange(mesh.id, { lmax, maxAspectRatio });
+  };
+
+  // Schedule a commit once typing pauses, replacing any still-pending one.
+  const commitDebounced = (lmaxValue: string, aspectValue: string) => {
+    clearPending();
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null;
+      commitNow(lmaxValue, aspectValue);
+    }, FILTER_DEBOUNCE_MS);
+  };
+
+  // Commit the current input immediately (Enter / blur = explicit confirmation).
+  const commitImmediate = () => commitNow(lmaxStr, aspectStr);
+
+  const confidenceClass =
+    estimate.label === 'High' ? 'text-green-300'
+    : estimate.label === 'Medium' ? 'text-amber-300'
+    : estimate.label === 'Low' ? 'text-red-300'
+    : 'text-neutral-400';
+
+  // Mode separation shares eta's color scale: far-apart modes (High) are a
+  // trustworthy cut; close modes (Low) flag that the auto-Lmax may be slicing
+  // one surface rather than trimming bridges.
+  const separationRatioClass =
+    estimate.sepLabel === 'High' ? 'text-green-300'
+    : estimate.sepLabel === 'Medium' ? 'text-amber-300'
+    : estimate.sepLabel === 'Low' ? 'text-red-300'
+    : 'text-neutral-400';
+
+  return (
+    <div className="space-y-1.5" data-testid="mesh-helios-filter">
+      <div className="text-[10px] text-neutral-400 flex items-center gap-1">
+        <Filter className="w-3 h-3" />
+        Filter
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="text-[9px] text-neutral-500 block mb-0.5">L<sub>max</sub> (m)</label>
+          <input
+            data-testid="mesh-helios-lmax"
+            type="number"
+            step="0.01"
+            min="0.001"
+            max={cap.lmax}
+            value={lmaxStr}
+            onChange={(e) => { setLmaxStr(e.target.value); commitDebounced(e.target.value, aspectStr); }}
+            onBlur={commitImmediate}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitImmediate(); }}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full px-1.5 py-1 bg-neutral-700 border border-neutral-600 rounded text-[11px] text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+          />
+        </div>
+        <div>
+          <label className="text-[9px] text-neutral-500 block mb-0.5">Max aspect</label>
+          <input
+            data-testid="mesh-helios-aspect"
+            type="number"
+            step="0.5"
+            min="1"
+            value={aspectStr}
+            onChange={(e) => { setAspectStr(e.target.value); commitDebounced(lmaxStr, e.target.value); }}
+            onBlur={commitImmediate}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitImmediate(); }}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full px-1.5 py-1 bg-neutral-700 border border-neutral-600 rounded text-[11px] text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+          />
+        </div>
+      </div>
+      <div className="flex items-center justify-between">
+        <button
+          data-testid="mesh-helios-auto"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!hasEst) return;
+            setLmaxStr(formatLmax(estLmax!));
+            commitNow(String(estLmax), aspectStr);
+          }}
+          disabled={!hasEst}
+          title="Auto-estimate Lmax from the candidate edge-length distribution"
+          className={`flex items-center gap-1 text-[10px] transition-colors ${
+            hasEst ? 'text-green-400 hover:text-green-300' : 'text-neutral-600 cursor-not-allowed'
+          }`}
+        >
+          <Wand2 className="w-3 h-3" /> Auto
+        </button>
+        {estimate.label !== 'n/a' && (
+          <div className="relative flex items-center gap-1">
+            <span data-testid="mesh-helios-separation" className={`text-[10px] ${confidenceClass}`}>
+              Separation: {estimate.label} (η {estimate.eta.toFixed(2)})
+              {estimate.sepRatio != null && (
+                <span className={separationRatioClass}>
+                  {' · '}Modes {estimate.sepRatio.toFixed(1)}× ({estimate.sepLabel})
+                </span>
+              )}
+            </span>
+            <button
+              data-testid="mesh-helios-separation-help"
+              onClick={(e) => { e.stopPropagation(); setShowHelp((v) => !v); }}
+              aria-label="How to read the separation metrics"
+              className="text-neutral-500 hover:text-neutral-200 transition-colors"
+            >
+              <HelpCircle className="w-3 h-3" />
+            </button>
+            {showHelp && (
+              <div
+                data-testid="mesh-helios-separation-help-popover"
+                onClick={(e) => e.stopPropagation()}
+                className="absolute right-0 top-5 z-20 w-60 space-y-1.5 rounded border border-neutral-600 bg-neutral-800 p-2 text-[9px] leading-snug text-neutral-300 shadow-lg"
+              >
+                <div>
+                  <span className="font-semibold text-neutral-100">η (eta) — split cleanliness.</span>{' '}
+                  How cleanly the candidate edge lengths fall into two groups (0–1).
+                  High means a sharp valley between short “surface” edges and long
+                  “bridge” edges; Low means they blur together, so the auto
+                  L<sub>max</sub> is a guess.
+                </div>
+                <div>
+                  <span className="font-semibold text-neutral-100">Modes — how far apart.</span>{' '}
+                  The longer edge group’s length divided by the shorter group’s.
+                  Genuine gap bridges sit many× above the surface spacing (High).
+                  A small ratio (Low) means both groups are really surface —
+                  just sampled at different spacings — so cutting between them
+                  drops valid triangles and leaves holes.
+                </div>
+                <div className="text-neutral-400">
+                  Watch for <span className="text-green-300">High η</span> with{' '}
+                  <span className="text-red-300">Low Modes</span>: a confident cut
+                  in the wrong place. Raise L<sub>max</sub> if the mesh looks
+                  holey.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      {estimate.merged && (
+        <div className="flex gap-1 rounded px-1.5 py-1 border bg-amber-500/10 border-amber-500/40 text-[9px] text-amber-200">
+          <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+          <span>Looks like a merged multi-scan cloud — triangulate each scan position separately for a clean result.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Compact Lmax display: enough precision to be useful without a noisy tail.
+function formatLmax(v: number): string {
+  if (!Number.isFinite(v)) return '';
+  return Number(v.toPrecision(4)).toString();
+}
 
 interface Vec3 { x: number; y: number; z: number }
 
@@ -56,6 +257,8 @@ interface MeshesListPanelProps {
   onWireframeChange: (v: boolean) => void;
   // Open the leaf-angle distribution plot for a Helios mesh.
   onOpenLeafAngles: (id: string) => void;
+  // Apply the interactive Lmax / aspect filter to a Helios triangulation mesh.
+  onHeliosFilterChange: (id: string, next: { lmax: number; maxAspectRatio: number }) => void;
 }
 
 export function MeshesListPanel({
@@ -94,6 +297,7 @@ export function MeshesListPanel({
   onOpacityChange,
   onWireframeChange,
   onOpenLeafAngles,
+  onHeliosFilterChange,
 }: MeshesListPanelProps) {
   return (
     <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
@@ -278,7 +482,7 @@ export function MeshesListPanel({
                       <div>Radii: {mesh.triangulationParams.radii.map(r => r.toFixed(3)).join(', ')}</div>
                     )}
                     {mesh.triangulationParams.lmax !== undefined && (
-                      <div>L<sub>max</sub>: {mesh.triangulationParams.lmax} m</div>
+                      <div>L<sub>max</sub>: {formatLmax(mesh.triangulationParams.lmax)} m</div>
                     )}
                     {mesh.triangulationParams.maxAspectRatio !== undefined && (
                       <div>Max aspect ratio: {mesh.triangulationParams.maxAspectRatio}</div>
@@ -301,6 +505,11 @@ export function MeshesListPanel({
                       <div>Points used: {mesh.triangulationParams.pointsUsed.toLocaleString()}</div>
                     )}
                   </div>
+                )}
+                {/* Interactive Helios filter — only on unfiltered Helios
+                    triangulation meshes (those carry the candidate metrics). */}
+                {mesh.heliosFilter && mesh.heliosUnfiltered && (
+                  <HeliosFilterControls mesh={mesh} onChange={onHeliosFilterChange} />
                 )}
                 {canColorByTriangle && (
                 <div className="space-y-1.5">

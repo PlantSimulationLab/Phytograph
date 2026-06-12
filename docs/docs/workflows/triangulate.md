@@ -46,8 +46,9 @@ The resulting mesh appears in the Scene panel's **Meshes** list, named
 after the method and source cloud — e.g. *"Poisson triangulation
 (tree.xyz)"* — so triangulation results are distinguishable at a glance
 from imported meshes, plant models, and each other. If two share the same
-auto-name, the later one is numbered — *"… (2)"*, *"… (3)"*. The original
-cloud stays in the scene; hide it (eye icon) to see the mesh alone.
+auto-name, the later one is numbered — *"… (2)"*, *"… (3)"*. The source
+cloud is auto-hidden when the mesh lands so the result isn't buried in a
+sea of points; it stays in the scene and can be re-shown (eye icon).
 
 ### Manage a mesh in the Meshes list
 
@@ -106,29 +107,12 @@ disabled with an explanatory tooltip otherwise.
     (Ntheta/Nphi) and **angular bounds** all come from that scan's own
     parameters. Edit them per scan in the Scans panel — they are no
     longer typed in once for the whole batch.
-4. **Parameters**:
-    - **Lmax** — maximum allowed edge length in the mesh (meters)
-    - **Max Aspect Ratio** — drops triangles with bad shape (default 4)
-
-    Not sure what Lmax to use? Click **Suggest** (next to the Lmax field).
-    Phytograph runs an unfiltered triangulation and inspects the spread of
-    candidate edge lengths: valid triangles connect adjacent points on the
-    same leaf or branch (short edges), while erroneous ones bridge separate
-    surfaces (long edges). It sets Lmax at the natural split between those two
-    scales and reports a **separation confidence** — *High* when the scales are
-    cleanly separated (the result is insensitive to Lmax), *Medium*/*Low* when
-    they overlap (leaves close together relative to scan resolution), in which
-    case the mesh is sensitive to Lmax and worth reviewing. The suggestion only
-    fills the field — you can still edit it.
-
-    !!! warning "Merged multi-scan clouds"
-
-        Helios triangulation assumes **single-scan-position** data — it uses one
-        scanner origin per scan to reconstruct ray directions. If a scan is
-        actually a registered *merge* of several scanner positions, Suggest will
-        flag it: the triangulation would bridge surfaces seen from different
-        origins, producing spurious triangles. Triangulate each scan position
-        separately instead of meshing the merged cloud.
+4. **Filtering happens afterwards.** There is no Lmax to set here — Phytograph
+    triangulates *unfiltered*, keeping every candidate triangle, and the
+    edge-length (**Lmax**) and **aspect-ratio** filter is applied as a live
+    post-processing step in the mesh panel (next step). This means estimating a
+    good Lmax is instant, and you can change it and watch the mesh update without
+    ever re-triangulating.
 5. **Grid** — the triangulation grid bounds the region that gets meshed:
     - **Auto — fit to all points** (default when you haven't made a
       box): Phytograph fits a single-cell grid around every point. A
@@ -142,13 +126,56 @@ disabled with an explanatory tooltip otherwise.
 6. Click **Triangulate**.
 
 The mesh lands in the **Meshes** list named *"Helios triangulation"* (the
-word *triangulation* keeps it distinct from a Helios **plant model**);
-expand its row to see the L<sub>max</sub>, aspect-ratio, and fused-scan
-count it was built with.
+word *triangulation* keeps it distinct from a Helios **plant model**).
+Expand its row to reach the **Filter** controls:
 
-For most TLS data of stone-fruit trees, defaults work; adjust **Lmax**
-down (to ~5–10 cm) for finer branch surfaces, or up if your scan is
-sparse.
+- **Lmax** — maximum allowed edge length (meters). Triangles with a longer
+  edge are hidden. Seeded automatically from the candidate edge-length
+  distribution (see below); edit it and the mesh re-filters instantly.
+- **Max aspect** — drops mis-shapen triangles (max edge ÷ min edge; default 4).
+- **Auto** — re-applies the automatic Lmax estimate.
+
+The auto-estimate inspects the spread of candidate edge lengths: valid triangles
+connect adjacent points on the same leaf or branch (short edges), while erroneous
+ones bridge separate surfaces (long edges). It places Lmax at the natural split
+between those two scales and reports two numbers (with a **?** next to them that
+opens a short how-to-read explainer):
+
+- **Separation (η)** — how *cleanly* the edge lengths fall into two groups.
+  *High* means a sharp valley between the short and long scales (the mesh is
+  insensitive to Lmax); *Medium*/*Low* means they blur together (leaves close
+  together relative to scan resolution) and the mesh is sensitive to Lmax.
+- **Modes (×)** — how *far apart* those two groups are. Genuine gap bridges sit
+  many times above the surface spacing (*High*). A small ratio (*Low*) means
+  both groups are really surface — sampled at different spacings, e.g. a coarse
+  or strongly anisotropic scan — so cutting between them drops valid triangles
+  and leaves holes.
+
+Watch for **High η with Low Modes**: a confident split placed in the wrong
+spot. If the mesh looks holey there, raise Lmax. The filter breakdown above the
+controls (candidates / kept / dropped) updates as you adjust the filter.
+
+!!! warning "Merged multi-scan clouds"
+
+    Helios triangulation assumes **single-scan-position** data — it uses one
+    scanner origin per scan to reconstruct ray directions. If a scan is actually
+    a registered *merge* of several scanner positions, the auto-estimate flags it
+    (a toast and a note in the Filter panel): the triangulation would bridge
+    surfaces seen from different origins, producing spurious triangles.
+    Triangulate each scan position separately instead of meshing the merged cloud.
+
+For most TLS data of stone-fruit trees the auto Lmax works; nudge it down
+(to ~5–10 cm) for finer branch surfaces, or up if your scan is sparse.
+
+!!! note "Very large scans"
+
+    Full-resolution TLS clouds can produce several million candidate triangles —
+    more than fits in a single response. When that happens Phytograph returns the
+    densest few million triangles (a notice tells you how many of how many
+    candidates were kept) and the Filter can only be **tightened** from there;
+    loosening past that point means re-triangulating. Cropping to a voxel box or
+    segmenting away ground/trunk first keeps the mesh — and the filter range —
+    full.
 
 !!! tip "Leaf area density"
 

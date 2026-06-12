@@ -59,7 +59,9 @@ test('Computes multi-return leaf area density from an imported full-waveform sca
     // row to refocus it: in mixed mode a plain click keeps the scan and clears
     // the box selection (it does NOT toggle the scan off — that only happens when
     // the scan is the entire selection). Then open the LAD tool, pick grid, run.
-    await scanRows.nth(0).click();
+    // Click the row's NAME, not the row center: the row's right-side action
+    // buttons stop propagation, so a center click can miss the select handler.
+    await scanRows.nth(0).getByTestId('scan-row-name').click();
     await expect(scanRows.nth(0)).toHaveAttribute('data-selected', 'true');
 
     await page.getByTestId('tool-compute-lad').click();
