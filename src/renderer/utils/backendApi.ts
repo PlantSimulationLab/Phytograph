@@ -63,13 +63,37 @@ import { BACKEND_PORT_PROD } from '../../shared/constants';
 // re-exported below so backendApi consumers get it without a second import.
 import type { ScanParamsFromFile } from '../lib/scanParameters';
 
+// Cached backend base URL. The port is chosen per-instance by the main process
+// (src/main/backend.ts) so concurrent app instances / dev sessions / E2E runs
+// never collide on a fixed port. We can't read it synchronously from a static
+// renderer bundle, so initBackendUrl() fetches it once from main via the
+// preload bridge and caches it here for the many synchronous getBackendUrl()
+// callers. Until that resolves we fall back to the prod default (8008), which
+// is correct for any single-instance run.
+let cachedBackendUrl = `http://127.0.0.1:${BACKEND_PORT_PROD}`;
+
 /**
- * Get the backend API base URL.
- * The bundled PyInstaller backend always listens on BACKEND_PORT_PROD —
- * in dev, main.ts supervises the same binary on the same port.
+ * Fetch the real backend URL from the main process and cache it. Call once at
+ * renderer startup, before issuing API calls. Idempotent and safe to await
+ * multiple times. Falls back silently to the default if the bridge is absent
+ * (e.g. unit tests run outside Electron).
+ */
+export async function initBackendUrl(): Promise<string> {
+  try {
+    const info = await window.electronAPI?.backend?.getInfo?.();
+    if (info?.url) cachedBackendUrl = info.url;
+  } catch {
+    // Keep the default; getBackendUrl() stays usable.
+  }
+  return cachedBackendUrl;
+}
+
+/**
+ * Get the backend API base URL. Returns the per-instance URL once
+ * initBackendUrl() has resolved; before that, the prod default.
  */
 export function getBackendUrl(): string {
-  return `http://127.0.0.1:${BACKEND_PORT_PROD}`;
+  return cachedBackendUrl;
 }
 
 /**
@@ -1369,6 +1393,80 @@ export async function exportPointCloudLasLaz(
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('LAS/LAZ export failed:', error);
+    throw error;
+  }
+}
+
+// One scan to export to the Helios XML + per-scan ASCII bundle. Point source is
+// one of session_id / points / file_path (resolved in that order, backend-side).
+export interface ScanExportEntry {
+  origin: [number, number, number];
+  n_theta?: number;
+  n_phi?: number;
+  theta_min?: number;
+  theta_max?: number;
+  phi_min?: number;
+  phi_max?: number;
+  beam_exit_diameter?: number;
+  beam_divergence?: number;
+  session_id?: string;
+  points?: number[][];
+  scalar_columns?: Record<string, number[]>;
+  file_path?: string;
+  ascii_format?: string | null;
+  // World-space offset applied to the points (viewer translation), or omitted.
+  translation?: [number, number, number];
+}
+
+export interface ScanExportRequest {
+  scans: ScanExportEntry[];
+  base_name?: string;
+  include_misses: boolean;
+}
+
+export interface ScanExportFile {
+  name: string;
+  data: string;       // base64
+  is_xml: boolean;
+}
+
+export interface ScanExportResponse {
+  success: boolean;
+  files?: ScanExportFile[];
+  point_count?: number;
+  scan_count?: number;
+  error?: string;
+}
+
+/**
+ * Export one or more scans to a Helios XML metadata file + one ASCII data file
+ * per scan (re-loadable via PyHelios loadXML). Preserves the `is_miss` flag and
+ * other per-hit scalar columns, applies viewer translation, and honors session
+ * edits — so the bundle round-trips losslessly back into Phytograph/Helios.
+ */
+export async function exportScanXml(
+  request: ScanExportRequest
+): Promise<ScanExportResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+  try {
+    const response = await fetch(`${baseUrl}/api/scan/export-xml`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Scan XML export failed:', error);
     throw error;
   }
 }

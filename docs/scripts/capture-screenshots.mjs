@@ -42,7 +42,10 @@ if (!FIXTURE) {
   process.exit(1);
 }
 
-const BACKEND_URL = 'http://127.0.0.1:8008';
+// The supervised backend now binds a per-instance port; pin one here and pass
+// it to Electron via PHYTOGRAPH_BACKEND_PORT so we know where to poll.
+const BACKEND_PORT = Number(process.env.PHYTOGRAPH_BACKEND_PORT) || 8008;
+const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 
 async function waitForBackend(timeoutMs = 120_000) {
   const startedAt = Date.now();
@@ -81,6 +84,7 @@ async function main() {
     cwd: repoRoot,
     timeout: 60_000,
     // Deliberately NOT setting PHYTOGRAPH_E2E=1 — we want the window visible.
+    env: { ...process.env, PHYTOGRAPH_BACKEND_PORT: String(BACKEND_PORT) },
   });
   const page = await app.firstWindow();
 

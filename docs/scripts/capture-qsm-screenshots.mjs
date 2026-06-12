@@ -33,7 +33,9 @@ const outDir = join(repoRoot, 'docs', 'docs', 'assets', 'screenshots');
 const FIXTURE =
   process.env.SCREENSHOT_FIXTURE || join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 
-const BACKEND_URL = 'http://127.0.0.1:8008';
+// Per-instance backend port; pin one and pass it to Electron. See backend.ts.
+const BACKEND_PORT = Number(process.env.PHYTOGRAPH_BACKEND_PORT) || 8008;
+const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 
 async function waitForBackend(timeoutMs = 120_000) {
   const startedAt = Date.now();
@@ -69,7 +71,7 @@ async function main() {
     args: ['.'],
     cwd: repoRoot,
     timeout: 60_000,
-    env: { ...process.env, PHYTOGRAPH_E2E: '1' },
+    env: { ...process.env, PHYTOGRAPH_E2E: '1', PHYTOGRAPH_BACKEND_PORT: String(BACKEND_PORT) },
   });
   const page = await app.firstWindow();
 

@@ -60,7 +60,8 @@ import { applyHeliosFilter, computeHeliosMetrics, heliosFilterCounts } from '../
 import type { HeliosFilterEstimate } from '../lib/heliosFilter';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
-import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, GROUND_CLASS_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, GROUND_CLASS_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
+import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { MissOverlay } from './viewer/renderers/MissOverlay';
@@ -3524,7 +3525,11 @@ export default function PointCloudViewer({
     }
 
     if (format === 'xyz') {
-      const lines: string[] = [];
+      // Bare coordinates, but with a '#'-prefixed column header (CloudCompare
+      // convention, matching Helios's exportPointCloud(write_header=True)). The
+      // loader skips '#' lines so the file still round-trips, while ASCII readers
+      // can map columns by name. Richer per-point fields go to TXT/CSV.
+      const lines: string[] = ['# x y z'];
       for (let i = 0; i < data.pointCount; i++) {
         const x = data.positions[i * 3].toFixed(6);
         const y = data.positions[i * 3 + 1].toFixed(6);
@@ -3533,11 +3538,12 @@ export default function PointCloudViewer({
       }
       downloadFile(lines.join('\n'), `${baseName}.xyz`);
     } else if (format === 'txt') {
-      // TXT format: space-delimited with header, includes all fields
+      // TXT format: space-delimited with a '#'-prefixed header (CloudCompare
+      // convention), includes all fields.
       const scalarFieldNames = data.scalarFields ? Object.keys(data.scalarFields) : [];
-      let header = 'X Y Z';
-      if (data.colors) header += ' R G B';
-      if (data.intensities) header += ' Intensity';
+      let header = '# x y z';
+      if (data.colors) header += ' r255 g255 b255';
+      if (data.intensities) header += ' intensity';
       for (const fieldName of scalarFieldNames) {
         // Replace spaces with underscores in field names for TXT format
         header += ` ${fieldName.replace(/\s+/g, '_')}`;
@@ -3751,6 +3757,119 @@ export default function PointCloudViewer({
     }
     setShowExportPanel(false);
   }, [selectedIds, clouds, getDisplayData, buildPointSource, downloadFile]);
+
+  // Export the selected scan(s) as a Helios XML metadata file + one ASCII data
+  // file per scan (re-loadable via loadXML, round-trips back into Phytograph).
+  // `includeMisses` writes the sky/miss points (+ is_miss column); when off, the
+  // export is returns-only. Requires a scan that carries scanner parameters.
+  // Build the export entry for one scan-bearing cloud (source precedence
+  // session → file → inline, plus viewer translation and the is_miss column).
+  // Returns null when the cloud has no scanner params or no point data.
+  const buildScanExportEntry = useCallback((cloudId: string): ScanExportEntry | null => {
+    const cloud = clouds.find(c => c.id === cloudId);
+    if (!cloud || !cloud.params) return null;
+    const params = cloud.params;
+    const entry: ScanExportEntry = {
+      origin: [params.origin.x, params.origin.y, params.origin.z],
+      n_theta: params.zenithPoints,
+      n_phi: params.azimuthPoints,
+      theta_min: params.zenithMinDeg,
+      theta_max: params.zenithMaxDeg,
+      phi_min: params.azimuthMinDeg,
+      phi_max: params.azimuthMaxDeg,
+      beam_exit_diameter: params.beamExitDiameterM,
+      beam_divergence: params.beamDivergenceMrad,
+    };
+    const t = getEditState(cloud.id).translation;
+    if (t.x !== 0 || t.y !== 0 || t.z !== 0) entry.translation = [t.x, t.y, t.z];
+
+    const sessionId = cloud.data.octree?.sessionId;
+    if (sessionId) {
+      entry.session_id = sessionId;
+      if (cloud.sourcePath) {
+        entry.file_path = cloud.sourcePath;
+        entry.ascii_format = cloud.asciiFormat ?? null;
+      }
+    } else if (cloud.sourcePath) {
+      entry.file_path = cloud.sourcePath;
+      entry.ascii_format = cloud.asciiFormat ?? null;
+    } else if (cloud.data.positions.length > 0) {
+      const points: number[][] = [];
+      for (let i = 0; i < cloud.data.pointCount; i++) {
+        points.push([cloud.data.positions[i * 3], cloud.data.positions[i * 3 + 1], cloud.data.positions[i * 3 + 2]]);
+      }
+      entry.points = points;
+      // Inline clouds must ship the is_miss column so misses survive export.
+      const miss = cloud.data.scalarFields?.[MISS_ATTRIBUTE];
+      if (miss && miss.values.length === cloud.data.pointCount) {
+        entry.scalar_columns = { [MISS_ATTRIBUTE]: Array.from(miss.values) };
+      }
+    } else {
+      return null;  // no point data
+    }
+    return entry;
+  }, [clouds, getEditState]);
+
+  // Export one or more selected scans as a single Helios XML + per-scan ASCII
+  // bundle. `scanIds` are the user-chosen scans (from the panel's scan list).
+  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean) => {
+    const entries: ScanExportEntry[] = [];
+    for (const id of scanIds) {
+      const e = buildScanExportEntry(id);
+      if (e) entries.push(e);
+    }
+    if (entries.length === 0) {
+      showToast({ title: 'Export Failed', type: 'error',
+        message: 'No exportable scans selected (a scan needs scanner parameters and point data).' });
+      return;
+    }
+
+    // Default base name: the single scan's name, or a generic bundle name.
+    const firstCloud = clouds.find(c => c.id === scanIds[0]);
+    const baseName = entries.length === 1
+      ? (firstCloud?.data.fileName?.replace(/\.[^.]+$/, '') || 'scan')
+      : 'scans';
+    const xmlPath = await window.electronAPI?.dialog.save({
+      defaultPath: `${baseName}.xml`,
+      title: 'Export Scan (XML + per-scan data)',
+      filters: [{ name: 'Helios scan XML', extensions: ['xml'] }],
+    });
+    if (!xmlPath) { setShowExportPanel(false); return; }
+
+    // Derive the chosen folder + base name so the backend names match the files
+    // we write (the XML's <filename> references stay valid). Strip ANY trailing
+    // extension the user may have typed (e.g. a stray .las / .xyz): the data files
+    // are always Helios .xyz and the metadata file is always <base>.xml — the data
+    // format is fixed by exportScans(), not chosen here, so we never let a foreign
+    // extension leak into the base name and produce an unloadable <filename>.
+    const sep = xmlPath.includes('\\') ? '\\' : '/';
+    const dir = xmlPath.slice(0, xmlPath.lastIndexOf(sep));
+    const chosenBase = xmlPath.slice(xmlPath.lastIndexOf(sep) + 1).replace(/\.[^.]+$/, '') || 'scan';
+
+    try {
+      const resp = await exportScanXml({
+        scans: entries, base_name: chosenBase, include_misses: includeMisses,
+      });
+      if (!resp.success || !resp.files) {
+        showToast({ title: 'Export Failed', type: 'error', message: resp.error || 'Unknown error' });
+        return;
+      }
+      // Write each returned file into the chosen folder, decoding base64.
+      for (const f of resp.files) {
+        const bin = atob(f.data);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const target = `${dir}${sep}${f.name}`;
+        await window.electronAPI?.fs.writeBinary(target, bytes.buffer.slice(0) as ArrayBuffer);
+      }
+      showToast({ title: 'Export Complete', type: 'success',
+        message: `Wrote ${resp.files.length} file(s) (${resp.point_count?.toLocaleString() ?? '?'} points).` });
+    } catch (error) {
+      showToast({ title: 'Export Failed', type: 'error',
+        message: error instanceof Error ? error.message : 'Unknown error' });
+    }
+    setShowExportPanel(false);
+  }, [clouds, buildScanExportEntry]);
 
   // Export mesh in various formats
   const exportMesh = useCallback((meshId: string, format: 'obj' | 'ply' | 'stl') => {
@@ -11748,6 +11867,18 @@ export default function PointCloudViewer({
           selectionType={selectionType}
           singleCloudSelected={selectedIds.size === 1}
           cloudName={clouds.find(c => c.id === Array.from(selectedIds)[0])?.data.fileName || ''}
+          // Every scan that carries scanner parameters (so it can be written as a
+          // scan XML), with whether it currently holds misses and is selected. The
+          // panel renders these as a checkbox list, pre-checked to the selection.
+          scanExportList={clouds
+            .filter(c => !!c.params)
+            .map(c => ({
+              id: c.id,
+              name: c.data.fileName || c.id,
+              hasMisses: !!(c.data.octree?.hasMisses || c.data.scalarFields?.[MISS_ATTRIBUTE]),
+              selected: selectedIds.has(c.id),
+            }))}
+          onExportScanXml={exportScanXmlBundle}
           meshSelected={!!selectedMesh}
           meshName={selectedMesh ? displayNameOfMesh(selectedMesh) : ''}
           meshTriangleCount={selectedMesh?.data.triangleCount ?? 0}

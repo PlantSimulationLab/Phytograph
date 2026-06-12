@@ -11,6 +11,9 @@ backend-api/venv/
 *.log
 .vite/
 
+# Build-time generated submodule version info (scripts/gen-version-info.mjs)
+src/shared/generated/
+
 # Research harness outputs (generated; not shipped)
 backend-api/research/out/
 

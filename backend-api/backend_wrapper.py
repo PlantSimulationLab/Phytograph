@@ -38,6 +38,10 @@ from main import app
 import uvicorn
 
 if __name__ == "__main__":
-    # Always run on port 8008 without reload
-    logger.info("Starting server on http://127.0.0.1:8008")
-    uvicorn.run(app, host="127.0.0.1", port=8008, reload=False, log_level="info")
+    # Port is chosen by whoever spawned us (the Electron supervisor in
+    # src/main/backend.ts, or scripts/dev.mjs) and passed via
+    # PHYTOGRAPH_BACKEND_PORT so multiple app instances / dev sessions never
+    # collide on a fixed port. Falls back to 8008 when launched standalone.
+    port = int(os.environ.get("PHYTOGRAPH_BACKEND_PORT", "8008"))
+    logger.info(f"Starting server on http://127.0.0.1:{port}")
+    uvicorn.run(app, host="127.0.0.1", port=port, reload=False, log_level="info")

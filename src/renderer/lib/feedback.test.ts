@@ -11,12 +11,16 @@ import { REPO_URL } from '../../shared/constants';
 const DIAG: Diagnostics = {
   appVersion: '0.13.1',
   backendVersion: '0.13.1',
+  pyheliosVersion: 'v0.1.22',
+  heliosVersion: 'v1.3.74',
   platform: 'darwin',
 };
 
 describe('diagnosticsSummary', () => {
-  it('renders a one-line version/backend/OS summary', () => {
-    expect(diagnosticsSummary(DIAG)).toBe('Phytograph 0.13.1 · backend 0.13.1 · darwin');
+  it('renders a one-line version/backend/engine/OS summary', () => {
+    expect(diagnosticsSummary(DIAG)).toBe(
+      'Phytograph 0.13.1 · backend 0.13.1 · PyHelios v0.1.22 · Helios v1.3.74 · darwin',
+    );
   });
 });
 
@@ -27,6 +31,8 @@ describe('buildIssueBody', () => {
     expect(body).toContain('It crashed on import.');
     expect(body).toContain('- Phytograph: 0.13.1');
     expect(body).toContain('- Backend: 0.13.1');
+    expect(body).toContain('- PyHelios: v0.1.22');
+    expect(body).toContain('- Helios (C++): v1.3.74');
     expect(body).toContain('- OS: darwin');
   });
 

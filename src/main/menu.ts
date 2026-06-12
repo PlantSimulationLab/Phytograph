@@ -37,7 +37,10 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
             // Setting the label directly on the menu template overrides it.
             label: 'Phytograph',
             submenu: [
-              { role: 'about' },
+              // Custom About dialog (React) instead of role:'about', which would
+              // show Electron's framework logo + Electron's version. Ours lists
+              // the app, backend, PyHelios, and helios-core versions.
+              { label: 'About Phytograph', click: () => send({ kind: 'about' }) },
               { type: 'separator' },
               {
                 label: 'Settings…',
@@ -187,6 +190,14 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
             void shell.openExternal(REPO_URL);
           },
         },
+        // On macOS, About lives in the app menu (per convention). On
+        // Windows/Linux there's no app menu, so surface it under Help.
+        ...(isMac
+          ? []
+          : ([
+              { type: 'separator' },
+              { label: 'About Phytograph', click: () => send({ kind: 'about' }) },
+            ] as MenuItemConstructorOptions[])),
       ],
     },
   ];

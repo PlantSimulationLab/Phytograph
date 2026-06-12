@@ -5,9 +5,18 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./App.css";
+import { initBackendUrl } from "./utils/backendApi";
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+// Resolve the backend URL from the main process before first render, so every
+// getBackendUrl() caller sees the per-instance dynamic port. The fetch is a
+// single fast IPC round-trip; if it fails (e.g. running outside Electron) the
+// cached default is used and we render anyway.
+function mount() {
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  );
+}
+
+initBackendUrl().finally(mount);

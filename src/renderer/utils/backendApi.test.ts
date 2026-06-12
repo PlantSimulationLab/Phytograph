@@ -5,6 +5,7 @@ import {
   createPlantSession,
   deletePlantSession,
   exportPointCloudLasLaz,
+  exportScanXml,
   extractSkeleton,
   generatePlantCanopy,
   generatePlantModel,
@@ -597,6 +598,37 @@ describe('point cloud LAS/LAZ import/export', () => {
     await expect(
       exportPointCloudLasLaz({ points: [], format: 'laz' }),
     ).rejects.toThrow('lazrs missing');
+  });
+
+  it('exportScanXml POSTs to /api/scan/export-xml with the scan bundle request', async () => {
+    const req = {
+      scans: [{
+        origin: [0, 0, 3] as [number, number, number],
+        session_id: 'sess-1',
+        translation: [1, 2, 3] as [number, number, number],
+      }],
+      base_name: 'myscan',
+      include_misses: false,
+    };
+    const spy = mockFetchOk({
+      success: true,
+      files: [{ name: 'myscan.xml', data: 'eA==', is_xml: true }],
+      point_count: 10,
+      scan_count: 1,
+    });
+    const resp = await exportScanXml(req);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:8008/api/scan/export-xml');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(init?.body as string)).toEqual(req);
+    expect(resp.files?.[0].name).toBe('myscan.xml');
+  });
+
+  it('exportScanXml surfaces error', async () => {
+    mockFetchError(500, { detail: 'export boom' });
+    await expect(
+      exportScanXml({ scans: [], include_misses: true }),
+    ).rejects.toThrow('export boom');
   });
 
   it('importPointCloudLasLaz POSTs multipart to /api/pointcloud/import', async () => {

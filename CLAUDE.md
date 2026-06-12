@@ -8,17 +8,23 @@ Phytograph is an Electron desktop app for LiDAR point clouds and plant architect
 
 Three processes, three boundaries:
 
-- **Renderer** (`src/renderer/`) — React + Vite, no Node access. Talks to Python over HTTP to `127.0.0.1:8008/api/*` and to the OS via `window.electronAPI` (exposed by preload).
+- **Renderer** (`src/renderer/`) — React + Vite, no Node access. Talks to Python over HTTP to `127.0.0.1:<backend-port>/api/*` (the port is dynamic per instance — see Port wiring) and to the OS via `window.electronAPI` (exposed by preload).
 - **Main** (`src/main/`) — Electron lifecycle, spawns and supervises the Python sidecar (`backend.ts`), handles file dialogs / fs / persistent store (`ipc.ts`), and auto-updates (`updater.ts`).
 - **Backend** (`backend-api/main.py`) — single FastAPI file containing all endpoints (`/api/fit`, `/api/triangulate`, `/api/plant/*`, `/api/c2m/*`, `/api/skeleton/extract`, etc.). `backend_wrapper.py` is the PyInstaller entrypoint.
 
 The IPC bridge is intentionally narrow — only `dialog`, `fs`, `store`, `backend.getInfo`, and `webUtils.getPathForFile` are exposed. Anything compute-heavy goes over HTTP, not IPC.
 
-### Port wiring (kept in `src/shared/constants.ts`)
+### Port wiring (dynamic per instance)
 
-- Renderer dev server: **1427**
-- Backend port: **8008** — the renderer **always** hits 8008 via `getBackendUrl()` in `src/renderer/utils/backendApi.ts`, in both dev and packaged builds. In dev, `scripts/dev.mjs` spawns `uvicorn --reload` (using `backend-api/venv`) on 8008; in packaged builds the supervised PyInstaller bundle takes that port. The supervisor in `src/main/backend.ts` checks `PHYTOGRAPH_DEV_BACKEND=1` (set by `scripts/dev.mjs` when uvicorn is running) and stands down so it doesn't clobber the dev backend.
-- Backend port: **8007** — legacy constant in `src/shared/constants.ts`, unused. Kept for now to avoid a separate migration.
+**Ports are chosen at runtime, not fixed**, so concurrent app instances, a `npm run dev` session, parallel E2E runs, and other co-developed apps never collide. The `8008` / `1427` constants in `src/shared/constants.ts` are now only *fallback defaults* for a bare `electron .` or a standalone `backend_wrapper.py` launch.
+
+- **Who picks the port:** whoever owns the instance.
+  - `npm run dev` → `scripts/dev.mjs` calls `findFreePort()` (bind `:0`) for both the backend and the Vite renderer, passes the backend port to `uvicorn --port` and to Electron via `PHYTOGRAPH_BACKEND_PORT`, and the renderer port to Vite (`--port --strictPort`) and to Electron via `PHYTOGRAPH_RENDERER_PORT`.
+  - Packaged app → the supervisor (`src/main/backend.ts` `resolvePort()`) picks a free port (or honors `PHYTOGRAPH_BACKEND_PORT` if pinned) and spawns the bundled backend with it.
+  - E2E → `tests/e2e/helpers/launchApp.ts` picks a free port per launch and pins it via `PHYTOGRAPH_BACKEND_PORT`, then polls that port in `waitForBackend(port)`.
+- **How the renderer learns the port:** it does **not** hardcode it. `initBackendUrl()` (called in `src/renderer/main.tsx` before first render) fetches `backend.getInfo()` over IPC, which returns the real port from `getBackendPort()` in the main process, and caches it for the synchronous `getBackendUrl()` callers.
+- **`PHYTOGRAPH_DEV_BACKEND=1`** (set by `scripts/dev.mjs` when uvicorn is running) still makes the Electron supervisor stand down rather than spawn its own bundle.
+- **Collision safety:** the supervisor reuses a *compatible* backend already on its port and only `kill`s an *incompatible* one. It never pre-emptively kills a port it couldn't version-probe — so a developer's running dev backend is never murdered by a test run or a second instance.
 
 ### Version-lock contract
 
@@ -28,7 +34,7 @@ The supervisor refuses to talk to a mismatched backend. When a backend change re
 2. `src/shared/constants.ts` — `EXPECTED_BACKEND_VERSION`
 3. `package.json` — `version`
 
-`backend.ts` hits `/version` on startup; if the running backend's version doesn't match `EXPECTED_BACKEND_VERSION`, it kills the port and respawns its own bundled binary.
+`backend.ts` hits `/version` on the instance's port at startup; if a backend is already there with a *matching* version it's reused, if it *mismatches* it's killed and the bundled binary respawned, and if nothing answers the bundled binary is started fresh.
 
 ## Common commands
 
@@ -76,7 +82,7 @@ Push a tag (`git tag v0.2.0 && git push origin v0.2.0`); `.github/workflows/rele
 - **PyHelios is a source submodule, not a wheel.** It lives at `pyhelios/` (with its own nested `helios-core` C++ submodule) so we can co-develop it; there is **no** `pyhelios3d` pip fallback. `scripts/build-pyhelios.mjs` compiles the native `libhelios` (plugins: `plantarchitecture` + `lidar`; `--nogpu` drops the radiation/OptiX CUDA toolchain) into `pyhelios/pyhelios_build/build/lib/` and `pip install -e`s the package. Note: the `lidar` plugin pulls in the `visualizer` plugin at the C++ level, so OpenGL (glfw/glew/freetype) gets compiled too — fine on macOS (Cocoa) and Windows (native GL) with no extra packages; on Linux it would need `libgl1-mesa-dev`/`xorg-dev` (not a CI concern — the release matrix is macOS + Windows). Prereqs: cmake + a C++ compiler (Xcode CLT on macOS, MSVC on Windows). The native libs + textures + xml asset trees travel with the PyInstaller bundle via `--collect-all pyhelios` in `scripts/build-backend.mjs`. The first `npm run dev` / `build:backend` on a fresh clone compiles Helios (several minutes); `build-backend.mjs` and `dev.mjs` auto-build it if the lib is missing.
 - **PyHelios auto-rebuild**: `backend-api/main.py` puts `pyhelios/` on `sys.path` at import time and rebuilds `libhelios` if any `.cpp/.hpp/.h` under `helios-core/` or `native/` is newer than the compiled lib. So editing the Helios C++ and restarting the backend recompiles automatically. After bumping the submodule, also bump the version-lock trio (`BACKEND_VERSION`, `EXPECTED_BACKEND_VERSION`, `package.json`) if the change requires a fresh packaged build.
 - **macOS quarantine on fresh installs**: `xattr -dr com.apple.quarantine /Applications/Phytograph.app` (only works on unsigned builds; signed builds' CodeSignature seal makes xattrs immutable, so use Finder drag instead).
-- **Stale backend on 8008**: if the supervised backend won't start, check for a leftover process: `kill $(lsof -ti :8008)`.
+- **Stale backend process**: with dynamic ports a leftover backend no longer blocks the next launch (it picks a different free port), but to clean up orphans: `pkill -f phytograph_backend` (packaged bundle) or `pkill -f 'uvicorn main:app'` (dev). To find what's on a specific port: `lsof -ti :<port>`.
 
 ## Testing
 

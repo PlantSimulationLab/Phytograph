@@ -119,7 +119,10 @@ function createWindow(): void {
   // renderer from dist-renderer just like production would. (npm run
   // build is a prereq for the E2E suite; see CLAUDE.md.)
   if (isDev && !isE2E) {
-    mainWindow.loadURL(`http://localhost:${RENDERER_DEV_PORT}`);
+    // scripts/dev.mjs picks a free renderer port per session and passes it via
+    // PHYTOGRAPH_RENDERER_PORT; fall back to the constant for a bare electron run.
+    const rendererPort = Number(process.env.PHYTOGRAPH_RENDERER_PORT) || RENDERER_DEV_PORT;
+    mainWindow.loadURL(`http://localhost:${rendererPort}`);
     if (wantDevTools) mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
     mainWindow.loadFile(join(__dirname, '../dist-renderer/index.html'));

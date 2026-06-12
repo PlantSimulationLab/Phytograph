@@ -16,15 +16,18 @@ Two entry points. Both accept the same set of formats — see
 
 === "File menu"
 
-    **File → Import** opens a file picker. Choose an entry to set the
-    format:
+    **File → Import** has an entry per format; each opens a file picker
+    filtered to that type. Pick one or more files and Phytograph imports
+    them as that format:
 
-    - **Auto-detect** (default)
+    - **Auto-detect** (default) — type chosen from extension + contents
     - **Point Cloud** — force, e.g., a `.ply` to be read as a cloud
     - **Mesh** — force, e.g., a vertex-only `.obj` to be read as a mesh
     - **Skeleton** — for `.json` skeleton graphs
 
-    Use a specific format when auto-detection picks the wrong type.
+    Use a specific format when auto-detection picks the wrong type. As with
+    drag-and-drop, point clouds open the [import wizard](#the-import-wizard)
+    before loading.
 
 ### The import wizard
 
@@ -151,12 +154,53 @@ the Scene panel and click the purple **Export** button in the toolbar
 |---|---|
 | `.las` / `.laz` | x, y, z, intensity, color, classification — LAS standard fields only |
 | `.ply` | All fields including arbitrary scalars |
-| `.xyz` / `.txt` | x, y, z, plus selected scalars as additional columns |
-| `.csv` | Same as `.xyz` but with comma separators and a header row |
+| `.xyz` | x, y, z only, with a `#`-prefixed column header line |
+| `.txt` | x, y, z plus color / intensity / scalars, with a `#`-prefixed column header |
+| `.csv` | Same fields as `.txt` but comma-separated with a plain header row |
 | `.obj` | Vertices only (no faces) — useful for piping into other tools |
+
+The `.xyz` and `.txt` exports write a leading `#`-prefixed column header
+(the CloudCompare convention, e.g. `# x y z is_miss`). Phytograph's own
+importer reads that header to auto-map columns on re-import, and most
+ASCII readers (CloudCompare included) skip the `#` line as a comment.
 
 If you need to round-trip with full fidelity, use `.ply` — it preserves
 everything Phytograph knows about the cloud.
+
+### Scan XML (re-loadable scan)
+
+Whenever the scene holds **scans** — clouds that carry scanner parameters
+(origin, field of view, beam optics) — the Export panel shows a **Scan info
+(XML + per-scan data)** section. It lists every scan with a checkbox, so you
+can write one, several, or all of them into a **single** Helios scan bundle:
+an `.xml` metadata file plus **one ASCII data file per scan**, named
+`<base>_<scanID>.xyz` alongside the XML. Pick the `.xml` location and the data
+files are written into the same folder.
+
+The checklist is pre-checked to match the scans currently selected in the
+Scans panel — so importing a multi-scan XML and clicking **Write scan XML**
+re-exports all of them by default — but you can check or uncheck any scan
+without changing the viewport selection.
+
+Unlike the point-cloud formats above, this bundle is **re-loadable as a
+scan** — re-importing the XML restores the scanner parameters and the
+[sky/miss points](../reference/file-formats.md#skymiss-points), so the
+imported clouds can drive parameter-dependent analyses (leaf area density,
+Helios triangulation) again. It is the round-trip-faithful path for synthetic
+scans and edited scans.
+
+- **Include miss points** — when on (default), the sky/miss points and the
+  `is_miss` column are written, so misses survive the round-trip. Turn it off
+  for a returns-only export. The option is available only when at least one
+  checked scan actually carries misses.
+- The per-scan file split is required: the XML references each data file by
+  scan, so a single merged file could not be re-associated with its scanner
+  parameters.
+- Edits (crop, translation, filtering) are baked into the exported
+  coordinates — what you see is what gets written.
+
+If the scene holds no scans with parameters, the section does not appear (add
+parameters from the Scans panel to enable it).
 
 ### Mesh formats
 

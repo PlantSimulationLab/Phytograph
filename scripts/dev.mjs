@@ -12,6 +12,7 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import waitOn from 'wait-on';
@@ -19,8 +20,22 @@ import waitOn from 'wait-on';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
-const RENDERER_URL = 'http://localhost:1427';
-const BACKEND_URL = 'http://127.0.0.1:8008/version';
+// Ask the OS for a free TCP port (bind :0, read the assignment). Each
+// `npm run dev` picks its own backend + renderer ports so concurrent dev
+// sessions — or another co-developed app — never collide. The chosen ports are
+// threaded to uvicorn (--port), Vite (--port), and Electron (env), and the
+// renderer learns the backend port from main via the getInfo IPC.
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
 const isWin = process.platform === 'win32';
 const backendDir = join(root, 'backend-api');
 const venvPython = isWin
@@ -38,12 +53,21 @@ async function runOnce(cmd, args) {
 }
 
 (async () => {
+  // Per-session ports — never collide with another dev session or app.
+  const backendPort = Number(process.env.PHYTOGRAPH_BACKEND_PORT) || (await findFreePort());
+  const rendererPort = Number(process.env.PHYTOGRAPH_RENDERER_PORT) || (await findFreePort());
+  const RENDERER_URL = `http://localhost:${rendererPort}`;
+  const BACKEND_URL = `http://127.0.0.1:${backendPort}/version`;
+  console.log(`[dev] backend port ${backendPort}, renderer port ${rendererPort}`);
+
+  // Capture submodule versions for the About dialog (gitignored generated file).
+  await runOnce('node', ['scripts/gen-version-info.mjs']);
   console.log('[dev] building main + preload...');
   await runOnce('npx', ['vite', 'build', '--config', 'vite.preload.config.ts']);
   await runOnce('npx', ['vite', 'build', '--config', 'vite.main.config.ts']);
 
   let uvicorn = null;
-  const electronEnv = { ...process.env };
+  const electronEnv = { ...process.env, PHYTOGRAPH_RENDERER_PORT: String(rendererPort) };
 
   if (existsSync(venvPython)) {
     // Build the PyHelios native library up front if it's missing, so the first
@@ -61,7 +85,7 @@ async function runOnce(cmd, args) {
       await runOnce('node', ['scripts/build-pyhelios.mjs']);
     }
 
-    console.log('[dev] starting uvicorn --reload (backend) on port 8008...');
+    console.log(`[dev] starting uvicorn --reload (backend) on port ${backendPort}...`);
     // --reload-dir restricts watching to backend-api/ so edits under node_modules
     // or resources/ don't trigger restarts. uvicorn uses watchfiles when
     // available; it's installed in backend-api/venv.
@@ -76,7 +100,7 @@ async function runOnce(cmd, args) {
     const GLFW_DUP_WARNING = /^objc\[\d+\]: Class GLFW\w+ is implemented in both /;
     uvicorn = spawn(
       venvPython,
-      ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8008',
+      ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(backendPort),
        '--reload', '--reload-dir', '.'],
       { stdio: ['inherit', 'inherit', 'pipe'], cwd: backendDir, env: process.env },
     );
@@ -99,6 +123,7 @@ async function runOnce(cmd, args) {
       console.log(`[dev] uvicorn exited (code=${code}, signal=${signal})`);
     });
     electronEnv.PHYTOGRAPH_DEV_BACKEND = '1';
+    electronEnv.PHYTOGRAPH_BACKEND_PORT = String(backendPort);
   } else {
     console.log(
       `[dev] backend venv not found at ${venvPython} — ` +
@@ -107,8 +132,9 @@ async function runOnce(cmd, args) {
     );
   }
 
-  console.log('[dev] starting Vite renderer dev server...');
-  const vite = run('npx', ['vite', '--config', 'vite.renderer.config.ts']);
+  console.log(`[dev] starting Vite renderer dev server on port ${rendererPort}...`);
+  const vite = run('npx', ['vite', '--config', 'vite.renderer.config.ts',
+    '--port', String(rendererPort), '--strictPort']);
 
   console.log(`[dev] waiting for ${RENDERER_URL}...`);
   await waitOn({ resources: [RENDERER_URL], timeout: 60_000, interval: 200, validateStatus: () => true });
@@ -118,7 +144,7 @@ async function runOnce(cmd, args) {
     // Use http-get: wait-on's default `http` probe sends HEAD, which FastAPI
     // doesn't auto-register for GET routes and answers with a noisy 405.
     await waitOn({
-      resources: [`http-get://127.0.0.1:8008/version`],
+      resources: [`http-get://127.0.0.1:${backendPort}/version`],
       timeout: 120_000,
       interval: 300,
       validateStatus: (status) => status === 200,

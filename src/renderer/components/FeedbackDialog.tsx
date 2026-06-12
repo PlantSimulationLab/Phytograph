@@ -39,6 +39,8 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
         setDiagnostics({
           appVersion: info.appVersion,
           backendVersion: info.expectedVersion,
+          pyheliosVersion: info.pyheliosVersion,
+          heliosVersion: info.heliosVersion,
           platform: info.platform,
         });
       })
@@ -55,6 +57,8 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
       const diag: Diagnostics = diagnostics ?? {
         appVersion: 'unknown',
         backendVersion: 'unknown',
+        pyheliosVersion: 'unknown',
+        heliosVersion: 'unknown',
         platform: 'unknown',
       };
       const body = buildIssueBody(mode, description, diag);

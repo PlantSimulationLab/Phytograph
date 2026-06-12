@@ -25,10 +25,13 @@ const species = process.argv[2] || 'bean';
 const age = process.argv[3] || '30';
 const outPath = join(repoRoot, 'tests', 'e2e', 'visual', 'plant-render.png');
 
+// Per-instance backend port; pin one and pass it to Electron. See backend.ts.
+const BACKEND_PORT = Number(process.env.PHYTOGRAPH_BACKEND_PORT) || 8008;
+
 async function waitForBackend(timeoutMs = 120000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    try { const r = await fetch('http://127.0.0.1:8008/version'); if (r.ok) return; } catch {}
+    try { const r = await fetch(`http://127.0.0.1:${BACKEND_PORT}/version`); if (r.ok) return; } catch {}
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error('backend never came up');
@@ -39,7 +42,7 @@ const app = await _electron.launch({
   cwd: repoRoot,
   timeout: 60000,
   // Intentionally NOT setting PHYTOGRAPH_E2E so the window renders at real size.
-  env: { ...process.env },
+  env: { ...process.env, PHYTOGRAPH_BACKEND_PORT: String(BACKEND_PORT) },
 });
 const page = await app.firstWindow();
 await page.waitForLoadState('domcontentloaded');

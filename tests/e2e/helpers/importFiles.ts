@@ -4,33 +4,54 @@ import type { ElectronApplication, Page } from '@playwright/test';
 // variants in src/shared/ipc.ts).
 export type ImportKind = 'import-auto' | 'import-point-cloud' | 'import-mesh' | 'import-skeleton';
 
-// Imports files through the File→Import menu pathway.
+// Imports files through the File→Import menu pathway — the real one a user hits.
 //
-// First fires the real menu command over IPC — exactly what a native menu
-// click does (main → `webContents.send(IPC.MenuCommand, payload)`,
-// src/main/menu.ts) — which the renderer's onMenuCommand handler receives,
-// setting the pending import type. Then it hands the files to the dropzone's
-// hidden <input> directly: the same onDrop path drag-and-drop uses.
+// File→Import sends a menu command over IPC (main → `webContents.send`,
+// src/main/menu.ts); the renderer's handler (handleMenuImport in App.tsx) then
+// shows the native open dialog via the `dialog:open` IPC and feeds the chosen
+// paths into the import pipeline (reading bytes with the real `fs:readBinary`).
 //
-// We feed the input rather than waiting on an OS file chooser because the menu
-// command reaches the renderer without user activation, so react-dropzone's
-// open() can't surface a native dialog under automation. (Routing is by file
-// extension regardless, so the explicit `kind` and auto-detect agree for every
-// fixture here; the menu command keeps the type explicit and exercises the
-// real menu IPC.) E2E runs with the native menu chrome disabled (menu.ts
-// short-circuits under PHYTOGRAPH_E2E) and the in-window import dropdown was
-// removed, so this is the import entry point for the suite.
+// Under automation we can't drive an OS file chooser, so we replace the
+// `dialog:open` handler to deterministically return the fixture path(s) — the
+// same `multi: true` shape the renderer requests (an array). Everything
+// downstream is real: real fs reads, real parsers, real backend import. This is
+// also why the old gesture bug is now caught: the dialog is shown by the main
+// process, not the renderer's gesture-gated dropzone.open().
+//
+// The handler is restored to throwing on the next call so a test that triggers
+// an *unexpected* second import fails loudly instead of silently re-importing.
 export async function importFiles(
   app: ElectronApplication,
   page: Page,
   kind: ImportKind,
   files: string | string[],
 ): Promise<void> {
+  const paths = Array.isArray(files) ? files : [files];
+
+  // The menu command is delivered to the renderer's onMenuCommand subscriber
+  // (registered in a React effect). Wait until the app has mounted before
+  // firing, or the IPC arrives before anything is listening and is dropped.
+  await page.getByTestId('app-dropzone-input').waitFor({ state: 'attached' });
+
+  await app.evaluate(async ({ ipcMain }, fixturePaths: string[]) => {
+    ipcMain.removeHandler('dialog:open');
+    let served = false;
+    ipcMain.handle('dialog:open', async () => {
+      if (served) return null; // a second, unexpected prompt → user-cancel
+      served = true;
+      // Renderer requests `multi: true`, so it accepts an array of paths.
+      return fixturePaths;
+    });
+  }, paths);
+
   await app.evaluate(({ BrowserWindow }, k) => {
     // IPC.MenuCommand === 'menu:command' (src/shared/ipc.ts). Hard-coded for
     // the same reason stubOpenDialog hard-codes 'dialog:open': the evaluate
     // body is serialized into the main process and can't close over TS imports.
     BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: k });
   }, kind);
-  await page.getByTestId('app-dropzone-input').setInputFiles(files);
+
+  // Give the async handleMenuImport chain (dialog → readBinary → parse) a beat
+  // to kick off; callers then await the resulting UI (wizard, mesh row, etc.).
+  await page.waitForTimeout(100);
 }

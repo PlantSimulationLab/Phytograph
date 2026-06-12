@@ -10,7 +10,10 @@ import {
   type OpenDialogOptions,
   type SaveDialogOptions,
 } from '../shared/ipc.js';
-import { EXPECTED_BACKEND_VERSION, BACKEND_PORT_DEV, BACKEND_PORT_PROD } from '../shared/constants.js';
+import { EXPECTED_BACKEND_VERSION } from '../shared/constants.js';
+import { getBackendPort } from './backend.js';
+// Generated at build time by scripts/gen-version-info.mjs (gitignored).
+import { PYHELIOS_VERSION, HELIOS_CORE_VERSION } from '../shared/generated/versionInfo.js';
 
 const store = new Store({ name: 'phytograph-store' });
 
@@ -18,11 +21,16 @@ export function registerIpc(): void {
   ipcMain.handle(IPC.BackendGetInfo, (): BackendInfo => {
     const isDev = !app.isPackaged;
     return {
-      url: `http://localhost:${isDev ? BACKEND_PORT_DEV : BACKEND_PORT_PROD}`,
+      // The actual port this instance's backend was started on (dynamic,
+      // per-instance). This is the renderer's source of truth — getBackendUrl()
+      // in the renderer fetches this once at startup and caches it.
+      url: `http://127.0.0.1:${getBackendPort()}`,
       expectedVersion: EXPECTED_BACKEND_VERSION,
       isDev,
       appVersion: app.getVersion(),
       platform: process.platform,
+      pyheliosVersion: PYHELIOS_VERSION,
+      heliosVersion: HELIOS_CORE_VERSION,
     };
   });
 

@@ -74,6 +74,12 @@ test('feedback: bug report hands off to a pre-filled GitHub issue URL', async ()
     expect(body).toContain('## Environment');
     expect(body).toMatch(/- Phytograph: \d+\.\d+\.\d+/);
     expect(body).toMatch(/- Backend: \d+\.\d+\.\d+/);
+    // Engine versions baked in at build time from the git submodules — real,
+    // non-empty, not the "unknown" fallback.
+    expect(body).toMatch(/- PyHelios: \S+/);
+    expect(body).not.toContain('- PyHelios: unknown');
+    expect(body).toMatch(/- Helios \(C\+\+\): \S+/);
+    expect(body).not.toContain('- Helios (C++): unknown');
     expect(body).toMatch(/- OS: (darwin|win32|linux)/);
   } finally {
     await close();

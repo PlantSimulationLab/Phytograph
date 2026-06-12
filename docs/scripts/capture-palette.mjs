@@ -7,7 +7,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, '..', '..');
 const outDir = join(repoRoot, 'docs', 'docs', 'assets', 'screenshots');
 
-const BACKEND_URL = 'http://127.0.0.1:8008';
+// Per-instance backend port; pin one and pass it to Electron so we know where
+// to poll. See src/main/backend.ts.
+const BACKEND_PORT = Number(process.env.PHYTOGRAPH_BACKEND_PORT) || 8008;
+const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 
 async function waitForBackend(timeoutMs = 120_000) {
   const startedAt = Date.now();
@@ -21,7 +24,10 @@ async function waitForBackend(timeoutMs = 120_000) {
   throw new Error('Backend never came up');
 }
 
-const app = await _electron.launch({ args: ['.'], cwd: repoRoot, timeout: 60_000 });
+const app = await _electron.launch({
+  args: ['.'], cwd: repoRoot, timeout: 60_000,
+  env: { ...process.env, PHYTOGRAPH_BACKEND_PORT: String(BACKEND_PORT) },
+});
 const page = await app.firstWindow();
 await waitForBackend();
 await page.waitForTimeout(1500);

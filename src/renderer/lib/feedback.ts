@@ -12,12 +12,14 @@ export type FeedbackMode = 'bug' | 'feature';
 export interface Diagnostics {
   appVersion: string;
   backendVersion: string;
+  pyheliosVersion: string;
+  heliosVersion: string;
   platform: string;
 }
 
 /** One-line human-readable summary shown in the dialog and embedded in reports. */
 export function diagnosticsSummary(d: Diagnostics): string {
-  return `Phytograph ${d.appVersion} · backend ${d.backendVersion} · ${d.platform}`;
+  return `Phytograph ${d.appVersion} · backend ${d.backendVersion} · PyHelios ${d.pyheliosVersion} · Helios ${d.heliosVersion} · ${d.platform}`;
 }
 
 /**
@@ -36,6 +38,8 @@ export function buildIssueBody(mode: FeedbackMode, description: string, d: Diagn
     '',
     `- Phytograph: ${d.appVersion}`,
     `- Backend: ${d.backendVersion}`,
+    `- PyHelios: ${d.pyheliosVersion}`,
+    `- Helios (C++): ${d.heliosVersion}`,
     `- OS: ${d.platform}`,
   ].join('\n');
 }

@@ -15,6 +15,7 @@ import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from 
 import { registerCategoricalSlug } from "./lib/classification";
 import { resolveTargets } from "./lib/bulkActions";
 import { FeedbackDialog } from "./components/FeedbackDialog";
+import { AboutDialog } from "./components/AboutDialog";
 import type { FeedbackMode } from "./lib/feedback";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
@@ -26,6 +27,16 @@ import logoImage from "./assets/logo.png";
 
 type NavItem = 'viewer' | 'options';
 type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton';
+
+// Optional overrides for an import. Menu-driven imports (which go through the
+// native Electron dialog, not the renderer dropzone) pass the import type and
+// resolved on-disk paths explicitly — synthetic Files built from dialog paths
+// carry no webUtils path and there is no pendingImportTypeRef to read.
+interface ImportOptions {
+  importType?: ImportType;
+  path?: string;       // single-file (handleFileUpload)
+  paths?: (string | undefined)[]; // multi-file, parallel to files (handleMultipleFiles)
+}
 
 // Strip the directory and trailing extension from a file name for use as a
 // default display label (e.g. "tree_scan.ply" → "tree_scan"). Falls back to the
@@ -58,6 +69,8 @@ function App() {
   const [importProgress, setImportProgress] = useState<BulkImportProgressState | null>(null);
   // null = closed; otherwise the open feedback dialog's mode.
   const [feedbackMode, setFeedbackMode] = useState<FeedbackMode | null>(null);
+  // Whether the About dialog is open (opened from the app / Help menu).
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const pendingImportTypeRef = useRef<ImportType>('auto');
 
@@ -189,10 +202,13 @@ function App() {
     };
   }, []);
 
-  const handleFileUpload = useCallback(async (file: File) => {
+  const handleFileUpload = useCallback(async (file: File, opts?: ImportOptions) => {
     setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
 
-    const importType = pendingImportTypeRef.current;
+    const importType = opts?.importType ?? pendingImportTypeRef.current;
+    // Menu-driven imports pass the on-disk path explicitly (resolved by the
+    // native dialog) since synthetic Files have no webUtils path.
+    const explicitPath = opts?.path;
 
     try {
       // Determine how to import based on user selection or auto-detect
@@ -231,11 +247,13 @@ function App() {
           // parser when there's no path, the format isn't backend-handled, or the
           // backend import fails / yields nothing usable.
           const ext = file.name.toLowerCase().split('.').pop() ?? '';
-          let objPath: string | undefined;
-          try {
-            objPath = window.electronAPI?.getPathForFile?.(file) || undefined;
-          } catch {
-            objPath = undefined;
+          let objPath: string | undefined = explicitPath;
+          if (!objPath) {
+            try {
+              objPath = window.electronAPI?.getPathForFile?.(file) || undefined;
+            } catch {
+              objPath = undefined;
+            }
           }
 
           let backendMesh: MeshImportResponse | null = null;
@@ -314,11 +332,13 @@ function App() {
         // Parse as point cloud (default). We record the on-disk source path
         // when the file came from a native dialog/dropzone so the backend can
         // read it directly (and so the import wizard can preview it).
-        let sourcePath: string | undefined;
-        try {
-          sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
-        } catch {
-          sourcePath = undefined;
+        let sourcePath: string | undefined = explicitPath;
+        if (!sourcePath) {
+          try {
+            sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
+          } catch {
+            sourcePath = undefined;
+          }
         }
 
         const ext = file.name.toLowerCase().split('.').pop() ?? '';
@@ -364,7 +384,7 @@ function App() {
   }, [getNextColor, openImportWizard, buildScanFromWizardResult]);
 
   // Handle multiple files
-  const handleMultipleFiles = useCallback(async (files: File[]) => {
+  const handleMultipleFiles = useCallback(async (files: File[], opts?: ImportOptions) => {
     setImportProgress({ current: 0, total: files.length, label: 'Preparing…' });
     const newScans: Scan[] = [];
     const errors: string[] = [];
@@ -372,7 +392,10 @@ function App() {
     let skeletonCount = 0;
     let colorIndex = 0;
 
-    const importType = pendingImportTypeRef.current;
+    const importType = opts?.importType ?? pendingImportTypeRef.current;
+    // Menu-driven imports supply on-disk paths parallel to `files` (resolved by
+    // the native dialog); synthetic Files have no webUtils path otherwise.
+    const explicitPaths = opts?.paths;
 
     const getColorForFile = () => {
       const usedColors = new Set([...scans.map(s => s.color), ...newScans.map(e => e.color)]);
@@ -419,11 +442,13 @@ function App() {
           // Path-backed PLY/OBJ prefer the backend importer (binary PLY + per-vertex
           // color for PLY; MTL/textures for OBJ); everything else parses locally.
           const ext = file.name.toLowerCase().split('.').pop() ?? '';
-          let meshPath: string | undefined;
-          try {
-            meshPath = window.electronAPI?.getPathForFile?.(file) || undefined;
-          } catch {
-            meshPath = undefined;
+          let meshPath: string | undefined = explicitPaths?.[fileIdx];
+          if (!meshPath) {
+            try {
+              meshPath = window.electronAPI?.getPathForFile?.(file) || undefined;
+            } catch {
+              meshPath = undefined;
+            }
           }
 
           let backendMesh: MeshImportResponse | null = null;
@@ -493,11 +518,13 @@ function App() {
           // Point cloud. Resolve the on-disk path; path-backed files go to the
           // wizard (collected below), path-less Blobs/fixtures fall back to the
           // in-renderer flat parser (the wizard can't preview without a path).
-          let sourcePath: string | undefined;
-          try {
-            sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
-          } catch {
-            sourcePath = undefined;
+          let sourcePath: string | undefined = explicitPaths?.[fileIdx];
+          if (!sourcePath) {
+            try {
+              sourcePath = window.electronAPI?.getPathForFile?.(file) || undefined;
+            } catch {
+              sourcePath = undefined;
+            }
           }
           const ext = file.name.toLowerCase().split('.').pop() ?? '';
           if (sourcePath && OCTREE_DROP_EXTENSIONS.has(ext)) {
@@ -572,14 +599,18 @@ function App() {
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setIsDragOver(false);
+    // Drops always auto-detect. Pass it explicitly rather than trusting the
+    // ref: menu imports no longer touch pendingImportTypeRef, but a cancelled
+    // import in older flows could leave it stale, which previously routed a
+    // dropped .ply through the wrong parser ("Unsupported skeleton format").
     if (acceptedFiles.length === 1) {
-      handleFileUpload(acceptedFiles[0]);
+      handleFileUpload(acceptedFiles[0], { importType: 'auto' });
     } else if (acceptedFiles.length > 1) {
-      handleMultipleFiles(acceptedFiles);
+      handleMultipleFiles(acceptedFiles, { importType: 'auto' });
     }
   }, [handleFileUpload, handleMultipleFiles]);
 
-  const { getRootProps, getInputProps, open } = useDropzone({
+  const { getRootProps, getInputProps } = useDropzone({
     onDrop,
     onDragEnter: () => setIsDragOver(true),
     onDragLeave: () => setIsDragOver(false),
@@ -902,31 +933,89 @@ function App() {
     showToast({ title: `Saved ${data.pointCount.toLocaleString()} points to ${fileName}`, type: 'success' });
   }, []);
 
+  // File → Import menu entry point. The renderer dropzone's open() relies on a
+  // programmatic <input>.click(), which Chromium gates on a transient user
+  // gesture — a native-menu → IPC callback carries none, so the picker silently
+  // failed to appear (the bug this replaces). The native Electron dialog is
+  // shown by the main process and needs no renderer gesture; it also returns
+  // absolute paths directly, which the backend importers and wizard want. We
+  // read each chosen file's bytes (fs.readBinary) into a real File so the
+  // existing File-based parsers work, and thread the path through explicitly.
+  const handleMenuImport = useCallback(async (importType: ImportType) => {
+    const filtersFor = (t: ImportType): { name: string; extensions: string[] }[] => {
+      const strip = (fmts: { ext: string }[]) => fmts.map(f => f.ext.replace(/^\./, ''));
+      const pc = strip(POINT_CLOUD_FORMATS);
+      const mesh = strip(MESH_FORMATS);
+      const skel = strip(SKELETON_FORMATS);
+      switch (t) {
+        case 'pointcloud':
+          return [{ name: 'Point Clouds', extensions: pc }];
+        case 'mesh':
+          return [{ name: 'Meshes', extensions: mesh }];
+        case 'skeleton':
+          return [{ name: 'Skeletons', extensions: skel }];
+        default:
+          return [{ name: 'Supported Files', extensions: [...new Set([...pc, ...mesh, ...skel])] }];
+      }
+    };
+
+    setActiveNav('viewer');
+    let selected: string | string[] | null;
+    try {
+      selected = await window.electronAPI.dialog.open({ multi: true, filters: filtersFor(importType) });
+    } catch (err) {
+      showToast({ title: err instanceof Error ? err.message : 'Failed to open file dialog', type: 'error' });
+      return;
+    }
+    if (!selected) return; // user cancelled
+    const paths = Array.isArray(selected) ? selected : [selected];
+    if (paths.length === 0) return;
+
+    // Build real File objects from the chosen paths so the File-based parsers
+    // (parseMesh/parseSkeleton/parsePointCloud) work; the explicit paths drive
+    // the backend importers + import wizard.
+    setImportProgress({ current: 0, total: paths.length, label: 'Reading files…' });
+    const files: File[] = [];
+    const okPaths: string[] = [];
+    for (const p of paths) {
+      try {
+        const bytes = await window.electronAPI.fs.readBinary(p);
+        const name = p.split(/[\\/]/).pop() ?? 'file';
+        files.push(new File([bytes], name));
+        okPaths.push(p);
+      } catch (err) {
+        showToast({ title: `Failed to read ${p}: ${err instanceof Error ? err.message : err}`, type: 'error' });
+      }
+    }
+    if (files.length === 0) {
+      setImportProgress(null);
+      return;
+    }
+
+    if (files.length === 1) {
+      await handleFileUpload(files[0], { importType, path: okPaths[0] });
+    } else {
+      await handleMultipleFiles(files, { importType, paths: okPaths });
+    }
+  }, [handleFileUpload, handleMultipleFiles]);
+
   // Subscribe to application-menu commands dispatched from main (src/main/menu.ts).
-  // Most menu items map to existing handlers; File → Import sets
-  // pendingImportTypeRef and re-uses the dropzone's open() to pick files.
+  // Most menu items map to existing handlers; File → Import routes through the
+  // native file dialog (handleMenuImport) rather than the renderer dropzone.
   useEffect(() => {
     const unsubscribe = window.electronAPI.onMenuCommand((payload) => {
       switch (payload.kind) {
         case 'import-auto':
-          pendingImportTypeRef.current = 'auto';
-          setActiveNav('viewer');
-          open();
+          void handleMenuImport('auto');
           break;
         case 'import-point-cloud':
-          pendingImportTypeRef.current = 'pointcloud';
-          setActiveNav('viewer');
-          open();
+          void handleMenuImport('pointcloud');
           break;
         case 'import-mesh':
-          pendingImportTypeRef.current = 'mesh';
-          setActiveNav('viewer');
-          open();
+          void handleMenuImport('mesh');
           break;
         case 'import-skeleton':
-          pendingImportTypeRef.current = 'skeleton';
-          setActiveNav('viewer');
-          open();
+          void handleMenuImport('skeleton');
           break;
         case 'save':
         case 'export':
@@ -954,13 +1043,16 @@ function App() {
         case 'feedback':
           setFeedbackMode(payload.mode);
           break;
+        case 'about':
+          setAboutOpen(true);
+          break;
         case 'nav':
           setActiveNav(payload.target);
           break;
       }
     });
     return unsubscribe;
-  }, [open, handleSelectAll, handleDeselectAll]);
+  }, [handleMenuImport, handleSelectAll, handleDeselectAll]);
 
   // Calculate total points across data-bearing scans only.
   const totalPoints = scans.reduce((sum, s) => sum + (s.data?.pointCount ?? 0), 0);
@@ -1170,6 +1262,9 @@ function App() {
         mode={feedbackMode ?? 'bug'}
         onClose={() => setFeedbackMode(null)}
       />
+
+      {/* About dialog — opened from the app menu (macOS) or Help menu (Win/Linux). */}
+      <AboutDialog isOpen={aboutOpen} onClose={() => setAboutOpen(false)} />
 
       {/* Drag overlay */}
       {isDragOver && (

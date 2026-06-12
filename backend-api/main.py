@@ -113,15 +113,24 @@ BACKEND_VERSION = "0.13.1"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
-# Configure CORS for Tauri
+# Configure CORS. The renderer's dev-server origin is now a *dynamic* port
+# (scripts/dev.mjs picks a free one per session), so a fixed allowlist of
+# localhost:<port> entries no longer matches — it broke the splash, which
+# fetches /version cross-origin from http://localhost:<dynamic>. Allow any
+# loopback origin via regex instead. This is safe: the backend only ever binds
+# 127.0.0.1, so only processes on this machine can reach it regardless of CORS,
+# and CORS is a browser-enforced policy, not a network boundary. The packaged
+# app loads from app:///file:// (covered by allow_origins below); dev and any
+# localhost tooling are covered by the regex.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "tauri://localhost",
-        "http://localhost:1427",
-        "http://localhost:3000",
-        "http://localhost:5173"
+        "app://localhost",
+        "file://",
     ],
+    # http(s)://localhost:<anyport> and http(s)://127.0.0.1:<anyport>
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -3565,6 +3574,263 @@ async def lad_compute(request: LADComputeRequest):
     return StreamingResponse(stream_result(), media_type="application/json")
 
 
+# ==================== SCAN EXPORT (Helios XML + per-scan ASCII) ====================
+# Export one or more scans to the native Helios scan format: an XML metadata file
+# (scanner origin, angular sweep, beam optics, ASCII_format) plus ONE ASCII data
+# file per scan (`<base>_<scanID>.xyz`). The per-scan split is load-bearing — the
+# XML references each data file by scan, so a single merged file could not be
+# re-associated with its scanner parameters. Re-loadable via PyHelios loadXML().
+#
+# This is the round-trip-faithful path: it preserves the `is_miss` flag (and any
+# other per-hit scalar columns) by passing them through addScan(column_format=...)
+# so exportScans() writes them and the loader can read them back. Edits are
+# honored because the points are resolved through the same session/inline/file
+# machinery the LAD path uses (a session-backed cloud yields its surviving,
+# translation-applied points; deletions already applied, never re-reading disk).
+
+class ScanExportEntry(BaseModel):
+    """One scan to export. Point source is one of session_id / points / file_path
+    (resolved in that precedence, mirroring the LAD path). Scanner geometry is
+    written into the XML; translation is applied to the points on export."""
+    origin: List[float]                          # [x, y, z] scanner position
+    n_theta: Optional[int] = None                # Ntheta (zenith samples)
+    n_phi: Optional[int] = None                  # Nphi (azimuth samples)
+    theta_min: float = 0.0                       # degrees
+    theta_max: float = 180.0
+    phi_min: float = 0.0
+    phi_max: float = 360.0
+    beam_exit_diameter: Optional[float] = None   # meters
+    beam_divergence: Optional[float] = None      # milliradians
+    # Point source (one of):
+    session_id: Optional[str] = None             # live edited session (honors deletions)
+    points: Optional[List[List[float]]] = None   # inline flat cloud
+    scalar_columns: Optional[Dict[str, List[float]]] = None  # aligned per-point columns
+    file_path: Optional[str] = None              # source file fallback
+    ascii_format: Optional[str] = None
+    # World-space offset applied to the points (viewer translation), or null.
+    translation: Optional[List[float]] = None
+
+
+class ScanExportRequest(BaseModel):
+    """Export one or more scans to a Helios XML + per-scan ASCII bundle."""
+    scans: List[ScanExportEntry]
+    base_name: Optional[str] = None              # output base (→ <base>.xml, <base>_<id>.xyz)
+    include_misses: bool = True                  # write miss points (+ is_miss column)
+
+
+# Standard scalar columns we try to preserve on export, in a stable order. Any of
+# these present on the scan is written; absent ones are skipped. `is_miss` first so
+# the miss flag is always adjacent to xyz when present.
+_SCAN_EXPORT_SCALAR_COLUMNS = ['is_miss', 'timestamp', 'target_index',
+                               'target_count', 'intensity']
+
+
+def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
+    """Resolve a scan entry to (xyz float64 (N,3), labels list[str],
+    vals float64 (N,k)|None) for native export — translation applied, edits
+    honored, all standard scalar columns preserved.
+
+    Mirrors the LAD resolver's source precedence (live session → inline points →
+    source file), but surfaces the full _SCAN_EXPORT_SCALAR_COLUMNS set rather
+    than only the LAD subset, and optionally drops miss rows.
+    """
+    import numpy as np
+
+    origin = scan_entry.origin
+    if len(origin) != 3:
+        raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
+
+    # Build a slug -> (N,) getter for whichever source backs this scan, matching
+    # the LAD path: session (honors deletions) → inline columns → source file.
+    sess = None
+    if scan_entry.session_id:
+        with _cloud_session_lock:
+            sess = _cloud_sessions.get(scan_entry.session_id)
+        if sess is None and not (scan_entry.points or scan_entry.file_path):
+            raise ValueError(
+                f"Cloud session not found: {scan_entry.session_id}. The backend "
+                "may have restarted since import. Re-import the scan and try again.")
+
+    if sess is not None:
+        with _cloud_session_lock:
+            keep = ~sess.deleted
+            xyz = np.ascontiguousarray(sess.positions[keep], dtype=np.float64)
+            extras = {k: v[keep] for k, v in sess.extras.items()}
+        def _get(slug):
+            return np.asarray(extras[slug]) if slug in extras else None
+    elif scan_entry.points:
+        xyz = np.ascontiguousarray(
+            np.asarray(scan_entry.points, dtype=np.float64)[:, :3])
+        _inline_cols = scan_entry.scalar_columns or {}
+        _inline_n = xyz.shape[0]
+        def _get(slug):
+            return (np.asarray(_inline_cols[slug])
+                    if slug in _inline_cols and len(_inline_cols[slug]) == _inline_n
+                    else None)
+    elif scan_entry.file_path:
+        if not os.path.isfile(scan_entry.file_path):
+            raise ValueError(f"Scan file not found: {scan_entry.file_path}")
+        xyz, _, _ = _load_pointcloud_arrays(
+            scan_entry.file_path, scan_entry.ascii_format)
+        xyz = np.ascontiguousarray(np.asarray(xyz, dtype=np.float64)[:, :3])
+        col_map = _read_scan_columns_from_file(
+            scan_entry.file_path, scan_entry.ascii_format)
+        def _get(slug):
+            return col_map.get(slug)
+    else:
+        raise ValueError("Scan entry has no points, file_path, or session_id")
+
+    # Apply translation so the exported coordinates match what the user sees.
+    t = getattr(scan_entry, 'translation', None)
+    if t is not None:
+        tt = np.asarray(t, dtype=np.float64)
+        if tt.shape != (3,):
+            raise ValueError(f"translation must be [tx, ty, tz]; got {t!r}")
+        xyz = xyz + tt
+
+    # Collect the scalar columns this scan actually carries, in stable order.
+    labels: List[str] = []
+    cols: list = []
+    for slug in _SCAN_EXPORT_SCALAR_COLUMNS:
+        col = _get(slug)
+        if col is not None and len(col) == xyz.shape[0]:
+            labels.append(slug)
+            cols.append(np.asarray(col, dtype=np.float64))
+
+    # Optionally drop miss rows (and then the now-uniform is_miss column).
+    if not include_misses and 'is_miss' in labels:
+        mi = labels.index('is_miss')
+        keep_rows = np.asarray(cols[mi]) == 0
+        xyz = xyz[keep_rows]
+        cols = [c[keep_rows] for c in cols]
+        # Drop the is_miss column entirely — every surviving row is a return.
+        labels.pop(mi)
+        cols.pop(mi)
+
+    vals = np.column_stack(cols).astype(np.float64) if cols else None
+    return xyz, labels, vals
+
+
+def _read_scan_columns_from_file(file_path: str, ascii_format: Optional[str]) -> dict:
+    """Read every recognised scalar column from an ASCII scan file into a
+    slug -> (N,) float array dict (parallel to _file_to_lad_arrays but for the
+    full export column set). Used only for the file-fallback export path."""
+    import numpy as np
+
+    fmt = ascii_format or _detect_ascii_format(file_path)
+    tokens = fmt.split()
+    col_idx = {c: tokens.index(c) for c in _SCAN_EXPORT_SCALAR_COLUMNS if c in tokens}
+    if not col_idx:
+        return {}
+    need = max(col_idx.values()) + 1
+    rows: dict = {c: [] for c in col_idx}
+    with open(file_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line[0] in "#/":
+                continue
+            parts = line.split()
+            if len(parts) < need:
+                continue
+            try:
+                parsed = {c: float(parts[col_idx[c]]) for c in col_idx}
+            except (ValueError, IndexError):
+                continue
+            for c in col_idx:
+                rows[c].append(parsed[c])
+    return {c: np.asarray(v, dtype=np.float64) for c, v in rows.items()}
+
+
+def _do_scan_export(request: "ScanExportRequest") -> dict:
+    """Export the request's scans to Helios XML + one ASCII data file per scan.
+
+    Returns {"success", "files": [{"name", "data"(base64), "is_xml"}], ...}. The
+    renderer writes every returned file into the user-chosen folder, keeping the
+    XML's relative `<filename>` references valid.
+    """
+    import base64
+    import tempfile
+    import math as _math
+
+    try:
+        from pyhelios import LiDARCloud
+    except ImportError as e:
+        return {"success": False, "error": f"PyHelios not installed: {e}"}
+
+    if not request.scans:
+        return {"success": False, "error": "No scans to export"}
+
+    try:
+        cloud = LiDARCloud()
+        cloud.disableMessages()
+        total_points = 0
+        for scan_entry in request.scans:
+            xyz, labels, vals = _resolve_scan_export_arrays(
+                scan_entry, request.include_misses)
+            origin = scan_entry.origin
+            theta_min, theta_max = scan_entry.theta_min, scan_entry.theta_max
+            phi_min, phi_max = scan_entry.phi_min, scan_entry.phi_max
+            # Resolution: use the scan's own raster when present, else estimate a
+            # plausible grid from the point count and angular aspect ratio.
+            if scan_entry.n_theta and scan_entry.n_phi:
+                n_theta, n_phi = int(scan_entry.n_theta), int(scan_entry.n_phi)
+            else:
+                aspect = (theta_max - theta_min) / max(phi_max - phi_min, 1e-10)
+                n_phi = max(int(_math.sqrt(xyz.shape[0] / max(aspect, 0.01))), 10)
+                n_theta = max(int(xyz.shape[0] / n_phi), 10)
+            # column_format drives what exportScans() writes — xyz plus every
+            # preserved scalar, so the miss flag and friends round-trip.
+            column_format = ['x', 'y', 'z'] + labels
+            cloud.addScan(
+                origin=[float(origin[0]), float(origin[1]), float(origin[2])],
+                Ntheta=int(n_theta),
+                theta_range=(_math.radians(theta_min), _math.radians(theta_max)),
+                Nphi=int(n_phi),
+                phi_range=(_math.radians(phi_min), _math.radians(phi_max)),
+                exit_diameter=float(scan_entry.beam_exit_diameter or 0.0),
+                beam_divergence=float(scan_entry.beam_divergence or 0.0) / 1000.0,
+                column_format=column_format,
+            )
+            sid = cloud.getScanCount() - 1
+            if xyz.shape[0] > 0:
+                dirs = _directions_from_origin(xyz, origin)
+                cloud.addHitPointsWithData(sid, xyz, dirs, labels, vals)
+            total_points += int(xyz.shape[0])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Sanitise the base name: drop any directory components and any trailing
+            # extension a caller may have sent (e.g. "myscan.las"). The data files
+            # exportScans() writes are always Helios ASCII (.xyz) and the metadata
+            # file is always <base>.xml — so a foreign extension must never leak into
+            # the <filename> the XML references, or the bundle would not re-load.
+            raw = request.base_name or "scans"
+            base = os.path.splitext(os.path.basename(raw))[0] or "scans"
+            xml_path = os.path.join(tmpdir, f"{base}.xml")
+            cloud.exportScans(xml_path)
+            files = []
+            for name in sorted(os.listdir(tmpdir)):
+                with open(os.path.join(tmpdir, name), "rb") as fh:
+                    files.append({
+                        "name": name,
+                        "data": base64.b64encode(fh.read()).decode("ascii"),
+                        "is_xml": name.lower().endswith(".xml"),
+                    })
+
+        return {"success": True, "files": files, "point_count": total_points,
+                "scan_count": len(request.scans)}
+
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": f"Scan export failed: {e}"}
+
+
+@app.post("/api/scan/export-xml")
+async def scan_export_xml(request: "ScanExportRequest"):
+    """Export scans to a Helios XML + per-scan ASCII bundle (base64 files)."""
+    return _do_scan_export(request)
+
+
 # ==================== SYNTHETIC LIDAR SCANNING ====================
 # True ray-traced synthetic scanning via the PyHelios `lidar` plugin. The scene
 # geometry (plant + imported meshes, already world-space transformed by the
@@ -3593,6 +3859,15 @@ class LidarScanScanner(BaseModel):
     return_type: str = "single"  # "single" (discrete) or "multi" (full-waveform)
     exit_diameter_m: float = 0.0
     beam_divergence_mrad: float = 0.0
+    # Measurement-error model (applies to both return types). Defaults of 0
+    # disable each effect, preserving an ideal noise-free, perfectly-level scan.
+    range_noise_m: float = 0.0       # Gaussian along-beam range noise stddev (meters)
+    angle_noise_mrad: float = 0.0    # Gaussian beam-pointing jitter stddev (milliradians)
+    # Residual scanner tilt away from plumb (a dual-axis inclinometer's two
+    # angles). Roll is applied first, then pitch. Degrees here; converted to the
+    # radians pyhelios expects below.
+    tilt_roll_deg: float = 0.0
+    tilt_pitch_deg: float = 0.0
 
 
 class LidarScanRequest(BaseModel):

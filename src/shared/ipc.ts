@@ -36,6 +36,10 @@ export interface BackendInfo {
   appVersion: string;
   /** OS platform: 'darwin' | 'win32' | 'linux'. */
   platform: string;
+  /** PyHelios submodule version (git describe), captured at build time. */
+  pyheliosVersion: string;
+  /** helios-core C++ submodule version (git describe), captured at build time. */
+  heliosVersion: string;
 }
 
 export interface OpenDialogOptions {
@@ -74,4 +78,5 @@ export type MenuCommandPayload =
   | { kind: 'reset-camera' }
   | { kind: 'snap-view'; direction: SnapViewDirection }
   | { kind: 'feedback'; mode: 'bug' | 'feature' }
+  | { kind: 'about' }
   | { kind: 'nav'; target: 'viewer' | 'options' };

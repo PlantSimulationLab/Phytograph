@@ -105,6 +105,15 @@ indicators (Left/Right/Scroll meanings depending on tool), and the
 last operation's status message (e.g., *"Loaded 84,795 points from
 scan.xyz"*).
 
+## About / version info
+
+Open **Phytograph → About Phytograph** (macOS) or **Help → About
+Phytograph** (Windows/Linux) to see the versions Phytograph is running:
+the **Application** and **Backend** versions, plus the **PyHelios** and
+**Helios (C++)** engine versions. These are handy to quote when reporting
+a bug — the same numbers are auto-attached to the
+[bug/feature reports](feedback.md) you send from within the app.
+
 ## Command palette
 
 Press <kbd>⌘</kbd>+<kbd>K</kbd> (macOS) or <kbd>Ctrl</kbd>+<kbd>K</kbd>

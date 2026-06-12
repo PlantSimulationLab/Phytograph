@@ -26,7 +26,8 @@ them.
 ## What gets included
 
 So that reports are easy to act on, Phytograph automatically attaches a small
-**Environment** block — the Phytograph version, backend version, and your
-operating system. It's shown in the dialog ("Includes: …") and appears in the
+**Environment** block — the Phytograph version, backend version, the PyHelios
+and Helios (C++) engine versions, and your operating system. It's shown in the
+dialog ("Includes: …") and appears in the
 pre-filled issue/email, where you can review or edit it before sending. No other
 data from your scans or files is included.
