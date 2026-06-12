@@ -12,6 +12,7 @@ memorize anything.
 |---|---|
 | Top-left | Phytograph logo and the current scene summary ("N Clouds, M Meshes…") |
 | Top-center | The active mode label |
+| Top-right | **Report a Bug** and **Request a Feature** buttons (see [Reporting bugs & requesting features](feedback.md)) |
 
 Import is via **drag-and-drop** onto the window or the **File → Import**
 menu — choose **Auto-detect**, or an explicit **Point Cloud**, **Mesh**,

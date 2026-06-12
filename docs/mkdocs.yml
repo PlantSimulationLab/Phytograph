@@ -94,6 +94,7 @@ nav:
       - Install Phytograph: guide/install.md
       - Your first import: guide/first-import.md
       - Tour of the interface: guide/interface-tour.md
+      - Reporting bugs & requesting features: guide/feedback.md
   - Concepts:
       - concepts/index.md
       - Scans: concepts/scans.md

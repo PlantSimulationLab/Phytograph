@@ -20,6 +20,8 @@ export const IPC = {
   StoreDelete: 'store:delete',
   // Backend info
   BackendGetInfo: 'backend:getInfo',
+  // Open a URL (https: or mailto:) in the OS default browser / mail client
+  ShellOpenExternal: 'shell:openExternal',
   // File-drop events (main -> renderer)
   FileDropEvent: 'fileDrop:event',
   // Menu commands (main -> renderer)
@@ -30,6 +32,10 @@ export interface BackendInfo {
   url: string;
   expectedVersion: string;
   isDev: boolean;
+  /** App version (Electron app.getVersion(), reads package.json). */
+  appVersion: string;
+  /** OS platform: 'darwin' | 'win32' | 'linux'. */
+  platform: string;
 }
 
 export interface OpenDialogOptions {
@@ -67,4 +73,5 @@ export type MenuCommandPayload =
   | { kind: 'deselect-all' }
   | { kind: 'reset-camera' }
   | { kind: 'snap-view'; direction: SnapViewDirection }
+  | { kind: 'feedback'; mode: 'bug' | 'feature' }
   | { kind: 'nav'; target: 'viewer' | 'options' };

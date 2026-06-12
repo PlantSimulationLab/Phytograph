@@ -30,6 +30,9 @@ const api = {
   app: {
     getCwd: (): Promise<string> => ipcRenderer.invoke(IPC.AppGetCwd),
   },
+  shell: {
+    openExternal: (url: string): Promise<void> => ipcRenderer.invoke(IPC.ShellOpenExternal, url),
+  },
   store: {
     get: <T = unknown>(key: string): Promise<T | undefined> => ipcRenderer.invoke(IPC.StoreGet, key),
     set: (key: string, value: unknown): Promise<void> => ipcRenderer.invoke(IPC.StoreSet, key, value),

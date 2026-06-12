@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Box, FileUp } from "lucide-react";
+import { Box, FileUp, Bug, Lightbulb } from "lucide-react";
 import * as THREE from 'three';
 import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
@@ -14,6 +14,8 @@ import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
 import { registerCategoricalSlug } from "./lib/classification";
 import { resolveTargets } from "./lib/bulkActions";
+import { FeedbackDialog } from "./components/FeedbackDialog";
+import type { FeedbackMode } from "./lib/feedback";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
 // we have a disk path. Every supported point-cloud format is here; only inputs
@@ -54,6 +56,8 @@ function App() {
   // File → Import menu) is in flight. Reuses BulkImportProgress so every
   // import pathway shows the same spinner + bar + filename modal.
   const [importProgress, setImportProgress] = useState<BulkImportProgressState | null>(null);
+  // null = closed; otherwise the open feedback dialog's mode.
+  const [feedbackMode, setFeedbackMode] = useState<FeedbackMode | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const pendingImportTypeRef = useRef<ImportType>('auto');
 
@@ -947,6 +951,9 @@ function App() {
         case 'snap-view':
           (window as any).__snapToView?.(payload.direction);
           break;
+        case 'feedback':
+          setFeedbackMode(payload.mode);
+          break;
         case 'nav':
           setActiveNav(payload.target);
           break;
@@ -1006,6 +1013,27 @@ function App() {
             ({totalPoints.toLocaleString()} total points)
           </span>
         </div>
+
+        <div className="flex-1" />
+
+        <button
+          data-testid="report-bug-btn"
+          onClick={() => setFeedbackMode('bug')}
+          title="Report a bug"
+          className="px-3 py-1.5 text-sm bg-neutral-700 text-neutral-200 rounded hover:bg-neutral-600 transition-colors flex items-center gap-1"
+        >
+          <Bug className="w-4 h-4" />
+          Report a Bug
+        </button>
+        <button
+          data-testid="request-feature-btn"
+          onClick={() => setFeedbackMode('feature')}
+          title="Request a feature"
+          className="px-3 py-1.5 text-sm bg-neutral-700 text-neutral-200 rounded hover:bg-neutral-600 transition-colors flex items-center gap-1"
+        >
+          <Lightbulb className="w-4 h-4" />
+          Request a Feature
+        </button>
       </div>
 
       {/* 3D Viewer */}
@@ -1135,6 +1163,13 @@ function App() {
           component as the Helios XML and per-scan attach pathways so every
           import shows an identical modal. */}
       <BulkImportProgress progress={importProgress} />
+
+      {/* Feedback dialog — opened from the toolbar buttons or Help menu. */}
+      <FeedbackDialog
+        isOpen={feedbackMode !== null}
+        mode={feedbackMode ?? 'bug'}
+        onClose={() => setFeedbackMode(null)}
+      />
 
       {/* Drag overlay */}
       {isDragOver && (

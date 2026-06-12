@@ -1,7 +1,7 @@
 // Main-process IPC handlers backing the renderer's window.electronAPI surface.
 // Mirrors the Tauri plugins the frontend currently uses: dialog, fs, store, file-drop events.
 
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { access, readFile, writeFile } from 'node:fs/promises';
 import Store from 'electron-store';
 import {
@@ -21,8 +21,14 @@ export function registerIpc(): void {
       url: `http://localhost:${isDev ? BACKEND_PORT_DEV : BACKEND_PORT_PROD}`,
       expectedVersion: EXPECTED_BACKEND_VERSION,
       isDev,
+      appVersion: app.getVersion(),
+      platform: process.platform,
     };
   });
+
+  // Open an https: URL in the browser or a mailto: link in the default mail
+  // client. The feedback dialog uses this for both its GitHub and email paths.
+  ipcMain.handle(IPC.ShellOpenExternal, (_e, url: string) => shell.openExternal(url));
 
   ipcMain.handle(IPC.DialogOpen, async (_e, opts: OpenDialogOptions = {}) => {
     const win = BrowserWindow.getFocusedWindow();

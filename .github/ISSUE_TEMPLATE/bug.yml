@@ -1,0 +1,24 @@
+name: Bug report
+description: Report something that isn't working in Phytograph
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: What happened? What did you expect instead? Steps to reproduce, if you know them.
+      placeholder: |
+        When I ... I expected ... but instead ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: App version, backend version, and OS. The in-app "Report a Bug" button fills this in automatically.
+      placeholder: |
+        - Phytograph: 0.13.1
+        - Backend: 0.13.1
+        - OS: darwin
+    validations:
+      required: false

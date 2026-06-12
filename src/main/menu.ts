@@ -1,11 +1,10 @@
 import { BrowserWindow, Menu, MenuItemConstructorOptions, app, shell } from 'electron';
 import { IPC, type MenuCommandPayload, type SnapViewDirection } from '../shared/ipc.js';
+import { REPO_URL } from '../shared/constants.js';
 
 const isMac = process.platform === 'darwin';
 const isE2E = process.env.PHYTOGRAPH_E2E === '1';
 const isDev = !app.isPackaged;
-
-const REPO_URL = 'https://github.com/PlantSimulationLab/phytograph';
 
 export function installApplicationMenu(getMainWindow: () => BrowserWindow | null): void {
   // Tests assume an inert chrome — no native menu wired to the window.
@@ -173,6 +172,15 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
     {
       label: 'Help',
       submenu: [
+        {
+          label: 'Report a Bug…',
+          click: () => send({ kind: 'feedback', mode: 'bug' }),
+        },
+        {
+          label: 'Request a Feature…',
+          click: () => send({ kind: 'feedback', mode: 'feature' }),
+        },
+        { type: 'separator' },
         {
           label: 'Phytograph on GitHub',
           click: () => {

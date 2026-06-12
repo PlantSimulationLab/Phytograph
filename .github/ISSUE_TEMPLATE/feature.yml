@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest a new feature or improvement for Phytograph
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature request
+      description: What problem would this solve? How do you imagine it working?
+      placeholder: |
+        It would help if Phytograph could ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: App version, backend version, and OS. The in-app "Request a Feature" button fills this in automatically.
+      placeholder: |
+        - Phytograph: 0.13.1
+        - Backend: 0.13.1
+        - OS: darwin
+    validations:
+      required: false
