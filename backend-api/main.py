@@ -1931,6 +1931,17 @@ try:
 except (ValueError, TypeError):
     _TREEISO_MAX_POINTS = 5_000_000
 
+# BFS skeleton extraction builds an in-RAM neighbour graph and runs BFS/cluster
+# passes over it; beyond a few million points the graph + Python passes get
+# heavy. Cap so the endpoint fails fast with an actionable message instead of
+# appearing to hang. Override via env. (The renderer already downsamples
+# octree-backed clouds to ~20k via source.max_points; this guards the inline /
+# uncapped paths.)
+try:
+    _SKELETON_MAX_POINTS = int(os.environ.get("PHYTOGRAPH_SKELETON_MAX_POINTS", "3000000"))
+except (ValueError, TypeError):
+    _SKELETON_MAX_POINTS = 3_000_000
+
 
 class TreeSegmentationRequest(BaseModel):
     """Request model for individual-tree segmentation via TreeIso.
@@ -5448,7 +5459,19 @@ def remove_statistical_outliers(points: np.ndarray, nb_neighbors: int = 20, std_
 
 def build_neighbor_graph(points: np.ndarray, search_radius: float, max_neighbors: int = 20) -> dict:
     """
-    Build an undirected graph connecting neighboring points using KD-tree.
+    Build an undirected graph connecting neighboring points using a KD-tree.
+
+    Each point is linked to its up-to-`max_neighbors` nearest neighbours that
+    lie within `search_radius`. Implemented as a single batched k-NN query
+    (cKDTree, parallel workers) plus a radius mask — NOT a per-point
+    `query_ball_point` Python loop, which on a multi-million-point TLS cloud
+    materialises a Python list per point and runs for minutes. The batched
+    query mirrors the wood-segmentation neighbour pass (`_wood_local_pca_features`).
+
+    Because cKDTree returns neighbours sorted by increasing distance, taking the
+    first `max_neighbors` after dropping self and applying the radius mask is
+    exactly the "keep the closest within radius" semantics of the old code — a
+    behaviour-preserving rewrite, not a quality change.
 
     Args:
         points: Nx3 array of point coordinates
@@ -5456,27 +5479,40 @@ def build_neighbor_graph(points: np.ndarray, search_radius: float, max_neighbors
         max_neighbors: Maximum number of neighbors per point
 
     Returns:
-        dict with 'neighbors' (list of neighbor indices for each point) and 'kdtree'
+        dict with 'neighbors' (per-point int32 ndarray of neighbour indices, so
+        `for j in neighbors[i]` still yields ints) and 'kdtree'
     """
-    from scipy.spatial import KDTree
+    from scipy.spatial import cKDTree
 
-    tree = KDTree(points)
+    tree = cKDTree(points)
     n_points = len(points)
+    if n_points == 0:
+        return {'neighbors': [], 'kdtree': tree}
 
-    # Query neighbors within radius for all points
-    neighbors = []
-    for i in range(n_points):
-        # Find neighbors within radius
-        idx = tree.query_ball_point(points[i], search_radius)
-        # Remove self
-        idx = [j for j in idx if j != i]
-        # Limit to max_neighbors
-        if len(idx) > max_neighbors:
-            # Keep closest neighbors
-            dists = [np.linalg.norm(points[i] - points[j]) for j in idx]
-            sorted_idx = np.argsort(dists)[:max_neighbors]
-            idx = [idx[k] for k in sorted_idx]
-        neighbors.append(idx)
+    # k+1: the nearest neighbour of a point is itself (distance 0); we drop it.
+    k = min(max_neighbors + 1, n_points)
+
+    # Query in chunks: a single full query allocates the (N,k) float64 distances
+    # AND int64 indices at once, which OOMs on large clouds. Chunking caps the
+    # transient to one block (same rationale as the wood-seg pass).
+    neighbors: list = [None] * n_points
+    chunk = 200_000
+    for start in range(0, n_points, chunk):
+        end = min(start + chunk, n_points)
+        dist_block, idx_block = tree.query(points[start:end], k=k, workers=-1)
+        if idx_block.ndim == 1:  # k == 1 edge case (n_points == 1)
+            idx_block = idx_block[:, None]
+            dist_block = dist_block[:, None]
+        for r in range(end - start):
+            gi = start + r          # global point index
+            cols = idx_block[r]
+            d = dist_block[r]
+            keep = (cols != gi) & (d <= search_radius)  # drop self + outside radius
+            sel = cols[keep]
+            if sel.shape[0] > max_neighbors:
+                sel = sel[:max_neighbors]  # already distance-sorted → closest
+            neighbors[gi] = sel.astype(np.int32, copy=False)
+        del dist_block, idx_block
 
     return {'neighbors': neighbors, 'kdtree': tree}
 
@@ -6470,6 +6506,21 @@ async def extract_stem_skeleton(request: SkeletonRequest):
         else:
             points = np.array(request.points or [], dtype=np.float64)
         points_original_count = len(points)
+
+        if points_original_count > _SKELETON_MAX_POINTS:
+            return SkeletonResponse(
+                success=False,
+                skeleton_points=[],
+                num_nodes=0,
+                dominant_axis=request.dominant_axis,
+                points_before_filtering=points_original_count,
+                points_after_filtering=points_original_count,
+                error=(
+                    f"{points_original_count:,} points exceeds the "
+                    f"{_SKELETON_MAX_POINTS:,}-point limit for skeleton extraction. "
+                    "Downsample or crop first."
+                ),
+            )
 
         if len(points) < 50:
             return SkeletonResponse(
@@ -9254,49 +9305,72 @@ def _format_points_as_text(
     """Format an (N,3) point array (+ optional 0-1 colors, intensity) as XYZ /
     TXT / CSV / PLY / OBJ text. Column conventions match the renderer's flat
     text export exactly: 6-decimal positions, colors as 0-255 ints, intensity
-    4-decimal."""
+    4-decimal.
+
+    Vectorised with `np.savetxt` rather than a per-point Python f-string loop —
+    on a multi-million-point octree cloud the old loop dominated export time and
+    held the whole formatted string list in RAM. Output is byte-identical to the
+    previous loop (same precision, separators, headers, and no trailing newline).
+    """
+    import io
+
     n = len(points)
     has_colors = colors is not None and len(colors) == n
     has_int = intensity is not None and len(intensity) == n
     rgb = np.clip(np.rint(colors * 255.0), 0, 255).astype(int) if has_colors else None
 
-    lines: List[str] = []
+    def _savetxt(cols: list, fmts: list, sep: str) -> str:
+        """np.savetxt the column-stacked `cols` with per-column `fmts`, joined by
+        `sep`, returning the body WITHOUT the trailing newline savetxt appends."""
+        buf = io.StringIO()
+        np.savetxt(buf, np.column_stack(cols), fmt=sep.join(fmts), delimiter=sep)
+        return buf.getvalue().rstrip("\n")
+
+    pos_fmt = ["%.6f", "%.6f", "%.6f"]
+
     if fmt == "xyz":
-        for i in range(n):
-            lines.append(f"{points[i, 0]:.6f} {points[i, 1]:.6f} {points[i, 2]:.6f}")
-    elif fmt in ("txt", "csv"):
+        return _savetxt([points[:, 0], points[:, 1], points[:, 2]], pos_fmt, " ")
+
+    if fmt in ("txt", "csv"):
         sep = "," if fmt == "csv" else " "
         head = ["X", "Y", "Z"]
+        cols = [points[:, 0], points[:, 1], points[:, 2]]
+        fmts = list(pos_fmt)
         if has_colors:
             head += ["R", "G", "B"]
+            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
+            fmts += ["%d", "%d", "%d"]
         if has_int:
             head += ["Intensity"]
-        lines.append(sep.join(head))
-        for i in range(n):
-            cols = [f"{points[i, 0]:.6f}", f"{points[i, 1]:.6f}", f"{points[i, 2]:.6f}"]
-            if has_colors:
-                cols += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
-            if has_int:
-                cols += [f"{float(intensity[i]):.4f}"]
-            lines.append(sep.join(cols))
-    elif fmt == "ply":
-        lines += ["ply", "format ascii 1.0", f"element vertex {n}",
+            cols += [np.asarray(intensity, dtype=np.float64)]
+            fmts += ["%.4f"]
+        body = _savetxt(cols, fmts, sep)
+        # Match the old loop exactly: header only (no trailing newline) when empty.
+        return sep.join(head) + ("\n" + body if body else "")
+
+    if fmt == "ply":
+        header = ["ply", "format ascii 1.0", f"element vertex {n}",
                   "property float x", "property float y", "property float z"]
+        cols = [points[:, 0], points[:, 1], points[:, 2]]
+        fmts = list(pos_fmt)
         if has_colors:
-            lines += ["property uchar red", "property uchar green", "property uchar blue"]
-        lines.append("end_header")
-        for i in range(n):
-            line = f"{points[i, 0]:.6f} {points[i, 1]:.6f} {points[i, 2]:.6f}"
-            if has_colors:
-                line += f" {rgb[i, 0]} {rgb[i, 1]} {rgb[i, 2]}"
-            lines.append(line)
-    elif fmt == "obj":
-        lines += ["# Point cloud exported from Phytograph", f"# {n} points"]
-        for i in range(n):
-            lines.append(f"v {points[i, 0]:.6f} {points[i, 1]:.6f} {points[i, 2]:.6f}")
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported text export format: {fmt}")
-    return "\n".join(lines)
+            header += ["property uchar red", "property uchar green", "property uchar blue"]
+            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
+            fmts += ["%d", "%d", "%d"]
+        header.append("end_header")
+        body = _savetxt(cols, fmts, " ")
+        return "\n".join(header) + ("\n" + body if body else "")
+
+    if fmt == "obj":
+        header = ["# Point cloud exported from Phytograph", f"# {n} points"]
+        # The 'v ' prefix is the first format field (a literal column).
+        body = _savetxt(
+            [points[:, 0], points[:, 1], points[:, 2]],
+            ["v %.6f", "%.6f", "%.6f"], " ",
+        )
+        return "\n".join(header) + ("\n" + body if body else "")
+
+    raise HTTPException(status_code=400, detail=f"Unsupported text export format: {fmt}")
 
 
 @app.post("/api/pointcloud/export", response_model=PointCloudExportResponse)
@@ -9456,89 +9530,39 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
 @app.post("/api/pointcloud/import", response_model=PointCloudImportResponse)
 async def import_point_cloud_las(file: UploadFile = File(...)):
     """
-    Import a LAS or LAZ file and return the point cloud data.
+    Import a LAS or LAZ file (multipart upload) and stream back a packed binary
+    (PHX1) point-cloud response — the SAME format as `import_by_path`, decoded
+    straight into Float32Arrays by the renderer.
 
-    Uses laspy with lazrs backend for LAZ decompression.
-    Supports LAS 1.0-1.4 and all point formats.
+    This is the no-disk-path fallback (a File blob with no real path can't use
+    import_by_path). It previously returned `points.tolist()` as a JSON body,
+    which on a large LAZ trips V8's ~512 MB max-string ceiling and triples peak
+    memory; the binary stream avoids both. laspy + lazrs handle LAZ; reading is
+    shared with the path-based loader via `_load_las_arrays`.
     """
     import tempfile
     import os
 
-    try:
-        import laspy
-    except ImportError:
-        return PointCloudImportResponse(
-            success=False,
-            error="laspy library not installed. Run: pip install laspy[lazrs]"
+    filename = file.filename or "upload.las"
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ['.las', '.laz']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format: {ext}. Expected .las or .laz",
         )
 
+    # Save the upload to a temp file so laspy (which reads from a path) can
+    # decode it, then reuse the shared loader + binary packer.
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
     try:
-        # Get file extension
-        filename = file.filename or "upload.las"
-        ext = os.path.splitext(filename)[1].lower()
-
-        if ext not in ['.las', '.laz']:
-            return PointCloudImportResponse(
-                success=False,
-                error=f"Unsupported file format: {ext}. Expected .las or .laz"
-            )
-
-        # Save uploaded file to temp location
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-            content = await file.read()
-            tmp.write(content)
-            tmp_path = tmp.name
-
-        try:
-            # Read LAS/LAZ file
-            las = laspy.read(tmp_path)
-
-            # Extract points (use scaled coordinates)
-            points = np.column_stack([las.x, las.y, las.z])
-
-            # Check for RGB colors
-            colors = None
-            has_colors = False
-
-            # Point formats 2, 3, 5, 7, 8, 10 have RGB
-            if hasattr(las, 'red') and hasattr(las, 'green') and hasattr(las, 'blue'):
-                try:
-                    red = np.array(las.red)
-                    green = np.array(las.green)
-                    blue = np.array(las.blue)
-
-                    # Check if colors are actually set (not all zeros)
-                    if red.max() > 0 or green.max() > 0 or blue.max() > 0:
-                        # Convert from 16-bit to 0-1 range
-                        colors = np.column_stack([
-                            red / 65535.0,
-                            green / 65535.0,
-                            blue / 65535.0
-                        ]).tolist()
-                        has_colors = True
-                except:
-                    pass
-
-            return PointCloudImportResponse(
-                success=True,
-                points=points.tolist(),
-                colors=colors,
-                point_count=len(points),
-                has_colors=has_colors,
-                filename=filename
-            )
-
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return PointCloudImportResponse(
-            success=False,
-            error=f"Import failed: {str(e)}"
-        )
+        positions, colors, intensity = _load_las_arrays(tmp_path)
+        return _pack_pointcloud_response(positions, colors, intensity)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 # ==================== POINT CLOUD PATH-BASED IMPORT ====================
@@ -9627,6 +9651,9 @@ _POINTCLOUD_BIN_MAGIC = b'PHX1'
 # may be accompanied by a Helios `ascii_format` hint; PLY/PCD ignore it.
 _PANDAS_EXTENSIONS = {'xyz', 'txt', 'csv', 'pts', 'asc'}
 _OPEN3D_EXTENSIONS = {'ply', 'pcd'}
+# LAS/LAZ via laspy — served by the binary import_by_path path (was previously
+# only reachable through the slow multipart /api/pointcloud/import JSON endpoint).
+_LAS_EXTENSIONS = {'las', 'laz'}
 
 
 class ColumnPlanEntry(BaseModel):
@@ -10494,14 +10521,62 @@ def _load_pointcloud_arrays(
         return _load_xyz_arrays(file_path, ascii_format, column_plan)
     if ext in _OPEN3D_EXTENSIONS:
         return _load_ply_pcd_arrays(file_path)
+    if ext in _LAS_EXTENSIONS:
+        return _load_las_arrays(file_path)
 
     raise HTTPException(
         status_code=400,
         detail=(
             f"Unsupported extension for path-based import: .{ext}. "
-            f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS)}"
+            f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS | _LAS_EXTENSIONS)}"
         ),
     )
+
+
+def _load_las_arrays(
+    file_path: str,
+) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    """Read a LAS/LAZ file into (positions[N,3] float64, colors[N,3] float32 in
+    0-1 | None, intensity[N] float32 | None). Same laspy read as the legacy
+    multipart `/api/pointcloud/import` endpoint, but returns the arrays for the
+    binary `import_by_path` stream instead of JSON-serialising them — so a large
+    LAZ no longer round-trips through `points.tolist()` + a 100s-of-MB JSON body.
+    """
+    try:
+        import laspy
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="laspy library not installed. Run: pip install laspy[lazrs]",
+        )
+
+    las = laspy.read(file_path)
+    positions = np.column_stack([las.x, las.y, las.z]).astype(np.float64, copy=False)
+
+    colors = None
+    if hasattr(las, 'red') and hasattr(las, 'green') and hasattr(las, 'blue'):
+        try:
+            red = np.asarray(las.red)
+            green = np.asarray(las.green)
+            blue = np.asarray(las.blue)
+            # Only treat RGB as present if actually set (not an all-zero block).
+            if red.max() > 0 or green.max() > 0 or blue.max() > 0:
+                colors = (np.column_stack([red, green, blue]) / 65535.0).astype(
+                    np.float32, copy=False
+                )
+        except Exception:
+            colors = None
+
+    intensity = None
+    if hasattr(las, 'intensity'):
+        try:
+            inten = np.asarray(las.intensity, dtype=np.float32)
+            if inten.size == len(positions) and inten.max() > 0:
+                intensity = inten
+        except Exception:
+            intensity = None
+
+    return positions, colors, intensity
 
 
 def _read_points_from_source(

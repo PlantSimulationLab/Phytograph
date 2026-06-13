@@ -11,7 +11,9 @@
 // a 400 or 404 — no path traversal possible.
 
 import { app, protocol } from 'electron';
-import { existsSync, openSync, closeSync, readSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { join, basename } from 'node:path';
 
 const SCHEME = 'app';
@@ -104,11 +106,12 @@ export function registerOctreeProtocol(): void {
     }
 
     const absPath = join(octreeCacheRoot(), cacheId, fileName);
-    if (!existsSync(absPath)) {
+    let total: number;
+    try {
+      total = (await stat(absPath)).size;
+    } catch {
       return new Response(`no such file: ${cacheId}/${fileName}`, { status: 404 });
     }
-
-    const total = statSync(absPath).size;
     const rangeHeader = req.headers.get('range');
 
     // metadata.json gets a rewrite of non-standard `inf`/`-inf`/`nan` to
@@ -124,7 +127,7 @@ export function registerOctreeProtocol(): void {
     // there. Range requests on metadata.json are not expected, so this
     // whole-file path is fine.
     if (fileName === 'metadata.json') {
-      const text = readFileSync(absPath, 'utf8')
+      const text = (await readFile(absPath, 'utf8'))
         .replace(/(?<![\w.])-?inf(?![\w.])/g, 'null')
         .replace(/(?<![\w.])nan(?![\w.])/g, 'null');
       const body = new TextEncoder().encode(text);
@@ -163,14 +166,15 @@ export function registerOctreeProtocol(): void {
     }
 
     const length = end - start + 1;
-    const buf = Buffer.allocUnsafe(length);
-    const fd = openSync(absPath, 'r');
-    try {
-      readSync(fd, buf, 0, length, start);
-    } finally {
-      closeSync(fd);
-    }
-    const body = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    // Stream the byte range straight off disk instead of buffering the whole
+    // range into RAM with a synchronous read. octree.bin is hundreds of MB; the
+    // old openSync/readSync into Buffer.allocUnsafe(length) both spiked
+    // main-process memory and BLOCKED the event loop (freezing all IPC/windows)
+    // for the duration of the read. createReadStream → web ReadableStream lets
+    // Electron pull bytes incrementally. `end` is inclusive for both
+    // createReadStream and the HTTP Range spec, so it passes through directly.
+    const nodeStream = createReadStream(absPath, { start, end });
+    const body = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
 
     const headers: Record<string, string> = {
       'Content-Type': contentTypeFor(fileName),

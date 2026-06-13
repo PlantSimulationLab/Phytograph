@@ -329,3 +329,89 @@ def test_ascii_format_hint_is_ignored_for_ply(client, tmp_path: Path):
     })
     assert res.status_code == 200, res.text
     assert _positions(res.content, 1).tolist() == [[7, 8, 9]]
+
+
+def test_las_file_imports_via_binary_path(client, tmp_path: Path):
+    """LAS/LAZ now route through the binary import_by_path (was multipart JSON).
+    Round-trip a tiny LAS with RGB + intensity and confirm the packed response."""
+    laspy = pytest.importorskip("laspy")
+    import numpy as np
+
+    n = 5
+    hdr = laspy.LasHeader(point_format=3, version="1.2")
+    las = laspy.LasData(hdr)
+    las.x = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    las.y = np.array([0.0, 0.5, 1.0, 1.5, 2.0])
+    las.z = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+    las.red = (np.arange(n) * 1000).astype(np.uint16)
+    las.green = (np.arange(n) * 500).astype(np.uint16)
+    las.blue = (np.arange(n) * 250).astype(np.uint16)
+    las.intensity = (np.arange(n) * 10 + 1).astype(np.uint16)
+    p = tmp_path / "scan.las"
+    las.write(str(p))
+
+    res = client.post("/api/pointcloud/import_by_path", json={"file_path": str(p)})
+    assert res.status_code == 200, res.text
+    assert res.headers["content-type"] == "application/octet-stream"
+    body = res.content
+    header = _unpack_header(body)
+    assert header["magic"] == b"PHX1"
+    assert header["count"] == n
+    assert header["has_colors"] and header["has_intensity"]
+    pts = _positions(body, n)
+    assert np.allclose(pts[:, 0], [0, 1, 2, 3, 4])
+    assert np.allclose(pts[:, 2], [0, 0.25, 0.5, 0.75, 1.0])
+
+
+def test_text_export_is_byte_identical_to_reference(client):
+    """The vectorised _format_points_as_text must match the prior per-point
+    f-string loop exactly (precision, separators, headers, no trailing newline)."""
+    import numpy as np
+    import main
+
+    def reference(fmt, points, colors, intensity):
+        n = len(points)
+        has_colors = colors is not None and len(colors) == n
+        has_int = intensity is not None and len(intensity) == n
+        rgb = np.clip(np.rint(colors * 255.0), 0, 255).astype(int) if has_colors else None
+        lines = []
+        if fmt == "xyz":
+            for i in range(n):
+                lines.append(f"{points[i,0]:.6f} {points[i,1]:.6f} {points[i,2]:.6f}")
+        elif fmt in ("txt", "csv"):
+            sep = "," if fmt == "csv" else " "
+            head = ["X", "Y", "Z"] + (["R", "G", "B"] if has_colors else []) + (["Intensity"] if has_int else [])
+            lines.append(sep.join(head))
+            for i in range(n):
+                cols = [f"{points[i,0]:.6f}", f"{points[i,1]:.6f}", f"{points[i,2]:.6f}"]
+                if has_colors:
+                    cols += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
+                if has_int:
+                    cols += [f"{float(intensity[i]):.4f}"]
+                lines.append(sep.join(cols))
+        elif fmt == "ply":
+            lines += ["ply", "format ascii 1.0", f"element vertex {n}",
+                      "property float x", "property float y", "property float z"]
+            if has_colors:
+                lines += ["property uchar red", "property uchar green", "property uchar blue"]
+            lines.append("end_header")
+            for i in range(n):
+                line = f"{points[i,0]:.6f} {points[i,1]:.6f} {points[i,2]:.6f}"
+                if has_colors:
+                    line += f" {rgb[i,0]} {rgb[i,1]} {rgb[i,2]}"
+                lines.append(line)
+        elif fmt == "obj":
+            lines += ["# Point cloud exported from Phytograph", f"# {n} points"]
+            for i in range(n):
+                lines.append(f"v {points[i,0]:.6f} {points[i,1]:.6f} {points[i,2]:.6f}")
+        return "\n".join(lines)
+
+    rs = np.random.RandomState(7)
+    pts = rs.rand(9, 3) * np.array([12.0, -6.0, 3.5])
+    cols = rs.rand(9, 3)
+    inten = rs.rand(9) * 500
+    for fmt in ("xyz", "txt", "csv", "ply", "obj"):
+        for c in (None, cols):
+            for it in (None, inten):
+                assert main._format_points_as_text(fmt, pts, c, it) == reference(fmt, pts, c, it), \
+                    f"mismatch fmt={fmt} colors={c is not None} int={it is not None}"

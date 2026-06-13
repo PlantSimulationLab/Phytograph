@@ -15,9 +15,17 @@ export async function stubOpenDialog(
 ): Promise<void> {
   const responses = Array.isArray(filePathOrResponses) ? filePathOrResponses : [filePathOrResponses];
   await app.evaluate(async ({ ipcMain }, openResponses: (string | null)[]) => {
-    const g = globalThis as unknown as { __openDialogCalls?: unknown[]; __openDialogIndex?: number };
+    const g = globalThis as unknown as {
+      __openDialogCalls?: unknown[];
+      __openDialogIndex?: number;
+      __phytographAllowPath?: (p: string) => void;
+    };
     g.__openDialogCalls = [];
     g.__openDialogIndex = 0;
+    // Seed the fs allowlist with every path this stub may return, mirroring the
+    // real dialog:open handler — otherwise downstream fs:readBinary/readText is
+    // denied (src/main/fsAllowlist.ts). null entries (user-cancel) are skipped.
+    for (const r of openResponses) if (r) g.__phytographAllowPath?.(r);
     ipcMain.removeHandler('dialog:open');
     ipcMain.handle('dialog:open', async (_e, opts) => {
       g.__openDialogCalls!.push(opts);

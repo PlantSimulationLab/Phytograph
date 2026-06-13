@@ -1871,7 +1871,7 @@ export async function fetchBinaryFrame(
  */
 export async function importPointCloudLasLaz(
   file: File
-): Promise<PointCloudImportResponse> {
+): Promise<ImportPointCloudByPathResult> {
   const baseUrl = getBackendUrl();
   console.log('LAS/LAZ import - file:', file.name, 'size:', file.size);
 
@@ -1892,11 +1892,15 @@ export async function importPointCloudLasLaz(
     clearTimeout(timeoutId);
 
     if (!response.ok) {
+      // Success is an octet-stream PHX1 frame; errors are JSON {detail}.
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
 
-    return await response.json();
+    // The endpoint now streams the packed binary (PHX1) frame, decoded into
+    // Float32Array views — no JSON point list, no V8 string-size ceiling.
+    const buf = await response.arrayBuffer();
+    return decodePointCloudBinary(buf);
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('LAS/LAZ import failed:', error);

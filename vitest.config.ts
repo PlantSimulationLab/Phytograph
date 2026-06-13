@@ -15,7 +15,10 @@ export default defineConfig({
     environment: 'happy-dom',
     globals: true,
     setupFiles: ['./tests/setup/electronAPI.mock.ts'],
-    include: ['src/renderer/**/*.test.{ts,tsx}'],
+    // Renderer logic + the handful of pure (electron-free) main-process modules
+    // that warrant a unit test (e.g. the fs allowlist). Coverage scope below
+    // stays renderer-only by design (CLAUDE.md).
+    include: ['src/renderer/**/*.test.{ts,tsx}', 'src/main/**/*.test.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],

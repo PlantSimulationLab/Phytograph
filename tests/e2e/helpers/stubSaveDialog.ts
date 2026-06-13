@@ -14,8 +14,15 @@ export async function stubSaveDialog(
   filePath: string,
 ): Promise<void> {
   await app.evaluate(async ({ ipcMain }, savePath: string) => {
-    const g = globalThis as unknown as { __saveDialogCalls?: unknown[] };
+    const g = globalThis as unknown as {
+      __saveDialogCalls?: unknown[];
+      __phytographAllowPath?: (p: string, kind?: 'file' | 'saveFile' | 'directory') => void;
+    };
     g.__saveDialogCalls = [];
+    // Mirror the real dialog:save handler: allow writes to this save target AND
+    // its sibling folder (scan export writes backend-named files next to it),
+    // or the fs allowlist (src/main/fsAllowlist.ts) denies fs:writeBinary.
+    g.__phytographAllowPath?.(savePath, 'saveFile');
     // The renderer's IPC channel name is 'dialog:save' (see src/shared/ipc.ts).
     ipcMain.removeHandler('dialog:save');
     ipcMain.handle('dialog:save', async (_e, opts) => {

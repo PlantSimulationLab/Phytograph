@@ -15,6 +15,7 @@ import {
 } from '../shared/ipc.js';
 import { EXPECTED_BACKEND_VERSION } from '../shared/constants.js';
 import { getBackendPort } from './backend.js';
+import { allowPath, isPathAllowed, isWriteAllowed } from './fsAllowlist.js';
 import { copySessionLogTo, getLogFilePath, logFromRenderer } from './logger.js';
 // Generated at build time by scripts/gen-version-info.mjs (gitignored).
 import { PYHELIOS_VERSION, HELIOS_CORE_VERSION } from '../shared/generated/versionInfo.js';
@@ -78,6 +79,11 @@ export function registerIpc(): void {
         : ['openFile'],
     });
     if (result.canceled) return null;
+    // Whatever the user picked is now allowed. A chosen directory authorizes
+    // writes to its direct children (export-to-folder flows); chosen files are
+    // allowed for reads.
+    const kind = opts.directory ? 'directory' : 'file';
+    for (const p of result.filePaths) allowPath(p, kind);
     return opts.multi ? result.filePaths : result.filePaths[0];
   });
 
@@ -88,7 +94,12 @@ export function registerIpc(): void {
       defaultPath: opts.defaultPath,
       filters: opts.filters,
     });
-    return result.canceled ? null : result.filePath ?? null;
+    if (result.canceled || !result.filePath) return null;
+    // The user chose this save target; allow the write to it AND to sibling
+    // files in the same folder (the scan exporter writes backend-named files
+    // next to the chosen path).
+    allowPath(result.filePath, 'saveFile');
+    return result.filePath;
   });
 
   ipcMain.handle(IPC.DialogMessageBox, async (_e, opts: MessageBoxOptions) => {
@@ -105,20 +116,54 @@ export function registerIpc(): void {
     return { response: result.response };
   });
 
+  // One-way: the renderer reports a path it obtained from a native drag-drop or
+  // <input type=file> (resolved via webUtils.getPathForFile in preload). That's
+  // a genuine user selection, so allowlist it before the renderer reads it.
+  ipcMain.on(IPC.FsAllowPath, (_e, path: string) => {
+    if (typeof path === 'string') allowPath(path);
+  });
+
+  // The fs handlers enforce the "user-selected paths only" contract: a path is
+  // readable/writable only if it was returned by a dialog or reported via
+  // FsAllowPath. This prevents a compromised renderer from reaching arbitrary
+  // files (e.g. ~/.ssh/id_rsa) through the bridge.
+  const denyRead = (path: string): void => {
+    if (!isPathAllowed(path)) {
+      throw new Error(`fs access denied: "${path}" is not a user-selected path`);
+    }
+  };
+  const denyWrite = (path: string): void => {
+    if (!isWriteAllowed(path)) {
+      throw new Error(`fs write denied: "${path}" is not a user-selected path`);
+    }
+  };
+
   ipcMain.handle(IPC.FsReadText, async (_e, path: string) => {
+    denyRead(path);
     return readFile(path, 'utf-8');
   });
   ipcMain.handle(IPC.FsReadBinary, async (_e, path: string) => {
+    denyRead(path);
     const buf = await readFile(path);
     return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
   });
   ipcMain.handle(IPC.FsWriteText, async (_e, path: string, contents: string) => {
+    denyWrite(path);
     await writeFile(path, contents, 'utf-8');
   });
   ipcMain.handle(IPC.FsWriteBinary, async (_e, path: string, contents: ArrayBuffer) => {
+    denyWrite(path);
     await writeFile(path, Buffer.from(contents));
   });
   ipcMain.handle(IPC.FsExists, async (_e, path: string): Promise<boolean> => {
+    // The scan-file resolver probes candidate companion paths here. Report a
+    // non-authorized path as simply "not found" rather than throwing — that
+    // doesn't leak existence of arbitrary files (always false) and lets the
+    // resolver fall through to its "Locate…" prompt for anything outside the
+    // selected file's folder (e.g. its cwd fallback candidate).
+    if (!isPathAllowed(path) && !isWriteAllowed(path)) {
+      return false;
+    }
     try {
       await access(path);
       return true;

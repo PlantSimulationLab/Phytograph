@@ -699,42 +699,16 @@ export async function parseLAS(file: File): Promise<PointCloudData> {
   return result;
 }
 
-// Parse LAZ format via backend (uses laspy with lazrs for decompression)
+// Parse LAS/LAZ via the backend (laspy + lazrs). This is the no-disk-path
+// fallback — a File blob with no real path can't use the binary import_by_path
+// route. The endpoint now streams a packed PHX1 binary frame (decoded into
+// Float32Array views by importPointCloudLasLaz), so the result is reused
+// directly via buildPointCloudFromBackend — no per-point number[][] copy and no
+// V8 string-size ceiling on the response.
 export async function parseLAZ(file: File): Promise<PointCloudData> {
   try {
-    const response = await importPointCloudLasLaz(file);
-
-    if (!response.success || !response.points) {
-      throw new Error(response.error || 'Failed to import LAZ file');
-    }
-
-    const pointCount = response.point_count;
-    const positions = new Float32Array(pointCount * 3);
-
-    for (let i = 0; i < pointCount; i++) {
-      positions[i * 3] = response.points[i][0];
-      positions[i * 3 + 1] = response.points[i][1];
-      positions[i * 3 + 2] = response.points[i][2];
-    }
-
-    const result: PointCloudData = {
-      positions,
-      pointCount,
-      bounds: calculateBounds(positions, pointCount),
-      fileName: file.name,
-    };
-
-    if (response.has_colors && response.colors) {
-      const colorArray = new Float32Array(pointCount * 3);
-      for (let i = 0; i < pointCount; i++) {
-        colorArray[i * 3] = response.colors[i][0];
-        colorArray[i * 3 + 1] = response.colors[i][1];
-        colorArray[i * 3 + 2] = response.colors[i][2];
-      }
-      result.colors = colorArray;
-    }
-
-    return result;
+    const result = await importPointCloudLasLaz(file);
+    return buildPointCloudFromBackend(result, file.name);
   } catch (error) {
     // If backend is not available, provide helpful error message
     if (error instanceof TypeError && error.message.includes('fetch')) {

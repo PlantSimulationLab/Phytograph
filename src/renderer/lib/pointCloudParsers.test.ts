@@ -355,20 +355,27 @@ describe('parseLAS', () => {
 // ────────────────────────────────────────────────────────────────────────
 
 describe('parseLAZ', () => {
+  // The backend streams a packed PHX1 binary frame (positions, optional
+  // colors/intensity) — no JSON point list. Build a minimal two-point frame.
+  function packPhx1(points: number[][]): ArrayBuffer {
+    const n = points.length;
+    const HEADER = 32;
+    const buf = new ArrayBuffer(HEADER + n * 3 * 4);
+    const u8 = new Uint8Array(buf);
+    u8.set([0x50, 0x48, 0x58, 0x31], 0); // 'PHX1'
+    new DataView(buf).setUint32(4, n, true);
+    const pos = new Float32Array(buf, HEADER, n * 3);
+    for (let i = 0; i < n; i++) {
+      pos[i * 3] = points[i][0];
+      pos[i * 3 + 1] = points[i][1];
+      pos[i * 3 + 2] = points[i][2];
+    }
+    return buf;
+  }
+
   it('forwards to the backend and returns a PointCloudData', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          success: true,
-          points: [
-            [1, 2, 3],
-            [4, 5, 6],
-          ],
-          point_count: 2,
-          has_colors: false,
-        }),
-        { status: 200 },
-      ),
+      new Response(packPhx1([[1, 2, 3], [4, 5, 6]]), { status: 200 }),
     );
     const file = new File([new Uint8Array([0])], 'cloud.laz');
     const data = await parseLAZ(file);
@@ -378,11 +385,12 @@ describe('parseLAZ', () => {
   });
 
   it('surfaces backend error', async () => {
+    // Errors come back as a non-OK HTTP response with a JSON {detail}.
     vi.spyOn(global, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ success: false, error: 'bad file' }), { status: 200 }),
+      new Response(JSON.stringify({ detail: 'bad file' }), { status: 400 }),
     );
     const file = new File([new Uint8Array([0])], 'cloud.laz');
-    await expect(parseLAZ(file)).rejects.toThrow(/bad file|Failed to import LAZ/);
+    await expect(parseLAZ(file)).rejects.toThrow(/bad file/);
   });
 });
 

@@ -42,7 +42,8 @@ A **single ~5000-line FastAPI file** containing all endpoints:
 Only these surfaces are exposed to the renderer:
 
 - `dialog` (open/save file dialogs)
-- `fs` (limited filesystem operations the renderer can't do over HTTP)
+- `fs` (filesystem ops the renderer can't do over HTTP — **restricted to
+  user-selected paths**, see *Filesystem access* below)
 - `store` (persistent settings via `electron-store`)
 - `backend.getInfo` (version + port reporting)
 - `shell.openExternal` (open https/mailto URLs)
@@ -94,6 +95,48 @@ the LRU-by-timestamp policy of the on-disk `_evict_octree_cache`:
   is capped at `PHYTOGRAPH_MAX_DELETED_HISTORY` (default 50) snapshots.
 
 All four limits are environment-overridable.
+
+## Filesystem access (allowlist)
+
+The `fs` bridge enforces "user-selected paths only" — it isn't a blanket
+filesystem API. `src/main/fsAllowlist.ts` records every path the user actually
+chose and the handlers reject anything else, so a renderer compromise can't read
+`~/.ssh/id_rsa` or overwrite arbitrary files:
+
+- An open/save **dialog** result is allowlisted when it's returned.
+- A **drag-drop / `<input type=file>`** path is allowlisted by preload right
+  after `webUtils.getPathForFile` resolves it (one-way `fs:allowPath` IPC).
+- **Reads** are permitted for an explicitly-selected file *and its direct
+  siblings* (companion-file allowance — selecting `scene.xml` lets the
+  scan-import resolver find `scene.xyz` next to it). **Writes** are permitted to
+  a save target and to direct children of a chosen export directory. Neither
+  recurses into subdirectories.
+
+## Custom protocols & data transport
+
+Heavy data never crosses IPC as JSON:
+
+- **Octree streaming.** `octreeProtocol.ts` serves Potree files over
+  `app://octree/<sha1>/<file>`. `octree.bin` is hundreds of MB and potree-core
+  fetches it in `Range` chunks, so the handler **streams** each range with
+  `fs.createReadStream` → a web `ReadableStream` rather than reading it into a
+  Buffer — no main-process memory spike, no event-loop block. `metadata.json`
+  stays a small buffered read (it needs an inf/nan→null rewrite).
+- **Binary point-cloud frames.** Point-cloud import and compute responses use a
+  packed binary layout (`PHX1` for import via `_pack_pointcloud_response`; `PHB1`
+  for array responses) decoded straight into `Float32Array` views, bypassing
+  V8's ~512 MB max-string ceiling. LAS/LAZ import (both `import_by_path` and the
+  no-path multipart fallback) and text export (`_format_points_as_text`, now
+  vectorised via `np.savetxt`) all go through these fast paths instead of
+  per-point JSON / f-string loops.
+
+## Compute caps
+
+Several backend endpoints fail fast past a point cap instead of hanging on a
+pathological cloud — `_TREEISO_MAX_POINTS`, `_WOOD_SEGMENT_MAX_POINTS`, and
+`_SKELETON_MAX_POINTS` (`PHYTOGRAPH_SKELETON_MAX_POINTS`, default 3 M; the
+skeleton neighbour graph is built with a single batched KD-tree query rather
+than a per-point Python loop). All are environment-overridable.
 
 ## Logging
 

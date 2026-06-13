@@ -676,16 +676,21 @@ describe('point cloud LAS/LAZ import/export', () => {
     ).rejects.toThrow('export boom');
   });
 
-  it('importPointCloudLasLaz POSTs multipart to /api/pointcloud/import', async () => {
-    const spy = mockFetchOk({
-      success: true,
-      points: [[0, 0, 0]],
-      point_count: 1,
-      has_colors: false,
-      filename: 'in.laz',
-    });
+  it('importPointCloudLasLaz POSTs multipart to /api/pointcloud/import and decodes the PHX1 binary', async () => {
+    // The endpoint now streams a packed PHX1 frame (not JSON). Build a minimal
+    // one-point frame so the decode path is exercised.
+    const HEADER = 32;
+    const buf = new ArrayBuffer(HEADER + 3 * 4);
+    const u8 = new Uint8Array(buf);
+    u8.set([0x50, 0x48, 0x58, 0x31], 0); // 'PHX1'
+    new DataView(buf).setUint32(4, 1, true); // point_count = 1
+    const pos = new Float32Array(buf, HEADER, 3);
+    pos.set([7, 8, 9]);
+    const spy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(buf, { status: 200 }));
     const file = new File([new Uint8Array([1, 2, 3])], 'in.laz', { type: 'application/octet-stream' });
-    await importPointCloudLasLaz(file);
+    const result = await importPointCloudLasLaz(file);
+    expect(result.pointCount).toBe(1);
+    expect(Array.from(result.positions)).toEqual([7, 8, 9]);
     const [url, init] = spy.mock.calls[0];
     expect(url).toBe('http://127.0.0.1:8008/api/pointcloud/import');
     expect(init?.method).toBe('POST');

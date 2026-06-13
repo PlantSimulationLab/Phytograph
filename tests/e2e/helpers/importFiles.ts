@@ -35,6 +35,11 @@ export async function importFiles(
 
   await app.evaluate(async ({ ipcMain }, fixturePaths: string[]) => {
     ipcMain.removeHandler('dialog:open');
+    // Mark the fixtures as user-selected, exactly as the real dialog:open
+    // handler does — otherwise the fs allowlist (src/main/fsAllowlist.ts) denies
+    // the downstream fs:readBinary. The real handler we're replacing seeds this.
+    const allow = (globalThis as { __phytographAllowPath?: (p: string) => void }).__phytographAllowPath;
+    for (const p of fixturePaths) allow?.(p);
     let served = false;
     ipcMain.handle('dialog:open', async () => {
       if (served) return null; // a second, unexpected prompt → user-cancel

@@ -13,6 +13,9 @@ export const IPC = {
   FsWriteText: 'fs:writeText',
   FsWriteBinary: 'fs:writeBinary',
   FsExists: 'fs:exists',
+  // renderer -> main (one-way): allowlist a drag-drop / file-input path so the
+  // fs handlers will read it (it's a genuine user selection).
+  FsAllowPath: 'fs:allowPath',
   // App info
   AppGetCwd: 'app:getCwd',
   // Persistent key/value store

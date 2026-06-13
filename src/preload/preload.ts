@@ -58,7 +58,13 @@ const api = {
   },
   // Resolves the absolute path of a File obtained from a native drag-drop or
   // <input type="file"> in the renderer. Replaces the deprecated File.path.
-  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+  // Also allowlists the path in main so the fs IPC handlers will read it — this
+  // is a genuine user selection (the user dragged/picked the file).
+  getPathForFile: (file: File): string => {
+    const path = webUtils.getPathForFile(file);
+    if (path) ipcRenderer.send(IPC.FsAllowPath, path);
+    return path;
+  },
   onFileDrop: (handler: (payload: FileDropPayload) => void): (() => void) => {
     const listener = (_e: unknown, payload: FileDropPayload) => handler(payload);
     ipcRenderer.on(IPC.FileDropEvent, listener);

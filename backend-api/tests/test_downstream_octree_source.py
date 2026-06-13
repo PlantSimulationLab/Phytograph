@@ -135,6 +135,20 @@ def test_skeleton_source_auto_radius(client, tree_xyz):
     assert src["num_nodes"] > 0
 
 
+def test_skeleton_point_cap_fails_fast(client, tree_points, monkeypatch):
+    # Past the cap the endpoint must refuse with an actionable message rather
+    # than building a huge neighbour graph and appearing to hang.
+    import main
+    monkeypatch.setattr(main, "_SKELETON_MAX_POINTS", len(tree_points) - 1)
+    resp = client.post("/api/skeleton/extract", json={
+        "points": tree_points.tolist(),
+        "remove_outliers": False, "search_radius": 0.05, "threshold_filter": 3,
+    }).json()
+    assert resp["success"] is False
+    assert "limit" in resp["error"].lower()
+    assert resp["num_nodes"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Cloud-to-mesh distance
 # ---------------------------------------------------------------------------
