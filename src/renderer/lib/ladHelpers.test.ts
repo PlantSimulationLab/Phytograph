@@ -91,6 +91,12 @@ describe('buildLADRequest', () => {
     expect(req.min_voxel_hits).toBe(4);
   });
 
+  it('threads element_width when provided, omits it otherwise', () => {
+    expect(buildLADRequest([makeScan()], GRID, PARAMS).element_width).toBeUndefined();
+    const withWidth = buildLADRequest([makeScan()], GRID, { ...PARAMS, elementWidth: 0.05 });
+    expect(withWidth.element_width).toBe(0.05);
+  });
+
   it('uses the file path when available, omitting inline points', () => {
     const req = buildLADRequest([makeScan({ sourcePath: '/data/a.xyz', asciiFormat: 'x y z' })], GRID, PARAMS);
     const s = req.scans[0];

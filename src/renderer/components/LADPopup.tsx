@@ -79,6 +79,10 @@ export function LADPopup({
   const [lmaxStr, setLmaxStr] = useState('0.1');
   const [maxAspectRatioStr, setMaxAspectRatioStr] = useState('4.0');
   const [minVoxelHitsStr, setMinVoxelHitsStr] = useState('5');
+  // Characteristic vegetation element width (m). Drives the Pimont (2018)
+  // uncertainty that the backend computes on every run. Broadleaf ≈ 0.05 m,
+  // conifer needles ≈ 0.002 m — presets below set common values.
+  const [elementWidthStr, setElementWidthStr] = useState('0.05');
   const [error, setError] = useState<string | null>(null);
 
   // Seed Lmax / aspect from the mesh filter the user dialed in (when provided)
@@ -138,16 +142,18 @@ export function LADPopup({
     const lmax = parseFloat(lmaxStr) || 0.1;
     const maxAspectRatio = parseFloat(maxAspectRatioStr) || 4.0;
     const minVoxelHits = Math.max(1, parseInt(minVoxelHitsStr, 10) || 1);
+    const elementWidth = Math.max(0, parseFloat(elementWidthStr) || 0.05);
 
     const request = buildLADRequest(selectedScans, selectedGrid.grid, {
       lmax,
       maxAspectRatio,
       minVoxelHits,
+      elementWidth,
     });
 
     onStartLAD(request, selectedScans.map(s => s.color), selectedGrid.id);
     onClose();
-  }, [selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, onStartLAD, onClose]);
+  }, [selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, onStartLAD, onClose]);
 
   if (!isOpen) return null;
 
@@ -344,6 +350,46 @@ export function LADPopup({
                 />
                 <p className="text-[9px] text-neutral-500 mt-0.5">Skip sparse voxels</p>
               </div>
+            </div>
+
+            {/* Element width — drives the Pimont et al. (2018) sampling
+                uncertainty reported alongside the LAD estimate. Presets set
+                common values; the field stays editable. */}
+            <div className="mt-4">
+              <label className="text-[10px] text-neutral-400 block mb-1">
+                Element width (m)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  data-testid="lad-input-element-width"
+                  type="number"
+                  value={elementWidthStr}
+                  onChange={(e) => setElementWidthStr(e.target.value)}
+                  step="0.01"
+                  min="0"
+                  className="w-28 px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                />
+                <button
+                  data-testid="lad-preset-broadleaf"
+                  type="button"
+                  onClick={() => setElementWidthStr('0.05')}
+                  className="px-2 py-1 text-[10px] rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-700 transition-colors"
+                >
+                  Broadleaf (0.05)
+                </button>
+                <button
+                  data-testid="lad-preset-conifer"
+                  type="button"
+                  onClick={() => setElementWidthStr('0.002')}
+                  className="px-2 py-1 text-[10px] rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-700 transition-colors"
+                >
+                  Conifer (0.002)
+                </button>
+              </div>
+              <p className="text-[9px] text-neutral-500 mt-0.5">
+                Characteristic leaf/needle width. Sets the Pimont et al. (2018)
+                sampling-uncertainty interval reported with the result.
+              </p>
             </div>
 
             <label className="text-xs font-medium text-neutral-300 block mt-4 mb-1">Voxel Grid (required)</label>

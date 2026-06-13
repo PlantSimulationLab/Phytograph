@@ -48,6 +48,11 @@ surface.
       inversion bakes in the same filtering — still editable here.
     - **Min Voxel Hits** skips voxels with too few returns to solve
       reliably.
+    - **Element width (m)** is the characteristic width of a leaf or
+      needle. It sets the sampling-uncertainty interval reported with the
+      result (Pimont et al. 2018). Use the **Broadleaf (0.05)** or
+      **Conifer (0.002)** preset, or type your own value. It does not
+      change the LAD point estimate, only the confidence interval.
     - The **return type** is shown read-only; it follows each scan's own
       parameters. Multi-return scans need per-pulse metadata in the source
       (see [the concept page](../concepts/leaf-area-density.md#single-vs-multi-return-scans)).
@@ -64,6 +69,14 @@ surface.
 - **Hover** a cell to read its exact LAD, G(θ), and hit count.
 - In the result's row you can toggle visibility, adjust **opacity**,
   **hide empty voxels** (default on), and change the colormap.
+- Selecting the result also shows a **group-scale confidence interval**
+  (e.g. *Mean LAD 1.23 [1.15–1.31] m²/m³, 95% CI*), computed across all
+  solved voxels following Pimont et al. (2018). This is the recommended
+  aggregate — it is far tighter and more trustworthy than a single
+  voxel's interval. It reflects sampling uncertainty *conditional on the
+  beams that entered the voxels*; it does **not** capture occlusion bias
+  (foliage no beam ever reached). If the interval falls outside the
+  method's validity range, it is not reported.
 
 ## Tips
 

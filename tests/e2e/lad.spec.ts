@@ -71,6 +71,11 @@ test('Computes per-voxel leaf area density for the leaf-cube fixture', async () 
     await page.getByTestId('lad-input-aspect').fill('10');
     await page.getByTestId('lad-input-min-hits').fill('1');
 
+    // Set the element width via the Broadleaf preset — this drives the Pimont
+    // (2018) uncertainty interval the result panel reports.
+    await page.getByTestId('lad-preset-broadleaf').click();
+    await expect(page.getByTestId('lad-input-element-width')).toHaveValue('0.05');
+
     await page.getByTestId('lad-compute-button').click();
 
     // The LAD result row appears once the live backend returns (cold pyhelios
@@ -99,6 +104,14 @@ test('Computes per-voxel leaf area density for the leaf-cube fixture', async () 
     await ladRow.click();
     await page.getByTestId('lad-colormap').selectOption('magma');
     await expect(colorbar).toBeVisible();
+
+    // Selecting the row (done above) expands it; the group-scale Pimont CI
+    // summary is shown. For the uniform leaf cube the interval is valid and
+    // brackets a mean near the true LAD of 2.0 m²/m³.
+    const uncertainty = page.getByTestId('lad-uncertainty-summary');
+    await expect(uncertainty).toBeVisible();
+    await expect(uncertainty).toContainText(/Mean LAD .*\[.*–.*\] m²\/m³/);
+    await expect(uncertainty).toContainText(/95% group-scale CI/);
   } finally {
     await close();
   }

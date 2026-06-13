@@ -605,7 +605,7 @@ const LAD_MULTI_RETURN_FIELDS = ['timestamp', 'target_index', 'target_count'] as
 export function buildLADRequest(
   scans: Scan[],
   grid: HeliosGrid,
-  params: { lmax: number; maxAspectRatio: number; minVoxelHits: number },
+  params: { lmax: number; maxAspectRatio: number; minVoxelHits: number; elementWidth?: number },
 ): LADRequest {
   const requestScans: LADScanEntry[] = scans.map(scan => {
     const p = scan.params!;
@@ -677,6 +677,8 @@ export function buildLADRequest(
     lmax: params.lmax,
     max_aspect_ratio: params.maxAspectRatio,
     min_voxel_hits: params.minVoxelHits,
+    // Drives the Pimont (2018) uncertainty; omit to let the backend default it.
+    ...(params.elementWidth !== undefined ? { element_width: params.elementWidth } : {}),
     // Request-level angular fallbacks (per-scan values above take precedence).
     theta_min: 30,
     theta_max: 130,

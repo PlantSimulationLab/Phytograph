@@ -78,8 +78,9 @@ class _FakeCloud:
             return getattr(self, "_gapfill_codes", [])
         return []
 
-    def calculateLeafArea(self, ctx, min_hits):
-        self.calls.append(("calculateLeafArea", min_hits))
+    def calculateLeafArea(self, ctx, min_hits, element_width=None):
+        # Uncertainty is always on now: _do_lad_computation passes element_width.
+        self.calls.append(("calculateLeafArea", min_hits, element_width))
 
     def getGridCellCount(self):
         return self.gridcells
@@ -98,6 +99,25 @@ class _FakeCloud:
 
     def getCellGtheta(self, i):
         return 0.5
+
+    # --- Pimont (2018) uncertainty getters (stubbed) ---
+    def getCellLADVariance(self, i):
+        return 0.04          # std 0.2
+
+    def getCellBeamCount(self, i):
+        return 1000
+
+    def getCellRelativeDensityIndex(self, i):
+        return 0.6
+
+    def getCellMeanPathLength(self, i):
+        return 0.8
+
+    def getCellLeafAreaConfidenceInterval(self, i, conf):
+        return (True, 1.8, 2.2)
+
+    def getGroupLADConfidenceInterval(self, indices, conf):
+        return (True, 2.0, 1.9, 2.1)
 
 
 class _FakeContext:
@@ -334,6 +354,58 @@ class TestCountPointsPerCell:
 
 
 # ---------------------------------------------------------------------------
+# Pimont (2018) uncertainty wiring (stubbed pyhelios — deterministic shaping)
+# ---------------------------------------------------------------------------
+
+class TestLADUncertaintyShaping:
+    def test_element_width_threaded_and_group_ci_returned(self, tmp_path, stub_pyhelios):
+        req = _single_return_request(tmp_path)
+        object.__setattr__(req, "element_width", 0.05)
+        result = main._do_lad_computation(req)
+        assert result["success"] is True
+
+        # element_width reaches calculateLeafArea (now a 3-arg call) and is echoed.
+        cloud = stub_pyhelios.instances[-1]
+        la_call = next(c for c in cloud.calls if c[0] == "calculateLeafArea")
+        assert la_call[2] == pytest.approx(0.05)
+        assert result["element_width"] == pytest.approx(0.05)
+        assert result["confidence_level"] == pytest.approx(0.95)
+
+        # Per-cell uncertainty surfaced: variance 0.04 -> std 0.2; CI carried.
+        cell = result["cells"][0]
+        assert cell["lad_variance"] == pytest.approx(0.04)
+        assert cell["lad_std"] == pytest.approx(0.2)
+        assert cell["beam_count"] == 1000
+        assert cell["relative_density_index"] == pytest.approx(0.6)
+        assert cell["ci_valid"] is True
+        assert cell["leaf_area_ci_lower"] == pytest.approx(1.8)
+        assert cell["leaf_area_ci_upper"] == pytest.approx(2.2)
+
+        # Group-scale CI: valid, with mean inside the bounds.
+        assert result["group_ci_valid"] is True
+        assert result["group_lad_ci_lower"] <= result["group_lad_mean"] <= result["group_lad_ci_upper"]
+
+    def test_min_voxel_hits_none_floors_to_five_and_warns(self, tmp_path, stub_pyhelios):
+        req = _single_return_request(tmp_path)
+        object.__setattr__(req, "min_voxel_hits", None)
+        result = main._do_lad_computation(req)
+        assert result["success"] is True
+        cloud = stub_pyhelios.instances[-1]
+        la_call = next(c for c in cloud.calls if c[0] == "calculateLeafArea")
+        assert la_call[1] == 5  # floored
+        assert any("defaulted to 5" in w for w in result["warnings"])
+
+    def test_response_model_serializes_without_nan(self, tmp_path, stub_pyhelios):
+        # The success dict must round-trip through the Pydantic response model
+        # (sentinels already mapped to None/JSON-safe values).
+        result = main._do_lad_computation(_single_return_request(tmp_path))
+        model = main.LADComputeResponse(**result)
+        dumped = model.model_dump()
+        assert dumped["element_width"] == pytest.approx(0.05)
+        assert dumped["cells"][0]["lad_std"] == pytest.approx(0.2)
+
+
+# ---------------------------------------------------------------------------
 # End-to-end against real pyhelios + the committed leaf-cube fixture.
 # ---------------------------------------------------------------------------
 
@@ -367,6 +439,22 @@ class TestLeafCubeLAD:
         assert cell["gtheta"] == pytest.approx(0.5, rel=0.12)
         assert cell["hit_count"] > 0
         assert result["return_mode"] == "single"
+
+    def test_uncertainty_reported_with_element_width(self):
+        pytest.importorskip("pyhelios")
+        result = main._do_lad_computation(self._request())
+        assert result["success"] is True, result.get("error")
+        # Uncertainty is on by default (element_width defaults to 0.05).
+        assert result["element_width"] == pytest.approx(0.05)
+        assert result["confidence_level"] == pytest.approx(0.95)
+        cell = result["cells"][0]
+        # A solved voxel reports a non-negative std and a real beam count.
+        assert cell["lad_std"] is not None and cell["lad_std"] >= 0
+        assert cell["beam_count"] is not None and cell["beam_count"] >= 0
+        # Group-scale CI brackets its own mean when valid.
+        if result["group_ci_valid"]:
+            assert (result["group_lad_ci_lower"] <= result["group_lad_mean"]
+                    <= result["group_lad_ci_upper"])
 
     def test_eight_voxel_rmse_against_truth(self):
         pytest.importorskip("pyhelios")

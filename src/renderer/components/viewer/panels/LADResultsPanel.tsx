@@ -81,6 +81,47 @@ export function LADResultsPanel({
               </div>
               {isSelected && (
                 <div className="px-2 py-2 space-y-2 border-t border-neutral-700/50">
+                  {result.uncertainty && (
+                    <div
+                      data-testid="lad-uncertainty-summary"
+                      className="rounded bg-neutral-900/60 border border-neutral-700/60 px-2 py-1.5"
+                    >
+                      {result.uncertainty.groupCiValid &&
+                       result.uncertainty.groupLadMean != null &&
+                       result.uncertainty.groupLadCiLower != null &&
+                       result.uncertainty.groupLadCiUpper != null ? (
+                        <>
+                          <div className="text-[11px] text-neutral-200 font-medium">
+                            Mean LAD {result.uncertainty.groupLadMean.toFixed(2)}{' '}
+                            [{result.uncertainty.groupLadCiLower.toFixed(2)}–
+                            {result.uncertainty.groupLadCiUpper.toFixed(2)}] m²/m³
+                          </div>
+                          <div className="text-[9px] text-neutral-500">
+                            {(result.uncertainty.confidenceLevel * 100).toFixed(0)}% group-scale CI
+                            (Pimont et al. 2018) · recommended aggregate
+                          </div>
+                        </>
+                      ) : (
+                        <div className="text-[10px] text-amber-300">
+                          Uncertainty was computed, but the group-scale interval fell
+                          outside the Pimont validity range and is not reported.
+                        </div>
+                      )}
+                      <div
+                        className="text-[9px] text-neutral-500 mt-1 cursor-help"
+                        title={
+                          'This interval reflects sampling uncertainty conditional on ' +
+                          'beams that entered the voxels — it does NOT capture occlusion ' +
+                          'bias (canopy no beam reached). Single-voxel intervals are ' +
+                          'routinely ±50–100% and valid only in narrow regimes; the ' +
+                          'group-scale interval shown here is the recommended, much ' +
+                          'tighter aggregate.'
+                        }
+                      >
+                        What this does (and doesn’t) capture ⓘ
+                      </div>
+                    </div>
+                  )}
                   <div>
                     <label className="text-[10px] text-neutral-400 block mb-1">
                       Opacity: {result.opacity.toFixed(2)}

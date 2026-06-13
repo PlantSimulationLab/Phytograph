@@ -96,5 +96,27 @@ the shared [colormap](../reference/color-modes.md), with a colorbar in
 m²/m³. Hover a cell to read its exact LAD, G(θ), and hit count. Empty
 voxels (no returns) are hidden by default.
 
+## How certain is the estimate?
+
+Every inversion also reports a **sampling-uncertainty interval** following
+Pimont et al. (2018). It depends on the **element width** you set in the
+LAD dialog — the characteristic width of a leaf or needle (broadleaf
+≈ 0.05 m, conifer ≈ 0.002 m) — which scales the variance without changing
+the LAD point estimate.
+
+When you select the result, the panel shows a **group-scale confidence
+interval** aggregated over all solved voxels (e.g. *Mean LAD 1.23
+[1.15–1.31] m²/m³, 95% CI*). This group-scale interval is the one to
+report: per-voxel intervals are routinely ±50–100% and only trustworthy in
+narrow regimes, whereas the aggregate is much tighter (typically ±5–10%).
+
+Two caveats worth keeping in mind:
+
+- The interval is **conditional on the beams that entered the voxels**. It
+  quantifies sampling noise, not **occlusion bias** — foliage that no beam
+  ever reached is invisible to both the estimate and its interval.
+- If the data fall outside the method's validity envelope, no interval is
+  reported rather than a misleading one.
+
 See [Estimate leaf area density](../workflows/estimate-leaf-area-density.md)
 for the step-by-step workflow.

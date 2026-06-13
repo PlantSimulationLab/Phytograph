@@ -2203,6 +2203,11 @@ class LADComputeRequest(BaseModel):
     lmax: float = 0.1                      # max triangle edge length (G-function)
     max_aspect_ratio: float = 4.0         # max triangle aspect ratio
     min_voxel_hits: Optional[int] = None  # min ray hits for a voxel to be solved
+    # Characteristic vegetation element width (m); broadleaf ~0.05, conifer ~0.002.
+    # Drives the Pimont et al. (2018) per-voxel sampling-uncertainty computation,
+    # which runs on every LAD inversion. element_width <= 0 yields a sampling-only
+    # variance (term a; the element-position term b is omitted).
+    element_width: float = 0.05
     # Request-level angular fallbacks (degrees), used only for scans that don't
     # carry their own theta/phi (mirrors HeliosTriangulationRequest).
     theta_min: float = 30.0
@@ -2219,6 +2224,16 @@ class LADCell(BaseModel):
     lad: float            # m^2/m^3 (leaf_area / voxel volume)
     gtheta: float         # G(theta) leaf-projection coefficient
     hit_count: int        # points falling inside the voxel (numpy-binned)
+    # Pimont et al. (2018) per-voxel sampling uncertainty. None when undefined for
+    # the cell (unsolved voxel, or the variance/CI fell outside its validity range).
+    beam_count: Optional[int] = None             # N beams that entered the voxel
+    relative_density_index: Optional[float] = None  # I_rdi, fraction intercepted
+    mean_path_length: Optional[float] = None     # mean beam path length (m)
+    lad_variance: Optional[float] = None         # sampling variance of LAD, (1/m)^2
+    lad_std: Optional[float] = None              # sqrt(lad_variance)
+    ci_valid: Optional[bool] = None              # single-voxel Pimont validity gate
+    leaf_area_ci_lower: Optional[float] = None   # m^2 (only when ci_valid)
+    leaf_area_ci_upper: Optional[float] = None   # m^2 (only when ci_valid)
 
 class LADComputeResponse(BaseModel):
     """Response model for leaf area density computation."""
@@ -2234,6 +2249,16 @@ class LADComputeResponse(BaseModel):
     return_mode: str = "single"      # "single" | "multi"
     total_leaf_area: float = 0.0
     method_used: str = "helios"
+    # Group-scale LAD confidence interval (Pimont et al. 2018, Eq. 39) over all
+    # solved voxels — the recommended aggregate (much tighter than single-voxel).
+    # group_ci_valid=False => the interval fell outside the Pimont validity range
+    # (or no voxel was solved) and lower/upper are omitted.
+    group_ci_valid: Optional[bool] = None
+    group_lad_mean: Optional[float] = None       # m^2/m^3
+    group_lad_ci_lower: Optional[float] = None   # m^2/m^3
+    group_lad_ci_upper: Optional[float] = None   # m^2/m^3
+    confidence_level: Optional[float] = None     # e.g. 0.95
+    element_width: Optional[float] = None         # echo of the width used (m)
     warnings: List[str] = []
     error: Optional[str] = None
 
@@ -3410,8 +3435,26 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
                 "warnings": warnings,
             }
 
+        # Pimont et al. (2018) per-voxel sampling uncertainty is computed on every
+        # inversion. It requires min_voxel_hits to be set; the renderer always
+        # sends a value, but a bare API caller may not — floor to 5 and warn rather
+        # than failing the whole run.
+        conf_level = 0.95
+        element_width = request.element_width
+        min_hits = request.min_voxel_hits
+        if min_hits is None:
+            min_hits = 5
+            warnings.append(
+                "Leaf-area uncertainty (Pimont et al.) requires a minimum voxel-hits "
+                "threshold; defaulted to 5. Set 'Min Voxel Hits' to control which "
+                "voxels are solved."
+            )
         with Context() as ctx:
-            cloud.calculateLeafArea(ctx, request.min_voxel_hits)
+            cloud.calculateLeafArea(ctx, min_hits, element_width)
+
+        def _clean(x):
+            """NaN -> None so the value survives JSON serialization."""
+            return None if (x != x) else x
 
         # Per-cell hit counts: Helios exposes no getter, so bin the points into
         # the grid AABBs ourselves. Reads each scan file once (positions only).
@@ -3422,12 +3465,14 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
 
         cells = []
         total_leaf_area = 0.0
+        solved_indices = []  # voxels with a real LAD solution + defined variance
         for i in range(n_cells):
             c = cell_centers[i]
             s = cell_sizes[i]
             la = float(cloud.getCellLeafArea(i))
             lad = float(cloud.getCellLeafAreaDensity(i))
             gt = float(cloud.getCellGtheta(i))
+            lad_solved = lad == lad  # finite before the NaN->0 squash below
             # Helios returns NaN for unsolved cells; surface them as 0 so the UI
             # can treat them as empty rather than choking on NaN in JSON.
             if la != la:
@@ -3437,7 +3482,14 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
             if gt != gt:
                 gt = 0.0
             total_leaf_area += la
-            cells.append({
+
+            # Pimont per-voxel uncertainty. Sentinels: beam_count -1, variance -1,
+            # and NaN all map to None so the UI gates on presence. Single-voxel CI
+            # bounds are only meaningful when the validity gate passes.
+            var = float(cloud.getCellLADVariance(i))
+            bc = int(cloud.getCellBeamCount(i))
+            ci_valid, ci_lo, ci_hi = cloud.getCellLeafAreaConfidenceInterval(i, conf_level)
+            cell = {
                 "index": i,
                 "center": [c.x, c.y, c.z],
                 "size": [s.x, s.y, s.z],
@@ -3445,7 +3497,39 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
                 "lad": lad,
                 "gtheta": gt,
                 "hit_count": int(hit_counts[i]),
-            })
+                "beam_count": bc if bc >= 0 else None,
+                "relative_density_index": _clean(float(cloud.getCellRelativeDensityIndex(i))),
+                "mean_path_length": _clean(float(cloud.getCellMeanPathLength(i))),
+                "lad_variance": var if var >= 0 else None,
+                "lad_std": math.sqrt(var) if var >= 0 else None,
+                "ci_valid": bool(ci_valid),
+                "leaf_area_ci_lower": _clean(float(ci_lo)) if ci_valid else None,
+                "leaf_area_ci_upper": _clean(float(ci_hi)) if ci_valid else None,
+            }
+            if lad_solved and var >= 0:
+                solved_indices.append(i)
+            cells.append(cell)
+
+        # Group-scale CI (Pimont Eq. 39) over the solved voxels — the recommended,
+        # much-tighter aggregate. Reported even when individual single-voxel CIs are
+        # gated out. Zero solved voxels => not computable.
+        group_ci_valid = False
+        group_lad_mean = None
+        group_lad_ci_lower = None
+        group_lad_ci_upper = None
+        if solved_indices:
+            gvalid, gmean, glo, ghi = cloud.getGroupLADConfidenceInterval(
+                solved_indices, conf_level)
+            group_ci_valid = bool(gvalid)
+            group_lad_mean = _clean(float(gmean))
+            if gvalid:
+                group_lad_ci_lower = _clean(float(glo))
+                group_lad_ci_upper = _clean(float(ghi))
+        else:
+            warnings.append(
+                "Leaf-area uncertainty was computed, but no voxel met the criteria "
+                "for a solution, so no confidence interval could be reported."
+            )
 
         bb_lo = [grid_center[k] - grid_size[k] / 2 for k in range(3)]
         bb_hi = [grid_center[k] + grid_size[k] / 2 for k in range(3)]
@@ -3462,6 +3546,12 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
             "is_multi_return": is_multi,
             "return_mode": return_mode,
             "total_leaf_area": total_leaf_area,
+            "group_ci_valid": group_ci_valid,
+            "group_lad_mean": group_lad_mean,
+            "group_lad_ci_lower": group_lad_ci_lower,
+            "group_lad_ci_upper": group_lad_ci_upper,
+            "confidence_level": conf_level,
+            "element_width": element_width,
             "gapfilled_misses": recovered_misses,
             "had_miss_points": any_has_misses,
             "method_used": "helios",

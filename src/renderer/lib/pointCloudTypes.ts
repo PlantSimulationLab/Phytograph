@@ -454,6 +454,17 @@ export interface LADVoxel {
   lad: number;        // m²/m³
   gtheta: number;
   hitCount: number;
+  // Pimont et al. (2018) per-voxel sampling uncertainty. Absent when undefined
+  // for the cell. Carried through the model but not surfaced in the hover tooltip
+  // (single-voxel intervals are wide/unreliable; the panel shows the group CI).
+  beamCount?: number;
+  relativeDensityIndex?: number;
+  meanPathLength?: number;        // m
+  ladVariance?: number;           // (1/m)²
+  ladStd?: number;                // sqrt(ladVariance)
+  ciValid?: boolean;
+  leafAreaCiLower?: number;       // m²
+  leafAreaCiUpper?: number;       // m²
 }
 
 // A leaf-area-density result: a 3D grid of voxels each carrying an LAD scalar.
@@ -478,6 +489,17 @@ export interface LADResultEntry {
   ladMaxOverride?: number;
   hideEmpty: boolean;        // hide cells with lad<=0 / hitCount===0
   opacity: number;           // 0..1 cell translucency
+  // Group-scale Pimont (2018) uncertainty summary over solved voxels — the
+  // recommended aggregate, shown in the result panel. Absent for results
+  // computed before this field existed (backward compat).
+  uncertainty?: {
+    elementWidth: number;       // m
+    confidenceLevel: number;    // e.g. 0.95
+    groupCiValid: boolean;
+    groupLadMean?: number;      // m²/m³
+    groupLadCiLower?: number;   // m²/m³
+    groupLadCiUpper?: number;   // m²/m³
+  };
 }
 
 // Color mapping modes
