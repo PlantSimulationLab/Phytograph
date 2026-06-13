@@ -109,7 +109,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.13.4"
+BACKEND_VERSION = "0.14.0"
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -3593,6 +3593,10 @@ class ScanExportEntry(BaseModel):
     (resolved in that precedence, mirroring the LAD path). Scanner geometry is
     written into the XML; translation is applied to the points on export."""
     origin: List[float]                          # [x, y, z] scanner position
+    # "raster" (default) or "spinning_multibeam". Multibeam scans export via
+    # beam_elevation_angles_deg; n_theta/theta_* are ignored for them.
+    scan_pattern: Optional[str] = "raster"
+    beam_elevation_angles_deg: Optional[List[float]] = None  # deg above horizon (multibeam)
     n_theta: Optional[int] = None                # Ntheta (zenith samples)
     n_phi: Optional[int] = None                  # Nphi (azimuth samples)
     theta_min: float = 0.0                       # degrees
@@ -4072,16 +4076,34 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
             n_phi = max(int(_math.sqrt(xyz.shape[0] / max(aspect, 0.01))), 10)
             n_theta = max(int(xyz.shape[0] / n_phi), 10)
         column_format = ['x', 'y', 'z'] + labels
-        cloud.addScan(
-            origin=[float(origin[0]), float(origin[1]), float(origin[2])],
-            Ntheta=int(n_theta),
-            theta_range=(_math.radians(theta_min), _math.radians(theta_max)),
-            Nphi=int(n_phi),
-            phi_range=(_math.radians(phi_min), _math.radians(phi_max)),
-            exit_diameter=float(scan_entry.beam_exit_diameter or 0.0),
-            beam_divergence=float(scan_entry.beam_divergence or 0.0) / 1000.0,
-            column_format=column_format,
-        )
+        if scan_entry.scan_pattern == "spinning_multibeam":
+            # Re-loadable multibeam scan: exportScans writes <scanPattern> +
+            # <beamElevationAngles>. Convert elevation (deg) -> zenith (rad).
+            elevs = scan_entry.beam_elevation_angles_deg or []
+            if not elevs:
+                return {"success": False,
+                        "error": "Spinning-multibeam scan has no beam elevation angles to export"}
+            beam_zenith_angles = [_math.radians(90.0 - float(e)) for e in elevs]
+            cloud.addScanMultibeam(
+                origin=[float(origin[0]), float(origin[1]), float(origin[2])],
+                beam_zenith_angles=beam_zenith_angles,
+                Nphi=int(n_phi),
+                phi_range=(_math.radians(phi_min), _math.radians(phi_max)),
+                exit_diameter=float(scan_entry.beam_exit_diameter or 0.0),
+                beam_divergence=float(scan_entry.beam_divergence or 0.0) / 1000.0,
+                column_format=column_format,
+            )
+        else:
+            cloud.addScan(
+                origin=[float(origin[0]), float(origin[1]), float(origin[2])],
+                Ntheta=int(n_theta),
+                theta_range=(_math.radians(theta_min), _math.radians(theta_max)),
+                Nphi=int(n_phi),
+                phi_range=(_math.radians(phi_min), _math.radians(phi_max)),
+                exit_diameter=float(scan_entry.beam_exit_diameter or 0.0),
+                beam_divergence=float(scan_entry.beam_divergence or 0.0) / 1000.0,
+                column_format=column_format,
+            )
         sid = cloud.getScanCount() - 1
         if xyz.shape[0] > 0:
             dirs = _directions_from_origin(xyz, origin)
@@ -4153,6 +4175,13 @@ class LidarScanScanner(BaseModel):
     """A single scanner position + acquisition geometry (mirrors ScanParameters)."""
     id: str                      # renderer scan id — results are returned keyed by this
     origin: List[float]          # [x, y, z] scanner position
+    # Acquisition pattern. "raster" = uniform Ntheta x Nphi grid (default).
+    # "spinning_multibeam" = one fixed laser channel per beam_elevation_angles_deg
+    # entry (rotating multi-channel sensor); n_theta / theta_*_deg are ignored.
+    scan_pattern: str = "raster"
+    # Per-channel beam elevation angles, degrees above horizon (multibeam only).
+    # Converted to zenith (zenith = 90 - elevation) before the pyhelios call.
+    beam_elevation_angles_deg: Optional[List[float]] = None
     n_theta: int                 # zenith samples (Ntheta)
     n_phi: int                   # azimuth samples (Nphi)
     theta_min_deg: float         # zenith angle range (degrees, 0-180)
@@ -4279,20 +4308,43 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                 # Tilt (deg→rad) and noise (range in m verbatim, angle mrad→rad)
                 # are passed per-scan; 0 leaves them disabled.
                 for s in request.scanners:
-                    lidar.addScan(
-                        origin=[float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
-                        Ntheta=int(s.n_theta),
-                        theta_range=(math.radians(s.theta_min_deg), math.radians(s.theta_max_deg)),
-                        Nphi=int(s.n_phi),
-                        phi_range=(math.radians(s.phi_min_deg), math.radians(s.phi_max_deg)),
-                        exit_diameter=float(s.exit_diameter_m),
-                        beam_divergence=float(s.beam_divergence_mrad) * 1e-3,
-                        column_format=column_format,
-                        range_noise_stddev=float(s.range_noise_m),
-                        angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
-                        scan_tilt_roll=math.radians(s.tilt_roll_deg),
-                        scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
-                    )
+                    if s.scan_pattern == "spinning_multibeam":
+                        # One fixed laser channel per elevation angle. Convert each
+                        # elevation (deg above horizon) to a zenith angle in radians
+                        # (zenith = 90 - elevation); Ntheta = number of channels.
+                        elevs = s.beam_elevation_angles_deg or []
+                        if not elevs:
+                            return {"success": False,
+                                    "error": f"Spinning-multibeam scanner '{s.id}' has no beam elevation angles"}
+                        beam_zenith_angles = [math.radians(90.0 - float(e)) for e in elevs]
+                        lidar.addScanMultibeam(
+                            origin=[float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
+                            beam_zenith_angles=beam_zenith_angles,
+                            Nphi=int(s.n_phi),
+                            phi_range=(math.radians(s.phi_min_deg), math.radians(s.phi_max_deg)),
+                            exit_diameter=float(s.exit_diameter_m),
+                            beam_divergence=float(s.beam_divergence_mrad) * 1e-3,
+                            column_format=column_format,
+                            range_noise_stddev=float(s.range_noise_m),
+                            angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
+                            scan_tilt_roll=math.radians(s.tilt_roll_deg),
+                            scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
+                        )
+                    else:
+                        lidar.addScan(
+                            origin=[float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
+                            Ntheta=int(s.n_theta),
+                            theta_range=(math.radians(s.theta_min_deg), math.radians(s.theta_max_deg)),
+                            Nphi=int(s.n_phi),
+                            phi_range=(math.radians(s.phi_min_deg), math.radians(s.phi_max_deg)),
+                            exit_diameter=float(s.exit_diameter_m),
+                            beam_divergence=float(s.beam_divergence_mrad) * 1e-3,
+                            column_format=column_format,
+                            range_noise_stddev=float(s.range_noise_m),
+                            angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
+                            scan_tilt_roll=math.radians(s.tilt_roll_deg),
+                            scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
+                        )
 
                 # Crop-to-grid: scan_grid_only restricts ray-tracing to the cells
                 # of a grid, which must be defined on the cloud first via addGrid.

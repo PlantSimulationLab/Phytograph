@@ -226,6 +226,67 @@ class TestScanExportRoundTrip:
             os.chdir(cwd)
 
 
+class TestMultibeamExport:
+    """Spinning-multibeam scans export as <scanPattern>/<beamElevationAngles>."""
+
+    def _multibeam_entry(self):
+        return main.ScanExportEntry(
+            origin=[0.0, 0.0, 3.0],
+            scan_pattern="spinning_multibeam",
+            beam_elevation_angles_deg=[15.0, 5.0, -5.0, -15.0],
+            n_phi=20, phi_min=0, phi_max=360,
+            points=[list(p) for p in _PTS], scalar_columns={"is_miss": list(_MISS)})
+
+    def test_xml_carries_pattern_and_elevation_tags(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[self._multibeam_entry()], base_name="mb", include_misses=True))
+        assert res["success"] is True, res.get("error")
+        xml = _decode(res["files"], ".xml")
+        # helios-core's exportScans writes the multibeam marker + per-channel angles.
+        assert re.search(r"<scanPattern>\s*spinning_multibeam\s*</scanPattern>", xml)
+        elev = re.search(r"<beamElevationAngles>(.*?)</beamElevationAngles>", xml)
+        assert elev is not None
+        vals = [float(v) for v in elev.group(1).split()]
+        # Four channels, recovered to within rounding of the input elevations.
+        assert len(vals) == 4
+        assert vals[0] == pytest.approx(15.0, abs=1e-3)
+        assert vals[-1] == pytest.approx(-15.0, abs=1e-3)
+
+    def test_multibeam_bundle_reloads_as_multibeam(self, tmp_path):
+        pytest.importorskip("pyhelios")
+        from pyhelios import LiDARCloud
+        from pyhelios.LiDARCloud import ScanPattern
+
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[self._multibeam_entry()], base_name="mbrt", include_misses=True))
+        assert res["success"] is True, res.get("error")
+        for f in res["files"]:
+            (tmp_path / f["name"]).write_bytes(base64.b64decode(f["data"]))
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            cloud = LiDARCloud()
+            cloud.disableMessages()
+            cloud.loadXML("mbrt.xml")
+            assert cloud.getScanPattern(0) == ScanPattern.SPINNING_MULTIBEAM
+            # Ntheta == number of channels we exported.
+            assert cloud.getScanSizeTheta(0) == 4
+        finally:
+            os.chdir(cwd)
+
+    def test_empty_elevation_list_fails(self):
+        pytest.importorskip("pyhelios")
+        entry = main.ScanExportEntry(
+            origin=[0.0, 0.0, 3.0], scan_pattern="spinning_multibeam",
+            beam_elevation_angles_deg=[], n_phi=20,
+            points=[list(p) for p in _PTS])
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="mb", include_misses=True))
+        assert res["success"] is False
+        assert "elevation" in res["error"].lower()
+
+
 class TestScanExportErrors:
     def test_no_scans_fails(self):
         res = main._do_scan_export(main.ScanExportRequest(scans=[], include_misses=True))

@@ -48,6 +48,86 @@ describe('parseHeliosScanXml', () => {
     ]);
   });
 
+  it('defaults the pattern to raster for an ordinary <scan> (no <scanPattern>)', () => {
+    const xml = '<scan><origin>0 0 0</origin><size>10 20</size></scan>';
+    const { scans } = parseHeliosScanXml(xml);
+    expect(scans[0].params.pattern).toBe('raster');
+  });
+
+  it('parses a spinning-multibeam scan (<scanPattern> + <beamElevationAngles> + <Nphi>)', () => {
+    const xml = `
+      <scan>
+        <scanPattern>spinning_multibeam</scanPattern>
+        <origin>0 0 2</origin>
+        <beamElevationAngles>15 10 5 0 -5</beamElevationAngles>
+        <Nphi>720</Nphi>
+        <phiMin>0</phiMin>
+        <phiMax>360</phiMax>
+      </scan>
+    `;
+    const { scans } = parseHeliosScanXml(xml);
+    expect(scans).toHaveLength(1);
+    const p = scans[0].params;
+    expect(p.pattern).toBe('spinning_multibeam');
+    expect(p.beamElevationAnglesDeg).toEqual([15, 10, 5, 0, -5]);
+    // Nphi → azimuthPoints; phi range carried verbatim.
+    expect(p.azimuthPoints).toBe(720);
+    expect(p.azimuthMinDeg).toBeCloseTo(0, 6);
+    expect(p.azimuthMaxDeg).toBeCloseTo(360, 6);
+  });
+
+  it('falls back to size[1] for the azimuth count when <Nphi> is absent', () => {
+    const xml = `
+      <scan>
+        <scanPattern>spinning_multibeam</scanPattern>
+        <origin>0 0 2</origin>
+        <size>0 480</size>
+        <beamElevationAngles>2 -2</beamElevationAngles>
+      </scan>
+    `;
+    const { scans } = parseHeliosScanXml(xml);
+    expect(scans[0].params.pattern).toBe('spinning_multibeam');
+    expect(scans[0].params.azimuthPoints).toBe(480);
+    expect(scans[0].params.beamElevationAnglesDeg).toEqual([2, -2]);
+  });
+
+  it('accepts case- and separator-insensitive <scanPattern> spellings', () => {
+    for (const spelling of ['spinning-multibeam', 'SpinningMultibeam', 'SPINNING_MULTIBEAM']) {
+      const xml = `
+        <scan>
+          <scanPattern>${spelling}</scanPattern>
+          <origin>0 0 1</origin>
+          <beamElevationAngles>1 -1</beamElevationAngles>
+          <Nphi>360</Nphi>
+        </scan>
+      `;
+      const { scans } = parseHeliosScanXml(xml);
+      expect(scans[0].params.pattern).toBe('spinning_multibeam');
+    }
+  });
+
+  it('throws when a multibeam scan is missing <beamElevationAngles>', () => {
+    const xml = `
+      <scan>
+        <scanPattern>spinning_multibeam</scanPattern>
+        <origin>0 0 1</origin>
+        <Nphi>360</Nphi>
+      </scan>
+    `;
+    expect(() => parseHeliosScanXml(xml)).toThrow(/missing required <beamElevationAngles>/);
+  });
+
+  it('throws when a multibeam scan has no azimuth count (<Nphi> or <size>)', () => {
+    const xml = `
+      <scan>
+        <scanPattern>spinning_multibeam</scanPattern>
+        <origin>0 0 1</origin>
+        <beamElevationAngles>1 -1</beamElevationAngles>
+      </scan>
+    `;
+    expect(() => parseHeliosScanXml(xml)).toThrow(/missing the azimuth count/);
+  });
+
   it('treats <exitDiameter> / <beamDivergence> as multi-return and converts mrad', () => {
     const xml = `
       <scan>

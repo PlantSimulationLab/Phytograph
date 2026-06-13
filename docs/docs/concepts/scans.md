@@ -47,7 +47,15 @@ per-pulse directions from `(point − origin)`.
 ## What's in the parameters
 
 - **Origin** — (x, y, z) position of the scanner head in metres
-- **Zenith (θ) min / max, points** — vertical sweep bounds (degrees) and number of rays
+- **Scan pattern** — **raster** (a uniform zenith × azimuth grid, the
+  classic terrestrial-scanner dome sweep) or **spinning multibeam** (a
+  rotating multi-channel sensor like a Velodyne/Ouster/Hesai, where each
+  channel fires at a fixed elevation as the head spins)
+- **Zenith (θ) min / max, points** — vertical sweep bounds (degrees) and
+  number of rays (raster only)
+- **Beam elevation angles** (spinning multibeam only) — per-channel
+  elevation angles in degrees above the horizon; the channel count sets
+  the vertical resolution in place of a zenith point count
 - **Azimuth (φ) min / max, points** — horizontal sweep bounds (degrees) and number of rays
 - **Return type** — single (one return per ray) or multi (partial
   returns through foliage)

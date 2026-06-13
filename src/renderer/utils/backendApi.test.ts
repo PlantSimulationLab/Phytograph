@@ -531,6 +531,7 @@ describe('runLidarScan', () => {
       scanners: [{
         id: 'scanner-1',
         origin: [0, 0, 2],
+        scan_pattern: 'raster' as const,
         n_theta: 50, n_phi: 50,
         theta_min_deg: 0, theta_max_deg: 180,
         phi_min_deg: 0, phi_max_deg: 360,
@@ -563,6 +564,34 @@ describe('runLidarScan', () => {
     expect(res.results[0].scannerId).toBe('scanner-1');
     expect(res.results[0].numPoints).toBe(1);
     expect(Array.from(res.results[0].scalars.intensity)).toEqual([expect.closeTo(0.9, 5)]);
+  });
+
+  it('serializes a spinning-multibeam scanner with its elevation angles', async () => {
+    const req = {
+      meshes: [{ vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], triangles: [[0, 1, 2]] }],
+      scanners: [{
+        id: 'mb-1',
+        origin: [0, 0, 2],
+        scan_pattern: 'spinning_multibeam' as const,
+        beam_elevation_angles_deg: [15, 5, -5, -15],
+        n_theta: 100, n_phi: 720,
+        theta_min_deg: 0, theta_max_deg: 180,
+        phi_min_deg: 0, phi_max_deg: 360,
+        return_type: 'single' as const,
+        exit_diameter_m: 0, beam_divergence_mrad: 0,
+        tilt_roll_deg: 0, tilt_pitch_deg: 0,
+        range_noise_m: 0, angle_noise_mrad: 0,
+      }],
+    };
+    const spy = mockFetchBinaryFrame(
+      { success: true, scanners: [{ scanner_id: 'mb-1', num_points: 0, has_colors: false, scalar_fields: [] }] },
+      [],
+    );
+    await runLidarScan(req);
+    const [, init] = spy.mock.calls[0];
+    const sent = JSON.parse(init?.body as string);
+    expect(sent.scanners[0].scan_pattern).toBe('spinning_multibeam');
+    expect(sent.scanners[0].beam_elevation_angles_deg).toEqual([15, 5, -5, -15]);
   });
 
   it('surfaces error', async () => {

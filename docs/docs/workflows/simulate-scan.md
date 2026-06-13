@@ -20,25 +20,57 @@ You need geometry in the scene to scan: typically a generated
 2. **Label** — a name for this scan (e.g., `north-1`, `position-A`).
    The label appears on the scanner marker in the 3D view.
 
-3. **Origin** — (X, Y, Z) in meters of the scanner head. A typical TLS
+3. **Scan pattern** — choose how the rays are laid out. The pattern
+   determines which inputs the popup shows next:
+
+    === "Raster"
+
+        A uniform zenith × azimuth grid — the classic gimbal/dome sweep
+        of a terrestrial laser scanner. You set both a vertical (zenith)
+        and horizontal (azimuth) ray count and sweep. This is the
+        default and matches most TLS instruments.
+
+    === "Spinning multibeam"
+
+        A rotating multi-channel sensor (Velodyne / Ouster / Hesai
+        style). Each laser channel fires at a fixed elevation as the head
+        spins, so instead of a zenith sweep you list the **beam elevation
+        angles** directly (see step 4). The number of channels sets the
+        vertical resolution; the azimuth count and sweep still apply.
+
+4. **Origin** — (X, Y, Z) in meters of the scanner head. A typical TLS
    campaign places scanners 1.5–2 m above ground, 3–5 m from the
    plant.
 
-4. **Scan size**:
-    - **Zenith points** — number of rays vertically
-    - **Azimuth points** — number of rays horizontally
+5. **Scan size** and **angular sweep** — what you enter here depends on
+   the pattern:
 
-    For reference: a Riegl VZ-400 at fine resolution is roughly
-    20,000 × 30,000 rays. For preview work, 500 × 1000 is fast and
-    produces a usable cloud.
+    === "Raster"
 
-5. **Angular sweep** — set the min and max angular positions of the
-   sweep; the range is the difference between them, so asymmetric
-   sweeps are supported:
-    - **Zenith (θ) min / max** — vertical bounds in degrees (e.g.
-      30–130 from straight up; 0–180 for full vertical coverage)
-    - **Azimuth (φ) min / max** — horizontal bounds (e.g. 0–360 for a
-      full pan)
+        - **Scan size** — **Zenith points** (rays vertically) and
+          **Azimuth points** (rays horizontally). For reference: a Riegl
+          VZ-400 at fine resolution is roughly 20,000 × 30,000 rays. For
+          preview work, 500 × 1000 is fast and produces a usable cloud.
+        - **Angular sweep** — min and max angular positions of the sweep;
+          the range is the difference between them, so asymmetric sweeps
+          are supported:
+            - **Zenith (θ) min / max** — vertical bounds in degrees
+              (e.g. 30–130 from straight up; 0–180 for full vertical
+              coverage)
+            - **Azimuth (φ) min / max** — horizontal bounds (e.g. 0–360
+              for a full pan)
+
+    === "Spinning multibeam"
+
+        - **Azimuth (Nphi)** — number of azimuth steps per rotation.
+        - **Beam elevation angles** — a comma- or space-separated list of
+          per-channel elevation angles, in **degrees above the horizon**
+          (positive = above horizon, the convention on manufacturer spec
+          sheets). For example `15, 10, 5, 0, -5, -10, -15, -20` is an
+          8-channel sensor. The channel count sets the vertical
+          resolution; there is no separate zenith point count or zenith
+          sweep.
+        - **Azimuth (φ) min / max** — horizontal bounds, as for raster.
 
 6. **Return type**:
 
@@ -82,6 +114,13 @@ created per `<scan>` element, and any top-level `<grid>` blocks become
 voxel-grid boxes.
 A `<scanTilt>` tag (two numbers, `roll pitch` in degrees) populates the
 scanner tilt; absent, the scan imports level.
+A `<scanPattern>spinning_multibeam</scanPattern>` tag imports the scan as
+a spinning-multibeam scan; its per-channel `<beamElevationAngles>` (a
+space-separated list of elevation degrees above the horizon) and
+`<Nphi>` (azimuth steps) populate the pattern's inputs. Without a
+`<scanPattern>` tag the scan imports as a raster scan, as before. Scans
+exported from Phytograph round-trip: a multibeam scan you save as Helios
+XML re-imports as a multibeam scan.
 If a `<scan>` carries a `<filename>` tag and that file is on disk
 alongside the XML (or in the current working directory), Phytograph
 auto-loads the point data and attaches it to the new scan. Otherwise

@@ -6,6 +6,12 @@
 // no radian fallback. Internally we model angular sweeps in degrees too,
 // so values pass through unchanged.
 //
+// A scan may also be a spinning-multibeam scan, flagged by
+// <scanPattern>spinning_multibeam</scanPattern>. Those carry
+// <beamElevationAngles> (space-separated per-channel elevation degrees above
+// the horizon, required) and an azimuth count via <Nphi> (or size[1]) instead
+// of a zenith grid.
+//
 // We extract the optional <filename> (relative path to the recorded point
 // data) and <ASCII_format> (column layout descriptor) so the caller can
 // auto-attach the referenced point cloud and forward the format hint to the
@@ -17,6 +23,12 @@
 // are still ignored.
 
 import { DEFAULT_SCAN_PARAMETERS, type ScanParameters } from './scanParameters';
+
+// Recognised spellings of the spinning-multibeam <scanPattern> value, matching
+// helios-core's case-insensitive acceptance (spinning_multibeam /
+// spinning-multibeam / spinningmultibeam). We normalise to alpha-only and
+// compare against this single canonical form.
+const MULTIBEAM_PATTERN_NORM = 'spinningmultibeam';
 
 // Helios defaults from the spec — applied in degrees when a tag is missing.
 const DEFAULT_THETA_MIN_DEG = 0;
@@ -129,13 +141,48 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
     throw new HeliosXmlParseError(`<scan> at index ${index} is missing required <origin>.`);
   }
 
+  // Scan pattern: 'spinning_multibeam' (any helios spelling) vs the default
+  // 'raster'. Normalise to alpha-only for the case-insensitive compare.
+  const patternRaw = tagText(el, 'scanPattern');
+  const isMultibeam =
+    patternRaw !== null &&
+    patternRaw.toLowerCase().replace(/[^a-z]/g, '') === MULTIBEAM_PATTERN_NORM;
+
+  // <size> is "n_theta n_phi". Required for raster; for multibeam Ntheta comes
+  // from the per-channel angle list so <size> may be absent — Nphi then comes
+  // from <Nphi> or, as a fallback, size[1].
   const size = parseIntPairTag(el, 'size');
-  if (!size) {
+
+  // Beam elevation angles (degrees above horizon) — required for multibeam.
+  const beamElevationAnglesDeg = isMultibeam
+    ? parseFloatListTag(el, 'beamElevationAngles')
+    : null;
+  if (isMultibeam && (!beamElevationAnglesDeg || beamElevationAnglesDeg.length === 0)) {
+    throw new HeliosXmlParseError(
+      `<scan> at index ${index} is a spinning_multibeam scan but is missing required <beamElevationAngles>.`,
+    );
+  }
+
+  // Azimuth sample count (Nphi). Multibeam may carry an explicit <Nphi>; both
+  // patterns fall back to size[1].
+  const nPhiTag = parseNumberTag(el, 'Nphi');
+  const azimuthPoints =
+    nPhiTag !== null ? nPhiTag : size ? size[1] : null;
+
+  if (isMultibeam) {
+    if (azimuthPoints === null) {
+      throw new HeliosXmlParseError(
+        `<scan> at index ${index} is a spinning_multibeam scan but is missing the azimuth count (<Nphi> or <size>).`,
+      );
+    }
+  } else if (!size) {
     throw new HeliosXmlParseError(`<scan> at index ${index} is missing required <size>.`);
   }
+
   // Helios <size> is "n_theta n_phi" — number of samples along zenith and
-  // azimuth respectively. Maps directly onto our zenith/azimuth point counts.
-  const [zenithPoints, azimuthPoints] = size;
+  // azimuth respectively. For raster, zenith count is size[0]; for multibeam
+  // it's irrelevant (Ntheta = number of channels) and stays at the default.
+  const zenithPoints = size ? size[0] : DEFAULT_SCAN_PARAMETERS.zenithPoints;
 
   // Theta/phi min/max map directly onto our zenith/azimuth sweep boundaries —
   // stored verbatim so asymmetric sweeps survive a round-trip.
@@ -160,8 +207,11 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
 
   const params: ScanParameters = {
     origin: { x: origin[0], y: origin[1], z: origin[2] },
+    pattern: isMultibeam ? 'spinning_multibeam' : 'raster',
     zenithPoints: Math.max(1, zenithPoints),
-    azimuthPoints: Math.max(1, azimuthPoints),
+    // azimuthPoints is guaranteed non-null here (raster requires <size>;
+    // multibeam requires <Nphi> or <size>).
+    azimuthPoints: Math.max(1, azimuthPoints!),
     zenithMinDeg: thetaMinDeg,
     zenithMaxDeg: thetaMaxDeg,
     azimuthMinDeg: phiMinDeg,
@@ -173,6 +223,7 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
       : DEFAULT_SCAN_PARAMETERS.beamDivergenceMrad,
     tiltRollDeg: tilt ? tilt[0] : DEFAULT_SCAN_PARAMETERS.tiltRollDeg,
     tiltPitchDeg: tilt ? tilt[1] : DEFAULT_SCAN_PARAMETERS.tiltPitchDeg,
+    beamElevationAnglesDeg: beamElevationAnglesDeg ?? DEFAULT_SCAN_PARAMETERS.beamElevationAnglesDeg,
   };
 
   return {
@@ -200,6 +251,15 @@ function parseNumberTag(parent: Element, tag: string): number | null {
   if (text === null || text === '') return null;
   const n = Number(text);
   return Number.isFinite(n) ? n : null;
+}
+
+// Parse a whitespace-separated list of floats (e.g. <beamElevationAngles>).
+// Returns null if the tag is absent or yields no finite values.
+function parseFloatListTag(parent: Element, tag: string): number[] | null {
+  const text = tagText(parent, tag);
+  if (text === null) return null;
+  const parts = text.split(/\s+/).filter(Boolean).map(Number).filter(Number.isFinite);
+  return parts.length > 0 ? parts : null;
 }
 
 function parseVec3Tag(parent: Element, tag: string): [number, number, number] | null {

@@ -3934,6 +3934,9 @@ export default function PointCloudViewer({
     const params = cloud.params;
     const entry: ScanExportEntry = {
       origin: [params.origin.x, params.origin.y, params.origin.z],
+      scan_pattern: params.pattern,
+      beam_elevation_angles_deg:
+        params.pattern === 'spinning_multibeam' ? params.beamElevationAnglesDeg : undefined,
       n_theta: params.zenithPoints,
       n_phi: params.azimuthPoints,
       theta_min: params.zenithMinDeg,
@@ -4339,6 +4342,9 @@ export default function PointCloudViewer({
         return {
           id: s.id,
           origin: [p.origin.x, p.origin.y, p.origin.z],
+          scan_pattern: p.pattern,
+          beam_elevation_angles_deg:
+            p.pattern === 'spinning_multibeam' ? p.beamElevationAnglesDeg : undefined,
           n_theta: p.zenithPoints,
           n_phi: p.azimuthPoints,
           theta_min_deg: p.zenithMinDeg,
@@ -7779,6 +7785,16 @@ export default function PointCloudViewer({
         lad: c.lad,
         gtheta: c.gtheta,
         hitCount: c.hit_count,
+        // Per-voxel Pimont uncertainty — carried through only when present, so
+        // non-uncertainty voxels stay lean.
+        ...(c.lad_std != null ? { ladStd: c.lad_std } : {}),
+        ...(c.lad_variance != null ? { ladVariance: c.lad_variance } : {}),
+        ...(c.beam_count != null ? { beamCount: c.beam_count } : {}),
+        ...(c.relative_density_index != null ? { relativeDensityIndex: c.relative_density_index } : {}),
+        ...(c.mean_path_length != null ? { meanPathLength: c.mean_path_length } : {}),
+        ...(c.ci_valid != null ? { ciValid: c.ci_valid } : {}),
+        ...(c.leaf_area_ci_lower != null ? { leafAreaCiLower: c.leaf_area_ci_lower } : {}),
+        ...(c.leaf_area_ci_upper != null ? { leafAreaCiUpper: c.leaf_area_ci_upper } : {}),
       }));
 
       const entry: LADResultEntry = {
@@ -7800,6 +7816,18 @@ export default function PointCloudViewer({
         // order-dependent see-through artifacts of alpha blending. The user can
         // dial opacity down in the LAD row to peer inside the canopy.
         opacity: 1,
+        // Group-scale Pimont CI summary — attached when the backend reported a
+        // width (i.e. uncertainty was computed). Old responses lack these keys.
+        ...(response.element_width != null ? {
+          uncertainty: {
+            elementWidth: response.element_width,
+            confidenceLevel: response.confidence_level ?? 0.95,
+            groupCiValid: response.group_ci_valid ?? false,
+            groupLadMean: response.group_lad_mean ?? undefined,
+            groupLadCiLower: response.group_lad_ci_lower ?? undefined,
+            groupLadCiUpper: response.group_lad_ci_upper ?? undefined,
+          },
+        } : {}),
       };
 
       setLadResults(prev => [...prev, entry]);

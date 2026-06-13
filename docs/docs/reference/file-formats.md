@@ -190,6 +190,15 @@ two numbers, `roll pitch` in degrees, giving the scanner's residual tilt away
 from level (absent → level). `<filename>` and `<ASCII_format>` auto-attach the
 referenced point data.
 
+A `<scan>` carrying `<scanPattern>spinning_multibeam</scanPattern>` imports as a
+**spinning-multibeam** scan instead of a raster scan. Such a scan replaces the
+zenith point count and zenith sweep with `<beamElevationAngles>` — a
+space-separated list of per-channel elevation angles in degrees above the
+horizon (required for multibeam) — and takes its azimuth step count from
+`<Nphi>` (or the second component of `<size>`). The azimuth sweep
+(`<phiMin>`/`<phiMax>`) still applies. Scans exported from Phytograph round-trip:
+a multibeam scan saved as Helios XML re-imports as multibeam.
+
 A Helios XML may also contain top-level `<grid>` blocks (siblings of `<scan>`),
 which describe the voxel grid Helios uses for leaf-area-density. On import,
 each `<grid>` becomes a **voxel grid** object named `Grid 1`, `Grid 2`, …:

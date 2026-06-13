@@ -503,6 +503,9 @@ export interface LADRequest {
   lmax: number;                 // max triangle edge length (G-function)
   max_aspect_ratio: number;     // max triangle aspect ratio
   min_voxel_hits: number;       // min ray hits for a voxel to be solved
+  // Characteristic vegetation element width (m), e.g. broadleaf ≈ 0.05, conifer
+  // ≈ 0.002. Drives the Pimont et al. (2018) per-voxel sampling uncertainty.
+  element_width?: number;
   // Request-level angular fallbacks (degrees) for scans lacking their own.
   theta_min: number;
   theta_max: number;
@@ -518,6 +521,16 @@ export interface LADVoxelResult {
   lad: number;         // m²/m³
   gtheta: number;      // G(theta)
   hit_count: number;
+  // Pimont et al. (2018) per-voxel sampling uncertainty. null/absent when
+  // undefined for the cell (unsolved voxel, or outside the validity range).
+  beam_count?: number | null;
+  relative_density_index?: number | null;
+  mean_path_length?: number | null;
+  lad_variance?: number | null;       // (1/m)²
+  lad_std?: number | null;            // sqrt(lad_variance)
+  ci_valid?: boolean | null;
+  leaf_area_ci_lower?: number | null; // m² (only when ci_valid)
+  leaf_area_ci_upper?: number | null; // m² (only when ci_valid)
 }
 
 export interface LADResponse {
@@ -533,6 +546,14 @@ export interface LADResponse {
   return_mode: string;         // "single" | "multi"
   total_leaf_area: number;
   method_used: string;
+  // Group-scale LAD confidence interval (Pimont et al. 2018, Eq. 39) over solved
+  // voxels — the recommended aggregate. group_ci_valid=false => not reported.
+  group_ci_valid?: boolean | null;
+  group_lad_mean?: number | null;       // m²/m³
+  group_lad_ci_lower?: number | null;   // m²/m³
+  group_lad_ci_upper?: number | null;   // m²/m³
+  confidence_level?: number | null;     // e.g. 0.95
+  element_width?: number | null;        // width used (m)
   warnings: string[];
   error?: string;
 }
@@ -1249,6 +1270,12 @@ export interface LidarScanMesh {
 export interface LidarScanScanner {
   id: string;
   origin: number[];  // [x, y, z]
+  // 'raster' (uniform Ntheta x Nphi grid) or 'spinning_multibeam' (one channel
+  // per beam_elevation_angles_deg entry; n_theta/theta_* are ignored).
+  scan_pattern: 'raster' | 'spinning_multibeam';
+  // Per-channel beam elevation angles, degrees above horizon (multibeam only).
+  // The backend converts each to a zenith angle (zenith = 90 - elevation).
+  beam_elevation_angles_deg?: number[];
   n_theta: number;
   n_phi: number;
   theta_min_deg: number;
@@ -1426,6 +1453,10 @@ export async function exportPointCloudLasLaz(
 // one of session_id / points / file_path (resolved in that order, backend-side).
 export interface ScanExportEntry {
   origin: [number, number, number];
+  // 'raster' (default) or 'spinning_multibeam'. Multibeam scans are exported via
+  // beam_elevation_angles_deg; n_theta/theta_* are ignored for them.
+  scan_pattern?: 'raster' | 'spinning_multibeam';
+  beam_elevation_angles_deg?: number[];  // degrees above horizon (multibeam only)
   n_theta?: number;
   n_phi?: number;
   theta_min?: number;

@@ -9,9 +9,24 @@
 
 export type ReturnType = 'single' | 'multi';
 
+// Acquisition geometry of the scan.
+//   - 'raster'            : uniform Ntheta x Nphi angular grid (the classic
+//                           gimbal/dome sweep). Zenith is `zenithPoints` samples
+//                           across the [zenithMin, zenithMax] sweep.
+//   - 'spinning_multibeam': a rotating multi-channel sensor (Velodyne/Ouster/
+//                           Hesai). Each laser channel fires at a fixed zenith
+//                           angle taken from `beamElevationAnglesDeg`, so Ntheta
+//                           is the number of channels and there is no zenith
+//                           sweep. Azimuth (azimuthPoints = Nphi, azimuth
+//                           sweep = phi range) is shared with raster.
+export type ScanPattern = 'raster' | 'spinning_multibeam';
+
 export interface ScanParameters {
   origin: { x: number; y: number; z: number };
-  // Number of sample rays in each angular direction.
+  pattern: ScanPattern;
+  // Number of sample rays in each angular direction. For spinning_multibeam,
+  // `zenithPoints` and the zenith sweep are unused (Ntheta = number of channels);
+  // `azimuthPoints` is still Nphi.
   zenithPoints: number;
   azimuthPoints: number;
   // Angular sweep boundaries, in degrees. Min/max positions define the sweep
@@ -34,10 +49,16 @@ export interface ScanParameters {
   // scan_tilt_roll/scan_tilt_pitch (radians).
   tiltRollDeg: number;
   tiltPitchDeg: number;
+  // Spinning-multibeam only. Per-channel beam elevation angles in degrees above
+  // the horizon — the manufacturer-spec convention (positive = above horizon).
+  // Length sets Ntheta. Maps to Helios <beamElevationAngles>; the backend
+  // converts each to a zenith angle (zenith = 90 - elevation) for pyhelios.
+  beamElevationAnglesDeg: number[];
 }
 
 export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   origin: { x: 0, y: 0, z: 0 },
+  pattern: 'raster',
   zenithPoints: 100,
   azimuthPoints: 360,
   zenithMinDeg: 0,
@@ -49,6 +70,8 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   beamDivergenceMrad: 0.5,
   tiltRollDeg: 0,
   tiltPitchDeg: 0,
+  // A generic 8-channel elevation spread; only used when pattern is multibeam.
+  beamElevationAnglesDeg: [15, 10, 5, 0, -5, -10, -15, -20],
 };
 
 export function makeDefaultScanParameters(
@@ -85,6 +108,8 @@ export interface ScanParamsFromFile {
 // stays at the sensible default — so "not in the file" continues to mean
 // "left blank" exactly as it does today.
 export function scanParametersFromFile(src: ScanParamsFromFile): ScanParameters {
+  // File-header imports (E57 pose / PCD VIEWPOINT) never describe a multibeam
+  // sensor, so pattern stays 'raster' (from DEFAULT_SCAN_PARAMETERS) here.
   const p: ScanParameters = {
     ...DEFAULT_SCAN_PARAMETERS,
     origin: { x: src.origin[0], y: src.origin[1], z: src.origin[2] },

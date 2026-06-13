@@ -147,6 +147,117 @@ class TestRealScan:
         assert not np.array_equal(by_id["A"]["points"], by_id["B"]["points"])
 
 
+# A solid 1 m cube centered at z=0.5 — a finite-VOLUME target. Multibeam scans
+# need this (not a flat patch or a thin near-coplanar pyramid): the lidar engine
+# culls rays against the geometry's axis-aligned bounding box, and a degenerate
+# (zero-thickness) AABB collapses a slab and reports every ray as a miss,
+# regardless of scan pattern. A closed box gives a non-degenerate AABB so the
+# multibeam channels land real returns just like a raster sweep does.
+_BOX_CENTER = (0.0, 0.0, 0.5)
+_BOX_HALF = 0.5  # half-extent → 1 m cube spanning z in [0, 1]
+
+
+def _box_mesh(center=_BOX_CENTER, half=_BOX_HALF):
+    cx, cy, cz = center
+    verts = [[cx + dx * half, cy + dy * half, cz + dz * half]
+             for dx in (-1, 1) for dy in (-1, 1) for dz in (-1, 1)]
+    tris = [[0, 1, 3], [0, 3, 2], [4, 6, 7], [4, 7, 5], [0, 4, 5], [0, 5, 1],
+            [2, 3, 7], [2, 7, 6], [0, 2, 6], [0, 6, 4], [1, 5, 7], [1, 7, 3]]
+    return verts, tris
+
+
+_BOX_VERTS, _BOX_TRIS = _box_mesh()
+
+
+def _multibeam_scanner(scanner_id="mb", origin=(0.0, 0.0, 3.0),
+                       elevations=(-40.0, -50.0, -60.0, -70.0, -80.0), n_phi=720):
+    """A spinning-multibeam scanner aimed downward at the box below it.
+
+    Elevations are degrees above horizon (negative = below horizon, i.e. looking
+    down). Each becomes one laser channel; the count sets the zenith resolution.
+    """
+    return {
+        "id": scanner_id,
+        "origin": list(origin),
+        "scan_pattern": "spinning_multibeam",
+        "beam_elevation_angles_deg": list(elevations),
+        # n_theta / theta_* are ignored for multibeam but the model requires them.
+        "n_theta": 1,
+        "n_phi": n_phi,
+        "theta_min_deg": 0.0,
+        "theta_max_deg": 180.0,
+        "phi_min_deg": 0.0,
+        "phi_max_deg": 360.0,
+        "return_type": "single",
+        "exit_diameter_m": 0.0,
+        "beam_divergence_mrad": 0.0,
+    }
+
+
+class TestMultibeamScan:
+    """Spinning-multibeam pattern against the compiled lidar plugin."""
+
+    def test_multibeam_produces_real_returns_on_the_box(self, client):
+        # A multi-channel sensor 3 m above the box, sweeping downward, lands real
+        # returns on the top face — exactly as the raster path does.
+        pytest.importorskip("pyhelios")
+        resp = client.post("/api/lidar/scan", json={
+            "meshes": [{"vertices": _BOX_VERTS, "triangles": _BOX_TRIS}],
+            "scanners": [_multibeam_scanner("mb")],
+        })
+        assert resp.status_code == 200, resp.text
+        body = decode_lidar_scan(resp.content)
+        assert body["success"] is True, body.get("error")
+        assert len(body["results"]) == 1
+        res = body["results"][0]
+        assert res["scanner_id"] == "mb"
+        assert res["num_points"] > 0, "multibeam sweep over the box should hit it"
+        pts = np.array(res["points"], dtype=np.float64)
+        assert np.isfinite(pts).all()
+        # Hits sit on the solid cube (z in [0, 1]) within its footprint.
+        assert pts[:, 2].min() >= -1e-3
+        assert pts[:, 2].max() <= 1.0 + 1e-3
+        assert pts[:, 0].min() >= -_BOX_HALF - 1e-3 and pts[:, 0].max() <= _BOX_HALF + 1e-3
+        assert pts[:, 1].min() >= -_BOX_HALF - 1e-3 and pts[:, 1].max() <= _BOX_HALF + 1e-3
+
+    def test_channel_count_sets_the_zenith_resolution(self, client):
+        # Ntheta == number of channels, so a denser elevation list samples the
+        # surface more finely → more hits than a sparse one (statistical check).
+        pytest.importorskip("pyhelios")
+
+        def scan(elevs):
+            resp = client.post("/api/lidar/scan", json={
+                "meshes": [{"vertices": _BOX_VERTS, "triangles": _BOX_TRIS}],
+                "scanners": [_multibeam_scanner("mb", elevations=elevs)],
+            })
+            assert resp.status_code == 200, resp.text
+            body = decode_lidar_scan(resp.content)
+            assert body["success"] is True, body.get("error")
+            return body["results"][0]["num_points"]
+
+        # Steep-enough elevations so both sets land on the box's top face (a
+        # 0.5 m-wide face 2 m below the scanner; shallow beams sweep past it).
+        sparse = scan((-60.0, -80.0))
+        dense = scan(tuple(float(-40 - 5 * i) for i in range(10)))  # 10 channels
+        assert sparse > 0
+        assert dense > sparse
+
+    def test_empty_elevation_list_is_rejected(self, client):
+        # A multibeam scanner with no channels can't define any beams → failure,
+        # not a silent empty scan.
+        pytest.importorskip("pyhelios")
+        scanner = _multibeam_scanner("mb")
+        scanner["beam_elevation_angles_deg"] = []
+        resp = client.post("/api/lidar/scan", json={
+            "meshes": [{"vertices": _BOX_VERTS, "triangles": _BOX_TRIS}],
+            "scanners": [scanner],
+        })
+        assert resp.status_code == 200
+        body, _ = decode_bin_frame(resp.content)
+        assert body["success"] is False
+        assert "elevation" in body["error"].lower()
+
+
 class TestScanOptions:
     """Noise, tilt, and miss-recording run-options against the compiled plugin."""
 

@@ -5,6 +5,7 @@ import {
   DEFAULT_SCAN_PARAMETERS,
   type ReturnType,
   type ScanParameters,
+  type ScanPattern,
 } from '../lib/scanParameters';
 import {
   parseHeliosScanXml,
@@ -77,14 +78,24 @@ export function ScanParametersPopup({
   const [label, setLabel] = useState<string>(seedLabel);
   const [params, setParams] = useState<ScanParameters>(seedParams);
   const [importError, setImportError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  // The elevation-angles field is edited as free text (comma/space separated)
+  // so partial input like a trailing comma isn't clobbered by the parsed array.
+  // The parsed number[] lives in params.beamElevationAnglesDeg.
+  const [elevationText, setElevationText] = useState<string>(
+    () => seedParams().beamElevationAnglesDeg.join(', '),
+  );
 
   // Reset form (and clear any stale import error) whenever the popup is
   // reopened so editing the same scan twice doesn't carry over stale state.
   useEffect(() => {
     if (isOpen) {
+      const seeded = seedParams();
       setLabel(seedLabel());
-      setParams(seedParams());
+      setParams(seeded);
+      setElevationText(seeded.beamElevationAnglesDeg.join(', '));
       setImportError(null);
+      setSubmitError(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initial, defaults]);
@@ -162,8 +173,27 @@ export function ScanParametersPopup({
     setParams(p => ({ ...p, [key]: Number.isFinite(v) ? v : 0 }));
   };
 
+  // Parse the free-text elevation field into params.beamElevationAnglesDeg on
+  // every keystroke; the raw text is kept for display so partial entries survive.
+  const setElevations = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const text = e.target.value;
+    setElevationText(text);
+    const list = text.split(/[\s,]+/).filter(Boolean).map(Number).filter(Number.isFinite);
+    setParams(p => ({ ...p, beamElevationAnglesDeg: list }));
+    if (submitError) setSubmitError(null);
+  };
+
+  const setPattern = (pattern: ScanPattern) => {
+    setParams(p => ({ ...p, pattern }));
+    if (submitError) setSubmitError(null);
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (params.pattern === 'spinning_multibeam' && params.beamElevationAnglesDeg.length < 1) {
+      setSubmitError('Enter at least one beam elevation angle for a spinning-multibeam scan.');
+      return;
+    }
     onSubmit(label, params);
   };
 
@@ -228,6 +258,30 @@ export function ScanParametersPopup({
           </div>
 
           <div>
+            <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scan pattern</label>
+            <div className="flex gap-2">
+              {([
+                ['raster', 'Raster'],
+                ['spinning_multibeam', 'Spinning multibeam'],
+              ] as [ScanPattern, string][]).map(([value, text]) => (
+                <button
+                  key={value}
+                  type="button"
+                  data-testid={`scan-pattern-${value === 'spinning_multibeam' ? 'multibeam' : value}`}
+                  onClick={() => setPattern(value)}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm transition-colors ${
+                    params.pattern === value
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+                  }`}
+                >
+                  {text}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Origin (m)</label>
             <div className="grid grid-cols-3 gap-2">
               {(['x', 'y', 'z'] as const).map(axis => (
@@ -248,21 +302,25 @@ export function ScanParametersPopup({
 
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scan size (# points)</label>
-            <div className="grid grid-cols-2 gap-2">
+            <div className={`grid gap-2 ${params.pattern === 'raster' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              {params.pattern === 'raster' && (
+                <div>
+                  <label className="block text-xs text-neutral-500 mb-1">Zenith</label>
+                  <input
+                    data-testid="scan-zenith-points"
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={params.zenithPoints}
+                    onChange={setInt('zenithPoints')}
+                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                  />
+                </div>
+              )}
               <div>
-                <label className="block text-xs text-neutral-500 mb-1">Zenith</label>
-                <input
-                  data-testid="scan-zenith-points"
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={params.zenithPoints}
-                  onChange={setInt('zenithPoints')}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-neutral-500 mb-1">Azimuth</label>
+                <label className="block text-xs text-neutral-500 mb-1">
+                  {params.pattern === 'raster' ? 'Azimuth' : 'Azimuth (Nphi)'}
+                </label>
                 <input
                   data-testid="scan-azimuth-points"
                   type="number"
@@ -279,29 +337,31 @@ export function ScanParametersPopup({
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Angular sweep (degrees)</label>
             <div className="space-y-2">
-              <div>
-                <label className="block text-xs text-neutral-500 mb-1">Zenith (θ) min / max</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <DebouncedNumberInput
-                    data-testid="scan-zenith-min"
-                    min={0}
-                    max={180}
-                    step="any"
-                    value={params.zenithMinDeg}
-                    onCommit={setAngle('zenithMinDeg')}
-                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                  />
-                  <DebouncedNumberInput
-                    data-testid="scan-zenith-max"
-                    min={0}
-                    max={180}
-                    step="any"
-                    value={params.zenithMaxDeg}
-                    onCommit={setAngle('zenithMaxDeg')}
-                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                  />
+              {params.pattern === 'raster' && (
+                <div>
+                  <label className="block text-xs text-neutral-500 mb-1">Zenith (θ) min / max</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <DebouncedNumberInput
+                      data-testid="scan-zenith-min"
+                      min={0}
+                      max={180}
+                      step="any"
+                      value={params.zenithMinDeg}
+                      onCommit={setAngle('zenithMinDeg')}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                    />
+                    <DebouncedNumberInput
+                      data-testid="scan-zenith-max"
+                      min={0}
+                      max={180}
+                      step="any"
+                      value={params.zenithMaxDeg}
+                      onCommit={setAngle('zenithMaxDeg')}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                    />
+                  </div>
                 </div>
-              </div>
+              )}
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Azimuth (φ) min / max</label>
                 <div className="grid grid-cols-2 gap-2">
@@ -327,6 +387,27 @@ export function ScanParametersPopup({
               </div>
             </div>
           </div>
+
+          {params.pattern === 'spinning_multibeam' && (
+            <div>
+              <label className="block text-sm font-medium text-neutral-300 mb-1.5">
+                Beam elevation angles (deg above horizon)
+              </label>
+              <input
+                data-testid="scan-beam-elevations"
+                type="text"
+                value={elevationText}
+                onChange={setElevations}
+                placeholder="15, 10, 5, 0, -5, -10, -15, -20"
+                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+              />
+              <p className="mt-1 text-[11px] text-neutral-500">
+                One value per laser channel, e.g. <code>15, 10, 5, 0, -5</code>. Positive is above
+                horizon. The channel count ({params.beamElevationAnglesDeg.length}) sets the scan's
+                zenith resolution.
+              </p>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scanner tilt (degrees)</label>
@@ -408,6 +489,12 @@ export function ScanParametersPopup({
                 />
               </div>
             </div>
+          )}
+
+          {submitError && (
+            <p data-testid="scan-submit-error" className="text-xs text-red-400">
+              {submitError}
+            </p>
           )}
 
           <button

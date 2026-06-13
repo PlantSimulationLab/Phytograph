@@ -73,6 +73,15 @@ describe('scanParametersFromFile', () => {
     expect(JSON.stringify(DEFAULT_SCAN_PARAMETERS)).toBe(before);
   });
 
+  it('defaults to the raster pattern with a non-empty elevation list', () => {
+    // pattern defaults to 'raster' so existing scans/imports are unchanged; the
+    // elevation list is only consulted for multibeam but must be a sane default.
+    expect(DEFAULT_SCAN_PARAMETERS.pattern).toBe('raster');
+    expect(DEFAULT_SCAN_PARAMETERS.beamElevationAnglesDeg.length).toBeGreaterThan(0);
+    // File-header imports never describe a multibeam sensor → always raster.
+    expect(scanParametersFromFile({ origin: [0, 0, 0] }).pattern).toBe('raster');
+  });
+
   it('defaults tilt to level (0/0) and honors a file-carried tilt', () => {
     // Tilt is a scan property: absent → level; present → carried through.
     expect(DEFAULT_SCAN_PARAMETERS.tiltRollDeg).toBe(0);
