@@ -24,12 +24,20 @@ interface WoodSegmentPanelProps {
   selectedCount: number;
   inProgress: boolean;
   error: string | null;
+  // Reflectance assist: only meaningful when the selected cloud carries a
+  // per-point reflectance/intensity scalar. `reflectanceAvailable` gates whether
+  // the toggle is shown at all; `useReflectance` is the user's on/off choice
+  // (defaulted on when available — the per-cloud weighting makes it harmless on
+  // low-contrast species).
+  reflectanceAvailable: boolean;
+  useReflectance: boolean;
   onClose: () => void;
   onWoodBiasChange: (n: number) => void;
   onKMaxChange: (n: number) => void;
   onRegItersChange: (n: number) => void;
   onModeChange: (m: WoodSegmentMode) => void;
   onMultiModeChange: (m: WoodMultiMode) => void;
+  onUseReflectanceChange: (b: boolean) => void;
   onSegment: () => void;
 }
 
@@ -42,12 +50,15 @@ export function WoodSegmentPanel({
   selectedCount,
   inProgress,
   error,
+  reflectanceAvailable,
+  useReflectance,
   onClose,
   onWoodBiasChange,
   onKMaxChange,
   onRegItersChange,
   onModeChange,
   onMultiModeChange,
+  onUseReflectanceChange,
   onSegment,
 }: WoodSegmentPanelProps) {
   return (
@@ -158,6 +169,29 @@ export function WoodSegmentPanel({
           className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
         />
       </div>
+
+      {/* Reflectance assist — only when the cloud carries a reflectance/intensity
+          scalar. Auto-weighted per cloud, so on a low-contrast species it's a
+          no-op; ticked on by default when available. */}
+      {reflectanceAvailable && (
+        <label className="flex items-start gap-2 mb-3 cursor-pointer">
+          <input
+            data-testid="wood-use-reflectance"
+            type="checkbox"
+            checked={useReflectance}
+            onChange={(e) => onUseReflectanceChange(e.target.checked)}
+            disabled={inProgress}
+            className="mt-0.5 accent-green-500"
+          />
+          <span className="text-[10px] text-neutral-300 leading-snug">
+            Use reflectance assist
+            <span className="block text-neutral-500">
+              Supplement geometry with the cloud's reflectance, weighted by how
+              well it separates wood from leaf (no effect on low-contrast species).
+            </span>
+          </span>
+        </label>
+      )}
 
       {/* Output mode. In aggregate mode the labels are scattered back to each
           scan in place, so split/remove (which produce per-cloud children)

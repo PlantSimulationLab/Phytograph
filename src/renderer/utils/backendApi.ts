@@ -237,6 +237,16 @@ export interface WoodSegmentationRequest {
   reg_iters?: number;
   min_speckle?: number;
   voxel_size?: number;
+  // REFLECTANCE ASSIST: when the cloud carries a per-point reflectance/intensity
+  // scalar, supplement the geometric score with it — auto-weighted per cloud by
+  // how separable wood/leaf are in the reflectance (≈0 on low-contrast species,
+  // so it never hurts). `reflectance` is the inline path (aligned 1:1 with
+  // `points`); for `source`/`sources`/session clouds the backend re-reads it
+  // (`scalar_slug` picks which session extra-dim). `reflectance_weight_max`
+  // caps the blend (0 disables the assist).
+  reflectance?: number[];
+  scalar_slug?: string;
+  reflectance_weight_max?: number;
 }
 
 export interface WoodSegmentationResponse {

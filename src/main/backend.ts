@@ -5,8 +5,9 @@ import { spawn, execSync, ChildProcess } from 'node:child_process';
 import { existsSync, chmodSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
-import { app } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import { EXPECTED_BACKEND_VERSION, BACKEND_PORT_PROD } from '../shared/constants.js';
+import { IPC, type BackendStatusPayload } from '../shared/ipc.js';
 import { backendLog } from './logger.js';
 
 // Split a possibly-multi-line stdout/stderr chunk into clean lines for the log
@@ -41,6 +42,35 @@ let child: ChildProcess | null = null;
 // report it to the renderer. Each app instance / dev session / E2E run gets its
 // own free port so they never collide on a fixed 8008.
 let resolvedPort: number | null = null;
+
+// --- Crash recovery state ----------------------------------------------------
+// The sidecar can die mid-session (an open3d/PyHelios native crash, an OOM
+// kill). Without recovery, every later /api/* call fails for the rest of the
+// session with no surfaced reason. We respawn it on the SAME port (the renderer
+// caches the backend URL once at init and never re-fetches it, so the port must
+// not change) with a capped backoff, and push a status event so the renderer
+// can tell the user their in-RAM sessions were lost and need re-importing.
+let intentionalStop = false;        // true while stopBackend() is tearing down
+let restartAttempts = 0;
+let restartTimer: ReturnType<typeof setTimeout> | null = null;
+const MAX_RESTART_ATTEMPTS = 3;
+const RESTART_BACKOFF_MS = [500, 2000, 5000];
+
+// How main reaches the renderer to push status. Set by setBackendWindowGetter()
+// from main.ts (same pattern as installApplicationMenu / setupAutoUpdater).
+let getMainWindow: () => BrowserWindow | null = () => null;
+
+export function setBackendWindowGetter(getter: () => BrowserWindow | null): void {
+  getMainWindow = getter;
+}
+
+function emitBackendStatus(payload: BackendStatusPayload): void {
+  try {
+    getMainWindow()?.webContents.send(IPC.BackendStatus, payload);
+  } catch {
+    // Window may be gone (quitting) — a dropped status event is harmless.
+  }
+}
 
 /** Ask the OS for a free TCP port by binding :0 and reading back the assignment. */
 function findFreePort(): Promise<number> {
@@ -138,6 +168,9 @@ function killPort(port: number): void {
 
 export async function startBackend(): Promise<void> {
   console.log(`Expected backend version: ${EXPECTED_BACKEND_VERSION}`);
+  // Fresh start (or restart after a clean stop): re-arm crash recovery.
+  intentionalStop = false;
+  restartAttempts = 0;
 
   const port = await resolvePort();
 
@@ -202,6 +235,15 @@ export async function startBackend(): Promise<void> {
     try { chmodSync(binPath, 0o755); } catch { /* ignore */ }
   }
 
+  spawnChild(binPath, port);
+}
+
+/**
+ * Spawn the backend child on `port` and wire its stdio + lifecycle handlers.
+ * Factored out of startBackend so a crash recovery can re-run JUST the spawn
+ * (reusing the already-resolved port) without re-doing the version probe.
+ */
+function spawnChild(binPath: string, port: number): void {
   console.log(`Starting backend: ${binPath} on port ${port}`);
   // PHYTOGRAPH_RESOURCES tells the backend where extraResources live in the
   // packaged app, so it can locate the bundled PotreeConverter binary at
@@ -239,17 +281,90 @@ export async function startBackend(): Promise<void> {
   child.on('exit', (code, signal) => {
     console.log(`Backend exited (code=${code}, signal=${signal})`);
     child = null;
+    if (!intentionalStop) handleUnexpectedExit(binPath, port);
   });
 }
 
+/**
+ * The sidecar died and we didn't ask it to. Respawn it on the same port with a
+ * capped backoff; notify the renderer along the way so the user learns their
+ * in-RAM sessions are gone and a re-import is needed.
+ */
+function handleUnexpectedExit(binPath: string, port: number): void {
+  if (restartAttempts >= MAX_RESTART_ATTEMPTS) {
+    console.error(`[Backend] crashed and exhausted ${MAX_RESTART_ATTEMPTS} restart attempts; giving up.`);
+    emitBackendStatus({ status: 'failed', port });
+    return;
+  }
+  const delay = RESTART_BACKOFF_MS[Math.min(restartAttempts, RESTART_BACKOFF_MS.length - 1)];
+  restartAttempts += 1;
+  console.warn(`[Backend] crashed; respawning (attempt ${restartAttempts}/${MAX_RESTART_ATTEMPTS}) in ${delay}ms on port ${port}.`);
+  emitBackendStatus({ status: 'restarting', port });
+  if (restartTimer) clearTimeout(restartTimer);
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    if (intentionalStop) return;  // app started quitting while we waited
+    if (!existsSync(binPath)) {
+      console.error(`[Backend] binary missing at ${binPath}; cannot respawn.`);
+      emitBackendStatus({ status: 'failed', port });
+      return;
+    }
+    spawnChild(binPath, port);
+    // Confirm the respawn actually bound the port before declaring success, so
+    // the renderer's `ready` toast is reliable. The bundled backend takes a
+    // moment to import + bind, so poll /version a few times. If it never
+    // answers, the child's own 'exit' drives the next attempt; a success resets
+    // the attempt counter so later, unrelated crashes get a fresh budget.
+    void confirmHealthy(port).then((v) => {
+      if (v && !intentionalStop) {
+        restartAttempts = 0;
+        console.log(`[Backend] respawned and healthy (v${v}) on port ${port}.`);
+        emitBackendStatus({ status: 'ready', port });
+      }
+    });
+  }, delay);
+}
+
+/** Poll /version up to ~10s; resolve with the version string or null. */
+async function confirmHealthy(port: number): Promise<string | null> {
+  for (let i = 0; i < 5; i++) {
+    if (intentionalStop || child === null) return null;
+    const v = await fetchVersion(port);
+    if (v) return v;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return null;
+}
+
 export function stopBackend(): void {
-  if (!child) return;
+  intentionalStop = true;
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
+  const dying = child;
+  if (!dying) return;
   console.log('Cleaning up backend...');
+  // Track actual exit (not `dying.killed`, which flips true the instant we send
+  // SIGTERM regardless of whether the process honored it). Without this, a
+  // sidecar stuck in a long native open3d/Helios call would never get SIGKILL'd
+  // and would orphan, holding its port and RAM.
+  let exited = dying.exitCode !== null || dying.signalCode !== null;
+  dying.once('exit', () => { exited = true; });
   try {
-    child.kill();
+    dying.kill();  // SIGTERM — let uvicorn shut down gracefully if it can.
   } catch (e) {
     console.error('Failed to terminate backend:', e);
   }
+  // Escalate to SIGKILL if SIGTERM is ignored. The timer is unref'd so it never
+  // by itself keeps the Electron process alive during quit.
+  const killTimer = setTimeout(() => {
+    if (!exited) {
+      console.warn('[Backend] did not exit on SIGTERM; sending SIGKILL.');
+      try { dying.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+  }, 3000);
+  if (typeof killTimer.unref === 'function') killTimer.unref();
   child = null;
   console.log('Backend terminated');
 }

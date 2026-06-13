@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startBackend, stopBackend } from './backend.js';
+import { startBackend, stopBackend, setBackendWindowGetter } from './backend.js';
 import { registerIpc } from './ipc.js';
 import { installApplicationMenu } from './menu.js';
 import { setupAutoUpdater } from './updater.js';
@@ -173,6 +173,9 @@ app.whenReady().then(async () => {
     mainWindow?.webContents.send(IPC.FileDropEvent, payload);
   });
 
+  // Give the supervisor a way to reach the renderer with crash/restart status.
+  // (Safe to set before the window exists: emitBackendStatus no-ops on null.)
+  setBackendWindowGetter(() => mainWindow);
   await startBackend();
   createWindow();
   setupAutoUpdater(() => mainWindow);

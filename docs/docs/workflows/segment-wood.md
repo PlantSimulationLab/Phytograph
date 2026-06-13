@@ -29,6 +29,12 @@ locally compact** (trunk and branches are smooth cylinders), while foliage
       densities.
     - **Smoothing** — how aggressively isolated misclassifications are cleaned
       up by a majority vote over neighbours. **0** disables it.
+    - **Use reflectance assist** — *only shown when the cloud carries a
+      reflectance or intensity value per point* (e.g. a Riegl `Reflectance`
+      column, auto-detected on import). When ticked, the brightest returns —
+      which at the scanner wavelength are almost always wood — are recovered as
+      wood even where the geometry alone missed them. It is ticked on by default
+      when available; see the note below for when to turn it off.
 5. Choose the **Output**:
     - **Label in place** — keep every point, add a **Wood Class** attribute,
       and recolour by it.
@@ -74,6 +80,23 @@ leaves, ready for leaf-area analysis.
     accuracy. Fine twigs embedded in dense foliage are the usual error source.
     For the best woody reconstruction, run it before skeleton/QSM extraction and
     spot-check the result in the viewer.
+
+!!! note "Reflectance assist — when it helps"
+    Many terrestrial scanners (e.g. Riegl, 1550 nm) record a **reflectance** or
+    intensity value per return, and at that wavelength **wood reflects more
+    strongly than foliage**. When the cloud carries that value, the optional
+    **reflectance assist** uses only the *brightest* returns — the part of the
+    range that is reliably woody — to recover wood the geometry missed (thin
+    branches and twigs especially). It never reclassifies a point *away* from
+    wood, so it can only help, not flood the result.
+
+    The catch is **species**: the wood-vs-leaf brightness gap is large for some
+    species (oak, beech) and weak for others (almond, redbud). On weak-contrast
+    species the assist has little signal to work with — it stays mild rather than
+    helping, and you may prefer to **untick it**. The classifier auto-limits its
+    influence so it is safe to leave on by default, but for a species you know to
+    be low-contrast, geometry alone is the better choice. It is not a substitute
+    for geometry — it supplements it.
 
 !!! note "Large clouds"
     Clouds imported from XYZ files stream from disk as an octree. Wood/leaf

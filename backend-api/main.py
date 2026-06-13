@@ -13,6 +13,7 @@ import re
 import math
 import os
 import sys
+import time
 import subprocess
 from pathlib import Path
 from pytexit import py2tex
@@ -109,7 +110,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.14.1"
+BACKEND_VERSION = "0.15.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -1795,6 +1796,19 @@ class WoodSegmentationRequest(BaseModel):
     min_speckle: int = 0
     branch_grow_sph: float = 0.02
     voxel_size: float = 0.0
+    # REFLECTANCE ASSIST (optional). When the cloud carries a per-point
+    # reflectance/intensity scalar (Riegl `Reflectance` dB, an ASCII
+    # intensity/reflectance column, or a LAS extra-dim), it can supplement the
+    # geometric score — but only proportionally to how separable wood/leaf
+    # actually are in it (auto-weighted per cloud; ~0 on low-contrast species so
+    # the result falls back to pure geometry). `reflectance` is the inline path
+    # (aligned 1:1 with `points`); for `source`/`sources`/session clouds the
+    # backend re-reads the scalar itself (`scalar_slug` picks which session
+    # extra-dim, default 'reflectance' then 'intensity'). `reflectance_weight_max`
+    # caps the blend weight (0 disables the assist entirely).
+    reflectance: Optional[List[float]] = None
+    scalar_slug: Optional[str] = None
+    reflectance_weight_max: float = 0.4
 
 
 class WoodSegmentationResponse(BaseModel):
@@ -1824,6 +1838,7 @@ def _wood_segment_kwargs(request: "WoodSegmentationRequest") -> dict:
         min_speckle=request.min_speckle,
         branch_grow_sph=request.branch_grow_sph,
         voxel_size=request.voxel_size,
+        reflectance_weight_max=request.reflectance_weight_max,
     )
 
 
@@ -1839,18 +1854,38 @@ async def segment_wood_points(request: WoodSegmentationRequest):
         # which is exactly the point — better local neighbourhoods. Assumes the
         # sources are pre-registered (a common coordinate frame).
         source_counts: List[int] = []
+        # Optional per-point reflectance, kept aligned 1:1 with `points`. For the
+        # source/sources paths the scalar is re-read from disk alongside XYZ (so
+        # it survives the same full-resolution read); for inline `points` the
+        # caller supplies it directly. None ⇒ pure-geometry (today's behaviour).
+        reflectance: Optional[np.ndarray] = None
         if request.sources:
             parts = []
+            refl_parts: List[Optional[np.ndarray]] = []
             for s in request.sources:
                 full = s.model_copy(update={"max_points": None})  # full resolution
-                pts, _, _ = _read_points_from_source(full)
+                pts, _, inten = _read_points_from_source(full)
                 parts.append(np.asarray(pts, dtype=np.float64))
+                refl_parts.append(
+                    np.asarray(inten, dtype=np.float64) if inten is not None else None
+                )
                 source_counts.append(len(pts))
             points = np.concatenate(parts, axis=0) if parts else np.empty((0, 3))
+            # Only use reflectance if EVERY source carried it (else alignment and
+            # per-cloud separability are meaningless across mixed sources).
+            if parts and all(r is not None for r in refl_parts):
+                reflectance = np.concatenate(refl_parts, axis=0)
+        elif request.source is not None:
+            src = request.source.model_copy(update={"max_points": None})
+            points, _, inten = _read_points_from_source(src)
+            points = np.asarray(points, dtype=np.float64)
+            reflectance = np.asarray(inten, dtype=np.float64) if inten is not None else None
+        elif request.points is not None:
+            points = np.array(request.points, dtype=np.float64)
+            if request.reflectance is not None and len(request.reflectance) == len(points):
+                reflectance = np.asarray(request.reflectance, dtype=np.float64)
         else:
-            # _resolve_segmentation_points reads `.points` / `.source`, both of
-            # which WoodSegmentationRequest shares with GroundSegmentationRequest.
-            points = _resolve_segmentation_points(request)  # type: ignore[arg-type]
+            raise HTTPException(status_code=400, detail="Provide `points`, `source`, or `sources`.")
 
         if len(points) < 3:
             return WoodSegmentationResponse(
@@ -1859,7 +1894,7 @@ async def segment_wood_points(request: WoodSegmentationRequest):
                 error="Need at least 3 points for wood/leaf segmentation",
             )
 
-        labels = segment_wood(points, **_wood_segment_kwargs(request))
+        labels = segment_wood(points, reflectance=reflectance, **_wood_segment_kwargs(request))
         num_wood = int(np.count_nonzero(labels == WOOD_CLASS_WOOD))
         return WoodSegmentationResponse(
             success=True,
@@ -4636,6 +4671,7 @@ def _create_lidar_scan_session(r: dict) -> dict:
         deleted_history=[],
         octree_cache_id=None,
         created_at=time.time(),
+        last_accessed=time.time(),
     )
 
     # Register the session FIRST — it (positions + is_miss) is what powers the
@@ -4643,6 +4679,7 @@ def _create_lidar_scan_session(r: dict) -> dict:
     # is a best-effort extra: a synthetic cloud renders from its in-memory points,
     # not the octree, so if PotreeConverter is unavailable we still return a
     # usable session (just without octree metadata).
+    _sweep_cloud_sessions()
     with _cloud_session_lock:
         _cloud_sessions[session_id] = sess
 
@@ -5108,6 +5145,48 @@ def _wood_prune_speckle(
     return out
 
 
+def _wood_reflectance_wood_seed(
+    reflectance: np.ndarray,
+    weight_max: float,
+    tail_pctile_at_max: float = 88.0,
+) -> np.ndarray:
+    """Boolean mask of points to PROMOTE to wood from a one-sided high-reflectance
+    cut. Returns all-False when reflectance is unusable.
+
+    Empirically (Weiser oak/beech, Riegl 1550 nm), P(wood | reflectance) is
+    flat-low across the bottom ~70-80 % of the range and only rises steeply in
+    the TOP couple of deciles (to ~0.9-0.99) — the mid/low range overlaps too
+    much to separate (Beland 2014 Fig 8). So the only safe radiometric move is to
+    promote the very brightest returns the geometry missed. `weight_max` ∈ (0,1]
+    sets how deep into the upper tail we cut: at the max (1.0) we take everything
+    above `tail_pctile_at_max` (default 88th percentile), scaling toward the 99th
+    percentile as weight_max → 0. Confining promotion to a thin top tail keeps it
+    from flooding wood on low-contrast species (where that tail isn't specifically
+    wood, but is small). Promotion only ADDS wood — it never demotes — so the
+    assist can only recover missed wood, and the user toggle disables it entirely
+    for species known to lack contrast.
+    """
+    finite = np.isfinite(reflectance)
+    if finite.sum() < 50 or weight_max <= 0:
+        return np.zeros(reflectance.shape[0], dtype=bool)
+
+    rf = reflectance[finite].astype(np.float64)
+    w = float(min(weight_max, 1.0))
+    # weight_max → percentile: w=1 ⇒ tail_pctile_at_max; w→0 ⇒ ~99th.
+    pctile = 99.0 - (99.0 - tail_pctile_at_max) * w
+    thresh = float(np.percentile(rf, pctile))
+    # Promote STRICTLY above the threshold. A constant / contrast-free reflectance
+    # has thresh == max, so `> thresh` selects nothing — the assist is inert and
+    # the result falls back to pure geometry (the harmless-on-low-contrast
+    # guarantee). Using `>=` here would promote the entire flat distribution.
+    if not np.isfinite(thresh) or thresh >= float(rf.max()):
+        return np.zeros(reflectance.shape[0], dtype=bool)
+
+    mask = np.zeros(reflectance.shape[0], dtype=bool)
+    mask[finite] = rf > thresh
+    return mask
+
+
 def segment_wood(
     points: np.ndarray,
     k_min: int = 10,
@@ -5120,8 +5199,11 @@ def segment_wood(
     branch_grow_sph: float = 0.02,
     voxel_size: float = 0.0,
     max_points: Optional[int] = None,
+    reflectance: Optional[np.ndarray] = None,
+    reflectance_weight_max: float = 0.4,
 ) -> np.ndarray:
-    """Classify each point as wood (1) or leaf (2) from XYZ geometry alone.
+    """Classify each point as wood (1) or leaf (2) from geometry (+ optional
+    reflectance assist).
 
     Pipeline (classical / non-ML, runs on CPU in seconds-to-minutes):
       1. Per-point local-PCA features at an eigen-entropy-optimal scale
@@ -5129,7 +5211,14 @@ def segment_wood(
       2. A wood saliency score = verticality + (1 − sphericity): wood is
          vertical (trunk/branches) and locally COMPACT (low sphericity), while
          foliage scatters the neighbourhood in 3D (high sphericity) and hangs at
-         varied non-vertical angles. A 2-component 1-D Gaussian Mixture splits
+         varied non-vertical angles. OPTIONAL reflectance assist: when a
+         per-point `reflectance` scalar is supplied (and `reflectance_weight_max`
+         > 0), a 1-D GMM on the reflectance contributes a wood-probability term
+         to this score, weighted by how separable wood/leaf are in it — so it
+         helps high-contrast species (oak/beech: wood reads higher reflectance)
+         and is inert (weight ≈ 0) on low-contrast ones (almond/redbud) or when
+         `reflectance` is None. See `_wood_blend_reflectance`.
+         A 2-component 1-D Gaussian Mixture splits
          the score; the higher-mean component is wood and `wood_bias` is its
          posterior threshold (0.5 = argmax; higher → stricter / less wood; lower
          → more wood).
@@ -5172,6 +5261,15 @@ def segment_wood(
     if n_full == 0:
         return np.zeros(0, dtype=np.int32)
 
+    # Reflectance must align 1:1 with the full cloud to survive the downsample
+    # mapping below; a length mismatch means a caller bug — drop it rather than
+    # silently misalign the assist.
+    refl_full = None
+    if reflectance is not None:
+        refl_full = np.asarray(reflectance, dtype=np.float64).ravel()
+        if refl_full.shape[0] != n_full or not np.isfinite(refl_full).any():
+            refl_full = None
+
     cap = int(max_points) if max_points is not None else _WOOD_SEGMENT_MAX_POINTS
 
     # AUTO safety downsample: the per-point k-NN feature extraction allocates an
@@ -5200,8 +5298,18 @@ def segment_wood(
         pts = np.asarray(down.points, dtype=np.float64)
         if len(pts) < 3:
             pts = pts_full  # downsample collapsed the cloud; fall back
+            refl = refl_full
+        elif refl_full is not None:
+            # voxel_down_sample averages/reorders points, so reflectance can't be
+            # strided — assign each downsampled point its nearest full-res point's
+            # reflectance (same NN mapping used to propagate labels back).
+            _, nn_down = cKDTree(pts_full).query(pts, k=1, workers=-1)
+            refl = refl_full[nn_down]
+        else:
+            refl = None
     else:
         pts = pts_full
+        refl = refl_full
 
     n = len(pts)
     if n < 3:
@@ -5259,6 +5367,21 @@ def segment_wood(
         else:
             raw = np.full(n, WOOD_CLASS_LEAF, dtype=np.int32)
     raw = raw.astype(np.int32)
+
+    # REFLECTANCE ASSIST (one-sided high-reflectance promotion). At the scanner
+    # wavelength (e.g. Riegl 1550 nm) wood reflects more than foliage, but the
+    # distributions OVERLAP heavily through the low/mid range (Beland 2014 Fig 8)
+    # — only the UPPER TAIL is reliably wood (validated on Weiser oak/beech:
+    # P(wood) is flat-low until the top ~2 deciles, then jumps to ~0.9-0.99). So
+    # we use reflectance ONLY to PROMOTE very-high-reflectance points the geometry
+    # missed (never to demote), then let branch-grow + regularisation propagate
+    # from those recovered seeds. On a low-contrast species the upper tail isn't
+    # specifically wood, but because promotion is confined to a thin top tail the
+    # net effect is mild (the user toggle disables it for known low-contrast
+    # species). See `_wood_reflectance_wood_seed`.
+    if refl is not None and reflectance_weight_max and reflectance_weight_max > 0:
+        promote = _wood_reflectance_wood_seed(refl, float(reflectance_weight_max))
+        raw = np.where(promote, WOOD_CLASS_WOOD, raw).astype(np.int32)
 
     # Branch recovery: the verticality-weighted GMM seed catches the trunk and
     # vertical wood but misses HORIZONTAL scaffold branches (low verticality →
@@ -6723,6 +6846,7 @@ class PlantSession:
     current_age: float
     position: tuple  # (x, y, z)
     created_at: float  # timestamp
+    last_accessed: float = 0.0  # bumped on every read/advance; drives idle eviction
 
 
 class PlantSessionCreateRequest(BaseModel):
@@ -7554,7 +7678,8 @@ async def create_plant_session(request: PlantSessionCreateRequest):
             plantarch=plantarch,
             current_age=current_age,
             position=(request.position_x, request.position_y, request.position_z),
-            created_at=time.time()
+            created_at=time.time(),
+            last_accessed=time.time(),
         )
 
         # Write plant structure XML for morph tool
@@ -7571,6 +7696,7 @@ async def create_plant_session(request: PlantSessionCreateRequest):
         except Exception as xml_err:
             print(f"[Plant Session] Warning: failed to write XML: {xml_err}")
 
+        _sweep_plant_sessions()
         with _session_lock:
             _plant_sessions[session_id] = session
 
@@ -7606,6 +7732,7 @@ async def advance_plant_session(session_id: str, request: PlantSessionAdvanceReq
             if session_id not in _plant_sessions:
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
             session = _plant_sessions[session_id]
+            session.last_accessed = time.time()
 
         if request.dt < 0:
             raise HTTPException(status_code=400, detail="dt must be >= 0")
@@ -7670,6 +7797,7 @@ async def get_plant_session_status(session_id: str):
             if session_id not in _plant_sessions:
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
             session = _plant_sessions[session_id]
+            session.last_accessed = time.time()
 
         height = session.plantarch.getPlantHeight(session.plant_id)
 
@@ -8049,7 +8177,8 @@ async def morph_plant(request: PlantMorphRequest):
             plantarch=plantarch,
             current_age=current_age,
             position=position,
-            created_at=time.time()
+            created_at=time.time(),
+            last_accessed=time.time(),
         )
 
         # Extract geometry (+ real Helios UVs / materials / textures)
@@ -8070,6 +8199,7 @@ async def morph_plant(request: PlantMorphRequest):
         # Store session
         with _session_lock:
             _plant_sessions[session_id] = session
+        _sweep_plant_sessions()
 
         print(f"[Morph] Rebuilt plant {session_id}: age={current_age:.1f}, height={height:.3f}m, {vertex_count} vertices")
 
@@ -8844,9 +8974,11 @@ async def generate_plant_stream(request: PlantStreamRequest):
                     current_age=current_age,
                     position=(request.position_x, request.position_y, request.position_z),
                     created_at=time.time(),
+                    last_accessed=time.time(),
                 )
                 with _session_lock:
                     _plant_sessions[session_id] = session
+                _sweep_plant_sessions()
                 result["session_id"] = session_id
                 result["age"] = current_age
                 keep_session = True
@@ -12592,6 +12724,87 @@ _cloud_sessions: Dict[str, "CloudSession"] = {}
 _cloud_session_lock = threading.Lock()
 
 
+# ---- In-RAM session eviction ------------------------------------------------
+# Cloud and plant sessions each hold the full source-of-truth in RAM (a cloud
+# session is ~30-60 bytes/point; a plant session pins a live pyhelios context).
+# They are reclaimed only by an explicit DELETE, so a renderer reload/crash that
+# never issues one leaks them until the backend dies. We bound that lazily (no
+# background thread): every session create/read/mutate bumps `last_accessed` and
+# opportunistically sweeps idle + over-cap sessions, mirroring the LRU-by-time
+# policy of `_evict_octree_cache`. All three limits are env-overridable.
+try:
+    _SESSION_IDLE_TTL_SECONDS = float(
+        os.environ.get("PHYTOGRAPH_SESSION_IDLE_TTL_SECONDS", str(30 * 60))
+    )
+except (ValueError, TypeError):
+    _SESSION_IDLE_TTL_SECONDS = 30 * 60.0
+try:
+    _MAX_CLOUD_SESSIONS = int(os.environ.get("PHYTOGRAPH_MAX_CLOUD_SESSIONS", "8"))
+except (ValueError, TypeError):
+    _MAX_CLOUD_SESSIONS = 8
+try:
+    _MAX_PLANT_SESSIONS = int(os.environ.get("PHYTOGRAPH_MAX_PLANT_SESSIONS", "8"))
+except (ValueError, TypeError):
+    _MAX_PLANT_SESSIONS = 8
+try:
+    _MAX_DELETED_HISTORY = int(os.environ.get("PHYTOGRAPH_MAX_DELETED_HISTORY", "50"))
+except (ValueError, TypeError):
+    _MAX_DELETED_HISTORY = 50
+
+
+def _evict_session_ids(sessions: Dict[str, Any], max_count: int, now: float) -> List[str]:
+    """Return the ids to evict from `sessions` to satisfy the idle-TTL and the
+    count cap, oldest `last_accessed` first. Pure (no mutation) so the caller can
+    do teardown under whatever lock it already holds. Sessions are evicted when
+    untouched for longer than the TTL, then — if still over `max_count` — the
+    least-recently-accessed survivors are dropped until at the cap."""
+    if not sessions:
+        return []
+    # (last_accessed, id), oldest first. Fall back to created_at if unset.
+    ranked = sorted(
+        sessions.items(),
+        key=lambda kv: getattr(kv[1], "last_accessed", 0.0) or getattr(kv[1], "created_at", 0.0),
+    )
+    evict: List[str] = []
+    ttl = _SESSION_IDLE_TTL_SECONDS
+    for sid, sess in ranked:
+        last = getattr(sess, "last_accessed", 0.0) or getattr(sess, "created_at", 0.0)
+        if ttl > 0 and (now - last) > ttl:
+            evict.append(sid)
+    survivors = [sid for sid, _ in ranked if sid not in evict]
+    overflow = len(survivors) - max(0, max_count)
+    if overflow > 0:
+        evict.extend(survivors[:overflow])  # oldest survivors first
+    return evict
+
+
+def _sweep_cloud_sessions() -> None:
+    """Lazily drop idle / over-cap cloud sessions (frees their RAM arrays)."""
+    now = time.time()
+    with _cloud_session_lock:
+        for sid in _evict_session_ids(_cloud_sessions, _MAX_CLOUD_SESSIONS, now):
+            sess = _cloud_sessions.pop(sid, None)
+            if sess is not None:
+                print(f"[Cloud Session] Evicted idle/over-cap session {sid}")
+
+
+def _sweep_plant_sessions() -> None:
+    """Lazily drop idle / over-cap plant sessions, tearing down pyhelios."""
+    now = time.time()
+    with _session_lock:
+        for sid in _evict_session_ids(_plant_sessions, _MAX_PLANT_SESSIONS, now):
+            sess = _plant_sessions.pop(sid, None)
+            if sess is None:
+                continue
+            # Same teardown as the DELETE endpoint so native resources are freed.
+            try:
+                sess.plantarch.__exit__(None, None, None)
+                sess.context.__exit__(None, None, None)
+            except Exception:
+                pass
+            print(f"[Plant Session] Evicted idle/over-cap session {sid}")
+
+
 @dataclass
 class CloudSession:
     """An imported point cloud held in RAM as the COMPLETE source of truth.
@@ -12616,11 +12829,14 @@ class CloudSession:
     deleted_history: List[np.ndarray]  # mask snapshots, one per committed delete (undo)
     octree_cache_id: Optional[str]   # currently-built derived octree, or None if stale
     created_at: float
+    last_accessed: float = 0.0       # bumped on every read/mutate; drives idle eviction
 
 
 def _get_cloud_session(session_id: str) -> "CloudSession":
     with _cloud_session_lock:
         sess = _cloud_sessions.get(session_id)
+        if sess is not None:
+            sess.last_accessed = time.time()
     if sess is None:
         raise HTTPException(status_code=404, detail=f"Cloud session not found: {session_id}")
     return sess
@@ -12856,6 +13072,7 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             deleted_history=[],
             octree_cache_id=None,
             created_at=time.time(),
+            last_accessed=time.time(),
         )
         # Build the octree from a HITS-ONLY LAS so far-field misses (~20 km) don't
         # poison its bounding box / camera framing. Misses stay in the session
@@ -12865,6 +13082,7 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         cache_key, cache_dir, meta = _build_octree_from_las(hits_las, extra_dims_meta)
         sess.octree_cache_id = cache_key
 
+    _sweep_cloud_sessions()
     with _cloud_session_lock:
         _cloud_sessions[session_id] = sess
     meta = {"cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
@@ -13013,6 +13231,11 @@ async def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
         # store the boolean mask per applied delete (cheap: 1 bit/point) rather
         # than replaying regions, so undo is exact regardless of edit kind.
         sess.deleted_history.append(sess.deleted.copy())
+        # Bound the undo stack: each snapshot is a full (N,) bool mask, so an
+        # unbounded history grows RAM by ~1 byte/point per erase click. Keep only
+        # the most recent _MAX_DELETED_HISTORY snapshots (older undos are dropped).
+        if len(sess.deleted_history) > _MAX_DELETED_HISTORY:
+            sess.deleted_history = sess.deleted_history[-_MAX_DELETED_HISTORY:]
         sess.octree_cache_id = None  # derived octree is now stale until bake
         deleted_count = int(sess.deleted.sum())
         total = int(len(sess.positions))
@@ -13186,6 +13409,7 @@ def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSess
         deleted_history=[],
         octree_cache_id=None,
         created_at=time.time(),
+        last_accessed=time.time(),
     )
     _cloud_sessions[new_id] = new_sess
     return new_sess
@@ -13377,16 +13601,55 @@ class SessionWoodSegmentRequest(WoodSegmentationRequest):
     pass
 
 
+def _session_reflectance_scalar(sess, scalar_slug, keep):
+    """Resolve an optional per-point reflectance/intensity scalar from a session,
+    masked to surviving points (`keep`), as float64 aligned 1:1 with the points,
+    or None when nothing usable is present.
+
+    Lookup order: an explicit `scalar_slug` (case-insensitive) in the extra-dim
+    columns → the common reflectance/intensity slugs → the LAS `intensity` field.
+    Slug matching is case-insensitive because the Riegl extra-dim is 'Reflectance'
+    while ASCII roles are lowercase 'reflectance'/'intensity'.
+    """
+    extras = sess.extras or {}
+    lower = {k.lower(): k for k in extras}
+
+    def _take(arr):
+        a = np.asarray(arr, dtype=np.float64)
+        return a[keep] if a.shape[0] == keep.shape[0] else None
+
+    if scalar_slug:
+        key = lower.get(scalar_slug.lower())
+        if key is not None:
+            return _take(extras[key])
+    for cand in ("reflectance", "intensity"):
+        key = lower.get(cand)
+        if key is not None:
+            return _take(extras[key])
+    if sess.intensity is not None:
+        return _take(sess.intensity)
+    return None
+
+
 @app.post("/api/cloud/session/{session_id}/segment_wood")
 async def session_segment_wood(session_id: str, request: SessionWoodSegmentRequest):
     """Wood/leaf segmentation on the in-RAM survivors → append `wood_class` →
     rebuild octree from the arrays. No source file read."""
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
-        pts = sess.positions[~sess.deleted].copy()
+        keep = ~sess.deleted
+        pts = sess.positions[keep].copy()
+        # Resolve an optional per-point reflectance scalar from the session,
+        # aligned 1:1 with the surviving points. `scalar_slug` picks a specific
+        # extra-dim (e.g. 'Reflectance'); default tries the common slugs then the
+        # LAS intensity field. None ⇒ pure geometry. The reflectance_weight_max
+        # request field still gates whether the assist runs at all.
+        reflectance = None
+        if request.reflectance_weight_max and request.reflectance_weight_max > 0:
+            reflectance = _session_reflectance_scalar(sess, request.scalar_slug, keep)
     if len(pts) < 3:
         raise HTTPException(status_code=400, detail="Need at least 3 points for wood/leaf segmentation.")
-    labels = segment_wood(pts, **_wood_segment_kwargs(request))
+    labels = segment_wood(pts, reflectance=reflectance, **_wood_segment_kwargs(request))
     with _cloud_session_lock:
         _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
     cache_key, cache_dir, meta = _session_rebuild(sess)

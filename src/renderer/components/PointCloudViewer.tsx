@@ -156,6 +156,17 @@ import { serializeQsm, sanitizeQsmFilename, qsmExtForFormat, type QSMExportForma
 type GridPlane = 'z-up' | 'y-up';
 type EditMode = 'none' | 'translate' | 'crop' | 'rotate' | 'erase';
 
+// Tuning fields threaded from handleWoodSegment to each per-cloud worker. The
+// optional `reflectance_weight_max` (>0) and `scalar_slug` enable the reflectance
+// assist; `reflectance` carries the inline scalar for the flat-cloud path.
+type WoodSegmentTuning = {
+  wood_bias: number;
+  k_max: number;
+  reg_iters: number;
+  reflectance_weight_max?: number;
+  scalar_slug?: string;
+};
+
 // Converts the user-facing Mesh Lighting multiplier (Display panel, default
 // 1.0) into the physical three.js light intensity fed to the ambient + key
 // directional lights. 1.0 × this scale reproduces the prior default look
@@ -508,8 +519,13 @@ export default function PointCloudViewer({
   // >1 scan: 'aggregate' segments them together (denser geometry) then writes
   // labels back to each; 'per-scan' segments each independently.
   const [woodMultiMode, setWoodMultiMode] = useState<WoodMultiMode>('per-scan');
+  // Reflectance assist (opt-in toggle; defaults on when the selected cloud
+  // carries a reflectance/intensity scalar — see woodReflectanceAvailable).
+  const [woodUseReflectance, setWoodUseReflectance] = useState(true);
+  // segment_wood's reflectance_weight_max when the assist is active.
+  const WOOD_REFLECTANCE_WEIGHT_MAX = 0.4;
   // Holds the latest single-cloud wood segmenter; see segmentOneWoodCloud below.
-  const segmentOneWoodCloudRef = useRef<(cloud: PointCloudEntry, WOOD: number, LEAF: number, woodParams: { wood_bias: number; k_max: number; reg_iters: number }) => Promise<void>>(async () => {});
+  const segmentOneWoodCloudRef = useRef<(cloud: PointCloudEntry, WOOD: number, LEAF: number, woodParams: WoodSegmentTuning) => Promise<void>>(async () => {});
   // Tree (individual-tree) segmentation via TreeIso.
   const [showTreeSegmentPanel, setShowTreeSegmentPanel] = useState(false);
   const [treeSegmentInProgress, setTreeSegmentInProgress] = useState(false);
@@ -4949,6 +4965,38 @@ export default function PointCloudViewer({
     }
   }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSplitClouds]);
 
+  // Pull a per-point reflectance/intensity scalar from a flat cloud's display
+  // data for the inline reflectance-assist path, as a plain number[] aligned to
+  // the point order, or null when none is present. Prefers a 'reflectance'
+  // scalar field, then 'intensity' field, then the `intensities` array.
+  const inlineReflectance = useCallback((d: PointCloudData): number[] | null => {
+    const sf = d.scalarFields;
+    if (sf) {
+      const key = Object.keys(sf).find(k => /^(reflectance|intensity)$/i.test(k));
+      if (key && sf[key]?.values?.length === d.pointCount) {
+        return Array.from(sf[key].values);
+      }
+    }
+    if (d.intensities && d.intensities.length === d.pointCount) {
+      return Array.from(d.intensities);
+    }
+    return null;
+  }, []);
+
+  // True when the (single) selected cloud carries a reflectance/intensity scalar
+  // — gates the assist toggle in the panel. Octree/session clouds expose it via
+  // a scalar field or the source's intensity, which the backend re-reads.
+  const woodReflectanceAvailable = useMemo(() => {
+    const ids = Array.from(selectedIds);
+    return ids.some(tid => {
+      const c = clouds.find(x => x.id === tid);
+      if (!c) return false;
+      const sf = c.data.scalarFields;
+      const hasField = !!sf && Object.keys(sf).some(k => /^(reflectance|intensity)$/i.test(k));
+      return hasField || !!(c.data.intensities && c.data.intensities.length > 0);
+    });
+  }, [selectedIds, clouds]);
+
   // Segment wood vs leaf points (geometric, non-ML: verticality + low-sphericity).
   // Writes a `wood_class` scalar attribute (1=wood, 2=leaf) and colours by it.
   // Mirrors handleGroundSegment: session (octree) clouds run on the in-RAM array
@@ -4966,7 +5014,17 @@ export default function PointCloudViewer({
     if (targets.length === 0) return;
 
     const WOOD = 1, LEAF = 2;
-    const woodParams = { wood_bias: woodBias, k_max: woodKMax, reg_iters: woodRegIters };
+    // Reflectance assist: enabled only when the user toggle is on. The backend
+    // self-weights by per-cloud separability (≈0 on low-contrast species), and
+    // for octree/session clouds it re-reads the scalar itself, so we just pass a
+    // positive weight cap; the inline path additionally sends the scalar array.
+    const reflWeight = woodUseReflectance ? WOOD_REFLECTANCE_WEIGHT_MAX : 0;
+    const woodParams: WoodSegmentTuning = {
+      wood_bias: woodBias,
+      k_max: woodKMax,
+      reg_iters: woodRegIters,
+      reflectance_weight_max: reflWeight,
+    };
     const aggregate = targets.length > 1 && woodMultiMode === 'aggregate';
 
     setWoodSegmentInProgress(true);
@@ -4994,6 +5052,11 @@ export default function PointCloudViewer({
           // Concatenate every cloud's world-space points in selection order,
           // tracking each run so labels can be sliced back.
           const inlineParts: number[][] = [];
+          const reflParts: number[] = [];
+          // Reflectance assist only applies if EVERY scan carries the scalar
+          // (otherwise the concatenated array can't align 1:1) — mirrors the
+          // backend's all-or-nothing rule for multi-source requests.
+          let allHaveRefl = reflWeight > 0;
           const order: { id: string; count: number; displayData: PointCloudData }[] = [];
           for (const { cloud, ps } of resolved) {
             const d = (ps as { data: PointCloudData }).data;
@@ -5005,10 +5068,18 @@ export default function PointCloudViewer({
                 d.positions[i * 3 + 2] + t.z,
               ]);
             }
+            const r = allHaveRefl ? inlineReflectance(d) : null;
+            if (r) reflParts.push(...r); else allHaveRefl = false;
             order.push({ id: cloud.id, count: d.pointCount, displayData: d });
           }
 
-          const response = await segmentWood({ points: inlineParts, ...woodParams });
+          const response = await segmentWood({
+            points: inlineParts,
+            ...woodParams,
+            ...(allHaveRefl && reflParts.length === inlineParts.length
+              ? { reflectance: reflParts }
+              : {}),
+          });
           if (!response.success) {
             throw new Error(response.error || 'Wood/leaf segmentation failed');
           }
@@ -5053,7 +5124,7 @@ export default function PointCloudViewer({
     } finally {
       setWoodSegmentInProgress(false);
     }
-  }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode]);
+  }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodUseReflectance, inlineReflectance]);
 
   // Segment a single cloud and apply the result per `woodMode` (label / split /
   // remove). Used by the per-scan path (and single selection).
@@ -5061,7 +5132,7 @@ export default function PointCloudViewer({
     cloud: PointCloudEntry,
     WOOD: number,
     LEAF: number,
-    woodParams: { wood_bias: number; k_max: number; reg_iters: number },
+    woodParams: WoodSegmentTuning,
   ) => {
     const id = cloud.id;
     {
@@ -5136,7 +5207,17 @@ export default function PointCloudViewer({
         ];
       }
 
-      const response = await segmentWood({ points, ...woodParams });
+      // Reflectance assist (inline path): send the per-point scalar when present
+      // and the assist is on. The backend self-limits its effect, so passing it
+      // is safe even on low-contrast clouds.
+      const refl = (woodParams.reflectance_weight_max ?? 0) > 0
+        ? inlineReflectance(displayData)
+        : null;
+      const response = await segmentWood({
+        points,
+        ...woodParams,
+        ...(refl && refl.length === count ? { reflectance: refl } : {}),
+      });
       if (!response.success) {
         throw new Error(response.error || 'Wood/leaf segmentation failed');
       }
@@ -5211,7 +5292,7 @@ export default function PointCloudViewer({
         message: `${response.num_wood.toLocaleString()} wood, ${response.num_leaf.toLocaleString()} leaf`,
       });
     }
-  }, [buildPointSource, onUpdateCloud, onAddCloud, woodMode]);
+  }, [buildPointSource, onUpdateCloud, onAddCloud, woodMode, inlineReflectance]);
   // Keep a ref to the latest worker so the memoised handleWoodSegment dispatcher
   // (which excludes it from deps to avoid a use-before-declaration cycle) always
   // invokes the current-woodMode version.
@@ -8416,6 +8497,35 @@ export default function PointCloudViewer({
 
     console.log(`[GIF] Starting GIF generation from age ${startAge} to ${endAge}`);
 
+    // Resources that must be released on ANY exit (success, user abort, early
+    // return, or a throw mid-loop). Declared outside the try so the catch can
+    // reach them — a thrown error after the WebGLRenderer is created would
+    // otherwise strand an offscreen GL context (browsers cap them at ~16, so a
+    // few failed exports break all WebGL until reload). `cleanup` is idempotent.
+    let renderer: THREE.WebGLRenderer | null = null;
+    let plantMesh: THREE.Mesh | null = null;
+    let sessionId: string | null = null;
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (plantMesh) {
+        plantMesh.geometry.dispose();
+        (plantMesh.material as THREE.Material).dispose();
+        plantMesh = null;
+      }
+      if (renderer) {
+        renderer.dispose();
+        renderer = null;
+      }
+      // Free the backend plant session so a failed export doesn't orphan it
+      // (now also bounded by backend session eviction, but explicit is cleaner).
+      if (sessionId) {
+        void deletePlantSession(sessionId).catch(() => {});
+        sessionId = null;
+      }
+    };
+
     try {
       // For "current" view, match the main camera's aspect ratio for identical framing
       // For preset views, use square 512x512
@@ -8433,7 +8543,7 @@ export default function PointCloudViewer({
         }
       }
 
-      const renderer = new THREE.WebGLRenderer({
+      renderer = new THREE.WebGLRenderer({
         antialias: true,
         alpha: gifBackground === 'transparent',
         preserveDrawingBuffer: true,
@@ -8545,12 +8655,13 @@ export default function PointCloudViewer({
         showToast({ title: 'Failed to create plant session', type: 'error' });
         setIsGeneratingGif(false);
         setGifProgress(null);
-        renderer.dispose();
+        cleanup();
         return;
       }
 
-      const sessionId = sessionResponse.session_id;
-      console.log(`[GIF] Created session ${sessionId} at age ${startAge}`);
+      sessionId = sessionResponse.session_id;
+      const sid = sessionId;  // non-null alias for the API calls below
+      console.log(`[GIF] Created session ${sid} at age ${startAge}`);
 
       // Helper to create an offscreen mesh for GIF frames. This uses vertex
       // colors only (no image textures) — the GIF export renders organ colors,
@@ -8598,12 +8709,12 @@ export default function PointCloudViewer({
       };
 
       // Get initial geometry
-      let advanceResponse = await advancePlantSession(sessionId, 0);
+      let advanceResponse = await advancePlantSession(sid, 0);
       if (!advanceResponse.success) {
         showToast({ title: 'Failed to get initial geometry', type: 'error' });
         setIsGeneratingGif(false);
         setGifProgress(null);
-        renderer.dispose();
+        cleanup();
         return;
       }
 
@@ -8613,7 +8724,7 @@ export default function PointCloudViewer({
       const totalFrames = endAge - startAge + 1;
 
       // Process first frame
-      let plantMesh = createMeshFromResponse(advanceResponse);
+      plantMesh = createMeshFromResponse(advanceResponse);
       scene.add(plantMesh);
       renderer.render(scene, camera);
 
@@ -8632,14 +8743,14 @@ export default function PointCloudViewer({
         // Check if aborted
         if (gifAbortRef.current) {
           console.log('[GIF] Generation aborted by user');
-          renderer.dispose();
+          cleanup();
           setIsGeneratingGif(false);
           setGifProgress(null);
           return;
         }
 
         // Advance by 1 day
-        advanceResponse = await advancePlantSession(sessionId, 1);
+        advanceResponse = await advancePlantSession(sid, 1);
         if (!advanceResponse.success) {
           console.error('[GIF] Failed to advance:', advanceResponse.error);
           break;
@@ -8664,10 +8775,10 @@ export default function PointCloudViewer({
         setGifProgress({ current: frameCount, total: totalFrames, phase: 'frames' });
       }
 
-      // Clean up mesh
+      // Remove the last frame's mesh from the scene; final disposal happens in
+      // cleanup() (called from the 'finished' callback) so the renderer and the
+      // mesh are released together along exactly one path.
       scene.remove(plantMesh);
-      plantMesh.geometry.dispose();
-      (plantMesh.material as THREE.Material).dispose();
 
       console.log(`[GIF] Captured ${frameCount} frames, encoding...`);
       setGifProgress({ current: frameCount, total: totalFrames, phase: 'encoding' });
@@ -8687,7 +8798,7 @@ export default function PointCloudViewer({
         console.log('[GIF] Download started');
         showToast({ title: 'GIF downloaded successfully!', type: 'success' });
 
-        renderer.dispose();
+        cleanup();
         setIsGeneratingGif(false);
         setGifProgress(null);
       });
@@ -8697,6 +8808,7 @@ export default function PointCloudViewer({
     } catch (error) {
       console.error('[GIF] Error:', error);
       showToast({ title: `GIF generation failed: ${error}`, type: 'error' });
+      cleanup();
       setIsGeneratingGif(false);
       setGifProgress(null);
     }
@@ -11789,12 +11901,15 @@ export default function PointCloudViewer({
           selectedCount={selectedIds.size}
           inProgress={woodSegmentInProgress}
           error={woodSegmentError}
+          reflectanceAvailable={woodReflectanceAvailable}
+          useReflectance={woodUseReflectance}
           onClose={() => setShowWoodSegmentPanel(false)}
           onWoodBiasChange={setWoodBias}
           onKMaxChange={setWoodKMax}
           onRegItersChange={setWoodRegIters}
           onModeChange={setWoodMode}
           onMultiModeChange={setWoodMultiMode}
+          onUseReflectanceChange={setWoodUseReflectance}
           onSegment={handleWoodSegment}
         />
       )}

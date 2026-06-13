@@ -1167,6 +1167,36 @@ function App() {
     return unsubscribe;
   }, [handleMenuImport, handleSelectAll, handleDeselectAll]);
 
+  // Subscribe to backend crash/restart status pushed by the supervisor
+  // (src/main/backend.ts). The sidecar holds imported clouds/plant sessions in
+  // RAM, so a crash loses them even though the supervisor respawns it on the
+  // same port — tell the user to re-import. `onBackendStatus` may be absent in
+  // older preload builds, so guard the optional call.
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onBackendStatus?.((payload) => {
+      if (payload.status === 'restarting') {
+        showToast({
+          title: 'The compute backend stopped unexpectedly — restarting…',
+          type: 'error',
+          duration: 0,
+        });
+      } else if (payload.status === 'ready') {
+        showToast({
+          title: 'The backend restarted. Re-import your data to continue.',
+          type: 'info',
+          duration: 0,
+        });
+      } else if (payload.status === 'failed') {
+        showToast({
+          title: 'The compute backend could not be restarted. Please relaunch Phytograph.',
+          type: 'error',
+          duration: 0,
+        });
+      }
+    });
+    return unsubscribe;
+  }, []);
+
   // Calculate total points across data-bearing scans only.
   const totalPoints = scans.reduce((sum, s) => sum + (s.data?.pointCount ?? 0), 0);
 

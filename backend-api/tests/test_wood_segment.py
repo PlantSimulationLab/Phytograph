@@ -37,13 +37,18 @@ import main
 
 FIXDIR = Path(__file__).parent / "fixtures" / "leafwood"
 
-# (fixture stem, min overall accuracy, min wood F1). Per-cloud bars chosen with
-# margin below observed; oak is the hardest real tree (wood-heavy, OA≈0.80).
+# (fixture stem, min overall accuracy, min wood F1, min thin-wood recall). Bars
+# chosen with margin below observed; oak is the hardest real tree (wood-heavy,
+# OA≈0.80). thin-wood recall (twigs caught as wood) baselines on these decimated
+# fixtures: spruce 0.83 / oak 0.91 / beech 0.85 / lewos 0.80 — floors set ~0.10
+# below. NB decimation distorts neighbourhood density (→sphericity), so this is a
+# coarse REGRESSION TRIPWIRE; the authoritative thin-wood numbers are measured
+# full-resolution in the one-off local validation, not here.
 FIXTURES = [
-    ("weiser_spruce_small", 0.80, 0.55),     # European conifer
-    ("weiser_oak_small", 0.78, 0.65),        # European broadleaf
-    ("weiser_beech_small", 0.83, 0.65),      # European broadleaf
-    ("lewos_tropical_small", 0.85, 0.60),    # tropical broadleaf (the screenshot tree)
+    ("weiser_spruce_small", 0.80, 0.55, 0.70),     # European conifer
+    ("weiser_oak_small", 0.78, 0.65, 0.78),        # European broadleaf
+    ("weiser_beech_small", 0.83, 0.65, 0.72),      # European broadleaf
+    ("lewos_tropical_small", 0.85, 0.60, 0.68),    # tropical broadleaf (the screenshot tree)
 ]
 # Note: the synthetic almond scan is NOT a pass/fail gate. The method is tuned
 # for real TLS (verticality + low-sphericity, plus connected-branch growing),
@@ -69,8 +74,42 @@ def _f1(pred, truth, cls):
     return float(2 * p * r / max(p + r, 1e-9))
 
 
-@pytest.mark.parametrize("stem,min_oa,min_wood_f1", FIXTURES, ids=[f[0] for f in FIXTURES])
-def test_wood_segment_quantitative(stem, min_oa, min_wood_f1):
+# Sphericity below this on a ground-truth WOOD point ⇒ a locally 1-D/compact
+# neighbourhood, i.e. a thin branch / twig (λ₃≈0). Trunk points are also low-
+# sphericity, so we additionally exclude the lowest height band (see below) to
+# isolate the *crown* twigs that geometric methods notoriously misclassify.
+_THIN_WOOD_SPH = 0.02
+
+
+def _thin_wood_recall(points, pred, truth, sph_thresh=_THIN_WOOD_SPH, trunk_frac=0.15):
+    """Recall over ground-truth WOOD points that are THIN branches/twigs.
+
+    Aggregate OA/wood-F1 hide the failure that actually looks bad: thin crown
+    branches getting labelled leaf (documented for geometric methods — Wan 2024
+    RSE). This metric isolates that. The "thin twig" set is ground-truth wood
+    with low sphericity (λ₃/λ₁ small ⇒ locally 1-D), EXCLUDING the bottom
+    `trunk_frac` of the height range so the (easy, always-caught) trunk doesn't
+    dilute the score. Sphericity comes from the same `_wood_local_pca_features`
+    the classifier uses, computed here on the FULL cloud independent of `pred`.
+
+    Returns (recall, n_thin). recall is NaN when there are no thin-wood points.
+    """
+    feats, _ = main._wood_local_pca_features(points, k_min=10, k_max=100, k_step=10)
+    sph = feats[:, 2]
+    z = points[:, 2]
+    zmin, zmax = float(z.min()), float(z.max())
+    above_trunk = z >= (zmin + trunk_frac * (zmax - zmin))
+    thin_wood = (truth == main.WOOD_CLASS_WOOD) & (sph < sph_thresh) & above_trunk
+    n_thin = int(thin_wood.sum())
+    if n_thin == 0:
+        return float("nan"), 0
+    recall = float((pred[thin_wood] == main.WOOD_CLASS_WOOD).mean())
+    return recall, n_thin
+
+
+@pytest.mark.parametrize("stem,min_oa,min_wood_f1,min_thin_recall", FIXTURES,
+                         ids=[f[0] for f in FIXTURES])
+def test_wood_segment_quantitative(stem, min_oa, min_wood_f1, min_thin_recall):
     """segment_wood labels vs ground truth on labelled wood/leaf clouds."""
     points, truth = _load(stem)
     pred = main.segment_wood(points)
@@ -81,11 +120,14 @@ def test_wood_segment_quantitative(stem, min_oa, min_wood_f1):
     oa = float((pred == truth).mean())
     f1_wood = _f1(pred, truth, main.WOOD_CLASS_WOOD)
     f1_leaf = _f1(pred, truth, main.WOOD_CLASS_LEAF)
+    thin_recall, n_thin = _thin_wood_recall(points, pred, truth)
 
     # Confusion matrix + metrics, surfaced under `pytest -s` so a regression is
-    # debuggable rather than a bare assertion failure.
+    # debuggable rather than a bare assertion failure. thin-wood recall is the
+    # metric that tracks the visually-obvious failure (twigs labelled leaf).
     print(
         f"\n{stem}: OA={oa:.4f} F1_wood={f1_wood:.4f} F1_leaf={f1_leaf:.4f} "
+        f"thin_wood_recall={thin_recall:.4f} (n_thin={n_thin}) "
         f"wood%true={(truth == main.WOOD_CLASS_WOOD).mean():.2f} "
         f"wood%pred={(pred == main.WOOD_CLASS_WOOD).mean():.2f}"
     )
@@ -95,6 +137,10 @@ def test_wood_segment_quantitative(stem, min_oa, min_wood_f1):
 
     assert oa >= min_oa, f"{stem} overall accuracy {oa:.4f} below {min_oa}"
     assert f1_wood >= min_wood_f1, f"{stem} wood F1 {f1_wood:.4f} below {min_wood_f1}"
+    assert thin_recall >= min_thin_recall, (
+        f"{stem} thin-wood (twig) recall {thin_recall:.4f} below {min_thin_recall} "
+        f"— crown branches/twigs being misclassified as leaf"
+    )
 
 
 def test_wood_segment_synthetic_almond_informational():
@@ -174,6 +220,76 @@ def test_wood_segment_endpoint_inline():
     assert body["success"] is True
     assert len(body["labels"]) == len(points)
     assert body["num_wood"] + body["num_leaf"] == body["num_points"] == len(points)
+    assert set(body["labels"]).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
+
+
+def test_wood_segment_reflectance_inert_when_no_contrast():
+    """Reflectance assist must be a no-op when the reflectance carries no
+    wood/leaf contrast — proves graceful fallback to pure geometry (the property
+    that keeps it harmless on low-contrast species like almond/redbud). A
+    CONSTANT reflectance has an empty upper tail, so the one-sided promotion
+    selects nothing and the labels must match the geometry-only result exactly."""
+    points, _ = _load("weiser_oak_small")
+    geom = main.segment_wood(points)
+    const = main.segment_wood(points, reflectance=np.full(len(points), -8.0),
+                              reflectance_weight_max=0.4)
+    assert np.array_equal(geom, const), (
+        "constant (contrast-free) reflectance changed the result — the assist is "
+        "not falling back to geometry"
+    )
+    # A length-mismatched reflectance is ignored (defensive: caller bug shouldn't
+    # corrupt the result), so it also matches geometry-only.
+    bad = main.segment_wood(points, reflectance=np.full(len(points) - 1, -8.0),
+                            reflectance_weight_max=0.4)
+    assert np.array_equal(geom, bad)
+
+
+def test_wood_segment_reflectance_only_promotes_wood():
+    """The reflectance assist is ONE-SIDED: it can only PROMOTE points to wood
+    (recover missed wood), never demote. So with the same geometry, enabling it
+    can only ever INCREASE the wood count — it must never remove wood. Uses a
+    reflectance that correlates with the (geometry) trunk so the upper tail is
+    real wood."""
+    points, truth = _load("weiser_oak_small")
+    geom = main.segment_wood(points)
+    # Reflectance: brightest on true wood (so the upper tail is genuinely woody),
+    # dim on leaf — the favourable case the assist is designed for.
+    rng = np.random.RandomState(0)
+    refl = np.where(truth == main.WOOD_CLASS_WOOD,
+                    rng.normal(-5.0, 1.0, len(points)),
+                    rng.normal(-13.0, 2.0, len(points)))
+    assisted = main.segment_wood(points, reflectance=refl, reflectance_weight_max=0.4)
+    n_wood_geom = int((geom == main.WOOD_CLASS_WOOD).sum())
+    n_wood_assisted = int((assisted == main.WOOD_CLASS_WOOD).sum())
+    assert n_wood_assisted >= n_wood_geom, (
+        f"assist removed wood ({n_wood_geom}→{n_wood_assisted}); it must only promote"
+    )
+
+
+def test_wood_segment_endpoint_inline_reflectance():
+    """The stateless endpoint accepts an inline `reflectance` array aligned to
+    `points` and returns aligned labels (smoke test of the request plumbing)."""
+    from fastapi.testclient import TestClient
+
+    rng = np.random.RandomState(2)
+    trunk = np.column_stack([
+        np.zeros(200), np.zeros(200), np.linspace(0, 1.5, 200)
+    ]) + rng.normal(0, 0.002, (200, 3))
+    leaf = rng.normal([0.3, 0.3, 1.0], 0.1, (400, 3))
+    points = np.vstack([trunk, leaf])
+    # Brighter reflectance on the trunk than the leaf blob.
+    refl = np.concatenate([np.full(200, -4.0), np.full(400, -14.0)])
+
+    client = TestClient(main.app)
+    resp = client.post("/api/segment/wood", json={
+        "points": points.tolist(),
+        "reflectance": refl.tolist(),
+        "reflectance_weight_max": 0.4,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert len(body["labels"]) == len(points)
     assert set(body["labels"]).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
 
 

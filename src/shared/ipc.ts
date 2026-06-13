@@ -31,7 +31,17 @@ export const IPC = {
   FileDropEvent: 'fileDrop:event',
   // Menu commands (main -> renderer)
   MenuCommand: 'menu:command',
+  // Backend supervisor status (main -> renderer): crash/restart lifecycle
+  BackendStatus: 'backend:status',
 } as const;
+
+export type BackendStatusPayload =
+  // The sidecar crashed; the supervisor is respawning it on the same port.
+  | { status: 'restarting'; port: number }
+  // The respawned sidecar is healthy again (in-RAM sessions were lost).
+  | { status: 'ready'; port: number }
+  // Respawn attempts were exhausted; compute features are unavailable.
+  | { status: 'failed'; port: number };
 
 export interface BackendInfo {
   url: string;

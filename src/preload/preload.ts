@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import {
   IPC,
   type BackendInfo,
+  type BackendStatusPayload,
   type FileDropPayload,
   type LogExportResult,
   type LogLevel,
@@ -67,6 +68,11 @@ const api = {
     const listener = (_e: unknown, payload: MenuCommandPayload) => handler(payload);
     ipcRenderer.on(IPC.MenuCommand, listener);
     return () => ipcRenderer.removeListener(IPC.MenuCommand, listener);
+  },
+  onBackendStatus: (handler: (payload: BackendStatusPayload) => void): (() => void) => {
+    const listener = (_e: unknown, payload: BackendStatusPayload) => handler(payload);
+    ipcRenderer.on(IPC.BackendStatus, listener);
+    return () => ipcRenderer.removeListener(IPC.BackendStatus, listener);
   },
 };
 
