@@ -26,10 +26,15 @@ export function diagnosticsSummary(d: Diagnostics): string {
  * Build the markdown issue/email body: the user's description followed by an
  * environment block. The same body is used for both the GitHub and email paths.
  */
-export function buildIssueBody(mode: FeedbackMode, description: string, d: Diagnostics): string {
+export function buildIssueBody(
+  mode: FeedbackMode,
+  description: string,
+  d: Diagnostics,
+  logFileName?: string,
+): string {
   const heading = mode === 'bug' ? '## Bug description' : '## Feature request';
   const desc = description.trim() || '_(no description provided)_';
-  return [
+  const lines = [
     heading,
     '',
     desc,
@@ -41,7 +46,18 @@ export function buildIssueBody(mode: FeedbackMode, description: string, d: Diagn
     `- PyHelios: ${d.pyheliosVersion}`,
     `- Helios (C++): ${d.heliosVersion}`,
     `- OS: ${d.platform}`,
-  ].join('\n');
+  ];
+  // External URLs (GitHub/mailto) can't carry attachments, so when the user
+  // chose to include logs we name the saved file and ask them to drag it in.
+  if (logFileName) {
+    lines.push(
+      '',
+      '## Session logs',
+      '',
+      `Attached separately — please drag \`${logFileName}\` into this report.`,
+    );
+  }
+  return lines.join('\n');
 }
 
 /**

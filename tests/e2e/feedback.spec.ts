@@ -1,5 +1,9 @@
 import { test, expect, type ElectronApplication } from '@playwright/test';
+import { readFileSync, existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { launchApp } from './helpers/launchApp';
+import { stubSaveDialog } from './helpers/stubSaveDialog';
 
 // Drives the in-app feedback feature end-to-end against the LIVE app. The two
 // toolbar buttons open a dialog that collects a title + description, then hands
@@ -54,6 +58,12 @@ test('feedback: bug report hands off to a pre-filled GitHub issue URL', async ()
     await page
       .getByTestId('feedback-description')
       .fill('The viewer freezes right after the import wizard closes.');
+
+    // This test exercises the plain (no-attachment) handoff, so untick the
+    // "Attach session logs" box (defaults ON for bug reports) — otherwise the
+    // send would route through the save dialog. The attach path is covered by
+    // its own test below.
+    await page.getByTestId('feedback-include-logs').uncheck();
 
     await expect(page.getByTestId('feedback-github')).toBeEnabled();
     await page.getByTestId('feedback-github').click();
@@ -111,6 +121,52 @@ test('feedback: feature request hands off to a pre-filled mailto URL', async () 
     expect(decoded).toContain('## Feature request');
     expect(decoded).toMatch(/- Phytograph: \d+\.\d+\.\d+/);
   } finally {
+    await close();
+  }
+});
+
+test('feedback: "Attach session logs" writes a real combined log file and names it in the report', async () => {
+  const { app, page, close } = await launchApp();
+  const savePath = join(tmpdir(), `phytograph-e2e-logs-${Date.now()}.txt`);
+
+  try {
+    await captureOpenExternal(app);
+    await stubSaveDialog(app, savePath);
+
+    await page.getByTestId('report-bug-btn').click();
+    const dialog = page.getByTestId('feedback-dialog');
+    await expect(dialog).toBeVisible();
+
+    // The checkbox defaults ON for bug reports.
+    const includeLogs = page.getByTestId('feedback-include-logs');
+    await expect(includeLogs).toBeChecked();
+
+    await page.getByTestId('feedback-title').fill('Backend error during fit');
+    await page.getByTestId('feedback-description').fill('Got a 500 on /api/fit.');
+
+    await page.getByTestId('feedback-github').click();
+    await expect(dialog).not.toBeVisible();
+
+    // The combined log file was written to disk and is non-trivial.
+    expect(existsSync(savePath)).toBe(true);
+    const contents = readFileSync(savePath, 'utf-8');
+    expect(contents.length).toBeGreaterThan(100);
+    // Structural markers from copySessionLogTo's assembled output.
+    expect(contents).toContain('Phytograph session log export');
+    expect(contents).toContain('main / renderer / backend');
+    // Real backend output captured via the sidecar stdout/stderr tee: the
+    // wrapper logs a distinctive "Starting server on http://127.0.0.1:<port>"
+    // line at boot. Asserting it proves the [backend] stream actually reached
+    // the unified file — the whole point of the tee.
+    expect(contents).toMatch(/Starting server on http:\/\/127\.0\.0\.1:\d+/);
+
+    // The handoff URL body points the user at the file they need to drag in.
+    const url = await lastOpenedUrl(app);
+    const body = new URL(url).searchParams.get('body') ?? '';
+    expect(body).toContain('## Session logs');
+    expect(body).toContain(savePath.split(/[\\/]/).pop()!);
+  } finally {
+    if (existsSync(savePath)) rmSync(savePath, { force: true });
     await close();
   }
 });

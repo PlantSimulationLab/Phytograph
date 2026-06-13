@@ -41,6 +41,20 @@ test('generates a procedural plant model with non-default species and age', asyn
     await age.fill('15');
     await expect(age).toHaveValue('15');
 
+    // Regression guard: typing a negative position coordinate one keystroke at a
+    // time must work. These fields were a controlled type="number" reset to 0 on
+    // any non-finite parse, so the default "0" couldn't be cleared and a leading
+    // "-" snapped back to 0 — you literally couldn't enter a negative coordinate.
+    // Clear the X field and type "-1.5" char by char; the minus must survive.
+    const posX = page.getByTestId('plant-position-x');
+    await posX.click();
+    await posX.fill('');
+    await posX.pressSequentially('-1.5', { delay: 30 });
+    await expect(posX).toHaveValue('-1.5');
+    // Reset to origin so the rest of the test is unaffected.
+    await posX.fill('0');
+    await posX.blur();
+
     // Generate.
     await page.getByTestId('plant-generate-button').click();
 

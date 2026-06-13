@@ -4,24 +4,25 @@
 
 import { app, dialog, BrowserWindow } from 'electron';
 import electronUpdater from 'electron-updater';
+import { updaterLog } from './logger.js';
 
 const { autoUpdater } = electronUpdater;
 
 export function setupAutoUpdater(getWindow: () => BrowserWindow | null): void {
   if (!app.isPackaged) {
-    console.log('[updater] dev build — skipping auto-update check.');
+    updaterLog.info('dev build — skipping auto-update check.');
     return;
   }
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
-  autoUpdater.on('checking-for-update', () => console.log('[updater] checking for update...'));
-  autoUpdater.on('update-available', (info) => console.log(`[updater] update available: v${info.version}`));
-  autoUpdater.on('update-not-available', () => console.log('[updater] already up to date.'));
-  autoUpdater.on('error', (err) => console.error('[updater] error:', err));
+  autoUpdater.on('checking-for-update', () => updaterLog.info('checking for update...'));
+  autoUpdater.on('update-available', (info) => updaterLog.info(`update available: v${info.version}`));
+  autoUpdater.on('update-not-available', () => updaterLog.info('already up to date.'));
+  autoUpdater.on('error', (err) => updaterLog.error('error:', err));
   autoUpdater.on('download-progress', (p) => {
-    console.log(`[updater] download ${p.percent.toFixed(1)}% (${(p.bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s)`);
+    updaterLog.info(`download ${p.percent.toFixed(1)}% (${(p.bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s)`);
   });
 
   autoUpdater.on('update-downloaded', async (info) => {
@@ -39,5 +40,5 @@ export function setupAutoUpdater(getWindow: () => BrowserWindow | null): void {
   });
 
   // Fire-and-forget; failures are logged in the error handler above.
-  autoUpdater.checkForUpdates().catch((err) => console.error('[updater] check failed:', err));
+  autoUpdater.checkForUpdates().catch((err) => updaterLog.error('check failed:', err));
 }

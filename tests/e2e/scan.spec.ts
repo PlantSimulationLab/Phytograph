@@ -25,7 +25,18 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
 
     // Non-default label + origin + sweep + multi-return beam params.
     await page.getByTestId('scan-label-input').fill('North Tripod');
-    await page.getByTestId('scan-origin-x').fill('1.5');
+
+    // Regression guard: typing a negative origin one keystroke at a time must
+    // work. Previously the field was a controlled type="number" that reset any
+    // non-finite parse (including "" and a lone "-") back to 0, so you could
+    // neither erase the default zero nor type a leading minus. Clear the field
+    // and type "-2" character by character, asserting the minus survives.
+    const originX = page.getByTestId('scan-origin-x');
+    await originX.click();
+    await originX.fill('');
+    await originX.pressSequentially('-2', { delay: 30 });
+    await expect(originX).toHaveValue('-2');
+    await originX.fill('1.5');
     await page.getByTestId('scan-origin-y').fill('-2');
     await page.getByTestId('scan-origin-z').fill('0.75');
     await page.getByTestId('scan-zenith-points').fill('50');

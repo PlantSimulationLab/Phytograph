@@ -1,20 +1,20 @@
 # Install Phytograph
 
-Phytograph runs on macOS (Apple Silicon and Intel) and Windows 10/11.
-There is no installer for Linux yet — see the
-[developer instructions](../developers/getting-started/installation.md)
-to build from source.
+Phytograph runs on macOS (Apple Silicon and Intel), Windows 10/11, and
+Linux (x64).
 
 ## Download
 
 Get the latest installer from the
-[GitHub Releases page](https://github.com/PlantSimulationLab/phytograph/releases).
+[GitHub Releases page](https://github.com/PlantSimulationLab/phytograph/releases/latest).
 
 | Platform | File |
 |---|---|
-| macOS (Apple Silicon, M1/M2/M3/M4) | `Phytograph-X.Y.Z-arm64.dmg` |
-| macOS (Intel) | `Phytograph-X.Y.Z.dmg` |
-| Windows 10/11 | `Phytograph Setup X.Y.Z.exe` |
+| macOS (Apple Silicon, M1/M2/M3/M4) | `Phytograph-arm64.dmg` |
+| macOS (Intel) | `Phytograph-x64.dmg` |
+| Windows 10/11 | `Phytograph-Setup.exe` |
+| Linux (most distros) | `Phytograph.AppImage` |
+| Linux (Debian/Ubuntu) | `Phytograph-amd64.deb` |
 
 ## Install on macOS
 
@@ -34,10 +34,37 @@ Python environment unpacks itself. Subsequent launches are instant.
 
 ## Install on Windows
 
-1. Double-click `Phytograph Setup X.Y.Z.exe`.
+1. Double-click `Phytograph-Setup.exe`.
 2. If SmartScreen warns you, click **More info → Run anyway**.
 3. Follow the installer prompts.
 4. Launch Phytograph from the Start menu.
+
+## Install on Linux
+
+Two formats are provided. The **AppImage** runs on most distributions
+without installing anything:
+
+```bash
+chmod +x Phytograph.AppImage
+./Phytograph.AppImage
+```
+
+On **Debian/Ubuntu** you can install the `.deb` instead, which adds a
+desktop launcher and menu entry:
+
+```bash
+sudo apt install ./Phytograph-amd64.deb
+```
+
+As with macOS, the first launch takes about 30 seconds while the bundled
+Python environment unpacks itself.
+
+!!! note "AppImage prerequisites"
+    The AppImage needs FUSE to mount itself. Most desktop distributions
+    ship it; on a minimal install run `sudo apt install libfuse2`
+    (Debian/Ubuntu) or your distribution's equivalent. Alternatively,
+    extract and run without FUSE:
+    `./Phytograph.AppImage --appimage-extract-and-run`.
 
 ## What gets installed
 
@@ -50,6 +77,7 @@ The app stores its preferences and recent files list in:
 
 - **macOS**: `~/Library/Application Support/Phytograph/`
 - **Windows**: `%APPDATA%\Phytograph\`
+- **Linux**: `~/.config/Phytograph/`
 
 ## What's next
 

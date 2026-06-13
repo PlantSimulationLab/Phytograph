@@ -1,5 +1,6 @@
 import { Triangle, Loader2, X } from 'lucide-react';
 import { TriangulationMethod } from '../../../utils/backendApi';
+import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 
 // Presentational tool panel for point-cloud triangulation. State and the
 // `onTriangulate` / `onSetup` handlers live in PointCloudViewer; this component
@@ -114,13 +115,13 @@ export function TriangulationPanel({
             Auto Alpha
           </label>
           {alphaValue !== null && (
-            <input
-              type="number"
+            <DebouncedNumberInput
               value={alphaValue}
-              onChange={(e) => onAlphaValueChange(parseFloat(e.target.value) || 0.1)}
+              onCommit={onAlphaValueChange}
               className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600 mt-1"
               step="0.01"
-              min="0.001"
+              min={0.001}
+              debounceMs={0}
               disabled={inProgress}
             />
           )}

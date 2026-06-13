@@ -175,11 +175,18 @@ npm run build:backend
 # 2. Package the Electron app for the current OS.
 SKIP_NOTARIZATION=1 npm run package          # macOS — skips notarization
 npm run package:win                          # Windows
+npm run package:linux                        # Linux (run on a Linux box)
 ```
 
-Artifacts land in `release/`:
-- macOS: `Phytograph-X.Y.Z-arm64.dmg`, `Phytograph-X.Y.Z.dmg` (x64)
-- Windows: `Phytograph Setup X.Y.Z.exe`
+Artifacts land in `release/` (filenames are intentionally **version-free** —
+see "Stable download links" below):
+- macOS: `Phytograph-arm64.dmg`, `Phytograph-x64.dmg`
+- Windows: `Phytograph-Setup.exe`
+- Linux: `Phytograph.AppImage`, `Phytograph-amd64.deb`
+
+`package:linux` only works **on** Linux (electron-builder can't cross-build the
+AppImage/deb from macOS or Windows). It needs the same native deps CI installs:
+`sudo apt-get install -y libgl1-mesa-dev xorg-dev libtbb-dev`.
 
 **To launch the unsigned macOS build for testing** (Gatekeeper will block by
 default):
@@ -194,13 +201,45 @@ open release/mac-arm64/Phytograph.app
 ## Release (CI)
 
 Tag a version and push; the workflow at `.github/workflows/release.yml`
-builds the backend, signs and notarizes the app on macOS, builds for
-Windows, and publishes a draft GitHub Release.
+builds the backend and packages the app on three runners in parallel —
+macOS (signed + notarized), Windows, and Linux — and uploads every
+artifact to a single **draft** GitHub Release.
 
 ```bash
 git tag v0.2.0
 git push origin v0.2.0
 ```
+
+Review the draft (confirm all five artifacts attached: two macOS `.dmg`,
+one Windows `.exe`, one Linux `.AppImage`, one `.deb`), then click
+**Publish**. Publishing is what flags the release "Latest" and activates
+the stable download links below — drafts are never "Latest".
+
+### Stable download links (for the lab website)
+
+The electron-builder `artifactName` settings in `package.json` produce
+**version-free** filenames, so these per-OS permalinks never change between
+releases — wire them straight into download buttons on the lab site and
+never touch them again:
+
+```
+# macOS (Apple Silicon)
+https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-arm64.dmg
+# macOS (Intel)
+https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-x64.dmg
+# Windows
+https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-Setup.exe
+# Linux (AppImage)
+https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph.AppImage
+# Linux (Debian/Ubuntu)
+https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-amd64.deb
+```
+
+`…/releases/latest/…` resolves to whichever release is flagged "Latest", and
+a release becomes "Latest" only once **published** (drafts never are) — so
+the links activate the moment you publish a draft, and automatically point
+at the newest release thereafter. A plain landing-page link
+(`…/releases/latest`) also works if you'd rather let users pick their OS.
 
 ### Required GitHub Secrets
 

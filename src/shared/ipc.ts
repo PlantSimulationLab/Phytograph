@@ -23,6 +23,10 @@ export const IPC = {
   BackendGetInfo: 'backend:getInfo',
   // Open a URL (https: or mailto:) in the OS default browser / mail client
   ShellOpenExternal: 'shell:openExternal',
+  // Session logs
+  LogsGetPath: 'logs:getPath',     // renderer -> main: path of the current log file
+  LogsExport: 'logs:export',       // renderer -> main: write+reveal a combined log file
+  LogWrite: 'log:write',           // renderer -> main (one-way): forward a renderer log line
   // File-drop events (main -> renderer)
   FileDropEvent: 'fileDrop:event',
   // Menu commands (main -> renderer)
@@ -41,6 +45,14 @@ export interface BackendInfo {
   pyheliosVersion: string;
   /** helios-core C++ submodule version (git describe), captured at build time. */
   heliosVersion: string;
+}
+
+export type LogLevel = 'error' | 'warn' | 'info' | 'verbose' | 'debug';
+
+export interface LogExportResult {
+  /** Absolute path of the written combined log file, revealed in the OS file
+   * manager. null if the user cancelled the save dialog. */
+  savedPath: string | null;
 }
 
 export interface OpenDialogOptions {

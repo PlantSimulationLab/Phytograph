@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { X, Sprout, ChevronDown, Loader2 } from 'lucide-react';
 import { getAvailablePlantModels, PlantGenerationRequest, PlantCanopyRequest } from '../utils/backendApi';
+import { DebouncedNumberInput } from './DebouncedNumberInput';
 
 // A single plant or a regularly spaced canopy. The viewer branches on `mode`.
 export type PlantGenerationPayload =
@@ -215,13 +216,13 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">
               Age (days)
             </label>
-            <input
+            <DebouncedNumberInput
               data-testid="plant-age-input"
-              type="number"
               value={age}
-              onChange={(e) => setAge(Math.max(0, parseFloat(e.target.value) || 0))}
+              onCommit={setAge}
               min={0}
               step="any"
+              debounceMs={0}
               className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
               disabled={isGenerating}
             />
@@ -236,33 +237,36 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
             <div className="grid grid-cols-3 gap-2">
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">X</label>
-                <input
-                  type="number"
+                <DebouncedNumberInput
+                  data-testid="plant-position-x"
                   value={positionX}
-                  onChange={(e) => setPositionX(parseFloat(e.target.value) || 0)}
+                  onCommit={setPositionX}
                   step={0.1}
+                  debounceMs={0}
                   className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
                   disabled={isGenerating}
                 />
               </div>
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Y</label>
-                <input
-                  type="number"
+                <DebouncedNumberInput
+                  data-testid="plant-position-y"
                   value={positionY}
-                  onChange={(e) => setPositionY(parseFloat(e.target.value) || 0)}
+                  onCommit={setPositionY}
                   step={0.1}
+                  debounceMs={0}
                   className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
                   disabled={isGenerating}
                 />
               </div>
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Z</label>
-                <input
-                  type="number"
+                <DebouncedNumberInput
+                  data-testid="plant-position-z"
                   value={positionZ}
-                  onChange={(e) => setPositionZ(parseFloat(e.target.value) || 0)}
+                  onCommit={setPositionZ}
                   step={0.1}
+                  debounceMs={0}
                   className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
                   disabled={isGenerating}
                 />
@@ -280,26 +284,26 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-xs text-neutral-500 mb-1">X</label>
-                    <input
+                    <DebouncedNumberInput
                       data-testid="canopy-spacing-x"
-                      type="number"
                       value={spacingX}
-                      onChange={(e) => setSpacingX(Math.max(0, parseFloat(e.target.value) || 0))}
+                      onCommit={setSpacingX}
                       min={0}
                       step={0.1}
+                      debounceMs={0}
                       className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
                       disabled={isGenerating}
                     />
                   </div>
                   <div>
                     <label className="block text-xs text-neutral-500 mb-1">Y</label>
-                    <input
+                    <DebouncedNumberInput
                       data-testid="canopy-spacing-y"
-                      type="number"
                       value={spacingY}
-                      onChange={(e) => setSpacingY(Math.max(0, parseFloat(e.target.value) || 0))}
+                      onCommit={setSpacingY}
                       min={0}
                       step={0.1}
+                      debounceMs={0}
                       className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
                       disabled={isGenerating}
                     />
@@ -314,26 +318,28 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-xs text-neutral-500 mb-1">Columns (X)</label>
-                    <input
+                    <DebouncedNumberInput
                       data-testid="canopy-count-x"
-                      type="number"
                       value={countX}
-                      onChange={(e) => setCountX(Math.max(1, Math.round(parseFloat(e.target.value) || 1)))}
+                      onCommit={setCountX}
+                      parse={(s) => Math.round(parseFloat(s))}
                       min={1}
                       step={1}
+                      debounceMs={0}
                       className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
                       disabled={isGenerating}
                     />
                   </div>
                   <div>
                     <label className="block text-xs text-neutral-500 mb-1">Rows (Y)</label>
-                    <input
+                    <DebouncedNumberInput
                       data-testid="canopy-count-y"
-                      type="number"
                       value={countY}
-                      onChange={(e) => setCountY(Math.max(1, Math.round(parseFloat(e.target.value) || 1)))}
+                      onCommit={setCountY}
+                      parse={(s) => Math.round(parseFloat(s))}
                       min={1}
                       step={1}
+                      debounceMs={0}
                       className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
                       disabled={isGenerating}
                     />
@@ -378,9 +384,20 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
                   </div>
                   {useRandomSeed && (
                     <input
-                      type="number"
+                      // type="text" + inputMode numeric (not type="number" bound to
+                      // a parsed value): an empty field clears the seed to undefined,
+                      // and a non-numeric keystroke is dropped without wedging a
+                      // literal "NaN" into the field (parseInt('-') is NaN, and
+                      // NaN ?? '' would render "NaN").
+                      type="text"
+                      inputMode="numeric"
                       value={randomSeed ?? ''}
-                      onChange={(e) => setRandomSeed(e.target.value ? parseInt(e.target.value) : undefined)}
+                      onChange={(e) => {
+                        const raw = e.target.value.trim();
+                        if (raw === '') { setRandomSeed(undefined); return; }
+                        const n = parseInt(raw, 10);
+                        if (Number.isFinite(n)) setRandomSeed(n);
+                      }}
                       placeholder="Enter seed value"
                       className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
                       disabled={isGenerating}
@@ -397,14 +414,14 @@ export function PlantGenerationPopup({ isOpen, onClose, onGenerate, isGenerating
                     <label className="block text-sm font-medium text-neutral-300 mb-1.5">
                       Germination rate
                     </label>
-                    <input
+                    <DebouncedNumberInput
                       data-testid="canopy-germination-rate"
-                      type="number"
                       value={germinationRate}
-                      onChange={(e) => setGerminationRate(Math.min(1, Math.max(0, parseFloat(e.target.value) || 0)))}
+                      onCommit={setGerminationRate}
                       min={0}
                       max={1}
                       step={0.05}
+                      debounceMs={0}
                       className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-500"
                       disabled={isGenerating}
                     />

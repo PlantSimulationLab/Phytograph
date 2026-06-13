@@ -1,4 +1,5 @@
 import { ClockPlus, Play, Film, StopCircle, Loader2 } from 'lucide-react';
+import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 
 type GifBackground = 'transparent' | 'black' | 'white';
 type GifCameraView = 'current' | 'front' | 'side' | 'top' | 'iso';
@@ -139,11 +140,12 @@ export function PlantGrowthPanel({
             >
               −
             </button>
-            <input
-              type="number"
+            <DebouncedNumberInput
               value={ageStep}
-              onChange={(e) => onAgeStepChange(Math.max(1, parseInt(e.target.value) || 1))}
+              onCommit={onAgeStepChange}
+              parse={(s) => Math.round(parseFloat(s))}
               min={1}
+              debounceMs={0}
               className="flex-1 w-12 px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white text-center focus:outline-none focus:ring-1 focus:ring-neutral-500"
               disabled={isAdvancingAge}
             />

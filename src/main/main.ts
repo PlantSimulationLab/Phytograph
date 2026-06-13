@@ -8,6 +8,15 @@ import { setupAutoUpdater } from './updater.js';
 import { IPC, type FileDropPayload } from '../shared/ipc.js';
 import { RENDERER_DEV_PORT } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
+import { initLogging, getLogDir } from './logger.js';
+
+// Configure the unified session log before anything else logs. This also patches
+// the main-process console.* onto the file transport, so every console.log below
+// is persisted, and installs the uncaught-exception handler.
+initLogging();
+// Tell the spawned Python sidecar where to write its own rotating log file, so
+// it lands next to the electron-log file and can be concatenated on export.
+process.env.PHYTOGRAPH_LOG_DIR = getLogDir();
 
 // Must run before app.whenReady(). `protocol.registerSchemesAsPrivileged` is
 // a once-per-process call that has to be made while the protocol module is

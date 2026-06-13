@@ -1,4 +1,5 @@
 import { ChartScatter, X } from 'lucide-react';
+import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 
 // Presentational random-downsample panel. The actual resampling math lives in
 // lib/pointCloudHelpers.resampleCloud; PointCloudViewer owns the preview state
@@ -64,16 +65,13 @@ export function ResamplePanel({
       {/* Fraction Input */}
       <div className="mb-3">
         <label className="text-[10px] text-neutral-400 block mb-1">Keep fraction (0.001 - 1.0)</label>
-        <input
-          type="number"
+        <DebouncedNumberInput
           min={0.001}
           max={1.0}
           step={0.01}
+          debounceMs={0}
           value={fraction}
-          onChange={(e) => {
-            const val = parseFloat(e.target.value);
-            if (!isNaN(val)) onFractionChange(Math.min(1.0, Math.max(0.001, val)));
-          }}
+          onCommit={onFractionChange}
           className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
         />
         {/* Quick presets */}

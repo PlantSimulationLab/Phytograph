@@ -7,12 +7,15 @@ import Store from 'electron-store';
 import {
   IPC,
   type BackendInfo,
+  type LogExportResult,
+  type LogLevel,
   type MessageBoxOptions,
   type OpenDialogOptions,
   type SaveDialogOptions,
 } from '../shared/ipc.js';
 import { EXPECTED_BACKEND_VERSION } from '../shared/constants.js';
 import { getBackendPort } from './backend.js';
+import { copySessionLogTo, getLogFilePath, logFromRenderer } from './logger.js';
 // Generated at build time by scripts/gen-version-info.mjs (gitignored).
 import { PYHELIOS_VERSION, HELIOS_CORE_VERSION } from '../shared/generated/versionInfo.js';
 
@@ -38,6 +41,29 @@ export function registerIpc(): void {
   // Open an https: URL in the browser or a mailto: link in the default mail
   // client. The feedback dialog uses this for both its GitHub and email paths.
   ipcMain.handle(IPC.ShellOpenExternal, (_e, url: string) => shell.openExternal(url));
+
+  // Session logs ----------------------------------------------------------
+  // One-way forward of a renderer console/error line into the unified log file.
+  ipcMain.on(IPC.LogWrite, (_e, level: LogLevel, message: string) => {
+    logFromRenderer(level, message);
+  });
+
+  ipcMain.handle(IPC.LogsGetPath, (): string => getLogFilePath());
+
+  // Write a combined (main+renderer+backend) log file to `destPath` (the
+  // renderer picks it via the normal dialog.save() IPC first, matching how
+  // exports work elsewhere), then reveal it in the OS file manager so the user
+  // can drag it into a GitHub issue / email — external URLs can't carry
+  // attachments. A null destPath (user cancelled the save dialog) is a no-op.
+  ipcMain.handle(
+    IPC.LogsExport,
+    async (_e, destPath: string | null): Promise<LogExportResult> => {
+      if (!destPath) return { savedPath: null };
+      await copySessionLogTo(destPath);
+      shell.showItemInFolder(destPath);
+      return { savedPath: destPath };
+    },
+  );
 
   ipcMain.handle(IPC.DialogOpen, async (_e, opts: OpenDialogOptions = {}) => {
     const win = BrowserWindow.getFocusedWindow();

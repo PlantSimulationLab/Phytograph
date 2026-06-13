@@ -25,12 +25,16 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
+  // Default ON for bug reports (logs are diagnostic gold), OFF for feature
+  // requests (logs rarely help there).
+  const [includeLogs, setIncludeLogs] = useState(mode === 'bug');
 
   // Reset fields and (re)load diagnostics each time the dialog opens.
   useEffect(() => {
     if (!isOpen) return;
     setTitle('');
     setDescription('');
+    setIncludeLogs(mode === 'bug');
     let cancelled = false;
     void window.electronAPI.backend
       .getInfo()
@@ -50,10 +54,10 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
     return () => {
       cancelled = true;
     };
-  }, [isOpen]);
+  }, [isOpen, mode]);
 
   const send = useCallback(
-    (channel: 'github' | 'email') => {
+    async (channel: 'github' | 'email') => {
       const diag: Diagnostics = diagnostics ?? {
         appVersion: 'unknown',
         backendVersion: 'unknown',
@@ -61,7 +65,30 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
         heliosVersion: 'unknown',
         platform: 'unknown',
       };
-      const body = buildIssueBody(mode, description, diag);
+      // If logs are requested, save+reveal them first so the file exists before
+      // the user lands on the GitHub/email page; pass its name into the body so
+      // triage knows to look for the attachment they're about to drag in. The
+      // save path is chosen via the normal dialog.save() IPC (consistent with
+      // exports elsewhere); cancelling it just skips the attachment.
+      let logFileName: string | undefined;
+      if (includeLogs) {
+        try {
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          const dest = await window.electronAPI.dialog.save({
+            title: 'Save session logs',
+            defaultPath: `phytograph-logs-${stamp}.txt`,
+            filters: [{ name: 'Log file', extensions: ['txt', 'log'] }],
+          });
+          const result = await window.electronAPI.logs.export(dest);
+          if (result.savedPath) {
+            // basename, cross-platform.
+            logFileName = result.savedPath.split(/[\\/]/).pop();
+          }
+        } catch (e) {
+          console.error('Log export failed:', e);
+        }
+      }
+      const body = buildIssueBody(mode, description, diag, logFileName);
       const url =
         channel === 'github'
           ? buildGithubUrl(mode, title, body)
@@ -69,7 +96,7 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
       void window.electronAPI.shell.openExternal(url);
       onClose();
     },
-    [mode, title, description, diagnostics, onClose],
+    [mode, title, description, diagnostics, includeLogs, onClose],
   );
 
   if (!isOpen) return null;
@@ -136,6 +163,23 @@ export function FeedbackDialog({ isOpen, mode, onClose }: FeedbackDialogProps) {
               Includes: {diagnosticsSummary(diagnostics)}
             </p>
           )}
+
+          <label className="flex items-start gap-2 cursor-pointer select-none">
+            <input
+              data-testid="feedback-include-logs"
+              type="checkbox"
+              checked={includeLogs}
+              onChange={(e) => setIncludeLogs(e.target.checked)}
+              className="mt-0.5 accent-green-500"
+            />
+            <span className="text-[11px] text-neutral-400 leading-snug">
+              Attach session logs.{' '}
+              <span className="text-neutral-500">
+                Saves a log file and opens its folder so you can drag it into the
+                report (GitHub and email can&apos;t attach files automatically).
+              </span>
+            </span>
+          </label>
         </div>
 
         <div className="px-4 py-3 border-t border-neutral-700 space-y-2">

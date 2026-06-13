@@ -46,6 +46,18 @@ describe('buildIssueBody', () => {
     const body = buildIssueBody('bug', '   ', DIAG);
     expect(body).toContain('_(no description provided)_');
   });
+
+  it('omits the session-logs block when no log file name is given', () => {
+    const body = buildIssueBody('bug', 'desc', DIAG);
+    expect(body).not.toContain('## Session logs');
+  });
+
+  it('names the attached log file when one is provided', () => {
+    const body = buildIssueBody('bug', 'desc', DIAG, 'phytograph-logs-2026-06-12T10-00-00.txt');
+    expect(body).toContain('## Session logs');
+    expect(body).toContain('`phytograph-logs-2026-06-12T10-00-00.txt`');
+    expect(body).toContain('drag');
+  });
 });
 
 describe('buildGithubUrl', () => {

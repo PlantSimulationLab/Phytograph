@@ -12,12 +12,15 @@ npm run build:backend
 # 2. Package the Electron app for the current OS.
 SKIP_NOTARIZATION=1 npm run package          # macOS — skips notarization
 npm run package:win                          # Windows
+npm run package:linux                        # Linux (run on a Linux box)
 ```
 
-Artifacts land in `release/`:
+Artifacts land in `release/` (filenames are intentionally **version-free**
+so the lab-website "latest" download links never change between releases):
 
-- **macOS**: `Phytograph-X.Y.Z-arm64.dmg`, `Phytograph-X.Y.Z.dmg` (x64)
-- **Windows**: `Phytograph Setup X.Y.Z.exe`
+- **macOS**: `Phytograph-arm64.dmg`, `Phytograph-x64.dmg`
+- **Windows**: `Phytograph-Setup.exe`
+- **Linux**: `Phytograph.AppImage`, `Phytograph-amd64.deb`
 
 ## Launching the unsigned macOS build for testing
 

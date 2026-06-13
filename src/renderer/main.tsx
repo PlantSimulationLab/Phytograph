@@ -6,6 +6,12 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./App.css";
 import { initBackendUrl } from "./utils/backendApi";
+import { installConsoleForwarding } from "./lib/logger";
+
+// Forward console.error/warn into the unified session log file (via main) so a
+// bug report can attach renderer-side errors, which otherwise only live in the
+// invisible DevTools console of a packaged build.
+installConsoleForwarding();
 
 // Resolve the backend URL from the main process before first render, so every
 // getBackendUrl() caller sees the per-instance dynamic port. The fetch is a

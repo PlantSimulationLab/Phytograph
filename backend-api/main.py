@@ -109,7 +109,10 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.14.0"
+BACKEND_VERSION = "0.14.1"
+
+import logging
+logger = logging.getLogger("phytograph")
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -135,6 +138,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Centralized error logging. The ~38 per-endpoint try/except blocks already call
+# traceback.print_exc() and raise HTTPException(500, str(e)); this handler is the
+# safety net for anything that DOESN'T (future endpoints, errors outside a try).
+# It logs one structured line + traceback through the "phytograph" logger — which
+# backend_wrapper.py routes to the rotating file — so unhandled 500s are captured
+# in the session log a bug report can attach. The response shape is unchanged:
+# clients still receive {"detail": "..."} with status 500, same as before.
+from fastapi.requests import Request
+from fastapi.responses import JSONResponse
+from fastapi.exception_handlers import http_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _log_http_exception(request: Request, exc: StarletteHTTPException):
+    # 4xx (validation / client) at WARNING, 5xx (our bug) at ERROR.
+    level = logging.ERROR if exc.status_code >= 500 else logging.WARNING
+    logger.log(level, "%s %s -> %s: %s",
+               request.method, request.url.path, exc.status_code, exc.detail)
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(Exception)
+async def _log_unhandled_exception(request: Request, exc: Exception):
+    logger.error("Unhandled error in %s %s",
+                 request.method, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 @app.get("/")

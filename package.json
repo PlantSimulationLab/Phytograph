@@ -1,7 +1,7 @@
 {
   "name": "phytograph",
   "private": true,
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Phytograph desktop app.",
   "author": "Phytograph",
   "main": "dist-main/main.js",
@@ -21,6 +21,7 @@
     "package": "npm run build && electron-builder",
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win",
+    "package:linux": "npm run build && electron-builder --linux",
     "release": "npm run build && electron-builder --publish always",
     "typecheck": "npm run gen:version && tsc --noEmit",
     "test:unit": "vitest run",
@@ -125,6 +126,7 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "notarize": false,
+      "artifactName": "${productName}-${arch}.${ext}",
       "target": [
         {
           "target": "dmg",
@@ -147,6 +149,7 @@
     },
     "win": {
       "icon": "build/icon.ico",
+      "artifactName": "${productName}-Setup.${ext}",
       "target": [
         {
           "target": "nsis",
@@ -166,11 +169,15 @@
     },
     "linux": {
       "icon": "build/icon.png",
+      "artifactName": "${productName}.${ext}",
       "target": [
         "AppImage",
         "deb"
       ],
       "category": "Education"
+    },
+    "deb": {
+      "artifactName": "${productName}-amd64.${ext}"
     },
     "publish": [
       {

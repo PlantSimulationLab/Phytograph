@@ -1,13 +1,25 @@
 # Releasing
 
 Tag a version and push; the workflow at `.github/workflows/release.yml`
-builds the backend, signs and notarizes the app on macOS, builds for
-Windows, and publishes a draft GitHub Release.
+builds the backend and packages the app on three runners in parallel —
+macOS (signed + notarized), Windows, and Linux — and uploads every
+artifact to a single **draft** GitHub Release.
 
 ```bash
 git tag v0.2.0
 git push origin v0.2.0
 ```
+
+## Publishing and download links
+
+The workflow leaves the release as a **draft**. Review it (all five
+artifacts attached: two macOS `.dmg`, one Windows `.exe`, one Linux
+`.AppImage`, one `.deb`), then click **Publish**.
+
+Publishing flags the release "Latest" — which is what makes
+`https://github.com/PlantSimulationLab/Phytograph/releases/latest` (the
+link the lab website points at) resolve to it. Drafts are never "Latest",
+so the download links don't move until you publish.
 
 ## Required GitHub Secrets
 

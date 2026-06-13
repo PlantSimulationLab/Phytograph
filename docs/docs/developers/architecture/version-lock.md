@@ -49,7 +49,7 @@ git push origin vX.Y.Z
 ```
 
 The `release.yml` workflow signs and notarizes the macOS app, builds for
-Windows, and publishes a draft GitHub Release. Both the bundled backend
+Windows and Linux, and publishes a draft GitHub Release. Both the bundled backend
 and the renderer reference `vX.Y.Z`, so the supervisor's check passes by
 construction.
 

@@ -11724,14 +11724,13 @@ export default function PointCloudViewer({
             <label className="text-[10px] text-neutral-400 block mb-1">
               Triangulate max points
             </label>
-            <input
+            <DebouncedNumberInput
               data-testid="settings-triangulate-max-points"
-              type="number"
               min={1000}
               step={100000}
+              parse={(s) => parseInt(s, 10)}
               value={triangulateMaxPoints}
-              onChange={(e) => setTriangulateMaxPoints(parseInt(e.target.value) || 0)}
-              onBlur={(e) => commitTriangulateMaxPoints(parseInt(e.target.value) || 5_000_000)}
+              onCommit={commitTriangulateMaxPoints}
               className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
             />
             <div className="text-[9px] text-neutral-500 mt-1 leading-snug">

@@ -19,8 +19,9 @@ needs **cmake** and a **C++ compiler** (Xcode Command Line Tools on macOS,
 MSVC on Windows). The compile covers the `plantarchitecture` and `lidar`
 plugins (`--nogpu` skips the radiation/CUDA toolchain). The `lidar` plugin
 transitively builds the `visualizer` (OpenGL) plugin — fine on macOS and
-Windows with no extra packages; on Linux you'd also need `libgl1-mesa-dev`
-and `xorg-dev`.
+Windows with no extra packages; on Linux you'd also need `libgl1-mesa-dev`,
+`xorg-dev`, and `libtbb-dev` (the last for PotreeConverter):
+`sudo apt-get install -y libgl1-mesa-dev xorg-dev libtbb-dev`.
 
 ```bash
 # 1. Clone the repo (recursively, to pull the PyHelios + helios-core submodules)

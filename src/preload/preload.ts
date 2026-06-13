@@ -3,6 +3,8 @@ import {
   IPC,
   type BackendInfo,
   type FileDropPayload,
+  type LogExportResult,
+  type LogLevel,
   type MenuCommandPayload,
   type MessageBoxOptions,
   type MessageBoxResult,
@@ -36,6 +38,17 @@ const api = {
   },
   shell: {
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke(IPC.ShellOpenExternal, url),
+  },
+  logs: {
+    // Write a combined main+renderer+backend log file to `destPath` and reveal
+    // it in the OS file manager. The caller picks destPath via dialog.save()
+    // first (pass null to no-op on cancel). Returns the saved path or null.
+    export: (destPath: string | null): Promise<LogExportResult> =>
+      ipcRenderer.invoke(IPC.LogsExport, destPath),
+    getPath: (): Promise<string> => ipcRenderer.invoke(IPC.LogsGetPath),
+    // Fire-and-forget forward of a renderer log line into the unified file.
+    write: (level: LogLevel, message: string): void =>
+      ipcRenderer.send(IPC.LogWrite, level, message),
   },
   store: {
     get: <T = unknown>(key: string): Promise<T | undefined> => ipcRenderer.invoke(IPC.StoreGet, key),

@@ -25,6 +25,9 @@ jobs:
           - platform: windows-latest
             arch: x64
             backend_name: phytograph_backend
+          - platform: ubuntu-latest
+            arch: x64
+            backend_name: phytograph_backend
 
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 75
@@ -49,6 +52,22 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: backend-api/requirements.txt
+
+      # Native build headers the Linux runner doesn't ship: OpenGL + X11 dev
+      # headers for the PyHelios visualizer/lidar plugin (build-pyhelios.mjs),
+      # and Intel TBB for PotreeConverter (build-potree-converter.mjs probes it
+      # via `pkg-config --exists tbb` and errors out if missing). cmake and the
+      # C++ toolchain are already present on ubuntu-latest. macOS/Windows ship
+      # these via the system frameworks, so this step is Linux-only.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # libgl1-mesa-dev + xorg-dev: build-time GL/X11 headers (above).
+          # xvfb: a virtual X display for the runtime backend smoke test —
+          # importing libhelios links the visualizer's GL symbols, so give it a
+          # framebuffer in case the load path touches a display on a headless runner.
+          sudo apt-get install -y libgl1-mesa-dev xorg-dev libtbb-dev xvfb
 
       # Pin the cache to the exact PyHelios + helios-core commits so bumping
       # either submodule rebuilds the bundled native library.
@@ -76,10 +95,10 @@ jobs:
       # Compile the PyHelios native library (libhelios) and editable-install the
       # package so PyInstaller's collect-all picks it up. plantarchitecture +
       # lidar plugins; --nogpu drops the radiation/OptiX CUDA toolchain. (lidar
-      # pulls in the visualizer + OpenGL at the C++ level, which builds fine on
-      # the macOS/Windows runners with no extra packages — only Linux, which
-      # this matrix doesn't target, would need GL/X11 dev headers.) Runners
-      # provide cmake + a C++ toolchain (Xcode CLT on macOS, MSVC on Windows).
+      # pulls in the visualizer + OpenGL at the C++ level, which builds with no
+      # extra packages on macOS/Windows; on Linux the GL/X11 dev headers come
+      # from the "Install Linux build dependencies" step above.) Runners provide
+      # cmake + a C++ toolchain (Xcode CLT on macOS, MSVC on Windows, gcc on Linux).
       - name: Build PyHelios from source
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-pyhelios.mjs
@@ -93,6 +112,100 @@ jobs:
         run: |
           ls -la resources/${{ matrix.backend_name }}
           du -sh resources/${{ matrix.backend_name }}
+
+      # Smoke-test the PACKAGED backend, not the source: launch the PyInstaller
+      # binary exactly as the shipped app's supervisor (src/main/backend.ts)
+      # does — pass PHYTOGRAPH_BACKEND_PORT, poll /version until it answers,
+      # and assert the version matches package.json (the version-lock contract).
+      # This catches a bundle that builds but is dead on arrival — a missing
+      # hidden import, a libhelios that won't load, an open3d/scipy native dep
+      # that didn't get collected — the failure mode `ls`/`du` can't see. Runs
+      # on every job (no cache-hit guard) so a cached-but-broken bundle is
+      # caught too. Cold start unpacks PyInstaller + imports open3d/scipy/
+      # pyhelios, so allow a generous poll window.
+      - name: Smoke-test backend (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          PHYTOGRAPH_BACKEND_PORT: '8123'
+        run: |
+          set -euo pipefail
+          expected=$(node -p "require('./package.json').version")
+          echo "Expected backend version: $expected"
+          # On headless Linux, run under a virtual framebuffer in case loading
+          # libhelios's GL symbols touches a display. macOS has a native display
+          # path and needs no wrapper.
+          launcher=""
+          if [ "$RUNNER_OS" = "Linux" ]; then launcher="xvfb-run -a"; fi
+          $launcher ./resources/${{ matrix.backend_name }}/${{ matrix.backend_name }} &
+          backend_pid=$!
+          # Ensure the backend is killed however this step exits.
+          trap 'kill "$backend_pid" 2>/dev/null || true' EXIT
+
+          got=""
+          for i in $(seq 1 60); do
+            if ! kill -0 "$backend_pid" 2>/dev/null; then
+              echo "FAIL: backend process exited before serving (crash on startup)"
+              exit 1
+            fi
+            resp=$(curl -fsS "http://127.0.0.1:${PHYTOGRAPH_BACKEND_PORT}/version" 2>/dev/null || true)
+            if [ -n "$resp" ]; then
+              echo "Backend responded after ~${i}s: $resp"
+              got=$(node -p "JSON.parse(process.argv[1]).version" "$resp")
+              break
+            fi
+            sleep 1
+          done
+
+          if [ -z "$got" ]; then
+            echo "FAIL: backend never answered /version within 60s"
+            exit 1
+          fi
+          if [ "$got" != "$expected" ]; then
+            echo "FAIL: backend version '$got' != package.json '$expected'"
+            exit 1
+          fi
+          echo "PASS: packaged backend launched and reported version $got"
+
+      - name: Smoke-test backend (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PHYTOGRAPH_BACKEND_PORT: '8123'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = (Get-Content package.json | ConvertFrom-Json).version
+          Write-Host "Expected backend version: $expected"
+          $exe = "resources/${{ matrix.backend_name }}/${{ matrix.backend_name }}.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          try {
+            $got = $null
+            foreach ($i in 1..60) {
+              if ($proc.HasExited) {
+                Write-Host "FAIL: backend process exited before serving (crash on startup)"
+                exit 1
+              }
+              try {
+                $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$env:PHYTOGRAPH_BACKEND_PORT/version" -TimeoutSec 2
+                $got = $resp.version
+                Write-Host "Backend responded after ~${i}s: version $got"
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          }
+          if (-not $got) {
+            Write-Host "FAIL: backend never answered /version within 60s"
+            exit 1
+          }
+          if ($got -ne $expected) {
+            Write-Host "FAIL: backend version '$got' != package.json '$expected'"
+            exit 1
+          }
+          Write-Host "PASS: packaged backend launched and reported version $got"
 
       # ---------------- PotreeConverter build ----------------
       # PotreeConverter converts XYZ/LAS to the Potree 2.0 octree format the

@@ -7,6 +7,27 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { app } from 'electron';
 import { EXPECTED_BACKEND_VERSION, BACKEND_PORT_PROD } from '../shared/constants.js';
+import { backendLog } from './logger.js';
+
+// Split a possibly-multi-line stdout/stderr chunk into clean lines for the log
+// file. Carries a trailing partial line across chunks so a traceback split mid-
+// write isn't logged as two mangled fragments. The carry is capped so a stream
+// that never emits a newline (e.g. a \r-only progress spinner, which the split
+// below intentionally does NOT break on) can't grow it without bound.
+const MAX_CARRY = 64 * 1024;
+function makeLineTee(emit: (line: string) => void): (buf: Buffer) => void {
+  let carry = '';
+  return (buf: Buffer) => {
+    const text = carry + buf.toString();
+    const lines = text.split(/\r?\n/);
+    carry = lines.pop() ?? '';
+    for (const line of lines) if (line.length) emit(line);
+    if (carry.length > MAX_CARRY) {
+      emit(carry);
+      carry = '';
+    }
+  };
+}
 
 // PyInstaller --onedir produces resources/phytograph_backend/phytograph_backend(.exe)
 // alongside an _internal/ tree.
@@ -195,9 +216,20 @@ export async function startBackend(): Promise<void> {
   console.log(`Backend started with PID: ${child.pid}`);
   // Python's `logging` writes to stderr by default, so most lines here
   // (INFO/WARNING/uvicorn access logs) are not actually errors. Label by
-  // stream, not severity.
-  child.stdout?.on('data', (buf) => process.stdout.write(`[Backend stdout]: ${buf}`));
-  child.stderr?.on('data', (buf) => process.stderr.write(`[Backend stderr]: ${buf}`));
+  // stream, not severity. Each chunk is (a) passed through to this process's
+  // own stdout/stderr (terminal in dev) AND (b) teed line-by-line into the
+  // unified session log under the [backend] scope, so packaged builds — where
+  // there's no terminal — still capture the sidecar's diagnostics.
+  const outTee = makeLineTee((line) => backendLog.info(line));
+  const errTee = makeLineTee((line) => backendLog.info(line));
+  child.stdout?.on('data', (buf) => {
+    process.stdout.write(`[Backend stdout]: ${buf}`);
+    outTee(buf);
+  });
+  child.stderr?.on('data', (buf) => {
+    process.stderr.write(`[Backend stderr]: ${buf}`);
+    errTee(buf);
+  });
   // Without this, spawn failures (EACCES, missing dyld, etc.) become uncaught
   // 'error' events on the ChildProcess and disappear silently.
   child.on('error', (err) => {

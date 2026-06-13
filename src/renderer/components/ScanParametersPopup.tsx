@@ -161,16 +161,20 @@ export function ScanParametersPopup({
     setParams(p => ({ ...p, [key]: v }));
   };
 
-  const setOrigin = (axis: 'x' | 'y' | 'z') => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = parseFloat(e.target.value);
-    setParams(p => ({ ...p, origin: { ...p.origin, [axis]: Number.isFinite(v) ? v : 0 } }));
+  // Origin x/y/z are signed coordinates (a scanner can sit at negative
+  // positions), so they go through DebouncedNumberInput with no min. That
+  // component owns a focus-guarded text draft, which is what lets a user clear
+  // the field or type a lone "-" before the rest of a negative number — a plain
+  // controlled type="number" bound to the parsed value snaps "" / "-" back to 0
+  // and eats the keystroke.
+  const setOrigin = (axis: 'x' | 'y' | 'z') => (v: number) => {
+    setParams(p => ({ ...p, origin: { ...p.origin, [axis]: v } }));
   };
 
-  // Tilt roll/pitch are signed angles (a scanner can lean either way), so unlike
-  // setNum they're not clamped to a non-negative minimum.
-  const setTilt = (key: 'tiltRollDeg' | 'tiltPitchDeg') => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = parseFloat(e.target.value);
-    setParams(p => ({ ...p, [key]: Number.isFinite(v) ? v : 0 }));
+  // Tilt roll/pitch are signed angles (a scanner can lean either way); same
+  // text-draft reasoning as setOrigin above.
+  const setTilt = (key: 'tiltRollDeg' | 'tiltPitchDeg') => (v: number) => {
+    setParams(p => ({ ...p, [key]: v }));
   };
 
   // Parse the free-text elevation field into params.beamElevationAnglesDeg on
@@ -287,12 +291,12 @@ export function ScanParametersPopup({
               {(['x', 'y', 'z'] as const).map(axis => (
                 <div key={axis}>
                   <label className="block text-xs text-neutral-500 mb-1 uppercase">{axis}</label>
-                  <input
+                  <DebouncedNumberInput
                     data-testid={`scan-origin-${axis}`}
-                    type="number"
                     step="any"
+                    debounceMs={0}
                     value={params.origin[axis]}
-                    onChange={setOrigin(axis)}
+                    onCommit={setOrigin(axis)}
                     className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                   />
                 </div>
@@ -414,23 +418,23 @@ export function ScanParametersPopup({
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Roll</label>
-                <input
+                <DebouncedNumberInput
                   data-testid="scan-tilt-roll"
-                  type="number"
                   step="any"
+                  debounceMs={0}
                   value={params.tiltRollDeg}
-                  onChange={setTilt('tiltRollDeg')}
+                  onCommit={setTilt('tiltRollDeg')}
                   className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                 />
               </div>
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Pitch</label>
-                <input
+                <DebouncedNumberInput
                   data-testid="scan-tilt-pitch"
-                  type="number"
                   step="any"
+                  debounceMs={0}
                   value={params.tiltPitchDeg}
-                  onChange={setTilt('tiltPitchDeg')}
+                  onCommit={setTilt('tiltPitchDeg')}
                   className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                 />
               </div>

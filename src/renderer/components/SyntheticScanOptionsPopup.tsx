@@ -6,6 +6,7 @@ import {
   coerceSyntheticScanOptions,
   type SyntheticScanOptions,
 } from '../lib/syntheticScanOptions';
+import { DebouncedNumberInput } from './DebouncedNumberInput';
 
 interface SyntheticScanOptionsPopupProps {
   isOpen: boolean;
@@ -49,15 +50,16 @@ export function SyntheticScanOptionsPopup({
 
   if (!isOpen) return null;
 
-  const setNum = (key: 'rangeNoiseMm' | 'angleNoiseMrad' | 'pulseDistanceThresholdM', min = 0) =>
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const v = parseFloat(e.target.value);
-      setOpts(o => ({ ...o, [key]: Number.isFinite(v) ? Math.max(min, v) : min }));
+  // DebouncedNumberInput owns each field's text draft and only commits finite
+  // values, so clearing the field to retype works (no snap-back to the min).
+  // Clamping to the min happens on the committed value inside the component.
+  const setNum = (key: 'rangeNoiseMm' | 'angleNoiseMrad' | 'pulseDistanceThresholdM') =>
+    (v: number) => {
+      setOpts(o => ({ ...o, [key]: v }));
     };
 
-  const setRays = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = parseInt(e.target.value, 10);
-    setOpts(o => ({ ...o, raysPerPulse: Number.isFinite(v) ? Math.max(1, v) : 1 }));
+  const setRays = (v: number) => {
+    setOpts(o => ({ ...o, raysPerPulse: v }));
   };
 
   const handleRun = (e: React.FormEvent) => {
@@ -105,25 +107,25 @@ export function SyntheticScanOptionsPopup({
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Range (mm)</label>
-                <input
+                <DebouncedNumberInput
                   data-testid="scan-opt-range-noise"
-                  type="number"
                   min={0}
                   step="any"
+                  debounceMs={0}
                   value={opts.rangeNoiseMm}
-                  onChange={setNum('rangeNoiseMm')}
+                  onCommit={setNum('rangeNoiseMm')}
                   className={inputCls}
                 />
               </div>
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Angle (mrad)</label>
-                <input
+                <DebouncedNumberInput
                   data-testid="scan-opt-angle-noise"
-                  type="number"
                   min={0}
                   step="any"
+                  debounceMs={0}
                   value={opts.angleNoiseMrad}
-                  onChange={setNum('angleNoiseMrad')}
+                  onCommit={setNum('angleNoiseMrad')}
                   className={inputCls}
                 />
               </div>
@@ -173,25 +175,26 @@ export function SyntheticScanOptionsPopup({
               <p className="text-xs text-neutral-400">Full-waveform (multi-return)</p>
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Rays per pulse</label>
-                <input
+                <DebouncedNumberInput
                   data-testid="scan-opt-rays-per-pulse"
-                  type="number"
                   min={1}
                   step={1}
+                  debounceMs={0}
+                  parse={(s) => parseInt(s, 10)}
                   value={opts.raysPerPulse}
-                  onChange={setRays}
+                  onCommit={setRays}
                   className={inputCls}
                 />
               </div>
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">Pulse distance threshold (m)</label>
-                <input
+                <DebouncedNumberInput
                   data-testid="scan-opt-pulse-threshold"
-                  type="number"
                   min={0}
                   step="any"
+                  debounceMs={0}
                   value={opts.pulseDistanceThresholdM}
-                  onChange={setNum('pulseDistanceThresholdM')}
+                  onCommit={setNum('pulseDistanceThresholdM')}
                   className={inputCls}
                 />
               </div>

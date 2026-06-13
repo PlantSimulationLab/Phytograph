@@ -6,6 +6,7 @@ import {
   PlantMorphShoot,
   DistributionParam,
 } from '../utils/backendApi';
+import { DebouncedNumberInput } from './DebouncedNumberInput';
 
 interface MorphPopupProps {
   isOpen: boolean;
@@ -213,9 +214,12 @@ function DistributionParamRow({
   const scaleFactor = computeScaleFactor(param, defaultParam);
   const isModified = Math.abs(scaleFactor - 1.0) > 0.001;
 
-  const updateParam = (index: number, value: string) => {
-    const numVal = parseFloat(value);
-    if (isNaN(numVal)) return;
+  // Commit a finite numeric value into parameters[index]. The text fields use
+  // DebouncedNumberInput (which only emits finite numbers and owns its own text
+  // draft, so a half-typed "-" / "" survives); the sliders parse their string
+  // value before calling this.
+  const commitParam = (index: number, numVal: number) => {
+    if (!Number.isFinite(numVal)) return;
     const newParams = [...param.parameters];
     newParams[index] = numVal;
     onChange({ ...param, parameters: newParams });
@@ -246,11 +250,11 @@ function DistributionParamRow({
             </span>
           )}
           {param.distribution === 'constant' ? (
-            <input
-              type="number"
+            <DebouncedNumberInput
               value={param.parameters[0]}
-              onChange={(e) => updateParam(0, e.target.value)}
+              onCommit={(n) => commitParam(0, n)}
               step={step}
+              debounceMs={0}
               className={`w-20 px-1 py-0.5 text-[10px] rounded border text-right ${
                 isModified
                   ? 'bg-amber-900/30 border-amber-600/50 text-amber-300'
@@ -259,11 +263,11 @@ function DistributionParamRow({
             />
           ) : (
             <div className="flex items-center gap-0.5">
-              <input
-                type="number"
+              <DebouncedNumberInput
                 value={param.parameters[0]}
-                onChange={(e) => updateParam(0, e.target.value)}
+                onCommit={(n) => commitParam(0, n)}
                 step={step}
+                debounceMs={0}
                 className={`w-16 px-1 py-0.5 text-[10px] rounded border text-right ${
                   isModified
                     ? 'bg-amber-900/30 border-amber-600/50 text-amber-300'
@@ -271,11 +275,11 @@ function DistributionParamRow({
                 } focus:outline-none focus:ring-1 focus:ring-amber-500/50`}
               />
               <span className="text-neutral-500 text-[9px]">-</span>
-              <input
-                type="number"
+              <DebouncedNumberInput
                 value={param.parameters[1]}
-                onChange={(e) => updateParam(1, e.target.value)}
+                onCommit={(n) => commitParam(1, n)}
                 step={step}
+                debounceMs={0}
                 className={`w-16 px-1 py-0.5 text-[10px] rounded border text-right ${
                   isModified
                     ? 'bg-amber-900/30 border-amber-600/50 text-amber-300'
@@ -290,7 +294,7 @@ function DistributionParamRow({
         <input
           type="range"
           value={currentValue}
-          onChange={(e) => updateParam(0, e.target.value)}
+          onChange={(e) => commitParam(0, parseFloat(e.target.value))}
           min={rangeMin}
           max={rangeMax}
           step={step}
@@ -325,16 +329,13 @@ function GeometryScaleRow({
               {value.toFixed(2)}x
             </span>
           )}
-          <input
-            type="number"
+          <DebouncedNumberInput
             value={value}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (!isNaN(v)) onChange(v);
-            }}
+            onCommit={onChange}
             step={0.01}
             min={0.1}
             max={3.0}
+            debounceMs={0}
             className={`w-16 px-1 py-0.5 text-[10px] rounded border text-right ${
               isModified
                 ? 'bg-amber-900/30 border-amber-600/50 text-amber-300'

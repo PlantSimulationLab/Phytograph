@@ -1,4 +1,5 @@
 import React, { Component, ReactNode } from 'react';
+import { logToSession } from '../lib/logger';
 
 interface Props {
   children: ReactNode;
@@ -21,8 +22,15 @@ class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('[ErrorBoundary] Caught error:', error);
-    console.error('[ErrorBoundary] Error info:', errorInfo);
+    // Keep a bare console.error for DevTools (no error object, so the global
+    // console-forwarding patch doesn't ALSO write it to the session file — we
+    // write the full record once below, including the React componentStack,
+    // which is the most useful part for diagnosing a render crash).
+    console.error('[ErrorBoundary] Caught error — see session log for details');
+    logToSession(
+      'error',
+      `[ErrorBoundary] ${error.name}: ${error.message}\n${error.stack ?? ''}\ncomponentStack:${errorInfo.componentStack ?? ''}`,
+    );
   }
 
   render() {
