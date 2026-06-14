@@ -58,6 +58,9 @@ import {
   roundCoord3,
   resampleCloud,
   cloneFlatPointCloudData,
+  computeDisplayOffset,
+  displayViewToWorldView,
+  type Vec3Like,
 } from '../lib/pointCloudHelpers';
 import { applyHeliosFilter, computeHeliosMetrics, heliosFilterCounts } from '../lib/heliosFilter';
 import type { HeliosFilterEstimate } from '../lib/heliosFilter';
@@ -2070,12 +2073,23 @@ export default function PointCloudViewer({
         return;
       }
       const sessionId = octreeInfo.sessionId;
+      // The frame's `view` is the DISPLAY-space camera (world − displayOffset),
+      // but the backend reprojects TRUE WORLD positions. Convert to the world
+      // view V_world = V_disp · T(−offset) before sending (no-op when offset 0).
+      const off = displayOffsetRef.current;
+      const worldView =
+        off.x === 0 && off.y === 0 && off.z === 0
+          ? frame.view
+          : displayViewToWorldView(
+              new THREE.Matrix4().fromArray(frame.view),
+              off,
+            ).toArray();
       const deleteRegion: PendingDeleteRegion = {
         kind: 'squares_union',
         centers: frame.centers.map(c => [c.cx, c.cy] as [number, number]),
         half_sizes: frame.centers.map(() => eraseBrushPx),
         projection: frame.projection,
-        view: frame.view,
+        view: worldView,
         canvas: frame.canvas,
         invert: false, // delete points INSIDE the painted squares
       };
@@ -2670,6 +2684,7 @@ export default function PointCloudViewer({
                 polygonCameraRef.current,
                 polygonCanvasSizeRef.current,
                 false,
+                displayOffsetRef.current,
               );
               setCropPolygon({
                 points: region.points,
@@ -2948,6 +2963,22 @@ export default function PointCloudViewer({
     stableStaticBoundsRef.current = result;
     return result;
   }, [clouds, meshes, skeletons]);
+
+  // Render-only display offset (Layer 2 precision safety net). Derived from the
+  // world-space scene center, rounded to integers, zero below ~1e4 magnitude.
+  // It's keyed on `staticBounds` (already latched on the add-only id-set), so it
+  // only changes when the loaded object SET changes materially — never on a
+  // Translate drag — keeping geometry rebuilds + camera reframes rare. The whole
+  // scene renders at (world − displayOffset); every world coordinate shown to the
+  // user or sent to the backend adds it back. Distinct from a cloud's persistent
+  // `worldShift` (which lives in the stored data); displayOffset never leaves the
+  // viewer. A ref mirrors it for imperative event handlers (seed/crop/erase).
+  const displayOffset = useMemo<Vec3Like>(
+    () => computeDisplayOffset(staticBounds.center),
+    [staticBounds],
+  );
+  const displayOffsetRef = useRef<Vec3Like>(displayOffset);
+  displayOffsetRef.current = displayOffset;
 
   // Determine what's currently selected
   const hasCloudSelected = selectedIds.size > 0;
@@ -7034,8 +7065,14 @@ export default function PointCloudViewer({
       if (transformModalRef.current) return;
       if (!mainCameraRef.current) return;
       if (!lastMouse.set) return;
-      const pivot = computePivot();
-      if (!pivot) return;
+      const worldPivot = computePivot();
+      if (!worldPivot) return;
+      // The keyboard transform modal projects `pivot` through the DISPLAY camera
+      // (mainCameraRef) in computeTranslateDelta/RotationAngle/ScaleFactor, and
+      // those only consume pivot for screen math (the apply* fns use deltas +
+      // originals, never pivot). So store the pivot in DISPLAY space.
+      const off = displayOffsetRef.current;
+      const pivot = { x: worldPivot.x - off.x, y: worldPivot.y - off.y, z: worldPivot.z - off.z };
 
       let state: TransformModalState | null = null;
 
@@ -8975,6 +9012,35 @@ export default function PointCloudViewer({
     return clouds.find(c => c.visible) ?? null;
   }, [clouds, selectedIds]);
 
+  // Guard against a stale 'scalar' selection surviving across cloud changes.
+  // colorMode/selectedScalarField are GLOBAL across all clouds, but a scalar
+  // field (e.g. wood_class from a segmentation) only exists on the cloud that
+  // produced it. When that cloud is deleted — or a different cloud without the
+  // field becomes the representative — the dropdown drops the option but the
+  // mode stays 'scalar', so the renderer falls back to a flat gray ramp (and
+  // the dropdown shows a non-existent value). This is the recurring "imports
+  // gray / wrong color mode after delete" bug. Rather than reset color mode in
+  // every delete/import/segment path (the patch that keeps regressing), we
+  // validate the selection here against the SAME available-fields computation
+  // the dropdown uses, and fall back to the default when it's orphaned.
+  useEffect(() => {
+    if (colorMode !== 'scalar' || !selectedScalarField) return;
+    const cloud = colorbarSourceCloud;
+    // No visible cloud at all → nothing to validate against; leave state as-is
+    // so re-selecting the source cloud restores the mode.
+    if (!cloud) return;
+    const available = cloud.data.octree
+      ? octreeScalarFieldOptions(
+          cloud.data.octree.attributeRanges,
+          cloud.data.octree.attributeLabels,
+        ).map(o => o.value)
+      : Object.keys(cloud.data.scalarFields ?? {});
+    if (!available.includes(selectedScalarField)) {
+      setColorMode('per-scan');
+      setSelectedScalarField(undefined);
+    }
+  }, [colorMode, selectedScalarField, colorbarSourceCloud]);
+
   const dataRange = useMemo<{ min: number; max: number; label: string } | null>(() => {
     if (!colorbarSourceCloud || !isScalarColorMode) return null;
     const d = colorbarSourceCloud.data;
@@ -9065,9 +9131,21 @@ export default function PointCloudViewer({
           return (
             <group
               key={cloud.id}
+              // Render-only precision safety net: flat clouds render at
+              // (translation − displayOffset) so large UTM coords land near the
+              // origin (small net modelView translation; buffer stays shared in
+              // world space — flat positions are already float32 so re-centering
+              // the buffer can't recover precision, and this avoids a copy). The
+              // octree branch ignores this group (it attaches to the scene root)
+              // and applies the offset on pco.position itself. The resample
+              // preview renders at the origin, so it gets no offset.
               position={hasResamplePreview
                 ? [0, 0, 0]
-                : [editState.translation.x, editState.translation.y, editState.translation.z]}
+                : [
+                    editState.translation.x - displayOffset.x,
+                    editState.translation.y - displayOffset.y,
+                    editState.translation.z - displayOffset.z,
+                  ]}
             >
               {sourceData.octree ? (
                 <OctreePointCloud
@@ -9096,6 +9174,10 @@ export default function PointCloudViewer({
                   // preview renders at the origin (group position [0,0,0]), so it
                   // gets no offset either.
                   translation={hasResamplePreview ? undefined : editState.translation}
+                  // Render-only precision safety net: the resample preview lives
+                  // at the origin already (group [0,0,0]), so it gets no offset;
+                  // the live cloud renders at world − displayOffset.
+                  displayOffset={hasResamplePreview ? undefined : displayOffset}
                   onFirstTilesReady={
                     sourceData.octree
                       ? () => handleOctreeFirstTiles(sourceData.octree!.cacheId)
@@ -9141,9 +9223,24 @@ export default function PointCloudViewer({
                   //  - the live erase-brush preview (the in-progress stamps)
                   //    while the erase tool is active on this selected cloud.
                   clipBoxes={(() => {
-                    const committed = pendingDeletesToClipBoxes(
+                    // Committed-delete preview boxes are built in WORLD space
+                    // (box min/max or frozen V_world unprojection). The octree
+                    // renders at world − displayOffset, so shift each box by
+                    // T(−offset) into the display frame. The live erase preview
+                    // boxes already come from the display-positioned octree pick,
+                    // so they need no shift.
+                    const committedWorld = pendingDeletesToClipBoxes(
                       getEditState(cloud.id).pendingDeletes ?? [],
                     );
+                    const off = displayOffset;
+                    const committed =
+                      off.x === 0 && off.y === 0 && off.z === 0
+                        ? committedWorld
+                        : committedWorld.map(m =>
+                            new THREE.Matrix4()
+                              .makeTranslation(-off.x, -off.y, -off.z)
+                              .multiply(m),
+                          );
                     const live = isSelected && editMode === 'erase' && erasePreviewBoxes.length > 0
                       ? erasePreviewBoxes
                       : [];
@@ -9235,7 +9332,14 @@ export default function PointCloudViewer({
           return (
             <group
               key={mesh.id}
-              position={[meshPos.x + cloudOffset.x, meshPos.y + cloudOffset.y, meshPos.z + cloudOffset.z]}
+              // Render-only precision safety net: subtract displayOffset so the
+              // mesh renders near the origin (secondary fix — mesh vertices are a
+              // packed Float32Array, like flat clouds). Rotation/scale unaffected.
+              position={[
+                meshPos.x + cloudOffset.x - displayOffset.x,
+                meshPos.y + cloudOffset.y - displayOffset.y,
+                meshPos.z + cloudOffset.z - displayOffset.z,
+              ]}
               rotation={[meshRot.x * Math.PI / 180, meshRot.y * Math.PI / 180, meshRot.z * Math.PI / 180]}
               scale={[meshScale.x, meshScale.y, meshScale.z]}
             >
@@ -9286,7 +9390,14 @@ export default function PointCloudViewer({
           return (
             <group
               key={skeleton.id}
-              position={[skelPos.x, skelPos.y, skelPos.z]}
+              // Render-only precision safety net: subtract displayOffset so the
+              // skeleton renders near the origin (secondary fix — skeleton points
+              // are a packed Float32Array).
+              position={[
+                skelPos.x - displayOffset.x,
+                skelPos.y - displayOffset.y,
+                skelPos.z - displayOffset.z,
+              ]}
             >
               {skeletonShowAsCylinders ? (
                 <Skeleton3D
@@ -9313,21 +9424,30 @@ export default function PointCloudViewer({
             was given, which already carry the source cloud's translation (the
             inline path bakes editState.translation into getDisplayData; the octree
             path forwards translation to the backend). So the QSM lands in the same
-            world frame the cloud renders in — no extra <group> offset needed. */}
+            world frame the cloud renders in. The render-only displayOffset is applied
+            INSIDE QSM3D's float64 vertex build (precision-correct) rather than via a
+            group transform. */}
         {qsms.map(qsm => {
           if (!qsm.visible) return null;
           return (
             <group key={qsm.id}>
+              {/* QSM3D subtracts displayOffset in its own float64 vertex build
+                  (recovers precision), so its group stays at the origin. The
+                  leaves mesh is built at world coords, so it gets the offset via
+                  a wrapping group (secondary fix). */}
               <QSM3D
                 cylinders={qsm.cylinders}
                 shoots={qsm.shoots}
                 colorMode={qsmColorMode}
+                displayOffset={displayOffset}
               />
               {qsm.leaves && qsm.leavesVisible !== false && (
-                <TexturedPlantMesh
-                  data={qsm.leaves.data}
-                  plantMaterials={qsm.leaves.plantMaterials ?? []}
-                />
+                <group position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+                  <TexturedPlantMesh
+                    data={qsm.leaves.data}
+                    plantMaterials={qsm.leaves.plantMaterials ?? []}
+                  />
+                </group>
               )}
             </group>
           );
@@ -9341,16 +9461,19 @@ export default function PointCloudViewer({
           const min = result.ladMinOverride ?? auto.min;
           const max = result.ladMaxOverride ?? auto.max;
           return (
-            <LADVoxelGrid
-              key={result.id}
-              voxels={result.voxels}
-              colormap={colormap}
-              min={min}
-              max={max}
-              opacity={result.opacity}
-              hideEmpty={result.hideEmpty}
-              onHoverVoxel={setHoveredLadVoxel}
-            />
+            // Render-only precision safety net: LAD voxel centers are world
+            // coords, so render them near the origin via a wrapping group.
+            <group key={result.id} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+              <LADVoxelGrid
+                voxels={result.voxels}
+                colormap={colormap}
+                min={min}
+                max={max}
+                opacity={result.opacity}
+                hideEmpty={result.hideEmpty}
+                onHoverVoxel={setHoveredLadVoxel}
+              />
+            </group>
           );
         })}
 
@@ -9365,16 +9488,19 @@ export default function PointCloudViewer({
           // the marker can never drift out of sync with the row highlight.
           const isMarkerSelected = selectedScanIds.has(scan.id);
           return (
-            <ScannerMarker
-              key={scan.id}
-              origin={scan.params.origin}
-              heightMeters={scannerHeight}
-              color={scan.color}
-              selected={isMarkerSelected}
-              tiltRollDeg={scan.params.tiltRollDeg}
-              tiltPitchDeg={scan.params.tiltPitchDeg}
-              azimuthZeroDeg={scan.params.azimuthMinDeg}
-            />
+            // Render-only precision safety net: the marker's origin is a world
+            // coord, so render it near the origin via a wrapping group.
+            <group key={scan.id} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+              <ScannerMarker
+                origin={scan.params.origin}
+                heightMeters={scannerHeight}
+                color={scan.color}
+                selected={isMarkerSelected}
+                tiltRollDeg={scan.params.tiltRollDeg}
+                tiltPitchDeg={scan.params.tiltPitchDeg}
+                azimuthZeroDeg={scan.params.azimuthMinDeg}
+              />
+            </group>
           );
         })}
 
@@ -9382,6 +9508,7 @@ export default function PointCloudViewer({
           bounds={combinedBounds}
           hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0 || qsms.length > 0}
           enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive}
+          displayOffset={displayOffset}
         />
 
         {/* Snapshots the camera/size for the polygon- and rect-crop in/out
@@ -9406,10 +9533,13 @@ export default function PointCloudViewer({
         {/* Translation Gizmo for selected clouds */}
         {editMode === 'translate' && firstSelectedCloud && (
           <TranslationGizmo
+            // center in DISPLAY space (world − displayOffset): the gizmo's
+            // DragHandler projects the center through the display-space camera, so
+            // it must match. Emitted deltas are offset-invariant (handlers unchanged).
             center={new THREE.Vector3(
-              firstSelectedCloud.data.bounds.center.x + getEditState(firstSelectedCloud.id).translation.x,
-              firstSelectedCloud.data.bounds.center.y + getEditState(firstSelectedCloud.id).translation.y,
-              firstSelectedCloud.data.bounds.center.z + getEditState(firstSelectedCloud.id).translation.z
+              firstSelectedCloud.data.bounds.center.x + getEditState(firstSelectedCloud.id).translation.x - displayOffset.x,
+              firstSelectedCloud.data.bounds.center.y + getEditState(firstSelectedCloud.id).translation.y - displayOffset.y,
+              firstSelectedCloud.data.bounds.center.z + getEditState(firstSelectedCloud.id).translation.z - displayOffset.z
             )}
             size={firstSelectedCloud.data.bounds.size.length() / 3}
             onTranslate={handleGizmoTranslate}
@@ -9424,7 +9554,12 @@ export default function PointCloudViewer({
           const meshScale = meshScales.get(selectedMesh.id) || { x: 1, y: 1, z: 1 };
           return (
             <TranslationGizmo
-              center={new THREE.Vector3(meshPos.x, meshPos.y, meshPos.z)}
+              // center in DISPLAY space (world − displayOffset) — see cloud gizmo.
+              center={new THREE.Vector3(
+                meshPos.x - displayOffset.x,
+                meshPos.y - displayOffset.y,
+                meshPos.z - displayOffset.z,
+              )}
               size={Math.max(meshScale.x, meshScale.y, meshScale.z)}
               onTranslate={handleMeshTranslate}
               onDragStart={() => { startHistoryEntry('mesh', selectedMesh.id); setGizmoDragging(true); }}
@@ -9450,10 +9585,11 @@ export default function PointCloudViewer({
             minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
           }
           const size = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
+          // center in DISPLAY space (world − displayOffset) — see cloud gizmo.
           const center = new THREE.Vector3(
-            skelPos.x + (minX + maxX) / 2,
-            skelPos.y + (minY + maxY) / 2,
-            skelPos.z + (minZ + maxZ) / 2
+            skelPos.x + (minX + maxX) / 2 - displayOffset.x,
+            skelPos.y + (minY + maxY) / 2 - displayOffset.y,
+            skelPos.z + (minZ + maxZ) / 2 - displayOffset.z
           );
           return (
             <TranslationGizmo
@@ -9470,11 +9606,16 @@ export default function PointCloudViewer({
             lasso is drawn as an SVG overlay outside the canvas so it
             doesn't fight three.js event handling. */}
         {editMode === 'crop' && cropMode === 'box' && cropBox && (
-          <CropBox
-            min={cropBox.min}
-            max={cropBox.max}
-            keepInside={!cropInvert}
-          />
+          // Render-only precision safety net: cropBox.min/max state stays WORLD
+          // (it's sent to the backend as-is); only the rendered gizmo shifts into
+          // display space via a wrapping group.
+          <group position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+            <CropBox
+              min={cropBox.min}
+              max={cropBox.max}
+              keepInside={!cropInvert}
+            />
+          </group>
         )}
 
         {/* Two-click ground-plane box-draw raycaster. Active only while
@@ -9482,25 +9623,31 @@ export default function PointCloudViewer({
         {editMode === 'crop' &&
           (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2') && (
           <BoxDrawRaycaster
-            groundZ={combinedBounds.min.z}
+            // The raycaster lives in the scene (now DISPLAY space), so its ground
+            // plane is at the display z. The hit (x,y) is display-space; the
+            // corner refs + cropBox below store WORLD coords (offset added back),
+            // since cropBox is sent to the backend in world space.
+            groundZ={combinedBounds.min.z - displayOffset.z}
             onMove={(x, y) => {
-              boxDrawCursorRef.current = { x, y };
+              boxDrawCursorRef.current = { x: x + displayOffset.x, y: y + displayOffset.y };
               // Re-render so the corner-1 marker / preview box follows the
               // cursor. Cheap — the preview is a single wireframe box.
               setBoxDrawCursorTick(t => t + 1);
             }}
             onPick={(x, y) => {
+              const wx = x + displayOffset.x;
+              const wy = y + displayOffset.y;
               if (cropDrawState === 'awaiting-box-corner-1') {
-                boxDrawFirstCornerRef.current = { x, y };
+                boxDrawFirstCornerRef.current = { x: wx, y: wy };
                 setCropDrawState('awaiting-box-corner-2');
                 return;
               }
               const first = boxDrawFirstCornerRef.current;
               if (!first) { setCropDrawState('idle'); return; }
-              const minX = Math.min(first.x, x);
-              const minY = Math.min(first.y, y);
-              const maxX = Math.max(first.x, x);
-              const maxY = Math.max(first.y, y);
+              const minX = Math.min(first.x, wx);
+              const minY = Math.min(first.y, wy);
+              const maxX = Math.max(first.x, wx);
+              const maxY = Math.max(first.y, wy);
               setCropBox({
                 min: { x: minX, y: minY, z: combinedBounds.min.z },
                 max: { x: maxX, y: maxY, z: combinedBounds.max.z },
@@ -9528,7 +9675,9 @@ export default function PointCloudViewer({
             (combinedBounds.max.y - combinedBounds.min.y),
           ) * 0.01 || 0.1;
           return (
-            <group>
+            // first/cursor are stored in WORLD coords; this preview group renders
+            // them in DISPLAY space via the −displayOffset transform.
+            <group position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
               {first && (
                 <mesh position={[first.x, first.y, combinedBounds.min.z]}>
                   <sphereGeometry args={[markerSize, 16, 16]} />
@@ -9566,6 +9715,7 @@ export default function PointCloudViewer({
               isErasing={isErasing}
               cloudData={firstSelectedCloud.data}
               cloudTranslation={editState.translation}
+              displayOffset={displayOffset}
               alreadyErasedIndices={editState.erasedIndices}
               onErase={(indicesToErase) => {
                 setEditStates(prev => {
@@ -9638,7 +9788,15 @@ export default function PointCloudViewer({
             <EraseBrushOctree
               octree={eraseOctreeRef.current as any}
               brushHalfPx={eraseBrushPx}
-              cloudCenter={{ x: b.center.x, y: b.center.y, z: b.center.z }}
+              // cloudCenter in DISPLAY space: it's the fallback anchor plane for
+              // anchorAt(), which runs against the display-positioned octree and
+              // the display camera. The emitted frame's view is converted back to
+              // world at the backend-payload boundary (see handleApplyErase).
+              cloudCenter={{
+                x: b.center.x - displayOffset.x,
+                y: b.center.y - displayOffset.y,
+                z: b.center.z - displayOffset.z,
+              }}
               cloudDiagonal={b.size.length()}
               initialFrame={eraseFrame}
               onFrameChange={(frame, previewBoxes) => {
@@ -9690,10 +9848,21 @@ export default function PointCloudViewer({
             sectionSize={staticBounds.size.length() / 4}
             sectionThickness={1}
             sectionColor="#525252"
+            // Render-only precision safety net: the grid is drei geometry built
+            // at world coords (this is what kinked/vanished at UTM magnitudes), so
+            // position it at world − displayOffset to render near the origin.
             position={
               gridPlane === 'z-up'
-                ? [staticBounds.center.x, staticBounds.center.y, staticBounds.min.z]
-                : [staticBounds.center.x, staticBounds.min.y, staticBounds.center.z]
+                ? [
+                    staticBounds.center.x - displayOffset.x,
+                    staticBounds.center.y - displayOffset.y,
+                    staticBounds.min.z - displayOffset.z,
+                  ]
+                : [
+                    staticBounds.center.x - displayOffset.x,
+                    staticBounds.min.y - displayOffset.y,
+                    staticBounds.center.z - displayOffset.z,
+                  ]
             }
             rotation={gridPlane === 'z-up' ? [-Math.PI / 2, 0, 0] : [0, 0, 0]}
             fadeDistance={staticBounds.size.length() * 5}
@@ -9719,9 +9888,14 @@ export default function PointCloudViewer({
         const cam = mainCameraRef.current;
         const cloud = clouds.find(c => selectedIds.has(c.id));
         const groundZ = cloud?.data.bounds?.min.z ?? 0;
+        // treeSeedPoints are stored in WORLD coords (sent to the backend for
+        // segmentation), but `cam` renders in DISPLAY space (world − offset). So
+        // project world→display before .project(cam), and add the offset back on
+        // a fresh ray·plane hit before storing.
+        const off = displayOffset;
         const project = (p: [number, number, number]) => {
           if (!cam) return null;
-          const v = new THREE.Vector3(p[0], p[1], p[2]).project(cam);
+          const v = new THREE.Vector3(p[0] - off.x, p[1] - off.y, p[2] - off.z).project(cam);
           return { x: (v.x * 0.5 + 0.5) * 100, y: (-v.y * 0.5 + 0.5) * 100, behind: v.z > 1 };
         };
         const onSeedClick = (e: React.MouseEvent<SVGSVGElement>) => {
@@ -9733,10 +9907,12 @@ export default function PointCloudViewer({
           );
           const rc = new THREE.Raycaster();
           rc.setFromCamera(ndc, cam);
-          const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -groundZ);
+          // Plane at the DISPLAY ground z (the ray is in display/scene space).
+          const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -(groundZ - off.z));
           const hit = new THREE.Vector3();
           if (rc.ray.intersectPlane(plane, hit)) {
-            setTreeSeedPoints(prev => [...prev, [hit.x, hit.y, hit.z]]);
+            // Convert the display hit back to WORLD before storing.
+            setTreeSeedPoints(prev => [...prev, [hit.x + off.x, hit.y + off.y, hit.z + off.z]]);
           }
         };
         const onSeedContextMenu = (e: React.MouseEvent<SVGSVGElement>) => {
@@ -9926,6 +10102,7 @@ export default function PointCloudViewer({
               polygonCameraRef.current,
               polygonCanvasSizeRef.current,
               false,
+              displayOffsetRef.current,
             );
             setCropPolygon({
               points: region.points,

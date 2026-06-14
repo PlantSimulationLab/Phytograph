@@ -1,14 +1,22 @@
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startBackend, stopBackend, setBackendWindowGetter } from './backend.js';
+import { startBackend, stopBackend, setBackendWindowGetter, setBackendFailedHandler } from './backend.js';
 import { registerIpc } from './ipc.js';
 import { installApplicationMenu } from './menu.js';
 import { setupAutoUpdater } from './updater.js';
 import { IPC, type FileDropPayload } from '../shared/ipc.js';
 import { RENDERER_DEV_PORT } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
-import { initLogging, getLogDir } from './logger.js';
+import { initLogging, getLogDir, setFatalErrorHandler } from './logger.js';
+import { installCrashHandlers, showBackendFailedDialog, showFatalMainErrorDialog } from './crashDialog.js';
+import {
+  initCrashReporter,
+  checkPreviousSession,
+  markSessionStarted,
+  clearCleanShutdownMarker,
+  installCleanShutdownSignals,
+} from './postMortem.js';
 
 // Configure the unified session log before anything else logs. This also patches
 // the main-process console.* onto the file transport, so every console.log below
@@ -17,6 +25,20 @@ initLogging();
 // Tell the spawned Python sidecar where to write its own rotating log file, so
 // it lands next to the electron-log file and can be concatenated on export.
 process.env.PHYTOGRAPH_LOG_DIR = getLogDir();
+
+// Arm native crash capture as early as possible — Crashpad runs in a separate
+// OS process and captures a minidump even if the MAIN process dies natively
+// (segfault/OOM), which no in-process handler can survive. Local-only (no
+// upload); surfaced on the next launch by checkPreviousSession(). Must precede
+// app.whenReady() so it's armed before anything can crash.
+initCrashReporter();
+
+// Ctrl+C in the dev terminal (SIGINT) and OS-requested quit (SIGTERM) don't run
+// app's 'before-quit', so without this the clean-shutdown marker would survive
+// and the NEXT launch would wrongly report a crash. Treat both as intentional:
+// clear the marker + stop the backend, then exit 0. (SIGKILL / native crashes
+// stay uncatchable and correctly trip the post-mortem path.)
+installCleanShutdownSignals(stopBackend);
 
 // Must run before app.whenReady(). `protocol.registerSchemesAsPrivileged` is
 // a once-per-process call that has to be made while the protocol module is
@@ -147,6 +169,43 @@ function createWindow(): void {
   // Forward file-drop events into the renderer via the same IPC channel name
   // that preload exposes for subscription.
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
+
+  // Surface hard crashes (native renderer/GPU death that React's ErrorBoundary
+  // can't catch) as a native dialog that points at the RIGHT log and can reload
+  // the renderer in place — the backend (and its in-RAM data) survives a
+  // renderer crash, so a reload can recover the session. Suppressed under E2E,
+  // where a native modal would hang the Playwright driver. See crashDialog.ts.
+  if (!isE2E) installCrashHandlers(mainWindow, reloadRenderer);
+}
+
+/**
+ * Recover the renderer after a crash. If the window is still alive (e.g. backend
+ * 'failed', or a renderer crash that left the BrowserWindow intact) reload it;
+ * otherwise recreate it. The backend is left running — startBackend() already
+ * reuses a healthy sidecar on the same port, so a reload re-runs the renderer's
+ * initBackendUrl() against the existing (or respawning) backend.
+ */
+function reloadRenderer(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.reload();
+  } else {
+    createWindow();
+  }
+}
+
+/**
+ * Recovery for the backend-'failed' case: the supervisor gave up restarting the
+ * sidecar, so a bare renderer reload wouldn't bring compute back. Re-arm and
+ * restart the backend, then reload the renderer (which re-runs initBackendUrl
+ * against the freshly spawned sidecar on the same port).
+ */
+async function restartBackendAndReload(): Promise<void> {
+  try {
+    await startBackend();
+  } catch (e) {
+    console.error('[main] backend restart after failure threw:', e);
+  }
+  reloadRenderer();
 }
 
 app.whenReady().then(async () => {
@@ -166,6 +225,14 @@ app.whenReady().then(async () => {
   registerOctreeProtocol();
   installApplicationMenu(() => mainWindow);
 
+  // Post-mortem: detect whether the PREVIOUS session crashed (a native main-
+  // process death no live handler can catch) and, if so, surface a recovery
+  // dialog. MUST run before markSessionStarted() — it reads the old marker — and
+  // is skipped under E2E (a native modal would hang Playwright). Then mark THIS
+  // session as running; the marker is cleared on a clean quit (before-quit).
+  if (!isE2E) checkPreviousSession();
+  markSessionStarted();
+
   // Bridge: main can broadcast file-drop events to the focused window.
   // (No-op placeholder for now; native drag/drop happens in the renderer.
   // Wire native OS file-association open events here later.)
@@ -175,7 +242,19 @@ app.whenReady().then(async () => {
 
   // Give the supervisor a way to reach the renderer with crash/restart status.
   // (Safe to set before the window exists: emitBackendStatus no-ops on null.)
+  // A fatal uncaught exception in main can only show a dialog while the process
+  // is still alive — so register the handler now (after app.whenReady, since
+  // dialog.showMessageBoxSync needs the app ready). A crash before this point
+  // falls back to logger.ts's plain log+exit. Suppressed under E2E (a native
+  // modal would hang the Playwright driver).
+  if (!isE2E) setFatalErrorHandler(showFatalMainErrorDialog);
+
   setBackendWindowGetter(() => mainWindow);
+  // When the sidecar exhausts its restart budget, the renderer already gets a
+  // toast (App.tsx); also pop the native crash dialog so the user gets the
+  // log/report/reload actions, not just a dismissable toast. Suppressed under
+  // E2E (a native modal would hang the Playwright driver).
+  if (!isE2E) setBackendFailedHandler(() => showBackendFailedDialog(restartBackendAndReload));
   await startBackend();
   createWindow();
   setupAutoUpdater(() => mainWindow);
@@ -196,4 +275,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopBackend();
+  // A clean quit reached this handler — remove the marker so the next launch
+  // knows the session ended normally. (A crash/SIGKILL never gets here, so the
+  // marker survives and checkPreviousSession() detects the unclean exit.)
+  clearCleanShutdownMarker();
 });

@@ -19,7 +19,13 @@ import {
   roundCoord3,
   resampleCloud,
   cloneFlatPointCloudData,
+  computeDisplayOffset,
+  recenterPositions,
+  displayViewToWorldView,
+  worldToDisplay,
+  displayToWorld,
 } from './pointCloudHelpers';
+import { projectWorldToCanvasPixel } from './cropGeometry';
 import type { MeshData, PointCloudData } from './pointCloudTypes';
 import * as THREE from 'three';
 
@@ -528,6 +534,40 @@ describe('octreeScalarFieldOptions', () => {
     expect(opts.map(o => o.value).sort()).toEqual(['Reflectance_dB', 'classification']);
   });
 
+  it('filters the LAS sensor/schema dims PotreeConverter emits, but keeps real scalars', () => {
+    // Exact attribute names PotreeConverter writes for a plain XYZ import (the
+    // octree-scalar E2E fixture): the LAS standard dims come through degenerate
+    // and must not pollute the picker, while the three real columns survive.
+    const ranges = {
+      position: { min: [0, 0, 0], max: [1, 1, 1] },
+      intensity: { min: [0], max: [1] },
+      'return number': { min: [0], max: [0] },
+      'number of returns': { min: [0], max: [0] },
+      classification: { min: [0], max: [0] }, // real LAS dim — KEEP
+      'scan angle rank': { min: [0], max: [0] },
+      'user data': { min: [0], max: [0] },
+      'point source id': { min: [0], max: [0] },
+      'gps-time': { min: [0], max: [0] },
+      rgb: { min: [0], max: [255] },
+      timestamp: { min: [100], max: [247] },
+      Deviation: { min: [0], max: [3] },
+      target_index: { min: [0], max: [4] },
+    };
+    const values = octreeScalarFieldOptions(ranges, {}).map(o => o.value);
+    // The three real scalars + classification reach the picker.
+    expect(values.sort()).toEqual(
+      ['Deviation', 'classification', 'target_index', 'timestamp'].sort(),
+    );
+    // None of the LAS sensor dims leak (mirrors the E2E assertion).
+    for (const v of values) {
+      const lv = v.toLowerCase();
+      expect(lv).not.toContain('gps');
+      expect(lv).not.toContain('source id');
+      expect(lv).not.toContain('scan angle');
+      expect(lv).not.toContain('user data');
+    }
+  });
+
   it('applies labels when present, falls back to slug otherwise', () => {
     const ranges = {
       Reflectance_dB: { min: [-20], max: [-5] },
@@ -727,5 +767,185 @@ describe('cloneFlatPointCloudData', () => {
     expect(copy.colors).toBeUndefined();
     expect(copy.intensities).toBeUndefined();
     expect(copy.scalarFields).toBeUndefined();
+  });
+});
+
+describe('computeDisplayOffset', () => {
+  it('returns zero per-axis when the center magnitude is below the threshold', () => {
+    expect(computeDisplayOffset({ x: 0, y: 0, z: 0 })).toEqual({ x: 0, y: 0, z: 0 });
+    expect(computeDisplayOffset({ x: 9999, y: -5000, z: 100 })).toEqual({ x: 0, y: 0, z: 0 });
+  });
+
+  it('rounds to the nearest integer for large axes (exact in float)', () => {
+    expect(computeDisplayOffset({ x: 545123.6, y: 4183000.4, z: 50 })).toEqual({
+      x: 545124,
+      y: 4183000,
+      z: 0, // below threshold
+    });
+  });
+
+  it('treats each axis independently and honors a custom threshold', () => {
+    expect(computeDisplayOffset({ x: 2e6, y: 3, z: -1.5e6 }, 1e4)).toEqual({
+      x: 2000000,
+      y: 0,
+      z: -1500000,
+    });
+    expect(computeDisplayOffset({ x: 500, y: 0, z: 0 }, 100)).toEqual({ x: 500, y: 0, z: 0 });
+  });
+
+  it('returns zero for non-finite centers (empty/degenerate scenes)', () => {
+    expect(computeDisplayOffset({ x: Infinity, y: NaN, z: 0 })).toEqual({ x: 0, y: 0, z: 0 });
+  });
+});
+
+describe('recenterPositions', () => {
+  it('returns the SAME array reference (zero copy) when offset is all-zero', () => {
+    const src = new Float32Array([1, 2, 3, 4, 5, 6]);
+    const out = recenterPositions(src, 2, { x: 0, y: 0, z: 0 });
+    expect(out).toBe(src); // identity — no allocation
+  });
+
+  it('subtracts the offset per axis into a fresh array', () => {
+    const src = new Float32Array([10, 20, 30, 40, 50, 60]);
+    const out = recenterPositions(src, 2, { x: 1, y: 2, z: 3 });
+    expect(out).not.toBe(src);
+    expect(Array.from(out)).toEqual([9, 18, 27, 39, 48, 57]);
+    expect(Array.from(src)).toEqual([10, 20, 30, 40, 50, 60]); // source untouched
+  });
+
+  it('recovers full precision when fed a FLOAT64 source (the QSM/skeleton builder path)', () => {
+    // The renderer builds QSM/skeleton vertices from float64 JSON node values
+    // into a JS number[] before the single float32 cast. Subtracting the offset
+    // on those float64 values (then casting once) lands the vertex in float32
+    // already small — recovering precision. recenterPositions models that when
+    // its input still carries the full-precision value (here we mimic the
+    // float64 source by subtracting before the float32 store).
+    const trueX = 512345.678901;
+    const recenteredF64 = trueX - 512000; // float64 subtraction (what the builder does)
+    const stored = new Float32Array([recenteredF64])[0]; // single float32 cast
+    const recovered = stored + 512000;
+    expect(Math.abs(recovered - trueX)).toBeLessThan(1e-3); // sub-mm
+  });
+
+  it('does NOT recover precision already lost in a float32 source (documents the limit)', () => {
+    // Flat-cloud positions arrive from the backend ALREADY float32-quantized.
+    // Re-centering such an array only fixes the SECONDARY error (a huge
+    // modelView translation / depth range), not the primary attribute
+    // quantization — the low bits are already gone. This test pins that reality
+    // so nobody assumes recenterPositions magically restores a float32 cloud.
+    const trueX = 512345.678901;
+    const f32src = new Float32Array([trueX, 0, 0]); // precision already lost here
+    const out = recenterPositions(f32src, 1, { x: 512000, y: 0, z: 0 });
+    const recovered = out[0] + 512000;
+    expect(Math.abs(recovered - trueX)).toBeCloseTo(Math.abs(f32src[0] - trueX), 6);
+  });
+});
+
+describe('worldToDisplay / displayToWorld', () => {
+  it('round-trips exactly', () => {
+    const offset = { x: 545000, y: 4183000, z: 0 };
+    const world = { x: 545123.5, y: 4182990.25, z: 12.75 };
+    const display = worldToDisplay(world, offset);
+    expect(display).toEqual({ x: 123.5, y: -9.75, z: 12.75 });
+    expect(displayToWorld(display, offset)).toEqual(world);
+  });
+});
+
+describe('displayViewToWorldView', () => {
+  // Build a world-space camera looking at a far-off UTM center, then move it
+  // into display space (position − offset, target − offset) exactly as the
+  // renderer does. The recovered world view matrix must reproject true-world
+  // points to the SAME pixels the display camera renders the offset points to.
+  const offset = { x: 545000, y: 4183000, z: 0 };
+  const worldCenter = new THREE.Vector3(545100, 4183050, 5);
+
+  function makeCameras() {
+    const proj = new THREE.PerspectiveCamera(50, 16 / 9, 0.1, 5000);
+    proj.updateProjectionMatrix();
+
+    // World camera: orbiting the true world center.
+    const camWorld = proj.clone() as THREE.PerspectiveCamera;
+    camWorld.position.set(worldCenter.x + 200, worldCenter.y - 200, worldCenter.z + 150);
+    camWorld.up.set(0, 0, 1);
+    camWorld.lookAt(worldCenter);
+    camWorld.updateMatrixWorld(true);
+
+    // Display camera: same orientation, position shifted by −offset.
+    const camDisp = proj.clone() as THREE.PerspectiveCamera;
+    camDisp.position.set(
+      worldCenter.x + 200 - offset.x,
+      worldCenter.y - 200 - offset.y,
+      worldCenter.z + 150 - offset.z,
+    );
+    camDisp.up.set(0, 0, 1);
+    camDisp.lookAt(worldCenter.x - offset.x, worldCenter.y - offset.y, worldCenter.z - offset.z);
+    camDisp.updateMatrixWorld(true);
+
+    return { proj, camWorld, camDisp };
+  }
+
+  it('recovers a world view that reprojects world points to the rendered pixels', () => {
+    const { proj, camDisp } = makeCameras();
+    const canvas = { width: 1920, height: 1080 };
+    const projArr = proj.projectionMatrix.toArray();
+
+    const vWorldRecovered = displayViewToWorldView(camDisp.matrixWorldInverse, offset).toArray();
+
+    // Sample several true-world points around the center.
+    const samples = [
+      { x: 545100, y: 4183050, z: 5 },
+      { x: 545130, y: 4183020, z: 18 },
+      { x: 545070, y: 4183090, z: -4 },
+    ];
+    for (const w of samples) {
+      // What the BACKEND will compute with the recovered world view:
+      const backendPix = projectWorldToCanvasPixel(w, projArr, vWorldRecovered, canvas);
+      // What the user actually SAW: the display camera projecting the offset point.
+      const seenPix = projectWorldToCanvasPixel(
+        worldToDisplay(w, offset),
+        projArr,
+        camDisp.matrixWorldInverse.toArray(),
+        canvas,
+      );
+      expect(backendPix).not.toBeNull();
+      expect(seenPix).not.toBeNull();
+      expect(backendPix!.x).toBeCloseTo(seenPix!.x, 2);
+      expect(backendPix!.y).toBeCloseTo(seenPix!.y, 2);
+    }
+  });
+
+  it('equals the independently-derived world camera view matrix', () => {
+    const { camWorld, camDisp } = makeCameras();
+    const recovered = displayViewToWorldView(camDisp.matrixWorldInverse, offset).toArray();
+    const expected = camWorld.matrixWorldInverse.toArray();
+    for (let i = 0; i < 16; i++) expect(recovered[i]).toBeCloseTo(expected[i], 4);
+  });
+
+  it('a wrong-sign offset does NOT reproject correctly (locks the sign in)', () => {
+    const { proj, camDisp } = makeCameras();
+    const canvas = { width: 1920, height: 1080 };
+    const projArr = proj.projectionMatrix.toArray();
+    // Negate the offset → wrong direction.
+    const wrong = displayViewToWorldView(camDisp.matrixWorldInverse, {
+      x: -offset.x,
+      y: -offset.y,
+      z: -offset.z,
+    }).toArray();
+    const w = { x: 545100, y: 4183050, z: 5 };
+    const backendPix = projectWorldToCanvasPixel(w, projArr, wrong, canvas);
+    const seenPix = projectWorldToCanvasPixel(
+      worldToDisplay(w, offset),
+      projArr,
+      camDisp.matrixWorldInverse.toArray(),
+      canvas,
+    );
+    // With the wrong sign the reprojection is off by ~2·offset in world →
+    // either way it must not match the rendered pixel.
+    const matches =
+      backendPix != null &&
+      seenPix != null &&
+      Math.abs(backendPix.x - seenPix.x) < 1 &&
+      Math.abs(backendPix.y - seenPix.y) < 1;
+    expect(matches).toBe(false);
   });
 });

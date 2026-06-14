@@ -332,3 +332,68 @@ jobs:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         run: npm run release
+
+      # ---------------- Verify macOS notarization ----------------
+      # The afterSign hook (scripts/notarize.cjs) *submits* to Apple but
+      # silently no-ops if any APPLE_* secret is missing or SKIP_NOTARIZATION
+      # is set — so a green "Build & publish" does NOT prove the artifacts are
+      # notarized. This step asserts it independently, failing the release
+      # rather than shipping a build that trips Gatekeeper on users' machines.
+      #
+      #   codesign --verify    — the .app is signed with a valid Developer ID
+      #                          chain under the hardened runtime.
+      #   spctl --assess       — Gatekeeper's own verdict; "accepted /
+      #                          source=Notarized Developer ID" is the goal.
+      #   stapler validate     — a notarization ticket is stapled to each .dmg
+      #                          (so first launch works offline, no Apple ping).
+      - name: Verify macOS notarization
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app=$(find release -maxdepth 2 -name '*.app' -type d | head -1)
+          if [ -z "$app" ]; then
+            echo "FAIL: no .app found under release/"
+            find release -maxdepth 2 -name '*.app' -o -name '*.dmg' || true
+            exit 1
+          fi
+          echo "Verifying: $app"
+
+          echo "== codesign --verify =="
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          echo "== codesign signing authority =="
+          # Must be signed by a Developer ID Application authority, not adhoc.
+          if ! codesign -dvv "$app" 2>&1 | grep -q "Authority=Developer ID Application"; then
+            echo "FAIL: .app is not signed with a Developer ID Application certificate"
+            codesign -dvv "$app" 2>&1 | grep -i "authority\|signature" || true
+            exit 1
+          fi
+
+          echo "== spctl --assess (Gatekeeper) =="
+          # --assess exits non-zero if Gatekeeper would reject it; capture the
+          # human-readable reason too. "source=Notarized Developer ID" confirms
+          # the notary ticket is recognized.
+          assess=$(spctl --assess --type execute --verbose=4 "$app" 2>&1)
+          echo "$assess"
+          if ! echo "$assess" | grep -q "source=Notarized Developer ID"; then
+            echo "FAIL: .app did not assess as Notarized Developer ID"
+            exit 1
+          fi
+
+          echo "== stapler validate (.app) =="
+          xcrun stapler validate "$app"
+
+          echo "== stapler validate (.dmg artifacts) =="
+          dmgs=$(find release -maxdepth 1 -name '*.dmg' | sort)
+          if [ -z "$dmgs" ]; then
+            echo "FAIL: no .dmg artifacts found to validate"
+            exit 1
+          fi
+          for dmg in $dmgs; do
+            echo "-- $dmg"
+            xcrun stapler validate "$dmg"
+          done
+
+          echo "PASS: macOS build is signed, notarized, and stapled."

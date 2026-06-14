@@ -87,6 +87,14 @@ export interface OctreePointCloudProps {
   // parent's React `<group position>`), so the group transform does NOT reach it
   // — we have to set the offset on the octree object itself. Defaults to origin.
   translation?: { x: number; y: number; z: number };
+  // Render-only display offset (Layer 2 precision safety net). The whole scene
+  // renders at (world − displayOffset) so large UTM coordinates land near the
+  // origin. The octree attaches to the scene root, so — like `translation` — the
+  // offset must be applied to pco.position directly. potree node-local positions
+  // are already small float32 (re-origined server-side before tiling), so this is
+  // a pure float64 placement: no buffer rewrite, no precision concern. Defaults
+  // to origin (small-coord scenes are unaffected).
+  displayOffset?: { x: number; y: number; z: number };
   // Fired once, the first time LOD tiles have actually streamed in for this
   // mount. The parent uses it to force a single fresh-material remount so a
   // cloud that mounted directly into a gradient colour mode recompiles its
@@ -141,6 +149,7 @@ export function OctreePointCloud({
   clipBox = null,
   clipBoxes = null,
   translation,
+  displayOffset,
   onFirstTilesReady,
   onOctreeReady,
 }: OctreePointCloudProps) {
@@ -164,6 +173,12 @@ export function OctreePointCloud({
   // tear down and reload the whole octree on every drag tick).
   const translationRef = useRef(translation);
   translationRef.current = translation;
+
+  // Same pattern for the render-only display offset, so the cacheId-keyed loader
+  // seeds the initial position with the offset already applied (no streaming jump)
+  // without reloading the octree when the offset recomputes.
+  const displayOffsetRef = useRef(displayOffset);
+  displayOffsetRef.current = displayOffset;
 
   // The position potree-core assigns the cloud at load time. PotreeConverter
   // stores points relative to a per-cloud offset (usually the bounding-box min),
@@ -196,11 +211,12 @@ export function OctreePointCloud({
         // drags the gizmo / types a value.
         basePositionRef.current.copy(pco.position);
         const t = translationRef.current;
-        if (t) {
+        const o = displayOffsetRef.current;
+        if (t || o) {
           pco.position.set(
-            basePositionRef.current.x + t.x,
-            basePositionRef.current.y + t.y,
-            basePositionRef.current.z + t.z,
+            basePositionRef.current.x + (t?.x ?? 0) - (o?.x ?? 0),
+            basePositionRef.current.y + (t?.y ?? 0) - (o?.y ?? 0),
+            basePositionRef.current.z + (t?.z ?? 0) - (o?.z ?? 0),
           );
         }
         scene.add(pco);
@@ -231,9 +247,9 @@ export function OctreePointCloud({
     // replace it (see basePositionRef).
     const base = basePositionRef.current;
     octree.position.set(
-      base.x + (translation?.x ?? 0),
-      base.y + (translation?.y ?? 0),
-      base.z + (translation?.z ?? 0),
+      base.x + (translation?.x ?? 0) - (displayOffset?.x ?? 0),
+      base.y + (translation?.y ?? 0) - (displayOffset?.y ?? 0),
+      base.z + (translation?.z ?? 0) - (displayOffset?.z ?? 0),
     );
     // E2E hook: expose the live octree's net translation (offset from its base
     // load position) keyed by cacheId. Tests assert on THIS (the three.js object
@@ -243,20 +259,29 @@ export function OctreePointCloud({
     const cacheId = data.octree?.cacheId;
     if (cacheId) {
       const reg = ((window as any).__octreePositions ??= {});
+      const off = displayOffset ?? { x: 0, y: 0, z: 0 };
       reg[cacheId] = {
-        // Net Translate offset (object position minus loader base).
+        // Net Translate offset (object position minus loader base AND with the
+        // render-only display offset added back, so this still reports purely the
+        // Translate-tool contribution regardless of the precision safety net).
         net: {
-          x: octree.position.x - base.x,
-          y: octree.position.y - base.y,
-          z: octree.position.z - base.z,
+          x: octree.position.x - base.x + off.x,
+          y: octree.position.y - base.y + off.y,
+          z: octree.position.z - base.z + off.z,
         },
-        // Absolute world position of the octree object (loader base + net), so a
-        // test can confirm an untranslated cloud renders at its true world spot
+        // True WORLD position of the octree object (display position + offset), so
+        // a test can confirm an untranslated cloud maps to its true world spot
         // rather than corner-slammed to the origin.
-        world: { x: octree.position.x, y: octree.position.y, z: octree.position.z },
+        world: {
+          x: octree.position.x + off.x,
+          y: octree.position.y + off.y,
+          z: octree.position.z + off.z,
+        },
+        // The render-only display offset in effect (0 for small-coord scenes).
+        displayOffset: { x: off.x, y: off.y, z: off.z },
       };
     }
-  }, [octree, translation?.x, translation?.y, translation?.z, data.octree?.cacheId]);
+  }, [octree, translation?.x, translation?.y, translation?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z, data.octree?.cacheId]);
 
   // Drop the E2E position hook for this cloud on unmount.
   useEffect(() => {
@@ -542,10 +567,13 @@ export function OctreePointCloud({
         clipBox.max.y - clipBox.min.y,
         clipBox.max.z - clipBox.min.z,
       );
+      // clipBox is in WORLD coords, but the octree renders at world − displayOffset
+      // (its pco.position carries −offset). potree clip volumes are world-space, so
+      // shift the box center into the same display frame the cloud renders in.
       const center = new THREE.Vector3(
-        (clipBox.min.x + clipBox.max.x) / 2,
-        (clipBox.min.y + clipBox.max.y) / 2,
-        (clipBox.min.z + clipBox.max.z) / 2,
+        (clipBox.min.x + clipBox.max.x) / 2 - (displayOffset?.x ?? 0),
+        (clipBox.min.y + clipBox.max.y) / 2 - (displayOffset?.y ?? 0),
+        (clipBox.min.z + clipBox.max.z) / 2 - (displayOffset?.z ?? 0),
       );
       const box = createClipBox(size, center);
       (m as any).setClipBoxes([box]);
@@ -564,7 +592,8 @@ export function OctreePointCloud({
       (m as any).clipMode = ClipMode.DISABLED;
     }
   }, [octree, materialVersion, clipBox?.min.x, clipBox?.min.y, clipBox?.min.z,
-       clipBox?.max.x, clipBox?.max.y, clipBox?.max.z, clipBox?.invert]);
+       clipBox?.max.x, clipBox?.max.y, clipBox?.max.z, clipBox?.invert,
+       displayOffset?.x, displayOffset?.y, displayOffset?.z]);
 
   // Live erase-brush preview. The brush paints camera-aligned, view-extruded
   // boxes (square cross-section); we hand their world→box transforms to the

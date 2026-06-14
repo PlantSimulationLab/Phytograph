@@ -72,8 +72,13 @@ test('triangulation uses overwritten synthetic data, not the stale source file',
 
     // ── 4. Run the synthetic scan, overwriting the coarse imported data ───
     await page.getByTestId('run-synthetic-scan').click();
-    // Four scanners already carry imported data → the overwrite/duplicate
-    // prompt appears. Choose Overwrite (the path the bug lived on).
+    // The Synthetic Scan Options popup opens first — accept defaults and run.
+    const scanOptions = page.getByTestId('synthetic-scan-options-popup');
+    await expect(scanOptions).toBeVisible();
+    await page.getByTestId('scan-opt-run').click();
+    await expect(scanOptions).not.toBeVisible();
+    // Then, because four scanners already carry imported data, the
+    // overwrite/duplicate prompt appears. Choose Overwrite (the bug's path).
     await page.getByTestId('scan-overwrite-replace').click();
 
     // The scan-complete toast confirms the synthetic scan ran and wrote hits.

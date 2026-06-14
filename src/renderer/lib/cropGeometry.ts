@@ -127,18 +127,40 @@ export function worldBoundsUnion(
 // Convenience: build a polygon region from a live three.js camera. The
 // camera's matrices are snapshotted into plain arrays so the region
 // stays valid after the camera moves.
+//
+// `displayOffset` (Layer 2 precision safety net): the live camera renders in
+// DISPLAY space (world − offset), but the backend reprojects TRUE WORLD
+// positions through the frozen `view` matrix. So we convert the display view
+// V_disp into the world view V_world = V_disp · T(−offset) before freezing it.
+// The projection matrix is unaffected by the uniform translation (it consumes
+// only eye space) and is frozen as-is. Pass {0,0,0} (the default) for
+// small-coord scenes — then V_world === V_disp and nothing changes.
 export function polygonRegionFromCamera(
   points: Vec2[],
   camera: THREE.Camera,
   canvasSize: CanvasSize,
   invert: boolean,
+  displayOffset: Vec3 = { x: 0, y: 0, z: 0 },
 ): CropPolygonRegion {
   camera.updateMatrixWorld();
+  const view =
+    displayOffset.x === 0 && displayOffset.y === 0 && displayOffset.z === 0
+      ? camera.matrixWorldInverse.toArray()
+      : camera.matrixWorldInverse
+          .clone()
+          .multiply(
+            new THREE.Matrix4().makeTranslation(
+              -displayOffset.x,
+              -displayOffset.y,
+              -displayOffset.z,
+            ),
+          )
+          .toArray();
   return {
     mode: 'polygon',
     points: points.map((p) => ({ x: p.x, y: p.y })),
     projection: camera.projectionMatrix.toArray(),
-    view: camera.matrixWorldInverse.toArray(),
+    view,
     canvasSize: { width: canvasSize.width, height: canvasSize.height },
     invert,
   };

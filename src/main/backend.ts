@@ -64,6 +64,15 @@ export function setBackendWindowGetter(getter: () => BrowserWindow | null): void
   getMainWindow = getter;
 }
 
+// Called when the sidecar exhausts its restart budget ('failed'). main.ts wires
+// this to the native crash dialog. Kept as a callback so the supervisor stays
+// decoupled from the dialog/UI module.
+let onBackendFailed: () => void = () => {};
+
+export function setBackendFailedHandler(handler: () => void): void {
+  onBackendFailed = handler;
+}
+
 function emitBackendStatus(payload: BackendStatusPayload): void {
   try {
     getMainWindow()?.webContents.send(IPC.BackendStatus, payload);
@@ -294,6 +303,7 @@ function handleUnexpectedExit(binPath: string, port: number): void {
   if (restartAttempts >= MAX_RESTART_ATTEMPTS) {
     console.error(`[Backend] crashed and exhausted ${MAX_RESTART_ATTEMPTS} restart attempts; giving up.`);
     emitBackendStatus({ status: 'failed', port });
+    onBackendFailed();
     return;
   }
   const delay = RESTART_BACKOFF_MS[Math.min(restartAttempts, RESTART_BACKOFF_MS.length - 1)];
@@ -307,6 +317,7 @@ function handleUnexpectedExit(binPath: string, port: number): void {
     if (!existsSync(binPath)) {
       console.error(`[Backend] binary missing at ${binPath}; cannot respawn.`);
       emitBackendStatus({ status: 'failed', port });
+      onBackendFailed();
       return;
     }
     spawnChild(binPath, port);

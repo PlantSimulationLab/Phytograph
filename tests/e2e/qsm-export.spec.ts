@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
+import { stubOpenDialog } from './helpers/stubOpenDialog';
 
 const TREE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 
@@ -26,15 +27,10 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
   try {
     await expect(page.getByTestId('backend-splash')).toHaveCount(0, { timeout: 60_000 });
 
-    // Redirect the main-process directory picker to our tmp dir. This is the
-    // native dialog only — every other step (import, build, format choice,
-    // write) runs for real.
-    await app.evaluate(({ dialog }, dir) => {
-      dialog.showOpenDialog = async () =>
-        ({ canceled: false, filePaths: [dir] }) as Electron.OpenDialogReturnValue;
-    }, outDir);
-
-    // Import a tree and build a QSM through the real UI.
+    // Import a tree and build a QSM through the real UI. (importFiles installs
+    // its own one-shot `dialog:open` handler for the import file picker, which
+    // returns null on any later call — so the export's folder picker is stubbed
+    // separately, AFTER the import, just before the export step below.)
     await importFiles(app, page, 'import-point-cloud', [TREE]);
     await completeImportWizard(page);
 
@@ -52,6 +48,21 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
     await expect(qsmRow).toHaveCount(1, { timeout: 120_000 });
     const cylinderCount = parseInt((await qsmRow.first().getAttribute('data-cylinder-count'))!, 10);
     expect(cylinderCount).toBeGreaterThan(10);
+
+    // Now redirect the export's folder picker to our tmp dir. stubOpenDialog
+    // replaces the `dialog:open` handler (overriding importFiles' exhausted
+    // one-shot), and the export handler reads back the returned path as the
+    // folder. stubOpenDialog seeds the allowlist as a *file* though, whereas the
+    // real `dialog:open` handler authorizes a chosen *directory* for writes
+    // (allowPath(dir, 'directory')) — so authorize the export folder for writes
+    // the same way, or the real `fs.writeText` into it is denied and the export
+    // silently bails (panel stays open).
+    await stubOpenDialog(app, outDir);
+    await app.evaluate((_electron, dir) => {
+      (globalThis as unknown as {
+        __phytographAllowPath?: (p: string, kind?: 'file' | 'saveFile' | 'directory') => void;
+      }).__phytographAllowPath?.(dir, 'directory');
+    }, outDir);
 
     // --- Open the export dialog ---
     await page.getByTestId('qsm-export-open').click();

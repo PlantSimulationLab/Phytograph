@@ -70,6 +70,13 @@ test('generates a plant, scans it, and a point cloud appears', async () => {
     await expect(scanButton).toBeVisible();
     await scanButton.click();
 
+    // The Synthetic Scan Options popup opens before the scan runs (noise,
+    // misses, full-waveform tuning). Accept the defaults and run.
+    const scanOptions = page.getByTestId('synthetic-scan-options-popup');
+    await expect(scanOptions).toBeVisible();
+    await page.getByTestId('scan-opt-run').click();
+    await expect(scanOptions).not.toBeVisible();
+
     // ── 4. Point data must land ON THE SCANNER'S OWN ROW ─────────────────
     // The synthetic scan writes hits back into the scanner scan in place — no
     // new params-less cloud. The "overhead" row keeps its params AND gains data.

@@ -683,19 +683,49 @@ CURATED_LEAF_TEXTURES: List[str] = [
 
 
 def _plantarch_texture_dir() -> Path:
-    """Resolve the plantarchitecture textures directory (dev + bundled)."""
+    """Resolve the plantarchitecture textures directory (dev + bundled).
+
+    The PyInstaller bundle collects PyHelios assets under
+    ``pyhelios/assets/build/plugins/...`` (the wheel layout), NOT the
+    ``pyhelios/helios-core/plugins/...`` source layout — and the frozen ``qsm``
+    package has no real on-disk ``__file__`` to walk up from. So ask PyHelios's
+    own asset manager for the build directory first (it already resolves dev,
+    wheel, and frozen layouts), then fall back to source-tree guesses.
+    """
+    candidates: list[Path] = []
+
+    # PRIORITY 1: PyHelios asset manager — the single source of truth for where
+    # the collected assets live, correct in the frozen bundle and the dev wheel.
+    try:
+        from pyhelios.assets import get_asset_manager
+
+        build_path = get_asset_manager()._get_helios_build_path()
+        if build_path:
+            candidates.append(
+                Path(build_path)
+                / "plugins"
+                / "plantarchitecture"
+                / "assets"
+                / "textures"
+            )
+    except Exception:
+        # Asset manager unavailable (e.g. PyHelios import issue) — fall through
+        # to the source-tree guesses below rather than failing hard.
+        pass
+
+    # PRIORITY 2: source-tree layout, for a plain `python main.py` from the repo.
     # qsm/leaves.py -> backend-api/ -> repo root has pyhelios/...
     here = Path(__file__).resolve()
-    candidates = [
+    candidates.append(
         here.parent.parent.parent
         / "pyhelios"
         / "helios-core"
         / "plugins"
         / "plantarchitecture"
         / "assets"
-        / "textures",
-    ]
-    # Bundled layout: pyhelios collected next to the binary; search a couple ups.
+        / "textures"
+    )
+    # Bundled-ish layout: pyhelios collected next to the binary; search a few ups.
     for up in (here.parent.parent, here.parent.parent.parent.parent):
         candidates.append(
             up
@@ -706,6 +736,7 @@ def _plantarch_texture_dir() -> Path:
             / "assets"
             / "textures"
         )
+
     for c in candidates:
         if c.is_dir():
             return c

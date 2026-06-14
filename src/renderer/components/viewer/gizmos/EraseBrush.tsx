@@ -10,6 +10,12 @@ export interface EraseBrushProps {
   isErasing: boolean;
   cloudData: PointCloudData;
   cloudTranslation: { x: number; y: number; z: number };
+  // Render-only display offset (Layer 2). The brush works entirely in DISPLAY
+  // space (the scene + camera live there): points are reconstructed at
+  // (position + translation − displayOffset) so the display-camera ray and the
+  // brush indicator line up. The erased INDICES are offset-invariant, so the
+  // output is unchanged. Defaults to origin.
+  displayOffset?: { x: number; y: number; z: number };
   alreadyErasedIndices: Set<number>;
   onErase: (indicesToErase: Set<number>) => void;
   onBrushPositionChange: (position: THREE.Vector3 | null) => void;
@@ -18,8 +24,11 @@ export interface EraseBrushProps {
   setIsErasing: (value: boolean) => void;
 }
 
-export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, cloudTranslation, alreadyErasedIndices, onErase, onBrushPositionChange, onEraseStart, onEraseEnd, setIsErasing }: EraseBrushProps) {
+export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, cloudTranslation, displayOffset, alreadyErasedIndices, onErase, onBrushPositionChange, onEraseStart, onEraseEnd, setIsErasing }: EraseBrushProps) {
   const { camera, gl, size, raycaster } = useThree();
+  const offX = displayOffset?.x ?? 0;
+  const offY = displayOffset?.y ?? 0;
+  const offZ = displayOffset?.z ?? 0;
 
   // Update brush position based on mouse movement
   useEffect(() => {
@@ -52,9 +61,9 @@ export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, clo
         if (alreadyErasedIndices.has(i)) continue;
 
         const point = new THREE.Vector3(
-          cloudData.positions[i * 3] + cloudTranslation.x,
-          cloudData.positions[i * 3 + 1] + cloudTranslation.y,
-          cloudData.positions[i * 3 + 2] + cloudTranslation.z
+          cloudData.positions[i * 3] + cloudTranslation.x - offX,
+          cloudData.positions[i * 3 + 1] + cloudTranslation.y - offY,
+          cloudData.positions[i * 3 + 2] + cloudTranslation.z - offZ
         );
 
         // Perpendicular distance from the point to the ray.
@@ -79,9 +88,9 @@ export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, clo
       let brushAnchor = closestPoint;
       if (!brushAnchor) {
         const center = new THREE.Vector3(
-          cloudData.bounds.center.x + cloudTranslation.x,
-          cloudData.bounds.center.y + cloudTranslation.y,
-          cloudData.bounds.center.z + cloudTranslation.z
+          cloudData.bounds.center.x + cloudTranslation.x - offX,
+          cloudData.bounds.center.y + cloudTranslation.y - offY,
+          cloudData.bounds.center.z + cloudTranslation.z - offZ
         );
         const camToCenter = center.distanceTo(camera.position);
         brushAnchor = raycaster.ray.at(camToCenter, new THREE.Vector3());
@@ -98,9 +107,9 @@ export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, clo
           if (alreadyErasedIndices.has(i)) continue;
 
           const point = new THREE.Vector3(
-            cloudData.positions[i * 3] + cloudTranslation.x,
-            cloudData.positions[i * 3 + 1] + cloudTranslation.y,
-            cloudData.positions[i * 3 + 2] + cloudTranslation.z
+            cloudData.positions[i * 3] + cloudTranslation.x - offX,
+            cloudData.positions[i * 3 + 1] + cloudTranslation.y - offY,
+            cloudData.positions[i * 3 + 2] + cloudTranslation.z - offZ
           );
           if (point.distanceTo(closestPoint) < brushSize) {
             indicesToErase.add(i);
@@ -139,7 +148,7 @@ export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, clo
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [camera, gl, size, raycaster, cloudData, cloudTranslation, brushSize, isErasing, alreadyErasedIndices, onErase, onBrushPositionChange, onEraseStart, onEraseEnd, setIsErasing]);
+  }, [camera, gl, size, raycaster, cloudData, cloudTranslation, offX, offY, offZ, brushSize, isErasing, alreadyErasedIndices, onErase, onBrushPositionChange, onEraseStart, onEraseEnd, setIsErasing]);
 
   if (!brushPosition) return null;
 

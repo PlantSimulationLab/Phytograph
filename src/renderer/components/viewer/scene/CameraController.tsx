@@ -12,7 +12,18 @@ export function CameraController({
   bounds,
   hasContent,
   enabled = true,
-}: { bounds: PointCloudData['bounds']; hasContent: boolean; enabled?: boolean }) {
+  displayOffset,
+}: {
+  bounds: PointCloudData['bounds'];
+  hasContent: boolean;
+  enabled?: boolean;
+  // Render-only display offset (Layer 2). `bounds` is in WORLD space (it is also
+  // the gizmo/crop source of truth and must stay world); the camera and orbit
+  // target live in DISPLAY space (world − offset) so they're small near huge UTM
+  // coordinates. We convert world bounds centers to display space only at the
+  // points where we write camera.position / controls.target. Defaults to origin.
+  displayOffset?: { x: number; y: number; z: number };
+}) {
   const { camera } = useThree();
   const controlsRef = useRef<any>(null);
   const initializedRef = useRef(false);
@@ -21,11 +32,23 @@ export function CameraController({
   // Keep bounds ref updated for snap functions (but don't trigger camera changes)
   boundsRef.current = bounds;
 
+  // Live display offset in a ref so the memoized snap/frame callbacks read the
+  // current value without being torn down each time it recomputes.
+  const offsetRef = useRef(displayOffset);
+  offsetRef.current = displayOffset;
+  const displayCenter = useCallback((c: THREE.Vector3): THREE.Vector3 => {
+    const o = offsetRef.current;
+    return o ? new THREE.Vector3(c.x - o.x, c.y - o.y, c.z - o.z) : c.clone();
+  }, []);
+
   const snapToView = useCallback((direction: ViewDirection, target?: { center: THREE.Vector3, size: THREE.Vector3 }) => {
     if (!controlsRef.current) return;
 
-    // Use provided target or fall back to global bounds
-    const { center, size } = target || boundsRef.current;
+    // Use provided target or fall back to global bounds. Both are WORLD-space;
+    // convert the center to DISPLAY space (world − offset) since the camera and
+    // orbit target render in display space.
+    const { center: worldCenter, size } = target || boundsRef.current;
+    const center = displayCenter(worldCenter);
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const distance = maxDim * 2;
 
@@ -70,7 +93,7 @@ export function CameraController({
     camera.position.copy(newPos);
     controlsRef.current.target.copy(center);
     controlsRef.current.update();
-  }, [camera]);
+  }, [camera, displayCenter]);
 
   // Rotate the view to look straight down a world axis WITHOUT reframing.
   // Unlike snapToView (which recomputes distance from bounds and re-zooms),
@@ -112,7 +135,8 @@ export function CameraController({
   const frameSelection = useCallback((target?: { center: THREE.Vector3; size: THREE.Vector3 }) => {
     if (!controlsRef.current) return;
     const controls = controlsRef.current;
-    const { center, size } = target || boundsRef.current;
+    const { center: worldCenter, size } = target || boundsRef.current;
+    const center = displayCenter(worldCenter);
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const distance = maxDim * 2;
 
@@ -124,7 +148,7 @@ export function CameraController({
     camera.position.copy(center).addScaledVector(dir, distance);
     controls.target.copy(center);
     controls.update();
-  }, [camera]);
+  }, [camera, displayCenter]);
 
   // Initialize camera once on mount - fixed position, not dependent on bounds
   useEffect(() => {
@@ -185,6 +209,12 @@ export function CameraController({
         min: [boundsRef.current.min.x, boundsRef.current.min.y, boundsRef.current.min.z],
         max: [boundsRef.current.max.x, boundsRef.current.max.y, boundsRef.current.max.z],
       },
+      // Render-only display offset in effect (world − offset = display). camera
+      // position/target above are in DISPLAY space; bounds is WORLD space. A test
+      // reconciles them via this offset. Zero for small-coord scenes.
+      displayOffset: offsetRef.current
+        ? [offsetRef.current.x, offsetRef.current.y, offsetRef.current.z]
+        : [0, 0, 0],
     });
     return () => {
       delete (window as any).__resetPointCloudCamera;

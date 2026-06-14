@@ -70,6 +70,29 @@ dropdowns in; you correct anything that's wrong before importing:
 - **Rename fields** — a column set to **Scalar** or **Label** shows a name
   box under its dropdown; the name you give it is what appears later in the
   color-by picker.
+- **Global shift** — scans in a projected coordinate system (UTM, state plane)
+  carry very large coordinates — hundreds of thousands to millions of metres
+  from the meridian/equator. The wizard offers a **Global shift**: a checkbox
+  plus X / Y / Z fields, pre-filled with a suggested offset when the data's
+  coordinates are large. Leaving it **on** subtracts the offset at import so the
+  stored cloud sits near the origin; the offset is remembered, so **exports
+  recover the original world coordinates** automatically. This is the
+  CloudCompare-style "global shift" — convenient when you want small, readable
+  coordinates. Turning it **off keeps the original large coordinates** — and
+  that's perfectly fine to do: the viewer renders large-coordinate scenes
+  cleanly either way (see the note below). Z defaults to 0/off, matching the
+  common case where only the horizontal coordinates are large.
+
+!!! note "Large coordinates render cleanly with or without a shift"
+    The 3D viewport stores positions in 32-bit floats, which lose precision at
+    UTM magnitudes (~5 cm at 500,000 m) — historically this made the ground grid
+    kink or vanish and QSM/skeleton meshes flicker. The viewer now applies an
+    automatic, render-only offset that draws every scene near the origin
+    regardless of the stored coordinates' magnitude. It never changes your data,
+    exports, or any measurement — so you can **keep large coordinates** and still
+    get a clean grid and flicker-free meshes. The global shift above and this
+    automatic rendering offset are independent: the shift changes what's
+    *stored*; the rendering offset changes only what's *drawn*.
 
 For `.ply`, `.pcd`, `.las`, and `.laz`, the column layout is defined inside
 the file, so X/Y/Z and color roles can't be reassigned — but you can still

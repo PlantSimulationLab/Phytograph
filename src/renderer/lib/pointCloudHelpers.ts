@@ -38,6 +38,98 @@ export function roundCoord3(
   };
 }
 
+// ── Render-only display offset (Layer 2 precision safety net) ──────────────
+//
+// Projected/UTM scans carry huge coordinates (5e5–1e6+ m). float32 has ~24
+// mantissa bits, so at magnitude 5e5 the representable spacing is ~6 cm — and
+// vertex BufferAttributes are float32. The grid kinks and QSM/skeleton/triangle
+// meshes z-fight because the *vertex data itself* is already quantized the
+// moment it lands in the Float32Array, before any matrix is applied. Merely
+// translating the object via a float64 `.position` does NOT recover those lost
+// bits.
+//
+// The fix is a render-only `displayOffset`: an INTEGER per-axis offset near the
+// scene center. We subtract it from the owned vertex buffers (so the stored
+// float32 values are small, ~30 µm spacing) and from the camera (so the image
+// is unchanged), then ADD IT BACK at every boundary where a coordinate is shown
+// to the user or sent to the backend — exports/payloads stay in true world
+// space. `displayOffset` is transient and render-only; it is conceptually
+// distinct from a cloud's persistent `worldShift` (world = stored + worldShift).
+
+export type Vec3Like = { x: number; y: number; z: number };
+
+// Per axis: 0 when |center| is below `threshold` (small-coord scenes are a
+// complete no-op — buffers shared uncopied, image identical), else the rounded
+// integer nearest the center. Integers are exact in float32/float64, so the
+// offset is stable across recomputes and never reintroduces fractional error.
+export function computeDisplayOffset(
+  worldCenter: Vec3Like,
+  threshold = 1e4,
+): { x: number; y: number; z: number } {
+  const pick = (c: number) =>
+    !isFinite(c) || Math.abs(c) < threshold ? 0 : Math.round(c);
+  return { x: pick(worldCenter.x), y: pick(worldCenter.y), z: pick(worldCenter.z) };
+}
+
+// Subtract `offset` from interleaved [x,y,z,...] positions to move them into
+// display space. When the offset is all-zero the source array is returned
+// UNCHANGED (zero copy — preserves the shared-buffer memory model that keeps
+// big flat clouds off the heap twice).
+//
+// PRECISION NOTE: this only RECOVERS precision when `src` still carries the
+// full-precision value. Flat-cloud positions arrive from the backend ALREADY
+// float32-quantized (the float64→float32 cast happens server-side in
+// `_pack_pointcloud_response`), so re-centering them here cannot restore the
+// lost low bits — it only fixes the SECONDARY error (a huge modelView
+// translation column / depth-buffer range), which still meaningfully reduces
+// shimmer. The PRIMARY fix for renderer-built geometry (QSM/skeleton, whose
+// vertices are computed from float64 JSON into a number[] before the single
+// float32 cast) is to subtract the offset on that float64 path, where it lands
+// the vertex small BEFORE quantization. See QSM3D.appendTube / Skeleton3D.
+export function recenterPositions(
+  src: Float32Array,
+  count: number,
+  offset: Vec3Like,
+): Float32Array {
+  if (offset.x === 0 && offset.y === 0 && offset.z === 0) return src;
+  const out = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    out[i * 3] = src[i * 3] - offset.x;
+    out[i * 3 + 1] = src[i * 3 + 1] - offset.y;
+    out[i * 3 + 2] = src[i * 3 + 2] - offset.z;
+  }
+  return out;
+}
+
+// World↔display scalar point conversion (display = world − offset).
+export function worldToDisplay(p: Vec3Like, offset: Vec3Like): { x: number; y: number; z: number } {
+  return { x: p.x - offset.x, y: p.y - offset.y, z: p.z - offset.z };
+}
+export function displayToWorld(p: Vec3Like, offset: Vec3Like): { x: number; y: number; z: number } {
+  return { x: p.x + offset.x, y: p.y + offset.y, z: p.z + offset.z };
+}
+
+// Convert a display-space view matrix (the live offset camera's
+// matrixWorldInverse) into the WORLD-space view matrix the backend needs.
+//
+// The scene renders a world point p at p − offset, and the display camera's
+// view V_disp maps display points to eye space, so V_disp · (p − offset) is the
+// eye-space position the user actually saw. The backend reprojects TRUE WORLD
+// positions p through the frozen view, so it needs V_world with
+// V_world · p == V_disp · (p − offset), i.e.
+//   V_world = V_disp · T(−offset)
+// (right-multiply by a translation of −offset). The projection matrix is
+// unaffected by a uniform translation of geometry + camera (it consumes only
+// eye space), so it is frozen and sent unchanged.
+export function displayViewToWorldView(
+  vDisp: THREE.Matrix4,
+  offset: Vec3Like,
+): THREE.Matrix4 {
+  return vDisp
+    .clone()
+    .multiply(new THREE.Matrix4().makeTranslation(-offset.x, -offset.y, -offset.z));
+}
+
 // Compute bounding box center and size from interleaved [x,y,z,...] positions
 export function computeBoundsFromPositions(positions: Float32Array, count: number) {
   const min = new THREE.Vector3(Infinity, Infinity, Infinity);
@@ -477,9 +569,23 @@ export function fuzzyMatch(query: string, text: string): number {
 // to the picker is the whole point of the fix. Compared case-insensitively.
 // PotreeConverter 2.x can emit position/colour with spaces ('rgb', 'position');
 // the potree-core decoder uses the squashed forms — list both spellings.
+//
+// PotreeConverter also writes LAS standard point dimensions (return number,
+// scan angle rank, gps-time, …) even when the source is a plain XYZ with no such
+// data — they come through degenerate (all-zero). These are sensor/schema
+// plumbing, not user-meaningful scalars, so they must NOT appear in the
+// colour-by picker. Names are PotreeConverter's exact spellings (spaces and the
+// hyphen in 'gps-time'); the filter lowercases before comparing.
+//
+// NOTE: 'classification' is intentionally NOT filtered — it's a real LAS dim a
+// user may have segmented (ground/wood/leaf), so it stays selectable.
 const OCTREE_BUILTIN_ATTRIBUTES = new Set([
   'position', 'rgb', 'rgba', 'color', 'intensity',
   'normal', 'indices', 'spacing',
+  // LAS sensor/schema dimensions PotreeConverter always emits (degenerate for
+  // non-LAS sources); never user-meaningful as a colour-by field.
+  'return number', 'number of returns',
+  'scan angle rank', 'user data', 'point source id', 'gps-time',
 ]);
 
 // Derive the selectable scalar-field options for an octree-backed cloud from

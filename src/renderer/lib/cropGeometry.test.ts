@@ -170,4 +170,63 @@ describe('polygonRegionFromCamera', () => {
     expect(pixel!.x).toBeCloseTo(200, 1);
     expect(pixel!.y).toBeCloseTo(150, 1);
   });
+
+  it('bakes the display offset into a WORLD view (Layer 2 precision safety net)', () => {
+    // Simulate the renderer: a world camera looking at a far UTM center, moved
+    // into display space by −offset. polygonRegionFromCamera must emit a view
+    // that reprojects TRUE WORLD points to the same pixels the display camera
+    // renders the offset points to.
+    const offset = { x: 545000, y: 4183000, z: 0 };
+    const worldCenter = new THREE.Vector3(545100, 4183050, 5);
+    const cam = new THREE.PerspectiveCamera(50, 4 / 3, 0.1, 5000);
+    cam.up.set(0, 0, 1);
+    cam.position.set(
+      worldCenter.x + 200 - offset.x,
+      worldCenter.y - 200 - offset.y,
+      worldCenter.z + 150 - offset.z,
+    );
+    cam.lookAt(worldCenter.x - offset.x, worldCenter.y - offset.y, worldCenter.z - offset.z);
+    cam.updateMatrixWorld(true);
+
+    const canvas = { width: 800, height: 600 };
+    const region = polygonRegionFromCamera(
+      [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 50, y: 100 }],
+      cam,
+      canvas,
+      false,
+      offset,
+    );
+
+    // A true-world point reprojected with the emitted (world) view must match
+    // the same point's display projection through the live camera.
+    const world = { x: 545100, y: 4183050, z: 5 };
+    const backendPix = projectWorldToCanvasPixel(world, region.projection, region.view, canvas);
+    const seenPix = projectWorldToCanvasPixel(
+      { x: world.x - offset.x, y: world.y - offset.y, z: world.z - offset.z },
+      cam.projectionMatrix.toArray(),
+      cam.matrixWorldInverse.toArray(),
+      canvas,
+    );
+    expect(backendPix).not.toBeNull();
+    expect(seenPix).not.toBeNull();
+    expect(backendPix!.x).toBeCloseTo(seenPix!.x, 2);
+    expect(backendPix!.y).toBeCloseTo(seenPix!.y, 2);
+  });
+
+  it('is a no-op for a zero offset (view equals the live camera view)', () => {
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
+    cam.up.set(0, 0, 1);
+    cam.position.set(0, -10, 0);
+    cam.lookAt(0, 0, 0);
+    cam.updateMatrixWorld(true);
+    const region = polygonRegionFromCamera(
+      [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 1, y: 2 }],
+      cam,
+      { width: 100, height: 100 },
+      false,
+      { x: 0, y: 0, z: 0 },
+    );
+    const live = cam.matrixWorldInverse.toArray();
+    for (let i = 0; i < 16; i++) expect(region.view[i]).toBeCloseTo(live[i], 6);
+  });
 });

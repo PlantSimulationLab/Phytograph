@@ -55,3 +55,35 @@ It does **not** contain the contents of your scans or point clouds, but it
 **may include file names and paths** (which can contain your user name) for the
 files you opened. You can open it in any text editor to review — and edit — it
 before attaching. Untick the box if you'd rather not include it.
+
+## If the app crashes
+
+Some failures are too severe for the normal interface to recover from on its own
+— the display engine can stop unexpectedly, or the Python compute backend can
+fail to restart. When that happens, Phytograph shows a **crash dialog** instead
+of leaving you with a blank window:
+
+- **Reload** — restarts the part that crashed in place and tries to bring the
+  app back without a full relaunch. (Your imported data lives in memory and is
+  lost in a crash, so you'll need to re-import after reloading.)
+- **View Logs** — writes the combined session log and opens the folder with it
+  selected. This is the log that's actually useful for diagnosing the crash —
+  not the cryptic system crash-dump files your operating system may also leave in
+  a temporary folder.
+- **Report** — opens a pre-filled bug report (GitHub, or email if you have no
+  GitHub account) with the crash details and the log already written for you to
+  attach, exactly like the [Attaching logs](#attaching-logs) flow above.
+- **Quit** — closes Phytograph cleanly, shutting down the backend.
+
+If a reload keeps crashing, use **Report** to send the log, then **Quit** and
+relaunch.
+
+### When the whole app closes unexpectedly
+
+Some crashes take the entire application down at once — there's no chance to show
+a dialog while it's happening. Phytograph still notices: the next time you launch
+it, if the previous session didn't shut down cleanly, it shows a **"closed
+unexpectedly"** dialog with the same **View Logs** and **Report** options. When
+the operating system managed to capture a crash report, it's revealed alongside
+the log so you can attach both. You can dismiss this and keep working — it's just
+letting you know, and offering to help you report it.

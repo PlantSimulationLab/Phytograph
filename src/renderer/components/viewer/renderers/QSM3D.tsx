@@ -27,6 +27,12 @@ export interface QSM3DProps {
   opacity?: number;
   /** number of sides of each cross-section ring (more = rounder, costlier). */
   radialSegments?: number;
+  /**
+   * Render-only display offset (Layer 2 precision safety net). Subtracted from
+   * tube vertices at build time (float64) so large UTM coordinates render near
+   * the origin without z-fighting. Defaults to origin.
+   */
+  displayOffset?: { x: number; y: number; z: number };
 }
 
 // Rank palette: trunk (0) dark/woody -> outward orders brighten. Index by rank,
@@ -172,7 +178,16 @@ export function appendTube(
   nodes: THREE.Vector3[],
   radii: number[],
   colorPerNode: THREE.Color[],
-  n: number
+  n: number,
+  // Render-only display offset (Layer 2). QSM nodes come from float64 JSON, and
+  // arrays.positions is a float64 number[] until a single Float32 cast — so
+  // subtracting the offset HERE, before the cast, lands vertices small in float64
+  // and genuinely RECOVERS precision (this is the real fix for QSM tube
+  // z-fighting at UTM magnitudes, unlike flat clouds whose buffers are already
+  // float32). Defaults to origin (small-coord scenes unaffected). The frame
+  // (axial/radial directions) is offset-invariant — only the emitted vertex
+  // positions shift.
+  offset: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 }
 ): void {
   const m = nodes.length;
   if (m < 2) return;
@@ -239,9 +254,9 @@ export function appendTube(
       const ny = c * radial[i].y + s * orthogonal.y;
       const nz = c * radial[i].z + s * orthogonal.z;
       arrays.positions.push(
-        nodes[i].x + r * nx,
-        nodes[i].y + r * ny,
-        nodes[i].z + r * nz
+        nodes[i].x + r * nx - offset.x,
+        nodes[i].y + r * ny - offset.y,
+        nodes[i].z + r * nz - offset.z
       );
       arrays.normals.push(nx, ny, nz);
       arrays.colors.push(col.r, col.g, col.b);
@@ -268,7 +283,11 @@ export function QSM3D({
   colorMode = 'rank',
   opacity = 1.0,
   radialSegments = 8,
+  displayOffset,
 }: QSM3DProps) {
+  const offX = displayOffset?.x ?? 0;
+  const offY = displayOffset?.y ?? 0;
+  const offZ = displayOffset?.z ?? 0;
   const geometry = useMemo(() => {
     if (!cylinders || cylinders.length === 0) return null;
     if (!shoots || shoots.length === 0) return null;
@@ -290,7 +309,7 @@ export function QSM3D({
       const m = poly.nodes.length;
       if (m < 2) continue; // a 1-cylinder shoot still yields M=2
       const colorPerNode = shootNodeColors(poly, colorMode, m);
-      appendTube(arrays, poly.nodes, poly.radii, colorPerNode, n);
+      appendTube(arrays, poly.nodes, poly.radii, colorPerNode, n, { x: offX, y: offY, z: offZ });
     }
 
     if (arrays.positions.length === 0) return null;
@@ -303,7 +322,7 @@ export function QSM3D({
     return geo;
     // opacity is intentionally NOT a dep: it affects only the material (its own
     // useMemo), so including it would force a needless geometry rebuild.
-  }, [cylinders, shoots, colorMode, radialSegments]);
+  }, [cylinders, shoots, colorMode, radialSegments, offX, offY, offZ]);
 
   const material = useMemo(() => {
     const mat = new THREE.MeshStandardMaterial({

@@ -84,6 +84,24 @@ dimensions.
 colour on the recovered sky/miss points is set to black. Other E57 per-point
 fields beyond position, intensity, and colour are not yet preserved.
 
+### Large / projected coordinates
+
+Scans in a projected coordinate reference (UTM, state plane) have coordinates
+hundreds of thousands to millions of metres from the meridian/equator. Two
+features keep these usable:
+
+- **Global shift** (at import, optional, persistent) — the import wizard can
+  subtract a per-axis offset so the **stored** cloud sits near the origin, and
+  remembers the offset so **exports recover the original world coordinates**.
+  CloudCompare-style; suggested automatically when coordinates are large. See
+  [the import workflow](../workflows/import-export.md#the-import-wizard).
+- **Automatic render offset** (always on, render-only) — independent of the
+  shift, the viewer draws every scene near the origin to avoid 32-bit-float
+  artifacts (a kinked/missing ground grid, flickering QSM/skeleton meshes) at
+  large magnitudes. It changes only what's drawn — never stored data, exports,
+  measurements, or backend operations — so keeping large coordinates stays a
+  fully supported choice.
+
 ### Sky/miss points
 
 The [leaf-area-density inversion](../concepts/leaf-area-density.md) needs to know

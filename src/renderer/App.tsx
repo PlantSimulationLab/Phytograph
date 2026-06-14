@@ -1193,8 +1193,11 @@ function App() {
           duration: 0,
         });
       } else if (payload.status === 'failed') {
+        // The native crash dialog (src/main/crashDialog.ts) is the actionable
+        // surface here — it offers Reload / View Logs / Report. This toast is
+        // just the non-blocking breadcrumb in case the dialog was dismissed.
         showToast({
-          title: 'The compute backend could not be restarted. Please relaunch Phytograph.',
+          title: 'The compute backend could not be restarted — see the dialog to reload, view logs, or report.',
           type: 'error',
           duration: 0,
         });

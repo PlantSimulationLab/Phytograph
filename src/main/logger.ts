@@ -53,23 +53,43 @@ export function initLogging(): void {
   // Crash safety: previously an uncaught exception in main terminated the
   // process with no record. electron-log installs process.on('uncaughtException')
   // + 'unhandledRejection' listeners — which SUPPRESSES Node's default
-  // print-and-exit-1. We restore the exit for a genuine uncaught EXCEPTION
-  // (errorName 'Unhandled' — main is likely in a corrupted state, don't soldier
-  // on), but deliberately do NOT exit on an unhandled promise REJECTION
-  // (errorName 'Unhandled rejection'), which is usually a stray async error the
-  // app can survive. Either way the error is logged first. The file transport
-  // is synchronous (sync:true), so the line is on disk before process.exit.
+  // print-and-exit-1. We log the error first (the file transport is synchronous,
+  // so the line is on disk before anything else), then:
+  //   - genuine uncaught EXCEPTION ('Unhandled') — main is likely in a corrupted
+  //     state, so this is FATAL. We hand it to the fatal-error handler (which
+  //     shows the native crash dialog so the user can view logs / report) and
+  //     exit afterward.
+  //   - unhandled promise REJECTION ('Unhandled rejection') — usually a stray
+  //     async error the app can survive, so we log it and soldier on (no dialog).
   // Returning false stops electron-log from logging it a second time.
   electronLog.errorHandler.startCatching({
     showDialog: false,
     onError: ({ error, errorName }) => {
       electronLog.scope('main').error(`${errorName}:`, error);
       if (errorName !== 'Unhandled rejection') {
-        process.exit(1);
+        // Let main.ts surface the crash dialog (it owns the BrowserWindow and the
+        // crashDialog module). The handler is responsible for exiting the process
+        // after the user dismisses the dialog. If main.ts never registered one
+        // (e.g. crash during very early startup), fall back to the old behavior.
+        if (fatalErrorHandler) {
+          fatalErrorHandler(error instanceof Error ? error : new Error(String(error)));
+        } else {
+          process.exit(1);
+        }
       }
       return false;
     },
   });
+}
+
+// Set by main.ts. Invoked for a fatal uncaught exception in the main process so
+// main can show the native crash dialog before exiting. Kept here (not a direct
+// import of crashDialog) so logger.ts stays free of UI dependencies and the
+// handler can be installed only once initLogging has run.
+let fatalErrorHandler: ((error: Error) => void) | null = null;
+
+export function setFatalErrorHandler(handler: (error: Error) => void): void {
+  fatalErrorHandler = handler;
 }
 
 /** The configured root logger (scope: none / [main] semantics via console). */
