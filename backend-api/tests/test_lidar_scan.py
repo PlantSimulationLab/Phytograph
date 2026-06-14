@@ -325,6 +325,20 @@ class TestScanOptions:
         assert session["miss_count"] > 0
         sid = session["session_id"]
 
+        # Regression (camera auto-fit flies to infinity): the in-memory render
+        # points must be HITS ONLY. syntheticScan() places miss points ~1 km out
+        # along each beam (LIDAR_RAYTRACE_MISS_T = 1001 m). If they leak into the
+        # primary point array, the cloud's bounding box spans ~2 km, the camera
+        # auto-fit (distance = 2 * maxDim) parks the view ~4 km from a sub-metre
+        # target, and the user can't zoom back in. The misses are preserved in the
+        # session (for the overlay + LAD), so the render array must exclude them.
+        pts = np.asarray(res["points"], dtype=np.float64)
+        assert res["num_points"] == pts.shape[0]
+        # The pyramid spans <1 m about the origin; every hit must be within a few
+        # metres. A miss leaking in would push this to ~1000 m. Use a tight bound
+        # (10 m) so even one stray far point fails — not the 1 km miss distance.
+        assert np.abs(pts).max() < 10.0, "miss point (~1 km) leaked into render cloud"
+
         # The session-based miss overlay endpoint must find those misses and
         # project them onto the bounding sphere around the scanner origin.
         r = client.get(f"/api/cloud/session/{sid}/misses",

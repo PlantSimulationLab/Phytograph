@@ -7,16 +7,37 @@
 | Orbit | Left-click drag | One-finger drag |
 | Pan | Right-click drag, or ⌘/Ctrl + left drag | Two-finger drag |
 | Zoom | Scroll wheel | Pinch |
-| Frame an object | Double-click it | Same |
-| Reset to origin | Click **Reset View** in toolbar | Same |
+| Set focus point | Double-click an object | Same |
+| Zoom to selection | <kbd>F</kbd> (or the **Zoom to Selection** button) | Same |
+| Fit everything | <kbd>⌘/Ctrl</kbd>+<kbd>0</kbd>, or **Reset View** | Same |
 
 The camera orbits around a **focus point**. Double-clicking sets the
 focus point to whatever you double-clicked, which is the fastest way
 to start examining a region of a large scan.
 
+### Zoom to Selection vs. Reset Camera
+
+Two camera commands reframe the view, and they differ in *what* they
+fit and whether they change your viewing angle:
+
+- **Zoom to Selection** fits the **currently selected** cloud(s), mesh,
+  skeleton, or QSM to the viewport while **keeping your current orbit
+  angle** — it only re-centers and re-zooms, so the scene doesn't rotate.
+  This is the fast way to focus on one object in a crowded scene.
+  Available three ways: press <kbd>F</kbd>, click **Zoom to Selection**
+  in the **Snap View** panel (top-left), or **View → Fit to Selection**
+  (<kbd>⌘/Ctrl</kbd>+<kbd>9</kbd>) in the menu bar. The button is disabled
+  when nothing is selected; the menu command falls back to fitting
+  everything in that case.
+- **Reset Camera (Fit All)** fits **all** content from the default
+  **isometric** angle — it both reframes the whole scene and resets the
+  orbit orientation, so use it to get un-lost. Available as the **Reset
+  View** (home) button top-left, or **View → Reset Camera (Fit All)**
+  (<kbd>⌘/Ctrl</kbd>+<kbd>0</kbd>).
+
 ## Snap to a canonical view
 
-The compass cluster in the top-right snaps the camera to standard
+The **Snap View** panel in the top-left snaps the camera to standard
 orthographic and isometric views:
 
 - **Front**, **Back**, **Left**, **Right** — looking along the X or Y axis

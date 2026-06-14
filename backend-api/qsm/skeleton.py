@@ -66,6 +66,17 @@ class SkeletonGraph:
     is the geodesic level-set index of node i. ``point_count[i]`` is how many
     cloud points the node's component contained (a density proxy used later for
     GrowthLength-style decisions and radius seeding).
+
+    ``node_of_point`` and ``point_geodesic`` are the per-input-point connectivity
+    fields (both length N = the input cloud, or None for degenerate/fallback
+    builds). ``node_of_point[p]`` is the final node index point p was assigned to,
+    or -1 if p was unreachable from the root (occlusion island below the bridge
+    limit) OR fell on a node that was later pruned as a short spur. ``-1`` points
+    therefore have no skeleton membership and callers should fall back to a
+    point-wise decision for them. ``point_geodesic[p]`` is the true geodesic
+    distance from the root set (``inf`` for unreachable points). These are
+    populated for the connectivity-based wood/leaf segmenter; QSM build ignores
+    them, so they are purely additive.
     """
 
     nodes: np.ndarray  # (K, 3)
@@ -74,6 +85,8 @@ class SkeletonGraph:
     point_count: np.ndarray  # (K,) int
     root: int = 0
     meta: dict = field(default_factory=dict)
+    node_of_point: np.ndarray | None = None  # (N,) int, -1 = unreached/pruned
+    point_geodesic: np.ndarray | None = None  # (N,) float, inf = unreachable
 
     def __len__(self) -> int:
         return int(self.nodes.shape[0])
@@ -156,36 +169,78 @@ def _build_graph(points: np.ndarray, radius: float, max_neighbors: int, bridge_m
 
 def _bridge_components(points, pairs, n, bridge_max):
     """Return bridge edges (i, j, dist) connecting distinct components of the
-    radius graph via their mutually-nearest points, iterating until one
-    component or no bridge is short enough. Deterministic (component order +
-    KD-tree nearest)."""
+    radius graph, growing the LARGEST component by repeatedly adding the single
+    globally-nearest other-component point to it (a Prim-style star rooted at the
+    largest component), stopping when the nearest remaining gap exceeds
+    ``bridge_max``. Deterministic (lowest-index tie-breaking).
+
+    This is the near-linear reformulation of the original O(components x N) loop
+    (which rebuilt a KD-tree over the main component every iteration). On a dense
+    leaf-on cloud the radius graph fragments into thousands of foliage islands and
+    the old loop became quadratic (~minutes); here every candidate bridge edge --
+    every inter-component point pair within ``bridge_max`` -- is enumerated ONCE
+    via a single ``query_pairs(bridge_max)`` (any bridge the greedy could add is
+    <= bridge_max, so none are missed), then a bounded Prim grows the main
+    component over the candidate graph. Same greedy choice as before, same
+    determinism, no per-iteration KD-tree rebuilds.
+    """
+    import heapq
+
     data = np.ones(len(pairs), dtype=np.int8)
     adj = coo_matrix((data, (pairs[:, 0], pairs[:, 1])), shape=(n, n))
     ncomp, labels = connected_components(adj, directed=False)
+    if ncomp <= 1:
+        return []
+
+    # Every inter-component point pair within bridge_max = the full candidate set.
+    cand = cKDTree(points).query_pairs(bridge_max, output_type="ndarray")
+    if len(cand) == 0:
+        return []
+    a = cand[:, 0]
+    b = cand[:, 1]
+    cross = labels[a] != labels[b]
+    if not np.any(cross):
+        return []
+    a = a[cross]; b = b[cross]
+    cd = np.linalg.norm(points[a] - points[b], axis=1)
+
+    # Per-component adjacency over candidate edges: comp -> list of
+    # (dist, point_in_comp, point_in_other_comp, other_comp). Built once.
+    from collections import defaultdict
+    comp_edges = defaultdict(list)
+    la = labels[a]; lb = labels[b]
+    for idx in range(len(a)):
+        ca = int(la[idx]); cb = int(lb[idx])
+        ia = int(a[idx]); ib = int(b[idx]); dist = float(cd[idx])
+        comp_edges[ca].append((dist, ia, ib, cb))
+        comp_edges[cb].append((dist, ib, ia, ca))
+
+    # Prim from the largest component: a min-heap of candidate bridges out of the
+    # current merged super-component. Pop the globally nearest; if it reaches a new
+    # component, accept the bridge (deterministic: ties broken by (dist, i, j) via
+    # the heap tuple) and push that component's outgoing edges.
+    # connected_components labels are contiguous in [0, ncomp).
+    counts = np.bincount(labels, minlength=ncomp)
+    main = int(np.argmax(counts))
+    merged = np.zeros(ncomp, dtype=bool)
+    merged[main] = True
+
+    heap: list[tuple[float, int, int, int]] = []
+    for dist, i, j, oc in comp_edges[main]:
+        heapq.heappush(heap, (dist, i, j, oc))
+
     bridges: list[tuple[int, int, float]] = []
-    guard = 0
-    while ncomp > 1 and guard < n:
-        guard += 1
-        comp_ids = np.unique(labels)
-        # Anchor on the largest component; connect the nearest other-component
-        # point to it.
-        counts = np.bincount(labels, minlength=int(labels.max()) + 1)
-        main = int(np.argmax(counts))
-        main_pts_idx = np.where(labels == main)[0]
-        other_idx = np.where(labels != main)[0]
-        if other_idx.size == 0:
-            break
-        main_tree = cKDTree(points[main_pts_idx])
-        dists, nn = main_tree.query(points[other_idx])
-        k = int(np.argmin(dists))
-        if dists[k] > bridge_max:
-            break  # nearest gap too large -> leave disconnected (real debris)
-        i = int(other_idx[k])
-        j = int(main_pts_idx[int(nn[k])])
-        bridges.append((i, j, float(dists[k])))
-        # Merge: relabel i's whole component into main, recompute cheaply.
-        labels[labels == labels[i]] = main
-        ncomp = int(np.unique(labels).size)
+    while heap:
+        dist, i, j, oc = heapq.heappop(heap)
+        if dist > bridge_max:
+            break  # nearest remaining gap too large -> stop (real debris)
+        if merged[oc]:
+            continue  # that component already attached
+        bridges.append((i, j, float(dist)))
+        merged[oc] = True
+        for d2, p2, q2, oc2 in comp_edges[oc]:
+            if not merged[oc2]:
+                heapq.heappush(heap, (d2, p2, q2, oc2))
     return bridges
 
 
@@ -342,9 +397,16 @@ def extract_skeleton(points: np.ndarray, opts: SkeletonOptions | None = None) ->
     _reconnect_orphans(nodes, parent, node_level_arr, root, bin_width, opts.gap_tolerance_bins)
 
     if opts.min_spur_nodes > 0:
-        nodes, parent, node_level_arr, node_count_arr, root = _prune_spurs(
+        nodes, parent, node_level_arr, node_count_arr, root, spur_remap = _prune_spurs(
             nodes, parent, node_level_arr, node_count_arr, root, opts.min_spur_nodes
         )
+        # Re-index per-point node assignments through the spur remap: points on a
+        # pruned spur node become -1 (no skeleton membership) and the connectivity
+        # segmenter falls back to a point-wise decision for them. Assigned points
+        # have node_of_point in [0, K); unassigned were already -1.
+        assigned = node_of_point >= 0
+        node_of_point = node_of_point.copy()
+        node_of_point[assigned] = spur_remap[node_of_point[assigned]]
 
     if opts.smooth_iterations > 0:
         nodes = _smooth_nodes(
@@ -364,6 +426,8 @@ def extract_skeleton(points: np.ndarray, opts: SkeletonOptions | None = None) ->
             "n_nodes": K,
             "unreachable_points": int(np.sum(~reachable)),
         },
+        node_of_point=node_of_point.astype(np.int64, copy=False),
+        point_geodesic=geo.astype(np.float64, copy=False),
     )
     # The parent relation is acyclic + single-rooted by construction; assert it so
     # any future regression (e.g. a parent-selection change re-introducing a cycle)
@@ -472,10 +536,14 @@ def _prune_spurs(nodes, parent, level, count, root, min_spur_nodes):
     """Iteratively remove short dead-end spurs: a leaf whose branch (walking up
     until a fork or the root) has fewer than ``min_spur_nodes`` nodes is a
     transient fragment, not a real branch. Removing these collapses spurious
-    forks. Re-indexes the surviving nodes. Deterministic."""
+    forks. Re-indexes the surviving nodes. Deterministic.
+
+    Also returns ``remap`` (K,) int: old-node-id -> new-node-id, with -1 for
+    pruned nodes, so a caller holding per-point node assignments can re-index
+    them against the surviving nodes (pruned -> -1)."""
     K = len(nodes)
     if K == 0:
-        return nodes, parent, level, count, root
+        return nodes, parent, level, count, root, np.zeros(0, dtype=np.int64)
 
     alive = np.ones(K, dtype=bool)
     changed = True
@@ -511,7 +579,12 @@ def _prune_spurs(nodes, parent, level, count, root, min_spur_nodes):
         p = int(parent[o])
         new_parent[n] = remap.get(p, -1) if p >= 0 else -1
     new_root = remap.get(root, 0)
-    return new_nodes, new_parent, new_level, new_count, new_root
+    # Dense old->new remap array (pruned nodes -> -1) for re-indexing per-point
+    # node assignments. Indexable by any old node id in [0, K).
+    remap_arr = np.full(K, -1, dtype=np.int64)
+    for o, nn in remap.items():
+        remap_arr[o] = nn
+    return new_nodes, new_parent, new_level, new_count, new_root, remap_arr
 
 
 def _reconnect_orphans(

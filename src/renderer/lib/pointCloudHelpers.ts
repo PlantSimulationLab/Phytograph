@@ -467,22 +467,18 @@ export function fuzzyMatch(query: string, text: string): number {
   return qi === q.length ? 1 : 0;
 }
 
-// Octree attribute names that are builtin LAS/Potree schema fields, not
-// user-imported scalar columns. Excluded from the scalar picker because they
-// either have a dedicated color mode (intensity, rgb) or aren't meaningful as
-// a continuous gradient here (position, classification, return number, …).
-// Compared case-insensitively against attribute names from octree metadata.
-// Names are compared case-insensitively. PotreeConverter 2.x emits these with
-// spaces/hyphens ('return number', 'gps-time', 'point source id'); the
-// potree-core decoder / older tooling uses the squashed forms — list both.
+// Octree attribute names that have a dedicated render path (geometry / colour /
+// intensity), so they must never appear in the *scalar* picker. Everything else
+// in the octree metadata IS a user-selectable scalar — including the standard
+// LAS dimensions the backend now carries explicitly (classification, scan_angle,
+// point_source_id, user_data, …; see `_read_las_into_arrays`). Those used to be
+// filtered out here, but the backend rebuilds the octree from session arrays and
+// only surfaces a dim when it holds non-constant data, so carrying them through
+// to the picker is the whole point of the fix. Compared case-insensitively.
+// PotreeConverter 2.x can emit position/colour with spaces ('rgb', 'position');
+// the potree-core decoder uses the squashed forms — list both spellings.
 const OCTREE_BUILTIN_ATTRIBUTES = new Set([
-  'position', 'rgb', 'rgba', 'color', 'intensity', 'classification',
-  'returnnumber', 'return number',
-  'numberofreturns', 'number of returns',
-  'scananglerank', 'scan angle rank', 'scanangle', 'scan angle',
-  'userdata', 'user data',
-  'pointsourceid', 'point source id', 'sourceid', 'source id',
-  'gpstime', 'gps-time', 'gps time',
+  'position', 'rgb', 'rgba', 'color', 'intensity',
   'normal', 'indices', 'spacing',
 ]);
 

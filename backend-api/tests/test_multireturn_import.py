@@ -244,6 +244,75 @@ def test_las_degenerate_standard_dims_not_mapped(tmp_path):
         assert slug not in extras, f"phantom {slug} mapped from all-zero standard dim"
 
 
+def test_las_nonconstant_standard_dims_carried_as_scalars(tmp_path):
+    """Standard LAS dims that hold real (non-constant) data — classification,
+    point_source_id, scan_angle, … — are carried into the session as scalar
+    fields so they reach the renderer's colour-by picker. The octree is rebuilt
+    from these arrays, not the source file, so a dropped dim is gone for good."""
+    las_path = tmp_path / "rich.las"
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    las = laspy.LasData(header)
+    las.x = np.array([0.1, 0.3, 0.5, 0.7])
+    las.y = np.array([0.2, 0.4, 0.6, 0.8])
+    las.z = np.array([1.0, 1.5, 0.5, 0.9])
+    las.classification = np.array([2, 5, 5, 2], dtype=np.uint8)      # non-constant
+    las.point_source_id = np.array([10, 10, 11, 12], dtype=np.uint16)  # non-constant
+    las.user_data = np.array([0, 0, 0, 0], dtype=np.uint8)           # constant → skip
+    las.write(str(las_path))
+
+    _, _, _, extras, extra_dims_meta = main._read_las_into_arrays(las_path)
+
+    # Carried under a 'las_'-prefixed slug (the bare name would collide with the
+    # reserved LAS standard schema when _session_to_las rebuilds the octree LAS).
+    assert "las_classification" in extras, "non-constant classification was dropped"
+    assert "las_point_source_id" in extras, "non-constant point_source_id was dropped"
+    np.testing.assert_allclose(extras["las_classification"], [2, 5, 5, 2])
+    np.testing.assert_allclose(extras["las_point_source_id"], [10, 10, 11, 12])
+    # Constant standard dims stay out of the picker (noise, not signal).
+    assert "las_user_data" not in extras, "all-zero user_data should not be carried"
+    # x/y/z handled as positions, never duplicated as a scalar.
+    for skipped in ("X", "Y", "Z", "intensity", "las_X", "las_intensity"):
+        assert skipped not in extras
+    # The label is the clean LAS name; the slug carries the prefix.
+    meta_by_slug = {ed["slug"]: ed["label"] for ed in extra_dims_meta}
+    assert meta_by_slug.get("las_classification") == "classification"
+    assert meta_by_slug.get("las_point_source_id") == "point_source_id"
+
+
+def test_carried_standard_dims_survive_session_to_las(tmp_path):
+    """The carried standard dims must round-trip through `_session_to_las` (which
+    re-adds every extra-dim slug to the rebuilt octree LAS). This is why the slug
+    is prefixed: an extra dim named 'classification' collides with the reserved
+    LAS standard schema and hard-crashes laspy's bit-packer. Regression guard —
+    a unit test that only checks `_read_las_into_arrays` would miss the crash."""
+    src = tmp_path / "rich.las"
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    las = laspy.LasData(header)
+    las.x = np.array([0.1, 0.3, 0.5, 0.7])
+    las.y = np.array([0.2, 0.4, 0.6, 0.8])
+    las.z = np.array([1.0, 1.5, 0.5, 0.9])
+    las.classification = np.array([2, 5, 5, 2], dtype=np.uint8)
+    las.point_source_id = np.array([10, 10, 11, 12], dtype=np.uint16)
+    las.write(str(src))
+
+    positions, colors, intensity, extras, extra_dims_meta = main._read_las_into_arrays(src)
+    sess = _session_from_arrays(positions, colors, intensity, extras, extra_dims_meta)
+
+    out = tmp_path / "rebuilt.las"
+    n = main._session_to_las(sess, out)
+    assert n == 4
+
+    back = laspy.read(str(out))
+    back_dims = {d.name for d in back.point_format.extra_dimensions}
+    assert {"las_classification", "las_point_source_id"} <= back_dims
+    np.testing.assert_allclose(np.asarray(back["las_classification"]), [2, 5, 5, 2])
+    np.testing.assert_allclose(np.asarray(back["las_point_source_id"]), [10, 10, 11, 12])
+
+
 # ---------------------------------------------------------------------------
 # LAD in-RAM array accessor (feeds Helios via addHitPointsWithData — no ASCII)
 # ---------------------------------------------------------------------------

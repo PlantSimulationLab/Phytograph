@@ -45,7 +45,8 @@ The main interactive area. Camera controls:
 | Orbit | Left-click drag | One-finger drag |
 | Pan | Right-click drag, or ⌘/Ctrl + left-click drag | Two-finger drag |
 | Zoom | Scroll wheel | Pinch |
-| Frame an object | Double-click an object | Same |
+| Set focus point | Double-click an object | Same |
+| Zoom to selection | <kbd>F</kbd> (or the **Zoom to Selection** toolbar button) | Same |
 
 The 1m × 1m grid on the world XY plane gives you a fixed sense of
 scale; lighter lines every 10 cm let you eyeball details.

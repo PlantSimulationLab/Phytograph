@@ -102,6 +102,30 @@ export function CameraController({
     snapToView('iso');
   }, [snapToView]);
 
+  // Frame a target (center + size) WITHOUT changing the viewing angle. Unlike
+  // snapToView (which moves the camera to a fixed direction and re-zooms),
+  // frameSelection keeps the current camera→target direction and up vector and
+  // only re-centers + re-zooms so the target fills the viewport. This is the
+  // "zoom to selection" / frame-selection (F key) behavior familiar from CAD and
+  // DCC tools: it preserves wherever the user has orbited to. With no target it
+  // falls back to the global bounds (i.e. "fit everything from here").
+  const frameSelection = useCallback((target?: { center: THREE.Vector3; size: THREE.Vector3 }) => {
+    if (!controlsRef.current) return;
+    const controls = controlsRef.current;
+    const { center, size } = target || boundsRef.current;
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const distance = maxDim * 2;
+
+    // Preserve the current orbit direction (camera relative to its target).
+    const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+    if (dir.lengthSq() < 1e-12) dir.set(0.6, -0.6, 0.5); // degenerate: fall back to iso-ish
+    dir.normalize();
+
+    camera.position.copy(center).addScaledVector(dir, distance);
+    controls.target.copy(center);
+    controls.update();
+  }, [camera]);
+
   // Initialize camera once on mount - fixed position, not dependent on bounds
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -146,6 +170,7 @@ export function CameraController({
     (window as any).__resetPointCloudCamera = resetCamera;
     (window as any).__snapToView = snapToView;
     (window as any).__orientToAxis = orientToAxis;
+    (window as any).__frameSelection = frameSelection;
     // Test hook: read live camera + controls + scene state without poking
     // R3F's internal store. Used by the M2 verification smoke test.
     // Test hook for the M2 smoke test: read camera + auto-frame latch + bounds.
@@ -165,9 +190,10 @@ export function CameraController({
       delete (window as any).__resetPointCloudCamera;
       delete (window as any).__snapToView;
       delete (window as any).__orientToAxis;
+      delete (window as any).__frameSelection;
       delete (window as any).__getCameraState;
     };
-  }, [resetCamera, snapToView, orientToAxis, camera]);
+  }, [resetCamera, snapToView, orientToAxis, frameSelection, camera]);
 
   return (
     <OrbitControls

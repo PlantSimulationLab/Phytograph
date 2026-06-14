@@ -143,6 +143,39 @@ def test_skeleton_handles_occlusion_gap(dense_simple):
     assert cov_gt >= 0.75  # relaxed under occlusion
 
 
+def test_skeleton_exposes_per_point_connectivity(dense_simple):
+    """The connectivity-based wood/leaf segmenter consumes node_of_point +
+    point_geodesic. Assert they're populated, aligned to the input cloud, and
+    internally consistent: every assigned point maps to a valid node id, the
+    geodesic field is non-negative (finite where reachable), and the root node's
+    membership has the smallest geodesic distances."""
+    qsm, cloud = dense_simple
+    graph = extract_skeleton(cloud)
+    n = len(cloud)
+
+    assert graph.node_of_point is not None
+    assert graph.point_geodesic is not None
+    assert graph.node_of_point.shape == (n,)
+    assert graph.point_geodesic.shape == (n,)
+
+    nop = graph.node_of_point
+    # Every value is either -1 (unreached/pruned) or a valid final node index.
+    assert nop.min() >= -1
+    assert nop.max() < len(graph)
+    # The dense simple tree connects, so the vast majority of points get a node.
+    assert float(np.mean(nop >= 0)) > 0.9
+
+    geo = graph.point_geodesic
+    finite = np.isfinite(geo)
+    assert np.all(geo[finite] >= 0.0)
+    # Root-set points (lowest band) have ~zero geodesic distance.
+    assert float(np.nanmin(np.where(finite, geo, np.nan))) < 1e-6
+
+    # Determinism extends to the new fields.
+    again = extract_skeleton(cloud)
+    np.testing.assert_array_equal(nop, again.node_of_point)
+
+
 def test_skeleton_on_tricky_fork():
     """The adversarial fork tree must still yield a valid single-rooted skeleton
     that traces both the trunk and the decoy lateral."""

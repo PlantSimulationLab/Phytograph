@@ -758,6 +758,7 @@ export async function parsePointCloudFromPath(
   asciiFormat?: string | null,
   columnPlan?: ColumnPlan | null,
   categoricalAttributes?: string[],
+  worldShift?: [number, number, number] | null,
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -767,14 +768,17 @@ export async function parsePointCloudFromPath(
     // Editable octree flow: load into a mutable backend session (positions held
     // in RAM as the source of truth) and stream its derived octree. Crop/erase
     // then route through delete_region; downstream ops read the masked array.
-    const meta = await createCloudSession(path, asciiFormat ?? null, columnPlan ?? null);
+    // The optional CloudCompare-style global shift is subtracted at session
+    // create (the array + octree get small coords); the backend echoes it back.
+    const meta = await createCloudSession(path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null);
     return buildPointCloudFromOctree(
       meta, path, name, asciiFormat, columnPlan, categoricalAttributes, meta.session_id,
+      meta.world_shift ?? null,
     );
   }
 
   if (BACKEND_PATH_EXTENSIONS.has(ext)) {
-    const result = await importPointCloudByPath(path, asciiFormat ?? null, columnPlan ?? null);
+    const result = await importPointCloudByPath(path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null);
     return buildPointCloudFromBackend(result, name);
   }
 
@@ -801,6 +805,7 @@ export function buildPointCloudFromOctree(
   columnPlan?: ColumnPlan | null,
   categoricalAttributes?: string[],
   sessionId?: string | null,
+  worldShift?: [number, number, number] | null,
 ): PointCloudData {
   // Prefer the tight data extent over the cube-padded octree bounds.
   // Crop-box init, fit-to-bounds camera framing, and the bounds shown in
@@ -839,6 +844,7 @@ export function buildPointCloudFromOctree(
       cacheId: meta.cache_id,
       sourceXyzPath,
       sessionId: sessionId ?? null,
+      worldShift: worldShift ?? null,
       asciiFormat: asciiFormat ?? null,
       attributeRanges,
       attributeLabels,

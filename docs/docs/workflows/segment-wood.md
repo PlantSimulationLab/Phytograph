@@ -2,15 +2,20 @@
 
 For plant-architecture work — skeletons, QSMs, branch geometry — the
 **woody structure** (trunk and branches) needs to be separated from the
-**leaves**. Phytograph classifies each point as wood or leaf from its local
-3-D geometry alone, with no machine learning and no training step, so it runs
-locally on any ground-cropped cloud.
+**leaves**. Phytograph classifies each point as wood or leaf with no machine
+learning and no training step, so it runs locally on any ground-cropped cloud.
 
-The method reads two cues that hold across species: wood is **vertical and
-locally compact** (trunk and branches are smooth cylinders), while foliage
-**scatters the local neighbourhood in 3-D** and hangs at varied angles. It does
-*not* rely on points being "linear", because branches and many leaves
-(needles, narrow blades) are both linear — that cue can't tell them apart.
+There are two methods (see **Method** below):
+
+- **Connectivity** (the default) roots a skeleton at the trunk base and traces
+  each branch back to it. Wood is what lies on a continuous path to the trunk —
+  a thin twig connects back through the branches, a leaf does not. This recovers
+  the fine branches that a shape-only method drops. It **requires the ground to
+  be removed** (the skeleton roots at the lowest points).
+- **Geometric** is the original point-wise classifier. It reads two local cues:
+  wood is **vertical and locally compact** (smooth cylinders), while foliage
+  **scatters the neighbourhood in 3-D**. It does *not* use "linearity", because
+  branches and many leaves (needles, narrow blades) are both linear.
 
 ## Segment
 
@@ -21,6 +26,11 @@ locally compact** (trunk and branches are smooth cylinders), while foliage
    the command palette and choose **Segment Wood / Leaf**.
 4. Adjust the parameters if needed (the defaults work across broadleaf and
    conifer scans):
+    - **Method** — **Connectivity** (default; skeleton backbone, recovers thin
+      twigs, needs the ground removed) or **Geometric** (local shape only). Use
+      Geometric if the cloud can't be cleanly ground-removed, or for a quick
+      shape-based pass on a partial/disconnected cloud where a single rooted tree
+      can't be traced.
     - **Wood sensitivity (0–1)** — the wood/leaf decision threshold. Raise it
       to classify more points as wood (catches thin twigs at the cost of some
       leaf bleed); lower it to be stricter about what counts as wood.
@@ -76,10 +86,15 @@ leaves, ready for leaf-area analysis.
 
 !!! note "How accurate is it?"
     On manually-labelled terrestrial-laser scans of real trees (oak, beech,
-    maple, pine, spruce) the classifier reaches roughly **80–90 %** overall
-    accuracy. Fine twigs embedded in dense foliage are the usual error source.
-    For the best woody reconstruction, run it before skeleton/QSM extraction and
-    spot-check the result in the viewer.
+    maple, pine, spruce) both methods reach roughly **80–90 %** overall accuracy.
+    Fine twigs embedded in dense foliage are the usual error source — and that is
+    exactly where **Connectivity** helps: by tracing branches back to the trunk it
+    recovers thin twigs the geometric method drops, which matters most when the
+    result feeds skeleton/QSM extraction (a missed twig breaks a branch). The
+    trade is that on very dense crowns it can be slightly less precise overall, so
+    if you only need a coarse leaf-removal, **Geometric** can be a touch cleaner.
+    Run wood/leaf separation before skeleton/QSM extraction and spot-check in the
+    viewer either way.
 
 !!! note "Reflectance assist — when it helps"
     Many terrestrial scanners (e.g. Riegl, 1550 nm) record a **reflectance** or
@@ -103,4 +118,7 @@ leaves, ready for leaf-area analysis.
     segmentation re-reads the original file at full resolution, so the
     classification covers every point — not a downsampled subset. For very large
     clouds the backend can voxel-downsample, classify, and propagate labels back
-    to full resolution.
+    to full resolution. The **Connectivity** method builds its skeleton on that
+    reduced set, so on very heavily downsampled clouds the traced backbone is
+    coarser; for the finest twig recovery, segment before any aggressive
+    decimation.

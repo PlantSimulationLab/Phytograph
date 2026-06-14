@@ -52,7 +52,10 @@ Try the basic camera controls:
 - **Rotate**: left-click drag on the 3D canvas
 - **Pan**: right-click drag (or middle-click drag)
 - **Zoom**: mouse wheel
-- **Reset**: click the **Reset View** button in the top toolbar
+- **Zoom to selection**: select an object and press <kbd>F</kbd> (or click
+  the **Zoom to Selection** button) to fit it in view without changing the angle
+- **Reset / fit all**: click the **Reset View** button in the top toolbar to
+  frame everything from the default isometric angle
 
 On the right, the **Scans** panel lists everything currently loaded
 (meshes and skeletons get their own panels below it once present).

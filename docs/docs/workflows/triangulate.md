@@ -81,8 +81,10 @@ Each mesh row supports a few quick edits:
     the **Triangulate max points** limit (default 5,000,000) before meshing,
     which bounds memory use. If a cloud is downsampled you'll see a warning
     toast telling you how many points were used. Raise the cap in **Settings**
-    (open the command palette and search "Settings") for more surface detail at
-    the cost of more memory.
+    (open it from the app menu — *Phytograph → Settings…* on macOS, *File →
+    Settings* on Windows/Linux, or press ++cmd+comma++ / ++ctrl+comma++) under
+    **Performance → Triangulate max points** for more surface detail at the cost
+    of more memory.
 
 ## Helios Triangulation
 

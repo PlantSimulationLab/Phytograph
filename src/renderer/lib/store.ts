@@ -39,6 +39,12 @@ export interface AppSettings {
   // whole point set in RAM, so an uncapped 100M-point octree would OOM; the
   // backend stride-downsamples to this cap and the UI warns when it does.
   triangulateMaxPoints: number;
+  // Default viewer background the 3D canvas opens with each session. The viewer
+  // still lets you flip black/white per session; this is just the starting value.
+  defaultBackgroundColor: 'black' | 'white';
+  // Default render size (in px) for points in newly-loaded clouds. The viewer's
+  // Display panel still adjusts the live size; this seeds it on launch.
+  defaultPointSize: number;
 }
 
 export interface StoreData {
@@ -46,7 +52,12 @@ export interface StoreData {
   settings: AppSettings;
 }
 
-const DEFAULT_SETTINGS: AppSettings = { theme: 'light', triangulateMaxPoints: 5_000_000 };
+const DEFAULT_SETTINGS: AppSettings = {
+  theme: 'light',
+  triangulateMaxPoints: 5_000_000,
+  defaultBackgroundColor: 'black',
+  defaultPointSize: 1,
+};
 
 const hasElectron = (): boolean => typeof window !== 'undefined' && !!window.electronAPI;
 

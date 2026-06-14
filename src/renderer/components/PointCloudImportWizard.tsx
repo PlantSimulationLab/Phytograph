@@ -9,6 +9,7 @@ import {
 } from '../utils/backendApi';
 import type { ScanParameters } from '../lib/scanParameters';
 import { showToast } from './Toast';
+import { DebouncedNumberInput } from './DebouncedNumberInput';
 
 // One scan to walk the user through. `path` is REQUIRED — the wizard previews
 // by reading the file on disk; callers without a path (Blob fixtures) should
@@ -30,6 +31,10 @@ export interface WizardResult {
   asciiFormat: string | null;
   columnPlan: ColumnPlan | null;   // null → let the backend auto-detect
   categoricalSlugs: string[];
+  // CloudCompare-style global shift [x, y, z] to SUBTRACT from every point at
+  // import, or null to keep the original coordinates. Auto-suggested from the
+  // preview for large (e.g. UTM) clouds; the user can edit or disable it.
+  worldShift: [number, number, number] | null;
 }
 
 interface PointCloudImportWizardProps {
@@ -92,6 +97,12 @@ interface ScanConfig {
   // True when preview returned no usable columns; the wizard then only offers
   // "import with auto-detect" for this scan.
   autoOnly: boolean;
+  // CloudCompare-style global shift. `shiftEnabled` gates whether it's applied;
+  // `shift` holds the per-axis offset to SUBTRACT. Seeded from the preview's
+  // `suggested_shift` (enabled when the cloud's coords are large), with Z left at
+  // 0/keep by default since elevation is rarely huge. The user can edit/toggle.
+  shiftEnabled: boolean;
+  shift: { x: number; y: number; z: number };
 }
 
 // Normalise a backend-detected role to the wizard's RGB convention: the backend
@@ -132,7 +143,17 @@ function blankScanConfig(): ScanConfig {
   return {
     preview: null, loading: true, error: null, warning: null,
     columns: [], rgbIs255: true, autoOnly: false,
+    shiftEnabled: false, shift: { x: 0, y: 0, z: 0 },
   };
+}
+
+// The shift [x, y, z] for a scan, or null when disabled / all-zero (a zero shift
+// is a no-op, so don't bother sending it). Returned to the caller in WizardResult.
+function effectiveShift(cfg: ScanConfig): [number, number, number] | null {
+  if (!cfg.shiftEnabled) return null;
+  const { x, y, z } = cfg.shift;
+  if (x === 0 && y === 0 && z === 0) return null;
+  return [x, y, z];
 }
 
 // Does this scan's column config have all of x, y, z assigned? Required before
@@ -213,6 +234,10 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
           const preview = await previewPointCloud(input.path, input.asciiFormatHint ?? null);
           if (cancelled) return;
           const columns = preview.columns.map(configFromColumn);
+          // Seed the global shift from the backend's suggestion (present only for
+          // large/UTM coords). Default Z to keep (0) — elevation is rarely huge —
+          // even when a Z suggestion is offered, matching CloudCompare's default.
+          const sug = preview.suggested_shift ?? null;
           setConfigs((prev) => prev.map((c, idx) => idx === i ? {
             ...c,
             preview,
@@ -220,6 +245,8 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
             warning: preview.warning ?? null,
             columns,
             autoOnly: columns.length === 0,
+            shiftEnabled: sug != null,
+            shift: sug ? { x: sug[0], y: sug[1], z: 0 } : { x: 0, y: 0, z: 0 },
           } : c));
         } catch (e) {
           if (cancelled) return;
@@ -243,6 +270,15 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
 
   const setRgbIs255 = useCallback((v: boolean) => {
     setConfigs((prev) => prev.map((c, i) => i === stepIdx ? { ...c, rgbIs255: v } : c));
+  }, [stepIdx]);
+
+  const setShiftEnabled = useCallback((v: boolean) => {
+    setConfigs((prev) => prev.map((c, i) => i === stepIdx ? { ...c, shiftEnabled: v } : c));
+  }, [stepIdx]);
+
+  const setShiftAxis = useCallback((axis: 'x' | 'y' | 'z', v: number) => {
+    setConfigs((prev) => prev.map((c, i) => i === stepIdx
+      ? { ...c, shift: { ...c.shift, [axis]: v } } : c));
   }, [stepIdx]);
 
   // Copy the current scan's column config onto every other scan whose column
@@ -298,6 +334,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         asciiFormat: input.asciiFormatHint ?? null,
         columnPlan: buildColumnPlan(c),
         categoricalSlugs: categoricalSlugs(c),
+        worldShift: effectiveShift(c),
       };
     });
     onComplete(results);
@@ -543,6 +580,56 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
               reassigned. You can still rename scalar fields and switch any scalar between
               <span className="text-neutral-400"> Scalar</span> (gradient) and
               <span className="text-neutral-400"> Label</span> (discrete classes).
+            </div>
+          )}
+
+          {/* Global shift (CloudCompare-style). Subtracts a large offset from every
+              point at import so coordinates are small and easy to work with — and so
+              the viewport doesn't lose float32 precision (kinked grid / flickering
+              meshes). Auto-suggested + on by default for large (e.g. UTM) clouds;
+              the original coordinates are restored on export. Shown for every
+              previewed scan, including auto-detect-only ones. */}
+          {cfg && !cfg.loading && !cfg.error && (
+            <div
+              data-testid="import-wizard-shift"
+              className="border border-neutral-700 rounded-lg px-3 py-2.5 space-y-2"
+            >
+              <label className="flex items-center gap-2 text-[11px] text-neutral-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  data-testid="import-wizard-shift-enabled"
+                  checked={cfg.shiftEnabled}
+                  onChange={(e) => setShiftEnabled(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-neutral-600 bg-neutral-700 text-blue-500 focus:ring-0 cursor-pointer"
+                />
+                <span className="font-medium">Apply global shift</span>
+                {cfg.preview?.suggested_shift != null && (
+                  <span className="text-[10px] text-amber-300/90">
+                    — large coordinates detected
+                  </span>
+                )}
+              </label>
+              <p className="text-[10px] text-neutral-500 leading-snug">
+                Subtracts this offset from every point so coordinates stay small and the
+                viewport renders cleanly. The original (global) coordinates are restored
+                when you export.
+              </p>
+              <div className="flex items-center gap-3">
+                {(['x', 'y', 'z'] as const).map((axis) => (
+                  <label key={axis} className="flex items-center gap-1.5 text-[11px] text-neutral-300">
+                    <span className="uppercase w-3 text-neutral-400">{axis}</span>
+                    <DebouncedNumberInput
+                      value={cfg.shift[axis]}
+                      onCommit={(n) => setShiftAxis(axis, n)}
+                      disabled={!cfg.shiftEnabled}
+                      debounceMs={0}
+                      data-testid={`import-wizard-shift-${axis}`}
+                      aria-label={`Global shift ${axis.toUpperCase()}`}
+                      className="w-32 px-2 py-1 text-xs bg-neutral-900 border border-neutral-700 rounded text-neutral-100 disabled:opacity-40 focus:outline-none focus:border-blue-500"
+                    />
+                  </label>
+                ))}
+              </div>
             </div>
           )}
         </div>

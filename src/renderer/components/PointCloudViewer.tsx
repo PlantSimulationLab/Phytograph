@@ -3,11 +3,11 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Settings, Copy, Compass} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass} from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid } from '../utils/backendApi';
 import { showToast } from './Toast';
-import { getSettings, updateSettings } from '../lib/store';
+import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
 import {
   ColormapName,
@@ -91,7 +91,7 @@ import { EraseBrush } from './viewer/gizmos/EraseBrush';
 import { EraseBrushOctree, type EraseSquareFrame } from './viewer/gizmos/EraseBrushOctree';
 import { TriangulationPanel } from './viewer/panels/TriangulationPanel';
 import { GroundSegmentPanel } from './viewer/panels/GroundSegmentPanel';
-import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode } from './viewer/panels/WoodSegmentPanel';
+import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode, type WoodMethod } from './viewer/panels/WoodSegmentPanel';
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
@@ -136,7 +136,7 @@ import type {
   CloudFilters,
 } from '../lib/pointCloudTypes';
 import { meshDisplayNameFor } from '../lib/pointCloudTypes';
-import { eligibleLeafAngleMeshes, meanLeafInclination } from '../lib/adjustLeafAngles';
+import { eligibleLeafAngleMeshes, meanLeafInclination, qsmAabb } from '../lib/adjustLeafAngles';
 export type {
   ScalarField,
   OctreeRef,
@@ -165,6 +165,7 @@ type WoodSegmentTuning = {
   reg_iters: number;
   reflectance_weight_max?: number;
   scalar_slug?: string;
+  method?: WoodMethod;
 };
 
 // Converts the user-facing Mesh Lighting multiplier (Display panel, default
@@ -255,6 +256,8 @@ interface PointCloudViewerProps {
   // multi-scan XML imports get the same preview/column-mapping flow as a
   // drag-drop. App owns the single wizard mount.
   onRequestImportWizard?: (inputs: WizardScanInput[]) => Promise<WizardResult[] | null>;
+  // Opens the app-wide Settings modal (owned by App). Used by the command palette.
+  onOpenSettings?: () => void;
 }
 
 // Compute the next selection Set for a modifier-aware click, mirroring App's
@@ -342,6 +345,7 @@ export default function PointCloudViewer({
   onPendingDeletesChange,
   onViewerContentChange,
   onRequestImportWizard,
+  onOpenSettings,
 }: PointCloudViewerProps) {
   // Legacy internal aliases. The bulk of this file was written against
   // `clouds` / `selectedIds` / `onUpdateCloud` etc., and assumes every entry
@@ -519,6 +523,10 @@ export default function PointCloudViewer({
   // >1 scan: 'aggregate' segments them together (denser geometry) then writes
   // labels back to each; 'per-scan' segments each independently.
   const [woodMultiMode, setWoodMultiMode] = useState<WoodMultiMode>('per-scan');
+  // Classification method: 'connectivity' (skeleton backbone — recovers thin
+  // twigs; needs ground removed) is the default; 'geometric' is the original
+  // point-wise classifier.
+  const [woodMethod, setWoodMethod] = useState<WoodMethod>('connectivity');
   // Reflectance assist (opt-in toggle; defaults on when the selected cloud
   // carries a reflectance/intensity scalar — see woodReflectanceAvailable).
   const [woodUseReflectance, setWoodUseReflectance] = useState(true);
@@ -618,6 +626,10 @@ export default function PointCloudViewer({
   const [qsmColorMode, setQSMColorMode] = useState<QSMColorMode>('rank');
   // QSM-entry multi-selection (for the panel header bulk actions).
   const [selectedQSMIds, setSelectedQSMIds] = useState<Set<string>>(new Set());
+  // Stable "zoom to selection" entry point. The implementation closes over
+  // getSnapViewTarget (declared further down), so it's assigned each render to a
+  // ref here that earlier callbacks (command registry, keydown) can call safely.
+  const zoomToSelectionRef = useRef<() => void>(() => {});
   // QSM export dialog: format + per-QSM selection, then one file per QSM into a
   // user-picked folder. See handleExportQSMs below.
   const [showQSMExportPanel, setShowQSMExportPanel] = useState(false);
@@ -782,7 +794,7 @@ export default function PointCloudViewer({
         results = onRequestImportWizard
           ? await onRequestImportWizard(inputs)
           : // No wizard host (defensive): import with auto-detect.
-            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [] }));
+            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], worldShift: null }));
         if (!results) return; // user cancelled the wizard
       }
 
@@ -861,17 +873,19 @@ export default function PointCloudViewer({
   // Export panel state
   const [showExportPanel, setShowExportPanel] = useState(false);
 
-  // Global app settings (persisted via electron-store). Currently just the
-  // triangulate point cap for octree clouds; loaded once on mount.
-  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  // Global app settings (persisted via electron-store, edited in SettingsDialog).
+  // Loaded once on mount: the triangulate point cap for octree clouds, plus the
+  // default background color and point size that seed the per-session viewer
+  // controls below. The SettingsDialog owns editing; here we only consume.
   const [triangulateMaxPoints, setTriangulateMaxPoints] = useState(5_000_000);
   useEffect(() => {
-    getSettings().then(s => setTriangulateMaxPoints(s.triangulateMaxPoints)).catch(() => {});
-  }, []);
-  const commitTriangulateMaxPoints = useCallback((value: number) => {
-    const v = Math.max(1000, Math.floor(value) || 5_000_000);
-    setTriangulateMaxPoints(v);
-    updateSettings({ triangulateMaxPoints: v }).catch(() => {});
+    getSettings()
+      .then(s => {
+        setTriangulateMaxPoints(s.triangulateMaxPoints);
+        setBgColor(s.defaultBackgroundColor);
+        setPointSize(s.defaultPointSize);
+      })
+      .catch(() => {});
   }, []);
 
   // Alignment comparison state
@@ -1516,10 +1530,16 @@ export default function PointCloudViewer({
       closeAllToolPanels('export');
       setShowExportPanel(true);
     };
+    // Fit the current selection (or everything, if nothing is selected) without
+    // changing the viewing angle. Delegates to zoomToSelectionRef, which is
+    // re-pointed at the latest implementation on every render, so this stable
+    // wrapper never goes stale. Used by the View → Fit to Selection app menu.
+    (window as any).__zoomToSelection = () => zoomToSelectionRef.current();
     return () => {
       delete (window as any).__handleUndo;
       delete (window as any).__handleRedo;
       delete (window as any).__openExportPanel;
+      delete (window as any).__zoomToSelection;
     };
   }, [handleUndo, handleRedo, closeAllToolPanels]);
 
@@ -2608,6 +2628,18 @@ export default function PointCloudViewer({
         e.preventDefault();
         handleRedo();
       }
+      // F: zoom/fit to the current selection (frame selection), keeping the
+      // current viewing angle. Ignored while typing, with a modifier held, or
+      // while a transform modal (t/s/r) owns the keyboard.
+      if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey && !transformModalRef.current) {
+        const el = document.activeElement as HTMLElement | null;
+        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+          || el.tagName === 'SELECT' || el.isContentEditable);
+        if (!typing) {
+          e.preventDefault();
+          zoomToSelectionRef.current();
+        }
+      }
       // E: toggle erase MODE while the Erase tool is open (the same as the
       // panel's Erase-mode button). It does NOT open or close the tool — that's
       // the toolbar Eraser button's job. Toggling mode ON freezes the view and
@@ -2708,7 +2740,7 @@ export default function PointCloudViewer({
 
   // Calculate combined bounds (including clouds, meshes, and skeletons)
   const combinedBounds = useMemo(() => {
-    const hasContent = clouds.length > 0 || meshes.length > 0 || skeletons.length > 0;
+    const hasContent = clouds.length > 0 || meshes.length > 0 || skeletons.length > 0 || qsms.length > 0;
 
     // Return default bounds when scene is empty
     if (!hasContent) {
@@ -2763,6 +2795,16 @@ export default function PointCloudViewer({
       }
     }
 
+    // Include QSM bounds (cylinder endpoints, already world-space)
+    for (const qsm of qsms) {
+      if (!qsm.visible) continue;
+      const box = qsmAabb(qsm);
+      if (!box) continue;
+      min.x = Math.min(min.x, box.min[0]); max.x = Math.max(max.x, box.max[0]);
+      min.y = Math.min(min.y, box.min[1]); max.y = Math.max(max.y, box.max[1]);
+      min.z = Math.min(min.z, box.min[2]); max.z = Math.max(max.z, box.max[2]);
+    }
+
     // Fallback if no visible objects
     if (!isFinite(min.x)) {
       if (clouds.length > 0) return clouds[0].data.bounds;
@@ -2778,7 +2820,7 @@ export default function PointCloudViewer({
     const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
     const size = new THREE.Vector3().subVectors(max, min);
     return { min, max, center, size };
-  }, [clouds, meshes, skeletons, getEditState]);
+  }, [clouds, meshes, skeletons, qsms, getEditState]);
 
   // Open the add-scan popup with sensible defaults: next label and current
   // scene center as origin. Shared by the toolbar Radio button (Create
@@ -2912,6 +2954,9 @@ export default function PointCloudViewer({
   const hasMeshSelected = selectedMeshIds.size > 0;
   const hasSkeletonSelected = selectedSkeletonId !== null;
   const hasPlantMeshSelected = hasMeshSelected && meshes.find(m => selectedMeshIds.has(m.id))?.isPlant;
+  const hasQSMSelected = selectedQSMIds.size > 0;
+  // True when any framable object is selected — gates "Zoom to Selection".
+  const hasAnySelection = hasCloudSelected || hasMeshSelected || hasSkeletonSelected || hasQSMSelected;
 
   // Command registry
   const commands = useMemo(() => {
@@ -2977,11 +3022,11 @@ export default function PointCloudViewer({
       { id: 'redo', name: 'Redo', keywords: ['forward'], action: () => handleRedo(), category: 'History', requires: null },
 
       // Global settings (always available)
-      { id: 'settings', name: 'Settings', keywords: ['options', 'preferences', 'triangulate', 'max points', 'cap'], action: () => setShowSettingsPanel(v => !v), category: 'App', requires: null },
+      { id: 'settings', name: 'Settings', keywords: ['options', 'preferences', 'triangulate', 'max points', 'cap', 'background', 'point size'], action: () => onOpenSettings?.(), category: 'App', requires: null },
     ];
 
     return cmds;
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, onSelectAll, onDeselectAll, onStitchClouds, selectedIds, handleUndo, handleRedo]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, onSelectAll, onDeselectAll, onStitchClouds, selectedIds, handleUndo, handleRedo, onOpenSettings]);
 
   // Filter and sort commands based on search
   const filteredCommands = useMemo(() => {
@@ -3239,6 +3284,31 @@ export default function PointCloudViewer({
       }
     }
 
+    // If QSMs are selected, compute their combined cylinder bounds. QSM
+    // cylinder coordinates are already world-space (no per-QSM translation
+    // offset), so we union the AABBs directly.
+    if (selectedQSMIds.size > 0) {
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      let hasData = false;
+      for (const id of selectedQSMIds) {
+        const qsm = qsms.find(q => q.id === id);
+        if (!qsm) continue;
+        const box = qsmAabb(qsm);
+        if (!box) continue;
+        minX = Math.min(minX, box.min[0]); maxX = Math.max(maxX, box.max[0]);
+        minY = Math.min(minY, box.min[1]); maxY = Math.max(maxY, box.max[1]);
+        minZ = Math.min(minZ, box.min[2]); maxZ = Math.max(maxZ, box.max[2]);
+        hasData = true;
+      }
+      if (hasData) {
+        return {
+          center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
+          size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ)
+        };
+      }
+    }
+
     // If point clouds are selected, compute combined bounds
     if (selectedIds.size > 0) {
       let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -3272,7 +3342,16 @@ export default function PointCloudViewer({
       center: new THREE.Vector3(0, 0, 0),
       size: new THREE.Vector3(2, 2, 2)
     };
-  }, [selectedMeshId, selectedSkeletonId, selectedIds, meshes, skeletons, clouds, meshPositions, skeletonPositions, getEditState]);
+  }, [selectedMeshId, selectedSkeletonId, selectedQSMIds, selectedIds, meshes, skeletons, qsms, clouds, meshPositions, skeletonPositions, getEditState]);
+
+  // Frame the current selection (or everything, if nothing is selected) without
+  // changing the viewing angle. Wired into zoomToSelectionRef (declared earlier)
+  // so callbacks created *before* getSnapViewTarget's declaration — the command
+  // registry and the global keydown handler — always invoke the latest version
+  // without a stale closure or a TDZ on first render.
+  zoomToSelectionRef.current = () => {
+    (window as any).__frameSelection?.(getSnapViewTarget());
+  };
 
   // Apply erased points permanently - returns new PointCloudData with
   // points removed and bounds recalculated. Two-pass typed-array fill so
@@ -5014,6 +5093,13 @@ export default function PointCloudViewer({
     if (targets.length === 0) return;
 
     const WOOD = 1, LEAF = 2;
+    // Surface non-fatal backend advisories (e.g. the connectivity method warning
+    // that the cloud's base looks like un-removed ground) as a warning toast.
+    const showWoodWarnings = (warnings?: string[]) => {
+      if (warnings && warnings.length > 0) {
+        showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: warnings.join(' ') });
+      }
+    };
     // Reflectance assist: enabled only when the user toggle is on. The backend
     // self-weights by per-cloud separability (≈0 on low-contrast species), and
     // for octree/session clouds it re-reads the scalar itself, so we just pass a
@@ -5024,6 +5110,7 @@ export default function PointCloudViewer({
       k_max: woodKMax,
       reg_iters: woodRegIters,
       reflectance_weight_max: reflWeight,
+      method: woodMethod,
     };
     const aggregate = targets.length > 1 && woodMultiMode === 'aggregate';
 
@@ -5083,6 +5170,7 @@ export default function PointCloudViewer({
           if (!response.success) {
             throw new Error(response.error || 'Wood/leaf segmentation failed');
           }
+          showWoodWarnings(response.warnings);
           const labels = response.labels;
 
           let cursor = 0;
@@ -5124,7 +5212,7 @@ export default function PointCloudViewer({
     } finally {
       setWoodSegmentInProgress(false);
     }
-  }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodUseReflectance, inlineReflectance]);
+  }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodMethod, woodUseReflectance, inlineReflectance]);
 
   // Segment a single cloud and apply the result per `woodMode` (label / split /
   // remove). Used by the per-scan path (and single selection).
@@ -5148,6 +5236,9 @@ export default function PointCloudViewer({
         const baseName = cloud.data.fileName ?? id;
         const sessionId = octreeInfo.sessionId;
         const meta = await sessionSegmentWood(sessionId, woodParams);
+        if (meta.warnings && meta.warnings.length > 0) {
+          showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: meta.warnings.join(' ') });
+        }
 
         if (woodMode === 'remove') {
           // Keep only leaf points (delete wood) on the same session.
@@ -5220,6 +5311,9 @@ export default function PointCloudViewer({
       });
       if (!response.success) {
         throw new Error(response.error || 'Wood/leaf segmentation failed');
+      }
+      if (response.warnings && response.warnings.length > 0) {
+        showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: response.warnings.join(' ') });
       }
 
       // Build a child cloud holding only the points of `classValue` (used by
@@ -9286,7 +9380,7 @@ export default function PointCloudViewer({
 
         <CameraController
           bounds={combinedBounds}
-          hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0}
+          hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0 || qsms.length > 0}
           enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive}
         />
 
@@ -10375,11 +10469,28 @@ export default function PointCloudViewer({
                         <div>y: <span className="font-mono text-neutral-300">{scan.params.origin.y.toFixed(3)}</span></div>
                         <div>z: <span className="font-mono text-neutral-300">{scan.params.origin.z.toFixed(3)}</span></div>
                       </div>
-                      <div>
-                        size: <span className="font-mono text-neutral-300">{scan.params.zenithPoints} × {scan.params.azimuthPoints}</span>
-                        <span className="mx-1">·</span>
-                        sweep: <span className="font-mono text-neutral-300">θ {scan.params.zenithMinDeg.toFixed(0)}–{scan.params.zenithMaxDeg.toFixed(0)}° · φ {scan.params.azimuthMinDeg.toFixed(0)}–{scan.params.azimuthMaxDeg.toFixed(0)}°</span>
-                      </div>
+                      {scan.params.pattern === 'spinning_multibeam' ? (
+                        <>
+                          <div>
+                            pattern: <span className="text-neutral-300">spinning multibeam</span>
+                            <span className="mx-1">·</span>
+                            size: <span className="font-mono text-neutral-300">{scan.params.beamElevationAnglesDeg.length} ch × {scan.params.azimuthPoints}</span>
+                            <span className="mx-1">·</span>
+                            sweep: <span className="font-mono text-neutral-300">φ {scan.params.azimuthMinDeg.toFixed(0)}–{scan.params.azimuthMaxDeg.toFixed(0)}°</span>
+                          </div>
+                          <div>
+                            beam elev: <span className="font-mono text-neutral-300">{scan.params.beamElevationAnglesDeg.map((a) => a.toFixed(0)).join(', ')}°</span>
+                          </div>
+                        </>
+                      ) : (
+                        <div>
+                          pattern: <span className="text-neutral-300">raster</span>
+                          <span className="mx-1">·</span>
+                          size: <span className="font-mono text-neutral-300">{scan.params.zenithPoints} × {scan.params.azimuthPoints}</span>
+                          <span className="mx-1">·</span>
+                          sweep: <span className="font-mono text-neutral-300">θ {scan.params.zenithMinDeg.toFixed(0)}–{scan.params.zenithMaxDeg.toFixed(0)}° · φ {scan.params.azimuthMinDeg.toFixed(0)}–{scan.params.azimuthMaxDeg.toFixed(0)}°</span>
+                        </div>
+                      )}
                       <div>
                         return: <span className="text-neutral-300">{scan.params.returnType}</span>
                         {scan.params.returnType === 'multi' && (
@@ -10657,7 +10768,7 @@ export default function PointCloudViewer({
       <div className="absolute top-4 left-4 flex flex-col gap-2">
         {/* View Controls */}
         <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg flex gap-1">
-          <button onClick={() => (window as any).__resetPointCloudCamera?.()} className="p-2 hover:bg-neutral-700 rounded transition-colors flex items-center justify-center" title="Reset View">
+          <button onClick={() => (window as any).__resetPointCloudCamera?.()} className="p-2 hover:bg-neutral-700 rounded transition-colors flex items-center justify-center" title="Reset View — frame all content from the default isometric angle">
             <Home className="w-4 h-4 text-neutral-300" />
           </button>
           <button onClick={() => { setShowCommandPalette(true); setCommandSearch(''); setCommandSelectedIndex(0); }} className="p-2 hover:bg-neutral-700 rounded transition-colors flex items-center justify-center" title="Search Commands (Cmd+K)">
@@ -10679,6 +10790,14 @@ export default function PointCloudViewer({
             <button onClick={() => (window as any).__snapToView?.('front', getSnapViewTarget())} className="p-1.5 hover:bg-neutral-700 rounded" title="Front View"><ArrowDown className="w-3 h-3 text-neutral-300" /></button>
             <button onClick={() => (window as any).__snapToView?.('bottom', getSnapViewTarget())} className="p-1.5 hover:bg-neutral-700 rounded" title="Bottom View"><Circle className="w-2.5 h-2.5 text-neutral-500" /></button>
           </div>
+          <button
+            onClick={() => zoomToSelectionRef.current()}
+            disabled={!hasAnySelection}
+            className="mt-1 w-full flex items-center justify-center gap-1 px-1.5 py-1 rounded bg-neutral-700/60 hover:bg-neutral-700 text-[10px] text-neutral-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-700/60"
+            title="Zoom to Selection — fit selected geometry in the viewport, keeping the current angle (F)"
+          >
+            <Maximize2 className="w-3 h-3" /> Zoom to Selection
+          </button>
         </div>
 
         {/* Create Shapes - always visible */}
@@ -11816,44 +11935,6 @@ export default function PointCloudViewer({
         );
       })()}
 
-      {/* Settings Panel (global) */}
-      {showSettingsPanel && (
-        <div data-testid="settings-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-30">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-              <Settings className="w-3 h-3" />
-              Settings
-            </div>
-            <button
-              onClick={() => setShowSettingsPanel(false)}
-              className="p-1 hover:bg-neutral-700 rounded"
-            >
-              <X className="w-3 h-3 text-neutral-400" />
-            </button>
-          </div>
-
-          <div className="mb-2">
-            <label className="text-[10px] text-neutral-400 block mb-1">
-              Triangulate max points
-            </label>
-            <DebouncedNumberInput
-              data-testid="settings-triangulate-max-points"
-              min={1000}
-              step={100000}
-              parse={(s) => parseInt(s, 10)}
-              value={triangulateMaxPoints}
-              onCommit={commitTriangulateMaxPoints}
-              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
-            />
-            <div className="text-[9px] text-neutral-500 mt-1 leading-snug">
-              Streamed (octree) clouds are downsampled to this many points before
-              triangulation to bound memory. You'll be warned when a cloud is
-              downsampled.
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Triangulation Panel */}
       {showTriangulationPanel && selectedIds.size === 1 && (
         <TriangulationPanel
@@ -11898,6 +11979,7 @@ export default function PointCloudViewer({
           regIters={woodRegIters}
           mode={woodMode}
           multiMode={woodMultiMode}
+          method={woodMethod}
           selectedCount={selectedIds.size}
           inProgress={woodSegmentInProgress}
           error={woodSegmentError}
@@ -11909,6 +11991,7 @@ export default function PointCloudViewer({
           onRegItersChange={setWoodRegIters}
           onModeChange={setWoodMode}
           onMultiModeChange={setWoodMultiMode}
+          onMethodChange={setWoodMethod}
           onUseReflectanceChange={setWoodUseReflectance}
           onSegment={handleWoodSegment}
         />

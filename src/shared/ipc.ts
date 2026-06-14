@@ -121,6 +121,7 @@ export type MenuCommandPayload =
   | { kind: 'select-all' }
   | { kind: 'deselect-all' }
   | { kind: 'reset-camera' }
+  | { kind: 'fit-selection' }
   | { kind: 'snap-view'; direction: SnapViewDirection }
   | { kind: 'feedback'; mode: 'bug' | 'feature' }
   | { kind: 'about' }

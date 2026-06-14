@@ -765,6 +765,7 @@ describe('importPointCloudByPath (renamed from importXyzByPath; now also serves 
       file_path: '/abs/scan.xyz',
       ascii_format: null,
       column_plan: null,
+      world_shift: null,
     });
   });
 

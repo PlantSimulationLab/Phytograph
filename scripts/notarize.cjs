@@ -1,6 +1,7 @@
 // electron-builder afterSign hook: submits the .app to Apple notarization.
-// Skipped on non-macOS platforms and when notary credentials are missing
-// (e.g., local dev builds, intel-mac CI without pyhelios3d).
+// Skipped on non-macOS platforms, when SKIP_NOTARIZATION is set, and when
+// notary credentials (APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID) are missing
+// — e.g. local dev builds, or CI before the Apple secrets are configured.
 
 const { notarize } = require('@electron/notarize');
 

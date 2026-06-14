@@ -53,7 +53,20 @@ describe('store tags', () => {
 describe('store settings', () => {
   it('returns default light theme when nothing is stored', async () => {
     const settings = await getSettings();
-    expect(settings).toEqual({ theme: 'light', triangulateMaxPoints: 5_000_000 });
+    expect(settings).toEqual({
+      theme: 'light',
+      triangulateMaxPoints: 5_000_000,
+      defaultBackgroundColor: 'black',
+      defaultPointSize: 1,
+    });
+  });
+
+  it('updateSettings persists the new display defaults', async () => {
+    await updateSettings({ defaultBackgroundColor: 'white', defaultPointSize: 3 });
+    const settings = await getSettings();
+    expect(settings.defaultBackgroundColor).toBe('white');
+    expect(settings.defaultPointSize).toBe(3);
+    expect(settings.triangulateMaxPoints).toBe(5_000_000); // untouched
   });
 
   it('updateSettings merges and persists', async () => {
@@ -112,7 +125,12 @@ describe('store export/import', () => {
     const json = await exportData();
     const parsed = JSON.parse(json);
     expect(parsed.tags).toEqual([]);
-    expect(parsed.settings).toEqual({ theme: 'light', triangulateMaxPoints: 5_000_000 });
+    expect(parsed.settings).toEqual({
+      theme: 'light',
+      triangulateMaxPoints: 5_000_000,
+      defaultBackgroundColor: 'black',
+      defaultPointSize: 1,
+    });
   });
 });
 

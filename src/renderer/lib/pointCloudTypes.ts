@@ -37,6 +37,12 @@ export interface OctreeRef {
   // apply" bakes a fresh octree (updating `cacheId`). Octree clouds imported
   // via the editable flow always carry this.
   sessionId?: string | null;
+  // CloudCompare-style global shift [x, y, z] applied at import (SUBTRACTED from
+  // every point, so the in-RAM/backend array — and this octree — hold small,
+  // precision-friendly coords; world = stored + worldShift). null/absent when the
+  // cloud kept its original coordinates. Provenance + lets world-coord readouts
+  // add it back; the backend session restores world coords for downstream ops.
+  worldShift?: [number, number, number] | null;
   asciiFormat?: string | null; // Helios <ASCII_format> hint, when known
   // Optional per-attribute min/max from PotreeConverter's metadata.
   // Keyed by attribute name ("intensity", "rgb", "classification", …).

@@ -17,6 +17,7 @@ import { parseHeliosScanXml, HeliosXmlParseError } from "./lib/heliosScanXml";
 import { resolveTargets } from "./lib/bulkActions";
 import { FeedbackDialog } from "./components/FeedbackDialog";
 import { AboutDialog } from "./components/AboutDialog";
+import { SettingsDialog } from "./components/SettingsDialog";
 import type { FeedbackMode } from "./lib/feedback";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
@@ -26,7 +27,6 @@ import type { FeedbackMode } from "./lib/feedback";
 const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57']);
 import logoImage from "./assets/logo.png";
 
-type NavItem = 'viewer' | 'options';
 type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton' | 'scanxml';
 
 // Optional overrides for an import. Menu-driven imports (which go through the
@@ -61,7 +61,9 @@ const SCAN_COLORS = [
 ];
 
 function App() {
-  const [activeNav, setActiveNav] = useState<NavItem>('viewer');
+  // Settings live in a modal dialog (SettingsDialog), opened from the app/File
+  // menu (⌘,/Ctrl+,). The viewer is the only "page", always mounted.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [scans, setScans] = useState<Scan[]>([]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
   // Progress shown over the viewer while an import (drag-drop or the
@@ -177,9 +179,9 @@ function App() {
     result: WizardResult,
     color: string,
   ): Promise<Scan> => {
-    const { input, asciiFormat, columnPlan, categoricalSlugs } = result;
+    const { input, asciiFormat, columnPlan, categoricalSlugs, worldShift } = result;
     const data = await parsePointCloudFromPath(
-      input.path, asciiFormat, columnPlan, categoricalSlugs,
+      input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift,
     );
     for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
     // Scan params precedence: an explicit XML <scan> (input.params) wins; else,
@@ -239,7 +241,7 @@ function App() {
     // Clear App's progress modal before handing off — bulkImportScans drives its
     // own (the same BulkImportProgress component), so they'd otherwise stack.
     setImportProgress(null);
-    setActiveNav('viewer');
+    setSettingsOpen(false);
     await importRefsRef.current.bulkImportScans(parsed.scans, parsed.grids, path);
   }, []);
 
@@ -345,7 +347,7 @@ function App() {
               method: 'delaunay',
               name: baseNameForLabel(file.name),
             });
-            setActiveNav('viewer');
+            setSettingsOpen(false);
             const texturedLabel = backendMesh.has_textures ? 'textured mesh' : 'mesh';
             showToast({ title: `Loaded ${texturedLabel} with ${backendMesh.triangle_count.toLocaleString()} triangles from ${file.name}`, type: 'success' });
           } else {
@@ -365,7 +367,7 @@ function App() {
               method: 'delaunay', // Default for imported meshes
               name: baseNameForLabel(file.name),
             });
-            setActiveNav('viewer');
+            setSettingsOpen(false);
             if (materialsDropped) {
               showToast({
                 title: `Imported geometry from ${file.name}, but couldn't load its materials — the backend was unavailable. Re-import to apply colors/textures.`,
@@ -395,7 +397,7 @@ function App() {
             visible: true,
             color: getNextColor(),
           });
-          setActiveNav('viewer');
+          setSettingsOpen(false);
           showToast({ title: `Loaded skeleton with ${skeletonData.pointCount.toLocaleString()} nodes from ${file.name}`, type: 'success' });
         } else {
           showToast({ title: 'Viewer not ready for skeleton import', type: 'error' });
@@ -425,7 +427,7 @@ function App() {
           const newScan = await buildScanFromWizardResult(results[0], getNextColor());
           setScans(prev => [...prev, newScan]);
           setSelectedScanIds(new Set([newScan.id]));
-          setActiveNav('viewer');
+          setSettingsOpen(false);
           showToast({ title: `Loaded ${newScan.data!.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
         } else {
           // No on-disk path (Blob/test fixture): the wizard can't preview, so
@@ -441,7 +443,7 @@ function App() {
           };
           setScans(prev => [...prev, newScan]);
           setSelectedScanIds(new Set([newScan.id]));
-          setActiveNav('viewer');
+          setSettingsOpen(false);
           showToast({ title: `Loaded ${data.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
         }
       }
@@ -667,7 +669,7 @@ function App() {
 
     const loadedCount = newScans.length + meshCount + skeletonCount;
     if (loadedCount > 0) {
-      setActiveNav('viewer');
+      setSettingsOpen(false);
       const parts = [];
       if (newScans.length > 0) parts.push(`${newScans.length} scan(s)`);
       if (meshCount > 0) parts.push(`${meshCount} mesh(es)`);
@@ -1069,7 +1071,7 @@ function App() {
       }
     };
 
-    setActiveNav('viewer');
+    setSettingsOpen(false);
     let selected: string | string[] | null;
     try {
       selected = await window.electronAPI.dialog.open({ multi: true, filters: filtersFor(importType) });
@@ -1132,7 +1134,7 @@ function App() {
           break;
         case 'save':
         case 'export':
-          setActiveNav('viewer');
+          setSettingsOpen(false);
           (window as any).__openExportPanel?.();
           break;
         case 'undo':
@@ -1150,6 +1152,9 @@ function App() {
         case 'reset-camera':
           (window as any).__resetPointCloudCamera?.();
           break;
+        case 'fit-selection':
+          (window as any).__zoomToSelection?.();
+          break;
         case 'snap-view':
           (window as any).__snapToView?.(payload.direction);
           break;
@@ -1160,7 +1165,8 @@ function App() {
           setAboutOpen(true);
           break;
         case 'nav':
-          setActiveNav(payload.target);
+          // 'options' opens the Settings modal; 'viewer' just ensures it's closed.
+          setSettingsOpen(payload.target === 'options');
           break;
       }
     });
@@ -1298,6 +1304,7 @@ function App() {
           onPendingDeletesChange={handlePendingDeletesChange}
           onViewerContentChange={setViewerHasContent}
           onRequestImportWizard={openImportWizard}
+          onOpenSettings={() => setSettingsOpen(true)}
           className="flex-1"
         />
         {scans.length === 0 && !viewerHasContent && renderEmptyHint()}
@@ -1305,71 +1312,6 @@ function App() {
     </div>
   );
 
-  // Render options page
-  const renderOptions = () => (
-    <div className="flex-1 p-8">
-      <h2 className="text-2xl font-bold text-slate-800 mb-6">Settings</h2>
-      <div className="max-w-2xl space-y-6">
-        <div className="bg-white rounded-lg border border-slate-200 p-6">
-          <h3 className="text-lg font-medium text-slate-800 mb-4">Application</h3>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">
-                Version
-              </label>
-              <p className="text-sm text-slate-500">Phytograph 0.1.0</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg border border-slate-200 p-6">
-          <h3 className="text-lg font-medium text-slate-800 mb-4">Supported Formats</h3>
-
-          <div className="mb-4">
-            <h4 className="text-sm font-medium text-blue-700 mb-2">Point Clouds</h4>
-            <div className="grid grid-cols-2 gap-2">
-              {POINT_CLOUD_FORMATS.map(f => (
-                <div key={f.ext} className="flex items-start gap-2 text-sm">
-                  <span className="font-mono bg-blue-50 px-1.5 py-0.5 rounded text-blue-700">
-                    {f.ext}
-                  </span>
-                  <span className="text-slate-600">{f.desc}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="mb-4">
-            <h4 className="text-sm font-medium text-green-700 mb-2">Meshes</h4>
-            <div className="grid grid-cols-2 gap-2">
-              {MESH_FORMATS.map(f => (
-                <div key={f.ext} className="flex items-start gap-2 text-sm">
-                  <span className="font-mono bg-green-50 px-1.5 py-0.5 rounded text-green-700">
-                    {f.ext}
-                  </span>
-                  <span className="text-slate-600">{f.desc}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <h4 className="text-sm font-medium text-amber-700 mb-2">Skeletons</h4>
-            <div className="grid grid-cols-2 gap-2">
-              {SKELETON_FORMATS.map(f => (
-                <div key={f.ext} className="flex items-start gap-2 text-sm">
-                  <span className="font-mono bg-amber-50 px-1.5 py-0.5 rounded text-amber-700">
-                    {f.ext}
-                  </span>
-                  <span className="text-slate-600">{f.desc}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
 
   return (
     <div {...getRootProps()} data-testid="app-root" className="flex h-screen flex-col bg-slate-50 select-none">
@@ -1382,13 +1324,9 @@ function App() {
 
       <div className="flex flex-1 min-h-0">
 
-      {/* Main Content */}
+      {/* Main Content — the viewer is the only page; Settings is a modal overlay. */}
       <div className="flex-1 flex flex-col overflow-hidden relative">
-        {/* Settings page - conditionally rendered over the viewer */}
-        {activeNav === 'options' && renderOptions()}
-
-        {/* Viewer - always mounted but hidden when not active to preserve state */}
-        <div className={`absolute inset-0 flex flex-col ${activeNav === 'viewer' ? '' : 'invisible pointer-events-none'}`}>
+        <div className="absolute inset-0 flex flex-col">
           {renderViewer()}
         </div>
       </div>
@@ -1408,6 +1346,9 @@ function App() {
 
       {/* About dialog — opened from the app menu (macOS) or Help menu (Win/Linux). */}
       <AboutDialog isOpen={aboutOpen} onClose={() => setAboutOpen(false)} />
+
+      {/* Settings dialog — opened from the app menu (macOS) or File menu (Win/Linux) via ⌘,/Ctrl+,. */}
+      <SettingsDialog isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       {/* Drag overlay */}
       {isDragOver && (

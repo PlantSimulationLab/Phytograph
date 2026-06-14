@@ -12,6 +12,13 @@ export type WoodSegmentMode = 'label' | 'split' | 'remove';
 // scatters the labels back to each scan; 'per-scan' segments each independently.
 export type WoodMultiMode = 'aggregate' | 'per-scan';
 
+// Classification method:
+//  - 'connectivity': roots a geodesic skeleton at the trunk base and recovers
+//    the woody backbone (thin branches/twigs the point-wise method misses).
+//    Needs the ground removed.
+//  - 'geometric': the original point-wise classifier (local shape only).
+export type WoodMethod = 'geometric' | 'connectivity';
+
 // Presentational tool panel for wood/leaf segmentation. The `onSegment` handler
 // and all state live in PointCloudViewer; the parent gates rendering on
 // `showWoodSegmentPanel && selectedIds.size >= 1`.
@@ -21,6 +28,7 @@ interface WoodSegmentPanelProps {
   regIters: number;
   mode: WoodSegmentMode;
   multiMode: WoodMultiMode;
+  method: WoodMethod;
   selectedCount: number;
   inProgress: boolean;
   error: string | null;
@@ -37,6 +45,7 @@ interface WoodSegmentPanelProps {
   onRegItersChange: (n: number) => void;
   onModeChange: (m: WoodSegmentMode) => void;
   onMultiModeChange: (m: WoodMultiMode) => void;
+  onMethodChange: (m: WoodMethod) => void;
   onUseReflectanceChange: (b: boolean) => void;
   onSegment: () => void;
 }
@@ -47,6 +56,7 @@ export function WoodSegmentPanel({
   regIters,
   mode,
   multiMode,
+  method,
   selectedCount,
   inProgress,
   error,
@@ -58,6 +68,7 @@ export function WoodSegmentPanel({
   onRegItersChange,
   onModeChange,
   onMultiModeChange,
+  onMethodChange,
   onUseReflectanceChange,
   onSegment,
 }: WoodSegmentPanelProps) {
@@ -74,9 +85,29 @@ export function WoodSegmentPanel({
       </div>
 
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-        Separates woody structure (trunk, branches) from leaves using local
-        geometry. Crop the ground first. Higher sensitivity classifies more
-        points as wood.
+        Separates woody structure (trunk, branches) from leaves. Crop the ground
+        first. Higher sensitivity classifies more points as wood.
+      </div>
+
+      {/* Method: connectivity (skeleton backbone, recovers thin twigs) vs the
+          original geometric (local shape). */}
+      <div className="mb-3">
+        <label className="text-[10px] text-neutral-400 block mb-1">Method</label>
+        <select
+          data-testid="wood-method"
+          value={method}
+          onChange={(e) => onMethodChange(e.target.value as WoodMethod)}
+          disabled={inProgress}
+          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+        >
+          <option value="connectivity">Connectivity (skeleton backbone)</option>
+          <option value="geometric">Geometric (local shape)</option>
+        </select>
+        <div className="text-[9px] text-neutral-500 mt-1 leading-snug">
+          {method === 'connectivity'
+            ? 'Traces branches back to the trunk base — recovers thin twigs the local method drops. Requires ground removal.'
+            : 'Classifies each point from its local 3-D shape only.'}
+        </div>
       </div>
 
       {/* Multi-scan mode: segment selected scans together (denser, for multi-

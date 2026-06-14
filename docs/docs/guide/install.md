@@ -26,8 +26,11 @@ Get the latest installer from the
 The first launch takes about 30 seconds while the bundled scientific
 Python environment unpacks itself. Subsequent launches are instant.
 
-!!! note "If macOS says the app can't be opened"
-    On a fresh install you may see *"Phytograph can't be opened because
+Phytograph is signed with an Apple Developer ID and notarized by Apple, so
+it opens with a normal double-click — no security warning.
+
+!!! note "If macOS still says the app can't be opened"
+    Older or unsigned builds may show *"Phytograph can't be opened because
     Apple cannot check it for malicious software"*. Right-click the app
     in Applications, choose **Open**, and click **Open** in the dialog.
     You only need to do this once.

@@ -247,6 +247,12 @@ export interface WoodSegmentationRequest {
   reflectance?: number[];
   scalar_slug?: string;
   reflectance_weight_max?: number;
+  // METHOD: 'geometric' = original point-wise classifier; 'connectivity' = roots
+  // a geodesic skeleton at the trunk base and recovers the woody backbone (thin
+  // branches/twigs the point-wise method misses). Connectivity needs the ground
+  // removed; `backbone_support` (0 = auto) tunes its isolated-false-wood pruning.
+  method?: 'geometric' | 'connectivity';
+  backbone_support?: number;
 }
 
 export interface WoodSegmentationResponse {
@@ -256,6 +262,9 @@ export interface WoodSegmentationResponse {
   num_leaf: number;
   num_points: number;
   source_counts: number[];  // per-source point counts (aggregate); else []
+  // Non-fatal advisories from the connectivity method (e.g. base looks like
+  // un-removed ground). Surfaced as a warning toast; the result is still valid.
+  warnings?: string[];
   error?: string;
 }
 
@@ -1612,6 +1621,11 @@ export interface PointCloudPreviewResponse {
   columns: PreviewColumn[];
   sample_rows: string[][];
   warning?: string | null;
+  // CloudCompare-style suggested global shift [x, y, z] = floor(min) per axis,
+  // present only when the cloud's coordinates are large enough to lose float32
+  // precision (any |axis min| > ~1e4). null otherwise. The wizard pre-fills its
+  // shift fields from this (Z defaulted off). See _suggest_global_shift (backend).
+  suggested_shift?: [number, number, number] | null;
 }
 
 // Cheaply inspect a point-cloud file for the import wizard. The backend reads
@@ -1659,6 +1673,7 @@ export async function importPointCloudByPath(
   filePath: string,
   asciiFormat?: string | null,
   columnPlan?: ColumnPlan | null,
+  worldShift?: [number, number, number] | null,
 ): Promise<ImportPointCloudByPathResult> {
   const baseUrl = getBackendUrl();
   // 10 minute timeout: a multi-GB scan takes tens of seconds to parse and
@@ -1673,6 +1688,7 @@ export async function importPointCloudByPath(
         file_path: filePath,
         ascii_format: asciiFormat ?? null,
         column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
+        world_shift: worldShift ?? null,
       }),
       signal: controller.signal,
     });
@@ -2253,6 +2269,11 @@ export interface ScalarFilter {
 export interface CloudSessionMetadata extends OctreeMetadata {
   session_id: string;
   point_count: number;
+  // The CloudCompare-style global shift [x, y, z] that was applied at import
+  // (SUBTRACTED from every point, so world = stored + world_shift). null when no
+  // shift was applied. The renderer persists it on the cloud's OctreeRef for
+  // world-coord readouts/provenance; the backend restores world coords on read.
+  world_shift?: [number, number, number] | null;
   // Sky/miss points (laser pulses that returned nothing) are kept in the
   // session for LAD but NOT in the octree (their ~20 km coords would poison the
   // bounding box). `has_misses` lets the renderer offer a "Show misses" toggle;
@@ -2332,6 +2353,9 @@ export interface CloudSessionBakeResult extends OctreeMetadata {
   session_id: string;
   point_count: number;
   baked: boolean;
+  // Non-fatal advisories from the operation (e.g. wood/leaf connectivity warning
+  // that the base looks like un-removed ground). Surfaced as a warning toast.
+  warnings?: string[];
 }
 
 /**
@@ -2345,6 +2369,7 @@ export async function createCloudSession(
   filePath: string,
   asciiFormat?: string | null,
   columnPlan?: ColumnPlan | null,
+  worldShift?: [number, number, number] | null,
 ): Promise<CloudSessionMetadata> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
@@ -2357,6 +2382,7 @@ export async function createCloudSession(
         source_path: filePath,
         ascii_format: asciiFormat ?? null,
         column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
+        world_shift: worldShift ?? null,
       }),
       signal: controller.signal,
     });
@@ -2636,7 +2662,7 @@ export async function sessionSegmentGround(
  * (no file read). Pass segment_wood tuning params. */
 export async function sessionSegmentWood(
   sessionId: string,
-  params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number },
+  params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number; method?: 'geometric' | 'connectivity'; backbone_support?: number; reflectance_weight_max?: number; scalar_slug?: string },
 ): Promise<CloudSessionBakeResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();

@@ -7,6 +7,7 @@ On macOS use <kbd>⌘</kbd> where the table says <kbd>Ctrl</kbd>.
 | Shortcut | Action |
 |---|---|
 | <kbd>Ctrl</kbd>+<kbd>K</kbd> | Open the command palette |
+| <kbd>Ctrl</kbd>+<kbd>,</kbd> | Open Settings |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo |
 | <kbd>Ctrl</kbd>+<kbd>Y</kbd> | Redo |
 

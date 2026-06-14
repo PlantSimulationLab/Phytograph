@@ -134,20 +134,14 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
       label: 'View',
       submenu: [
         {
-          label: 'Viewer',
-          accelerator: 'CmdOrCtrl+1',
-          click: () => send({ kind: 'nav', target: 'viewer' }),
-        },
-        {
-          label: 'Settings',
-          accelerator: 'CmdOrCtrl+2',
-          click: () => send({ kind: 'nav', target: 'options' }),
-        },
-        { type: 'separator' },
-        {
-          label: 'Reset Camera',
+          label: 'Reset Camera (Fit All)',
           accelerator: 'CmdOrCtrl+0',
           click: () => send({ kind: 'reset-camera' }),
+        },
+        {
+          label: 'Fit to Selection',
+          accelerator: 'CmdOrCtrl+9',
+          click: () => send({ kind: 'fit-selection' }),
         },
         {
           label: 'Camera View',

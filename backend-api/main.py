@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import io
 import json
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from scipy.optimize import curve_fit, minimize
 import re
 import math
@@ -110,7 +110,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.15.0"
+BACKEND_VERSION = "0.16.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -1809,6 +1809,15 @@ class WoodSegmentationRequest(BaseModel):
     reflectance: Optional[List[float]] = None
     scalar_slug: Optional[str] = None
     reflectance_weight_max: float = 0.4
+    # METHOD. 'geometric' = the original point-wise classifier (local PCA + GMM).
+    # 'connectivity' = additionally root a geodesic skeleton at the trunk base and
+    # recover the woody backbone (points on continuous paths to the base), which
+    # recovers thin branches/twigs the point-wise method misses. Connectivity
+    # REQUIRES ground removal; if the base looks like residual ground the response
+    # carries a `ground_warning`. `backbone_support` (0 = auto) tunes the support
+    # floor for pruning isolated false-wood (higher → prunes more aggressively).
+    method: Literal["geometric", "connectivity"] = "connectivity"
+    backbone_support: float = 0.0
 
 
 class WoodSegmentationResponse(BaseModel):
@@ -1822,6 +1831,10 @@ class WoodSegmentationResponse(BaseModel):
     # the order given, so the caller can slice `labels` back per scan. Empty for
     # a single-source / inline request.
     source_counts: List[int] = []
+    # Non-fatal advisories from the connectivity method (e.g. the cloud's base
+    # looks like un-removed ground). The result is still returned; the UI surfaces
+    # these as a warning toast.
+    warnings: List[str] = []
     error: Optional[str] = None
 
 
@@ -1839,6 +1852,8 @@ def _wood_segment_kwargs(request: "WoodSegmentationRequest") -> dict:
         branch_grow_sph=request.branch_grow_sph,
         voxel_size=request.voxel_size,
         reflectance_weight_max=request.reflectance_weight_max,
+        method=request.method,
+        backbone_support=request.backbone_support,
     )
 
 
@@ -1894,7 +1909,9 @@ async def segment_wood_points(request: WoodSegmentationRequest):
                 error="Need at least 3 points for wood/leaf segmentation",
             )
 
-        labels = segment_wood(points, reflectance=reflectance, **_wood_segment_kwargs(request))
+        warns: List[str] = []
+        labels = segment_wood(points, reflectance=reflectance, warnings=warns,
+                              **_wood_segment_kwargs(request))
         num_wood = int(np.count_nonzero(labels == WOOD_CLASS_WOOD))
         return WoodSegmentationResponse(
             success=True,
@@ -1903,6 +1920,7 @@ async def segment_wood_points(request: WoodSegmentationRequest):
             num_leaf=len(labels) - num_wood,
             num_points=len(labels),
             source_counts=source_counts,
+            warnings=warns,
         )
 
     except HTTPException:
@@ -4585,31 +4603,55 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
 
         out = []
         for r in results:
-            npts = len(r["points"])
-            # Drop scalar fields that never resolved (all-NaN) so the renderer
-            # doesn't offer a dead color-by option.
-            scalars = {
-                k: v for k, v in r["scalars"].items()
-                if any(val == val for val in v)  # any non-NaN
-            }
-            entry = {
-                "scanner_id": r["scanner_id"],
-                "points": r["points"],
-                "colors": r["colors"] if npts else None,
-                "scalars": scalars,
-                "num_points": npts,
-            }
             # When this scan recorded any miss, build a cloud session for it so the
-            # existing session-based miss overlay + LAD work. The session holds the
-            # full points + an is_miss extra dim; its octree is built hits-only.
-            if record_misses and npts and any(v != 0 for v in r["is_miss"]):
+            # existing session-based miss overlay + LAD work. The session is built
+            # from the FULL `r` (hits + misses): its octree is hits-only, and the
+            # misses live in the session's is_miss extra dim for the overlay + LAD.
+            has_misses = record_misses and len(r["points"]) and any(v != 0 for v in r["is_miss"])
+            session = None
+            if has_misses:
                 try:
-                    entry["session"] = _create_lidar_scan_session(r)
+                    session = _create_lidar_scan_session(r)
                 except Exception:
                     import traceback
                     traceback.print_exc()
                     # A session failure must not lose the scan — fall back to a
-                    # plain in-memory cloud (misses still present as points).
+                    # plain in-memory cloud below (built from hits only).
+
+            # Strip miss rows from the in-memory render arrays. syntheticScan()
+            # places each miss ~1 km out along its beam (LIDAR_RAYTRACE_MISS_T =
+            # 1001 m); leaving them in the primary point array blows the cloud's
+            # bounding box to ~2 km, so the camera auto-fit (distance = 2 * maxDim)
+            # parks the view kilometres from a sub-metre target and the user can't
+            # zoom back in. They'd also be drawn twice (here + the MissOverlay).
+            # The misses are preserved in the session above (its octree is already
+            # hits-only), so the renderer only needs the hits.
+            keep = [i for i, m in enumerate(r["is_miss"]) if m == 0] if has_misses else None
+            if keep is not None:
+                points = [r["points"][i] for i in keep]
+                colors = [r["colors"][i] for i in keep]
+                raw_scalars = {k: [v[i] for i in keep] for k, v in r["scalars"].items()}
+            else:
+                points = r["points"]
+                colors = r["colors"]
+                raw_scalars = r["scalars"]
+
+            npts = len(points)
+            # Drop scalar fields that never resolved (all-NaN) so the renderer
+            # doesn't offer a dead color-by option.
+            scalars = {
+                k: v for k, v in raw_scalars.items()
+                if any(val == val for val in v)  # any non-NaN
+            }
+            entry = {
+                "scanner_id": r["scanner_id"],
+                "points": points,
+                "colors": colors if npts else None,
+                "scalars": scalars,
+                "num_points": npts,
+            }
+            if session is not None:
+                entry["session"] = session
             out.append(entry)
 
         return {"success": True, "results": out}
@@ -4678,6 +4720,7 @@ def _create_lidar_scan_session(r: dict) -> dict:
         intensity=intensity,
         extras=extras,
         extra_dims_meta=extra_dims_meta,
+        world_shift=None,  # synthetic scans are authored near the origin
         deleted=np.zeros(n, dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -5198,6 +5241,275 @@ def _wood_reflectance_wood_seed(
     return mask
 
 
+def _wood_geometric_labels(
+    pts: np.ndarray,
+    refl: Optional[np.ndarray],
+    *,
+    k_min: int, k_max: int, k_step: int, wood_bias: float,
+    reflectance_weight_max: float,
+):
+    """Shared geometric classification core: returns
+    (raw_labels, seed_mask, sphericity, nbr_idx) on the given (already-downsampled)
+    `pts`. `raw_labels` is the per-point GMM split + reflectance promotion (BEFORE
+    branch-grow/speckle/regularise). `seed_mask` is the HIGH-PRECISION wood seed
+    (strict GMM posterior) the connectivity method anchors its backbone on — the
+    trunk and obvious branches, kept tight to avoid seeding the backbone from
+    false-wood. Both the geometric and connectivity methods call this so they can
+    never drift apart. No region-grow / speckle / regularise here (the callers add
+    those)."""
+    from sklearn.mixture import GaussianMixture
+
+    n = len(pts)
+    features, nbr_idx = _wood_local_pca_features(pts, k_min, k_max, k_step)
+    verticality = features[:, 1]
+    sphericity = features[:, 2]
+
+    # Wood saliency = verticality + (1 - sphericity); see segment_wood docstring.
+    sph_n = np.clip(sphericity / (np.quantile(sphericity, 0.99) + 1e-9), 0.0, 1.0)
+    score = 0.5 * verticality + 0.5 * (1.0 - sph_n)
+
+    raw = None
+    seed = np.zeros(n, dtype=bool)
+    if n >= 50:
+        try:
+            gmm = GaussianMixture(n_components=2, n_init=3, reg_covar=1e-6, random_state=0)
+            s = score.reshape(-1, 1)
+            gmm.fit(s)
+            comp = gmm.predict(s)
+            means = [score[comp == c].mean() if np.any(comp == c) else -np.inf
+                     for c in (0, 1)]
+            wood_comp = int(np.argmax(means))
+            spread = float(np.std(score)) + 1e-9
+            separation = abs(means[0] - means[1]) / spread
+            if np.isfinite(separation) and separation >= 0.25:
+                proba = gmm.predict_proba(s)[:, wood_comp]
+                raw = np.where(proba >= wood_bias, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF)
+                # High-precision seed: a STRICTER posterior than wood_bias, so the
+                # connectivity backbone is anchored only on near-certain wood.
+                seed = proba >= max(float(wood_bias), 0.85)
+        except Exception:
+            raw = None
+
+    if raw is None:
+        if float(np.mean(score)) >= 0.5:
+            raw = np.full(n, WOOD_CLASS_WOOD, dtype=np.int32)
+        else:
+            raw = np.full(n, WOOD_CLASS_LEAF, dtype=np.int32)
+    raw = raw.astype(np.int32)
+
+    # Reflectance assist (one-sided high-reflectance promotion) — see
+    # _wood_reflectance_wood_seed. Promoted points also strengthen the seed.
+    if refl is not None and reflectance_weight_max and reflectance_weight_max > 0:
+        promote = _wood_reflectance_wood_seed(refl, float(reflectance_weight_max))
+        raw = np.where(promote, WOOD_CLASS_WOOD, raw).astype(np.int32)
+        seed = seed | promote
+
+    return raw, seed, sphericity, nbr_idx
+
+
+def _wood_geometric_core(
+    pts: np.ndarray,
+    refl: Optional[np.ndarray],
+    *,
+    k_min: int, k_max: int, k_step: int, wood_bias: float,
+    reg_k: int, reg_iters: int, min_speckle: int, branch_grow_sph: float,
+    reflectance_weight_max: float,
+) -> np.ndarray:
+    """The original point-wise wood/leaf pipeline on a single (downsampled) cloud:
+    geometric GMM + reflectance → branch-grow → speckle prune → regularise. Returns
+    down-resolution int32 labels. Byte-identical to the pre-refactor inline code."""
+    raw, _seed, sphericity, nbr_idx = _wood_geometric_labels(
+        pts, refl, k_min=k_min, k_max=k_max, k_step=k_step, wood_bias=wood_bias,
+        reflectance_weight_max=reflectance_weight_max,
+    )
+
+    # Branch recovery: grow wood into connected low-sphericity points (recovers
+    # horizontal scaffold branches the verticality score misses).
+    if branch_grow_sph and branch_grow_sph > 0:
+        grown = _wood_grow_branches(
+            raw == WOOD_CLASS_WOOD, sphericity, nbr_idx, float(branch_grow_sph),
+        )
+        raw = np.where(grown, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
+
+    if min_speckle and min_speckle > 1:
+        wood_mask = _wood_prune_speckle(pts, raw == WOOD_CLASS_WOOD, nbr_idx,
+                                        min_size=int(min_speckle))
+        raw = np.where(wood_mask, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
+
+    return _wood_regularize(raw, nbr_idx, reg_k, reg_iters)
+
+
+def _wood_subtree_support(graph) -> np.ndarray:
+    """Per-node count of cloud points hanging at or below the node in the rooted
+    skeleton tree (the node's own point_count plus all descendants'). This is the
+    path-funnel / betweenness proxy: the trunk funnels ALL descendants (== N at the
+    root), a major fork funnels the crown fraction it feeds, a terminal leaf-cluster
+    tip funnels only its own handful. Computed by a single reverse-`level` sweep:
+    children always have a strictly higher level than their parent (skeleton is
+    acyclic by construction), so processing high→low level and adding each node's
+    accumulated total into its parent is correct and O(K)."""
+    parent = np.asarray(graph.parent)
+    level = np.asarray(graph.level)
+    support = np.asarray(graph.point_count, dtype=np.int64).copy()
+    # Process nodes from deepest level to shallowest; push each node's running
+    # total up to its parent.
+    order = np.argsort(-level, kind="stable")
+    for i in order:
+        p = int(parent[i])
+        if p >= 0:
+            support[p] += support[i]
+    return support
+
+
+def _wood_backbone_nodes(graph, support: np.ndarray, seed_node_mask: np.ndarray,
+                         min_support: int) -> np.ndarray:
+    """Boolean (K,) mask of skeleton nodes that are the woody BACKBONE: the union of
+    (a) nodes whose subtree support ≥ `min_support` (they funnel enough descendants
+    to be a trunk/branch, not a leaf tip), and (b) the ANCESTOR CLOSURE of the
+    geometric seed nodes — every node on the path from a confirmed-wood node back to
+    the root. (b) is the connectivity move: it guarantees a continuous woody chain
+    from each seed to the base, recovering thin branches the geometry missed, and it
+    bounds (a) (a high-support node not on any seed path won't drag in leaf)."""
+    K = len(graph)
+    parent = np.asarray(graph.parent)
+    backbone = support >= int(min_support)
+    # Ancestor closure of seeds: walk parent links to root, marking each node.
+    seen = np.zeros(K, dtype=bool)
+    for start in np.where(seed_node_mask)[0]:
+        cur = int(start)
+        while cur >= 0 and not seen[cur]:
+            seen[cur] = True
+            backbone[cur] = True
+            cur = int(parent[cur])
+    return backbone
+
+
+def _segment_wood_connectivity(
+    pts: np.ndarray,
+    refl: Optional[np.ndarray],
+    *,
+    k_min: int, k_max: int, k_step: int, wood_bias: float,
+    reg_k: int, reg_iters: int, min_speckle: int, branch_grow_sph: float,
+    reflectance_weight_max: float, backbone_support: float,
+    warnings: list,
+) -> np.ndarray:
+    """Connectivity-based wood/leaf classification on a single (downsampled) cloud.
+
+    Fuses the geometric classifier with a rooted geodesic skeleton (reusing
+    `qsm.skeleton.extract_skeleton`): geometry gives a high-precision wood seed,
+    connectivity recovers the woody backbone (points on continuous paths to the
+    trunk base) and prunes disconnected geometric false-wood. Falls back to the
+    geometric result whenever the skeleton can't give a usable backbone (degenerate
+    skeleton, no reachable points, etc.). Appends a ground-not-removed notice to
+    `warnings` when the base looks like residual ground. Returns down-resolution
+    int32 labels."""
+    from qsm.skeleton import extract_skeleton, SkeletonOptions
+
+    # 1. Geometric pass (shared core) → raw labels + high-precision seed + features.
+    raw, seed, sphericity, nbr_idx = _wood_geometric_labels(
+        pts, refl, k_min=k_min, k_max=k_max, k_step=k_step, wood_bias=wood_bias,
+        reflectance_weight_max=reflectance_weight_max,
+    )
+    geom_wood = raw == WOOD_CLASS_WOOD
+
+    def _finish(wood_mask):
+        """Apply the shared post-processing (speckle prune + regularise) and return
+        labels. branch-grow is skipped for connectivity — the backbone already does
+        the recovery branch-grow approximates, and re-growing would re-introduce the
+        leaf-bleed connectivity is meant to avoid."""
+        lab = np.where(wood_mask, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
+        if min_speckle and min_speckle > 1:
+            wm = _wood_prune_speckle(pts, lab == WOOD_CLASS_WOOD, nbr_idx, min_size=int(min_speckle))
+            lab = np.where(wm, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
+        return _wood_regularize(lab, nbr_idx, reg_k, reg_iters)
+
+    # 2. Build the rooted geodesic skeleton. On any failure, fall back to the full
+    # geometric pipeline (branch-grow included) — never worse than geometric.
+    def _geometric_fallback():
+        if branch_grow_sph and branch_grow_sph > 0:
+            grown = _wood_grow_branches(geom_wood, sphericity, nbr_idx, float(branch_grow_sph))
+            return _finish(grown)
+        return _finish(geom_wood)
+
+    try:
+        graph = extract_skeleton(pts, SkeletonOptions())
+    except Exception:
+        return _geometric_fallback()
+
+    nop = graph.node_of_point
+    if (nop is None or len(graph) < 2 or graph.meta.get("degenerate")
+            or graph.meta.get("fallback") or not np.any(nop >= 0)):
+        return _geometric_fallback()
+
+    # 3. Ground guard: the geodesic roots at the lowest points, so if the base
+    # level-set node spans a broad flat slab (much wider than a trunk) the cloud
+    # likely still contains ground and the whole tree will funnel through it. Warn
+    # but proceed (per product decision). Heuristic: base node horizontal extent vs
+    # the cloud's vertical extent.
+    try:
+        base_pts = pts[nop == int(graph.root)]
+        if len(base_pts) >= 3:
+            horiz = float(np.hypot(*(base_pts[:, :2].max(axis=0) - base_pts[:, :2].min(axis=0))))
+            height = float(pts[:, 2].max() - pts[:, 2].min()) + 1e-9
+            if horiz > 0.5 * height and horiz > 0.5:
+                warnings.append(
+                    "Connectivity segmentation: the tree base spans a wide flat area, "
+                    "which usually means the ground wasn't removed. Crop the ground "
+                    "first for a correct result."
+                )
+    except Exception:
+        pass
+
+    # 4. Build the woody BACKBONE = the ancestor closure of the high-precision
+    # geometric seed nodes (every node on the path from a confirmed-wood point back
+    # to the trunk base). This is the connectivity signal: a continuous chain from
+    # each seed to the root. We deliberately do NOT add a blanket subtree-support
+    # floor — that over-keeps badly on dense crowns (validated: a global floor reads
+    # 60-90% wood on tropical/oak). Support is used only to PRUNE (step 5b).
+    n = len(pts)
+    assigned = nop >= 0
+    support = _wood_subtree_support(graph)
+    seed_nodes = np.zeros(len(graph), dtype=bool)
+    seed_nodes[nop[(assigned) & seed]] = True
+    backbone_nodes = _wood_backbone_nodes(graph, support, seed_nodes,
+                                          min_support=10**18)  # support floor OFF
+    point_on_backbone = np.zeros(n, dtype=bool)
+    point_on_backbone[assigned] = backbone_nodes[nop[assigned]]
+
+    # 5. Geometry-PRIMARY fusion with two conservative connectivity corrections
+    # (mirrors TLSeparation/CWLS: geometry classifies, connectivity refines):
+    wood = geom_wood.copy()
+
+    # 5a. RECOVER thin branches the geometry dropped: a LEAF point that sits on the
+    # backbone path (between confirmed wood and the root) AND is locally compact
+    # (not a 3D-scattered leaf) is a missed twig → wood. The sphericity gate keeps
+    # this from dragging in leaf clusters that merely hang off a branch node.
+    sph_gate = sphericity < max(2.0 * float(branch_grow_sph or 0.02), 0.04)
+    recover = (~geom_wood) & point_on_backbone & sph_gate
+    wood |= recover
+
+    # 5b. PRUNE topologically-isolated false-wood: a WOOD point whose node is NOT on
+    # the backbone and has tiny subtree support (a compact leaf clump that fooled the
+    # local geometry) → leaf. `backbone_support` (>0) sets the support floor as a
+    # fraction of N; auto uses a small absolute floor. Conservative: only nodes well
+    # below the floor AND off the backbone are pruned.
+    if backbone_support and backbone_support > 0:
+        prune_floor = max(2, int(backbone_support * n))
+    else:
+        prune_floor = max(3, int(0.0005 * n))  # ~25 pts at 50k
+    node_tiny = support < prune_floor
+    point_tiny = np.zeros(n, dtype=bool)
+    point_tiny[assigned] = node_tiny[nop[assigned]]
+    prune = geom_wood & assigned & ~point_on_backbone & point_tiny
+    wood &= ~prune
+
+    # Unreachable / pruned-spur points (nop == -1) keep their geometric label — a
+    # second un-bridged trunk must not be forced to leaf.
+    wood[~assigned] = geom_wood[~assigned]
+
+    return _finish(wood)
+
+
 def segment_wood(
     points: np.ndarray,
     k_min: int = 10,
@@ -5212,9 +5524,23 @@ def segment_wood(
     max_points: Optional[int] = None,
     reflectance: Optional[np.ndarray] = None,
     reflectance_weight_max: float = 0.4,
+    method: str = "geometric",
+    backbone_support: float = 0.0,
+    warnings: Optional[list] = None,
 ) -> np.ndarray:
     """Classify each point as wood (1) or leaf (2) from geometry (+ optional
-    reflectance assist).
+    reflectance assist), via one of two `method`s.
+
+    `method="geometric"` (the original) is purely point-wise. `method="connectivity"`
+    additionally roots a geodesic skeleton at the trunk base and recovers the woody
+    backbone — the set of points on continuous paths back to the base — which the
+    point-wise method can't see, so it recovers thin branches/twigs and prunes
+    geometrically-compact-but-disconnected leaf clumps. It REQUIRES ground removal
+    (the geodesic roots at the lowest points); if the base looks like residual
+    ground it appends a warning to `warnings` (a caller-supplied list) but proceeds,
+    and it falls back to geometry when the skeleton degenerates. See
+    `_segment_wood_connectivity`. `backbone_support` (0 = auto) tunes how much
+    subtree support a node needs to count as backbone (higher → only major scaffold).
 
     Pipeline (classical / non-ML, runs on CPU in seconds-to-minutes):
       1. Per-point local-PCA features at an eigen-entropy-optimal scale
@@ -5265,7 +5591,9 @@ def segment_wood(
     Returns an int32 array length len(points), aligned to input order, with
     values WOOD_CLASS_WOOD / WOOD_CLASS_LEAF.
     """
-    from sklearn.mixture import GaussianMixture
+    # `warnings` is an optional caller-supplied list the connectivity method
+    # appends to (e.g. a ground-not-removed notice); keep a local handle.
+    _warnings = warnings if warnings is not None else []
 
     pts_full = np.ascontiguousarray(points[:, :3], dtype=np.float64)
     n_full = len(pts_full)
@@ -5329,91 +5657,29 @@ def segment_wood(
         labels_small = np.full(n_full, WOOD_CLASS_LEAF, dtype=np.int32)
         return labels_small
 
-    features, nbr_idx = _wood_local_pca_features(pts, k_min, k_max, k_step)
-    verticality = features[:, 1]
-    sphericity = features[:, 2]
-
-    # Wood saliency = verticality + (1 - sphericity). Wood is vertical (trunk +
-    # branches) and locally COMPACT (low sphericity); foliage scatters the local
-    # neighbourhood in 3D (high sphericity) and hangs at varied non-vertical
-    # angles. Validated to generalise across real broadleaf + conifer TLS
-    # (sphericity carries the signal) AND narrow-flat-leaf species like almond
-    # (verticality carries it) — see segment_wood docstring. Linearity is
-    # deliberately unused: branches are linear too, so it cannot separate them
-    # from leaves. Sphericity is normalised by its 99th percentile (a long-tailed
-    # ratio) so the additive blend with verticality∈[0,1] is balanced.
-    sph_n = np.clip(sphericity / (np.quantile(sphericity, 0.99) + 1e-9), 0.0, 1.0)
-    score = 0.5 * verticality + 0.5 * (1.0 - sph_n)
-
-    raw = None
-    if n >= 50:
-        try:
-            gmm = GaussianMixture(
-                n_components=2,
-                n_init=3,
-                reg_covar=1e-6,
-                random_state=0,
-            )
-            s = score.reshape(-1, 1)
-            gmm.fit(s)
-            comp = gmm.predict(s)
-            means = [score[comp == c].mean() if np.any(comp == c) else -np.inf
-                     for c in (0, 1)]
-            wood_comp = int(np.argmax(means))
-            # Degeneracy guard: if the two component means are essentially equal
-            # the score is unimodal (single population) — don't split it.
-            spread = float(np.std(score)) + 1e-9
-            separation = abs(means[0] - means[1]) / spread
-            if np.isfinite(separation) and separation >= 0.25:
-                proba = gmm.predict_proba(s)[:, wood_comp]
-                raw = np.where(proba >= wood_bias, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF)
-        except Exception:
-            raw = None
-
-    if raw is None:
-        # Degenerate / tiny / single-population cloud: decide globally by the
-        # mean saliency. High overall score → predominantly woody.
-        if float(np.mean(score)) >= 0.5:
-            raw = np.full(n, WOOD_CLASS_WOOD, dtype=np.int32)
-        else:
-            raw = np.full(n, WOOD_CLASS_LEAF, dtype=np.int32)
-    raw = raw.astype(np.int32)
-
-    # REFLECTANCE ASSIST (one-sided high-reflectance promotion). At the scanner
-    # wavelength (e.g. Riegl 1550 nm) wood reflects more than foliage, but the
-    # distributions OVERLAP heavily through the low/mid range (Beland 2014 Fig 8)
-    # — only the UPPER TAIL is reliably wood (validated on Weiser oak/beech:
-    # P(wood) is flat-low until the top ~2 deciles, then jumps to ~0.9-0.99). So
-    # we use reflectance ONLY to PROMOTE very-high-reflectance points the geometry
-    # missed (never to demote), then let branch-grow + regularisation propagate
-    # from those recovered seeds. On a low-contrast species the upper tail isn't
-    # specifically wood, but because promotion is confined to a thin top tail the
-    # net effect is mild (the user toggle disables it for known low-contrast
-    # species). See `_wood_reflectance_wood_seed`.
-    if refl is not None and reflectance_weight_max and reflectance_weight_max > 0:
-        promote = _wood_reflectance_wood_seed(refl, float(reflectance_weight_max))
-        raw = np.where(promote, WOOD_CLASS_WOOD, raw).astype(np.int32)
-
-    # Branch recovery: the verticality-weighted GMM seed catches the trunk and
-    # vertical wood but misses HORIZONTAL scaffold branches (low verticality →
-    # low score, even though they're compact/low-sphericity like the trunk).
-    # Region-grow the wood label from the seed into connected low-sphericity
-    # points to recover them. Tuned (sph<0.02) for real TLS trees; raise toward
-    # 0 to disable. (On synthetic narrow-leaf scans this can over-grow slightly,
-    # an accepted trade since production input is real TLS.)
-    if branch_grow_sph and branch_grow_sph > 0:
-        grown = _wood_grow_branches(
-            raw == WOOD_CLASS_WOOD, sphericity, nbr_idx, float(branch_grow_sph),
+    # Per-cloud classification of the (possibly downsampled) `pts`. The geometric
+    # method is the original point-wise pipeline; the connectivity method roots a
+    # geodesic skeleton at the trunk base and recovers the woody backbone (it
+    # falls back to geometry internally when the skeleton degenerates). Both
+    # return down-resolution labels; the full-res propagation below is shared.
+    if method == "connectivity":
+        labels_down = _segment_wood_connectivity(
+            pts, refl,
+            k_min=k_min, k_max=k_max, k_step=k_step, wood_bias=wood_bias,
+            reg_k=reg_k, reg_iters=reg_iters, min_speckle=min_speckle,
+            branch_grow_sph=branch_grow_sph,
+            reflectance_weight_max=reflectance_weight_max,
+            backbone_support=backbone_support,
+            warnings=_warnings,
         )
-        raw = np.where(grown, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
-
-    # Drop tiny isolated wood blobs (scattered false-wood in foliage).
-    if min_speckle and min_speckle > 1:
-        wood_mask = _wood_prune_speckle(pts, raw == WOOD_CLASS_WOOD, nbr_idx,
-                                        min_size=int(min_speckle))
-        raw = np.where(wood_mask, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
-
-    labels_down = _wood_regularize(raw, nbr_idx, reg_k, reg_iters)
+    else:
+        labels_down = _wood_geometric_core(
+            pts, refl,
+            k_min=k_min, k_max=k_max, k_step=k_step, wood_bias=wood_bias,
+            reg_k=reg_k, reg_iters=reg_iters, min_speckle=min_speckle,
+            branch_grow_sph=branch_grow_sph,
+            reflectance_weight_max=reflectance_weight_max,
+        )
 
     if n == n_full:
         return labels_down
@@ -9618,6 +9884,29 @@ _XYZ_KNOWN_ROLES = (
     | {'deviation', 'is_miss'}
 )
 
+# Standard LAS point-format dimensions that are NOT carried as user-selectable
+# scalar fields on import, because they're either materialised elsewhere in the
+# session (x/y/z → positions, red/green/blue → colors, intensity → intensity) or
+# auto-mapped to a canonical multi-return slug (`_LAS_MULTIRETURN_SRC`). Every
+# OTHER standard dimension that holds non-constant data (classification,
+# scan_angle, point_source_id, user_data, scanner_channel, …) IS carried so it
+# shows up in the renderer's scalar picker — see `_read_las_into_arrays`. Bit-
+# flag sub-fields (synthetic/key_point/withheld/overlap/...) are packed into the
+# single 'classification flags' byte by LAS 1.4; they're degenerate (all-zero)
+# on the clouds we ingest and noisy in the picker, so they stay on this list.
+_LAS_STD_DIMS_SKIP = {
+    'X', 'Y', 'Z',
+    'red', 'green', 'blue',
+    'intensity',
+    'synthetic', 'key_point', 'withheld', 'overlap',
+    'scan_direction_flag', 'edge_of_flight_line',
+}
+# Standard LAS dims auto-mapped to a canonical per-pulse slug in
+# `_read_las_into_arrays`; carried under the slug, not their raw name, so the LAD
+# path finds them — excluded from the generic standard-dim carry to avoid a
+# duplicate column.
+_LAS_MULTIRETURN_SRC = ('return_number', 'number_of_returns', 'gps_time')
+
 # Per-point sky/miss flag carried as a LAS extra dimension (0.0 = hit, 1.0 =
 # miss). Misses are laser pulses that returned nothing (hit the sky); Helios
 # represents each as a real point placed `_MISS_GAP_DISTANCE` metres from the
@@ -9698,6 +9987,12 @@ class ImportPointCloudByPathRequest(BaseModel):
     file_path: str
     ascii_format: Optional[str] = None
     column_plan: Optional[ColumnPlan] = None
+    # CloudCompare-style global shift [x, y, z] SUBTRACTED from every point at
+    # import (mirrors the cloud-session path). For the flat (non-octree) small-
+    # cloud path the renderer keeps the resulting small coordinates as its in-RAM
+    # array; the shift is echoed in the response so the renderer can persist it.
+    # None / omitted = keep the original coordinates.
+    world_shift: Optional[List[float]] = None
 
 
 class PointCloudPreviewRequest(BaseModel):
@@ -9738,6 +10033,13 @@ class PointCloudPreviewResponse(BaseModel):
     columns: List[PreviewColumn]
     sample_rows: List[List[str]]
     warning: Optional[str] = None
+    # CloudCompare-style suggested global shift [x, y, z] = floor(min) per axis,
+    # populated only when the cloud's coordinates are large enough that float32
+    # rendering would lose precision (any |axis min| exceeds _SHIFT_SUGGEST_THRESHOLD).
+    # null otherwise. The wizard pre-fills its shift fields from this (Z defaulted
+    # off, since elevation is rarely huge). Best-effort: null if the min couldn't
+    # be probed cheaply.
+    suggested_shift: Optional[List[float]] = None
 
 
 def _tokenize_ascii_format(fmt: str) -> List[str]:
@@ -10602,6 +10904,14 @@ def _read_points_from_source(
         sess = _get_cloud_session(src.session_id)
         with _cloud_session_lock:
             positions = sess.positions[~sess.deleted].copy()
+            session_world_shift = sess.world_shift
+        # Restore true world coordinates: the session stored points with the
+        # import-time global shift SUBTRACTED, so add it back here — the single
+        # chokepoint every downstream op (triangulate/skeleton/LAD/export) reads
+        # through. Done before the explicit `src.translation` so a per-op
+        # translation still composes on top of world coords.
+        if session_world_shift is not None:
+            positions = positions.astype(np.float64, copy=False) + session_world_shift
         colors = None
         intensity = None
     else:
@@ -10643,6 +10953,19 @@ async def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
     positions, colors, intensity = _load_pointcloud_arrays(
         request.file_path, request.ascii_format, request.column_plan
     )
+    # CloudCompare-style global shift: subtract the requested offset so the small
+    # cloud's in-RAM array (kept as-is by the flat renderer path) holds small,
+    # precision-friendly coordinates. The renderer persists the shift it sent on
+    # the cloud for world-coord readouts/exports. None/zero = keep coordinates.
+    if request.world_shift is not None:
+        ws = np.asarray(request.world_shift, dtype=np.float64)
+        if ws.shape != (3,):
+            raise HTTPException(
+                status_code=400,
+                detail=f"world_shift must be [x, y, z]; got {request.world_shift!r}",
+            )
+        if np.any(ws != 0.0):
+            positions = positions.astype(np.float64, copy=False) - ws
     return _pack_pointcloud_response(positions, colors, intensity)
 
 
@@ -12348,6 +12671,56 @@ def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
     )
 
 
+# Any coordinate whose magnitude exceeds this triggers a suggested global shift:
+# at ~1e4 m, float32's ~1e-7 relative precision already gives ~1 mm error, and it
+# degrades linearly past that (UTM ~1e6 → ~0.1 m). Below it, raw coordinates render
+# cleanly and a shift would only be a nuisance.
+_SHIFT_SUGGEST_THRESHOLD = 1.0e4
+
+
+def _suggest_global_shift(file_path: str,
+                          response: PointCloudPreviewResponse) -> Optional[List[float]]:
+    """Best-effort suggested CloudCompare-style global shift for `file_path`,
+    or None when the coordinates are small enough to render cleanly (or the min
+    can't be probed cheaply). The suggestion is floor(min) per axis when any
+    axis min exceeds `_SHIFT_SUGGEST_THRESHOLD`.
+
+    ASCII: a capped pandas read of just the x/y/z columns (roles come from the
+    already-computed preview `columns`). LAS/LAZ: the header mins (no body read).
+    Other formats: skipped (None) — the viewer's render-offset still keeps them
+    artifact-free; only the explicit import shift is unavailable there."""
+    try:
+        ext = _Path(file_path).suffix.lower().lstrip('.')
+        mins: Optional[np.ndarray] = None
+        if ext in _PANDAS_EXTENSIONS:
+            role_idx = {c.detected_role: c.index for c in response.columns
+                        if c.detected_role in ('x', 'y', 'z')}
+            if not all(r in role_idx for r in ('x', 'y', 'z')):
+                return None
+            usecols = [role_idx['x'], role_idx['y'], role_idx['z']]
+            df = pd.read_csv(
+                file_path, sep=_ascii_pandas_sep(file_path), header=None,
+                comment='#', usecols=usecols, names=['x', 'y', 'z'],
+                dtype=np.float64, engine='c', skip_blank_lines=True,
+                skiprows=_ascii_skiprows(file_path), on_bad_lines='skip',
+                nrows=200_000,  # cap: enough for a stable min without a full read
+            ).dropna()
+            if df.empty:
+                return None
+            mins = df.to_numpy().min(axis=0)
+        elif ext in ('las', 'laz'):
+            import laspy
+            with laspy.open(file_path) as reader:
+                mins = np.asarray(reader.header.mins, dtype=np.float64)
+        if mins is None or mins.shape != (3,) or not np.all(np.isfinite(mins)):
+            return None
+        if not np.any(np.abs(mins) > _SHIFT_SUGGEST_THRESHOLD):
+            return None
+        return [float(v) for v in np.floor(mins)]
+    except Exception:
+        return None  # never block preview on a shift probe
+
+
 @app.post("/api/pointcloud/preview")
 async def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewResponse:
     """Cheaply inspect a point-cloud file for the import wizard.
@@ -12362,16 +12735,22 @@ async def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPre
     max_rows = max(1, min(int(request.max_rows or 20), 100))
     ext = source.suffix.lower().lstrip('.')
     try:
+        resp: Optional[PointCloudPreviewResponse] = None
         if ext in _PANDAS_EXTENSIONS:
-            return _preview_ascii(str(source), request.ascii_format, max_rows)
-        if ext == 'ply':
-            return _preview_ply(str(source))
-        if ext == 'pcd':
-            return _preview_pcd(str(source))
-        if ext == 'e57':
-            return _preview_e57(str(source))
-        if ext in ('las', 'laz'):
-            return _preview_las(str(source), max_rows)
+            resp = _preview_ascii(str(source), request.ascii_format, max_rows)
+        elif ext == 'ply':
+            resp = _preview_ply(str(source))
+        elif ext == 'pcd':
+            resp = _preview_pcd(str(source))
+        elif ext == 'e57':
+            resp = _preview_e57(str(source))
+        elif ext in ('las', 'laz'):
+            resp = _preview_las(str(source), max_rows)
+        if resp is not None:
+            # Probe coordinate magnitude and pre-fill a suggested global shift for
+            # large (e.g. UTM) clouds, so the wizard can offer it on by default.
+            resp.suggested_shift = _suggest_global_shift(str(source), resp)
+            return resp
     except Exception as e:  # never block import on a preview failure
         return PointCloudPreviewResponse(
             kind=ext or 'ascii', delimiter=None, has_header=False,
@@ -12905,6 +13284,15 @@ class CloudSession:
     octree_cache_id: Optional[str]   # currently-built derived octree, or None if stale
     created_at: float
     last_accessed: float = 0.0       # bumped on every read/mutate; drives idle eviction
+    # CloudCompare-style global shift applied at import: the per-axis offset that
+    # was SUBTRACTED from `positions` at create, so `world = stored + world_shift`.
+    # None means the session holds true world coordinates (no shift). Stored here
+    # so `_read_points_from_source` can restore world coords for every downstream
+    # op (triangulate/skeleton/LAD/export) at the single read chokepoint, keeping
+    # the in-RAM array (small, precision-friendly) the source of truth. Defaulted
+    # so direct constructions that predate this field (tests, internal helpers)
+    # need no change — a session with no shift behaves exactly as before.
+    world_shift: Optional[np.ndarray] = None  # (3,) float64 | None
 
 
 def _get_cloud_session(session_id: str) -> "CloudSession":
@@ -12976,6 +13364,33 @@ def _read_las_into_arrays(
             if vals.size and np.any(vals != vals.flat[0]):  # not constant/all-zero
                 extras[slug] = vals.astype(np.float32)
                 extra_dims_meta.append({"slug": slug, "label": _MULTI_RETURN_LABELS[slug]})
+
+    # Carry the remaining STANDARD LAS dimensions (classification, scan_angle,
+    # point_source_id, user_data, scanner_channel, …) as user-selectable scalar
+    # fields. Without this they'd be dropped here — the octree is rebuilt from
+    # these session arrays (`_session_to_las` → PotreeConverter), NOT from the
+    # original file, so anything not in `extras` never reaches the scalar picker.
+    # Skip the dims handled elsewhere (positions/colors/intensity, the multi-
+    # return sources mapped above, bit-flags) and any all-constant column (an
+    # all-zero classification etc. is noise in the picker, not signal).
+    #
+    # CRUCIAL: the slug is PREFIXED ('las_classification', …), not the bare LAS
+    # name. `_session_to_las` re-adds every extra-dim slug to the rebuilt LAS via
+    # add_extra_dim — and a slug that collides with a reserved standard-dim name
+    # (e.g. 'classification') makes laspy try to bit-pack the float column into
+    # the classification-flags byte and hard-crash the process. The 'las_' prefix
+    # keeps the slug clear of the standard schema; the label stays the clean name.
+    for d in las.point_format.standard_dimensions:
+        name = d.name
+        if (name in _LAS_STD_DIMS_SKIP or name in _LAS_MULTIRETURN_SRC):
+            continue
+        slug = f"las_{name}"
+        if slug in extras or name in extras:
+            continue
+        vals = np.asarray(las[name])
+        if vals.size and np.any(vals != vals.flat[0]):  # not constant
+            extras[slug] = vals.astype(np.float32)
+            extra_dims_meta.append({"slug": slug, "label": name})
     return positions, colors, intensity, extras, extra_dims_meta
 
 
@@ -13080,6 +13495,12 @@ class CloudSessionCreateRequest(BaseModel):
     source_path: str
     ascii_format: Optional[str] = None
     column_plan: Optional[ColumnPlan] = None
+    # CloudCompare-style global shift chosen in the import wizard: [x, y, z]
+    # SUBTRACTED from every point at create so the in-RAM array holds small,
+    # precision-friendly coordinates. The shift is stored on the session and added
+    # back at the read chokepoint, so downstream ops/exports recover true world
+    # coords. None / omitted = keep the original (possibly large) coordinates.
+    world_shift: Optional[List[float]] = None
 
 
 class DeleteRegionRequest(BaseModel):
@@ -13116,6 +13537,23 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             source_path, request.ascii_format, tmp_dir, request.column_plan,
         )
         positions, colors, intensity, extras, extra_dims_meta = _read_las_into_arrays(las_path)
+        # CloudCompare-style global shift: subtract the requested offset so the
+        # in-RAM array (the source of truth) — and the octree built from it below —
+        # hold small, precision-friendly coordinates. The shift is stored on the
+        # session and added back in `_read_points_from_source`, so triangulate /
+        # skeleton / LAD / export all see true world coords. A near-zero or absent
+        # shift means the cloud keeps its original coordinates.
+        world_shift_arr: Optional[np.ndarray] = None
+        if request.world_shift is not None:
+            ws = np.asarray(request.world_shift, dtype=np.float64)
+            if ws.shape != (3,):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"world_shift must be [x, y, z]; got {request.world_shift!r}",
+                )
+            if np.any(ws != 0.0):
+                positions = positions - ws  # new array; positions is float64 here
+                world_shift_arr = ws
         # `_read_las_into_arrays` sets label==slug from the LAS header, which
         # loses the wizard's custom labels. `_source_to_las` returns the proper
         # [{slug, label}] (honoring the column_plan), so overlay those labels.
@@ -13143,6 +13581,7 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             intensity=intensity,
             extras=extras,
             extra_dims_meta=extra_dims_meta,
+            world_shift=world_shift_arr,
             deleted=np.zeros(n, dtype=bool),
             deleted_history=[],
             octree_cache_id=None,
@@ -13196,7 +13635,11 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             "directions are recovered from the scan grid during LAD."
         ]
 
-    return {"session_id": session_id, "point_count": n, **miss_info, **meta}
+    # Echo the applied global shift so the renderer persists it on the cloud's
+    # OctreeRef (provenance + world-coord readouts). null when no shift was applied.
+    world_shift_out = world_shift_arr.tolist() if world_shift_arr is not None else None
+    return {"session_id": session_id, "point_count": n, "world_shift": world_shift_out,
+            **miss_info, **meta}
 
 
 @app.get("/api/cloud/session/{session_id}/misses")
@@ -13480,6 +13923,9 @@ def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSess
         intensity=sess.intensity[surv][keep].copy() if sess.intensity is not None else None,
         extras={k: v[surv][keep].copy() for k, v in sess.extras.items()},
         extra_dims_meta=list(sess.extra_dims_meta),
+        # Inherit the parent's import shift so the subset's stored positions stay
+        # in the same (shifted) space and still restore to world coords on read.
+        world_shift=(sess.world_shift.copy() if sess.world_shift is not None else None),
         deleted=np.zeros(int(keep.sum()), dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -13724,11 +14170,12 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
             reflectance = _session_reflectance_scalar(sess, request.scalar_slug, keep)
     if len(pts) < 3:
         raise HTTPException(status_code=400, detail="Need at least 3 points for wood/leaf segmentation.")
-    labels = segment_wood(pts, reflectance=reflectance, **_wood_segment_kwargs(request))
+    warns: List[str] = []
+    labels = segment_wood(pts, reflectance=reflectance, warnings=warns, **_wood_segment_kwargs(request))
     with _cloud_session_lock:
         _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
     cache_key, cache_dir, meta = _session_rebuild(sess)
-    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "warnings": warns, **meta}
 
 
 class SessionTreeSegmentRequest(TreeSegmentationRequest):

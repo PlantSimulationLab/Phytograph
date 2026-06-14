@@ -158,6 +158,52 @@ def test_wood_segment_synthetic_almond_informational():
           f"F1_wood={_f1(pred, truth, main.WOOD_CLASS_WOOD):.4f}")
 
 
+def test_wood_segment_method_geometric_equals_default():
+    """The `method='geometric'` path must be byte-identical to the legacy default
+    (segment_wood with no method arg) — guards the refactor that split the
+    geometric core out so the connectivity method could share it. Run on every
+    real fixture so a divergence on any species is caught."""
+    for stem, *_ in FIXTURES:
+        points, _ = _load(stem)
+        a = main.segment_wood(points)                       # legacy fn default
+        b = main.segment_wood(points, method="geometric")
+        assert np.array_equal(a, b), f"{stem}: method='geometric' diverged from the default"
+
+
+@pytest.mark.parametrize("stem", [f[0] for f in FIXTURES], ids=[f[0] for f in FIXTURES])
+def test_wood_segment_connectivity_runs(stem):
+    """The connectivity method runs on every real fixture and returns aligned,
+    valid labels with both classes present. This is a SMOKE/shape gate — the
+    accuracy improvement claim is measured full-resolution one-off (decimation
+    distorts the skeleton), not asserted here."""
+    points, _ = _load(stem)
+    pred = main.segment_wood(points, method="connectivity")
+    assert pred.shape == (len(points),)
+    assert pred.dtype == np.int32
+    assert set(np.unique(pred)).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
+    # A real tree has both wood and leaf; connectivity must not collapse to one.
+    assert main.WOOD_CLASS_WOOD in pred and main.WOOD_CLASS_LEAF in pred
+
+
+def test_wood_segment_connectivity_degenerate_falls_back():
+    """When the skeleton can't give a usable backbone (too few points, or two
+    far-apart clusters that don't form one rooted tree), the connectivity method
+    must fall back to a valid geometric result rather than raise or return garbage."""
+    rng = np.random.RandomState(3)
+    # Two well-separated blobs: the skeleton roots one; the other is unreachable
+    # and must keep its geometric label (not be forced to a single class / crash).
+    a = rng.normal([0, 0, 1.0], 0.05, (300, 3))
+    b = rng.normal([20, 20, 1.0], 0.05, (300, 3))
+    points = np.vstack([a, b])
+    pred = main.segment_wood(points, method="connectivity")
+    assert pred.shape == (len(points),)
+    assert set(np.unique(pred)).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
+
+    # A trivially tiny cloud must also be handled.
+    tiny = main.segment_wood(rng.normal(0, 1, (5, 3)), method="connectivity")
+    assert tiny.shape == (5,)
+
+
 def test_wood_segment_labels_aligned_and_typed():
     """Labels align 1:1 with input order and are the documented int values."""
     rng = np.random.RandomState(0)
@@ -285,12 +331,41 @@ def test_wood_segment_endpoint_inline_reflectance():
         "points": points.tolist(),
         "reflectance": refl.tolist(),
         "reflectance_weight_max": 0.4,
+        "method": "geometric",  # this test exercises reflectance, not connectivity
     })
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is True
     assert len(body["labels"]) == len(points)
     assert set(body["labels"]).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
+
+
+def test_wood_segment_endpoint_connectivity():
+    """The stateless endpoint accepts `method='connectivity'` and returns aligned
+    labels (request-plumbing smoke for the new method + the warnings field)."""
+    from fastapi.testclient import TestClient
+
+    rng = np.random.RandomState(5)
+    trunk = np.column_stack([
+        np.zeros(400), np.zeros(400), np.linspace(0, 2.5, 400)
+    ]) + rng.normal(0, 0.004, (400, 3))
+    branch = np.column_stack([
+        np.linspace(0, 0.8, 200), np.zeros(200), 1.8 + np.linspace(0, 0.4, 200)
+    ]) + rng.normal(0, 0.004, (200, 3))
+    leaf = rng.normal([0.4, 0.4, 2.0], 0.2, (800, 3))
+    points = np.vstack([trunk, branch, leaf])
+
+    client = TestClient(main.app)
+    resp = client.post("/api/segment/wood", json={
+        "points": points.tolist(),
+        "method": "connectivity",
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert len(body["labels"]) == len(points)
+    assert set(body["labels"]).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
+    assert "warnings" in body  # field present (may be empty)
 
 
 def test_wood_segment_too_few_points():

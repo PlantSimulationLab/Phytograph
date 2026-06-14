@@ -32,15 +32,28 @@ octree as extra attributes), so a terrestrial-scanner export with
 `Reflectance[dB]`, `Deviation[]`, `Target Index[]`, etc. exposes each as
 a selectable, color-mappable field.
 
+For **LAS/LAZ** imports this covers two kinds of column:
+
+- The file's **extra dimensions** (e.g. `Amplitude`, `Reflectance`,
+  `Deviation`), carried under their native names.
+- The **standard LAS per-point fields** that hold real data —
+  `classification`, `point_source_id`, `scan_angle`, `user_data`,
+  `scanner_channel`, and the per-pulse return fields. A standard field is
+  only listed when it actually varies across the cloud; an all-zero or
+  constant column (common for fields a scanner never populated) is skipped
+  so the picker stays uncluttered. X/Y/Z, RGB, and intensity are always
+  excluded here because they already have dedicated color modes.
+
 Field names come from the file's header row when present (so
 `Reflectance[dB]` shows as **Reflectance [dB]**); files without a header
 fall back to positional names. The selected field's value range drives
 the colorbar, and the **Min/Max** inputs let you window it.
 
 !!! note
-    Clouds imported before this feature shipped (v0.3.4) won't show their
-    extra columns until re-imported — cached octrees built earlier don't
-    carry the extra attributes.
+    Clouds imported before their attributes were carried (XYZ/CSV extras:
+    v0.3.4; LAS/LAZ standard fields: v0.16.0) won't show those columns
+    until re-imported — cached octrees built earlier don't carry the
+    extra attributes.
 
 #### Categorical (classification) attributes
 

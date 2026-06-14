@@ -514,16 +514,18 @@ describe('octreeScalarFieldOptions', () => {
     expect(octreeScalarFieldOptions(undefined, undefined)).toEqual([]);
   });
 
-  it('filters out builtin LAS/Potree attributes', () => {
+  it('filters out only the geometry/colour/intensity builtins', () => {
     const ranges = {
       position: { min: [0, 0, 0], max: [1, 1, 1] },
       rgb: { min: [0], max: [255] },
       intensity: { min: [0], max: [100] },
+      // classification is a real LAS dim the backend now carries as a scalar —
+      // it must reach the picker, not get filtered like position/rgb/intensity.
       classification: { min: [0], max: [8] },
       Reflectance_dB: { min: [-20], max: [-5] },
     };
     const opts = octreeScalarFieldOptions(ranges, {});
-    expect(opts.map(o => o.value)).toEqual(['Reflectance_dB']);
+    expect(opts.map(o => o.value).sort()).toEqual(['Reflectance_dB', 'classification']);
   });
 
   it('applies labels when present, falls back to slug otherwise', () => {
@@ -559,19 +561,23 @@ describe('octreeScalarFieldOptions', () => {
     expect(opts.map(o => o.value)).toEqual(['MyScalar']);
   });
 
-  it("filters PotreeConverter's spaced/hyphenated builtin names", () => {
-    // PotreeConverter 2.x writes the full LAS schema with these exact names.
+  it('keeps standard LAS dims (the backend carries them as scalars now)', () => {
+    // The backend surfaces non-constant standard LAS dimensions under their
+    // native slugs (see _read_las_into_arrays); the picker must show them. Only
+    // position/colour/intensity/normal/indices/spacing are still hidden.
     const ranges = {
-      'return number': { min: [0], max: [1] },
-      'number of returns': { min: [0], max: [1] },
-      'scan angle rank': { min: [0], max: [0] },
-      'user data': { min: [0], max: [0] },
-      'point source id': { min: [0], max: [0] },
-      'gps-time': { min: [0], max: [0] },
+      position: { min: [0, 0, 0], max: [1, 1, 1] },
+      rgb: { min: [0], max: [255] },
+      intensity: { min: [0], max: [100] },
+      classification: { min: [0], max: [8] },
+      point_source_id: { min: [10], max: [12] },
+      scan_angle: { min: [-15], max: [15] },
       Timestamp_s: { min: [100], max: [247] },
     };
     const opts = octreeScalarFieldOptions(ranges, { Timestamp_s: 'Timestamp [s]' });
-    expect(opts.map(o => o.value)).toEqual(['Timestamp_s']);
+    expect(opts.map(o => o.value).sort()).toEqual(
+      ['Timestamp_s', 'classification', 'point_source_id', 'scan_angle'],
+    );
   });
 });
 
