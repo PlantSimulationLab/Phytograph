@@ -53,6 +53,17 @@ jobs:
           cache: 'pip'
           cache-dependency-path: backend-api/requirements.txt
 
+      # Activate the MSVC toolchain on Windows. The PyHelios and PotreeConverter
+      # CMake builds use the "Visual Studio 17 2022" generator, which fails with
+      # "could not find any instance of Visual Studio" unless the VS Developer
+      # environment (vcvars) is on PATH. The hosted runner has VS installed but
+      # doesn't activate it for plain `run:` steps, so do it explicitly here.
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       # Native build headers the Linux runner doesn't ship: OpenGL + X11 dev
       # headers for the PyHelios visualizer/lidar plugin (build-pyhelios.mjs),
       # and Intel TBB for PotreeConverter (build-potree-converter.mjs probes it
@@ -64,10 +75,12 @@ jobs:
         run: |
           sudo apt-get update
           # libgl1-mesa-dev + xorg-dev: build-time GL/X11 headers (above).
+          # libglu1-mesa-dev: GLU headers (GL/glu.h) — the visualizer plugin's
+          # bundled glew pulls it in, and it's a separate package from libgl.
           # xvfb: a virtual X display for the runtime backend smoke test —
           # importing libhelios links the visualizer's GL symbols, so give it a
           # framebuffer in case the load path touches a display on a headless runner.
-          sudo apt-get install -y libgl1-mesa-dev xorg-dev libtbb-dev xvfb
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
 
       # Pin the cache to the exact PyHelios + helios-core commits so bumping
       # either submodule rebuilds the bundled native library.
@@ -217,7 +230,13 @@ jobs:
         id: potree-key-unix
         shell: bash
         run: |
-          script_hash=$(sha256sum scripts/build-potree-converter.mjs | cut -d' ' -f1)
+          # macOS runners have `shasum`, not GNU `sha256sum`; Linux has both.
+          # Pick whichever exists so this one step works on macOS and Linux.
+          if command -v sha256sum >/dev/null; then
+            script_hash=$(sha256sum scripts/build-potree-converter.mjs | cut -d' ' -f1)
+          else
+            script_hash=$(shasum -a 256 scripts/build-potree-converter.mjs | cut -d' ' -f1)
+          fi
           echo "key=$script_hash" >> "$GITHUB_OUTPUT"
 
       - name: Compute PotreeConverter cache key (Windows)
