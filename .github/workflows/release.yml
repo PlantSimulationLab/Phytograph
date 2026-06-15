@@ -132,29 +132,36 @@ jobs:
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-pyhelios.mjs
 
-      # Add swap on Linux before the PyInstaller backend build. Three release
-      # runs had the Linux job die *during* "Build Python backend" with a totally
-      # unrecoverable log — not even the always() "after" step ran. That is the
-      # signature of an OOM kill of the runner agent itself, during PyInstaller's
-      # analysis of these large collect-all packages (scipy + open3d + skimage +
-      # pye57 …), which peaks well above the ~7.8 GB RAM these runners have.
-      # (An earlier "6.8 GB free" reading was taken BEFORE PyInstaller's peak, so
-      # it didn't disprove OOM.) The runner already ships a 3 GB /swapfile, so we
-      # ADD a second, separately-named file (/swapfile2) — `fallocate` on the
-      # existing /swapfile fails with "Text file busy". 10 GB gives generous
-      # headroom over the ~7.8 GB RAM.
-      - name: Add swap for PyInstaller (Linux)
+      # Enlarge swap on Linux before the PyInstaller backend build. The Linux
+      # job kept dying during "Build Python backend" with a totally unrecoverable
+      # log — not even the always() "after" step ran — the signature of an OOM
+      # kill of the runner agent during PyInstaller's analysis of the large
+      # collect-all packages (scipy + open3d + skimage + pye57 …), whose peak
+      # exceeds the ~7.8 GB RAM these runners have.
+      #
+      # Use the canonical resize recipe: swapoff the existing /swapfile first,
+      # rebuild it bigger with `dd` (NOT fallocate — fallocate can produce a
+      # sparse/holey file that swapon rejects on some filesystems), then swapon.
+      # A prior attempt that fallocate'd a second /swapfile2 without swapoff
+      # killed the runner at this very step. `set -x` + the `free`/`df` prints
+      # mean that if this step fails again, the cause is visible in the log
+      # (the failure is now contained to this step, not a runner-wide crash).
+      - name: Enlarge swap for PyInstaller (Linux)
         if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
         run: |
-          echo "== memory/disk BEFORE adding swap =="
+          set -x
+          echo "== memory/disk BEFORE =="
           free -h || true
           df -h / || true
-          sudo fallocate -l 10G /swapfile2
-          sudo chmod 600 /swapfile2
-          sudo mkswap /swapfile2
-          sudo swapon /swapfile2
-          echo "== memory AFTER adding 10G swap =="
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=12288 status=progress
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "== memory/disk AFTER (expect ~12G swap) =="
           free -h || true
+          df -h / || true
 
       - name: Build Python backend
         if: steps.backend-cache.outputs.cache-hit != 'true'
