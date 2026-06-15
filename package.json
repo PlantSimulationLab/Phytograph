@@ -174,7 +174,8 @@
         "AppImage",
         "deb"
       ],
-      "category": "Education"
+      "category": "Education",
+      "maintainer": "Plant Simulation Laboratory <baileylabshared@gmail.com>"
     },
     "deb": {
       "artifactName": "${productName}-amd64.${ext}"
