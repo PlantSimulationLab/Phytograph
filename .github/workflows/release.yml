@@ -132,39 +132,26 @@ jobs:
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-pyhelios.mjs
 
-      # The first release run's Linux job died during "Build Python backend"
-      # (PyInstaller bundling open3d + scipy + pyhelios) with an empty step
-      # conclusion and an unrecoverable log blob — the signature of an
-      # OOM-killed runner (the agent dies before uploading logs). ubuntu
-      # runners have ~7-16 GB RAM and PyInstaller's analysis of these large
-      # native deps is memory-hungry. Add swap on Linux so an OOM doesn't kill
-      # the runner, and print memory before/after so the next run shows
-      # definitively whether memory was the cause (or surfaces the real error,
-      # which will now be uploaded because the runner survives).
-      - name: Add swap + report memory (Linux)
+      # Lightweight memory/disk reporting around the Linux backend build.
+      # The first release run's Linux job died here with an unrecoverable log
+      # (initially suspected OOM), but a later run showed PyInstaller finishing
+      # with ~6.8 GB of 7.8 GB free and the runner's pre-existing 3 GB swap
+      # barely touched — so memory was NOT the cause, and the first failure was
+      # transient. No swapfile is added (ubuntu-24.04 already ships /swapfile;
+      # creating another fails with "Text file busy"). Just log resources so a
+      # future failure here has evidence. `|| true` keeps this non-fatal.
+      - name: Report memory before backend build (Linux)
         if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
-        run: |
-          echo "== memory/disk BEFORE swap =="
-          free -h || true
-          df -h / || true
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "== memory AFTER adding 8G swap =="
-          free -h || true
+        run: free -h || true; df -h / || true
 
       - name: Build Python backend
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-backend.mjs
 
       - name: Report memory after backend build (Linux)
-        # Runs even if the build failed, so we capture peak/leftover memory.
+        # always() so we capture state even if the build failed.
         if: always() && runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
-        run: |
-          echo "== memory/disk AFTER backend build =="
-          free -h || true
-          df -h / || true
+        run: free -h || true; df -h / || true
 
       - name: Verify backend binary
         shell: bash
@@ -409,8 +396,14 @@ jobs:
       #                          chain under the hardened runtime.
       #   spctl --assess       — Gatekeeper's own verdict; "accepted /
       #                          source=Notarized Developer ID" is the goal.
-      #   stapler validate     — a notarization ticket is stapled to each .dmg
-      #                          (so first launch works offline, no Apple ping).
+      #   stapler validate .app — the notarization ticket is stapled to the
+      #                          .app (so first launch works offline). This is
+      #                          the authoritative check: electron-builder
+      #                          notarizes + staples the .app, then packages
+      #                          that stapled .app into the .dmg/.zip. It does
+      #                          NOT separately staple the .dmg container, so a
+      #                          dmg-level staple is checked only informationally
+      #                          (its absence is normal and not a failure).
       - name: Verify macOS notarization
         if: startsWith(matrix.platform, 'macos')
         shell: bash
@@ -447,18 +440,27 @@ jobs:
             exit 1
           fi
 
+          # Authoritative: the .app must carry a stapled ticket.
           echo "== stapler validate (.app) =="
           xcrun stapler validate "$app"
 
-          echo "== stapler validate (.dmg artifacts) =="
+          # Informational only: electron-builder staples the .app, not the .dmg
+          # container, so a missing dmg-level ticket is expected and NOT a
+          # failure — the .dmg holds the already-stapled .app. Don't let a
+          # non-zero stapler exit kill the step (set -e is active).
+          echo "== stapler validate (.dmg artifacts) [informational] =="
           dmgs=$(find release -maxdepth 1 -name '*.dmg' | sort)
           if [ -z "$dmgs" ]; then
-            echo "FAIL: no .dmg artifacts found to validate"
+            echo "FAIL: no .dmg artifacts found"
             exit 1
           fi
           for dmg in $dmgs; do
             echo "-- $dmg"
-            xcrun stapler validate "$dmg"
+            if xcrun stapler validate "$dmg"; then
+              echo "   (dmg is stapled)"
+            else
+              echo "   (dmg not stapled — expected; the .app inside it is stapled)"
+            fi
           done
 
-          echo "PASS: macOS build is signed, notarized, and stapled."
+          echo "PASS: macOS build is signed and notarized; the .app is stapled."

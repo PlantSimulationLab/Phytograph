@@ -138,9 +138,16 @@ function install() {
   const tag = platformTag();
   const outDir = join(repoRoot, 'resources', 'potree_converter', tag);
   mkdirSync(outDir, { recursive: true });
-  const srcBin = join(BUILD_DIR, binaryName());
-  if (!existsSync(srcBin)) {
-    throw new Error(`build did not produce ${srcBin}`);
+  // Single-config generators (Make/Ninja on macOS/Linux) write the binary
+  // directly into BUILD_DIR; multi-config generators (MSVC/Visual Studio on
+  // Windows) write it into a per-config subdir, BUILD_DIR/Release/. Check both.
+  const candidates = [
+    join(BUILD_DIR, binaryName()),
+    join(BUILD_DIR, 'Release', binaryName()),
+  ];
+  const srcBin = candidates.find((p) => existsSync(p));
+  if (!srcBin) {
+    throw new Error(`build did not produce ${binaryName()} (looked in: ${candidates.join(', ')})`);
   }
   const dstBin = join(outDir, binaryName());
   copyFileSync(srcBin, dstBin);
