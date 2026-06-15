@@ -128,6 +128,22 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                   className="w-24 bg-neutral-700 text-neutral-200 text-sm rounded px-2 py-1.5 border border-neutral-600"
                 />
               </div>
+
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <label className="block text-sm text-neutral-200">Scan marker size</label>
+                  <p className="text-[11px] text-neutral-500">Scale factor for scan-position model markers (1 = real-world size).</p>
+                </div>
+                <DebouncedNumberInput
+                  data-testid="settings-scan-marker-scale"
+                  min={0.1}
+                  max={20}
+                  step={0.25}
+                  value={settings?.scanMarkerScale ?? 1}
+                  onCommit={(v) => patch({ scanMarkerScale: v })}
+                  className="w-24 bg-neutral-700 text-neutral-200 text-sm rounded px-2 py-1.5 border border-neutral-600"
+                />
+              </div>
             </div>
           </section>
 

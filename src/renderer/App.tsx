@@ -64,6 +64,9 @@ function App() {
   // Settings live in a modal dialog (SettingsDialog), opened from the app/File
   // menu (⌘,/Ctrl+,). The viewer is the only "page", always mounted.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Bumped each time the settings dialog closes so the always-mounted viewer can
+  // re-read persisted settings (e.g. scan-marker scale) and apply them live.
+  const [settingsEpoch, setSettingsEpoch] = useState(0);
   const [scans, setScans] = useState<Scan[]>([]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
   // Progress shown over the viewer while an import (drag-drop or the
@@ -1308,6 +1311,7 @@ function App() {
           onViewerContentChange={setViewerHasContent}
           onRequestImportWizard={openImportWizard}
           onOpenSettings={() => setSettingsOpen(true)}
+          settingsEpoch={settingsEpoch}
           className="flex-1"
         />
         {scans.length === 0 && !viewerHasContent && renderEmptyHint()}
@@ -1351,7 +1355,10 @@ function App() {
       <AboutDialog isOpen={aboutOpen} onClose={() => setAboutOpen(false)} />
 
       {/* Settings dialog — opened from the app menu (macOS) or File menu (Win/Linux) via ⌘,/Ctrl+,. */}
-      <SettingsDialog isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsDialog
+        isOpen={settingsOpen}
+        onClose={() => { setSettingsOpen(false); setSettingsEpoch((n) => n + 1); }}
+      />
 
       {/* Drag overlay */}
       {isDragOver && (

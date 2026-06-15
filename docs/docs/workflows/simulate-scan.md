@@ -20,7 +20,23 @@ You need geometry in the scene to scan: typically a generated
 2. **Label** — a name for this scan (e.g., `north-1`, `position-A`).
    The label appears on the scanner marker in the 3D view.
 
-3. **Scan pattern** — choose how the rays are laid out. The pattern
+3. **Scanner model** — pick the instrument the scan represents. Choosing
+   a specific model (RIEGL VZ-400i, Leica ScanStation P40, FARO Focus
+   S350, or Velodyne HDL-32E) does two things:
+
+    - **Marks the position with that instrument's shape**, drawn to its
+      real-world size (a Velodyne puck is ~14 cm; a Leica P40 ~40 cm).
+    - **Auto-fills the instrument-fixed parameters** — beam optics
+      (diameter and divergence), scan pattern, return type, per-channel
+      beam elevations (for the Velodyne), and the maximum angular sweep —
+      from the manufacturer's datasheet. Resolution (point counts) is
+      yours to set, and every auto-filled value stays editable.
+
+    Leave it on **Generic / custom** for an unknown or hand-tuned
+    scanner; the position is marked with a plain sphere and no values are
+    changed.
+
+4. **Scan pattern** — choose how the rays are laid out. The pattern
    determines which inputs the popup shows next:
 
     === "Raster"
@@ -38,11 +54,11 @@ You need geometry in the scene to scan: typically a generated
         angles** directly (see step 4). The number of channels sets the
         vertical resolution; the azimuth count and sweep still apply.
 
-4. **Origin** — (X, Y, Z) in meters of the scanner head. A typical TLS
+5. **Origin** — (X, Y, Z) in meters of the scanner head. A typical TLS
    campaign places scanners 1.5–2 m above ground, 3–5 m from the
    plant.
 
-5. **Scan size** and **angular sweep** — what you enter here depends on
+6. **Scan size** and **angular sweep** — what you enter here depends on
    the pattern:
 
     === "Raster"
@@ -72,7 +88,7 @@ You need geometry in the scene to scan: typically a generated
           sweep.
         - **Azimuth (φ) min / max** — horizontal bounds, as for raster.
 
-6. **Return type**:
+7. **Return type**:
 
     === "Single-return"
 
@@ -90,7 +106,7 @@ You need geometry in the scene to scan: typically a generated
         Slower but produces realistic returns from leaves and porous
         canopy.
 
-7. **Scanner tilt** — residual lean of the scanner away from level, in
+8. **Scanner tilt** — residual lean of the scanner away from level, in
    degrees. Real terrestrial scanners are never perfectly plumb; a
    dual-axis inclinometer reports the lean as two angles:
     - **Roll** — applied first, about the scanner's lateral axis
@@ -100,8 +116,9 @@ You need geometry in the scene to scan: typically a generated
     of the scan (it describes the instrument), so it's stored on the scan
     and editable later — useful even for documenting a real scan's pose.
 
-8. Click **Add Scan** to place the scanner. A radio-tower marker
-   appears in the 3D view at the origin.
+9. Click **Add Scan** to place the scanner. A marker — the selected
+   instrument's shape, or a sphere for a generic scanner — appears in the
+   3D view at the origin.
 
 ## Import scan positions from a real campaign
 

@@ -1,0 +1,22 @@
+# RIEGL VZ livery materials
+newmtl aluminum
+Kd 0.780 0.790 0.810
+Ks 0.550 0.550 0.570
+Ns 120
+illum 2
+d 1.0
+
+newmtl red
+Kd 0.800 0.090 0.100
+Ks 0.350 0.100 0.100
+Ns 60
+illum 2
+d 1.0
+
+newmtl glass
+Kd 0.070 0.160 0.180
+Ks 0.700 0.750 0.750
+Ns 200
+illum 2
+d 1.0
+

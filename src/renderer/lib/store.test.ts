@@ -58,6 +58,7 @@ describe('store settings', () => {
       triangulateMaxPoints: 5_000_000,
       defaultBackgroundColor: 'black',
       defaultPointSize: 1,
+      scanMarkerScale: 1,
     });
   });
 
@@ -130,6 +131,7 @@ describe('store export/import', () => {
       triangulateMaxPoints: 5_000_000,
       defaultBackgroundColor: 'black',
       defaultPointSize: 1,
+      scanMarkerScale: 1,
     });
   });
 });

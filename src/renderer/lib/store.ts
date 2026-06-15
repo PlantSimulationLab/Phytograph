@@ -45,6 +45,11 @@ export interface AppSettings {
   // Default render size (in px) for points in newly-loaded clouds. The viewer's
   // Display panel still adjusts the live size; this seeds it on launch.
   defaultPointSize: number;
+  // Global size multiplier for scan-position model markers. 1 = real-world
+  // scale (a Velodyne renders at ~0.14 m, a Leica P40 at ~0.40 m); raise it to
+  // make markers easier to spot against large scans, lower it to de-emphasise
+  // them. Applied to every marker's fitted scale when it's built.
+  scanMarkerScale: number;
 }
 
 export interface StoreData {
@@ -57,6 +62,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   triangulateMaxPoints: 5_000_000,
   defaultBackgroundColor: 'black',
   defaultPointSize: 1,
+  scanMarkerScale: 1,
 };
 
 const hasElectron = (): boolean => typeof window !== 'undefined' && !!window.electronAPI;

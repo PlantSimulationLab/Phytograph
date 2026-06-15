@@ -80,8 +80,19 @@ Three entry paths:
 ## What scans look like in the viewer
 
 A scan with point data renders as its points. A scan with parameters
-renders an additional radio-tower marker at the scanner origin.
-Toggling visibility on the row hides both, if present.
+renders an additional marker at the scanner origin — the shape of the
+selected scanner model (drawn to its real-world size), or a plain sphere
+for a generic scanner. Toggling visibility on the row hides both, if
+present.
+
+The markers are real-world sized, so a small sensor (a Velodyne puck) is
+genuinely tiny next to a large cloud. Two viewer controls help:
+
+- **Display panel → Scan markers** (lower-right) shows or hides the whole
+  marker layer at once, independent of each scan's row visibility.
+- **Settings → Scan marker size** sets a global scale multiplier applied
+  to every marker (1 = real-world size). Raise it to make markers easier
+  to spot; the change applies as soon as you close Settings.
 
 See [Simulate a LiDAR scan](../workflows/simulate-scan.md) for the full
 walkthrough of placing virtual scanners.

@@ -23,6 +23,13 @@ export type ScanPattern = 'raster' | 'spinning_multibeam';
 
 export interface ScanParameters {
   origin: { x: number; y: number; z: number };
+  // Which scanner instrument this scan represents. Drives the marker mesh and
+  // (at selection time) auto-fills the instrument-fixed acquisition parameters
+  // below. 'generic' is an unknown/custom scanner drawn as a plain sphere.
+  // Optional + defaulted so scans persisted before this field existed (and
+  // file-header / XML imports, which never name a model) read back as generic.
+  // See ./scannerModels for the catalog and presets.
+  scannerModel?: import('./scannerModels').ScannerModelId;
   pattern: ScanPattern;
   // Number of sample rays in each angular direction. For spinning_multibeam,
   // `zenithPoints` and the zenith sweep are unused (Ntheta = number of channels);
@@ -58,6 +65,7 @@ export interface ScanParameters {
 
 export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   origin: { x: 0, y: 0, z: 0 },
+  scannerModel: 'generic',
   pattern: 'raster',
   zenithPoints: 100,
   azimuthPoints: 360,

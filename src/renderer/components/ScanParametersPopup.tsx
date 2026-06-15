@@ -8,6 +8,11 @@ import {
   type ScanPattern,
 } from '../lib/scanParameters';
 import {
+  SCANNER_MODELS,
+  getScannerModel,
+  type ScannerModelId,
+} from '../lib/scannerModels';
+import {
   parseHeliosScanXml,
   HeliosXmlParseError,
   type HeliosXmlScan,
@@ -192,6 +197,26 @@ export function ScanParametersPopup({
     if (submitError) setSubmitError(null);
   };
 
+  // Selecting a scanner model records the choice (drives the marker mesh) and
+  // overwrites the instrument-fixed parameters with that model's preset. The
+  // preset only touches optics/pattern/return/elevations/sweep — origin, tilt,
+  // and resolution (point counts) are user choices and stay as-is. Everything
+  // remains editable afterward. 'generic' carries an empty preset, so picking it
+  // just sets the mesh back to the sphere without disturbing current values.
+  const setModel = (id: ScannerModelId) => {
+    const preset = getScannerModel(id).preset;
+    setParams(p => {
+      const next: ScanParameters = { ...p, ...preset, scannerModel: id };
+      // Keep the free-text elevation field in sync when the preset (de)fines
+      // channel elevations (e.g. switching to the Velodyne fills 32 channels).
+      if (preset.beamElevationAnglesDeg) {
+        setElevationText(preset.beamElevationAnglesDeg.join(', '));
+      }
+      return next;
+    });
+    if (submitError) setSubmitError(null);
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (params.pattern === 'spinning_multibeam' && params.beamElevationAnglesDeg.length < 1) {
@@ -259,6 +284,25 @@ export function ScanParametersPopup({
               onChange={(e) => setLabel(e.target.value)}
               className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
             />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scanner model</label>
+            <select
+              data-testid="scan-model-select"
+              value={params.scannerModel ?? 'generic'}
+              onChange={(e) => setModel(e.target.value as ScannerModelId)}
+              className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+            >
+              {SCANNER_MODELS.map(m => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-neutral-500">
+              Picking a specific instrument fills its beam optics, scan pattern, return
+              type, and angular sweep below (all still editable). “Generic / custom” leaves
+              the values untouched and marks the position with a plain sphere.
+            </p>
           </div>
 
           <div>

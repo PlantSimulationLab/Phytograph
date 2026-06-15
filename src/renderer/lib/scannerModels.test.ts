@@ -1,0 +1,91 @@
+import { describe, it, expect } from 'vitest';
+import {
+  SCANNER_MODELS,
+  getScannerModel,
+  DEFAULT_SCANNER_MODEL,
+  type ScannerModelId,
+} from './scannerModels';
+
+describe('scannerModels catalog', () => {
+  it('exposes generic plus the four bundled instruments', () => {
+    const ids = SCANNER_MODELS.map(m => m.id);
+    expect(ids).toEqual([
+      'generic',
+      'riegl_vz400i',
+      'leica_p40',
+      'faro_focus_s350',
+      'velodyne_hdl32e',
+    ]);
+  });
+
+  it('every model has a mesh, a positive real-world height, and matching format', () => {
+    for (const m of SCANNER_MODELS) {
+      expect(m.meshUrl).toBeTruthy();
+      expect(m.heightMeters).toBeGreaterThan(0);
+      expect(['ply', 'obj']).toContain(m.meshFormat);
+    }
+  });
+
+  it('generic is the default and renders the sphere with an empty preset', () => {
+    expect(DEFAULT_SCANNER_MODEL).toBe('generic');
+    const generic = getScannerModel('generic');
+    expect(generic.meshFormat).toBe('ply');
+    expect(generic.preset).toEqual({});
+  });
+
+  it('falls back to generic for unknown or undefined ids', () => {
+    expect(getScannerModel(undefined).id).toBe('generic');
+    expect(getScannerModel('nope' as ScannerModelId).id).toBe('generic');
+  });
+
+  it('instruments use OBJ meshes', () => {
+    for (const m of SCANNER_MODELS.filter(m => m.id !== 'generic')) {
+      expect(m.meshFormat).toBe('obj');
+    }
+  });
+
+  it('carries datasheet beam optics and vertical sweep for the terrestrial scanners', () => {
+    // RIEGL: vertical (line) scan total 100° (+60°/−40°) → zenith 30–130°.
+    // The datasheet quotes only divergence, so no exit aperture is preset.
+    const riegl = getScannerModel('riegl_vz400i').preset;
+    expect(riegl.beamDivergenceMrad).toBeCloseTo(0.35);
+    expect(riegl.pattern).toBe('raster');
+    expect(riegl.zenithMinDeg).toBe(30);
+    expect(riegl.zenithMaxDeg).toBe(130);
+    expect(riegl.beamExitDiameterM).toBeUndefined();
+
+    // Leica P40: 290° vertical FOV → mirror reaches zenith 0–145° (a ~70° blind
+    // cone under the tripod), NOT the full 0–180°.
+    const leica = getScannerModel('leica_p40').preset;
+    expect(leica.beamDivergenceMrad).toBeCloseTo(0.23);
+    expect(leica.beamExitDiameterM).toBeCloseTo(0.0035);
+    expect(leica.returnType).toBe('single');
+    expect(leica.zenithMinDeg).toBe(0);
+    expect(leica.zenithMaxDeg).toBe(145);
+
+    // FARO S350: 300° vertical FOV given as 2×150° → zenith 0–150°.
+    const faro = getScannerModel('faro_focus_s350').preset;
+    expect(faro.beamDivergenceMrad).toBeCloseTo(0.3);
+    expect(faro.beamExitDiameterM).toBeCloseTo(0.00212);
+    expect(faro.zenithMinDeg).toBe(0);
+    expect(faro.zenithMaxDeg).toBe(150);
+  });
+
+  it('models the Velodyne HDL-32E as a 32-channel spinning multibeam', () => {
+    const v = getScannerModel('velodyne_hdl32e').preset;
+    expect(v.pattern).toBe('spinning_multibeam');
+    expect(v.returnType).toBe('multi');
+    expect(v.beamElevationAnglesDeg).toHaveLength(32);
+    // Rectangular emitter ~1/2″ wide at the source → 12.7 mm on the wide axis.
+    expect(v.beamExitDiameterM).toBeCloseTo(0.0127);
+    // Channels span +10.67° (top) to −30.67° (bottom), monotonically decreasing.
+    const angles = v.beamElevationAnglesDeg!;
+    expect(angles[0]).toBeCloseTo(10.67, 1);
+    expect(angles[31]).toBeCloseTo(-30.67, 1);
+    for (let i = 1; i < angles.length; i++) {
+      expect(angles[i]).toBeLessThan(angles[i - 1]);
+    }
+    expect(v.azimuthMinDeg).toBe(0);
+    expect(v.azimuthMaxDeg).toBe(360);
+  });
+});
