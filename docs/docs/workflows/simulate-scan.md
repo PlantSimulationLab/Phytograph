@@ -116,7 +116,15 @@ You need geometry in the scene to scan: typically a generated
     of the scan (it describes the instrument), so it's stored on the scan
     and editable later — useful even for documenting a real scan's pose.
 
-9. Click **Add Scan** to place the scanner. A marker — the selected
+9. **Scanner heading** — the initial azimuth the scanner faces in the
+   horizontal plane, in degrees (`0` is the default heading; counter-clockwise
+   positive). Like tilt, it's a property of the scan and editable later. The
+   heading rotates the scanner **marker** in the 3D view so it points the right
+   way. *Note:* the synthetic-scan geometry does not yet rotate by heading — the
+   simulated rays are unaffected for now, pending a Helios update; the field is
+   stored and round-trips through XML regardless.
+
+10. Click **Add Scan** to place the scanner. A marker — the selected
    instrument's shape, or a sphere for a generic scanner — appears in the
    3D view at the origin.
 
@@ -130,7 +138,10 @@ This reads the same format the Helios scan simulator uses; one scan is
 created per `<scan>` element, and any top-level `<grid>` blocks become
 voxel-grid boxes.
 A `<scanTilt>` tag (two numbers, `roll pitch` in degrees) populates the
-scanner tilt; absent, the scan imports level.
+scanner tilt; absent, the scan imports level. A `<scanAzimuthOffset>` tag
+(a single number, degrees) populates the scanner heading; absent, the
+scan imports at heading 0 — so XML written before this field existed
+still loads.
 A `<scanPattern>spinning_multibeam</scanPattern>` tag imports the scan as
 a spinning-multibeam scan; its per-channel `<beamElevationAngles>` (a
 space-separated list of elevation degrees above the horizon) and

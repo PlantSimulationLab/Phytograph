@@ -537,7 +537,7 @@ describe('runLidarScan', () => {
         phi_min_deg: 0, phi_max_deg: 360,
         return_type: 'single' as const,
         exit_diameter_m: 0, beam_divergence_mrad: 0,
-        tilt_roll_deg: 0, tilt_pitch_deg: 0,
+        tilt_roll_deg: 0, tilt_pitch_deg: 0, scan_azimuth_offset_deg: 0,
         range_noise_m: 0, angle_noise_mrad: 0,
       }],
     };
@@ -579,7 +579,7 @@ describe('runLidarScan', () => {
         phi_min_deg: 0, phi_max_deg: 360,
         return_type: 'single' as const,
         exit_diameter_m: 0, beam_divergence_mrad: 0,
-        tilt_roll_deg: 0, tilt_pitch_deg: 0,
+        tilt_roll_deg: 0, tilt_pitch_deg: 0, scan_azimuth_offset_deg: 0,
         range_noise_m: 0, angle_noise_mrad: 0,
       }],
     };

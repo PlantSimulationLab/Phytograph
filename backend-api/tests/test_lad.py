@@ -849,9 +849,10 @@ class TestSingleReturnMissImportColumnMapping:
         assert by_index[0].detected_role == "x"
         assert by_index[1].detected_role == "y"
         assert by_index[2].detected_role == "z"
-        # The miss flag is carried as an extra under the CANONICAL slug, not a
+        # The miss flag reports the dedicated 'is_miss' role token (pre-selects
+        # the wizard's 'Miss Flag' option) pinned to the canonical slug — not a
         # positional fallback like 'col_4' and not dropped to 'skip'.
-        assert by_index[3].detected_role == "extra"
+        assert by_index[3].detected_role == "is_miss"
         assert by_index[3].suggested_slug == "is_miss"
 
     def test_wizard_column_plan_round_trips_miss_slug(self):

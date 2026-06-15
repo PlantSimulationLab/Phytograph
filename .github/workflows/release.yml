@@ -419,6 +419,18 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Linux ships .deb only — AppImage is intentionally disabled (see
+      # build.linux.target in package.json, which lists just "deb"). In the
+      # v0.19.0 release run the AppImage target hung here in electron-builder
+      # for 30+ min on the hosted ubuntu-24.04 runner with no error and no
+      # artifact, while .deb, the macOS .dmg/.zip and the Windows .exe all
+      # built and uploaded fine. To re-enable, add "AppImage" back to
+      # build.linux.target. To debug the hang: it's most likely electron-
+      # builder's appimagetool/FUSE step stalling on the runner — try
+      # pinning/upgrading electron-builder, setting USE_SYSTEM_FUSE, or running
+      # the AppImage build under a step-level `timeout` so the stall point is
+      # captured in the log (the in-progress step log isn't retrievable from
+      # the API mid-run, so only a timeout-induced failure surfaces it).
       - name: Build & publish app
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

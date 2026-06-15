@@ -60,6 +60,11 @@ per-pulse directions from `(point − origin)`.
 - **Return type** — single (one return per ray) or multi (partial
   returns through foliage)
 - **Beam properties** (multi-return only) — exit diameter, divergence
+- **Scanner tilt** — residual roll/pitch lean away from level (degrees)
+- **Scanner heading** — initial azimuth the scanner faces in the
+  horizontal plane (degrees; 0 is the default heading). Orients the
+  scanner marker in the 3D view and round-trips through XML
+  (`<scanAzimuthOffset>`)
 
 ## Importing scans
 

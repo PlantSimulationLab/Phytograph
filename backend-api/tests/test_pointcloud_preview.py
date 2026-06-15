@@ -88,11 +88,12 @@ def test_preview_commented_header_recovers_labels_and_roles(client, tmp_path: Pa
     assert [c["header_name"] for c in cols] == [
         "x", "y", "z", "r255", "g255", "b255", "row", "column", "is_miss"]
     roles = [c["detected_role"] for c in cols]
-    # x/y/z + RGB (r255 spelling recognised) + grid indices; is_miss carried as a
-    # scalar pinned to the canonical is_miss slug.
+    # x/y/z + RGB (r255 spelling recognised) + grid indices; is_miss reports the
+    # dedicated 'is_miss' role token (pre-selects the wizard's 'Miss Flag' option)
+    # pinned to the canonical is_miss slug.
     assert roles[:6] == ["x", "y", "z", "r255", "g255", "b255"]
     assert roles[6:8] == ["row_index", "column_index"]
-    assert cols[8]["detected_role"] == "extra"
+    assert cols[8]["detected_role"] == "is_miss"
     assert cols[8]["suggested_slug"] == "is_miss"
     assert cols[8]["suggested_label"] == "Miss"
     # The commented header is dropped by comment='#', so the FIRST sample row must
@@ -155,6 +156,22 @@ def test_miss_alias_spellings_normalise_to_is_miss(tmp_path: Path):
     ])
     _, extra = main._xyz_column_plan(None, None, cp)
     assert [e["slug"] for e in extra] == ["is_miss"]
+
+
+def test_explicit_is_miss_role_token_pins_canonical_slug(tmp_path: Path):
+    # The wizard's dedicated 'Miss Flag' option emits an explicit 'is_miss' role
+    # token (not 'extra'). It must plan to the canonical is_miss extra dim, never
+    # categorical, regardless of the column's header text.
+    cp = _plan([
+        {"index": 0, "role": "x"}, {"index": 1, "role": "y"}, {"index": 2, "role": "z"},
+        {"index": 3, "role": "is_miss"},
+    ])
+    names, extra = main._xyz_column_plan(None, None, cp)
+    assert names == ["x", "y", "z", "extra:is_miss"]
+    assert len(extra) == 1
+    assert extra[0]["slug"] == "is_miss"
+    assert extra[0]["label"] == main._MISS_LABEL
+    assert extra[0]["categorical"] is False
 
 
 def test_preview_headerless_xyz_positional(client, tmp_path: Path):

@@ -18,41 +18,70 @@ interface ScannerMarkerProps {
   selected?: boolean;
   // Residual scanner tilt away from plumb, in degrees (a dual-axis
   // inclinometer's two angles). Roll is applied first (about the body lateral
-  // axis), then pitch (about the body forward / azimuth-zero axis). Both default
+  // axis), then pitch (about the body forward / heading axis). Both default
   // to 0 (level). Derived from the scan's params at render time, so editing tilt
   // in the scan panel re-orients the marker live.
   tiltRollDeg?: number;
   tiltPitchDeg?: number;
-  // Azimuth-zero direction (phiMin), in degrees, defining the body forward axis
-  // in the world XY plane. The tilt axes are built relative to it so a tilted
-  // scanner leans in the right world direction regardless of its azimuth sweep.
-  azimuthZeroDeg?: number;
+  // Initial scanner heading, in degrees, defining where the body forward axis
+  // points in the world XY plane. The mesh bodies are authored forward-along-+Y,
+  // so heading 0 = +Y and the body is simply yawed by the heading (CCW) about
+  // world +Z. Tilt axes are built relative to the resulting forward so a tilted
+  // scanner leans in the right world direction. Default 0.
+  azimuthOffsetDeg?: number;
   // Global size multiplier applied uniformly on top of the model's real-world
   // fit (the user's "Scan marker size" setting). 1 = real-world scale. Applied
   // to the wrapping group, so it scales the fitted mesh as a whole.
   scale?: number;
 }
 
-// Build the marker's orientation quaternion from the tilt convention: with world
-// +Z up, the forward (azimuth-zero) axis is (cos φ₀, sin φ₀, 0) and the lateral
-// axis is forward × up = (sin φ₀, -cos φ₀, 0). Roll rotates about lateral first,
-// then pitch about forward (right-hand). Composing q = pitch ∘ roll applies roll
-// first. Returns identity when level so the common case stays cheap.
+// Tilt component of the marker orientation. With world +Z up and the body forward
+// (heading) axis at world azimuth φ₀ (measured CCW-from-+X), the forward axis is
+// (cos φ₀, sin φ₀, 0) and the lateral axis is forward × up = (sin φ₀, -cos φ₀, 0).
+// Roll rotates about lateral first, then pitch about forward (right-hand). Composing
+// q = pitch ∘ roll applies roll first. Identity when level.
+//
+// φ₀ here is the *world* forward azimuth, NOT the user's heading field — the meshes
+// are authored forward-along-+Y, so a heading of `a` points forward to +Y rotated by
+// `a`, i.e. world azimuth φ₀ = a + 90°. scannerOrientation() does that conversion.
 function tiltQuaternion(
   rollDeg: number,
   pitchDeg: number,
-  azimuthZeroDeg: number,
+  forwardAzimuthDeg: number,
 ): THREE.Quaternion {
-  // Identity when level — always return a concrete quaternion (never null) so
-  // that editing tilt back to 0/0 actively resets the group's orientation
-  // rather than leaving the previous tilt baked in.
   if (rollDeg === 0 && pitchDeg === 0) return new THREE.Quaternion();
-  const phi0 = (azimuthZeroDeg * Math.PI) / 180;
+  const phi0 = (forwardAzimuthDeg * Math.PI) / 180;
   const forward = new THREE.Vector3(Math.cos(phi0), Math.sin(phi0), 0);
   const lateral = new THREE.Vector3(Math.sin(phi0), -Math.cos(phi0), 0);
   const qRoll = new THREE.Quaternion().setFromAxisAngle(lateral, (rollDeg * Math.PI) / 180);
   const qPitch = new THREE.Quaternion().setFromAxisAngle(forward, (pitchDeg * Math.PI) / 180);
   return qPitch.multiply(qRoll);
+}
+
+// Heading (yaw) component: the mesh bodies are authored with their forward axis
+// along +Y and heading 0 = that default, so a heading of `a` is simply a yaw of `a`
+// (CCW) about world +Z — it rotates +Y to (-sin a, cos a, 0). Generic spheres are
+// rotationally symmetric so this is visually a no-op for them, but applying it
+// uniformly keeps one code path.
+function headingYawQuaternion(azimuthOffsetDeg: number): THREE.Quaternion {
+  const yaw = (azimuthOffsetDeg * Math.PI) / 180;
+  return new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), yaw);
+}
+
+// Full marker orientation: yaw the authored +Y-forward body to the heading first,
+// then apply tilt about the (now correctly-oriented) world axes — q = tilt ∘ yaw.
+// The body forward after the yaw sits at world azimuth (heading + 90°), so tilt is
+// built about that same axis to lean in the right direction. Returns a concrete
+// quaternion (never null) so resetting heading/tilt actively re-orients the group
+// rather than leaving a stale rotation baked in.
+export function scannerOrientation(
+  rollDeg: number,
+  pitchDeg: number,
+  azimuthOffsetDeg: number,
+): THREE.Quaternion {
+  const yaw = headingYawQuaternion(azimuthOffsetDeg);
+  const tilt = tiltQuaternion(rollDeg, pitchDeg, azimuthOffsetDeg + 90);
+  return tilt.multiply(yaw);
 }
 
 // Per-marker MeshStandardMaterial built from the scan's swatch colour. Darken in
@@ -188,15 +217,15 @@ export function ScannerMarker({
   selected = false,
   tiltRollDeg = 0,
   tiltPitchDeg = 0,
-  azimuthZeroDeg = 0,
+  azimuthOffsetDeg = 0,
   scale = 1,
 }: ScannerMarkerProps) {
   const resolved = useMemo(() => getScannerModel(model), [model]);
-  // Recompute only when the tilt inputs change. Identity (level) leaves the
-  // group at its default orientation.
+  // Recompute only when the heading/tilt inputs change. Combines the heading yaw
+  // (orient the authored +Y-forward body) with the residual tilt.
   const quaternion = useMemo(
-    () => tiltQuaternion(tiltRollDeg, tiltPitchDeg, azimuthZeroDeg),
-    [tiltRollDeg, tiltPitchDeg, azimuthZeroDeg],
+    () => scannerOrientation(tiltRollDeg, tiltPitchDeg, azimuthOffsetDeg),
+    [tiltRollDeg, tiltPitchDeg, azimuthOffsetDeg],
   );
   // Clamp to a sane positive multiplier so a stray 0/negative setting can't
   // collapse or invert every marker.

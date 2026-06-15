@@ -51,8 +51,8 @@ dropdowns in; you correct anything that's wrong before importing:
 - **Column roles** — for ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`,
   `.asc`), each column's dropdown sets its role: **X / Y / Z**,
   **Red / Green / Blue**, **Intensity**, **Reflectance**,
-  **Scan Row Index**, **Scan Column Index**, **Scalar**, **Label**, or
-  **Skip**. X, Y, and Z must be assigned before you can import.
+  **Scan Row Index**, **Scan Column Index**, **Miss Flag**, **Scalar**,
+  **Label**, or **Skip**. X, Y, and Z must be assigned before you can import.
 - **Scalar vs Label** — a **Scalar** column is a continuous measurement
   (intensity, height, timestamp) and colors as a smooth gradient; a
   **Label** column holds class ids (tree id, segment, classification) and
@@ -64,6 +64,16 @@ dropdowns in; you correct anything that's wrong before importing:
   rebuild missing pulses within the scan pattern. They carry through as
   scalar fields (slugs `row_index` / `column_index`) and auto-detect from
   common headers like `Row` / `Column` / `row_index`.
+- **Miss Flag** — a per-pulse 0/1 indicator of whether the laser returned
+  nothing (`0` = hit, `1` = sky/miss). Mapping it preserves the scan's miss
+  rays, which leaf-area-density inversion needs to measure gap fraction. It
+  carries through under the canonical `is_miss` slug (so the color-by **Miss**
+  mode and its fixed Hit/Miss legend find it) and auto-detects from headers
+  like `is_miss` / `miss` / `sky`. By default the viewer colors it with the
+  dedicated **Hit/Miss** scheme. If you instead pick **Scalar** for the column,
+  it keeps the `is_miss` slug (LAD still works) but colors as a continuous 0–1
+  gradient with a numeric legend — useful when you'd rather see the raw flag
+  value than the named classes.
 - **RGB range** — when an RGB role is present, choose whether the values are
   **0–255 integers** or **0–1 floats**, so colors import at the right
   brightness.

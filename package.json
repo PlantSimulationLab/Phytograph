@@ -29,6 +29,7 @@
     "test:unit:coverage": "vitest run --coverage",
     "test:backend": "cd backend-api && ./venv/bin/pytest",
     "test:e2e": "playwright test",
+    "test:smoke-packaged": "node scripts/smoke-packaged-app.mjs",
     "test": "npm run typecheck && npm run test:unit && npm run test:backend && npm run test:e2e"
   },
   "dependencies": {
@@ -171,7 +172,6 @@
     "linux": {
       "icon": "build/icon.png",
       "artifactName": "${productName}.${ext}",
-      "_comment_appimage": "AppImage temporarily disabled: in the v0.19.0 release run the AppImage target hung in 'Build & publish app' for 30+ min on the GitHub-hosted ubuntu-24.04 runner with no error and no artifact uploaded, while .deb, the macOS .dmg/.zip, and the Windows .exe all built and uploaded fine. To re-enable, add \"AppImage\" back to the target array below. To debug the hang: it's most likely electron-builder's appimagetool/FUSE step stalling on the runner — try pinning/upgrading electron-builder, setting USE_SYSTEM_FUSE, or running the AppImage build with a step-level timeout to capture where it stalls (the in-progress step log isn't retrievable from the API mid-run, so a timeout that fails the step is what surfaces the log). Until then we ship .deb only on Linux.",
       "target": [
         "deb"
       ],

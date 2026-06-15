@@ -56,6 +56,14 @@ export interface ScanParameters {
   // scan_tilt_roll/scan_tilt_pitch (radians).
   tiltRollDeg: number;
   tiltPitchDeg: number;
+  // Initial scanner heading in the world XY plane, in degrees — the azimuth the
+  // scanner's forward axis points along before the sweep begins. CCW-from-+X
+  // positive (0 = +X). A real property of how the instrument was set up on the
+  // tripod, independent of the azimuth *sweep* bounds below. Maps to Helios
+  // <scanAzimuthOffset> (degrees) and (once the struct lands) pyhelios
+  // scan_azimuth_offset (radians). 0 = default heading. Also orients the
+  // scanner marker mesh in the viewer.
+  azimuthOffsetDeg: number;
   // Spinning-multibeam only. Per-channel beam elevation angles in degrees above
   // the horizon — the manufacturer-spec convention (positive = above horizon).
   // Length sets Ntheta. Maps to Helios <beamElevationAngles>; the backend
@@ -78,6 +86,7 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   beamDivergenceMrad: 0.5,
   tiltRollDeg: 0,
   tiltPitchDeg: 0,
+  azimuthOffsetDeg: 0,
   // A generic 8-channel elevation spread; only used when pattern is multibeam.
   beamElevationAnglesDeg: [15, 10, 5, 0, -5, -10, -15, -20],
 };
@@ -107,6 +116,7 @@ export interface ScanParamsFromFile {
   phi_max?: number;
   tilt_roll_deg?: number;
   tilt_pitch_deg?: number;
+  azimuth_offset_deg?: number;
 }
 
 // Build ScanParameters from the partial set a file header carried, filling any
@@ -130,5 +140,6 @@ export function scanParametersFromFile(src: ScanParamsFromFile): ScanParameters 
   if (typeof src.phi_max === 'number') p.azimuthMaxDeg = src.phi_max;
   if (typeof src.tilt_roll_deg === 'number') p.tiltRollDeg = src.tilt_roll_deg;
   if (typeof src.tilt_pitch_deg === 'number') p.tiltPitchDeg = src.tilt_pitch_deg;
+  if (typeof src.azimuth_offset_deg === 'number') p.azimuthOffsetDeg = src.azimuth_offset_deg;
   return p;
 }

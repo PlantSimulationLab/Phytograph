@@ -10,6 +10,7 @@ import {
 import type { ScanParameters } from '../lib/scanParameters';
 import { showToast } from './Toast';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
+import { hasRegisteredScheme } from '../lib/classification';
 
 // One scan to walk the user through. `path` is REQUIRED — the wizard previews
 // by reading the file on disk; callers without a path (Blob fixtures) should
@@ -31,6 +32,11 @@ export interface WizardResult {
   asciiFormat: string | null;
   columnPlan: ColumnPlan | null;   // null → let the backend auto-detect
   categoricalSlugs: string[];
+  // Slugs the user forced to "Scalar" that would otherwise colour categorically
+  // by name (e.g. a Miss Flag downgraded to Scalar — it keeps the is_miss slug
+  // for LAD, but the user wants a continuous gradient, not the Hit/Miss scheme).
+  // App registers these as continuous overrides after import.
+  continuousSlugs: string[];
   // CloudCompare-style global shift [x, y, z] to SUBTRACT from every point at
   // import, or null to keep the original coordinates. Auto-suggested from the
   // preview for large (e.g. UTM) clouds; the user can edit or disable it.
@@ -61,6 +67,7 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'reflectance', label: 'Reflectance' },
   { value: 'row_index', label: 'Scan Row Index' },
   { value: 'column_index', label: 'Scan Column Index' },
+  { value: 'is_miss', label: 'Miss Flag' },
   { value: 'extra', label: 'Scalar' },
   { value: 'label', label: 'Label' },
   { value: 'skip', label: 'Skip' },
@@ -71,6 +78,14 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
 // pins them to canonical extra-dim slugs so the gap-filling / miss-recovery
 // path can reconstruct the raster — so they need no rename box and aren't in
 // SCALAR_ROLES below.
+//
+// 'is_miss' is the sky/miss flag (0 = return/hit, 1 = miss): a per-pulse 0/1
+// indicator that the laser returned nothing. Like the grid indices it passes
+// through as its own role token; the backend pins the canonical 'is_miss' slug
+// (regardless of the source spelling is_miss/miss/sky) so the LAD path and the
+// renderer's fixed Hit/Miss colour scheme find it by name. It is NOT a scalar
+// (no rename box) and NOT categorical-toggleable — the renderer always colours
+// it with the dedicated Hit/Miss scheme, so it's excluded from SCALAR_ROLES.
 
 // Roles that carry a named scalar field (and so get a rename box). 'label' is
 // the categorical variant of 'extra'.
@@ -206,6 +221,19 @@ function categoricalSlugs(cfg: ScanConfig): string[] {
     .filter(Boolean);
 }
 
+// Slugs the user set to 'Scalar' (role 'extra') whose name carries a registered
+// categorical scheme (e.g. a Miss Flag → Scalar keeps slug 'is_miss'). These
+// would otherwise colour with the fixed by-name scheme (Hit/Miss), ignoring the
+// Scalar choice — so they're registered as continuous overrides after import to
+// force the gradient path. The backend still pins the canonical slug, so LAD is
+// unaffected; only the renderer's colouring changes.
+function continuousSlugs(cfg: ScanConfig): string[] {
+  return cfg.columns
+    .filter((c) => c.role === 'extra' && hasRegisteredScheme(c.slug))
+    .map((c) => c.slug)
+    .filter(Boolean);
+}
+
 export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCloudImportWizardProps) {
   const [stepIdx, setStepIdx] = useState(0);
   const [configs, setConfigs] = useState<ScanConfig[]>(() => inputs.map(blankScanConfig));
@@ -334,6 +362,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         asciiFormat: input.asciiFormatHint ?? null,
         columnPlan: buildColumnPlan(c),
         categoricalSlugs: categoricalSlugs(c),
+        continuousSlugs: continuousSlugs(c),
         worldShift: effectiveShift(c),
       };
     });

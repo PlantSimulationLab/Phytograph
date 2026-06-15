@@ -202,6 +202,11 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
   // tag → level (0/0).
   const tilt = parseFloatPairTag(el, 'scanTilt');
 
+  // <scanAzimuthOffset> is the initial scanner heading in degrees (a single
+  // float). Maps directly onto our degree-based azimuthOffsetDeg. Absent tag →
+  // default heading (0), so XML written before this field existed still loads.
+  const azimuthOffsetDeg = parseNumberTag(el, 'scanAzimuthOffset');
+
   const filenameRaw = tagText(el, 'filename');
   const asciiFormatRaw = tagText(el, 'ASCII_format');
 
@@ -223,6 +228,7 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
       : DEFAULT_SCAN_PARAMETERS.beamDivergenceMrad,
     tiltRollDeg: tilt ? tilt[0] : DEFAULT_SCAN_PARAMETERS.tiltRollDeg,
     tiltPitchDeg: tilt ? tilt[1] : DEFAULT_SCAN_PARAMETERS.tiltPitchDeg,
+    azimuthOffsetDeg: azimuthOffsetDeg ?? DEFAULT_SCAN_PARAMETERS.azimuthOffsetDeg,
     beamElevationAnglesDeg: beamElevationAnglesDeg ?? DEFAULT_SCAN_PARAMETERS.beamElevationAnglesDeg,
   };
 

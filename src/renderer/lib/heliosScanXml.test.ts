@@ -167,6 +167,26 @@ describe('parseHeliosScanXml', () => {
     expect(scans[1].params.tiltPitchDeg).toBe(0);
   });
 
+  it('parses <scanAzimuthOffset> (degrees) and defaults to 0 when absent', () => {
+    const xml = `
+      <scan>
+        <origin>0 0 1</origin>
+        <size>10 20</size>
+        <scanAzimuthOffset>45</scanAzimuthOffset>
+      </scan>
+      <scan>
+        <origin>1 1 1</origin>
+        <size>10 10</size>
+      </scan>
+    `;
+    const { scans } = parseHeliosScanXml(xml);
+    expect(scans).toHaveLength(2);
+    // Degrees stored verbatim.
+    expect(scans[0].params.azimuthOffsetDeg).toBeCloseTo(45, 6);
+    // Absent tag → default heading (0), so pre-existing XML stays backward-compatible.
+    expect(scans[1].params.azimuthOffsetDeg).toBe(0);
+  });
+
   it('parses <filename> and <ASCII_format> (trimmed) and reports null when absent', () => {
     const xml = `
       <scan>

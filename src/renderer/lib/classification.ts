@@ -162,6 +162,17 @@ const SCHEMES: Record<string, CategoricalScheme> = {
   [MISS_ATTRIBUTE]: MISS_SCHEME,
 };
 
+// True when `slug` has a STATIC registered scheme (is_miss, ground_class, …) —
+// i.e. a field that colours categorically by name regardless of the wizard's
+// Scalar/Label dropdown. The wizard uses this to detect when a user picked
+// "Scalar" for such a slug (e.g. a Miss Flag downgraded to Scalar) and must
+// register a continuous override so the choice actually takes effect. Ignores
+// the dynamic sets — this is purely "does a fixed scheme exist for this name".
+export function hasRegisteredScheme(slug: string | undefined | null): boolean {
+  if (!slug) return false;
+  return slug.toLowerCase() in SCHEMES;
+}
+
 // Slugs the user marked categorical in the import wizard. Lower-cased on insert
 // so lookups match the case-insensitive slug convention used elsewhere. Module-
 // level (process-wide) so the three pure predicate functions below — called by
@@ -180,6 +191,35 @@ export function unregisterCategoricalSlug(slug: string | undefined | null): void
   DYNAMIC_CATEGORICAL.delete(slug.toLowerCase());
 }
 
+// Slugs the user explicitly forced to CONTINUOUS ("Scalar") in the import
+// wizard, overriding a registered categorical scheme they'd otherwise get by
+// name. The miss flag is the motivating case: a Miss Flag column carries under
+// the canonical is_miss slug (the LAD path needs it by name), so it always
+// resolves to the fixed Hit/Miss scheme — but a user who picks "Scalar" for it
+// is asking to see the raw 0/1 as a gradient with a numeric legend. This set
+// suppresses the registered scheme for those slugs so categoricalSchemeFor
+// returns null and the continuous-gradient path runs. Same process-wide,
+// additive, slug-keyed model as DYNAMIC_CATEGORICAL; rehydrated from each
+// cloud's OctreeRef.continuousAttributes at import/restore. If two clouds
+// disagree on the same slug, continuous wins (a registered scheme reappearing
+// would surprise the user who explicitly chose Scalar).
+const FORCE_CONTINUOUS = new Set<string>();
+
+// Mark `slug` as continuous (import wizard "Scalar" over a registered scheme).
+// Idempotent. Also clears any categorical registration for the slug so the two
+// sets can't both claim it.
+export function registerContinuousSlug(slug: string | undefined | null): void {
+  if (!slug) return;
+  const key = slug.toLowerCase();
+  FORCE_CONTINUOUS.add(key);
+  DYNAMIC_CATEGORICAL.delete(key);
+}
+
+export function unregisterContinuousSlug(slug: string | undefined | null): void {
+  if (!slug) return;
+  FORCE_CONTINUOUS.delete(slug.toLowerCase());
+}
+
 // True for attributes whose categorical scheme is generated from the data range
 // rather than registered with a fixed class list: the built-in tree_instance,
 // plus any slug a user marked categorical in the import wizard. Callers build
@@ -187,27 +227,43 @@ export function unregisterCategoricalSlug(slug: string | undefined | null): void
 export function isDynamicCategoricalAttribute(attribute: string | undefined | null): boolean {
   if (!attribute) return false;
   const key = attribute.toLowerCase();
+  if (FORCE_CONTINUOUS.has(key)) return false;
   return key === TREE_INSTANCE_ATTRIBUTE || DYNAMIC_CATEGORICAL.has(key);
 }
 
 // Resolve a categorical scheme for an attribute, generating it from `range`
 // (the attribute's [min,max]) when the attribute is dynamic. tree_instance uses
 // its dedicated Tree-N scheme; a wizard-marked field uses the generic Class-N
-// scheme. Static registered schemes (ground_class) fall through unchanged.
+// scheme. Static registered schemes (ground_class, is_miss) fall through
+// unchanged.
+//
+// A REGISTERED scheme always wins over the generic Class-N path, even when the
+// user marked the column categorical ("Label") in the import wizard. A known
+// semantic field like is_miss carries fixed domain labels (Hit/Miss); routing
+// it through the generic path would discard those for neutral "Class N" — and
+// worse, since the octree is built hits-only its observed range is [0,0], so
+// the generic path would collapse to a single bogus "Class 0". Honour the
+// registered scheme so "Label" never degrades a known field below "Scalar".
 export function categoricalSchemeForRange(
   attribute: string | undefined | null,
   range: [number, number] | undefined | null,
 ): CategoricalScheme | null {
   if (!attribute) return categoricalSchemeFor(attribute);
   const key = attribute.toLowerCase();
+  // Explicit "Scalar" override wins over EVERY categorical path (registered,
+  // tree_instance, and the generic wizard-marked one) — the user asked for a
+  // gradient, so report no scheme and let the continuous path run.
+  if (FORCE_CONTINUOUS.has(key)) return null;
   if (key === TREE_INSTANCE_ATTRIBUTE) {
     const maxId = range ? range[1] : 0;
     return buildTreeInstanceScheme(maxId);
   }
+  const registered = categoricalSchemeFor(attribute);
+  if (registered) return registered;
   if (DYNAMIC_CATEGORICAL.has(key)) {
     return buildGenericCategoricalScheme(attribute, range ?? null);
   }
-  return categoricalSchemeFor(attribute);
+  return null;
 }
 
 // Return the categorical scheme for an attribute, or null if it should use the
@@ -216,6 +272,10 @@ export function categoricalSchemeForRange(
 export function categoricalSchemeFor(attribute: string | undefined | null): CategoricalScheme | null {
   if (!attribute) return null;
   const key = attribute.toLowerCase();
+  // A slug the user forced to continuous ("Scalar") suppresses its registered
+  // scheme so the renderer falls through to the gradient path with a numeric
+  // legend, honouring the explicit choice over the by-name default.
+  if (FORCE_CONTINUOUS.has(key)) return null;
   return SCHEMES[key] ?? null;
 }
 

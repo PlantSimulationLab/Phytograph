@@ -3792,6 +3792,11 @@ class ScanExportEntry(BaseModel):
     phi_max: float = 360.0
     beam_exit_diameter: Optional[float] = None   # meters
     beam_divergence: Optional[float] = None      # milliradians
+    # Initial scanner heading (degrees). Carried so it round-trips into the XML,
+    # but PyHelios exportScans() does NOT yet serialize a <scanAzimuthOffset> tag
+    # (the helios-core struct lacks the field), so this is currently ACCEPTED BUT
+    # NOT WRITTEN. See the TODO(scanAzimuthOffset) block at the addScan call below.
+    scan_azimuth_offset: Optional[float] = None
     # Point source (one of):
     session_id: Optional[str] = None             # live edited session (honors deletions)
     points: Optional[List[List[float]]] = None   # inline flat cloud
@@ -4263,6 +4268,13 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
             n_phi = max(int(_math.sqrt(xyz.shape[0] / max(aspect, 0.01))), 10)
             n_theta = max(int(xyz.shape[0] / n_phi), 10)
         column_format = ['x', 'y', 'z'] + labels
+        # TODO(scanAzimuthOffset): scan_entry.scan_azimuth_offset carries the initial
+        # heading, but PyHelios exportScans() serializes the XML from the helios-core
+        # ScanMetadata struct, which has no scanAzimuthOffset field yet — so it is NOT
+        # written to the <scan> element today. FUTURE AGENT: once addScan/addScanMultibeam
+        # accept `scan_azimuth_offset` AND exportScans() writes <scanAzimuthOffset>, pass
+        # it in both branches below and delete this note. (The renderer already reads the
+        # tag on import; only the write half is blocked.)
         if scan_entry.scan_pattern == "spinning_multibeam":
             # Re-loadable multibeam scan: exportScans writes <scanPattern> +
             # <beamElevationAngles>. Convert elevation (deg) -> zenith (rad).
@@ -4387,6 +4399,12 @@ class LidarScanScanner(BaseModel):
     # radians pyhelios expects below.
     tilt_roll_deg: float = 0.0
     tilt_pitch_deg: float = 0.0
+    # Initial scanner heading in the horizontal plane (degrees). The renderer
+    # already sends this, but PyHelios/helios-core do NOT yet expose a
+    # scan_azimuth_offset parameter, so it is currently ACCEPTED BUT IGNORED here.
+    # See the flagged TODO(scanAzimuthOffset) blocks at the addScan / addScanMultibeam
+    # call sites below.
+    scan_azimuth_offset_deg: float = 0.0
 
 
 class LidarScanRequest(BaseModel):
@@ -4516,6 +4534,13 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                             angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
                             scan_tilt_roll=math.radians(s.tilt_roll_deg),
                             scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
+                            # TODO(scanAzimuthOffset): pass the initial heading once the
+                            # helios-core ScanMetadata struct + PyHelios bindings expose it.
+                            # Until then s.scan_azimuth_offset_deg is accepted but ignored.
+                            # FUTURE AGENT: if `scan_azimuth_offset` is now a real kwarg of
+                            # addScanMultibeam, WIRE IT UP and delete this note — the renderer
+                            # already sends the value:
+                            # scan_azimuth_offset=math.radians(s.scan_azimuth_offset_deg),
                         )
                     else:
                         lidar.addScan(
@@ -4531,6 +4556,13 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                             angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
                             scan_tilt_roll=math.radians(s.tilt_roll_deg),
                             scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
+                            # TODO(scanAzimuthOffset): pass the initial heading once the
+                            # helios-core ScanMetadata struct + PyHelios bindings expose it.
+                            # Until then s.scan_azimuth_offset_deg is accepted but ignored.
+                            # FUTURE AGENT: if `scan_azimuth_offset` is now a real kwarg of
+                            # addScan, WIRE IT UP and delete this note — the renderer already
+                            # sends the value:
+                            # scan_azimuth_offset=math.radians(s.scan_azimuth_offset_deg),
                         )
 
                 # Crop-to-grid: scan_grid_only restricts ray-tracing to the cells
@@ -12544,11 +12576,13 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
             suggested_slug = role
             suggested_label = _GRID_INDEX_LABELS[role]
         elif role == _MISS_SLUG:
-            # A sky/miss flag: carried as a scalar extra dim under the canonical
-            # is_miss slug (the wizard has no dedicated miss role), so the LAD
-            # path and renderer find it by name regardless of the source spelling
-            # (is_miss/miss/sky). Pin the slug/label to match `_plan_columns`.
-            detected_role = 'extra'
+            # A sky/miss flag: the wizard exposes a dedicated 'Miss Flag' role, so
+            # report the canonical is_miss role token directly (not 'extra') to
+            # pre-select it — mirroring the grid-index roles above. The slug/label
+            # are pinned to the canonical name (regardless of the source spelling
+            # is_miss/miss/sky) so the LAD path and the renderer's fixed Hit/Miss
+            # colour scheme find it by name, matching `_plan_columns`.
+            detected_role = _MISS_SLUG
             suggested_slug = _MISS_SLUG
             suggested_label = _MISS_LABEL
         else:

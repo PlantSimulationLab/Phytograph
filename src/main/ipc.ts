@@ -3,6 +3,8 @@
 
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { access, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import Store from 'electron-store';
 import {
   IPC,
@@ -20,6 +22,11 @@ import { copySessionLogTo, getLogFilePath, logFromRenderer } from './logger.js';
 // Generated at build time by scripts/gen-version-info.mjs (gitignored).
 import { PYHELIOS_VERSION, HELIOS_CORE_VERSION } from '../shared/generated/versionInfo.js';
 
+// Capture first-run BEFORE instantiating Store (which creates the file): if the
+// store JSON didn't exist yet, this is the first launch on this machine. Used to
+// tell the splash the first cold start is slower. Computed once at module load.
+const isFirstRun = !existsSync(join(app.getPath('userData'), 'phytograph-store.json'));
+
 const store = new Store({ name: 'phytograph-store' });
 
 export function registerIpc(): void {
@@ -36,6 +43,7 @@ export function registerIpc(): void {
       platform: process.platform,
       pyheliosVersion: PYHELIOS_VERSION,
       heliosVersion: HELIOS_CORE_VERSION,
+      firstRun: isFirstRun,
     };
   });
 

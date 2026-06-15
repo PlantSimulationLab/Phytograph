@@ -8,9 +8,12 @@ import {
   categoricalSchemeFor,
   categoricalSchemeForRange,
   colorForClassValue,
+  hasRegisteredScheme,
   isCategoricalAttribute,
   registerCategoricalSlug,
+  registerContinuousSlug,
   unregisterCategoricalSlug,
+  unregisterContinuousSlug,
 } from './classification';
 
 describe('categoricalSchemeFor', () => {
@@ -55,6 +58,25 @@ describe('is_miss scheme', () => {
     const scheme = categoricalSchemeFor(MISS_ATTRIBUTE)!;
     expect(colorForClassValue(scheme, 1)).toEqual(MISS_COLOR);
     expect(colorForClassValue(scheme, 0)).not.toEqual(MISS_COLOR);
+  });
+
+  // Regression: marking is_miss as "Label" in the import wizard registers it in
+  // the dynamic-categorical set. categoricalSchemeForRange must still resolve to
+  // the registered Hit/Miss scheme, NOT the generic Class-N path. Before the fix
+  // the dynamic check ran first, and because the octree is hits-only the observed
+  // range is [0,0], so the generic path collapsed to a single bogus "Class 0".
+  it('keeps the Hit/Miss scheme even when registered as a wizard categorical', () => {
+    registerCategoricalSlug(MISS_ATTRIBUTE);
+    try {
+      const scheme = categoricalSchemeForRange(MISS_ATTRIBUTE, [0, 0]);
+      expect(scheme).not.toBeNull();
+      expect(scheme!.classes.map((c) => c.label)).toEqual(['Hit', 'Miss']);
+      // A range with actual misses resolves to the same fixed scheme, never Class-N.
+      const withMisses = categoricalSchemeForRange(MISS_ATTRIBUTE, [0, 1]);
+      expect(withMisses!.classes.map((c) => c.label)).toEqual(['Hit', 'Miss']);
+    } finally {
+      unregisterCategoricalSlug(MISS_ATTRIBUTE);
+    }
   });
 });
 
@@ -122,6 +144,26 @@ describe('buildCategoricalGradientStops', () => {
       }
     }
   });
+
+  // Regression (all-hits is_miss): the column is constant 0, so the renderer
+  // widens the zero-width range [0,0] to [-1,1] so the shader's divisor isn't
+  // zero — every point then samples the gradient at t = (0-(-1))/2 = 0.5. The
+  // step gradient MUST be built against that SAME widened range, else t=0.5
+  // lands on the Hit/Miss seam and every (hit) point picks up the Miss colour.
+  // Built against [-1,1], the t=0.5 sample must fall inside the Hit band.
+  it('samples a constant all-hits column as Hit when range is widened to [-1,1]', () => {
+    const miss = categoricalSchemeFor(MISS_ATTRIBUTE)!;
+    const stops = buildCategoricalGradientStops(miss, [-1, 1]);
+    // Find the colour the gradient yields at t = 0.5 (the value every point maps
+    // to). Walk the step stops: the colour is the last stop at or before 0.5.
+    let sampled = stops[0][1];
+    for (const [t, color] of stops) {
+      if (t <= 0.5) sampled = color;
+    }
+    const hit = colorForClassValue(miss, 0);
+    expect(sampled).toEqual(hit);
+    expect(sampled).not.toEqual(MISS_COLOR);
+  });
 });
 
 describe('wizard-marked categorical fields (dynamic registry)', () => {
@@ -163,5 +205,62 @@ describe('wizard-marked categorical fields (dynamic registry)', () => {
     registerCategoricalSlug(null);
     registerCategoricalSlug(undefined);
     expect(isCategoricalAttribute('')).toBe(false);
+  });
+});
+
+describe('forced-continuous override (wizard "Scalar" over a registered scheme)', () => {
+  it('hasRegisteredScheme is true only for statically registered slugs', () => {
+    expect(hasRegisteredScheme(MISS_ATTRIBUTE)).toBe(true);
+    expect(hasRegisteredScheme('Is_Miss')).toBe(true);
+    expect(hasRegisteredScheme('ground_class')).toBe(true);
+    expect(hasRegisteredScheme('some_random_field')).toBe(false);
+    expect(hasRegisteredScheme(null)).toBe(false);
+    expect(hasRegisteredScheme('')).toBe(false);
+  });
+
+  it('suppresses the registered Hit/Miss scheme so is_miss colours continuously', () => {
+    // Sanity: by default is_miss is categorical with the Hit/Miss scheme.
+    expect(categoricalSchemeFor(MISS_ATTRIBUTE)).not.toBeNull();
+    registerContinuousSlug(MISS_ATTRIBUTE);
+    try {
+      // The static lookup, the range-aware resolver, and the predicate all now
+      // report NON-categorical, so the renderer/legend take the gradient path.
+      expect(categoricalSchemeFor(MISS_ATTRIBUTE)).toBeNull();
+      expect(categoricalSchemeForRange(MISS_ATTRIBUTE, [0, 1])).toBeNull();
+      expect(isCategoricalAttribute(MISS_ATTRIBUTE)).toBe(false);
+    } finally {
+      unregisterContinuousSlug(MISS_ATTRIBUTE);
+    }
+    // Unregistering restores the registered scheme.
+    expect(categoricalSchemeFor(MISS_ATTRIBUTE)).not.toBeNull();
+    expect(isCategoricalAttribute(MISS_ATTRIBUTE)).toBe(true);
+  });
+
+  it('continuous override wins even if the slug was also marked categorical', () => {
+    // A later "Scalar" choice must override an earlier categorical registration;
+    // registerContinuousSlug also clears the categorical set for the slug.
+    registerCategoricalSlug('dual_field');
+    registerContinuousSlug('dual_field');
+    try {
+      expect(isCategoricalAttribute('dual_field')).toBe(false);
+      expect(categoricalSchemeForRange('dual_field', [0, 3])).toBeNull();
+    } finally {
+      unregisterContinuousSlug('dual_field');
+      unregisterCategoricalSlug('dual_field');
+    }
+  });
+
+  it('is case-insensitive and ignores empty/nullish slugs', () => {
+    registerContinuousSlug('Is_Miss');
+    try {
+      expect(categoricalSchemeFor('is_miss')).toBeNull();
+    } finally {
+      unregisterContinuousSlug('Is_Miss');
+    }
+    registerContinuousSlug('');
+    registerContinuousSlug(null);
+    registerContinuousSlug(undefined);
+    // is_miss is categorical again (no real slug was registered).
+    expect(categoricalSchemeFor(MISS_ATTRIBUTE)).not.toBeNull();
   });
 });

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Loader2, AlertTriangle, RotateCw } from 'lucide-react';
 import splashImage from '../assets/splash.png';
 import { useBackendReady } from '../hooks/useBackendReady';
@@ -12,6 +13,26 @@ import { useBackendReady } from '../hooks/useBackendReady';
 // mounted underneath but unreachable to the user.
 export function BackendSplash() {
   const { status, elapsedMs, error, retry } = useBackendReady();
+
+  // First launch is much slower (PyInstaller unpack + open3d/pyhelios import +
+  // first-run OS scan), so we tailor the splash copy. main reports it via
+  // backend.getInfo().firstRun; default to false so an unexpected IPC failure
+  // shows the plainer (non-alarming) message rather than a false "first launch".
+  const [firstRun, setFirstRun] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void window.electronAPI.backend
+      .getInfo()
+      .then((i) => {
+        if (!cancelled) setFirstRun(i.firstRun);
+      })
+      .catch(() => {
+        /* keep default false */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (status === 'ready') return null;
 
@@ -37,13 +58,23 @@ export function BackendSplash() {
           <>
             <div className="flex items-center gap-3 text-neutral-200">
               <Loader2 className="h-5 w-5 animate-spin" />
-              <span className="text-base font-medium">Starting backend…</span>
+              <span className="text-base font-medium">
+                {firstRun ? 'Setting up Phytograph…' : 'Starting backend…'}
+              </span>
               <span className="text-sm text-neutral-500 font-mono">{seconds}s</span>
             </div>
-            <p className="max-w-sm text-xs text-neutral-500 leading-relaxed">
-              Initialising the Python compute backend (open3d, pyhelios). First
-              launch after install can take 30–60 seconds.
-            </p>
+            {firstRun ? (
+              <p className="max-w-sm text-xs text-amber-200/80 leading-relaxed">
+                <span className="font-medium text-amber-200">First launch</span> —
+                initialising the Python compute backend (open3d, pyhelios) for the
+                first time. This can take up to a minute; every launch after this
+                will be much faster.
+              </p>
+            ) : (
+              <p className="max-w-sm text-xs text-neutral-500 leading-relaxed">
+                Initialising the Python compute backend (open3d, pyhelios).
+              </p>
+            )}
           </>
         )}
 

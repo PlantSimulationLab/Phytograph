@@ -95,4 +95,15 @@ describe('scanParametersFromFile', () => {
     expect(tilted.tiltRollDeg).toBe(5);
     expect(tilted.tiltPitchDeg).toBe(-3);
   });
+
+  it('defaults heading (azimuth offset) to 0 and honors a file-carried value', () => {
+    // Initial scanner heading is a scan property: absent → 0; present → carried.
+    expect(DEFAULT_SCAN_PARAMETERS.azimuthOffsetDeg).toBe(0);
+
+    const noHeading = scanParametersFromFile({ origin: [0, 0, 0] });
+    expect(noHeading.azimuthOffsetDeg).toBe(0);
+
+    const headed = scanParametersFromFile({ origin: [0, 0, 0], azimuth_offset_deg: 45 });
+    expect(headed.azimuthOffsetDeg).toBe(45);
+  });
 });

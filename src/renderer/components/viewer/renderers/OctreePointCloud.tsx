@@ -429,23 +429,32 @@ export function OctreePointCloud({
     const gradientRange = scalarActive
       ? scalarRange
       : data.octree?.attributeRanges?.intensity;
+    // The effective [min,max] the SHADER uses to normalise each value into the
+    // gradient's 0..1 sample coordinate (t = (value - min) / (max - min)). The
+    // categorical step gradient below MUST be built against this SAME range, not
+    // the raw attribute range — otherwise the class bands and the sampled t land
+    // in different value spaces. For a constant column (e.g. an all-hits is_miss,
+    // range [0,0]) the widened [min-1, min+1] makes every point sample t=0.5; if
+    // the bands were laid out on the raw [0,0] that midpoint falls on the seam
+    // and every point picks up the wrong class (all "Miss"). Keeping them in sync
+    // makes t=0.5 land squarely inside the single present class's band.
+    let effectiveRange: [number, number] | undefined;
     if (rangeMin !== undefined && rangeMax !== undefined && rangeMax > rangeMin) {
       // User-overridden range from the Color By panel — use it directly.
       // The backend backs this with the actual intensity (reflectance ×
       // 256) so the user's UI values are in the same units as the
       // gradient sweep.
-      (m as any).intensityRange = [rangeMin, rangeMax];
+      effectiveRange = [rangeMin, rangeMax];
     } else if (gradientRange && gradientRange.min.length > 0 && gradientRange.max.length > 0) {
       const iMin = gradientRange.min[0];
       const iMax = gradientRange.max[0];
       // Guard against a zero-width range (constant values) — set
       // [min-1, min+1] so the divisor isn't zero and the cloud renders
       // as the middle of the gradient instead of NaN.
-      if (iMax > iMin) {
-        (m as any).intensityRange = [iMin, iMax];
-      } else {
-        (m as any).intensityRange = [iMin - 1, iMin + 1];
-      }
+      effectiveRange = iMax > iMin ? [iMin, iMax] : [iMin - 1, iMin + 1];
+    }
+    if (effectiveRange) {
+      (m as any).intensityRange = effectiveRange;
     }
 
     switch (colorMode) {
@@ -503,14 +512,17 @@ export function OctreePointCloud({
       // continuous ramp. Reuses the same INTENSITY_GRADIENT pipeline — only the
       // stop array differs — so no shader change. The intensityRange set above
       // (the attribute's [min,max]) is the value space the stops map against.
+      // Resolve the scheme from the RAW attribute range (it picks the class
+      // LIST — e.g. how many tree-instance classes exist), but lay the bands out
+      // against `effectiveRange` (the shader's actual t-mapping). They differ
+      // only for a constant column, where effectiveRange is widened to avoid a
+      // zero divisor; using it here keeps the sampled t inside the right band.
+      const bandRange = effectiveRange ?? (scalarRange ? [scalarRange.min[0], scalarRange.max[0]] : null);
       const categorical = scalarActive && scalarRange
         ? categoricalSchemeForRange(selectedScalarField, [scalarRange.min[0], scalarRange.max[0]])
         : null;
-      if (categorical && scalarRange) {
-        const stops = buildCategoricalGradientStops(categorical, [
-          scalarRange.min[0],
-          scalarRange.max[0],
-        ]);
+      if (categorical && bandRange) {
+        const stops = buildCategoricalGradientStops(categorical, [bandRange[0], bandRange[1]]);
         (m as any).gradient = stops.map(([t, [r, g, b]]) => [t, new THREE.Color(r, g, b)]);
       } else {
         const stopCount = 32;

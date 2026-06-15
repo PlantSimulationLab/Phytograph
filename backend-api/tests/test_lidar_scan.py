@@ -312,6 +312,27 @@ class TestScanOptions:
         # Centroid moves by a non-trivial amount once the scanner is tilted 20°.
         assert np.linalg.norm(lc - tc) > 1e-2
 
+    def test_azimuth_offset_is_accepted_but_not_yet_consumed(self, client):
+        # The renderer sends scan_azimuth_offset_deg (initial scanner heading), but
+        # helios-core / PyHelios don't expose the field yet, so the backend accepts
+        # it and IGNORES it (see the TODO(scanAzimuthOffset) blocks in main.py). This
+        # pins that documented behavior: the request must succeed, and the hit cloud
+        # must be IDENTICAL to one without the field — proving it is truly a no-op
+        # today. When Helios gains the field and the placeholders are wired up, this
+        # test should start failing (geometry will differ) and be replaced with a
+        # real "heading rotates the hit pattern" assertion, mirroring the tilt test.
+        base = self._scan_full(client, [_scanner("a")])["results"][0]
+        headed = self._scan_full(
+            client, [{**_scanner("a"), "scan_azimuth_offset_deg": 90.0}]
+        )["results"][0]
+
+        assert base["num_points"] > 0
+        assert headed["num_points"] == base["num_points"]
+        bc = np.asarray(base["points"], dtype=np.float64)
+        hc = np.asarray(headed["points"], dtype=np.float64)
+        # Same beams in the same order → identical hits (field ignored for now).
+        assert np.allclose(bc, hc)
+
     def test_record_misses_builds_a_session_with_is_miss(self, client):
         # A scanner sweeping the full sphere from above mostly misses the small
         # pyramid. With record_misses on, those rays are kept, flagged is_miss,

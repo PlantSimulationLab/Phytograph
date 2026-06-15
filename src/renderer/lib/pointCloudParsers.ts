@@ -759,6 +759,7 @@ export async function parsePointCloudFromPath(
   columnPlan?: ColumnPlan | null,
   categoricalAttributes?: string[],
   worldShift?: [number, number, number] | null,
+  continuousAttributes?: string[],
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -773,7 +774,7 @@ export async function parsePointCloudFromPath(
     const meta = await createCloudSession(path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null);
     return buildPointCloudFromOctree(
       meta, path, name, asciiFormat, columnPlan, categoricalAttributes, meta.session_id,
-      meta.world_shift ?? null,
+      meta.world_shift ?? null, continuousAttributes,
     );
   }
 
@@ -806,6 +807,7 @@ export function buildPointCloudFromOctree(
   categoricalAttributes?: string[],
   sessionId?: string | null,
   worldShift?: [number, number, number] | null,
+  continuousAttributes?: string[],
 ): PointCloudData {
   // Prefer the tight data extent over the cube-padded octree bounds.
   // Crop-box init, fit-to-bounds camera framing, and the bounds shown in
@@ -851,6 +853,9 @@ export function buildPointCloudFromOctree(
       columnPlan: columnPlan ?? null,
       categoricalAttributes: categoricalAttributes && categoricalAttributes.length
         ? categoricalAttributes
+        : undefined,
+      continuousAttributes: continuousAttributes && continuousAttributes.length
+        ? continuousAttributes
         : undefined,
       // Sky/miss info comes from the cloud-session create response (a superset
       // of OctreeMetadata); plain OctreeMetadata callers leave these undefined.

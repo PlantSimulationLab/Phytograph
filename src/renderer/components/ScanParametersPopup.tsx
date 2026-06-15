@@ -176,9 +176,9 @@ export function ScanParametersPopup({
     setParams(p => ({ ...p, origin: { ...p.origin, [axis]: v } }));
   };
 
-  // Tilt roll/pitch are signed angles (a scanner can lean either way); same
-  // text-draft reasoning as setOrigin above.
-  const setTilt = (key: 'tiltRollDeg' | 'tiltPitchDeg') => (v: number) => {
+  // Tilt roll/pitch and the heading offset are signed angles (a scanner can lean
+  // or face either way); same text-draft reasoning as setOrigin above.
+  const setTilt = (key: 'tiltRollDeg' | 'tiltPitchDeg' | 'azimuthOffsetDeg') => (v: number) => {
     setParams(p => ({ ...p, [key]: v }));
   };
 
@@ -200,7 +200,7 @@ export function ScanParametersPopup({
   // Selecting a scanner model records the choice (drives the marker mesh) and
   // overwrites the instrument-fixed parameters with that model's preset. The
   // preset only touches optics/pattern/return/elevations/sweep — origin, tilt,
-  // and resolution (point counts) are user choices and stay as-is. Everything
+  // heading, and resolution (point counts) are user choices and stay as-is. Everything
   // remains editable afterward. 'generic' carries an empty preset, so picking it
   // just sets the mesh back to the sphere without disturbing current values.
   const setModel = (id: ScannerModelId) => {
@@ -486,6 +486,22 @@ export function ScanParametersPopup({
             <p className="mt-1 text-[11px] text-neutral-500">
               Residual tilt of the scanner away from level. Roll is applied first (about the
               scanner's lateral axis), then pitch (about its forward axis). 0 / 0 is perfectly level.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scanner heading (degrees)</label>
+            <DebouncedNumberInput
+              data-testid="scan-azimuth-offset"
+              step="any"
+              debounceMs={0}
+              value={params.azimuthOffsetDeg}
+              onCommit={setTilt('azimuthOffsetDeg')}
+              className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+            />
+            <p className="mt-1 text-[11px] text-neutral-500">
+              Initial heading the scanner faces in the horizontal plane (azimuth offset).
+              Orients the scanner marker; 0 points along +Y. Counter-clockwise positive.
             </p>
           </div>
 
