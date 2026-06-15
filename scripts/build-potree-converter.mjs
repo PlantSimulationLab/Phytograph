@@ -18,7 +18,7 @@
 //   Windows: Visual Studio 2019+, CMake. TBB is pulled via vcpkg if present.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, copyFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, copyFileSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { platform, arch } from 'node:os';
@@ -153,6 +153,34 @@ function install() {
   copyFileSync(srcBin, dstBin);
   chmodSync(dstBin, 0o755);
   console.log(`installed ${dstBin} (${statSync(dstBin).size} bytes)`);
+
+  // PotreeConverter links its sibling libraries (e.g. liblaszip) via @rpath,
+  // and CMake bakes in an rpath pointing at the BUILD tree. Copying only the
+  // binary leaves it dependent on a path that won't exist on a user's machine
+  // — on macOS it aborts at launch with "Library not loaded:
+  // @rpath/liblaszip.dylib". Bundle the sibling shared libs next to the binary
+  // so it loads them from its own directory.
+  const buildOutDir = dirname(srcBin);
+  const bundleSiblings = (predicate) => {
+    for (const lib of readdirSync(buildOutDir).filter(predicate)) {
+      copyFileSync(join(buildOutDir, lib), join(outDir, lib));
+      console.log(`bundled ${lib}`);
+    }
+  };
+  if (platform() === 'darwin') {
+    bundleSiblings((f) => f.endsWith('.dylib'));
+    // Add the binary's own directory to its rpath search list (idempotent: a
+    // duplicate -add_rpath is only a non-fatal warning).
+    spawnSync('install_name_tool', ['-add_rpath', '@loader_path', dstBin], { stdio: 'inherit' });
+  } else if (platform() === 'linux') {
+    bundleSiblings((f) => f.includes('.so'));
+    // $ORIGIN lets the ELF binary load siblings from its own directory.
+    spawnSync('patchelf', ['--set-rpath', '$ORIGIN', dstBin], { stdio: 'inherit' });
+  } else if (platform() === 'win32') {
+    // Windows searches the executable's own directory for DLLs, so just copy
+    // any sibling DLLs next to the .exe.
+    bundleSiblings((f) => f.toLowerCase().endsWith('.dll'));
+  }
 }
 
 function outputExists() {
