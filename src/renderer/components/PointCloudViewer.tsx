@@ -27,6 +27,7 @@ import { type HeliosXmlScan, type HeliosXmlGrid } from '../lib/heliosScanXml';
 import { SyntheticScanOptionsPopup } from './SyntheticScanOptionsPopup';
 import { type SyntheticScanOptions } from '../lib/syntheticScanOptions';
 import { ScannerMarker } from './ScannerMarker';
+import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import { type ScanParameters } from '../lib/scanParameters';
@@ -261,6 +262,10 @@ interface PointCloudViewerProps {
   onRequestImportWizard?: (inputs: WizardScanInput[]) => Promise<WizardResult[] | null>;
   // Opens the app-wide Settings modal (owned by App). Used by the command palette.
   onOpenSettings?: () => void;
+  // Incremented by App whenever the Settings dialog closes, so this always-mounted
+  // viewer can re-read persisted settings (e.g. scan-marker scale) and apply them
+  // without a restart.
+  settingsEpoch?: number;
 }
 
 // Compute the next selection Set for a modifier-aware click, mirroring App's
@@ -349,6 +354,7 @@ export default function PointCloudViewer({
   onViewerContentChange,
   onRequestImportWizard,
   onOpenSettings,
+  settingsEpoch,
 }: PointCloudViewerProps) {
   // Legacy internal aliases. The bulk of this file was written against
   // `clouds` / `selectedIds` / `onUpdateCloud` etc., and assumes every entry
@@ -466,6 +472,11 @@ export default function PointCloudViewer({
   const [showGrid, setShowGrid] = useState(true);
   const [gridPlane, setGridPlane] = useState<GridPlane>('z-up');
   const [showAxes, setShowAxes] = useState(true);
+  // Show/hide the scan-position model markers (the scanner-shaped meshes). On by
+  // default. Session-only, like the Grid/Axes toggles next to it.
+  const [showScanMarkers, setShowScanMarkers] = useState(true);
+  // Global size multiplier for scan markers, seeded from persisted settings.
+  const [scanMarkerScale, setScanMarkerScale] = useState(1);
   const [displayPanelCollapsed, setDisplayPanelCollapsed] = useState(true);
   const [gizmoDragging, setGizmoDragging] = useState(false);
   const [bgColor, setBgColor] = useState<'black' | 'white'>('black');
@@ -526,10 +537,10 @@ export default function PointCloudViewer({
   // >1 scan: 'aggregate' segments them together (denser geometry) then writes
   // labels back to each; 'per-scan' segments each independently.
   const [woodMultiMode, setWoodMultiMode] = useState<WoodMultiMode>('per-scan');
-  // Classification method: 'connectivity' (skeleton backbone — recovers thin
-  // twigs; needs ground removed) is the default; 'geometric' is the original
-  // point-wise classifier.
-  const [woodMethod, setWoodMethod] = useState<WoodMethod>('connectivity');
+  // Classification method: 'sota' (branch-segment + cylinder-fit — recovers thin
+  // branches without flooding leaves; needs ground removed) is the default;
+  // 'connectivity' (skeleton backbone) and 'geometric' (point-wise) are alternatives.
+  const [woodMethod, setWoodMethod] = useState<WoodMethod>('sota');
   // Reflectance assist (opt-in toggle; defaults on when the selected cloud
   // carries a reflectance/intensity scalar — see woodReflectanceAvailable).
   const [woodUseReflectance, setWoodUseReflectance] = useState(true);
@@ -881,15 +892,25 @@ export default function PointCloudViewer({
   // default background color and point size that seed the per-session viewer
   // controls below. The SettingsDialog owns editing; here we only consume.
   const [triangulateMaxPoints, setTriangulateMaxPoints] = useState(5_000_000);
+  const settingsSeededRef = useRef(false);
   useEffect(() => {
     getSettings()
       .then(s => {
         setTriangulateMaxPoints(s.triangulateMaxPoints);
-        setBgColor(s.defaultBackgroundColor);
-        setPointSize(s.defaultPointSize);
+        setScanMarkerScale(s.scanMarkerScale);
+        // Background and point size are launch seeds (the Display panel owns the
+        // live values), so only adopt them on the very first load — not on every
+        // settings-dialog close, which would clobber a session tweak. Marker
+        // scale has no live Display control, so it re-reads each time.
+        if (!settingsSeededRef.current) {
+          settingsSeededRef.current = true;
+          setBgColor(s.defaultBackgroundColor);
+          setPointSize(s.defaultPointSize);
+        }
       })
       .catch(() => {});
-  }, []);
+    // Re-read when the settings dialog closes (settingsEpoch bumps).
+  }, [settingsEpoch]);
 
   // Alignment comparison state
   const [showAlignmentPanel, setShowAlignmentPanel] = useState(false);
@@ -9478,12 +9499,13 @@ export default function PointCloudViewer({
         })}
 
         {/* Scanner markers for every scan that carries scan parameters.
-            Rendered at a fixed physical height (a typical tripod scanner is
-            ~0.3-0.4 m tall) — scene-relative scaling made them tower over
-            small trees and shrink to specks against large scans. */}
-        {scansWithParams.map(scan => {
+            Each model renders at its real-world height (a Velodyne puck is
+            ~0.14 m; a Leica P40 ~0.40 m), so the marker is to scale with the
+            cloud rather than a one-size placeholder. The whole layer can be
+            hidden via the Display panel, and a global scale multiplier from
+            settings sizes every marker up or down together. */}
+        {showScanMarkers && scansWithParams.map(scan => {
           if (!scan.visible) return null;
-          const scannerHeight = 0.35;
           // Glow follows the Scans-pane selection — single source of truth, so
           // the marker can never drift out of sync with the row highlight.
           const isMarkerSelected = selectedScanIds.has(scan.id);
@@ -9493,12 +9515,13 @@ export default function PointCloudViewer({
             <group key={scan.id} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
               <ScannerMarker
                 origin={scan.params.origin}
-                heightMeters={scannerHeight}
+                model={scan.params.scannerModel}
                 color={scan.color}
                 selected={isMarkerSelected}
                 tiltRollDeg={scan.params.tiltRollDeg}
                 tiltPitchDeg={scan.params.tiltPitchDeg}
                 azimuthZeroDeg={scan.params.azimuthMinDeg}
+                scale={scanMarkerScale}
               />
             </group>
           );
@@ -10641,6 +10664,11 @@ export default function PointCloudViewer({
                   {/* Expanded parameters block. */}
                   {isExpanded && scanHasParams && (
                     <div data-testid={`scan-expanded-${scan.id}`} className="pl-6 pr-2 pb-2 pt-1 text-[10px] text-neutral-400 space-y-0.5">
+                      {scan.params.scannerModel && scan.params.scannerModel !== 'generic' && (
+                        <div>
+                          model: <span className="text-neutral-300">{getScannerModel(scan.params.scannerModel).label}</span>
+                        </div>
+                      )}
                       <div className="grid grid-cols-3 gap-x-2">
                         <div>x: <span className="font-mono text-neutral-300">{scan.params.origin.x.toFixed(3)}</span></div>
                         <div>y: <span className="font-mono text-neutral-300">{scan.params.origin.y.toFixed(3)}</span></div>
@@ -12927,6 +12955,10 @@ export default function PointCloudViewer({
               <label className="flex items-center gap-2 text-neutral-300 cursor-pointer">
                 <input type="checkbox" checked={showAxes} onChange={(e) => setShowAxes(e.target.checked)} className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500" />
                 Axes
+              </label>
+              <label className="flex items-center gap-2 text-neutral-300 cursor-pointer">
+                <input data-testid="display-scan-markers" type="checkbox" checked={showScanMarkers} onChange={(e) => setShowScanMarkers(e.target.checked)} className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500" />
+                Scan markers
               </label>
             </div>
           </div>

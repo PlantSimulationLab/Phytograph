@@ -110,7 +110,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.18.0"
+BACKEND_VERSION = "0.19.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -1809,14 +1809,15 @@ class WoodSegmentationRequest(BaseModel):
     reflectance: Optional[List[float]] = None
     scalar_slug: Optional[str] = None
     reflectance_weight_max: float = 0.4
-    # METHOD. 'geometric' = the original point-wise classifier (local PCA + GMM).
-    # 'connectivity' = additionally root a geodesic skeleton at the trunk base and
-    # recover the woody backbone (points on continuous paths to the base), which
-    # recovers thin branches/twigs the point-wise method misses. Connectivity
-    # REQUIRES ground removal; if the base looks like residual ground the response
-    # carries a `ground_warning`. `backbone_support` (0 = auto) tunes the support
-    # floor for pruning isolated false-wood (higher → prunes more aggressively).
-    method: Literal["geometric", "connectivity"] = "connectivity"
+    # METHOD.
+    #  'sota' (default) = literature-faithful segment-wise classifier: skeleton
+    #     branch-segments classified by cylinder-fit quality, recovering thin
+    #     branches the point-wise methods drop without flooding leaf. Best on real
+    #     TLS; REQUIRES ground removal (rooted skeleton).
+    #  'connectivity' = geodesic-skeleton backbone recovery (the prior default).
+    #  'geometric' = the original point-wise classifier (local PCA + GMM).
+    # `backbone_support` (0 = auto) tunes the connectivity support floor.
+    method: Literal["sota", "connectivity", "geometric"] = "sota"
     backbone_support: float = 0.0
 
 
@@ -5247,6 +5248,7 @@ def _wood_geometric_labels(
     *,
     k_min: int, k_max: int, k_step: int, wood_bias: float,
     reflectance_weight_max: float,
+    precomputed: Optional[tuple] = None,
 ):
     """Shared geometric classification core: returns
     (raw_labels, seed_mask, sphericity, nbr_idx) on the given (already-downsampled)
@@ -5256,11 +5258,15 @@ def _wood_geometric_labels(
     trunk and obvious branches, kept tight to avoid seeding the backbone from
     false-wood. Both the geometric and connectivity methods call this so they can
     never drift apart. No region-grow / speckle / regularise here (the callers add
-    those)."""
+    those). `precomputed=(features, nbr_idx)` reuses an existing feature pass (the
+    SOTA path computes features once and shares them — the pass is ~25s on 480k)."""
     from sklearn.mixture import GaussianMixture
 
     n = len(pts)
-    features, nbr_idx = _wood_local_pca_features(pts, k_min, k_max, k_step)
+    if precomputed is not None:
+        features, nbr_idx = precomputed
+    else:
+        features, nbr_idx = _wood_local_pca_features(pts, k_min, k_max, k_step)
     verticality = features[:, 1]
     sphericity = features[:, 2]
 
@@ -5314,13 +5320,15 @@ def _wood_geometric_core(
     k_min: int, k_max: int, k_step: int, wood_bias: float,
     reg_k: int, reg_iters: int, min_speckle: int, branch_grow_sph: float,
     reflectance_weight_max: float,
+    precomputed: Optional[tuple] = None,
 ) -> np.ndarray:
     """The original point-wise wood/leaf pipeline on a single (downsampled) cloud:
     geometric GMM + reflectance → branch-grow → speckle prune → regularise. Returns
-    down-resolution int32 labels. Byte-identical to the pre-refactor inline code."""
+    down-resolution int32 labels (byte-identical to the pre-refactor inline code).
+    `precomputed=(features, nbr_idx)` shares an existing feature pass (SOTA path)."""
     raw, _seed, sphericity, nbr_idx = _wood_geometric_labels(
         pts, refl, k_min=k_min, k_max=k_max, k_step=k_step, wood_bias=wood_bias,
-        reflectance_weight_max=reflectance_weight_max,
+        reflectance_weight_max=reflectance_weight_max, precomputed=precomputed,
     )
 
     # Branch recovery: grow wood into connected low-sphericity points (recovers
@@ -5510,6 +5518,132 @@ def _segment_wood_connectivity(
     return _finish(wood)
 
 
+# ==================== SOTA SEGMENT-WISE WOOD/LEAF (multi-scale + cylinder gate) ====================
+# Literature-faithful unsupervised recipe (LeWoS/Wang 2019/Wan 2021/CWLS 2025),
+# validated in a 5-iteration Phase-0 PoC. The current point-wise single-scale
+# classifier is the documented WEAK baseline; this segments first and classifies
+# whole branch segments by CYLINDER-FIT QUALITY (a real branch wraps a tight,
+# well-covered cylinder; a leaf-laden region does not). It recovers thin crown
+# branches the geometric core drops (the diagnosed failure) without flooding leaf.
+
+def _wood_skeleton_segments(pts: np.ndarray):
+    """Group points into BRANCH-SIZED segments via the geodesic skeleton.
+
+    Returns (graph, pt_seg, segments) where `pt_seg[i]` is point i's segment id
+    (-1 if unassigned), `segments` is the qsm `_Segment` list (runs of skeleton
+    nodes between forks). Returns (None, None, None) if the skeleton degenerates.
+
+    Why skeleton-segments and not curvature/connected-components: smooth wood is
+    all mutually connected, so a connected-component pass merges the entire tree
+    into ONE blob (Phase-0 PoC v2). The skeleton's fork-to-fork node runs are
+    naturally branch-sized — the unit a cylinder fit is meaningful on.
+    """
+    from qsm.skeleton import extract_skeleton, SkeletonOptions
+    from qsm.segments import build_segments
+
+    graph = extract_skeleton(pts, SkeletonOptions())
+    nop = graph.node_of_point
+    if (nop is None or len(graph) < 2 or graph.meta.get("degenerate")
+            or graph.meta.get("fallback") or not np.any(nop >= 0)):
+        return None, None, None
+    segments = build_segments(graph)
+    if not segments:
+        return None, None, None
+    # node -> segment lookup (vectorised); points map through node_of_point.
+    node_seg = np.full(len(graph), -1, dtype=np.int64)
+    for s in segments:
+        node_seg[np.asarray(s.node_ids, dtype=np.int64)] = s.seg_id
+    pt_seg = np.full(len(pts), -1, dtype=np.int64)
+    assigned = nop >= 0
+    pt_seg[assigned] = node_seg[nop[assigned]]
+    return graph, pt_seg, segments
+
+
+def _wood_classify_segments(
+    pts: np.ndarray, graph, pt_seg: np.ndarray, segments,
+    geom_wood: np.ndarray, *,
+    min_seg: int = 15, surf_cov_min: float = 0.3, mad_frac_max: float = 0.5,
+    shell_frac: float = 0.5,
+) -> np.ndarray:
+    """Cylinder-fit segment gate + tube-shell recovery (Phase-0 PoC v5).
+
+    Starts from the geometric wood labels and ADDS recovered wood: for each
+    branch-sized segment, fit a cylinder (qsm `fit_cylinder`); if it is a TIGHT,
+    WELL-COVERED tube (`surf_cov >= surf_cov_min` and `mad <= mad_frac_max*radius`)
+    it is a real branch — recover its TUBE SHELL (points within `shell_frac*radius`
+    of the fitted surface) as wood. Leaves splay off the shell and keep their
+    geometric label. `surf_cov_min`/`mad_frac_max`/`shell_frac` are the
+    operating-point dials (leaf-off recall vs leaf-on precision). Returns a wood
+    boolean mask (regularisation is applied by the caller).
+    """
+    from qsm.cylinders import fit_cylinder, CylinderFitOptions
+
+    wood = geom_wood.copy()
+    copts = CylinderFitOptions()
+    nodes = graph.nodes
+    for s in segments:
+        m = pt_seg == s.seg_id
+        if int(m.sum()) < min_seg:
+            continue
+        p = pts[m]
+        seg_nodes = nodes[np.asarray(s.node_ids, dtype=np.int64)]
+        seed_start, seed_end = seg_nodes[0], seg_nodes[-1]
+        axis = seed_end - seed_start
+        axlen = float(np.linalg.norm(axis))
+        if axlen < 1e-6:
+            continue
+        axis = axis / axlen
+        c = p - p.mean(axis=0)
+        r_perp = np.linalg.norm(c - np.outer(c @ axis, axis), axis=1)
+        seed_r = float(np.median(r_perp)) or 0.02
+        fit = fit_cylinder(p, seed_start, seed_end, seed_r, copts)
+        if fit is None or not fit.reliable:
+            continue
+        if not (fit.surf_cov >= surf_cov_min and fit.mad <= mad_frac_max * fit.radius):
+            continue  # not a clean tube → leaf-laden segment, reject
+        shell = np.abs(r_perp - fit.radius) <= max(shell_frac * fit.radius, 0.01)
+        idx = np.where(m)[0]
+        wood[idx[shell]] = True
+    return wood
+
+
+def _segment_wood_sota(
+    pts: np.ndarray,
+    refl: Optional[np.ndarray],
+    *,
+    k_min: int, k_max: int, k_step: int, wood_bias: float,
+    reg_k: int, reg_iters: int, min_speckle: int, branch_grow_sph: float,
+    reflectance_weight_max: float, backbone_support: float,
+    warnings: list,
+) -> np.ndarray:
+    """SOTA segment-wise wood/leaf classification on a single (downsampled) cloud.
+
+    Pipeline: geometric core (seed) → skeleton segments → cylinder-fit gate +
+    tube-shell recovery → regularise. Falls back to the geometric core whenever
+    the skeleton degenerates. Returns down-resolution int32 labels."""
+    # Compute the per-point PCA features ONCE and share them with the geometric
+    # core (the feature pass is ~25s on 480k points; computing it twice was the
+    # bulk of the SOTA path's runtime). `nbr_idx` is reused for the final regularise.
+    features, nbr_idx = _wood_local_pca_features(pts, k_min, k_max, k_step)
+    geom_labels = _wood_geometric_core(
+        pts, refl, k_min=k_min, k_max=k_max, k_step=k_step, wood_bias=wood_bias,
+        reg_k=reg_k, reg_iters=reg_iters, min_speckle=min_speckle,
+        branch_grow_sph=branch_grow_sph, reflectance_weight_max=reflectance_weight_max,
+        precomputed=(features, nbr_idx),
+    )
+    graph, pt_seg, segments = _wood_skeleton_segments(pts)
+    if graph is None:
+        return geom_labels  # degenerate skeleton → geometric fallback
+
+    geom_wood = geom_labels == WOOD_CLASS_WOOD
+    wood = _wood_classify_segments(pts, graph, pt_seg, segments, geom_wood)
+    labels = np.where(wood, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
+    if min_speckle and min_speckle > 1:
+        wm = _wood_prune_speckle(pts, labels == WOOD_CLASS_WOOD, nbr_idx, min_size=int(min_speckle))
+        labels = np.where(wm, WOOD_CLASS_WOOD, WOOD_CLASS_LEAF).astype(np.int32)
+    return _wood_regularize(labels, nbr_idx, reg_k, reg_iters)
+
+
 def segment_wood(
     points: np.ndarray,
     k_min: int = 10,
@@ -5662,7 +5796,17 @@ def segment_wood(
     # geodesic skeleton at the trunk base and recovers the woody backbone (it
     # falls back to geometry internally when the skeleton degenerates). Both
     # return down-resolution labels; the full-res propagation below is shared.
-    if method == "connectivity":
+    if method == "sota":
+        labels_down = _segment_wood_sota(
+            pts, refl,
+            k_min=k_min, k_max=k_max, k_step=k_step, wood_bias=wood_bias,
+            reg_k=reg_k, reg_iters=reg_iters, min_speckle=min_speckle,
+            branch_grow_sph=branch_grow_sph,
+            reflectance_weight_max=reflectance_weight_max,
+            backbone_support=backbone_support,
+            warnings=_warnings,
+        )
+    elif method == "connectivity":
         labels_down = _segment_wood_connectivity(
             pts, refl,
             k_min=k_min, k_max=k_max, k_step=k_step, wood_bias=wood_bias,

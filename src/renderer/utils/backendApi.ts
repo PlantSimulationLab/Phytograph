@@ -247,11 +247,12 @@ export interface WoodSegmentationRequest {
   reflectance?: number[];
   scalar_slug?: string;
   reflectance_weight_max?: number;
-  // METHOD: 'geometric' = original point-wise classifier; 'connectivity' = roots
-  // a geodesic skeleton at the trunk base and recovers the woody backbone (thin
-  // branches/twigs the point-wise method misses). Connectivity needs the ground
-  // removed; `backbone_support` (0 = auto) tunes its isolated-false-wood pruning.
-  method?: 'geometric' | 'connectivity';
+  // METHOD: 'sota' (default) = segment-wise classifier — skeleton branch-segments
+  // classified by cylinder-fit quality, recovering thin branches without flooding
+  // leaves; 'connectivity' = geodesic-skeleton backbone recovery; 'geometric' =
+  // original point-wise classifier. 'sota'/'connectivity' need the ground removed.
+  // `backbone_support` (0 = auto) tunes connectivity's isolated-false-wood pruning.
+  method?: 'sota' | 'connectivity' | 'geometric';
   backbone_support?: number;
 }
 
@@ -2662,7 +2663,7 @@ export async function sessionSegmentGround(
  * (no file read). Pass segment_wood tuning params. */
 export async function sessionSegmentWood(
   sessionId: string,
-  params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number; method?: 'geometric' | 'connectivity'; backbone_support?: number; reflectance_weight_max?: number; scalar_slug?: string },
+  params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number; method?: 'sota' | 'connectivity' | 'geometric'; backbone_support?: number; reflectance_weight_max?: number; scalar_slug?: string },
 ): Promise<CloudSessionBakeResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();

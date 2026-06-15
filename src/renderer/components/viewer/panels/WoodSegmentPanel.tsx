@@ -17,7 +17,7 @@ export type WoodMultiMode = 'aggregate' | 'per-scan';
 //    the woody backbone (thin branches/twigs the point-wise method misses).
 //    Needs the ground removed.
 //  - 'geometric': the original point-wise classifier (local shape only).
-export type WoodMethod = 'geometric' | 'connectivity';
+export type WoodMethod = 'sota' | 'connectivity' | 'geometric';
 
 // Presentational tool panel for wood/leaf segmentation. The `onSegment` handler
 // and all state live in PointCloudViewer; the parent gates rendering on
@@ -100,11 +100,14 @@ export function WoodSegmentPanel({
           disabled={inProgress}
           className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
         >
+          <option value="sota">Branch-segment (recommended)</option>
           <option value="connectivity">Connectivity (skeleton backbone)</option>
           <option value="geometric">Geometric (local shape)</option>
         </select>
         <div className="text-[9px] text-neutral-500 mt-1 leading-snug">
-          {method === 'connectivity'
+          {method === 'sota'
+            ? 'Classifies whole branch segments by cylinder fit — recovers thin branches without over-segmenting leaves. Requires ground removal.'
+            : method === 'connectivity'
             ? 'Traces branches back to the trunk base — recovers thin twigs the local method drops. Requires ground removal.'
             : 'Classifies each point from its local 3-D shape only.'}
         </div>

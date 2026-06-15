@@ -199,9 +199,56 @@ def test_wood_segment_connectivity_degenerate_falls_back():
     assert pred.shape == (len(points),)
     assert set(np.unique(pred)).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
 
-    # A trivially tiny cloud must also be handled.
-    tiny = main.segment_wood(rng.normal(0, 1, (5, 3)), method="connectivity")
+
+# --- SOTA segment-wise method (the new default) ---------------------------------
+
+@pytest.mark.parametrize("stem", [f[0] for f in FIXTURES], ids=[f[0] for f in FIXTURES])
+def test_wood_segment_sota_runs(stem):
+    """The SOTA (segment-wise + cylinder-fit) method runs on every real fixture and
+    returns aligned, valid labels with both classes present. SMOKE/shape gate —
+    the accuracy claim is measured full-resolution (decimation distorts the
+    skeleton segments / cylinder fits), not asserted on these decimated fixtures."""
+    points, _ = _load(stem)
+    pred = main.segment_wood(points, method="sota")
+    assert pred.shape == (len(points),)
+    assert pred.dtype == np.int32
+    assert set(np.unique(pred)).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
+    assert main.WOOD_CLASS_WOOD in pred and main.WOOD_CLASS_LEAF in pred
+
+
+def test_wood_segment_sota_degenerate_falls_back():
+    """SOTA must fall back to a valid geometric result when the skeleton degenerates."""
+    rng = np.random.RandomState(7)
+    pts = np.vstack([
+        rng.normal([0, 0, 1.0], 0.05, (300, 3)),
+        rng.normal([20, 20, 1.0], 0.05, (300, 3)),
+    ])
+    pred = main.segment_wood(pts, method="sota")
+    assert pred.shape == (len(pts),)
+    assert set(np.unique(pred)).issubset({main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF})
+    tiny = main.segment_wood(rng.normal(0, 1, (5, 3)), method="sota")
     assert tiny.shape == (5,)
+
+
+def test_wood_segment_sota_leafoff_invariant():
+    """THE diagnostic that drove the SOTA rebuild, now a permanent gate. On a
+    LEAF-OFF (all-wood) scan the answer is ~100% wood — yet the point-wise
+    geometric core mislabels 20-30% of branch points as leaf. The SOTA method
+    recovers them. Fixture: a real leaf-off tree (L1-Tree Tree_2, decimated to
+    ~52k; column 4 is the all-wood truth label). SOTA must recover materially more
+    wood than geometric here. (Bar set with margin below the observed full-res
+    ~0.93; even decimated, SOTA clears it while geometric trails ~0.82.)"""
+    points, truth = _load("leafoff_allwood_small")
+    assert (truth == main.WOOD_CLASS_WOOD).all(), "fixture must be all-wood"
+    sota = main.segment_wood(points, method="sota")
+    geom = main.segment_wood(points, method="geometric")
+    w_sota = float((sota == main.WOOD_CLASS_WOOD).mean())
+    w_geom = float((geom == main.WOOD_CLASS_WOOD).mean())
+    print(f"\nleaf-off invariant: SOTA wood%={w_sota:.3f}  geometric wood%={w_geom:.3f}")
+    assert w_sota >= 0.88, f"SOTA recovered only {w_sota:.3f} wood on an all-wood scan"
+    assert w_sota >= w_geom + 0.05, (
+        f"SOTA ({w_sota:.3f}) must beat geometric ({w_geom:.3f}) on leaf-off branch recovery"
+    )
 
 
 def test_wood_segment_labels_aligned_and_typed():

@@ -5,17 +5,20 @@ For plant-architecture work — skeletons, QSMs, branch geometry — the
 **leaves**. Phytograph classifies each point as wood or leaf with no machine
 learning and no training step, so it runs locally on any ground-cropped cloud.
 
-There are two methods (see **Method** below):
+There are three methods (see **Method** below):
 
-- **Connectivity** (the default) roots a skeleton at the trunk base and traces
-  each branch back to it. Wood is what lies on a continuous path to the trunk —
-  a thin twig connects back through the branches, a leaf does not. This recovers
-  the fine branches that a shape-only method drops. It **requires the ground to
-  be removed** (the skeleton roots at the lowest points).
-- **Geometric** is the original point-wise classifier. It reads two local cues:
-  wood is **vertical and locally compact** (smooth cylinders), while foliage
-  **scatters the neighbourhood in 3-D**. It does *not* use "linearity", because
-  branches and many leaves (needles, narrow blades) are both linear.
+- **Branch-segment** (the default, recommended) builds a skeleton, breaks it into
+  individual **branch segments**, and classifies each *whole segment* by how well
+  it fits a cylinder — a real branch wraps a tight cylinder, a clump of leaves
+  does not. Classifying segments rather than individual points recovers the thin
+  branches a point-wise method drops, without over-segmenting the leaves around
+  them. It **requires the ground to be removed** (the skeleton roots at the
+  lowest points).
+- **Connectivity** roots a skeleton at the trunk base and traces each branch back
+  to it (wood = on a continuous path to the trunk). Also needs the ground removed.
+- **Geometric** is the original point-wise classifier — each point judged by its
+  local 3-D shape (vertical and compact = wood; scattered = leaf). Use it when the
+  cloud can't be cleanly ground-removed.
 
 ## Segment
 
@@ -26,11 +29,11 @@ There are two methods (see **Method** below):
    the command palette and choose **Segment Wood / Leaf**.
 4. Adjust the parameters if needed (the defaults work across broadleaf and
    conifer scans):
-    - **Method** — **Connectivity** (default; skeleton backbone, recovers thin
-      twigs, needs the ground removed) or **Geometric** (local shape only). Use
-      Geometric if the cloud can't be cleanly ground-removed, or for a quick
-      shape-based pass on a partial/disconnected cloud where a single rooted tree
-      can't be traced.
+    - **Method** — **Branch-segment** (default; segment-wise cylinder-fit, best on
+      real trees, needs the ground removed), **Connectivity** (skeleton backbone),
+      or **Geometric** (local shape only). Use Geometric if the cloud can't be
+      cleanly ground-removed, or for a quick shape-based pass on a
+      partial/disconnected cloud where a single rooted tree can't be traced.
     - **Wood sensitivity (0–1)** — the wood/leaf decision threshold. Raise it
       to classify more points as wood (catches thin twigs at the cost of some
       leaf bleed); lower it to be stricter about what counts as wood.
