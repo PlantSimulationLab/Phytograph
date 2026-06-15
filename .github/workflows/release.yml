@@ -132,24 +132,36 @@ jobs:
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-pyhelios.mjs
 
-      # Lightweight memory/disk reporting around the Linux backend build.
-      # The first release run's Linux job died here with an unrecoverable log
-      # (initially suspected OOM), but a later run showed PyInstaller finishing
-      # with ~6.8 GB of 7.8 GB free and the runner's pre-existing 3 GB swap
-      # barely touched — so memory was NOT the cause, and the first failure was
-      # transient. No swapfile is added (ubuntu-24.04 already ships /swapfile;
-      # creating another fails with "Text file busy"). Just log resources so a
-      # future failure here has evidence. `|| true` keeps this non-fatal.
-      - name: Report memory before backend build (Linux)
+      # Add swap on Linux before the PyInstaller backend build. Three release
+      # runs had the Linux job die *during* "Build Python backend" with a totally
+      # unrecoverable log — not even the always() "after" step ran. That is the
+      # signature of an OOM kill of the runner agent itself, during PyInstaller's
+      # analysis of these large collect-all packages (scipy + open3d + skimage +
+      # pye57 …), which peaks well above the ~7.8 GB RAM these runners have.
+      # (An earlier "6.8 GB free" reading was taken BEFORE PyInstaller's peak, so
+      # it didn't disprove OOM.) The runner already ships a 3 GB /swapfile, so we
+      # ADD a second, separately-named file (/swapfile2) — `fallocate` on the
+      # existing /swapfile fails with "Text file busy". 10 GB gives generous
+      # headroom over the ~7.8 GB RAM.
+      - name: Add swap for PyInstaller (Linux)
         if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
-        run: free -h || true; df -h / || true
+        run: |
+          echo "== memory/disk BEFORE adding swap =="
+          free -h || true
+          df -h / || true
+          sudo fallocate -l 10G /swapfile2
+          sudo chmod 600 /swapfile2
+          sudo mkswap /swapfile2
+          sudo swapon /swapfile2
+          echo "== memory AFTER adding 10G swap =="
+          free -h || true
 
       - name: Build Python backend
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-backend.mjs
 
       - name: Report memory after backend build (Linux)
-        # always() so we capture state even if the build failed.
+        # always() so we capture peak/leftover state even if the build failed.
         if: always() && runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
         run: free -h || true; df -h / || true
 
@@ -324,7 +336,12 @@ jobs:
             exit 1
           }
           Write-Host "found: $($bin.FullName)"
-          & $bin.FullName --help | Select-Object -First 5
+          # PotreeConverter exits non-zero from --help, which under pwsh would
+          # fail the step. The binary having built + installed is the real
+          # check; run --help only for informational output and don't let its
+          # exit code (or a pipe close) fail the step.
+          try { & $bin.FullName --help 2>&1 | Select-Object -First 5 } catch { Write-Host "(--help returned non-zero; ignored)" }
+          Write-Host "PASS: PotreeConverter.exe present ($($bin.Length) bytes)"
 
       # ---------------- macOS signing setup ----------------
       - name: Import Apple Certificate (macOS)
