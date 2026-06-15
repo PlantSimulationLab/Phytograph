@@ -132,34 +132,39 @@ jobs:
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-pyhelios.mjs
 
-      # Enlarge swap on Linux before the PyInstaller backend build. The Linux
-      # job kept dying during "Build Python backend" with a totally unrecoverable
-      # log — not even the always() "after" step ran — the signature of an OOM
-      # kill of the runner agent during PyInstaller's analysis of the large
-      # collect-all packages (scipy + open3d + skimage + pye57 …), whose peak
-      # exceeds the ~7.8 GB RAM these runners have.
+      # Free disk + enlarge swap on Linux before the PyInstaller backend build.
+      # The Linux job kept dying during "Build Python backend" — the signature
+      # of an OOM kill during PyInstaller's analysis of the large collect-all
+      # packages (scipy + open3d + skimage + pye57 …), whose peak exceeds the
+      # ~7.8 GB RAM these runners have. But the FIRST fix attempts failed at the
+      # swap step itself with "dd: No space left on device": after the PyHelios
+      # build the root disk was already 95% full (4.2 GB free of 72 GB), so a
+      # big swapfile couldn't be written — and swapoff -a had already removed
+      # the runner's default 3 GB swap, leaving it WORSE off.
       #
-      # Use the canonical resize recipe: swapoff the existing /swapfile first,
-      # rebuild it bigger with `dd` (NOT fallocate — fallocate can produce a
-      # sparse/holey file that swapon rejects on some filesystems), then swapon.
-      # A prior attempt that fallocate'd a second /swapfile2 without swapoff
-      # killed the runner at this very step. `set -x` + the `free`/`df` prints
-      # mean that if this step fails again, the cause is visible in the log
-      # (the failure is now contained to this step, not a runner-wide crash).
-      - name: Enlarge swap for PyInstaller (Linux)
+      # So: (1) reclaim ~20-30 GB of preinstalled bloat the build doesn't need
+      # (dotnet, Android SDK, GHC, CodeQL), THEN (2) swapoff, rebuild /swapfile
+      # with dd (not fallocate — it can make a holey file swapon rejects), and
+      # swapon. 8 GB swap now fits and gives headroom over the 7.8 GB RAM.
+      # `set -x` keeps any failure visible in this step's log.
+      - name: Free disk + add swap for PyInstaller (Linux)
         if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
         run: |
           set -x
-          echo "== memory/disk BEFORE =="
-          free -h || true
+          echo "== disk BEFORE cleanup =="
+          df -h / || true
+          # Reclaim large preinstalled toolchains the backend build never uses.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          echo "== disk AFTER cleanup =="
           df -h / || true
           sudo swapoff -a || true
           sudo rm -f /swapfile
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=12288 status=progress
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          echo "== memory/disk AFTER (expect ~12G swap) =="
+          echo "== memory/disk AFTER (expect ~8G swap) =="
           free -h || true
           df -h / || true
 
