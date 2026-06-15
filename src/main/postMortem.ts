@@ -171,17 +171,24 @@ function newestDumpSince(sinceMs: number): string | null {
 export function checkPreviousSession(): boolean {
   const marker = markerPath();
   const uncleanExit = existsSync(marker);
-  // Read the marker's timestamp to bound the dump search to the crashed session;
-  // fall back to "any dump from the last day" if the marker is unreadable.
+
+  // The clean-shutdown marker is the only proof that a PREVIOUS session ran and
+  // didn't exit cleanly: markSessionStarted() writes it at launch and a clean
+  // quit deletes it. If it's absent we're either on a first launch (it never
+  // existed) or after a clean quit (it was removed) — in both cases there is no
+  // previous unclean session to report. Bail before searching for dumps, so a
+  // stray/startup minidump can't be mis-attributed to a prior crash (this was
+  // firing the recovery dialog on a freshly installed app's very first launch).
+  if (!uncleanExit) return false;
+
+  // A prior run left its marker → bound the dump search to that session.
   let sinceMs = Date.now() - 24 * 60 * 60 * 1000;
   try {
-    if (uncleanExit) sinceMs = statSync(marker).mtimeMs - 1000;
+    sinceMs = statSync(marker).mtimeMs - 1000;
   } catch {
-    /* use the fallback window */
+    /* marker unreadable — use the fallback window */
   }
   const dump = newestDumpSince(sinceMs);
-
-  if (!uncleanExit && !dump) return false; // previous session exited cleanly
 
   pmLog.warn(
     `Previous session did not exit cleanly (marker=${uncleanExit}, dump=${dump ?? 'none'}).`,

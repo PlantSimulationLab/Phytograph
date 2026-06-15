@@ -225,6 +225,19 @@ app.whenReady().then(async () => {
   registerOctreeProtocol();
   installApplicationMenu(() => mainWindow);
 
+  setBackendWindowGetter(() => mainWindow);
+  // When the sidecar exhausts its restart budget, the renderer already gets a
+  // toast (App.tsx); also pop the native crash dialog so the user gets the
+  // log/report/reload actions, not just a dismissable toast. Suppressed under
+  // E2E (a native modal would hang the Playwright driver).
+  if (!isE2E) setBackendFailedHandler(() => showBackendFailedDialog(restartBackendAndReload));
+
+  // Kick off the backend's (slow, ~10-20s cold) start NOW, before the synchronous
+  // post-mortem dialog below — otherwise that modal blocks the event loop and the
+  // sidecar doesn't even begin spawning until the user dismisses it. We await the
+  // promise after the dialog so startup still completes before the window opens.
+  const backendStarting = startBackend();
+
   // Post-mortem: detect whether the PREVIOUS session crashed (a native main-
   // process death no live handler can catch) and, if so, surface a recovery
   // dialog. MUST run before markSessionStarted() — it reads the old marker — and
@@ -249,18 +262,22 @@ app.whenReady().then(async () => {
   // modal would hang the Playwright driver).
   if (!isE2E) setFatalErrorHandler(showFatalMainErrorDialog);
 
-  setBackendWindowGetter(() => mainWindow);
-  // When the sidecar exhausts its restart budget, the renderer already gets a
-  // toast (App.tsx); also pop the native crash dialog so the user gets the
-  // log/report/reload actions, not just a dismissable toast. Suppressed under
-  // E2E (a native modal would hang the Playwright driver).
-  if (!isE2E) setBackendFailedHandler(() => showBackendFailedDialog(restartBackendAndReload));
-  await startBackend();
+  await backendStarting;
   createWindow();
   setupAutoUpdater(() => mainWindow);
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  // macOS: closing the window doesn't quit the app (window-all-closed only
+  // quits off-darwin), and window-all-closed calls stopBackend() — so the
+  // sidecar is gone by the time the user reopens via the Dock. Reopening fires
+  // 'activate'; if we only recreated the window the renderer would poll a dead
+  // backend for the full splash timeout and fail. So restart the backend too.
+  // startBackend() is idempotent (it reuses a healthy backend on its port and
+  // only spawns when none answers), so calling it again is safe and cheap.
+  app.on('activate', async () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      await startBackend();
+      createWindow();
+    }
   });
 });
 
