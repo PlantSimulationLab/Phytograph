@@ -22,15 +22,31 @@ jobs:
           - platform: macos-14
             arch: arm64
             backend_name: phytograph_backend
-          - platform: windows-latest
+          # Pinned to windows-2022 (not windows-latest): PyHelios's CMake build
+          # detects the "Visual Studio 17 2022" generator, but windows-latest
+          # now ships VS 18, so the generator can't find a matching install and
+          # configure fails. windows-2022 is the combo PyHelios's own CI uses
+          # (pyhelios/.github/workflows/pytest-windows.yml). Revisit when
+          # PyHelios's build_helios.py learns to detect VS 18, or when GitHub
+          # retires the windows-2022 image.
+          - platform: windows-2022
             arch: x64
             backend_name: phytograph_backend
-          - platform: ubuntu-latest
+          # Pinned to ubuntu-24.04 (not ubuntu-latest) to match the image
+          # PyHelios's own CI builds on (pyhelios/.github/workflows/
+          # pytest-linux.yml) and to avoid a surprise image bump (cf. the VS 18
+          # break on windows-latest).
+          - platform: ubuntu-24.04
             arch: x64
             backend_name: phytograph_backend
 
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 75
+    # 150 min (not 75): macOS notarization waits on Apple's notary service,
+    # whose queue can be slow — a brand-new account's *first* submission has
+    # sat "In Progress" for over an hour. The native builds (PyHelios, backend,
+    # PotreeConverter) finish well inside 75 min; the headroom is purely to
+    # avoid cancelling a good build while Apple processes notarization.
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@v4
@@ -116,9 +132,39 @@ jobs:
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-pyhelios.mjs
 
+      # The first release run's Linux job died during "Build Python backend"
+      # (PyInstaller bundling open3d + scipy + pyhelios) with an empty step
+      # conclusion and an unrecoverable log blob — the signature of an
+      # OOM-killed runner (the agent dies before uploading logs). ubuntu
+      # runners have ~7-16 GB RAM and PyInstaller's analysis of these large
+      # native deps is memory-hungry. Add swap on Linux so an OOM doesn't kill
+      # the runner, and print memory before/after so the next run shows
+      # definitively whether memory was the cause (or surfaces the real error,
+      # which will now be uploaded because the runner survives).
+      - name: Add swap + report memory (Linux)
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "== memory/disk BEFORE swap =="
+          free -h || true
+          df -h / || true
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "== memory AFTER adding 8G swap =="
+          free -h || true
+
       - name: Build Python backend
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-backend.mjs
+
+      - name: Report memory after backend build (Linux)
+        # Runs even if the build failed, so we capture peak/leftover memory.
+        if: always() && runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "== memory/disk AFTER backend build =="
+          free -h || true
+          df -h / || true
 
       - name: Verify backend binary
         shell: bash

@@ -22,7 +22,14 @@ exports.default = async function notarizing(context) {
   const appName = context.packager.appInfo.productFilename;
   const appPath = `${appOutDir}/${appName}.app`;
 
-  console.log(`[notarize] submitting ${appPath} (this typically takes a few minutes)...`);
+  // This wraps `notarytool submit --wait`, which uploads the app then POLLS
+  // Apple's notary service until it returns a verdict. The wait is unbounded:
+  // Apple's queue can be slow (a new account's first submission has sat "In
+  // Progress" for over an hour), so if CI appears stuck here it's almost always
+  // waiting on Apple, not hung locally. Check status out-of-band with:
+  //   xcrun notarytool history --apple-id … --team-id … --password …
+  const started = new Date().toISOString();
+  console.log(`[notarize] ${started} submitting ${appPath} — uploading, then waiting on Apple's notary service (can take minutes to hours)...`);
   await notarize({
     tool: 'notarytool',
     appBundleId: 'com.phytograph.app',
@@ -31,5 +38,5 @@ exports.default = async function notarizing(context) {
     appleIdPassword: APPLE_PASSWORD,
     teamId: APPLE_TEAM_ID,
   });
-  console.log('[notarize] complete.');
+  console.log(`[notarize] complete (submitted at ${started}, finished ${new Date().toISOString()}).`);
 };
