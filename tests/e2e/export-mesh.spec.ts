@@ -82,15 +82,15 @@ test('exports a generated mesh to OBJ via the Export panel', async () => {
     const expectedTriangles = parseInt(trianglesStr ?? '0', 10);
     expect(expectedTriangles).toBeGreaterThan(0);
 
-    // Select the mesh; the cloud must be deselected so the toolbar is in
-    // mesh-only mode (otherwise selectionType=='mixed' and the mesh
-    // export tool doesn't render).
+    // Select the mesh so the export modal targets it.
     await meshRow.click();
     await expect(meshRow).toHaveAttribute('data-selected', 'true');
     await expect(cloudRow).toHaveAttribute('data-selected', 'false');
 
-    // Open the export modal and click OBJ (mesh export).
-    await page.getByTestId('tool-export-mesh').click();
+    // Open the export modal and click OBJ (mesh export). Export now lives in
+    // File → Export (no toolbar icon); the native menu is disabled under E2E, so
+    // drive the same renderer entry point the menu uses.
+    await page.evaluate(() => (window as any).__openExportPanel?.());
     await expect(page.getByTestId('export-modal')).toBeVisible();
     await page.getByTestId('export-mesh-obj').click();
 

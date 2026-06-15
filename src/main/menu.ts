@@ -166,6 +166,65 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
           : []),
       ],
     },
+    {
+      // Tools — analysis operations on existing data. Each item runs a tool by
+      // its registry id via { kind: 'tool' }; the renderer dispatches through
+      // __runToolCommand (the tool actions live in PointCloudViewer's registry,
+      // the single source of truth shared with the toolbar and Cmd+K palette).
+      // Geometry generation and synthetic scanning are NOT here — they're
+      // scene-building, so they live under their own Create / Simulate menus.
+      label: 'Tools',
+      submenu: [
+        {
+          label: 'Pre-processing',
+          submenu: [
+            { label: 'Translate Point Cloud', click: () => send({ kind: 'tool', toolId: 'cloud-translate' }) },
+            { label: 'Crop Point Cloud', click: () => send({ kind: 'tool', toolId: 'cloud-crop' }) },
+            { label: 'Erase Brush', click: () => send({ kind: 'tool', toolId: 'cloud-erase' }) },
+            { label: 'Filter Points', click: () => send({ kind: 'tool', toolId: 'cloud-filter' }) },
+            { label: 'Resample Point Cloud', click: () => send({ kind: 'tool', toolId: 'cloud-resample' }) },
+            { label: 'Move to Origin', click: () => send({ kind: 'tool', toolId: 'cloud-move-origin' }) },
+            { type: 'separator' },
+            { label: 'Align Clouds (ICP)…', click: () => send({ kind: 'tool', toolId: 'cloud-align' }) },
+            { label: 'Stitch Clouds…', click: () => send({ kind: 'tool', toolId: 'cloud-stitch' }) },
+          ],
+        },
+        {
+          label: 'Segmentation',
+          submenu: [
+            { label: 'Segment Ground', click: () => send({ kind: 'tool', toolId: 'cloud-ground-segment' }) },
+            { label: 'Segment Wood / Leaf', click: () => send({ kind: 'tool', toolId: 'cloud-wood-segment' }) },
+            { label: 'Segment Trees', click: () => send({ kind: 'tool', toolId: 'cloud-segment-trees' }) },
+          ],
+        },
+        {
+          label: 'Reconstruction & Analysis',
+          submenu: [
+            { label: 'Triangulate…', click: () => send({ kind: 'tool', toolId: 'cloud-triangulate' }) },
+            { label: 'Extract Skeleton', click: () => send({ kind: 'tool', toolId: 'cloud-skeleton' }) },
+            { label: 'Build QSM', click: () => send({ kind: 'tool', toolId: 'cloud-qsm' }) },
+            { label: 'Compute Leaf Area Density…', click: () => send({ kind: 'tool', toolId: 'compute-lad' }) },
+          ],
+        },
+      ],
+    },
+    {
+      // Create — geometry generation + scanner placement (scene-building).
+      label: 'Create',
+      submenu: [
+        { label: 'Generate Plant…', click: () => send({ kind: 'tool', toolId: 'create-plant' }) },
+        { label: 'Import Model…', click: () => send({ kind: 'tool', toolId: 'import-model' }) },
+        { label: 'Create Voxel Grid', click: () => send({ kind: 'tool', toolId: 'create-voxel' }) },
+        { label: 'Add Scan…', click: () => send({ kind: 'tool', toolId: 'add-scan' }) },
+      ],
+    },
+    {
+      // Simulate — synthetic scanning.
+      label: 'Simulate',
+      submenu: [
+        { label: 'Run Synthetic Scan…', click: () => send({ kind: 'tool', toolId: 'lidar-scan' }) },
+      ],
+    },
     { role: 'windowMenu' },
     {
       label: 'Help',

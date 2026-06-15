@@ -58,6 +58,13 @@ export interface BackendInfo {
   pyheliosVersion: string;
   /** helios-core C++ submodule version (git describe), captured at build time. */
   heliosVersion: string;
+  /**
+   * True if this is the app's first launch on this machine (no persisted store
+   * existed at startup). The backend's cold start is much slower the first time
+   * (PyInstaller unpack + open3d/pyhelios import + macOS Gatekeeper scan), so
+   * the splash uses this to show a "first launch is slower" message.
+   */
+  firstRun: boolean;
 }
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'verbose' | 'debug';
@@ -125,4 +132,8 @@ export type MenuCommandPayload =
   | { kind: 'snap-view'; direction: SnapViewDirection }
   | { kind: 'feedback'; mode: 'bug' | 'feature' }
   | { kind: 'about' }
-  | { kind: 'nav'; target: 'viewer' | 'options' };
+  | { kind: 'nav'; target: 'viewer' | 'options' }
+  // Run a tool from the native Tools menu by its registry id. One payload kind
+  // carries every tool; the renderer dispatches via __runToolCommand (the tool
+  // actions live inside PointCloudViewer's command registry).
+  | { kind: 'tool'; toolId: string };

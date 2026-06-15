@@ -56,10 +56,9 @@ test('multi-scan crop applies one world-space box across two selected scans', as
     await expect(offsetRow).toHaveAttribute('data-selected', 'true');
     await expect(tinyRow).toHaveAttribute('data-selected', 'true');
 
-    // The single-cloud Crop button shouldn't be in the toolbar when 2+ are
-    // selected — the multi-cloud branch renders its own button instead.
-    await expect(page.getByTestId('tool-crop')).toHaveCount(0);
-    const cropBtn = page.getByTestId('tool-crop-multi');
+    // The static toolbar has a single Crop tool for any selection count; it
+    // initializes the crop box from the union of all selected scans' bounds.
+    const cropBtn = page.getByTestId('tool-crop');
     await expect(cropBtn).toBeVisible();
     await cropBtn.click();
 

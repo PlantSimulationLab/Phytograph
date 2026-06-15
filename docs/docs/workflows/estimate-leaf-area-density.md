@@ -40,12 +40,22 @@ surface.
    box exists — the tooltip tells you which is missing.
 
 3. **In the dialog:**
-    - Pick the **voxel grid** to use (required — no auto-grid).
+    - **Triangulation.** If you've already run a
+      [Helios triangulation](triangulate.md) over a voxel grid, choose
+      **Reuse: \<that mesh\>** here. The inversion then reuses *exactly* the
+      scans, grid, and Lmax / aspect that produced that mesh — reproducing its
+      G-function — and the scan picker, grid selector, and filter fields below
+      are hidden (they're locked to the mesh). Choose **Run a new triangulation**
+      to set everything yourself instead. (This selector only appears when a
+      reusable Helios triangulation exists — one built with a voxel grid.)
+    - Pick the **voxel grid** to use (required — no auto-grid). *(New
+      triangulation only.)*
     - **Max Edge Length (Lmax)** and **Max Aspect Ratio** control the
       triangulation that estimates the G-function (not the final mesh). If you
       already dialed in a filter on a [Helios triangulation](triangulate.md)
       mesh, these fields are **pre-filled** with that Lmax / aspect so the
-      inversion bakes in the same filtering — still editable here.
+      inversion bakes in the same filtering — still editable here. *(New
+      triangulation only.)*
     - **Min Voxel Hits** skips voxels with too few returns to solve
       reliably.
     - **Element width (m)** is the characteristic width of a leaf or

@@ -55,7 +55,10 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
     }
 
     // Open the Helios triangulation popup.
-    await page.getByTestId('tool-triangulate-helios').click();
+    await page.getByTestId('tool-triangulate').click();
+    // The static Triangulate tool opens the panel; with 2+ clouds (or the Helios
+    // method) it shows a Setup button that opens the multi-scan Helios dialog.
+    await page.getByTestId('triangulation-setup-button').click();
     const heliosPopup = page.getByTestId('helios-triangulation-popup');
     await expect(heliosPopup).toBeVisible();
 

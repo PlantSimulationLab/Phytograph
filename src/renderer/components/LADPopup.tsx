@@ -2,9 +2,26 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, Grid3x3 } from 'lucide-react';
 import { LADRequest } from '../utils/backendApi';
 import type { GridOption } from './HeliosTriangulationPopup';
+import type { HeliosGrid } from '../utils/backendApi';
 import type { Scan } from '../lib/scan';
 import { hasData, hasParams } from '../lib/scan';
 import { buildLADRequest } from '../lib/pointCloudHelpers';
+
+// An existing Helios triangulation the user can REUSE. Selecting it locks the
+// inversion to the same scans + grid + lmax/aspect that produced the mesh, so
+// the (re-run) triangulation reproduces that mesh's G-function exactly.
+export interface LADTriangulationOption {
+  id: string;        // mesh id
+  label: string;     // mesh display name
+  grid: HeliosGrid;  // the grid this mesh was triangulated in
+  scanIds: string[]; // the scans fused into it
+  lmax: number;
+  maxAspectRatio: number;
+  // The voxel-box mesh (if still in the scene) whose volume matches this grid.
+  // Reusing this triangulation hides that box so its faces don't z-fight the LAD
+  // voxel result. Undefined when the box was deleted/resized away.
+  gridMeshId?: string;
+}
 
 interface LADPopupProps {
   isOpen: boolean;
@@ -12,14 +29,20 @@ interface LADPopupProps {
   // `scanColors` is aligned 1:1 with `request.scans` (same order).
   // `gridMeshId` is the id of the voxel-box mesh used as the grid (a GridOption
   // id is its mesh id), so the caller can auto-hide that box once the LAD result
-  // — which occupies the same space — is shown, avoiding z-fighting.
+  // — which occupies the same space — is shown, avoiding z-fighting. When the
+  // user reuses an existing triangulation, the grid lives on that mesh (not a
+  // voxel box), so there's nothing to auto-hide → pass ''.
   onStartLAD: (request: LADRequest, scanColors: string[], gridMeshId: string) => void;
   scans: Scan[];
   initialSelectedIds?: Set<string>;
   onOpenScanParams?: (scanId: string) => void;
-  // Voxel boxes available as the LAD grid. LAD REQUIRES one — when empty the
-  // compute button is disabled and the user is told to create a voxel box.
+  // Voxel boxes available as the LAD grid. LAD REQUIRES one — when empty (and no
+  // triangulation is reused) the compute button is disabled and the user is told
+  // to create a voxel box.
   gridOptions?: GridOption[];
+  // Existing Helios triangulations the user can reuse instead of running a new
+  // one. Reusing one locks the scans, grid, and lmax/aspect to that mesh.
+  triangulationOptions?: LADTriangulationOption[];
   // Pre-fill Lmax / max aspect ratio from the filter the user dialed in on a
   // Helios triangulation mesh, so the inversion bakes in that filtering. Still
   // editable here. Omitted → fall back to the standard defaults.
@@ -40,11 +63,26 @@ export function LADPopup({
   initialSelectedIds,
   onOpenScanParams,
   gridOptions = [],
+  triangulationOptions = [],
   defaultLmax,
   defaultMaxAspectRatio,
 }: LADPopupProps) {
   const eligible = useMemo(() => scans.filter(s => hasData(s) && hasParams(s)), [scans]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
+
+  // Triangulation mode: '' = run a new triangulation (pick scans + grid + params
+  // below); otherwise the id of an existing Helios mesh to REUSE (its scans,
+  // grid, and lmax/aspect are locked, reproducing that mesh's G-function).
+  const [reuseTriId, setReuseTriId] = useState<string>('');
+  useEffect(() => {
+    if (!isOpen) return;
+    setReuseTriId(prev => (triangulationOptions.some(t => t.id === prev) ? prev : ''));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, triangulationOptions]);
+  const reuseTri = useMemo(
+    () => triangulationOptions.find(t => t.id === reuseTriId) ?? null,
+    [triangulationOptions, reuseTriId],
+  );
 
   // Which voxel box drives the grid. Default to the first available box;
   // empty string means "none selected" → cannot compute.
@@ -115,9 +153,22 @@ export function LADPopup({
     setSelectedScanIds(new Set());
   }, []);
 
-  const selectedScans = useMemo(
-    () => eligible.filter(s => selectedScanIds.has(s.id)),
-    [eligible, selectedScanIds],
+  // The scans actually fed to the inversion. When reusing a triangulation, they
+  // come from that mesh's recorded source scans (still resolved against the
+  // current session, so a deleted scan is dropped); otherwise the user's pick.
+  const selectedScans = useMemo(() => {
+    if (reuseTri) {
+      const ids = new Set(reuseTri.scanIds);
+      return eligible.filter(s => ids.has(s.id));
+    }
+    return eligible.filter(s => selectedScanIds.has(s.id));
+  }, [reuseTri, eligible, selectedScanIds]);
+
+  // Whether all of the reused mesh's source scans are still present (with data +
+  // params). If some are gone, the reused triangulation can't be reproduced.
+  const reuseScansMissing = useMemo(
+    () => (reuseTri ? reuseTri.scanIds.length - selectedScans.length : 0),
+    [reuseTri, selectedScans],
   );
 
   // Return-type summary derived from the selected scans (read-only — set it per
@@ -131,35 +182,44 @@ export function LADPopup({
     setError(null);
 
     if (selectedScans.length === 0) {
-      setError('Select at least one scan');
+      setError(reuseTri
+        ? 'The reused triangulation’s source scans are no longer available'
+        : 'Select at least one scan');
       return;
     }
-    if (!selectedGrid) {
+
+    // Grid + lmax/aspect come from the reused mesh, else from the dialog.
+    const grid = reuseTri ? reuseTri.grid : selectedGrid?.grid;
+    if (!grid) {
       setError('Select a voxel grid — LAD requires one');
       return;
     }
 
-    const lmax = parseFloat(lmaxStr) || 0.1;
-    const maxAspectRatio = parseFloat(maxAspectRatioStr) || 4.0;
+    const lmax = reuseTri ? reuseTri.lmax : (parseFloat(lmaxStr) || 0.1);
+    const maxAspectRatio = reuseTri ? reuseTri.maxAspectRatio : (parseFloat(maxAspectRatioStr) || 4.0);
     const minVoxelHits = Math.max(1, parseInt(minVoxelHitsStr, 10) || 1);
     const elementWidth = Math.max(0, parseFloat(elementWidthStr) || 0.05);
 
-    const request = buildLADRequest(selectedScans, selectedGrid.grid, {
+    const request = buildLADRequest(selectedScans, grid, {
       lmax,
       maxAspectRatio,
       minVoxelHits,
       elementWidth,
     });
 
-    onStartLAD(request, selectedScans.map(s => s.color), selectedGrid.id);
+    // The grid mesh to auto-hide so it doesn't z-fight the LAD voxel result. In
+    // new-triangulation mode that's the selected voxel box; in reuse mode it's
+    // the box the reused triangulation's grid matches (if it's still around).
+    const gridMeshId = reuseTri ? (reuseTri.gridMeshId ?? '') : (selectedGrid?.id ?? '');
+    onStartLAD(request, selectedScans.map(s => s.color), gridMeshId);
     onClose();
-  }, [selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, onStartLAD, onClose]);
+  }, [reuseTri, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, onStartLAD, onClose]);
 
   if (!isOpen) return null;
 
   const totalPoints = selectedScans.reduce((sum, s) => sum + s.data!.pointCount, 0);
   const ineligibleScans = scans.filter(s => hasData(s) && !hasParams(s));
-  const canCompute = selectedScans.length > 0 && selectedGrid != null;
+  const canCompute = selectedScans.length > 0 && (reuseTri != null || selectedGrid != null);
 
   return (
     <div
@@ -186,6 +246,41 @@ export function LADPopup({
         </div>
 
         <div className="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
+          {/* Triangulation source: run a new one, or reuse an existing Helios
+              mesh (which locks the scans, grid, and lmax/aspect to reproduce its
+              G-function). Only shown when reusable triangulations exist. */}
+          {triangulationOptions.length > 0 && (
+            <div>
+              <label className="text-xs font-medium text-neutral-300 block mb-1">Triangulation</label>
+              <select
+                data-testid="lad-triangulation-select"
+                value={reuseTriId}
+                onChange={(e) => setReuseTriId(e.target.value)}
+                className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+              >
+                <option value="">Run a new triangulation</option>
+                {triangulationOptions.map(t => (
+                  <option key={t.id} value={t.id}>Reuse: {t.label}</option>
+                ))}
+              </select>
+              {reuseTri && (
+                <p className="text-[9px] text-neutral-500 mt-1" data-testid="lad-reuse-summary">
+                  Reusing {reuseTri.label}: {reuseTri.scanIds.length} scan{reuseTri.scanIds.length > 1 ? 's' : ''},
+                  grid {reuseTri.grid.nx}×{reuseTri.grid.ny}×{reuseTri.grid.nz},
+                  Lmax {(reuseTri.lmax * 100).toFixed(1)} cm, aspect ≤ {reuseTri.maxAspectRatio}.
+                  Scans, grid, and filter are locked to match this mesh.
+                  {reuseScansMissing > 0 && (
+                    <span className="text-amber-300"> {reuseScansMissing} source scan(s) no longer available.</span>
+                  )}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Scan picker — only when running a NEW triangulation. When reusing,
+              the scans are fixed by the mesh, so we hide the picker. */}
+          {!reuseTri && (
+          <>
           {/* Select controls + count */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -279,6 +374,8 @@ export function LADPopup({
               Add scan parameters from the Scans panel.
             </div>
           )}
+          </>
+          )}
 
           {/* Return type (read-only, derived from the selected scans) */}
           {selectedScans.length > 0 && (
@@ -303,6 +400,10 @@ export function LADPopup({
             <label className="text-xs font-medium text-neutral-300 block mb-3">Parameters</label>
 
             <div className="grid grid-cols-3 gap-3">
+              {/* Lmax + Aspect drive the G-function triangulation, so they're
+                  locked when reusing an existing triangulation (the mesh already
+                  fixes them). Hidden in reuse mode; the reuse summary shows them. */}
+              {!reuseTri && (
               <div>
                 <label className="text-[10px] text-neutral-400 block mb-1">
                   Max Edge Length (Lmax)
@@ -318,7 +419,9 @@ export function LADPopup({
                 />
                 <p className="text-[9px] text-neutral-500 mt-0.5">G-function triangulation</p>
               </div>
+              )}
 
+              {!reuseTri && (
               <div>
                 <label className="text-[10px] text-neutral-400 block mb-1">
                   Max Aspect Ratio
@@ -334,6 +437,7 @@ export function LADPopup({
                 />
                 <p className="text-[9px] text-neutral-500 mt-0.5">Filters skinny triangles</p>
               </div>
+              )}
 
               <div>
                 <label className="text-[10px] text-neutral-400 block mb-1">
@@ -392,6 +496,10 @@ export function LADPopup({
               </p>
             </div>
 
+            {/* Voxel grid — only when running a new triangulation. When reusing,
+                the grid is fixed by the mesh (shown in the reuse summary above). */}
+            {!reuseTri && (
+            <>
             <label className="text-xs font-medium text-neutral-300 block mt-4 mb-1">Voxel Grid (required)</label>
             <p className="text-[9px] text-neutral-500 mb-2">
               LAD is computed per voxel, so an explicit voxel grid is the basis of
@@ -424,6 +532,8 @@ export function LADPopup({
                   </p>
                 )}
               </>
+            )}
+            </>
             )}
           </div>
 

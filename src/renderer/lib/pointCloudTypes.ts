@@ -66,6 +66,12 @@ export interface OctreeRef {
   // renderer registers these so they colour as discrete classes rather than a
   // continuous gradient. See classification.ts registerCategoricalSlug.
   categoricalAttributes?: string[];
+  // On-disk attribute slugs the user forced to "Scalar" that would otherwise
+  // colour categorically by name (e.g. a Miss Flag downgraded to Scalar keeps
+  // the is_miss slug for LAD but should render as a gradient). The renderer
+  // registers these as continuous overrides so the fixed Hit/Miss scheme is
+  // suppressed for this cloud. See classification.ts registerContinuousSlug.
+  continuousAttributes?: string[];
   // Sky/miss points (laser pulses that returned nothing). They live in the
   // backend session for LAD but are NOT in this octree (their ~20 km coords
   // would poison its bounding box), so they're fetched on demand and drawn as a
@@ -299,6 +305,15 @@ export interface MeshEntry {
     droppedLmax?: number;
     droppedAspect?: number;
     droppedDegenerate?: number;
+    // Helios-only: the scan ids that were fused into this mesh, recorded so the
+    // LAD tool can REUSE this triangulation — re-running the inversion against
+    // the exact same scans + grid (mesh.data.grid) + lmax/aspect reproduces this
+    // mesh's G-function. Absent on older meshes / cloud triangulations.
+    sourceScanIds?: string[];
+    // Helios-only: the voxel-box mesh id this triangulation was built in (when an
+    // explicit grid box was used). Lets a LAD reuse hide that box so its faces
+    // don't z-fight the LAD voxel result. Absent for the auto-grid path.
+    gridMeshId?: string;
   };
   // Interactive Helios filtering (method === 'helios'). `heliosUnfiltered.data`
   // holds the returned (auto-estimated, payload-bounded) mesh with per-triangle

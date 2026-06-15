@@ -95,6 +95,12 @@ test('Computes multi-return leaf area density from an imported full-waveform sca
     const colorbar = page.getByTestId('lad-colorbar');
     await expect(colorbar).toBeVisible();
     await expect(colorbar).toHaveAttribute('data-colorbar-label', /LAD/);
+
+    // The voxel grid box the LAD ran on is auto-hidden so its faces don't z-fight
+    // the LAD voxel result that fills the same volume. The one mesh row (the box)
+    // flips to data-visible="false".
+    await expect(page.getByTestId('mesh-row').first())
+      .toHaveAttribute('data-visible', 'false', { timeout: 10_000 });
   } finally {
     await close();
   }

@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, ClockPlus, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass} from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -16,7 +16,11 @@ import {
 } from '../lib/colormaps';
 import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenerationPopup';
 import { HeliosTriangulationPopup, type GridOption } from './HeliosTriangulationPopup';
-import { LADPopup } from './LADPopup';
+import { LADPopup, type LADTriangulationOption } from './LADPopup';
+import { Toolbar } from './Toolbar';
+import { StitchDialog } from './StitchDialog';
+import { AlignDialog } from './AlignDialog';
+import { type ToolCommand, type SelectionState, isCommandAvailable, requiresText as toolRequiresText, CREATE_GROUPS, SIMULATE_GROUPS } from '../lib/toolCommands';
 import { LeafAnglePlotPopup } from './LeafAnglePlotPopup';
 import { QSMResultsPopup } from './QSMResultsPopup';
 import { AddLeavesPopup } from './AddLeavesPopup';
@@ -67,7 +71,7 @@ import { applyHeliosFilter, computeHeliosMetrics, heliosFilterCounts } from '../
 import type { HeliosFilterEstimate } from '../lib/heliosFilter';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
-import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, GROUND_CLASS_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, GROUND_CLASS_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
@@ -314,6 +318,8 @@ function buildHeliosTriParams(
   maxAspectRatio: number,
   scanCount: number,
   droppedDegenerate: number,
+  sourceScanIds: string[] = [],
+  gridMeshId?: string,
 ): NonNullable<MeshEntry['triangulationParams']> {
   const c = heliosFilterCounts(unfilteredData, lmax, maxAspectRatio);
   return {
@@ -324,6 +330,8 @@ function buildHeliosTriParams(
     droppedLmax: c.droppedLmax,
     droppedAspect: c.droppedAspect,
     droppedDegenerate,
+    sourceScanIds: sourceScanIds.length > 0 ? sourceScanIds : undefined,
+    gridMeshId,
   };
 }
 
@@ -385,6 +393,9 @@ export default function PointCloudViewer({
     for (const cloud of clouds) {
       for (const slug of cloud.data.octree?.categoricalAttributes ?? []) {
         registerCategoricalSlug(slug);
+      }
+      for (const slug of cloud.data.octree?.continuousAttributes ?? []) {
+        registerContinuousSlug(slug);
       }
     }
   }, [clouds]);
@@ -808,7 +819,7 @@ export default function PointCloudViewer({
         results = onRequestImportWizard
           ? await onRequestImportWizard(inputs)
           : // No wizard host (defensive): import with auto-detect.
-            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], worldShift: null }));
+            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], worldShift: null }));
         if (!results) return; // user cancelled the wizard
       }
 
@@ -830,8 +841,9 @@ export default function PointCloudViewer({
           if (r) {
             setBulkImportProgress({ current: attachedCount + 1, total: wizardPending.length, label: `Loading ${r.input.fileName}` });
             try {
-              const data = await parsePointCloudFromPath(p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs);
+              const data = await parsePointCloudFromPath(p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs, null, r.continuousSlugs);
               for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
+              for (const slug of r.continuousSlugs) registerContinuousSlug(slug);
               scan.data = data;
               scan.sourcePath = p.resolved;
               scan.asciiFormat = r.asciiFormat;
@@ -944,6 +956,9 @@ export default function PointCloudViewer({
   // The QSM whose detailed-results window is open (null = closed).
   const [showQSMResultsId, setShowQSMResultsId] = useState<string | null>(null);
   const heliosAbortRef = useRef<AbortController | null>(null);
+  // Multi-input tool dialogs (pick their own inputs; always launchable).
+  const [showAlignDialog, setShowAlignDialog] = useState(false);
+  const [showStitchDialog, setShowStitchDialog] = useState(false);
   // Leaf area density popup + results + background task state
   const [showLADPopup, setShowLADPopup] = useState(false);
   const [ladResults, setLadResults] = useState<LADResultEntry[]>([]);
@@ -1650,6 +1665,8 @@ export default function PointCloudViewer({
     octreeInfo.columnPlan ?? null,
     octreeInfo.categoricalAttributes,
     sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
+    octreeInfo.worldShift ?? null,
+    octreeInfo.continuousAttributes,
   ), []);
 
   // Duplicate a scan — its point data AND any scan-parameter metadata — into a
@@ -2313,6 +2330,8 @@ export default function PointCloudViewer({
         octreeInfo.columnPlan ?? null,
         octreeInfo.categoricalAttributes,
         sessionId,
+        octreeInfo.worldShift ?? null,
+        octreeInfo.continuousAttributes,
       );
       onUpdateCloud(cloud.id, newData);
       // Clear the pending-delete stack + history for this cloud now that the
@@ -3010,18 +3029,11 @@ export default function PointCloudViewer({
   // True when any framable object is selected — gates "Zoom to Selection".
   const hasAnySelection = hasCloudSelected || hasMeshSelected || hasSkeletonSelected || hasQSMSelected;
 
-  // Command registry
+  // Command registry — the single source of truth for the static Toolbar, the
+  // Cmd+K palette, and the native Tools menu (see lib/toolCommands.ts for the
+  // ToolCommand type and the availability helpers shared across all three).
   const commands = useMemo(() => {
-    type Command = {
-      id: string;
-      name: string;
-      keywords?: string[];
-      action: () => void;
-      category: string;
-      requires?: 'cloud' | 'mesh' | 'skeleton' | 'plant' | 'multiple-clouds' | 'multiple-meshes' | null;
-    };
-
-    const cmds: Command[] = [
+    const cmds: ToolCommand[] = [
       // View commands - always available
       { id: 'reset-view', name: 'Reset View', keywords: ['home', 'camera'], action: () => (window as any).__resetPointCloudCamera?.(), category: 'View', requires: null },
       { id: 'view-top', name: 'Top View', keywords: ['camera', 'snap'], action: () => (window as any).__snapToView?.('top'), category: 'View', requires: null },
@@ -3036,37 +3048,54 @@ export default function PointCloudViewer({
       { id: 'select-all', name: 'Select All', keywords: ['pick', 'choose'], action: () => onSelectAll(), category: 'Selection', requires: null },
       { id: 'deselect-all', name: 'Deselect All', keywords: ['clear', 'none'], action: () => onDeselectAll(), category: 'Selection', requires: null },
 
-      // Create commands - always available
-      { id: 'create-voxel', name: 'Create Voxel', keywords: ['cube', 'box', 'shape', 'grid'], action: () => handleCreateShape('voxel'), category: 'Create', requires: null },
-      { id: 'create-plant', name: 'Generate Plant', keywords: ['helios', 'leaf', 'vegetation'], action: () => setShowPlantPopup(true), category: 'Create', requires: null },
 
-      // Point cloud tools
-      { id: 'cloud-translate', name: 'Translate Point Cloud', keywords: ['move', 'position'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'translate' ? 'none' : 'translate'); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'crop' ? 'none' : 'crop'); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPanel(!showTriangulationPanel); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPanel(!showQSMPanel); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setShowLADPopup(true); }, category: 'Point Cloud', requires: null },
-      { id: 'cloud-export', name: 'Export Point Cloud', keywords: ['save', 'las', 'laz', 'xyz'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Point Cloud', requires: 'cloud' },
-      { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => { if (selectedIds.size >= 2 && onStitchClouds) onStitchClouds(Array.from(selectedIds)); }, category: 'Point Cloud', requires: 'multiple-clouds' },
+      // ── Pre-processing ──────────────────────────────────────────────
+      { id: 'cloud-translate', name: 'Translate Point Cloud', keywords: ['move', 'position'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'translate' ? 'none' : 'translate'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Move, isActive: () => editMode === 'translate' },
+      { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => toggleCropMode(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
+      { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
+      { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
+      { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
+      { id: 'cloud-move-origin', name: 'Move to Origin', keywords: ['center', 'zero', 'reset position'], action: () => handleMoveToOrigin(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: CircleDot },
+      { id: 'cloud-align', name: 'Align Clouds (ICP)', keywords: ['register', 'icp', 'alignment', 'fit'], action: () => setShowAlignDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Globe, multiInput: true },
+      { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true },
 
-      // Mesh tools
-      { id: 'mesh-transform', name: 'Transform Mesh', keywords: ['translate', 'move', 'position', 'rotate', 'turn', 'spin', 'resize', 'scale', 'size'], action: () => setShowResizePanel(!showResizePanel), category: 'Mesh', requires: 'mesh' },
-      { id: 'lidar-scan', name: 'Synthetic LiDAR Scan', keywords: ['scan', 'lidar', 'simulate', 'points', 'point cloud', 'ray'], action: () => handleRunScan(), category: 'Mesh' },
-      { id: 'mesh-export', name: 'Export Mesh', keywords: ['save', 'obj', 'ply'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Mesh', requires: 'mesh' },
+      // ── Segmentation ────────────────────────────────────────────────
+      { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Layers, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
+      { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GitBranch, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
+      { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
 
-      // Plant-specific
+      // ── Reconstruction & analysis ───────────────────────────────────
+      { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPanel(!showTriangulationPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Triangle, testId: 'tool-triangulate', isActive: () => showTriangulationPanel },
+      { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Dna, testId: 'tool-skeleton', isActive: () => showSkeletonPanel },
+      { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPanel(!showQSMPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: QsmIcon, testId: 'tool-qsm', isActive: () => showQSMPanel },
+      { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
+
+      // ── Create (geometry + scanner placement — scene-building, not analysis) ──
+      { id: 'create-plant', name: 'Generate Plant', keywords: ['helios', 'leaf', 'vegetation', 'build', 'geometry'], action: () => setShowPlantPopup(true), category: 'Create', requires: null, toolGroup: 'create', icon: Sprout, testId: 'tool-plant-generate' },
+      { id: 'import-model', name: 'Import Model', keywords: ['mesh', 'obj', 'ply', 'load', 'geometry'], action: () => { (window as any).__importMesh?.(); }, category: 'Create', requires: null, toolGroup: 'create', icon: FileUp },
+      { id: 'create-voxel', name: 'Create Voxel Grid', keywords: ['cube', 'box', 'shape', 'grid', 'lad'], action: () => handleCreateShape('voxel'), category: 'Create', requires: null, toolGroup: 'create', icon: Box, testId: 'tool-create-voxel' },
+      { id: 'add-scan', name: 'Add Scan', keywords: ['scanner', 'lidar', 'marker', 'sensor'], action: () => openAddScanPopup(), category: 'Create', requires: null, toolGroup: 'create', icon: Radio, testId: 'tool-add-scan' },
+
+      // ── Simulate (synthetic scanning) ───────────────────────────────
+      { id: 'lidar-scan', name: 'Run Synthetic Scan', keywords: ['scan', 'lidar', 'simulate', 'points', 'point cloud', 'ray'], action: () => handleRunScan(), category: 'Simulate', toolGroup: 'simulate', icon: Compass, testId: 'tool-lidar-scan', multiInput: true },
+
+      // Mesh tools — Transform sits in pre-processing (it's the mesh analogue of
+      // translate/resize); the alignment variants are palette/menu only since
+      // they're selection-driven multi-object operations.
+      { id: 'mesh-transform', name: 'Transform Mesh', keywords: ['translate', 'move', 'position', 'rotate', 'turn', 'spin', 'resize', 'scale', 'size'], action: () => setShowResizePanel(!showResizePanel), category: 'Mesh', requires: 'mesh', toolGroup: 'preprocess', icon: Move, testId: 'tool-mesh-transform', isActive: () => showResizePanel },
+      { id: 'mesh-cloud-align', name: 'Align Mesh to Cloud', keywords: ['icp', 'register', 'fit', 'compare', 'distance'], action: () => { void handleAlignmentCompute(); }, category: 'Mesh' },
+      { id: 'mesh-mesh-align', name: 'Align Mesh to Mesh (ICP)', keywords: ['icp', 'register', 'fit'], action: () => { void handleMeshToMeshICP(); }, category: 'Mesh', requires: 'multiple-meshes' },
+
+      // Plant-specific (palette/menu only)
       { id: 'plant-growth', name: 'Plant Growth Panel', keywords: ['age', 'time', 'animate'], action: () => setShowPlantGrowthPanel(!showPlantGrowthPanel), category: 'Plant', requires: 'plant' },
       { id: 'plant-morph', name: 'Morph Plant', keywords: ['parameter', 'shoot', 'tune', 'modify'], action: () => setShowMorphPopup(true), category: 'Plant', requires: 'plant' },
 
-      // Skeleton tools
+      // Skeleton tools (palette/menu only)
       { id: 'skeleton-translate', name: 'Translate Skeleton', keywords: ['move', 'position'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'translate' ? 'none' : 'translate'); }, category: 'Skeleton', requires: 'skeleton' },
+
+      // Export (palette/menu only — removed from the static toolbar; lives in File → Export)
+      { id: 'cloud-export', name: 'Export Point Cloud', keywords: ['save', 'las', 'laz', 'xyz'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Point Cloud', requires: 'cloud' },
+      { id: 'mesh-export', name: 'Export Mesh', keywords: ['save', 'obj', 'ply'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Mesh', requires: 'mesh' },
       { id: 'skeleton-export', name: 'Export Skeleton', keywords: ['save', 'json'], action: () => { closeAllToolPanels('export'); setShowExportPanel(!showExportPanel); }, category: 'Skeleton', requires: 'skeleton' },
 
       // History
@@ -3078,42 +3107,49 @@ export default function PointCloudViewer({
     ];
 
     return cmds;
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, onSelectAll, onDeselectAll, onStitchClouds, selectedIds, handleUndo, handleRedo, onOpenSettings]);
+    // NOTE: handlers declared later in the component (handleMoveToOrigin,
+    // handleRunScan, handleCreateShape, openAddScanPopup) are intentionally
+    // omitted from deps — they're const-declared below this useMemo (TDZ), and
+    // their action closures only run on click, by which point they're defined.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
+
+  // Bridge for the native Tools menu (src/main/menu.ts → App.tsx) to run a tool
+  // by id. A ref keeps the latest `commands` (with fresh action closures) so the
+  // menu always invokes the current handler, never a stale one. One global,
+  // matching the __handleUndo / __snapToView pattern.
+  const commandsRef = useRef(commands);
+  commandsRef.current = commands;
+  useEffect(() => {
+    (window as any).__runToolCommand = (id: string) => {
+      commandsRef.current.find(c => c.id === id)?.action();
+    };
+    return () => { delete (window as any).__runToolCommand; };
+  }, []);
+
+  // Current selection state, shared by the static Toolbar, the Tools menu, and
+  // the Cmd+K palette so all three derive availability identically.
+  const toolSelection = useMemo<SelectionState>(() => ({
+    hasCloud: hasCloudSelected,
+    hasMesh: hasMeshSelected,
+    hasSkeleton: hasSkeletonSelected,
+    hasPlantMesh: !!hasPlantMeshSelected,
+    cloudCount: selectedIds.size,
+    meshCount: selectedMeshIds.size,
+    // Clouds present in the scene (with data), regardless of selection — gates
+    // multi-input tools (stitch/align/LAD) so they grey out in an empty scene.
+    totalCloudCount: clouds.length,
+  }), [hasCloudSelected, hasMeshSelected, hasSkeletonSelected, hasPlantMeshSelected, selectedIds.size, selectedMeshIds.size, clouds.length]);
 
   // Filter and sort commands based on search
   const filteredCommands = useMemo(() => {
-    const checkAvailable = (requires: string | null | undefined) => {
-      if (!requires) return true;
-      switch (requires) {
-        case 'cloud': return hasCloudSelected;
-        case 'mesh': return hasMeshSelected;
-        case 'skeleton': return hasSkeletonSelected;
-        case 'plant': return hasPlantMeshSelected;
-        case 'multiple-clouds': return selectedIds.size >= 2;
-        case 'multiple-meshes': return selectedMeshIds.size >= 2;
-        default: return true;
-      }
-    };
-
-    const getRequiresText = (requires: string | null | undefined) => {
-      switch (requires) {
-        case 'cloud': return 'point cloud';
-        case 'mesh': return 'mesh';
-        case 'skeleton': return 'skeleton';
-        case 'plant': return 'plant mesh';
-        case 'multiple-clouds': return '2+ point clouds';
-        case 'multiple-meshes': return '2+ meshes';
-        default: return '';
-      }
-    };
-
     return commands
       .map(cmd => {
         const nameScore = fuzzyMatch(commandSearch, cmd.name);
         const keywordScore = cmd.keywords?.reduce((max, kw) => Math.max(max, fuzzyMatch(commandSearch, kw)), 0) || 0;
         const score = Math.max(nameScore, keywordScore * 0.8);
-        const available = checkAvailable(cmd.requires);
-        const requiresText = getRequiresText(cmd.requires);
+        const available = isCommandAvailable(cmd, toolSelection);
+        const requiresText = toolRequiresText(cmd.requires ?? null);
         return { ...cmd, score, available, requiresText };
       })
       .filter(cmd => cmd.score > 0)
@@ -3123,7 +3159,7 @@ export default function PointCloudViewer({
         // Then by score
         return b.score - a.score;
       });
-  }, [commands, commandSearch, hasCloudSelected, hasMeshSelected, hasSkeletonSelected, hasPlantMeshSelected, selectedIds.size, selectedMeshIds.size]);
+  }, [commands, commandSearch, toolSelection]);
 
   // Reset selection when search changes
   useEffect(() => {
@@ -4092,6 +4128,8 @@ export default function PointCloudViewer({
       phi_max: params.azimuthMaxDeg,
       beam_exit_diameter: params.beamExitDiameterM,
       beam_divergence: params.beamDivergenceMrad,
+      // Carried for the round-trip; backend cannot yet write it to the XML.
+      scan_azimuth_offset: params.azimuthOffsetDeg,
     };
     const t = getEditState(cloud.id).translation;
     if (t.x !== 0 || t.y !== 0 || t.z !== 0) entry.translation = [t.x, t.y, t.z];
@@ -4482,6 +4520,17 @@ export default function PointCloudViewer({
     options: SyntheticScanOptions,
   ) => {
     setIsScanning(true);
+    // The scanner heading (azimuth offset) orients the marker but is not yet
+    // applied to the simulated rays — Helios doesn't consume the field until its
+    // struct change lands. Warn once if any participating scanner has a
+    // non-default heading so the user isn't surprised the hits ignore it.
+    if (activeScanners.some(s => (s.params?.azimuthOffsetDeg ?? 0) !== 0)) {
+      showToast({
+        title: 'Scanner heading not yet simulated',
+        message: 'A scanner has a non-zero azimuth offset. The marker is oriented to it, but the simulated scan does not yet rotate by heading.',
+        type: 'warning',
+      });
+    }
     try {
       const requestMeshes = targetMeshes.map(extractMeshWorldGeometry);
       const requestScanners = activeScanners.map(s => {
@@ -4505,6 +4554,8 @@ export default function PointCloudViewer({
           // applied uniformly to every scanner this run.
           tilt_roll_deg: p.tiltRollDeg,
           tilt_pitch_deg: p.tiltPitchDeg,
+          // Heading is sent but not yet consumed by Helios (struct field pending).
+          scan_azimuth_offset_deg: p.azimuthOffsetDeg,
           range_noise_m: options.rangeNoiseMm / 1000,  // mm → m
           angle_noise_mrad: options.angleNoiseMrad,
         };
@@ -5791,16 +5842,23 @@ export default function PointCloudViewer({
   }, [selectedIds, selectedMeshId, clouds, meshes, buildPointSource, meshPositions, setMeshPositions, setMeshRotations]);
 
   // Handle Cloud-to-Cloud ICP alignment
-  const handleCloudToCloudICP = useCallback(async () => {
-    // Need exactly 2 point clouds selected
-    if (selectedIds.size !== 2) {
-      showToast({ type: 'error', title: 'Selection Required', message: 'Select exactly 2 point clouds for cloud-to-cloud alignment' });
-      return;
+  const handleCloudToCloudICP = useCallback(async (targetId?: string, sourceId?: string) => {
+    // Inputs come from the Align dialog (explicit target/source) or, as a
+    // fallback, from a 2-cloud viewport selection (target = first selected).
+    let tId = targetId;
+    let sId = sourceId;
+    if (!tId || !sId) {
+      if (selectedIds.size !== 2) {
+        showToast({ type: 'error', title: 'Selection Required', message: 'Select exactly 2 point clouds for cloud-to-cloud alignment' });
+        return;
+      }
+      const cloudIds = Array.from(selectedIds);
+      tId = cloudIds[0];
+      sId = cloudIds[1];
     }
 
-    const cloudIds = Array.from(selectedIds);
-    const targetCloud = clouds.find(c => c.id === cloudIds[0]);
-    const sourceCloud = clouds.find(c => c.id === cloudIds[1]);
+    const targetCloud = clouds.find(c => c.id === tId);
+    const sourceCloud = clouds.find(c => c.id === sId);
 
     if (!targetCloud || !sourceCloud) {
       showToast({ type: 'error', title: 'Not Found', message: 'Could not find selected point clouds' });
@@ -7598,6 +7656,40 @@ export default function PointCloudViewer({
     return options;
   }, [meshes, meshPositions, meshScales, displayNameOfMesh]);
 
+  // Existing Helios triangulations the LAD tool can REUSE. The backend always
+  // re-triangulates internally, so "reuse" means locking the inversion to the
+  // exact scans + grid + lmax/aspect that produced the mesh — reproducing its
+  // G-function. Only meshes that carry their grid AND their source scan ids
+  // qualify (older meshes predating that provenance are skipped).
+  const ladTriangulationOptions = useMemo<LADTriangulationOption[]>(() => {
+    const options: LADTriangulationOption[] = [];
+    for (const m of meshes) {
+      if (m.method !== 'helios') continue;
+      const grid = m.data.grid;
+      const scanIds = m.triangulationParams?.sourceScanIds;
+      if (!grid || !scanIds || scanIds.length === 0) continue;
+      // The current filter is what feeds the inversion (heliosFilter), falling
+      // back to the build-time params if no live filter is recorded.
+      const lmax = m.heliosFilter?.lmax ?? m.triangulationParams?.lmax ?? 0.1;
+      const maxAspectRatio = m.heliosFilter?.maxAspectRatio ?? m.triangulationParams?.maxAspectRatio ?? 4.0;
+      // The voxel box this mesh was triangulated in (recorded at build time), but
+      // only if it's still in the scene — so the LAD run can hide it to avoid
+      // z-fighting. Drops to undefined if the box was deleted.
+      const gridMeshId = m.triangulationParams?.gridMeshId;
+      const gridBoxPresent = gridMeshId != null && meshes.some(x => x.id === gridMeshId);
+      options.push({
+        id: m.id,
+        label: displayNameOfMesh(m),
+        grid,
+        scanIds,
+        lmax,
+        maxAspectRatio,
+        gridMeshId: gridBoxPresent ? gridMeshId : undefined,
+      });
+    }
+    return options;
+  }, [meshes, displayNameOfMesh]);
+
   // Cache of the non-indexed POSITIONS buffer per mesh, keyed by mesh id and
   // pinned to the mesh's data identity. Positions are mode-independent, so we
   // build them once and reuse the same Float32Array across every color-mode /
@@ -7734,7 +7826,7 @@ export default function PointCloudViewer({
   // Handle Helios triangulation as a background task with cancel support.
   // `scanColors` is aligned 1:1 with request.scans so we can stash per-triangle
   // scan provenance (and the matching colors) on the resulting mesh.
-  const handleHeliosTriangulate = useCallback(async (request: HeliosTriangulationRequest, scanColors: string[] = [], sourceScanIds: string[] = []) => {
+  const handleHeliosTriangulate = useCallback(async (request: HeliosTriangulationRequest, scanColors: string[] = [], sourceScanIds: string[] = [], gridMeshId?: string) => {
     if (isHeliosRunning) return;
 
     const abort = new AbortController();
@@ -7885,8 +7977,10 @@ export default function PointCloudViewer({
         heliosFilter: { lmax: seedLmax, maxAspectRatio: seedAspect },
         // Provenance for the mesh list — the filter breakdown updates live as the
         // user adjusts Lmax/aspect (counts derived from the returned set).
+        // sourceScanIds + gridMeshId let the LAD tool reuse this triangulation
+        // (and hide its grid box to avoid z-fighting the LAD result).
         triangulationParams: buildHeliosTriParams(
-          returnedData, seedLmax, seedAspect, request.scans.length, 0),
+          returnedData, seedLmax, seedAspect, request.scans.length, 0, sourceScanIds, gridMeshId),
       };
 
       setMeshes(prev => [...prev, meshEntry]);
@@ -7984,7 +8078,11 @@ export default function PointCloudViewer({
           triangulationParams: buildHeliosTriParams(
             m.heliosUnfiltered.data, lmax, maxAspectRatio,
             m.triangulationParams?.scanCount ?? 0,
-            m.triangulationParams?.droppedDegenerate ?? 0),
+            m.triangulationParams?.droppedDegenerate ?? 0,
+            // Preserve the recorded source scans + grid box across live filter
+            // edits so the mesh stays reusable by the LAD tool.
+            m.triangulationParams?.sourceScanIds ?? [],
+            m.triangulationParams?.gridMeshId),
         };
       }));
     },
@@ -9520,7 +9618,7 @@ export default function PointCloudViewer({
                 selected={isMarkerSelected}
                 tiltRollDeg={scan.params.tiltRollDeg}
                 tiltPitchDeg={scan.params.tiltPitchDeg}
-                azimuthZeroDeg={scan.params.azimuthMinDeg}
+                azimuthOffsetDeg={scan.params.azimuthOffsetDeg}
                 scale={scanMarkerScale}
               />
             </group>
@@ -10969,8 +11067,11 @@ export default function PointCloudViewer({
             panel above — every entry there can hold data, params, or both. */}
       </div>
 
-      {/* Left Control Panel */}
-      <div className="absolute top-4 left-4 flex flex-col gap-2">
+      {/* Left Control Panel. Capped to the viewport height (less room for the
+          bottom-left status readout) and scrollable, so the now-taller toolbar
+          stack — View, Snap, Create, Simulate, Tools — never overlaps the status
+          bar on short windows. `pr-1` keeps the scrollbar off the buttons. */}
+      <div className="absolute top-4 left-4 bottom-16 flex flex-col gap-2 overflow-y-auto overflow-x-hidden pr-1">
         {/* View Controls */}
         <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg flex gap-1">
           <button onClick={() => (window as any).__resetPointCloudCamera?.()} className="p-2 hover:bg-neutral-700 rounded transition-colors flex items-center justify-center" title="Reset View — frame all content from the default isometric angle">
@@ -11005,652 +11106,50 @@ export default function PointCloudViewer({
           </button>
         </div>
 
-        {/* Create Shapes - always visible */}
-        <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg">
-          <div className="text-[10px] text-neutral-500 mb-1.5 text-center">Create</div>
-          <div className="grid grid-cols-3 gap-1">
+        {/* Create — geometry generation (scene-building, not analysis). */}
+        <Toolbar commands={commands} selection={toolSelection} title="Create" groups={CREATE_GROUPS} />
+
+        {/* Simulate — scanner setup + synthetic scanning. */}
+        <Toolbar commands={commands} selection={toolSelection} title="Simulate" groups={SIMULATE_GROUPS} />
+
+        {/* Tools — analysis operations on existing data. Renders from the single
+            command registry; unavailable single-input tools grey out, multi-input
+            tools stay enabled. (See lib/toolCommands.ts.) */}
+        <Toolbar commands={commands} selection={toolSelection} />
+
+        {/* History + delete footer (global; not part of the tool groups). */}
+        <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg flex gap-1">
+          <button onClick={handleUndo} disabled={historyIndex < 0 && !canUndoStitch?.()} className={`p-2 rounded flex-1 flex items-center justify-center ${historyIndex >= 0 || canUndoStitch?.() ? 'hover:bg-neutral-700' : 'opacity-40 cursor-not-allowed'}`} title="Undo (Ctrl+Z)">
+            <Undo2 className="w-4 h-4 text-neutral-300" />
+          </button>
+          <button onClick={handleRedo} disabled={historyIndex >= history.length - 1} className={`p-2 rounded flex-1 flex items-center justify-center ${historyIndex < history.length - 1 ? 'hover:bg-neutral-700' : 'opacity-40 cursor-not-allowed'}`} title="Redo (Ctrl+Y)">
+            <Redo2 className="w-4 h-4 text-neutral-300" />
+          </button>
+          {selectionType === 'mesh' && selectedMesh && (
             <button
-              data-testid="tool-create-voxel"
-              onClick={() => handleCreateShape('voxel')}
-              className="p-2 rounded transition-colors hover:bg-cyan-600 hover:text-white bg-neutral-700"
-              title="Create Voxel (Cube)"
+              onClick={() => {
+                const sourceName = displayNameOfMesh(selectedMesh);
+                setDeleteConfirm({ type: 'mesh', ids: [selectedMesh.id], label: sourceName });
+              }}
+              className="p-2 rounded flex-1 flex items-center justify-center hover:bg-red-600/30"
+              title="Delete Mesh"
             >
-              <Box className="w-4 h-4 text-neutral-300" />
+              <Trash2 className="w-4 h-4 text-neutral-300 hover:text-red-400" />
             </button>
+          )}
+          {selectionType === 'skeleton' && selectedSkeleton && (
             <button
-              data-testid="tool-plant-generate"
-              onClick={() => setShowPlantPopup(true)}
-              disabled={isGeneratingPlant}
-              className={`p-2 rounded transition-colors ${isGeneratingPlant ? 'bg-neutral-600 cursor-wait' : 'hover:bg-neutral-600 bg-neutral-700'}`}
-              title="Generate Plant Model"
+              onClick={() => {
+                const sourceName = clouds.find(c => c.id === selectedSkeleton.sourceCloudId)?.data.fileName || 'Skeleton';
+                setDeleteConfirm({ type: 'skeleton', ids: [selectedSkeleton.id], label: sourceName });
+              }}
+              className="p-2 rounded flex-1 flex items-center justify-center hover:bg-red-600/30"
+              title="Delete Skeleton"
             >
-              {isGeneratingPlant ? (
-                <Loader2 className="w-4 h-4 text-neutral-400 animate-spin" />
-              ) : (
-                <Sprout className="w-4 h-4 text-neutral-300" />
-              )}
+              <Trash2 className="w-4 h-4 text-neutral-300 hover:text-red-400" />
             </button>
-            <button
-              data-testid="tool-add-scan"
-              onClick={openAddScanPopup}
-              className="p-2 rounded transition-colors hover:bg-neutral-600 bg-neutral-700"
-              title="Add Scan"
-            >
-              <Radio className="w-4 h-4 text-neutral-300" />
-            </button>
-          </div>
+          )}
         </div>
-
-        {/* Tools - show for any selection type */}
-        {selectionType !== 'none' && (
-          <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg">
-            <div className="text-[10px] text-neutral-500 mb-1.5 text-center">Tools</div>
-            <div className="grid grid-cols-2 gap-1">
-              {/* Mixed Selection Tools - Only Move to Origin and Alignment */}
-              {selectionType === 'mixed' && (
-                <>
-                  {/* Move to Origin */}
-                  <button
-                    onClick={handleMoveToOrigin}
-                    className="p-2 rounded transition-colors hover:bg-neutral-700"
-                    title="Move to Origin"
-                  >
-                    <CircleDot className="w-4 h-4 text-neutral-300" />
-                  </button>
-                  {/* Alignment */}
-                  <button
-                    onClick={() => showAlignmentPanel ? setShowAlignmentPanel(false) : handleAlignmentCompute()}
-                    className={`p-2 rounded transition-colors ${showAlignmentPanel ? 'bg-cyan-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Alignment"
-                    disabled={isComputingAlignment}
-                  >
-                    {isComputingAlignment ? (
-                      <Loader2 className="w-4 h-4 text-neutral-300 animate-spin" />
-                    ) : (
-                      <Globe className={`w-4 h-4 ${showAlignmentPanel ? 'text-white' : 'text-neutral-300'}`} />
-                    )}
-                  </button>
-                </>
-              )}
-              {/* Multi-Cloud Selection Tools - Move to Origin, Crop, Alignment, Helios */}
-              {selectionType === 'multiCloud' && (
-                <>
-                  {/* Move to Origin */}
-                  <button
-                    onClick={handleMoveToOrigin}
-                    className="p-2 rounded transition-colors hover:bg-neutral-700"
-                    title="Move to Origin"
-                  >
-                    <CircleDot className="w-4 h-4 text-neutral-300" />
-                  </button>
-                  {/* Crop — same world-space region applied across every
-                      selected scan. */}
-                  <button
-                    data-testid="tool-crop-multi"
-                    onClick={toggleCropMode}
-                    className={`p-2 rounded transition-colors ${editMode === 'crop' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title={`Crop ${selectedIds.size} scans`}
-                  >
-                    <Crop className={`w-4 h-4 ${editMode === 'crop' ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* Alignment (Cloud-to-Cloud ICP) */}
-                  <button
-                    onClick={handleCloudToCloudICP}
-                    className={`p-2 rounded transition-colors ${isRunningICP ? 'bg-cyan-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Alignment - Align second cloud to first cloud (ICP)"
-                    disabled={isRunningICP || selectedIds.size !== 2}
-                  >
-                    {isRunningICP ? (
-                      <Loader2 className="w-4 h-4 text-neutral-300 animate-spin" />
-                    ) : (
-                      <Globe className={`w-4 h-4 ${selectedIds.size === 2 ? 'text-neutral-300' : 'text-neutral-500'}`} />
-                    )}
-                  </button>
-                  {/* Triangulate (Helios - multi-scan). Disabled when any
-                      selected data-bearing scan lacks scan parameters
-                      (origin), since Helios needs per-scan origins to
-                      reconstruct pulse directions. */}
-                  {(() => {
-                    const selectedDataScans = scans.filter(s => selectedScanIds.has(s.id) && hasData(s));
-                    const heliosReady = selectedDataScans.length >= 2 && selectedDataScans.every(hasParams);
-                    const tooltip = heliosReady
-                      ? 'Triangulate (Helios)'
-                      : 'Requires scan parameters (origin, etc.) — edit this scan to add them.';
-                    return (
-                      <button
-                        data-testid="tool-triangulate-helios"
-                        onClick={() => {
-                          if (!heliosReady) return;
-                          closeAllToolPanels();
-                          setShowHeliosPopup(true);
-                        }}
-                        disabled={!heliosReady}
-                        className={`p-2 rounded transition-colors ${
-                          !heliosReady
-                            ? 'opacity-50 cursor-not-allowed'
-                            : showHeliosPopup ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'
-                        }`}
-                        title={tooltip}
-                      >
-                        <Triangle className={`w-4 h-4 ${showHeliosPopup ? 'text-white' : 'text-neutral-300'}`} />
-                      </button>
-                    );
-                  })()}
-                  {/* Leaf Area Density (Helios). Needs scan parameters AND an
-                      explicit voxel grid (LAD is per-voxel, so the grid is the
-                      basis of the calculation, not optional). */}
-                  {(() => {
-                    const selectedDataScans = scans.filter(s => selectedScanIds.has(s.id) && hasData(s));
-                    const scansReady = selectedDataScans.length >= 1 && selectedDataScans.every(hasParams);
-                    const hasGrid = heliosGridOptions.length > 0;
-                    const ladReady = scansReady && hasGrid;
-                    const tooltip = !scansReady
-                      ? 'Requires scan parameters (origin, etc.) — edit this scan to add them.'
-                      : !hasGrid
-                        ? 'Create a voxel grid box first (Create Voxel).'
-                        : 'Compute Leaf Area Density';
-                    return (
-                      <button
-                        data-testid="tool-compute-lad"
-                        onClick={() => {
-                          if (!ladReady) return;
-                          closeAllToolPanels();
-                          setShowLADPopup(true);
-                        }}
-                        disabled={!ladReady}
-                        className={`p-2 rounded transition-colors ${
-                          !ladReady
-                            ? 'opacity-50 cursor-not-allowed'
-                            : showLADPopup ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'
-                        }`}
-                        title={tooltip}
-                      >
-                        <Grid3x3 className={`w-4 h-4 ${showLADPopup ? 'text-white' : 'text-neutral-300'}`} />
-                      </button>
-                    );
-                  })()}
-                  {/* Build QSM — batch: one QSM per selected scan, in sequence. */}
-                  <button
-                    data-testid="tool-qsm"
-                    onClick={() => {
-                      if (showQSMPanel) {
-                        setShowQSMPanel(false);
-                      } else {
-                        closeAllToolPanels('qsm');
-                        setShowQSMPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showQSMPanel ? 'bg-amber-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title={`Build QSM for ${selectedIds.size} scans`}
-                  >
-                    <QsmIcon className={`w-4 h-4 ${showQSMPanel ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* Segment Wood / Leaf — together (one segmentation, labels
-                      scattered back) or per-scan. */}
-                  <button
-                    data-testid="tool-wood-segment"
-                    onClick={() => {
-                      if (showWoodSegmentPanel) {
-                        setShowWoodSegmentPanel(false);
-                      } else {
-                        closeAllToolPanels('wood-segment');
-                        setShowWoodSegmentPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showWoodSegmentPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title={`Segment wood vs leaf for ${selectedIds.size} scans`}
-                  >
-                    <Trees className={`w-4 h-4 ${showWoodSegmentPanel ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                </>
-              )}
-              {/* Multi-Mesh Tools (2+ meshes selected) */}
-              {selectionType === 'multiMesh' && (
-                <>
-                  {/* Move to Origin */}
-                  <button
-                    onClick={handleMoveToOrigin}
-                    className="p-2 rounded transition-colors hover:bg-neutral-700"
-                    title="Move to Origin"
-                  >
-                    <CircleDot className="w-4 h-4 text-neutral-300" />
-                  </button>
-                  {/* Alignment (Mesh-to-Mesh ICP) */}
-                  <button
-                    onClick={handleMeshToMeshICP}
-                    className={`p-2 rounded transition-colors ${isRunningICP ? 'bg-cyan-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Alignment - Align second mesh to first mesh (ICP)"
-                    disabled={isRunningICP || selectedMeshIds.size !== 2}
-                  >
-                    {isRunningICP ? (
-                      <Loader2 className="w-4 h-4 text-neutral-300 animate-spin" />
-                    ) : (
-                      <Globe className={`w-4 h-4 ${selectedMeshIds.size === 2 ? 'text-neutral-300' : 'text-neutral-500'}`} />
-                    )}
-                  </button>
-                </>
-              )}
-              {/* Point Cloud Tools - Order: Move to Origin, Translate, Crop, Filter, Erase, Stitch, Triangulate, Extract Skeleton, Export, Delete */}
-              {selectionType === 'cloud' && (
-                <>
-                  {/* 1. Move to Origin */}
-                  <button
-                    onClick={handleMoveToOrigin}
-                    className="p-2 rounded transition-colors hover:bg-neutral-700"
-                    title="Move to Origin"
-                  >
-                    <CircleDot className="w-4 h-4 text-neutral-300" />
-                  </button>
-                  {/* 2. Translate */}
-                  <button
-                    onClick={() => {
-                      if (editMode === 'translate') {
-                        setEditMode('none');
-                      } else {
-                        closeAllToolPanels('editMode');
-                        setEditMode('translate');
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${editMode === 'translate' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Translate"
-                  >
-                    <Move className={`w-4 h-4 ${editMode === 'translate' ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 3. Crop — works for one OR many selected scans. When
-                       multiple are selected the crop region lives in
-                       world space and applies uniformly across them. */}
-                  <button
-                    data-testid="tool-crop"
-                    onClick={toggleCropMode}
-                    className={`p-2 rounded transition-colors ${editMode === 'crop' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Crop"
-                  >
-                    <Crop className={`w-4 h-4 ${editMode === 'crop' ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 4. Filter (single cloud only) */}
-                  {selectedIds.size === 1 && (
-                    <button
-                      data-testid="tool-filter"
-                      onClick={() => {
-                        if (showFilterPanel) {
-                          setShowFilterPanel(false);
-                        } else {
-                          closeAllToolPanels('filter');
-                          setShowFilterPanel(true);
-                        }
-                      }}
-                      className={`p-2 rounded transition-colors ${showFilterPanel ? 'bg-cyan-600 text-white' : 'hover:bg-neutral-700'}`}
-                      title="Filter Points"
-                    >
-                      <Filter className={`w-4 h-4 ${showFilterPanel ? 'text-white' : 'text-neutral-300'}`} />
-                    </button>
-                  )}
-                  {/* 4b. Resample (single cloud only) */}
-                  {selectedIds.size === 1 && (
-                    <button
-                      onClick={() => {
-                        if (showResamplePanel) {
-                          setShowResamplePanel(false);
-                          setResamplePreview(null); // Clear preview when closing
-                        } else {
-                          closeAllToolPanels('resample');
-                          setShowResamplePanel(true);
-                        }
-                      }}
-                      className={`p-2 rounded transition-colors ${showResamplePanel ? 'bg-cyan-600 text-white' : 'hover:bg-neutral-700'}`}
-                      title="Resample"
-                    >
-                      <ChartScatter className={`w-4 h-4 ${showResamplePanel ? 'text-white' : 'text-neutral-300'}`} />
-                    </button>
-                  )}
-                  {/* 5. Erase (single cloud only) */}
-                  {selectedIds.size === 1 && (
-                    <button
-                      data-testid="tool-erase"
-                      onClick={() => {
-                        if (editMode === 'erase') {
-                          setEditMode('none');
-                        } else {
-                          closeAllToolPanels('editMode');
-                          setEditMode('erase');
-                        }
-                      }}
-                      className={`p-2 rounded transition-colors ${editMode === 'erase' ? 'bg-red-600 text-white' : 'hover:bg-neutral-700'}`}
-                      title="Erase Brush"
-                    >
-                      <Eraser className={`w-4 h-4 ${editMode === 'erase' ? 'text-white' : 'text-neutral-300'}`} />
-                    </button>
-                  )}
-                  {/* 5b. Alignment (greyed out - use from mixed selection toolbar) */}
-                  <button
-                    className="p-2 rounded transition-colors opacity-40 cursor-not-allowed"
-                    title="Align Selected Objects"
-                    disabled={true}
-                  >
-                    <Globe className="w-4 h-4 text-neutral-500" />
-                  </button>
-                  {/* 6. Stitch (requires 2+ clouds) */}
-                  <button
-                    onClick={() => onStitchClouds?.(Array.from(selectedIds))}
-                    className={`p-2 rounded transition-colors ${selectedIds.size >= 2 ? 'hover:bg-neutral-700' : 'opacity-40 cursor-not-allowed'}`}
-                    title="Stitch Selected Clouds"
-                    disabled={selectedIds.size < 2 || !onStitchClouds}
-                  >
-                    <Merge className={`w-4 h-4 ${selectedIds.size >= 2 ? 'text-neutral-300' : 'text-neutral-500'}`} />
-                  </button>
-                  {/* 7. Triangulate */}
-                  <button
-                    data-testid="tool-triangulate"
-                    onClick={() => {
-                      if (showTriangulationPanel) {
-                        setShowTriangulationPanel(false);
-                      } else {
-                        closeAllToolPanels('triangulation');
-                        setShowTriangulationPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showTriangulationPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Triangulate"
-                  >
-                    <Triangle className={`w-4 h-4 ${showTriangulationPanel ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 8. Extract Skeleton (single cloud only) */}
-                  <button
-                    data-testid="tool-skeleton"
-                    onClick={() => {
-                      if (showSkeletonPanel) {
-                        setShowSkeletonPanel(false);
-                      } else {
-                        closeAllToolPanels('skeleton');
-                        setShowSkeletonPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showSkeletonPanel ? 'bg-amber-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Extract Skeleton"
-                    disabled={selectedIds.size !== 1}
-                  >
-                    <GitBranch className={`w-4 h-4 ${showSkeletonPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 8b. Build QSM (single cloud) — cylinders + radii + shoot
-                       rank. The batch (one QSM per scan) variant lives in the
-                       multiCloud toolbar above. */}
-                  <button
-                    data-testid="tool-qsm"
-                    onClick={() => {
-                      if (showQSMPanel) {
-                        setShowQSMPanel(false);
-                      } else {
-                        closeAllToolPanels('qsm');
-                        setShowQSMPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showQSMPanel ? 'bg-amber-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Build QSM (cylinders + shoot rank)"
-                    disabled={selectedIds.size !== 1}
-                  >
-                    <QsmIcon className={`w-4 h-4 ${showQSMPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 8a. Leaf Area Density (single cloud). Needs scan params +
-                       an explicit voxel grid (LAD is per-voxel). */}
-                  {(() => {
-                    const sel = scans.filter(s => selectedScanIds.has(s.id) && hasData(s));
-                    const scansReady = sel.length >= 1 && sel.every(hasParams);
-                    const hasGrid = heliosGridOptions.length > 0;
-                    const ladReady = scansReady && hasGrid;
-                    const tooltip = !scansReady
-                      ? 'Requires scan parameters (origin, etc.) — edit this scan to add them.'
-                      : !hasGrid
-                        ? 'Create a voxel grid box first (Create Voxel).'
-                        : 'Compute Leaf Area Density';
-                    return (
-                      <button
-                        data-testid="tool-compute-lad"
-                        onClick={() => {
-                          if (!ladReady) return;
-                          closeAllToolPanels();
-                          setShowLADPopup(true);
-                        }}
-                        disabled={!ladReady}
-                        className={`p-2 rounded transition-colors ${
-                          !ladReady
-                            ? 'opacity-50 cursor-not-allowed'
-                            : showLADPopup ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'
-                        }`}
-                        title={tooltip}
-                      >
-                        <Grid3x3 className={`w-4 h-4 ${showLADPopup ? 'text-white' : 'text-neutral-300'}`} />
-                      </button>
-                    );
-                  })()}
-                  {/* 8b. Segment Ground (single cloud only) */}
-                  <button
-                    data-testid="tool-ground-segment"
-                    onClick={() => {
-                      if (showGroundSegmentPanel) {
-                        setShowGroundSegmentPanel(false);
-                      } else {
-                        closeAllToolPanels('ground-segment');
-                        setShowGroundSegmentPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showGroundSegmentPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Segment ground points"
-                    disabled={selectedIds.size !== 1}
-                  >
-                    <Layers className={`w-4 h-4 ${showGroundSegmentPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 8b2. Segment Wood / Leaf (single cloud only) */}
-                  <button
-                    data-testid="tool-wood-segment"
-                    onClick={() => {
-                      if (showWoodSegmentPanel) {
-                        setShowWoodSegmentPanel(false);
-                      } else {
-                        closeAllToolPanels('wood-segment');
-                        setShowWoodSegmentPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showWoodSegmentPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Segment wood vs leaf points"
-                    disabled={selectedIds.size < 1}
-                  >
-                    <Trees className={`w-4 h-4 ${showWoodSegmentPanel ? 'text-white' : selectedIds.size < 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 8c. Segment Trees (single cloud only) */}
-                  <button
-                    data-testid="tool-tree-segment"
-                    onClick={() => {
-                      if (showTreeSegmentPanel) {
-                        setShowTreeSegmentPanel(false);
-                        setTreeSeedMode(false);
-                      } else {
-                        closeAllToolPanels('tree-segment');
-                        setShowTreeSegmentPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showTreeSegmentPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Segment individual trees"
-                    disabled={selectedIds.size !== 1}
-                  >
-                    <Sprout className={`w-4 h-4 ${showTreeSegmentPanel ? 'text-white' : selectedIds.size !== 1 ? 'text-neutral-500' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 9. Export */}
-                  <button
-                    data-testid="tool-export-cloud"
-                    onClick={() => {
-                      if (showExportPanel) {
-                        setShowExportPanel(false);
-                      } else {
-                        closeAllToolPanels('export');
-                        setShowExportPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showExportPanel ? 'bg-purple-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Export"
-                  >
-                    <Download className={`w-4 h-4 ${showExportPanel ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 11. Delete (single cloud only) */}
-                  {selectedIds.size === 1 && (
-                    <button
-                      onClick={() => {
-                        const cloudId = Array.from(selectedIds)[0];
-                        const cloud = clouds.find(c => c.id === cloudId);
-                        if (cloud) {
-                          setDeleteConfirm({ type: 'cloud', ids: [cloudId], label: cloud.data.fileName || 'Point Cloud' });
-                        }
-                      }}
-                      className="p-2 rounded transition-colors hover:bg-red-600/30"
-                      title="Delete Point Cloud"
-                    >
-                      <Trash2 className="w-4 h-4 text-neutral-300 hover:text-red-400" />
-                    </button>
-                  )}
-                </>
-              )}
-
-              {/* Mesh Tools */}
-              {selectionType === 'mesh' && selectedMesh && (
-                <>
-                  {/* 1. Transform (position + rotation + scale) */}
-                  <button
-                    data-testid="tool-mesh-transform"
-                    onClick={() => setShowResizePanel(!showResizePanel)}
-                    className={`p-2 rounded transition-colors ${showResizePanel ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Transform"
-                  >
-                    <Maximize2 className={`w-4 h-4 ${showResizePanel ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  {/* 2. Synthetic LiDAR Scan */}
-                  <button
-                    data-testid="tool-lidar-scan"
-                    onClick={() => handleRunScan()}
-                    disabled={isScanning}
-                    className="p-2 rounded transition-colors hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Run Synthetic LiDAR Scan"
-                  >
-                    {isScanning ? (
-                      <Loader2 className="w-4 h-4 text-neutral-300 animate-spin" />
-                    ) : (
-                      <ChartScatter className="w-4 h-4 text-neutral-300" />
-                    )}
-                  </button>
-                  {/* 6. Plant Growth (if plant) */}
-                  {selectedMesh.isPlant && (
-                    <button
-                      onClick={() => setShowPlantGrowthPanel(!showPlantGrowthPanel)}
-                      className={`p-2 rounded transition-colors ${showPlantGrowthPanel ? 'bg-neutral-600 text-white' : 'hover:bg-neutral-700'}`}
-                      title="Plant Growth"
-                    >
-                      <ClockPlus className={`w-4 h-4 ${showPlantGrowthPanel ? 'text-white' : 'text-neutral-300'}`} />
-                    </button>
-                  )}
-                  {/* 6b. Morph Plant (if plant) */}
-                  {selectedMesh.isPlant && (
-                    <button
-                      onClick={() => setShowMorphPopup(!showMorphPopup)}
-                      className={`p-2 rounded transition-colors ${showMorphPopup ? 'bg-amber-600 text-white' : 'hover:bg-neutral-700'}`}
-                      title="Morph Plant Parameters"
-                      disabled={isMorphing}
-                    >
-                      {isMorphing ? (
-                        <Loader2 className="w-4 h-4 text-amber-300 animate-spin" />
-                      ) : (
-                        <Dna className={`w-4 h-4 ${showMorphPopup ? 'text-white' : 'text-neutral-300'}`} />
-                      )}
-                    </button>
-                  )}
-                  {/* 7. Export */}
-                  <button
-                    data-testid="tool-export-mesh"
-                    onClick={() => {
-                      if (showExportPanel) {
-                        setShowExportPanel(false);
-                      } else {
-                        closeAllToolPanels('export');
-                        setShowExportPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showExportPanel ? 'bg-purple-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Export"
-                  >
-                    <Download className={`w-4 h-4 ${showExportPanel ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                </>
-              )}
-
-              {/* Skeleton Tools */}
-              {selectionType === 'skeleton' && selectedSkeleton && (
-                <>
-                  <button
-                    onClick={handleMoveToOrigin}
-                    className="p-2 rounded transition-colors hover:bg-neutral-700"
-                    title="Move to Origin"
-                  >
-                    <CircleDot className="w-4 h-4 text-neutral-300" />
-                  </button>
-                  <button
-                    onClick={() => setEditMode(editMode === 'translate' ? 'none' : 'translate')}
-                    className={`p-2 rounded transition-colors ${editMode === 'translate' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Translate"
-                  >
-                    <Move className={`w-4 h-4 ${editMode === 'translate' ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                  <button
-                    data-testid="tool-export-skeleton"
-                    onClick={() => {
-                      if (showExportPanel) {
-                        setShowExportPanel(false);
-                      } else {
-                        closeAllToolPanels('export');
-                        setShowExportPanel(true);
-                      }
-                    }}
-                    className={`p-2 rounded transition-colors ${showExportPanel ? 'bg-purple-600 text-white' : 'hover:bg-neutral-700'}`}
-                    title="Export"
-                  >
-                    <Download className={`w-4 h-4 ${showExportPanel ? 'text-white' : 'text-neutral-300'}`} />
-                  </button>
-                </>
-              )}
-
-              {/* Delete - available for meshes and skeletons */}
-              {selectionType === 'mesh' && selectedMesh && (
-                <button
-                  onClick={() => {
-                    const sourceName = displayNameOfMesh(selectedMesh);
-                    setDeleteConfirm({ type: 'mesh', ids: [selectedMesh.id], label: sourceName });
-                  }}
-                  className="p-2 rounded transition-colors hover:bg-red-600/30"
-                  title="Delete Mesh"
-                >
-                  <Trash2 className="w-4 h-4 text-neutral-300 hover:text-red-400" />
-                </button>
-              )}
-              {selectionType === 'skeleton' && selectedSkeleton && (
-                <button
-                  onClick={() => {
-                    const sourceName = clouds.find(c => c.id === selectedSkeleton.sourceCloudId)?.data.fileName || 'Skeleton';
-                    setDeleteConfirm({ type: 'skeleton', ids: [selectedSkeleton.id], label: sourceName });
-                  }}
-                  className="p-2 rounded transition-colors hover:bg-red-600/30"
-                  title="Delete Skeleton"
-                >
-                  <Trash2 className="w-4 h-4 text-neutral-300 hover:text-red-400" />
-                </button>
-              )}
-
-              {/* Undo/Redo - available for all selection types */}
-              <div className="col-span-2 border-t border-neutral-700 my-1" />
-              <button onClick={handleUndo} disabled={historyIndex < 0 && !canUndoStitch?.()} className={`p-2 rounded ${historyIndex >= 0 || canUndoStitch?.() ? 'hover:bg-neutral-700' : 'opacity-40'}`} title="Undo (Ctrl+Z)">
-                <Undo2 className="w-4 h-4 text-neutral-300" />
-              </button>
-              <button onClick={handleRedo} disabled={historyIndex >= history.length - 1} className={`p-2 rounded ${historyIndex < history.length - 1 ? 'hover:bg-neutral-700' : 'opacity-40'}`} title="Redo (Ctrl+Y)">
-                <Redo2 className="w-4 h-4 text-neutral-300" />
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Crop Panel — single panel handles Box, Rect, and Polygon modes
@@ -12141,7 +11640,7 @@ export default function PointCloudViewer({
       })()}
 
       {/* Triangulation Panel */}
-      {showTriangulationPanel && selectedIds.size === 1 && (
+      {showTriangulationPanel && selectedIds.size >= 1 && (
         <TriangulationPanel
           method={triangulationMethod}
           inProgress={triangulationInProgress}
@@ -13234,6 +12733,7 @@ export default function PointCloudViewer({
         onClose={() => setShowLADPopup(false)}
         scans={scans}
         gridOptions={heliosGridOptions}
+        triangulationOptions={ladTriangulationOptions}
         onStartLAD={handleComputeLAD}
         initialSelectedIds={selectedScanIds}
         defaultLmax={[...meshes].reverse().find(m => m.heliosFilter)?.heliosFilter?.lmax}
@@ -13242,6 +12742,24 @@ export default function PointCloudViewer({
           setShowLADPopup(false);
           setScanPopupState({ kind: 'edit', id });
         }}
+      />
+
+      {/* Multi-input tool dialogs — pick their own inputs, seeded from the
+          current selection. Launched from the static Toolbar / Tools menu. */}
+      <StitchDialog
+        isOpen={showStitchDialog}
+        onClose={() => setShowStitchDialog(false)}
+        clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color, pointCount: c.data.pointCount }))}
+        initialSelectedIds={selectedIds}
+        onStitch={(ids) => { if (ids.length >= 2) onStitchClouds?.(ids); }}
+      />
+      <AlignDialog
+        isOpen={showAlignDialog}
+        onClose={() => setShowAlignDialog(false)}
+        clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color, isOctree: !!c.data.octree }))}
+        initialSelectedIds={selectedIds}
+        isRunning={isRunningICP}
+        onAlign={(targetId, sourceId) => { void handleCloudToCloudICP(targetId, sourceId); }}
       />
 
       {/* Morph Plant Popup */}

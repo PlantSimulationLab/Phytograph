@@ -101,7 +101,10 @@ test('triangulation uses overwritten synthetic data, not the stale source file',
     for (let i = 1; i < 4; i++) {
       await rows.nth(i).click({ modifiers: ['ControlOrMeta'] });
     }
-    await page.getByTestId('tool-triangulate-helios').click();
+    await page.getByTestId('tool-triangulate').click();
+    // The static Triangulate tool opens the panel; with 2+ clouds (or the Helios
+    // method) it shows a Setup button that opens the multi-scan Helios dialog.
+    await page.getByTestId('triangulation-setup-button').click();
     const heliosPopup = page.getByTestId('helios-triangulation-popup');
     await expect(heliosPopup).toBeVisible();
     // Triangulation runs unfiltered; the Lmax/aspect filter is applied in the

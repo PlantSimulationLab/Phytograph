@@ -106,22 +106,27 @@ nav:
       - Leaf area density: concepts/leaf-area-density.md
   - Workflows:
       - workflows/index.md
-      - Import & export: workflows/import-export.md
-      - Viewer navigation: workflows/viewer-navigation.md
-      - Clean a point cloud: workflows/clean-point-cloud.md
-      - Segment ground points: workflows/segment-ground.md
-      - Separate leaf and wood: workflows/segment-wood.md
-      - Segment individual trees: workflows/segment-trees.md
-      - Triangulate a mesh: workflows/triangulate.md
-      - Estimate leaf area density: workflows/estimate-leaf-area-density.md
-      - Extract a skeleton: workflows/extract-skeleton.md
-      - Build a QSM: workflows/build-qsm.md
-      - Add leaves to a QSM: workflows/add-leaves.md
-      - Adjust leaf angles: workflows/adjust-leaf-angles.md
-      - Generate a plant: workflows/generate-plant.md
-      - Morph a plant: workflows/morph-plant.md
-      - Register & compare: workflows/register-compare.md
-      - Simulate a LiDAR scan: workflows/simulate-scan.md
+      - Getting around:
+          - Import & export: workflows/import-export.md
+          - Viewer navigation: workflows/viewer-navigation.md
+      - 1. Pre-processing:
+          - Clean a point cloud: workflows/clean-point-cloud.md
+          - Register & compare: workflows/register-compare.md
+      - 2. Segmentation:
+          - Segment ground points: workflows/segment-ground.md
+          - Separate leaf and wood: workflows/segment-wood.md
+          - Segment individual trees: workflows/segment-trees.md
+      - 3. Reconstruction & analysis:
+          - Triangulate a mesh: workflows/triangulate.md
+          - Extract a skeleton: workflows/extract-skeleton.md
+          - Build a QSM: workflows/build-qsm.md
+          - Add leaves to a QSM: workflows/add-leaves.md
+          - Adjust leaf angles: workflows/adjust-leaf-angles.md
+          - Estimate leaf area density: workflows/estimate-leaf-area-density.md
+      - 4. Scan simulation:
+          - Generate a plant: workflows/generate-plant.md
+          - Morph a plant: workflows/morph-plant.md
+          - Simulate a LiDAR scan: workflows/simulate-scan.md
   - Reference:
       - reference/index.md
       - File formats: reference/file-formats.md

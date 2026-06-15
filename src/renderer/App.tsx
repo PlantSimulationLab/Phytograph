@@ -12,7 +12,7 @@ import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isM
 import { importTexturedMesh, deleteCloudSession, type MeshImportResponse } from "./utils/backendApi";
 import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
-import { registerCategoricalSlug } from "./lib/classification";
+import { registerCategoricalSlug, registerContinuousSlug } from "./lib/classification";
 import { parseHeliosScanXml, HeliosXmlParseError } from "./lib/heliosScanXml";
 import { resolveTargets } from "./lib/bulkActions";
 import { FeedbackDialog } from "./components/FeedbackDialog";
@@ -182,11 +182,12 @@ function App() {
     result: WizardResult,
     color: string,
   ): Promise<Scan> => {
-    const { input, asciiFormat, columnPlan, categoricalSlugs, worldShift } = result;
+    const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, worldShift } = result;
     const data = await parsePointCloudFromPath(
-      input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift,
+      input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift, continuousSlugs,
     );
     for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
+    for (const slug of continuousSlugs) registerContinuousSlug(slug);
     // Scan params precedence: an explicit XML <scan> (input.params) wins; else,
     // if the file itself carried scan-pattern metadata (E57 pose + angular sweep
     // + grid, or a PCD VIEWPOINT origin), auto-populate from it so a lone-file
@@ -1114,6 +1115,14 @@ function App() {
     }
   }, [handleFileUpload, handleMultipleFiles]);
 
+  // Expose mesh import to the viewer's Tools toolbar / Tools menu "Import Model"
+  // command. App owns the native import dialog (handleMenuImport), so the viewer
+  // reaches it through this global — same bridge pattern as __handleUndo.
+  useEffect(() => {
+    (window as any).__importMesh = () => { void handleMenuImport('mesh'); };
+    return () => { delete (window as any).__importMesh; };
+  }, [handleMenuImport]);
+
   // Subscribe to application-menu commands dispatched from main (src/main/menu.ts).
   // Most menu items map to existing handlers; File → Import routes through the
   // native file dialog (handleMenuImport) rather than the renderer dropzone.
@@ -1170,6 +1179,12 @@ function App() {
         case 'nav':
           // 'options' opens the Settings modal; 'viewer' just ensures it's closed.
           setSettingsOpen(payload.target === 'options');
+          break;
+        case 'tool':
+          // Native Tools menu → run a tool by registry id. The viewer exposes
+          // __runToolCommand; ensure we're on the viewer (not Settings) first.
+          setSettingsOpen(false);
+          (window as any).__runToolCommand?.(payload.toolId);
           break;
       }
     });

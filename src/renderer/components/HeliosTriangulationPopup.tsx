@@ -21,7 +21,7 @@ interface HeliosTriangulationPopupProps {
   onClose: () => void;
   // `scanColors` is aligned 1:1 with `request.scans` (same order), so the
   // caller can map each triangle's scan index back to a display color.
-  onStartTriangulate: (request: HeliosTriangulationRequest, scanColors: string[], sourceScanIds: string[]) => void;
+  onStartTriangulate: (request: HeliosTriangulationRequest, scanColors: string[], sourceScanIds: string[], gridMeshId?: string) => void;
   scans: Scan[];
   initialSelectedIds?: Set<string>;
   onOpenScanParams?: (scanId: string) => void;
@@ -165,9 +165,11 @@ export function HeliosTriangulationPopup({
     // Source scan ids so the viewer can auto-hide the contributing scans once
     // the mesh lands (otherwise the result is buried in the point cloud).
     const sourceScanIds = selectedScans.map(s => s.id);
-    onStartTriangulate(request, scanColors, sourceScanIds);
+    // The voxel box this triangulation is built in (a GridOption id is its mesh
+    // id). Recorded on the mesh so reusing it for LAD can hide that exact box.
+    onStartTriangulate(request, scanColors, sourceScanIds, selectedGrid?.id);
     onClose();
-  }, [selectedScans, buildRequest, onStartTriangulate, onClose]);
+  }, [selectedScans, selectedGrid, buildRequest, onStartTriangulate, onClose]);
 
   if (!isOpen) return null;
 

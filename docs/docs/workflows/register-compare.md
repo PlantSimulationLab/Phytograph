@@ -9,11 +9,13 @@ The simplest case: you have several point clouds of the same plant
 (e.g., from different scan positions) that are already roughly aligned
 in world coordinates, and you want a single combined cloud.
 
-1. Select two or more clouds in the Scene panel
-   (<kbd>Shift</kbd>+click or <kbd>⌘/Ctrl</kbd>+click).
-2. Click **Stitch Selected Clouds** (toolbar merge icon).
-3. A new cloud appears containing all points. The originals stay in
-   the scene; hide them if you want.
+1. Open **Stitch Clouds** from the **Pre-processing** toolbar group (merge
+   icon) or **Tools → Pre-processing → Stitch Clouds**.
+2. In the dialog, check the two or more clouds to merge. (If you had clouds
+   selected in the scene, they're pre-checked — you can change the choice
+   here.)
+3. Click **Stitch**. A new cloud appears containing all points. The
+   originals stay in the scene; hide them if you want.
 
 Stitching is reversible via undo, and the originals aren't deleted —
 you can re-stitch with a different subset.
@@ -29,48 +31,44 @@ you can re-stitch with a different subset.
 Align one cloud to another by iteratively minimizing point-to-point
 distance.
 
-1. Select **exactly two** clouds.
-2. Click **Align** (double-arrow icon) → **Cloud-to-cloud**.
-3. The panel shows ICP parameters:
-    - **Max iterations** (default 50)
-    - **Convergence threshold** in meters (default 1e-6)
-    - **Voxel size** for downsampling during fit (default 0.02 m)
-4. Click **Run**.
+1. Open **Align Clouds (ICP)** from the **Pre-processing** toolbar group
+   (globe icon) or **Tools → Pre-processing → Align Clouds (ICP)**.
+2. In the dialog, pick the **target** (stays fixed) and the **source**
+   (moves onto the target). Streamed (large/octree) clouds can only be the
+   target — the source must be a regular cloud, since ICP transforms it.
+3. Click **Align**.
 
 ICP runs and reports:
 
 - **RMSE** — root-mean-square distance after alignment
 - **Min / Max distance** — worst-case error
-- A transformation matrix applied to the second cloud
+- A transformation matrix applied to the source cloud
 
-The second cloud is updated in place with the transformation. Undo to
+The source cloud is updated in place with the transformation. Undo to
 revert.
 
 ## Mesh-to-mesh ICP
 
 Same idea as cloud-to-cloud but on surfaces.
 
-1. Select exactly two meshes.
-2. Click **Align** → **Mesh-to-mesh**.
-3. Run. Mesh-to-mesh is typically more accurate than cloud-to-cloud
-   because surface normals provide an extra constraint.
+1. Select exactly two meshes in the scene panel.
+2. Run **Align Mesh to Mesh (ICP)** from the **Tools** menu or the command
+   palette (<kbd>⌘/Ctrl</kbd>+<kbd>K</kbd>). Mesh-to-mesh is typically more
+   accurate than cloud-to-cloud because surface normals provide an extra
+   constraint.
 
 ## Cloud-to-mesh
 
 For comparing a real scan against a procedural model (or any
 cloud-versus-mesh ground truth):
 
-1. Select one cloud and one mesh.
-2. Click **Align** → **Cloud-to-mesh**.
-3. Run.
+1. Select one cloud and one mesh in the scene panel.
+2. Run **Align Mesh to Cloud** from the **Tools** menu or the command
+   palette.
 
-The cloud is transformed to best fit the mesh. The result includes a
-**distance heatmap** — each cloud point colored by its distance to the
-nearest mesh face. Use this to identify where your scan diverges from
-the model.
-
-To swap roles (transform the mesh to fit the cloud), use **Mesh-to-cloud**
-in the same panel.
+The mesh is transformed to best fit the cloud, and the result includes a
+**distance heatmap** — each point colored by its distance to the nearest
+mesh face. Use this to identify where your scan diverges from the model.
 
 ## Reading the heatmap
 

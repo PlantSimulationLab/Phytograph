@@ -22,10 +22,42 @@ and delete.
 
 ## Left tool column
 
-A vertical column of icon buttons down the left side. Each opens a
-panel or tool mode. Hover any button to see its name. The exact set
-depends on what's selected in the scene panel; tool buttons that
-require a selection are disabled until you pick something.
+A vertical column down the left side. At the top are the **view** controls
+(reset camera, command-palette search) and the **snap-view** gizmo. Below
+those are three always-visible blocks — **Create**, **Simulate**, and
+**Tools**:
+
+| Block | Buttons |
+|---|---|
+| **Create** (build the scene) | Generate Plant, Import Model, Create Voxel Grid, Add Scan |
+| **Simulate** (synthetic scanning) | Run Synthetic Scan |
+| **Tools** › Pre-processing | Translate, Crop, Erase, Filter, Resample, Move to Origin, Align (ICP), Stitch |
+| **Tools** › Segmentation | Segment Ground, Segment Wood / Leaf, Segment Trees |
+| **Tools** › Reconstruction | Triangulate, Extract Skeleton, Build QSM, Leaf Area Density |
+
+**Create** and **Simulate** are kept separate from **Tools** on purpose:
+Create and Simulate *build* a scene (generating geometry, placing scanners,
+synthesizing scans), whereas Tools *operate on data you already have*. The
+Tools block holds only the three analysis stages of a typical pipeline.
+
+Hover any button to see its name. Buttons no longer appear and disappear
+with your selection — they're always shown so you can see what's available.
+
+- **Single-input tools** (Filter, Segment Ground, Triangulate, …) act on the
+  selected cloud. They're greyed out until you select one; the tooltip tells
+  you what to pick.
+- **Multi-input tools** (Align, Stitch, Leaf Area Density, Run Synthetic
+  Scan) stay enabled and open a dialog where you pick their inputs explicitly
+  — for example, Leaf Area Density lets you choose the scans and the voxel
+  grid. If a needed input doesn't exist yet, the dialog tells you.
+
+Everything in these blocks is also in the menu bar — under the **Tools**,
+**Create**, and **Simulate** menus, grouped the same way — and in the
+[command palette](#command-palette).
+
+The same operation can often be reached from a tool's results, too — running
+a Helios triangulation, for instance, defines the voxel grid that the Leaf
+Area Density dialog then reuses automatically.
 
 ## Bottom-left view gizmo
 
@@ -75,9 +107,10 @@ A scan can hold point data, scan parameters (origin, sweep, return type),
 or both — see [Scans](../concepts/scans.md) for details.
 
 Multi-select with <kbd>Shift</kbd>+click (range) or
-<kbd>⌘/Ctrl</kbd>+click (toggle). Many operations (Stitch, Align, Filter)
+<kbd>⌘/Ctrl</kbd>+click (toggle). Single-input tools (Filter, Segment, …)
 act on the current selection, so being deliberate about what's selected
-matters.
+matters; multi-input tools (Stitch, Align, Leaf Area Density) seed their
+dialog from the selection but let you change it there.
 
 ### Bulk show/hide and delete
 
