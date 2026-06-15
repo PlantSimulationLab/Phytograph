@@ -348,12 +348,15 @@ jobs:
             exit 1
           }
           Write-Host "found: $($bin.FullName)"
-          # PotreeConverter exits non-zero from --help, which under pwsh would
-          # fail the step. The binary having built + installed is the real
-          # check; run --help only for informational output and don't let its
-          # exit code (or a pipe close) fail the step.
-          try { & $bin.FullName --help 2>&1 | Select-Object -First 5 } catch { Write-Host "(--help returned non-zero; ignored)" }
+          # PotreeConverter exits non-zero from --help. The binary having built
+          # + installed is the real check, so --help is informational only.
+          # Don't run it through the pwsh step at all: even inside try/catch it
+          # leaves $LASTEXITCODE non-zero, and the step wrapper (pwsh -command)
+          # returns THAT as the step's exit code after the script ends — which
+          # failed the step despite our PASS line. Skip --help and exit 0
+          # explicitly so the step's result is ours, not PotreeConverter's.
           Write-Host "PASS: PotreeConverter.exe present ($($bin.Length) bytes)"
+          exit 0
 
       # ---------------- macOS signing setup ----------------
       - name: Import Apple Certificate (macOS)
