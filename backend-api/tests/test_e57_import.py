@@ -266,13 +266,16 @@ async def test_misses_endpoint_projects_just_beyond_farthest_hit(tmp_path, monke
     out = await main.get_cloud_misses(
         sid, origin_x=_ORIGIN[0], origin_y=_ORIGIN[1], origin_z=_ORIGIN[2])
     assert out["count"] == 2
-    # Radius is the farthest hit distance (5.0 from origin) plus a 5% margin, so
-    # every projected miss lies strictly beyond every hit.
-    assert out["radius"] == pytest.approx(5.0 * 1.05, rel=1e-4)
+    # Radius clears the farthest hit by a depth-scaled margin so the miss shell
+    # reads as a distinct halo well outside the cloud, not a band hugging its far
+    # surface: radius = max(far + depth, far*1.4, far + 1.0). All hits here sit at
+    # exactly 5.0 from the origin (depth == 0), so the far*1.4 floor wins → 7.0.
+    far = 5.0
+    assert out["radius"] == pytest.approx(far * 1.4, rel=1e-4)
     pos = np.array(out["positions"]).reshape(-1, 3)
     dist = np.linalg.norm(pos - _ORIGIN, axis=1)
     assert np.allclose(dist, out["radius"], rtol=1e-4)
-    assert float(dist.min()) > 5.0  # strictly outside the farthest hit
+    assert float(dist.min()) > far  # strictly outside the farthest hit
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
+import { stubMessageBox } from './helpers/stubMessageBox';
 
 // Regression test for the silent-empty-scan bug: when point data fails to load
 // during a Helios XML import (backend down, referenced file missing, user
@@ -18,9 +19,16 @@ test('Helios XML import aborts entirely when point data cannot load', async () =
 
   try {
     const xmlFixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'missing-data-scan.xml');
+    // When a referenced scan file can't be found, the resolver first shows a
+    // NATIVE "Scan file not found" message box with buttons ['Locate…', 'Skip']
+    // (src/renderer/lib/scanFileResolver.ts). That is a real OS window Playwright
+    // can't click, so we stub it to always choose "Locate…" (button index 0) —
+    // otherwise the test hangs on the native dialog until timeout.
+    await stubMessageBox(app, 0);
     // First dialog:open call returns the XML (the import file picker). Every
-    // subsequent call is the per-scan "Locate point-cloud file" prompt — we
-    // return null to simulate the user cancelling, so no data can be attached.
+    // subsequent call is the per-scan "Locate point-cloud file" prompt (reached
+    // after the user clicks "Locate…" above) — we return null to simulate the
+    // user cancelling that picker, so no data can be attached.
     await stubOpenDialog(app, [xmlFixture, null]);
 
     const panel = page.getByTestId('scans-panel');
