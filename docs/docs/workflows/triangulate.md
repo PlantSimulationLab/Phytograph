@@ -1,7 +1,7 @@
 # Triangulate a mesh
 
 Triangulation builds a surface mesh from a point cloud. Phytograph
-offers four methods; pick based on your data and what you want to do
+offers five methods; pick based on your data and what you want to do
 with the result.
 
 ## Quick decision
@@ -11,36 +11,73 @@ with the result.
 | Dense scan of a leaf or other roughly-flat surface | **Delaunay** |
 | Branch surfaces, consistent density | **Ball Pivot** |
 | Dense whole-plant scan, need a watertight surface | **Poisson** |
-| Multi-scan TLS data with scanner positions | **Helios Triangulation** |
+| Concave shapes you want to wrap tightly | **Alpha Shape** |
+| Multi-scan TLS data with scanner positions | **Helios** |
 
-## Standard triangulation (Delaunay / Ball Pivot / Poisson)
+## The Triangulation modal
 
-1. Select the point cloud in the Scene panel.
-2. Click **Triangulate** (triangle icon).
-3. The panel on the right opens with the method dropdown.
-4. Pick a method — parameters update based on your choice.
-5. Click **Triangulate**.
+All five methods live in one **Triangulation Setup** modal:
+
+1. Select one or more point clouds in the Scene panel.
+2. Click **Triangulate** (triangle icon) — the modal opens.
+3. **Method** — pick the algorithm from the dropdown. The parameters and
+   options below update to match. The default is **Helios** when any
+   listed scan carries scan parameters, otherwise **Ball Pivot**.
+4. **Scans** — tick which scans to triangulate. Each row shows the scan's
+   color, point count, and (when it has parameters) its scanner origin.
+   Use **All / None** to select in bulk. To change a scan's parameters,
+   edit it from the Scans panel before opening this modal.
+5. **Output** *(non-Helios methods)* — choose **Triangulate each scan
+   separately** (one mesh per scan) or **Merge selected scans into one
+   mesh** (their points are fused before meshing). Helios always fuses its
+   selected scans, so this toggle is hidden for it.
+6. Set the method-specific **Parameters** (below).
+7. Click **Triangulate**.
+
+While the mesh builds, a small **progress pill** appears at the top of the
+viewer for every method (not just Helios). It names the current stage —
+*Reading points*, *Estimating normals*, *Meshing*, *Cleaning up mesh*,
+*Computing surface area* — and shows a bar with the percentage. When you
+triangulate several scans separately the label is prefixed with the scan
+count (e.g. *[2/3] Meshing*), and a Helios run reports *Triangulating scan
+N of M*. Click the **✕** on the pill to cancel a run in progress; no mesh
+is added and nothing else changes.
 
 Method-specific parameters:
 
-=== "Delaunay"
-
-    - **Alpha** — controls how aggressively the mesh fills concavities.
-      Smaller alpha = tighter to the points, more holes; larger alpha =
-      smoother surface, more bridging across gaps.
-
 === "Ball Pivot"
 
-    - **Radius** — ball pivot radius. Should be ~1.5–2× the average
-      point spacing. Click **Estimate** to compute a reasonable value
-      from the cloud.
+    - **Auto radius** *(default on)* — the ball-pivot radius is computed
+      from the median nearest-neighbour spacing of the cloud.
+    - Untick it to set the **radius** manually (in meters). A good value
+      is ~1.5–2× the average point spacing.
 
 === "Poisson"
 
-    - **Depth** — octree depth. Higher = more detail and slower.
-      Default 9 is a good starting point for whole-plant scans.
-    - **Trim threshold** — clips low-confidence triangles in sparsely
-      sampled regions.
+    - **Octree depth** — higher = more detail and slower. Default 8 is a
+      good starting point for whole-plant scans.
+
+=== "Alpha Shape"
+
+    - **Auto Alpha** *(default on)* — alpha is chosen automatically.
+    - Untick it to set the **alpha** radius manually: smaller alpha =
+      tighter to the points, more holes; larger alpha = smoother surface,
+      more bridging across gaps.
+
+=== "Delaunay"
+
+    - No parameters — the points are projected to a plane and triangulated.
+      Best for a single roughly-flat surface.
+
+!!! note "Sky/miss returns are skipped"
+
+    If the cloud is a multi-return / full-waveform scan, its sky/miss
+    points — rays that hit nothing, recorded far out at the scanner's max
+    range — are **excluded automatically** before triangulation. They
+    aren't surface points, so meshing them would only span a phantom shell
+    far from the real geometry (and slow Ball Pivot to a crawl). This is
+    why the **points used** shown on the mesh row can be lower than the
+    cloud's total point count.
 
 The resulting mesh appears in the Scene panel's **Meshes** list, named
 after the method and source cloud — e.g. *"Poisson triangulation
@@ -65,15 +102,21 @@ Each mesh row supports a few quick edits:
   alpha-shape radius, or ball-pivoting radii, plus the normal-estimation
   settings and the number of points used (which reflects any downsampling
   of a large streamed cloud). For a **Helios mesh** it's L<sub>max</sub>,
-  the max aspect ratio, and how many scans were fused.
+  the max aspect ratio, and how many scans were fused. Once you apply the
+  [triangle filter](#filter-triangles-and-plot-leaf-angles-any-method) to any
+  mesh, the readout also shows the filter breakdown (candidates / kept /
+  dropped).
 - **Recolor** — click the color swatch to the left of the name to open a
   color picker. Pick a color or type a hex value. The color applies to the
   mesh surface; **texture-mapped meshes ignore it** and keep drawing their
   texture, so the swatch is only shown for untextured meshes.
-- **Transform** — with a mesh selected, the Blender-style shortcuts
-  <kbd>T</kbd> (translate), <kbd>S</kbd> (scale), and <kbd>R</kbd> (rotate)
-  move it in the viewer; lock an axis with <kbd>X</kbd>/<kbd>Y</kbd>/<kbd>Z</kbd>
-  or type an exact amount. See [Keyboard shortcuts](../reference/shortcuts.md).
+- **Transform** — click the **⤢** (double-arrow) button on the mesh's row to
+  open its Transform panel, where you can type an exact position, rotation
+  (degrees), and per-axis scale, or toggle the on-screen translate/rotate
+  gizmos. The Blender-style shortcuts <kbd>T</kbd> (translate), <kbd>S</kbd>
+  (scale), and <kbd>R</kbd> (rotate) still work with a mesh selected; lock an
+  axis with <kbd>X</kbd>/<kbd>Y</kbd>/<kbd>Z</kbd>. See
+  [Keyboard shortcuts](../reference/shortcuts.md).
 
 !!! note "Large (streamed) clouds are capped"
     Clouds imported from large XYZ scans are streamed from an on-disk octree
@@ -86,46 +129,75 @@ Each mesh row supports a few quick edits:
     **Performance → Triangulate max points** for more surface detail at the cost
     of more memory.
 
-## Helios Triangulation
+## Filter triangles and plot leaf angles (any method)
 
-Helios triangulation uses the scanner geometry to triangulate only the
+Two mesh tools work on **every** triangulated mesh — the cloud methods
+(ball-pivoting, Poisson, alpha-shape, Delaunay) as well as Helios. Expand a
+mesh's row to reach them:
+
+- **Filter** — an **Lmax** (maximum edge length, meters) and **Max aspect**
+  (max edge ÷ min edge) filter. Triangles with a longer edge or a more
+  mis-shapen ratio are hidden, and the mesh re-filters instantly as you type —
+  no re-triangulation. This is the quickest way to trim the long "bridge"
+  triangles a Delaunay or alpha-shape mesh throws across gaps. Cloud meshes
+  start **unfiltered** (Lmax wide open, aspect blank for "no limit"); type a
+  value to tighten. The **Auto** button, the **Separation (η)/Modes**
+  diagnostics, and the **Check point spacing** button are **Helios-only** (they
+  rely on the scanner-geometry estimate) and don't appear for cloud meshes — see
+  [Helios method](#helios-method) below for what they mean.
+- **Leaf angles…** — opens the leaf-angle distribution plot (inclination PDF,
+  azimuth rose, and a de Wit archetype + Beta fit). It reads the mesh's triangle
+  normals directly, area-weighted, so it works on any triangulated surface. A
+  mesh built with a voxel grid splits the distribution per cell; a mesh with no
+  grid (every cloud mesh, and an auto-grid Helios mesh) shows a single **Whole
+  mesh** distribution. See
+  [Estimate leaf area density](estimate-leaf-area-density.md) for the related
+  per-voxel inversion.
+
+## Helios method
+
+The **Helios** method uses the scanner geometry to triangulate only the
 rays that actually returned, producing more accurate branch surfaces
 than cloud-only methods. Every selected scan must carry both point
-data **and** scan parameters (the scanner origin) — the tool button is
-disabled with an explanatory tooltip otherwise.
+data **and** scan parameters (the scanner origin); scans missing
+parameters are listed but can't be selected, with a note telling you to
+add them.
+
+Select the **Helios** method in the Triangulation modal to reveal its
+options (the per-scan/merged toggle is hidden — Helios always fuses the
+selected scans):
 
 1. Make sure each scan you want to include has scan parameters
    attached. If a scan only has data, click the radio icon on its row
    in the Scans panel to add parameters (or import a Helios scan XML
    that carries `<origin>` and `<size>` for each `<scan>`).
-2. Select two or more eligible scans.
-3. Click the **Helios Triangulation** tool button (triangle icon). The
-   popup opens. Each row shows the scan's origin read from its
-   parameters — no manual entry. Click **Edit…** next to a row to open
-   the scan's parameters popup if you need to adjust it.
+2. In the **Scans** picker, tick two or more eligible scans. Each row
+   shows the scan's origin read from its parameters — no manual entry.
+   To adjust a scan's parameters, edit it from the Scans panel before
+   opening this modal.
 
     Each scan is triangulated in the angular grid it was actually
     sampled in: its **scanner origin**, **zenith/azimuth sample counts**
     (Ntheta/Nphi) and **angular bounds** all come from that scan's own
     parameters. Edit them per scan in the Scans panel — they are no
     longer typed in once for the whole batch.
-4. **Filtering happens afterwards.** There is no Lmax to set here — Phytograph
+3. **Filtering happens afterwards.** There is no Lmax to set here — Phytograph
     triangulates *unfiltered*, keeping every candidate triangle, and the
     edge-length (**Lmax**) and **aspect-ratio** filter is applied as a live
     post-processing step in the mesh panel (next step). This means estimating a
     good Lmax is instant, and you can change it and watch the mesh update without
     ever re-triangulating.
-5. **Grid** — the triangulation grid bounds the region that gets meshed:
+4. **Grid** — the triangulation grid bounds the region that gets meshed:
     - **Auto — fit to all points** (default when you haven't made a
       box): Phytograph fits a single-cell grid around every point. A
       warning reminds you that *all* points are triangulated, so the
       ground and trunk should already be segmented or cropped away.
-    - **A voxel box**: create one with **Create Voxel** (it appears in
+    - **A voxel box**: create one with **Create Voxel Grid** (it appears in
       the Meshes list), position and size it over the region you care
       about, and set its grid subdivisions in the mesh panel. It then
       appears in the **Grid** dropdown; selecting it uses the box's
       position, size and Nx×Ny×Nz cell counts as the grid.
-6. Click **Triangulate**.
+5. Click **Triangulate**.
 
 The mesh lands in the **Meshes** list named *"Helios triangulation"* (the
 word *triangulation* keeps it distinct from a Helios **plant model**).
@@ -156,6 +228,31 @@ opens a short how-to-read explainer):
 Watch for **High η with Low Modes**: a confident split placed in the wrong
 spot. If the mesh looks holey there, raise Lmax. The filter breakdown above the
 controls (candidates / kept / dropped) updates as you adjust the filter.
+
+#### Check point spacing
+
+The edge-based auto-estimate has a blind spot: on a **sparsely-sampled surface**
+(a thin shell of points relative to the leaf size) the triangulation generates
+mostly *bridge* triangles spanning the gaps, so the candidate-edge distribution
+is dominated by bridges. The split can still look clean (η/Modes read *Medium* or
+even *High*) while Lmax lands several times too large — and an oversized Lmax
+bridges across the surface, tilting the reconstructed leaf normals and corrupting
+the **leaf-angle distribution** and **G(θ)** (you may see G(θ) far below the
+expected ~0.5 for a near-spherical canopy).
+
+Because the candidate edges can't reveal this on their own, the Filter panel
+offers a **Check point spacing** button whenever the indicators aren't both
+*High*. It measures the actual nearest-neighbor spacing of the points **inside
+the grid** (an independent signal) and compares it to your current Lmax:
+
+- If Lmax is within a normal multiple of the spacing, it confirms bridging is
+  unlikely.
+- If Lmax is **much larger** than the spacing (≳3×), it warns that the mesh is
+  likely bridging and suggests lowering Lmax toward the point spacing.
+
+The check only reports — it never changes Lmax for you. It can take from a moment
+to tens of seconds on a very large cloud (it builds a spatial index over the
+in-grid points), which is why it's an explicit button rather than automatic.
 
 !!! warning "Merged multi-scan clouds"
 
@@ -265,9 +362,22 @@ Below the inclination chart a **fitted distribution parameters** table reports,
 leaf inclination — the standard Goel & Strebel (1984) model. The shape
 parameters **α** and **β** are estimated by moment matching (the mean and
 variance of the normalized inclination *t = θ/90*), alongside the mean
-inclination **mean θ** in degrees, the fit **R²**, and that cell's best de Wit
-archetype, so you can read every visible curve's parameters at a glance. A cell
-with no usable spread (all triangles coplanar) shows **—**.
+inclination **mean θ** in degrees, the fit **R²**, the leaf-projection
+coefficient **G(θ)** (see below), and that cell's best de Wit archetype, so you
+can read every visible curve's parameters at a glance. A cell with no usable
+spread (all triangles coplanar) shows **—** for the Beta columns.
+
+The **G(θ)** column is the area-weighted mean of *|n̂ · v̂|* over the cell's
+triangles, where *n̂* is each triangle's face normal and *v̂* is the beam
+direction — the leaf-projection coefficient Ross's *G*-function describes, here
+**measured directly** from the mesh geometry rather than assumed from a
+distribution. (It's the same quantity the
+[leaf area density inversion](estimate-leaf-area-density.md) reports per voxel.)
+When the mesh carries scan provenance the beam points from each triangle back to
+the scanner that saw it; for a mesh with no scan origins (e.g. a triangulated
+plant model) it falls back to the conventional **nadir** view (*v̂* straight
+down), so G(θ) reduces to the area-weighted mean of *|cos θ|* and is defined for
+every mesh.
 
 Tick **Show Beta fit** above the chart to overlay each cell's fitted Beta curve
 as a dashed line in the cell's color. It's off by default to keep the plot

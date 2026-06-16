@@ -22,9 +22,15 @@ export interface TriangleMeshProps {
   // to always blend ON TOP of the surface, so the volume tint is preserved
   // regardless of viewing direction. Default 0 = normal distance sorting.
   renderOrder?: number;
+  // Bias this surface's depth toward the camera so a surface that's coplanar
+  // with other geometry (e.g. a ground plane sitting exactly on the ground grid
+  // at z=0) wins the depth test consistently instead of z-fighting. The offset
+  // is in depth-buffer units, not world space, so it doesn't visibly move the
+  // surface. Default false = no offset.
+  polygonOffset?: boolean;
 }
 
-export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null, renderOrder = 0 }: TriangleMeshProps) {
+export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null, renderOrder = 0, polygonOffset = false }: TriangleMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const hasLoggedRef = useRef(false);
 
@@ -138,8 +144,13 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
       side: THREE.DoubleSide,
       flatShading: hasTriangleColors,  // Flat per-face shading for pseudocolor
       vertexColors: useColorAttr,  // Enable the color attribute
+      // Pull coplanar surfaces (e.g. a ground plane on the z=0 grid) toward the
+      // camera in depth so they don't z-fight. Negative units = nearer.
+      polygonOffset,
+      polygonOffsetFactor: polygonOffset ? -1 : 0,
+      polygonOffsetUnits: polygonOffset ? -1 : 0,
     });
-  }, [color, isTranslucent, wireframe, useColorAttr, hasTriangleColors]);
+  }, [color, isTranslucent, wireframe, useColorAttr, hasTriangleColors, polygonOffset]);
 
   // Update material properties when they change. opacity flows in here (not the
   // memo) so dragging the slider doesn't rebuild the material; transparent /

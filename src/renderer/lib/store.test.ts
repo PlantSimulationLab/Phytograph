@@ -59,6 +59,7 @@ describe('store settings', () => {
       defaultBackgroundColor: 'black',
       defaultPointSize: 1,
       scanMarkerScale: 1,
+      missDistanceThreshold: 1001,
     });
   });
 
@@ -90,6 +91,13 @@ describe('store settings', () => {
     const settings = await getSettings();
     expect(settings.theme).toBe('dark');
     expect(settings.triangulateMaxPoints).toBe(1_234_000);
+  });
+
+  it('updateSettings persists missDistanceThreshold', async () => {
+    await updateSettings({ missDistanceThreshold: 2500 });
+    const settings = await getSettings();
+    expect(settings.missDistanceThreshold).toBe(2500);
+    expect(settings.theme).toBe('light'); // untouched
   });
 });
 
@@ -132,6 +140,7 @@ describe('store export/import', () => {
       defaultBackgroundColor: 'black',
       defaultPointSize: 1,
       scanMarkerScale: 1,
+      missDistanceThreshold: 1001,
     });
   });
 });

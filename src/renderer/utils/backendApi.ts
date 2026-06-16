@@ -28,7 +28,16 @@ export type TriangulationMethod = 'ball_pivoting' | 'poisson' | 'alpha_shape' | 
 export interface TriangulationRequest {
   points?: number[][];  // [[x, y, z], ...] — omit when `source` is set
   source?: BackendPointSource;  // octree-backed clouds read from disk
+  // Merged multi-scan triangulation: every contributing octree source. The
+  // backend reads + vstacks them (folding in any inline `points` too) before
+  // meshing. Takes precedence over `source` when non-empty.
+  sources?: BackendPointSource[];
   method: TriangulationMethod;
+  // Crop-to-grid box [min_x, min_y, min_z, max_x, max_y, max_z] (world coords).
+  // When set, points outside this AABB are dropped before meshing (a numpy mask
+  // applied backend-side to the resolved points, regardless of source kind).
+  // Omit for no crop.
+  crop_box?: number[];
   // Ball pivoting parameters
   radii?: number[];
   // Poisson parameters
@@ -129,8 +138,9 @@ export function describeBackendError(error: unknown, action: string): Error {
 export async function triangulatePointCloud(
   request: TriangulationRequest,
   signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
 ): Promise<TriangulationResult> {
-  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate', request, signal);
+  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate', request, signal, 600000, onProgress);
   if (!meta.success) {
     return {
       success: false,
@@ -438,7 +448,7 @@ export interface HeliosTriangulationResult {
   numTriangles: number;
   numVertices: number;
   surfaceArea?: number;
-  // Interactive-filter support — see lib/heliosFilter.ts.
+  // Interactive-filter support — see lib/triangleFilter.ts.
   capLmax: number;
   capAspect: number;
   candidateCount: number;
@@ -455,8 +465,9 @@ export interface HeliosTriangulationResult {
 export async function heliosTriangulate(
   request: HeliosTriangulationRequest,
   signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
 ): Promise<HeliosTriangulationResult> {
-  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate/helios', request, signal);
+  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate/helios', request, signal, 600000, onProgress);
   if (!meta.success) {
     return {
       success: false,
@@ -620,6 +631,61 @@ export async function computeLAD(
     console.error('LAD computation failed:', error);
     throw error;
   }
+}
+
+// ==================== TRIANGULATION SPACING CHECK ====================
+
+// Verdict from /api/triangulate/check-spacing — an opt-in cross-check of the
+// auto-estimated Lmax against the actual in-grid point spacing. Offered as a
+// button when the Otsu indicators (separation confidence / mode separation)
+// aren't both High, because that's when the edge-based estimate can silently
+// overshoot on a sparsely-sampled surface (bridging across the gaps), which
+// corrupts the leaf normals and G(theta). Potentially expensive (a KD-tree over
+// up to tens of millions of points), hence opt-in rather than automatic.
+export interface SpacingCheckResult {
+  success: boolean;
+  medianSpacing?: number;    // median NN distance (m) of in-grid points
+  lmax: number;              // the Lmax this verdict was checked against
+  ratio?: number;            // lmax / medianSpacing
+  nPoints: number;           // in-grid points the spacing was measured on
+  likelyBridging: boolean;   // true when ratio is large enough to suspect bridging
+  message?: string;
+  error?: string;
+}
+
+/**
+ * Cross-check a triangulation's Lmax against the real point spacing inside the
+ * grid. Reuses the HeliosTriangulationRequest so the caller passes the exact
+ * scans + grid + lmax it triangulated with. The backend streams keepalive
+ * whitespace during the (possibly long) KD-tree pass; response.json() tolerates
+ * the leading whitespace.
+ */
+export async function checkTriangulationSpacing(
+  request: HeliosTriangulationRequest,
+  signal?: AbortSignal,
+): Promise<SpacingCheckResult> {
+  const baseUrl = getBackendUrl();
+  const response = await fetch(`${baseUrl}/api/triangulate/check-spacing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+    signal,
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+  }
+  const r = await response.json();
+  return {
+    success: r.success,
+    medianSpacing: r.median_spacing ?? undefined,
+    lmax: r.lmax,
+    ratio: r.ratio ?? undefined,
+    nPoints: r.n_points ?? 0,
+    likelyBridging: !!r.likely_bridging,
+    message: r.message ?? undefined,
+    error: r.error ?? undefined,
+  };
 }
 
 // ==================== SKELETON EXTRACTION API (BFS Graph-Based Algorithm) ====================
@@ -1823,17 +1889,69 @@ export interface BinaryFrame {
   buffers: Record<string, BinBuffer>;
 }
 const BIN_FRAME_MAGIC = 'PHB1';
+const PROGRESS_MARKER_MAGIC = 'PHP1';
+
+export interface ProgressMarker {
+  progress: number | null;
+  message: string;
+}
 
 function isWhitespaceByte(b: number): boolean {
   return b === 0x20 || b === 0x09 || b === 0x0a || b === 0x0d;
 }
 
+function magicAt(bytes: Uint8Array, off: number, magic: string): boolean {
+  if (off + 4 > bytes.length) return false;
+  return (
+    bytes[off] === magic.charCodeAt(0) &&
+    bytes[off + 1] === magic.charCodeAt(1) &&
+    bytes[off + 2] === magic.charCodeAt(2) &&
+    bytes[off + 3] === magic.charCodeAt(3)
+  );
+}
+
+/**
+ * Parse leading PHP1 progress markers (and whitespace keepalives) from `bytes`
+ * starting at `offset`. Returns the complete markers found and how many bytes
+ * were consumed — stopping at the first PHB1 magic, or at an incomplete trailing
+ * marker (so a marker split across stream reads is deferred to the next call).
+ */
+export function parseProgressMarkers(
+  bytes: Uint8Array,
+  offset: number,
+): { markers: ProgressMarker[]; consumed: number } {
+  const markers: ProgressMarker[] = [];
+  let o = offset;
+  for (;;) {
+    while (o < bytes.length && isWhitespaceByte(bytes[o])) o++;
+    if (!magicAt(bytes, o, PROGRESS_MARKER_MAGIC)) break; // PHB1 frame or no data yet
+    if (o + 8 > bytes.length) break; // header not fully arrived
+    const dv = new DataView(bytes.buffer, bytes.byteOffset + o + 4, 4);
+    const jsonLen = dv.getUint32(0, true);
+    if (o + 8 + jsonLen > bytes.length) break; // payload not fully arrived
+    const json = new TextDecoder().decode(bytes.subarray(o + 8, o + 8 + jsonLen));
+    try {
+      const parsed = JSON.parse(json) as ProgressMarker;
+      markers.push({ progress: parsed.progress ?? null, message: parsed.message ?? '' });
+    } catch {
+      // Ignore a malformed marker rather than wedging the stream.
+    }
+    o += 8 + jsonLen;
+  }
+  return { markers, consumed: o - offset };
+}
+
 export function decodeBinaryFrame(buf: ArrayBuffer): BinaryFrame {
   const bytes = new Uint8Array(buf);
-  // Skip the streaming keepalive (4-byte whitespace chunks) that precede the
-  // frame on long-compute endpoints.
+  // Skip the streaming keepalive (4-byte whitespace chunks) and any PHP1
+  // progress markers that precede the frame on long-compute endpoints.
   let start = 0;
-  while (start < bytes.length && isWhitespaceByte(bytes[start])) start++;
+  for (;;) {
+    while (start < bytes.length && isWhitespaceByte(bytes[start])) start++;
+    if (!magicAt(bytes, start, PROGRESS_MARKER_MAGIC)) break;
+    const dv = new DataView(buf, start + 4, 4);
+    start += 8 + dv.getUint32(0, true);
+  }
   if (bytes.length - start < 8) throw new Error('Binary frame too short');
   const magic = String.fromCharCode(bytes[start], bytes[start + 1], bytes[start + 2], bytes[start + 3]);
   if (magic !== BIN_FRAME_MAGIC) throw new Error(`Unexpected binary magic "${magic}"`);
@@ -1861,17 +1979,32 @@ export function decodeBinaryFrame(buf: ArrayBuffer): BinaryFrame {
   return { meta: header.meta, buffers };
 }
 
+// Reporter for per-stage progress streamed ahead of the PHB1 frame as PHP1
+// markers (see _bin_frame_streaming_response in backend-api/main.py).
+export type BinaryFrameProgress = (progress: number | null, message: string) => void;
+
 // POST a JSON request and decode a PHB1 binary-frame response. Mirrors the JSON
 // fetch helpers (10-min timeout, forwards an external abort signal).
+//
+// When `onProgress` is supplied the body is read incrementally: leading PHP1
+// progress markers are parsed and reported as they arrive (and the timeout is
+// refreshed on each chunk so an actively-streaming long compute isn't aborted),
+// then the buffered PHB1 frame is decoded. Without `onProgress` the original
+// one-shot arrayBuffer() path is used unchanged.
 export async function fetchBinaryFrame(
   path: string,
   request: unknown,
   signal?: AbortSignal,
   timeoutMs = 600000,
+  onProgress?: BinaryFrameProgress,
 ): Promise<BinaryFrame> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const refreshTimeout = () => {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  };
   if (signal) signal.addEventListener('abort', () => controller.abort());
   try {
     const response = await fetch(`${baseUrl}${path}`, {
@@ -1880,16 +2013,55 @@ export async function fetchBinaryFrame(
       body: JSON.stringify(request),
       signal: controller.signal,
     });
-    clearTimeout(timeoutId);
     if (!response.ok) {
+      clearTimeout(timeoutId);
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
-    return decodeBinaryFrame(await response.arrayBuffer());
+    if (!onProgress || !response.body) {
+      clearTimeout(timeoutId);
+      return decodeBinaryFrame(await response.arrayBuffer());
+    }
+
+    // Streaming path: accumulate bytes, draining leading PHP1 markers as they
+    // arrive, then decode the PHB1 frame from the full buffer.
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let pending = new Uint8Array(0); // unparsed leading bytes (markers + tail)
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        refreshTimeout();
+        chunks.push(value);
+        // Parse any complete markers visible at the head of the stream so far.
+        const merged = concatBytes([pending, value]);
+        const { markers, consumed } = parseProgressMarkers(merged, 0);
+        for (const m of markers) onProgress(m.progress, m.message);
+        pending = merged.subarray(consumed);
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+      clearTimeout(timeoutId);
+    }
+    const full = concatBytes(chunks);
+    return decodeBinaryFrame(full.buffer.slice(full.byteOffset, full.byteOffset + full.byteLength));
   } catch (error) {
     clearTimeout(timeoutId);
     throw error;
   }
+}
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const p of parts) total += p.byteLength;
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.byteLength;
+  }
+  return out;
 }
 
 /**
@@ -2381,6 +2553,10 @@ export async function createCloudSession(
   asciiFormat?: string | null,
   columnPlan?: ColumnPlan | null,
   worldShift?: [number, number, number] | null,
+  // Far-field distance (m) for miss auto-detection's distance fallback. Sourced
+  // from AppSettings.missDistanceThreshold by the importer; null → backend's
+  // 1001 m default. Only used when the scan has no is_miss/target_index signal.
+  missDistanceThreshold?: number | null,
 ): Promise<CloudSessionMetadata> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
@@ -2394,6 +2570,7 @@ export async function createCloudSession(
         ascii_format: asciiFormat ?? null,
         column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
         world_shift: worldShift ?? null,
+        miss_distance_threshold: missDistanceThreshold ?? null,
       }),
       signal: controller.signal,
     });

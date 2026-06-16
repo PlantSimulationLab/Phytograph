@@ -72,9 +72,11 @@ test('exports a generated mesh to OBJ via the Export panel', async () => {
 
     // Triangulate via the UI (Poisson at non-default depth 7).
     await page.getByTestId('tool-triangulate').click();
-    await page.getByTestId('triangulation-method').selectOption('poisson');
-    await page.getByTestId('triangulation-poisson-depth').fill('7');
-    await page.getByTestId('triangulation-run-button').click();
+    const triModal = page.getByTestId('triangulation-popup');
+    await expect(triModal).toBeVisible();
+    await triModal.getByTestId('triangulation-method').selectOption('poisson');
+    await triModal.getByTestId('triangulation-poisson-depth').fill('7');
+    await triModal.getByTestId('triangulation-run-button').click();
 
     const meshRow = page.getByTestId('mesh-row').first();
     await expect(meshRow).toBeVisible({ timeout: 60_000 });

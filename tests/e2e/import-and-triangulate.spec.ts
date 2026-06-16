@@ -48,23 +48,26 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
     // (No re-click — a plain click on the sole selection toggles it off.)
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
-    // Open the triangulation panel.
+    // Open the unified Triangulation modal. The imported scan (no scan params)
+    // makes Ball Pivoting the default method and the scan auto-selected.
     await page.getByTestId('tool-triangulate').click();
-    const panel = page.getByTestId('triangulation-panel');
-    await expect(panel).toBeVisible();
+    const modal = page.getByTestId('triangulation-popup');
+    await expect(modal).toBeVisible();
+    // The freshly-imported scan should be pre-selected in the picker.
+    await expect(modal.getByTestId('triangulation-scan-row')).toHaveCount(1);
 
     // Non-default user options: switch from Ball Pivoting to Poisson, pick a
-    // non-default octree depth of 7 (default is 9). Lower depth = faster on
-    // sparse fixtures and exercises method-specific parameter wiring.
-    await page.getByTestId('triangulation-method').selectOption('poisson');
-    const depth = page.getByTestId('triangulation-poisson-depth');
+    // non-default octree depth of 7. Lower depth = faster on sparse fixtures
+    // and exercises method-specific parameter wiring.
+    await modal.getByTestId('triangulation-method').selectOption('poisson');
+    const depth = modal.getByTestId('triangulation-poisson-depth');
     await expect(depth).toBeVisible();
     // Range input: fill triggers React's onChange the same way the slider does.
     await depth.fill('7');
     await expect(depth).toHaveValue('7');
 
     // Run it.
-    await page.getByTestId('triangulation-run-button').click();
+    await modal.getByTestId('triangulation-run-button').click();
 
     // Wait for the mesh row to appear (Poisson on 60 pts at depth 7 takes a
     // few seconds at most against the local backend).

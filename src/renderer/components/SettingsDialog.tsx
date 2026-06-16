@@ -168,6 +168,25 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                 className="w-32 bg-neutral-700 text-neutral-200 text-sm rounded px-2 py-1.5 border border-neutral-600"
               />
             </div>
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="flex-1">
+                <label className="block text-sm text-neutral-200">Miss detection distance (m)</label>
+                <p className="text-[11px] text-neutral-500 leading-snug">
+                  Fallback for tagging sky/miss points in scans that carry no <code>is_miss</code> column and no
+                  <code> target_index</code> sentinel: points farther than this from the scanner are treated as
+                  misses and excluded from the view. Defaults to Helios's 1001&nbsp;m placeholder distance.
+                </p>
+              </div>
+              <DebouncedNumberInput
+                data-testid="settings-miss-distance"
+                min={1}
+                max={100000}
+                step={10}
+                value={settings?.missDistanceThreshold ?? 1001}
+                onCommit={(v) => patch({ missDistanceThreshold: v })}
+                className="w-32 bg-neutral-700 text-neutral-200 text-sm rounded px-2 py-1.5 border border-neutral-600"
+              />
+            </div>
           </section>
 
           {/* Supported formats (reference) */}

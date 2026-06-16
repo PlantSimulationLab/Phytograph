@@ -44,15 +44,14 @@ test('leaf angle distribution: inclination PDF, azimuth rose, de Wit fit', async
 
     // --- Helios triangulate (auto grid) ------------------------------------
     await page.getByTestId('tool-triangulate').click();
-    // The static Triangulate tool opens the panel; with 2+ clouds (or the Helios
-    // method) it shows a Setup button that opens the multi-scan Helios dialog.
-    await page.getByTestId('triangulation-setup-button').click();
-    const heliosPopup = page.getByTestId('helios-triangulation-popup');
-    await expect(heliosPopup).toBeVisible();
-    await expect(page.getByTestId('helios-grid-allpoints-warning')).toBeVisible();
+    // Scans carry params, so the unified Triangulation modal defaults to Helios.
+    const modal = page.getByTestId('triangulation-popup');
+    await expect(modal).toBeVisible();
+    await expect(modal.getByTestId('triangulation-method')).toHaveValue('helios');
+    await expect(modal.getByTestId('helios-grid-allpoints-warning')).toBeVisible();
     // Triangulation runs unfiltered; the Lmax/aspect filter is applied in the
     // mesh panel afterwards.
-    await page.getByTestId('helios-triangulate-button').click();
+    await modal.getByTestId('triangulation-run-button').click();
 
     const meshRow = page.getByTestId('mesh-row').first();
     await expect(meshRow).toBeVisible({ timeout: 60_000 });
@@ -60,8 +59,8 @@ test('leaf angle distribution: inclination PDF, azimuth rose, de Wit fit', async
     // --- Filter the mesh, then open the leaf-angle window ------------------
     await meshRow.click();
     await meshRow.getByTestId('mesh-color-expand').click();
-    await page.getByTestId('mesh-helios-lmax').fill('0.5');
-    await page.getByTestId('mesh-helios-aspect').fill('5');
+    await page.getByTestId('mesh-tri-lmax').fill('0.5');
+    await page.getByTestId('mesh-tri-aspect').fill('5');
     await expect.poll(async () => {
       const s = await meshRow.getAttribute('data-triangle-count');
       return s ? parseInt(s, 10) : 0;

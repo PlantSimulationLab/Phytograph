@@ -242,7 +242,7 @@ export interface MeshData {
   // Helios-only: per-triangle filter metrics (aligned 1:1 with `indices`/3),
   // computed by the backend at full precision so the front-end can apply the
   // Lmax / aspect filter interactively and reproduce the C++ filter exactly
-  // (see lib/heliosFilter.ts). triEdgeMax = max of the triangle's three 3-D
+  // (see lib/triangleFilter.ts). triEdgeMax = max of the triangle's three 3-D
   // edge lengths (m); triAspect = maxEdge / minEdge. Present on an unfiltered
   // Helios triangulation mesh and on the filtered views derived from it.
   triEdgeMax?: Float32Array;
@@ -315,22 +315,38 @@ export interface MeshEntry {
     // don't z-fight the LAD voxel result. Absent for the auto-grid path.
     gridMeshId?: string;
   };
-  // Interactive Helios filtering (method === 'helios'). `heliosUnfiltered.data`
-  // holds the returned (auto-estimated, payload-bounded) mesh with per-triangle
-  // metrics computed from its geometry; `cap` is the loosening limit of that set
-  // (the front-end can filter down to it but not past it without a re-run);
-  // `estimate` is the backend auto-estimate (seeds the default + separation /
-  // merged-cloud readout). `heliosFilter` is the Lmax / aspect the user has
-  // dialed in. `data` is always the FILTERED view derived from
-  // heliosUnfiltered.data via applyHeliosFilter, so every consumer of `mesh.data`
-  // (rendering, leaf angles, exports) sees the chosen filter — and that chosen
+  // Interactive triangle filter — present on ANY triangulated mesh (Helios or
+  // the Open3D methods). `unfilteredMesh.data` holds the unfiltered candidate
+  // mesh with per-triangle metrics computed from its geometry; `cap` is the
+  // loosening limit of that set (the front-end can filter down to it but not past
+  // it without a re-run). `estimate` is the Helios backend auto-estimate (seeds
+  // the default + separation / merged-cloud readout), or the 'n/a' sentinel for
+  // Open3D meshes (no backend estimate; the panel then shows only the Lmax /
+  // aspect inputs). `triangleFilter` is the Lmax / aspect the user has dialed in.
+  // `data` is always the FILTERED view derived from unfilteredMesh.data via
+  // applyTriangleFilter, so every consumer of `mesh.data` (rendering, leaf
+  // angles, exports) sees the chosen filter — and for Helios that chosen
   // lmax/maxAspectRatio is what gets carried into the LAD inversion.
-  heliosUnfiltered?: {
+  unfilteredMesh?: {
     data: MeshData;
-    estimate: import('./heliosFilter').HeliosFilterEstimate;
+    estimate: import('./triangleFilter').TriangleFilterEstimate;
     cap: { lmax: number; maxAspectRatio: number };
   };
-  heliosFilter?: { lmax: number; maxAspectRatio: number };
+  triangleFilter?: { lmax: number; maxAspectRatio: number };
+  // Opt-in point-spacing cross-check (method === 'helios'). The auto-Lmax
+  // estimator can silently overshoot on a sparse surface (bridging across the
+  // gaps), which corrupts G(theta); the candidate-edge distribution can't
+  // self-diagnose that, so when the Otsu indicators aren't both High the panel
+  // offers a button that measures the real in-grid point spacing (a KD-tree pass,
+  // potentially slow on huge clouds) and compares it to the current Lmax. Holds
+  // the in-flight status and the latest verdict for display. Absent until run.
+  heliosSpacingCheck?: {
+    status: 'idle' | 'running' | 'done' | 'error';
+    medianSpacing?: number;   // median NN distance (m) of in-grid points
+    ratio?: number;           // lmax / medianSpacing the verdict was computed at
+    likelyBridging?: boolean; // true when the ratio suggests the run is bridging
+    message?: string;         // human-readable verdict / error
+  };
   // Plant-specific fields (for Helios plants)
   isPlant?: boolean;
   plantType?: string;
@@ -347,6 +363,10 @@ export interface MeshEntry {
   // Voxel-specific: per-axis grid subdivision count for the PyHelios LiDAR grid.
   // Only set on shape-voxel meshes; renders as a wireframe overlay when any axis > 1.
   gridSubdivisions?: { x: number; y: number; z: number };
+  // Set on shape-plane meshes. A flat plane is usually placed at the ground
+  // (z=0), coplanar with the ground grid; this flags the renderer to apply a
+  // depth polygon-offset so it doesn't z-fight the grid.
+  isPlane?: boolean;
 }
 
 // Human-readable label for a triangulation method, used in the default mesh
@@ -531,7 +551,7 @@ export interface LADResultEntry {
 export type ColorMode = 'x' | 'y' | 'height' | 'intensity' | 'rgb' | 'single' | 'per-scan' | 'scalar';
 
 // Shape types for shape creator
-export type ShapeType = 'voxel' | 'cylinder' | 'sphere' | 'cone';
+export type ShapeType = 'voxel' | 'cylinder' | 'sphere' | 'cone' | 'plane';
 
 // Filter range for a single field. Continuous fields use [min, max]; a
 // categorical field (e.g. ground_class / tree_instance) instead sets

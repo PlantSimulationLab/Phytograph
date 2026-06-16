@@ -629,6 +629,11 @@ export function generateShapeMesh(shapeType: ShapeType): MeshData {
       geometry = new THREE.CylinderGeometry(0, 0.5, 1, segments, 1);
       geometry.rotateX(-Math.PI / 2);
       break;
+    case 'plane':
+      // Unit quad in the XY plane (facing +Z). Width/length come from the mesh's
+      // per-axis scale transform; Euler rotation reorients it.
+      geometry = new THREE.PlaneGeometry(1, 1);
+      break;
     default:
       geometry = new THREE.BoxGeometry(1, 1, 1);
   }

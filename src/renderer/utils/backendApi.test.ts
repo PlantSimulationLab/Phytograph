@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   advancePlantSession,
   computeAlignmentDistance,
+  createCloudSession,
   createPlantSession,
   deletePlantSession,
   exportPointCloudLasLaz,
@@ -25,6 +26,8 @@ import {
   runLidarScan,
   segmentGround,
   triangulatePointCloud,
+  decodeBinaryFrame,
+  parseProgressMarkers,
 } from './backendApi';
 
 // Silence the production console.* calls — they're informational and just
@@ -707,6 +710,41 @@ describe('point cloud LAS/LAZ import/export', () => {
   });
 });
 
+describe('createCloudSession', () => {
+  const okBody = {
+    session_id: 's1', point_count: 10, cache_id: 'c1', cache_dir: '/x',
+    has_misses: false, miss_slug: 'is_miss',
+    bounds: { min: [0, 0, 0], max: [1, 1, 1] },
+    tight_bounds: { min: [0, 0, 0], max: [1, 1, 1] },
+  };
+
+  it('POSTs to /api/cloud/session/create with miss_distance_threshold null by default', async () => {
+    const spy = vi
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify(okBody), { status: 200 }));
+    await createCloudSession('/abs/scan.xyz', 'x y z target_index target_count');
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:8008/api/cloud/session/create');
+    expect(init?.method).toBe('POST');
+    const body = JSON.parse(init?.body as string);
+    expect(body).toMatchObject({
+      source_path: '/abs/scan.xyz',
+      ascii_format: 'x y z target_index target_count',
+      world_shift: null,
+      miss_distance_threshold: null,
+    });
+  });
+
+  it('forwards a user-configured miss_distance_threshold', async () => {
+    const spy = vi
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify(okBody), { status: 200 }));
+    await createCloudSession('/a.xyz', null, null, null, 2500);
+    const body = JSON.parse(spy.mock.calls[0][1]?.body as string);
+    expect(body.miss_distance_threshold).toBe(2500);
+  });
+});
+
 describe('importPointCloudByPath (renamed from importXyzByPath; now also serves PLY/PCD)', () => {
   // Build the same packed binary the backend streams back. Layout is
   // documented on /api/pointcloud/import_xyz_by_path. Kept duplicate from
@@ -1009,5 +1047,106 @@ describe('no-detail HTTP error fallbacks', () => {
         source_indices: [],
       }),
     ).rejects.toThrow(/HTTP 503/);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Progress markers (PHP1) that precede the PHB1 frame on streaming triangulate
+// endpoints. decodeBinaryFrame must skip them; parseProgressMarkers must read
+// complete markers and defer a marker split across stream reads.
+// ────────────────────────────────────────────────────────────────────────
+
+// Build a bare PHB1 frame buffer (no fetch mock) carrying one f32 buffer.
+function buildPhb1Frame(meta: Record<string, unknown>, name: string, data: number[]): ArrayBuffer {
+  const enc = new TextEncoder();
+  const descs = [{ name, dtype: 'f32', length: data.length }];
+  let headerStr = JSON.stringify({ meta, buffers: descs });
+  const pad = (4 - (enc.encode(headerStr).length % 4)) % 4;
+  headerStr += ' '.repeat(pad);
+  const headerBytes = enc.encode(headerStr);
+  const buf = new ArrayBuffer(8 + headerBytes.length + data.length * 4);
+  const u8 = new Uint8Array(buf);
+  const dv = new DataView(buf);
+  u8[0] = 0x50; u8[1] = 0x48; u8[2] = 0x42; u8[3] = 0x31; // 'PHB1'
+  dv.setUint32(4, headerBytes.length, true);
+  u8.set(headerBytes, 8);
+  new Float32Array(buf, 8 + headerBytes.length, data.length).set(data);
+  return buf;
+}
+
+// Build one PHP1 marker (mirrors _pack_progress_marker in main.py).
+function buildPhp1Marker(progress: number | null, message: string): Uint8Array {
+  const enc = new TextEncoder();
+  let payloadStr = JSON.stringify({ progress, message });
+  const pad = (4 - (enc.encode(payloadStr).length % 4)) % 4;
+  payloadStr += ' '.repeat(pad);
+  const payload = enc.encode(payloadStr);
+  const out = new Uint8Array(8 + payload.length);
+  out[0] = 0x50; out[1] = 0x48; out[2] = 0x50; out[3] = 0x31; // 'PHP1'
+  new DataView(out.buffer).setUint32(4, payload.length, true);
+  out.set(payload, 8);
+  return out;
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((n, p) => n + p.byteLength, 0);
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.byteLength; }
+  return out;
+}
+
+describe('parseProgressMarkers', () => {
+  it('parses leading PHP1 markers and stops at PHB1', () => {
+    const frame = new Uint8Array(buildPhb1Frame({ success: true }, 'vertices', [1, 2, 3]));
+    const m1 = buildPhp1Marker(0.25, 'Reading points');
+    const m2 = buildPhp1Marker(0.5, 'Meshing');
+    const stream = concat(new Uint8Array([0x20, 0x20, 0x20, 0x20]), m1, m2, frame);
+
+    const { markers, consumed } = parseProgressMarkers(stream, 0);
+    expect(markers).toEqual([
+      { progress: 0.25, message: 'Reading points' },
+      { progress: 0.5, message: 'Meshing' },
+    ]);
+    // Consumed the keepalive + both markers, stopping at the PHB1 magic.
+    expect(consumed).toBe(4 + m1.byteLength + m2.byteLength);
+  });
+
+  it('defers a marker split across reads (partial tail)', () => {
+    const full = buildPhp1Marker(0.75, 'Cleaning up mesh');
+    // First read delivers only the first 10 bytes of the marker.
+    const firstHalf = full.subarray(0, 10);
+    const r1 = parseProgressMarkers(firstHalf, 0);
+    expect(r1.markers).toEqual([]);
+    expect(r1.consumed).toBe(0); // nothing complete yet
+
+    // Re-presenting the whole marker (pending tail + remainder) parses it.
+    const r2 = parseProgressMarkers(full, 0);
+    expect(r2.markers).toEqual([{ progress: 0.75, message: 'Cleaning up mesh' }]);
+    expect(r2.consumed).toBe(full.byteLength);
+  });
+});
+
+describe('decodeBinaryFrame with leading progress markers', () => {
+  it('skips PHP1 markers + whitespace and decodes identically', () => {
+    const buf = buildPhb1Frame({ success: true, num_vertices: 1 }, 'vertices', [4, 5, 6]);
+    const plain = decodeBinaryFrame(buf);
+
+    const withMarkers = concat(
+      new Uint8Array([0x20, 0x20, 0x20, 0x20]),
+      buildPhp1Marker(0.1, 'Reading points'),
+      buildPhp1Marker(1.0, 'Finalizing'),
+      new Uint8Array(buf),
+    );
+    const decoded = decodeBinaryFrame(
+      withMarkers.buffer.slice(withMarkers.byteOffset, withMarkers.byteOffset + withMarkers.byteLength),
+    );
+
+    expect(decoded.meta).toEqual(plain.meta);
+    expect(Array.from(decoded.buffers.vertices as Float32Array)).toEqual([4, 5, 6]);
+  });
+
+  it('throws cleanly on a truncated frame', () => {
+    expect(() => decodeBinaryFrame(new Uint8Array([0x50, 0x48]).buffer)).toThrow();
   });
 });

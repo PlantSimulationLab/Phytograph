@@ -445,6 +445,27 @@ jobs:
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         run: npm run release
 
+      # ---------------- Smoke-test the PACKAGED app ----------------
+      # The steps above verify the backend BINARY boots and the .app is
+      # notarized, but nothing yet proves the assembled installer produces an
+      # app that actually OPENS. This launches the packaged binary under
+      # release/ via Playwright's _electron and asserts it doesn't instantly
+      # crash: the window opens, the supervised backend answers /version, and
+      # the renderer mounts. This is the artifact-level check that would catch
+      # a first-launch crash / backend-startup regression a green build hides.
+      # Linux needs a virtual display; macOS/Windows have a native one.
+      - name: Smoke-test packaged app (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          launcher=""
+          if [ "$RUNNER_OS" = "Linux" ]; then launcher="xvfb-run -a"; fi
+          $launcher npm run test:smoke-packaged
+
+      - name: Smoke-test packaged app (Windows)
+        if: runner.os == 'Windows'
+        run: npm run test:smoke-packaged
+
       # ---------------- Verify macOS notarization ----------------
       # The afterSign hook (scripts/notarize.cjs) *submits* to Apple but
       # silently no-ops if any APPLE_* secret is missing or SKIP_NOTARIZATION

@@ -102,14 +102,13 @@ test('triangulation uses overwritten synthetic data, not the stale source file',
       await rows.nth(i).click({ modifiers: ['ControlOrMeta'] });
     }
     await page.getByTestId('tool-triangulate').click();
-    // The static Triangulate tool opens the panel; with 2+ clouds (or the Helios
-    // method) it shows a Setup button that opens the multi-scan Helios dialog.
-    await page.getByTestId('triangulation-setup-button').click();
-    const heliosPopup = page.getByTestId('helios-triangulation-popup');
-    await expect(heliosPopup).toBeVisible();
-    // Triangulation runs unfiltered; the Lmax/aspect filter is applied in the
-    // mesh panel afterwards.
-    await page.getByTestId('helios-triangulate-button').click();
+    // The scans carry params, so the unified Triangulation modal defaults to the
+    // Helios method. Triangulation runs unfiltered; the Lmax/aspect filter is
+    // applied in the mesh panel afterwards.
+    const modal = page.getByTestId('triangulation-popup');
+    await expect(modal).toBeVisible();
+    await expect(modal.getByTestId('triangulation-method')).toHaveValue('helios');
+    await modal.getByTestId('triangulation-run-button').click();
 
     // A second mesh row (the triangulation result) is appended after the
     // imported sphere mesh.
@@ -120,8 +119,8 @@ test('triangulation uses overwritten synthetic data, not the stale source file',
     // the coarse file → 0 triangles at Lmax=0.05; the fine synthetic data yields
     // thousands. (The chevron's stopPropagation means no row selection is needed.)
     await triMeshRow.getByTestId('mesh-color-expand').click();
-    await page.getByTestId('mesh-helios-lmax').fill('0.05');
-    await page.getByTestId('mesh-helios-aspect').fill('4');
+    await page.getByTestId('mesh-tri-lmax').fill('0.05');
+    await page.getByTestId('mesh-tri-aspect').fill('4');
     await expect.poll(async () => {
       const s = await triMeshRow.getAttribute('data-triangle-count');
       return s ? parseInt(s, 10) : 0;

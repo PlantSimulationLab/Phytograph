@@ -45,10 +45,10 @@ test('imports a Helios <grid> block as a voxel-grid mesh', async () => {
     await expect(grid).toHaveAttribute('data-mesh-scale', '1.50,2.00,2.50');
     await expect(grid).toHaveAttribute('data-mesh-rotation', '0.0,0.0,30.0');
 
-    // Select the grid and open the resize panel to read its subdivisions.
-    await grid.click();
+    // Open the Transform panel for this mesh via its row's double-arrow button
+    // (which also selects the row) to read its subdivisions.
+    await grid.getByTestId('mesh-transform-toggle').click();
     await expect(grid).toHaveAttribute('data-selected', 'true');
-    await page.getByTestId('tool-mesh-transform').click();
 
     await expect(page.getByTestId('voxel-grid-x')).toHaveValue('2');
     await expect(page.getByTestId('voxel-grid-y')).toHaveValue('3');

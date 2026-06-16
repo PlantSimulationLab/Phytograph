@@ -37,6 +37,20 @@ test('Computes multi-return leaf area density from an imported full-waveform sca
     await expect(scanRows.nth(0)).toHaveAttribute('data-has-data', 'true');
     await expect(scanRows.nth(0)).toHaveAttribute('data-has-params', 'true');
 
+    // Miss auto-detection: this scan carries 2779 far-field sky/miss points
+    // (target_index == 99) but NO is_miss column. The backend must recover them
+    // at import — proven here by the per-scan "show misses" toggle, which only
+    // renders when the cloud's session reports has_misses. (It also keeps those
+    // 1001 m points out of the octree/bbox, fixing the ground-grid flicker.)
+    const scanId = await scanRows.nth(0).getAttribute('data-scan-id');
+    expect(scanId).toBeTruthy();
+    await expect(page.getByTestId(`scan-toggle-misses-${scanId}`)).toBeVisible();
+    // Octree (displayed cloud) is hits-only: ~6522 points, far below the 9301
+    // total. A point count near 9301 would mean misses leaked into the cloud.
+    const displayedPoints = parseInt((await scanRows.nth(0).getAttribute('data-point-count'))!, 10);
+    expect(displayedPoints).toBeGreaterThan(5000);
+    expect(displayedPoints).toBeLessThan(8000);
+
     // The imported scan's return type comes from the XML/params. Set it to
     // multi-return via the scan parameters popup so the LAD request marks it
     // multi (the backend still detects multi from the columns, but this matches

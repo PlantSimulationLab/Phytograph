@@ -75,8 +75,15 @@ export function MissOverlay({ sessionId, origin, pointSize = 0.05, refreshKey }:
   const material = useMemo(
     () => new THREE.PointsMaterial({
       color: new THREE.Color(MISS_COLOR[0], MISS_COLOR[1], MISS_COLOR[2]),
-      size: pointSize,
-      sizeAttenuation: true,
+      // SCREEN-PIXEL sizing (sizeAttenuation:false) to match the octree's
+      // Potree material, which uses PointSizeType.FIXED — i.e. `size` is pixels,
+      // not world units. With sizeAttenuation:true a pointSize of 1 rendered each
+      // miss as a 1-METRE sprite, so the thin projected sphere shell bloated into
+      // a slab as thick as it was wide. Pixels keep misses dot-sized like the
+      // hits regardless of zoom. Scale up slightly so they read as deliberate
+      // markers rather than noise.
+      size: Math.max(pointSize, 1) * 2,
+      sizeAttenuation: false,
       // Misses are display aids, not data — keep them lightweight and always
       // visible (no depth-write so they don't occlude the real cloud).
       depthWrite: false,

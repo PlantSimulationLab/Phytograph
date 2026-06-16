@@ -190,6 +190,32 @@ export function CameraController({
     return () => clearTimeout(timer);
   }, [hasContent, bounds, snapToView]);
 
+  // Adapt the perspective near/far planes to the scene size. The Canvas seeds a
+  // fixed near=0.01 / far=10000, which is the wrong scale at both extremes: a
+  // large scene clips at the far plane, and (worse) a far plane that dwarfs the
+  // content wastes depth-buffer precision near the camera, so coplanar geometry
+  // like the ground grid z-fights and flickers when orbiting near the origin.
+  // Derive far from the bounding-box diagonal and pin near so the ratio stays
+  // within the depth buffer's usable range (~1e5 for a 24-bit buffer). Runs
+  // whenever bounds change (cloud added / cropped / moved).
+  useEffect(() => {
+    const persp = camera as THREE.PerspectiveCamera;
+    if (!persp.isPerspectiveCamera) return;
+    const diag = bounds.size.length() || 1;
+    // Far must comfortably contain the scene from any orbit distance (the camera
+    // sits ~2x maxDim out); 10x diagonal is generous. Floor at 1000 so tiny
+    // scenes keep a sane far plane and don't clip when zoomed out.
+    const far = Math.max(1000, diag * 10);
+    // Cap far/near at 1e5 to preserve depth precision; never push near past a
+    // sub-centimetre 0.01 (we still want to zoom right up to a surface).
+    const near = Math.min(0.01, far / 1e5);
+    if (persp.far !== far || persp.near !== near) {
+      persp.far = far;
+      persp.near = near;
+      persp.updateProjectionMatrix();
+    }
+  }, [bounds, camera]);
+
   useEffect(() => {
     (window as any).__resetPointCloudCamera = resetCamera;
     (window as any).__snapToView = snapToView;

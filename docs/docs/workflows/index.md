@@ -4,10 +4,12 @@ Step-by-step recipes for the common tasks. Each workflow is
 self-contained — start at the top, follow along, end with a result.
 
 Every operation is reachable from the always-visible toolbar (left of the
-viewer) and from the menu bar. The toolbar and menus have three blocks:
-**Create** (build the scene — geometry and scanner placement), **Simulate**
-(synthesize scans), and **Tools** (analysis operations on existing data —
-pre-processing, segmentation, reconstruction). These workflows are grouped
+viewer) and from the menu bar. The **menu bar** has three menus: **Create**
+(build the scene — geometry and scanner placement), **Simulate** (synthesize
+scans), and **Tools** (analysis operations on existing data — pre-processing,
+segmentation, reconstruction). The **left toolbar** shows two of these as
+blocks — **Create** and **Tools**; the Simulate action (Run Synthetic Scan)
+lives in the Simulate menu and on the Scans panel. These workflows are grouped
 by the four stages of a typical processing pipeline.
 
 ## Getting around

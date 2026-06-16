@@ -20,7 +20,8 @@ classification field), do so first.
 ## Run extraction
 
 1. Select the cloud or mesh in the Scene panel.
-2. Click **Extract Skeleton** (branch icon).
+2. Click **Extract Skeleton** (the DNA-helix icon in the **Tools** ›
+   Reconstruction group).
 3. The panel on the right opens.
 4. Choose a **method**:
 

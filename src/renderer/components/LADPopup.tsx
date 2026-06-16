@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, Grid3x3 } from 'lucide-react';
 import { LADRequest } from '../utils/backendApi';
-import type { GridOption } from './HeliosTriangulationPopup';
+import type { GridOption } from '../lib/gridOption';
 import type { HeliosGrid } from '../utils/backendApi';
 import type { Scan } from '../lib/scan';
 import { hasData, hasParams } from '../lib/scan';
@@ -35,7 +35,6 @@ interface LADPopupProps {
   onStartLAD: (request: LADRequest, scanColors: string[], gridMeshId: string) => void;
   scans: Scan[];
   initialSelectedIds?: Set<string>;
-  onOpenScanParams?: (scanId: string) => void;
   // Voxel boxes available as the LAD grid. LAD REQUIRES one — when empty (and no
   // triangulation is reused) the compute button is disabled and the user is told
   // to create a voxel box.
@@ -61,7 +60,6 @@ export function LADPopup({
   onStartLAD,
   scans,
   initialSelectedIds,
-  onOpenScanParams,
   gridOptions = [],
   triangulationOptions = [],
   defaultLmax,
@@ -312,13 +310,12 @@ export function LADPopup({
             </div>
           ) : (
             <div className="border border-neutral-700 rounded-lg overflow-hidden">
-              <div className="grid grid-cols-[auto_1fr_auto_auto_auto_auto] gap-2 px-3 py-2 bg-neutral-900/80 border-b border-neutral-700 items-center">
+              <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-2 px-3 py-2 bg-neutral-900/80 border-b border-neutral-700 items-center">
                 <div className="w-4" />
                 <span className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider">Scan</span>
                 <span className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider w-16 text-center">X</span>
                 <span className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider w-16 text-center">Y</span>
                 <span className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider w-16 text-center">Z</span>
-                <span className="w-12" />
               </div>
 
               <div className="max-h-[35vh] overflow-y-auto">
@@ -330,7 +327,7 @@ export function LADPopup({
                       key={scan.id}
                       data-testid="lad-scan-row"
                       data-scan-id={scan.id}
-                      className={`grid grid-cols-[auto_1fr_auto_auto_auto_auto] gap-2 px-3 py-2 items-center border-b border-neutral-700/50 transition-colors ${
+                      className={`grid grid-cols-[auto_1fr_auto_auto_auto] gap-2 px-3 py-2 items-center border-b border-neutral-700/50 transition-colors ${
                         isSelected ? 'bg-neutral-700/30' : 'bg-neutral-800/50 opacity-60'
                       }`}
                     >
@@ -350,17 +347,6 @@ export function LADPopup({
                       <span className="w-16 px-1.5 py-1 text-[11px] text-neutral-300 text-center font-mono">{scan.params!.origin.x.toFixed(2)}</span>
                       <span className="w-16 px-1.5 py-1 text-[11px] text-neutral-300 text-center font-mono">{scan.params!.origin.y.toFixed(2)}</span>
                       <span className="w-16 px-1.5 py-1 text-[11px] text-neutral-300 text-center font-mono">{scan.params!.origin.z.toFixed(2)}</span>
-                      {onOpenScanParams ? (
-                        <button
-                          onClick={() => onOpenScanParams(scan.id)}
-                          className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors w-12 text-right"
-                          title="Edit scan parameters"
-                        >
-                          Edit…
-                        </button>
-                      ) : (
-                        <div className="w-12" />
-                      )}
                     </div>
                   );
                 })}

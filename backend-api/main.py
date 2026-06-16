@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import io
 import json
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Sequence
 from scipy.optimize import curve_fit, minimize
 import re
 import math
@@ -110,7 +110,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.19.0"
+BACKEND_VERSION = "0.23.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -1405,6 +1405,14 @@ class PointSource(BaseModel):
     # (`positions[i*3] + tx`) and the in-RAM `_region_mask` translation path.
     translation: Optional[List[float]] = None
     want_colors: bool = False
+    # Sky/miss points (`is_miss != 0`) are dropped by default for a session
+    # source: a miss is a ray that hit nothing, projected ~1 km out, so the
+    # surface-reconstruction consumers (triangulate, skeleton, segment, QSM) must
+    # never see it — exactly as the hits-only octree excludes it. Set True to
+    # keep misses (the only caller that does is export, which preserves whatever
+    # the user imported). Has no effect on a file-path source (those recover
+    # misses downstream via LAD's own readers, not this chokepoint).
+    include_misses: bool = False
     # When set, points come from a live cloud session's in-RAM array (the
     # Family-1 source of truth) with its per-point deletions already applied —
     # NOT from `source_path` on disk. This is how downstream ops honor unbaked
@@ -1424,7 +1432,23 @@ class TriangulationRequest(BaseModel):
     # `source.max_points` from the global "triangulate max points" setting to
     # bound open3d's memory on huge clouds.
     source: Optional[PointSource] = None
+    # MERGED multi-scan triangulation: read every source's points and fuse them
+    # into one cloud before meshing. Octree-backed clouds can't be merged on the
+    # client (their in-RAM points live in the backend session, and two source
+    # descriptors can't be concatenated into one request.source), so the renderer
+    # sends all contributing sources here and the backend vstacks them — keeping
+    # the session array as the source of truth. Takes precedence over
+    # `source` / `points` when non-empty. Each source's `max_points` still caps
+    # per-source; the fused total is bounded by the renderer.
+    sources: Optional[List[PointSource]] = None
     method: str = "ball_pivoting"  # "ball_pivoting", "poisson", "alpha_shape", "delaunay"
+    # Optional crop-to-grid box, as [min_x, min_y, min_z, max_x, max_y, max_z] in
+    # world coordinates. When set, points outside the (inclusive) AABB are dropped
+    # before meshing — a pure numpy mask applied to the resolved point array,
+    # regardless of source kind (inline / session / merged). Used by the
+    # "Crop to grid" toggle on the Ball Pivot path so only points inside a voxel
+    # box get triangulated. None = no crop (mesh every resolved point).
+    crop_box: Optional[List[float]] = None
     # Ball pivoting parameters
     radii: Optional[List[float]] = None  # Ball radii for ball pivoting (auto if None)
     # Poisson parameters
@@ -1454,7 +1478,7 @@ class TriangulationResponse(BaseModel):
     points_used: Optional[int] = None
 
 
-def _do_open3d_triangulation(request: TriangulationRequest) -> dict:
+def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> dict:
     """
     Triangulate a point cloud to create a mesh surface.
 
@@ -1466,26 +1490,63 @@ def _do_open3d_triangulation(request: TriangulationRequest) -> dict:
         - alpha_shape: Alpha Shape - creates mesh based on alpha radius, good for concave shapes
         - delaunay: 2D Delaunay triangulation projected to 3D - fast, for roughly planar surfaces
     """
+    def _report(fraction, message):
+        if progress is not None:
+            progress(fraction, message)
+
     try:
         import open3d as o3d
 
-        if request.source is not None:
+        _report(0.05, "Reading points")
+        if request.sources:
+            # Merged multi-scan: read and fuse every contributing source. Inline
+            # `points` (flat clouds that had no on-disk source) are folded in too,
+            # so a mix of octree- and inline-backed scans merges correctly.
+            parts = [_read_points_from_source(s)[0] for s in request.sources]
+            if request.points:
+                parts.append(np.array(request.points, dtype=np.float64))
+            parts = [p for p in parts if len(p) > 0]
+            points = np.vstack(parts) if parts else np.empty((0, 3), dtype=np.float64)
+        elif request.source is not None:
             points, _, _ = _read_points_from_source(request.source)
         else:
             points = np.array(request.points or [], dtype=np.float64)
+
+        # Crop to grid: drop points outside the requested AABB before meshing.
+        # A pure numpy mask on the already-resolved array — works the same for
+        # octree/session, merged, and inline sources (the points are in hand
+        # here regardless of how they were fetched). Applied before the
+        # min-3-points check so an over-tight box reports the right error.
+        if request.crop_box is not None and len(points) > 0:
+            cb = request.crop_box
+            if len(cb) != 6:
+                return {"success": False, "method_used": request.method,
+                        "num_triangles": 0, "num_vertices": 0, "points_used": 0,
+                        "error": "crop_box must be [min_x, min_y, min_z, max_x, max_y, max_z]"}
+            lo = np.array(cb[:3], dtype=np.float64)
+            hi = np.array(cb[3:], dtype=np.float64)
+            mask = np.all((points >= lo) & (points <= hi), axis=1)
+            points = points[mask]
+
         points_used = int(len(points))
 
         if len(points) < 3:
+            err = ("Need at least 3 points for triangulation — the crop-to-grid box "
+                   "contains too few points. Enlarge the grid box or turn off "
+                   "Crop to grid.") if request.crop_box is not None else \
+                  "Need at least 3 points for triangulation"
             return {"success": False, "method_used": request.method,
                     "num_triangles": 0, "num_vertices": 0, "points_used": points_used,
-                    "error": "Need at least 3 points for triangulation"}
+                    "error": err}
 
         # Create Open3D point cloud
+        _report(0.15, "Preparing point cloud")
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points)
 
         # Estimate normals if needed
         if request.estimate_normals:
+            _report(0.25, "Estimating normals")
             pcd.estimate_normals(
                 search_param=o3d.geometry.KDTreeSearchParamHybrid(
                     radius=request.normal_radius,
@@ -1497,6 +1558,7 @@ def _do_open3d_triangulation(request: TriangulationRequest) -> dict:
 
         mesh = None
         method_used = request.method
+        _report(0.45, f"Meshing ({request.method.replace('_', ' ')})")
 
         if request.method == "ball_pivoting":
             # Ball Pivoting Algorithm
@@ -1504,11 +1566,17 @@ def _do_open3d_triangulation(request: TriangulationRequest) -> dict:
                 pcd.estimate_normals()
                 pcd.orient_normals_consistent_tangent_plane(k=15)
 
-            # Auto-compute radii if not provided
+            # Auto-compute radii if not provided.
+            #
+            # Use the MEDIAN nearest-neighbor distance, not the mean: it is robust
+            # to the handful of sparse outliers that survive miss exclusion, so a
+            # few stray points can't inflate the ball radius (a too-large radius
+            # makes BPA explode combinatorially). The median reflects the real
+            # surface spacing.
             if request.radii is None:
                 distances = pcd.compute_nearest_neighbor_distance()
-                avg_dist = np.mean(distances)
-                radii = o3d.utility.DoubleVector([avg_dist, avg_dist * 2, avg_dist * 4])
+                ref_dist = float(np.median(distances))
+                radii = o3d.utility.DoubleVector([ref_dist, ref_dist * 2, ref_dist * 4])
             else:
                 radii = o3d.utility.DoubleVector(request.radii)
 
@@ -1525,6 +1593,7 @@ def _do_open3d_triangulation(request: TriangulationRequest) -> dict:
             )
 
             # Remove low-density vertices (artifacts)
+            _report(0.7, "Filtering low-density vertices")
             densities = np.asarray(densities)
             density_threshold = np.quantile(densities, 0.1)
             vertices_to_remove = densities < density_threshold
@@ -1602,6 +1671,7 @@ def _do_open3d_triangulation(request: TriangulationRequest) -> dict:
                     "error": "Triangulation produced no triangles. Try adjusting parameters or using a different method."}
 
         # Clean up mesh
+        _report(0.85, "Cleaning up mesh")
         mesh.remove_degenerate_triangles()
         mesh.remove_duplicated_triangles()
         mesh.remove_duplicated_vertices()
@@ -1612,6 +1682,7 @@ def _do_open3d_triangulation(request: TriangulationRequest) -> dict:
             mesh.compute_vertex_normals()
 
         # Calculate surface area
+        _report(0.95, "Computing surface area")
         surface_area = mesh.get_surface_area()
 
         # Extract results as numpy (the endpoint packs them straight to binary).
@@ -1619,6 +1690,7 @@ def _do_open3d_triangulation(request: TriangulationRequest) -> dict:
         triangles = np.asarray(mesh.triangles)
         normals = np.asarray(mesh.vertex_normals) if mesh.has_vertex_normals() else None
 
+        _report(1.0, "Finalizing")
         return {
             "success": True,
             "vertices": vertices,
@@ -1665,7 +1737,8 @@ def _pack_mesh_frame(result: dict, *, index_key: str = "triangles") -> bytes:
 @app.post("/api/triangulate")
 async def triangulate_point_cloud(request: TriangulationRequest):
     """Triangulate a point cloud (Open3D). Returns a PHB1 binary frame."""
-    return _bin_frame_streaming_response(lambda: _pack_mesh_frame(_do_open3d_triangulation(request)))
+    return _bin_frame_streaming_response(
+        lambda progress: _pack_mesh_frame(_do_open3d_triangulation(request, progress=progress)))
 
 
 # ==================== GROUND SEGMENTATION ====================
@@ -2280,6 +2353,35 @@ class HeliosTriangulationResponse(BaseModel):
     estimate: Optional["HeliosFilterEstimate"] = None
 
 
+class SpacingCheckResponse(BaseModel):
+    """Verdict from /api/triangulate/check-spacing — an opt-in cross-check of the
+    auto-estimated Lmax against the actual point spacing.
+
+    The auto-Lmax estimator (Otsu over candidate triangle-edge lengths) silently
+    fails on sparse shells: a thin layer of surface points generates mostly
+    *bridge* triangles spanning the cell interior, so the candidate-edge
+    distribution looks bimodal (eta/sep_ratio read "Medium"+) even though its
+    lower mode is still bridges, not surface. The chosen Lmax then far exceeds the
+    true point spacing and the reconstructed normals — hence G(theta) — are
+    garbage. The candidate edges can't self-diagnose this; an INDEPENDENT measure
+    of the surface scale can. We compute the median nearest-neighbor spacing of
+    the points strictly inside the grid cell(s) and compare it to `lmax`. This is
+    O(N log N) (a KD-tree build + query) and can take tens of seconds on a
+    tens-of-millions-of-points cloud, which is why it's a user-triggered button
+    rather than part of the triangulation, and why it's only offered when the
+    Otsu indicators aren't both High."""
+    success: bool
+    median_spacing: Optional[float] = None  # median NN distance (m) of in-cell points
+    lmax: float = 0.0                       # the Lmax this verdict was checked against
+    ratio: Optional[float] = None           # lmax / median_spacing
+    n_points: int = 0                       # in-cell points the spacing was measured on
+    # True when ratio >= _SPACING_BRIDGE_RATIO: Lmax is large enough relative to the
+    # point spacing that the triangulation is likely bridging across the surface.
+    likely_bridging: bool = False
+    message: Optional[str] = None           # human-readable verdict
+    error: Optional[str] = None
+
+
 # ==================== LEAF AREA DENSITY (LAD) ====================
 # Per-voxel leaf area density (m^2/m^3) via the PyHelios LiDAR plugin. LAD is
 # NOT the sum of triangle areas: the triangulation only supplies the per-cell
@@ -2632,7 +2734,7 @@ def _helios_filter_estimate(edge_max, scan_ids) -> dict:
             "merged": merged, "merged_message": _HELIOS_MERGED_MESSAGE if merged else None}
 
 
-def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool = False) -> dict:
+def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool = False, progress=None) -> dict:
     """Run Helios triangulation synchronously. Returns a result dict.
 
     When `edges_only` is True (the Lmax-suggestion path), skip the vertex dedup,
@@ -2656,10 +2758,15 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
     import os
     import numpy as np
 
+    def _report(fraction, message):
+        if progress is not None:
+            progress(fraction, message)
+
     tmpdir = None
     try:
         from pyhelios import LiDARCloud
 
+        _report(0.05, "Reading scans")
         tmpdir = tempfile.mkdtemp(prefix="phytograph_helios_")
 
         scans_info = []
@@ -2771,6 +2878,7 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         # verbatim. Otherwise auto-create a single cell tightly enclosing all
         # points and flag the response so the UI can warn that every point is
         # being triangulated (assumes ground/trunk already segmented/cropped).
+        _report(0.1, "Resolving grid")
         grid_warning = False
         grid_message = None
         if request.grid is not None:
@@ -2809,7 +2917,11 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         diag = {"candidates": 0, "kept": 0, "dropped_lmax": 0,
                 "dropped_aspect": 0, "dropped_degenerate": 0}
 
+        n_scans = len(scans_info)
         for scan_idx, scan_info in enumerate(scans_info):
+            _report(0.1 + 0.7 * scan_idx / max(n_scans, 1),
+                    f"Triangulating scan {scan_idx + 1} of {n_scans}"
+                    if n_scans > 1 else "Triangulating")
             xml_path = _generate_helios_xml(
                 tmpdir, [scan_info], grid_center, grid_size,
                 grid_nx, grid_ny, grid_nz,
@@ -2938,6 +3050,7 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         # returns the inverse map, which becomes the (T,3) triangle index list.
         # The big arrays are kept as numpy (not .tolist()) — the endpoint packs
         # them straight into the binary frame, skipping the list/JSON round-trip.
+        _report(0.85, "Deduplicating vertices")
         all_verts = tri_v.reshape(-1, 3)
         rounded = np.round(all_verts, 5)
         unique_arr, inverse = np.unique(rounded, axis=0, return_inverse=True)
@@ -2955,11 +3068,13 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         # leaf-angle distribution per voxel. With the auto 1x1x1 grid this is all
         # zeros. -1 (outside) is preserved; the binary packer casts it to the
         # uint32 sentinel 0xffffffff the renderer already treats as "outside".
+        _report(0.93, "Binning into grid")
         centroids = (v0 + v1 + v2) / 3.0
         triangle_cell_ids = _bin_points_to_cells(
             centroids, grid_center, grid_size, grid_nx, grid_ny, grid_nz
         )
 
+        _report(1.0, "Finalizing")
         return {
             "success": True,
             "vertices": unique_arr,
@@ -3053,7 +3168,190 @@ async def helios_triangulate(request: HeliosTriangulationRequest):
     meshes transfer compactly and parse as zero-copy typed arrays. Keepalive
     chunks during the (long) computation keep WebKit's stall timeout at bay.
     """
-    return _bin_frame_streaming_response(lambda: _pack_helios_triangulation(_do_helios_computation(request)))
+    return _bin_frame_streaming_response(
+        lambda progress: _pack_helios_triangulation(_do_helios_computation(request, progress=progress)))
+
+
+# Lmax / median-spacing ratio at or above which we call the triangulation "likely
+# bridging". A clean surface triangulated near its point spacing sits around 1-1.5x
+# (the self-test's 0.04 Lmax over ~0.03 spacing is ~1.3x); a bridge-contaminated
+# run like the leafcube_multi auto-estimate is ~7x. 3x is the conservative middle.
+_SPACING_BRIDGE_RATIO = 3.0
+
+
+def _resolve_scan_positions(scan_entry, warnings: list) -> "np.ndarray":
+    """Surviving (N,3) positions for one scan, by the same source priority as the
+    triangulation/LAD paths: live session (honoring unbaked deletions, never
+    re-reading the source) -> inline points -> source file. Positions only — the
+    spacing check needs no ray directions or multi-return columns."""
+    import numpy as np
+
+    sess = None
+    if scan_entry.session_id:
+        with _cloud_session_lock:
+            sess = _cloud_sessions.get(scan_entry.session_id)
+        if sess is None and scan_entry.file_path:
+            warnings.append(
+                "The edited point-cloud session was no longer available (the "
+                "backend likely restarted), so the spacing check used the source "
+                "file on disk. Unbaked deletions were not applied."
+            )
+        elif sess is None:
+            raise ValueError(
+                f"Cloud session not found: {scan_entry.session_id}. The backend "
+                "may have restarted since import. Re-import the scan and try again."
+            )
+
+    if sess is not None:
+        with _cloud_session_lock:
+            return np.ascontiguousarray(sess.positions[~sess.deleted], dtype=np.float64)
+    if scan_entry.points:
+        return np.asarray(scan_entry.points, dtype=np.float64).reshape(-1, 3)
+    if scan_entry.file_path:
+        if not os.path.isfile(scan_entry.file_path):
+            raise ValueError(f"Scan file not found: {scan_entry.file_path}")
+        xyz, _dirs, _labels, _vals, _flags = _file_to_lad_arrays(
+            scan_entry.file_path, scan_entry.ascii_format, scan_entry.origin)
+        return np.asarray(xyz, dtype=np.float64)
+    raise ValueError("Scan entry has no points, file_path, or session_id")
+
+
+def _points_inside_grid(xyz: "np.ndarray", grid_center, grid_size) -> "np.ndarray":
+    """Boolean mask for points STRICTLY inside the grid's overall AABB.
+
+    Distinct from `_cull_to_grid` (beam-intersects-AABB, which deliberately keeps
+    far miss rays for Beer's law): for the spacing check we want only the points
+    that actually lie on the reconstructed surface, so a far sky/miss point at
+    max range — whose beam crosses the grid but whose position is nowhere near it
+    — is excluded. Otherwise its nearest neighbor would be another distant miss,
+    poisoning the spacing estimate. Uses the grid's full extent (all cells), which
+    matches the region the triangulation tags with a gridCell."""
+    import numpy as np
+
+    c = np.asarray(grid_center, dtype=np.float64)
+    half = np.asarray(grid_size, dtype=np.float64) / 2.0
+    lo = c - half
+    hi = c + half
+    return np.all((xyz >= lo) & (xyz <= hi), axis=1)
+
+
+def _do_spacing_check(request: HeliosTriangulationRequest) -> dict:
+    """Measure in-cell point spacing and judge the request's Lmax against it.
+
+    See SpacingCheckResponse for the why. Pools the surviving in-cell points
+    across all scans, computes the median nearest-neighbor distance via a KD-tree,
+    and flags the run as likely-bridging when Lmax exceeds that spacing by
+    `_SPACING_BRIDGE_RATIO`."""
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    warnings: list = []
+
+    if request.grid is not None:
+        grid_center = list(request.grid.center)
+        grid_size = list(request.grid.size)
+    else:
+        # No explicit grid: the triangulation auto-boxed all points, so the
+        # spacing check measures the whole cloud (every point is "in-cell").
+        grid_center = grid_size = None
+
+    pooled = []
+    for scan_entry in request.scans:
+        xyz = _resolve_scan_positions(scan_entry, warnings)
+        if xyz.size == 0:
+            continue
+        if grid_center is not None:
+            xyz = xyz[_points_inside_grid(xyz, grid_center, grid_size)]
+        if xyz.size:
+            pooled.append(xyz)
+
+    if not pooled:
+        return {
+            "success": False,
+            "lmax": request.lmax,
+            "n_points": 0,
+            "error": "No points fall inside the grid — nothing to measure spacing on.",
+        }
+
+    pts = np.concatenate(pooled, axis=0)
+    n = pts.shape[0]
+    if n < 2:
+        return {
+            "success": False,
+            "lmax": request.lmax,
+            "n_points": int(n),
+            "error": "Too few in-grid points to measure a nearest-neighbor spacing.",
+        }
+
+    tree = cKDTree(pts)
+    # k=2: [0] is the point itself (distance 0), [1] is its nearest neighbor.
+    dist, _ = tree.query(pts, k=2, workers=-1)
+    nn = dist[:, 1]
+    nn = nn[np.isfinite(nn) & (nn > 0)]
+    if nn.size == 0:
+        return {
+            "success": False,
+            "lmax": request.lmax,
+            "n_points": int(n),
+            "error": "Nearest-neighbor distances were all zero (duplicate points?).",
+        }
+
+    median_spacing = float(np.median(nn))
+    ratio = request.lmax / median_spacing if median_spacing > 0 else None
+    likely = ratio is not None and ratio >= _SPACING_BRIDGE_RATIO
+
+    if likely:
+        message = (
+            f"Lmax ({request.lmax:g} m) is {ratio:.1f}x the median point spacing "
+            f"({median_spacing:.3g} m) inside the grid. The triangulation is likely "
+            f"bridging across a sparsely-sampled surface, which corrupts the leaf "
+            f"normals and G(theta). Try lowering Lmax toward the point spacing."
+        )
+    elif ratio is not None:
+        message = (
+            f"Lmax ({request.lmax:g} m) is {ratio:.1f}x the median point spacing "
+            f"({median_spacing:.3g} m) inside the grid — within the normal range, "
+            f"so bridging is unlikely to be distorting the result."
+        )
+    else:
+        message = f"Median point spacing inside the grid is {median_spacing:.3g} m."
+
+    return {
+        "success": True,
+        "median_spacing": median_spacing,
+        "lmax": request.lmax,
+        "ratio": ratio,
+        "n_points": int(n),
+        "likely_bridging": likely,
+        "message": message,
+        "warnings": warnings,
+    }
+
+
+@app.post("/api/triangulate/check-spacing", response_model=SpacingCheckResponse)
+async def triangulate_check_spacing(request: HeliosTriangulationRequest):
+    """Cross-check the auto-estimated Lmax against the actual in-grid point spacing.
+
+    An OPT-IN diagnostic (the renderer offers it as a button when the Otsu
+    indicators aren't both High). Potentially expensive — a KD-tree over up to
+    tens of millions of points — so it streams keepalive whitespace like
+    /api/lad/compute to survive WebKit's ~60s stall timeout, then yields the JSON
+    verdict. Reuses HeliosTriangulationRequest so the renderer sends the exact
+    scans + grid + lmax it triangulated with."""
+    import asyncio
+
+    def compute_and_serialize():
+        return json.dumps(_do_spacing_check(request))
+
+    async def stream_result():
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, compute_and_serialize)
+        while not future.done():
+            yield " "
+            await asyncio.sleep(5)
+        yield await future
+
+    return StreamingResponse(stream_result(), media_type="application/json")
 
 
 
@@ -9838,6 +10136,9 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
     if request.source is not None:
         src = request.source
         src.want_colors = True
+        # Export preserves whatever the user imported, sky/misses included — the
+        # compute consumers drop them, but an export should round-trip the cloud.
+        src.include_misses = True
         points, src_colors, src_intensity = _read_points_from_source(src)
         if fmt in ("xyz", "txt", "csv", "ply", "obj"):
             try:
@@ -10108,6 +10409,84 @@ def _normalise_miss_alias(name: str) -> Optional[str]:
 # its pulse direction. Matches Helios's gap_distance (LiDAR.cpp gapfillMisses).
 _MISS_GAP_DISTANCE = 20000.0
 
+# Helios assigns this sentinel target_index to a sky/miss return (LiDAR.cpp:5609,
+# "Special value to exclude from triangulation"). A miss-recording synthetic scan
+# exported to bare ASCII (e.g. `x y z timestamp target_index target_count`) drops
+# the canonical `is_miss` column but keeps this, so it's the primary signal for
+# recovering the flag at import — see `_autodetect_misses`.
+_MISS_TARGET_INDEX_SENTINEL = 99.0
+
+# Default far-field distance (m) for the DISTANCE fallback when neither an
+# is_miss column nor a target_index sentinel is present. Matches Helios's
+# LIDAR_RAYTRACE_MISS_T (LiDAR.h:831); user-overridable via the request.
+_MISS_RAYTRACE_DISTANCE = 1001.0
+
+
+def _autodetect_misses(
+    positions: "np.ndarray",
+    extras: Dict[str, "np.ndarray"],
+    extra_dims_meta: List[dict],
+    origin: Optional[Sequence[float]] = None,
+    distance_threshold: Optional[float] = None,
+) -> int:
+    """Recover the canonical `is_miss` flag for a cloud that carries Helios miss
+    points but no explicit `is_miss` column, MUTATING `extras`/`extra_dims_meta`
+    in place. Returns the number of misses tagged (0 if none / not applicable).
+
+    Helios synthetic scans place sky/miss returns at a far-field distance and tag
+    them `target_index == 99` (LiDAR.cpp:5607-5615). An ASCII export of such a
+    scan (e.g. `x y z timestamp target_index target_count`) keeps the sentinel
+    but loses `is_miss`, so the octree/overlay/LAD infrastructure — all of which
+    key off `is_miss` — never sees them and the far-field points poison the
+    bounding box. We synthesise the flag here, at the single file-read point, so
+    every downstream consumer works unchanged.
+
+    Precedence:
+      1. `is_miss` already present with any nonzero → leave untouched (an explicit
+         column always wins; matches E57 / structured-PLY recovery).
+      2. `target_index` present → miss = (target_index == 99). Exact, needs no
+         origin. This is the path the reported fixture hits.
+      3. origin known → miss = distance-from-origin >= 0.98 * threshold (mirrors
+         the C++ 0.98 band around miss_distance). `threshold` defaults to 1001 m.
+      4. neither index nor origin → no signal; tag nothing (don't guess).
+    """
+    # 1. Honour an explicit, already-flagged column.
+    existing = extras.get(_MISS_SLUG)
+    if existing is not None and bool(np.any(np.asarray(existing) != 0)):
+        return 0
+
+    n = int(positions.shape[0])
+    if n == 0:
+        return 0
+
+    miss: Optional[np.ndarray] = None
+
+    # 2. Primary: the target_index == 99 sentinel.
+    tindex = extras.get('target_index')
+    if tindex is not None:
+        miss = np.asarray(tindex) == _MISS_TARGET_INDEX_SENTINEL
+
+    # 3. Fallback: far-field distance from the scanner origin.
+    elif origin is not None:
+        org = np.asarray(origin, dtype=np.float64).reshape(3)
+        thr = float(distance_threshold) if distance_threshold else _MISS_RAYTRACE_DISTANCE
+        dist = np.linalg.norm(positions.astype(np.float64) - org, axis=1)
+        miss = dist >= 0.98 * thr
+
+    if miss is None:
+        return 0
+
+    count = int(np.count_nonzero(miss))
+    if count == 0:
+        return 0
+
+    # Overwrite any all-zero is_miss column (e.g. one synthesised by a prior step)
+    # rather than appending a duplicate dim.
+    extras[_MISS_SLUG] = miss.astype(np.float32)
+    if not any(ed.get("slug") == _MISS_SLUG for ed in extra_dims_meta):
+        extra_dims_meta.append({"slug": _MISS_SLUG, "label": _MISS_LABEL})
+    return count
+
 # Magic bytes on the wire. Renderer aborts if it sees anything else, so the
 # format is implicitly versioned by this value.
 _POINTCLOUD_BIN_MAGIC = b'PHX1'
@@ -10326,25 +10705,71 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
         if all(r in roles for r in ('x', 'y', 'z')):
             return roles
 
+    # Sample the first chunk of data rows: we need the column count AND, for the
+    # RGB assumption, the actual value ranges of the candidate colour columns.
+    sample: List[List[float]] = []
+    ncols = 0
     with open(file_path) as f:
         for raw in f:
             line = raw.strip()
             if not line or line.startswith('#') or line.startswith('//'):
                 continue
-            # Skip a header row for the positional count — use the first data row.
-            if any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
+            toks = line.split()
+            # Skip a header row — use the first data row for the count.
+            if any(re.search(r'[a-zA-Z]', tok) for tok in toks):
                 continue
-            ncols = len(line.split())
+            if ncols == 0:
+                ncols = len(toks)
+            try:
+                sample.append([float(t) for t in toks])
+            except ValueError:
+                # Ragged/garbage row — keep going; the count from the first
+                # clean row still drives the layout.
+                pass
+            if len(sample) >= 64:
+                break
+
+    if ncols >= 6:
+        # Positional convention assumes cols 4-6 are r255/g255/b255 — but only
+        # if those columns actually look like 8-bit colour. A column of GPS
+        # timestamps or return counts (Helios multi-return XYZ:
+        # `x y z timestamp intensity return#`) is order 1e5, nowhere near 0-255,
+        # so blindly tagging it 'red' silently mislabels the data. When the
+        # range check fails, drop the RGB guess and leave those columns 'skip'
+        # so the import wizard surfaces them as reassignable scalars instead.
+        if _columns_look_like_rgb255(sample, (3, 4, 5)):
             if ncols >= 7:
                 return ['x', 'y', 'z', 'r255', 'g255', 'b255', 'intensity']
-            if ncols >= 6:
-                return ['x', 'y', 'z', 'r255', 'g255', 'b255']
-            if ncols >= 4:
-                return ['x', 'y', 'z', 'intensity']
-            if ncols >= 3:
-                return ['x', 'y', 'z']
-            break
+            return ['x', 'y', 'z', 'r255', 'g255', 'b255']
+        # Not colour: keep xyz, carry the rest as reassignable extras.
+        return ['x', 'y', 'z'] + ['skip'] * (ncols - 3)
+    if ncols >= 4:
+        return ['x', 'y', 'z', 'intensity']
+    if ncols >= 3:
+        return ['x', 'y', 'z']
     return ['x', 'y', 'z']
+
+
+def _columns_look_like_rgb255(sample: List[List[float]], idxs) -> bool:
+    """Heuristic: do the given columns plausibly hold 8-bit RGB (0-255 ints)?
+
+    Used by the headerless positional fallback to avoid tagging a timestamp or
+    return-count column as 'red'. We require, across the sampled rows, that
+    every candidate value is a non-negative integer within 0-255. We do NOT
+    require the columns to span the full range (a uniform grey patch is valid
+    colour), only that nothing falls outside it. With no sample to inspect we
+    return False — better to leave columns unassigned than to guess wrong.
+    """
+    if not sample:
+        return False
+    for row in sample:
+        for i in idxs:
+            if i >= len(row):
+                return False
+            v = row[i]
+            if v < 0 or v > 255 or v != int(v):
+                return False
+    return True
 
 
 def _first_data_row_has_letters(file_path: str) -> bool:
@@ -10828,20 +11253,87 @@ def _bin_frame_bytes(meta: dict, buffers: "list[tuple]") -> bytes:
     return bytes(out)
 
 
+# Progress markers ride the same octet stream as the keepalives, ahead of the
+# PHB1 frame. Layout (little-endian):
+#   0  4              magic 'PHP1'
+#   4  4              uint32 json_len
+#   8  json_len       JSON {"progress": <float|null>, "message": "<str>"}
+#                     padded with spaces so the whole marker is a 4-byte multiple
+# The renderer skips/parses leading PHP1 markers (and whitespace keepalives)
+# before the PHB1 magic, so the frame's buffers stay 4-byte aligned for
+# zero-copy decode.
+_PROGRESS_MARKER_MAGIC = b"PHP1"
+
+
+def _pack_progress_marker(progress, message: str) -> bytes:
+    """Pack one PHP1 progress marker. `progress` is a 0..1 fraction or None."""
+    import struct
+    payload = json.dumps({"progress": progress, "message": message}).encode("utf-8")
+    payload += b" " * ((-len(payload)) % 4)  # keep total marker a 4-byte multiple
+    return _PROGRESS_MARKER_MAGIC + struct.pack("<I", len(payload)) + payload
+
+
 def _bin_frame_streaming_response(build_frame) -> StreamingResponse:
-    """Run build_frame() (returns PHB1 bytes) off-thread, emitting 4-byte
-    whitespace keepalives every 5s until it's done (so WebKit's ~60s stall
-    timeout doesn't fire on long computations), then the frame. The keepalive is
-    4 bytes so the total leading padding stays a multiple of 4 — the renderer
-    skips it and the frame's buffers remain 4-byte aligned for zero-copy decode."""
+    """Run build_frame() off-thread, emitting keepalives until it's done (so
+    WebKit's ~60s stall timeout doesn't fire on long computations), then the PHB1
+    frame. Keepalives are 4-byte whitespace chunks so the leading padding stays a
+    multiple of 4; the renderer skips them and the frame's buffers remain 4-byte
+    aligned for zero-copy decode.
+
+    `build_frame` may be either a zero-arg callable (returns PHB1 bytes) or a
+    one-arg callable taking a `progress(fraction, message)` reporter. When it
+    takes the reporter, queued progress updates are flushed as PHB1-compatible
+    PHP1 markers in place of blank keepalives, so the renderer can surface real
+    per-stage progress."""
     import asyncio
+    import inspect
+    import queue as _queue
+
+    wants_progress = len(inspect.signature(build_frame).parameters) >= 1
+    progress_queue: "_queue.Queue" = _queue.Queue()
+
+    def _report(fraction, message: str) -> None:
+        progress_queue.put((fraction, message))
+
+    def _run():
+        return build_frame(_report) if wants_progress else build_frame()
+
+    # In progress mode poll frequently so each stage flushes as its own stream
+    # chunk (rather than collapsing into the final drain on a fast compute) —
+    # this drives a smooth client-side bar. Emit a whitespace keepalive only
+    # every ~5s of genuine silence so the stall timeout never fires. Without a
+    # progress reporter, fall back to the plain 5s keepalive cadence.
+    poll = 0.02 if wants_progress else 5.0
+    silence_keepalive_after = 5.0
 
     async def stream():
         loop = asyncio.get_event_loop()
-        fut = loop.run_in_executor(None, build_frame)
+        fut = loop.run_in_executor(None, _run)
+        silent_for = 0.0
         while not fut.done():
-            yield b"    "
-            await asyncio.sleep(5)
+            emitted = False
+            try:
+                while True:
+                    fraction, message = progress_queue.get_nowait()
+                    yield _pack_progress_marker(fraction, message)
+                    emitted = True
+            except _queue.Empty:
+                pass
+            if emitted:
+                silent_for = 0.0
+            else:
+                silent_for += poll
+                if silent_for >= silence_keepalive_after:
+                    yield b"    "
+                    silent_for = 0.0
+            await asyncio.sleep(poll)
+        # Drain any progress queued in the final tick before the frame.
+        try:
+            while True:
+                fraction, message = progress_queue.get_nowait()
+                yield _pack_progress_marker(fraction, message)
+        except _queue.Empty:
+            pass
         yield await fut
 
     return StreamingResponse(stream(), media_type="application/octet-stream")
@@ -11075,11 +11567,23 @@ def _read_points_from_source(
     rebuild. The compute consumers of this path want positions only, so colours
     and intensity resolve to None here (the session DOES hold them — see
     `_read_las_into_arrays` — they're simply not surfaced for these ops).
+
+    Sky/miss points (`is_miss != 0`) are also dropped here, exactly as the
+    hits-only octree does (see `_session_to_las(exclude_misses=True)`). A miss is
+    a ray that hit nothing, projected ~1 km out — it is not a surface point, so
+    every compute consumer of this chokepoint (triangulate, skeleton, hits-only
+    LAD, export) must skip it. Leaving them in not only meshes a phantom shell a
+    kilometre away but, for ball-pivoting, makes BPA explode combinatorially and
+    hang. The misses-overlay endpoint reads `sess.extras` directly, not through
+    this function, so it still sees them.
     """
     if src.session_id is not None:
         sess = _get_cloud_session(src.session_id)
         with _cloud_session_lock:
-            positions = sess.positions[~sess.deleted].copy()
+            keep = ~sess.deleted
+            if not src.include_misses and _MISS_SLUG in sess.extras:
+                keep = keep & (sess.extras[_MISS_SLUG] == 0)
+            positions = sess.positions[keep].copy()
             session_world_shift = sess.world_shift
         # Restore true world coordinates: the session stored points with the
         # import-time global shift SUBTRACTED, so add it back here — the single
@@ -13679,6 +14183,12 @@ class CloudSessionCreateRequest(BaseModel):
     # back at the read chokepoint, so downstream ops/exports recover true world
     # coords. None / omitted = keep the original (possibly large) coordinates.
     world_shift: Optional[List[float]] = None
+    # Far-field distance (m) used by miss auto-detection's DISTANCE fallback only
+    # — when a scan carries no `is_miss` column AND no `target_index` sentinel, a
+    # point this far (>=0.98x) from the scanner origin is treated as a sky/miss.
+    # Mirrors Helios's LIDAR_RAYTRACE_MISS_T = 1001 m. None → 1001. The primary
+    # signal (target_index == 99) needs neither this nor an origin.
+    miss_distance_threshold: Optional[float] = None
 
 
 class DeleteRegionRequest(BaseModel):
@@ -13748,6 +14258,22 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             except FileNotFoundError:
                 pass
 
+        # Auto-detect Helios sky/miss points that arrived without an explicit
+        # `is_miss` column (e.g. an ASCII export carrying only target_index): tag
+        # them so they're excluded from the hits-only octree / bbox below and feed
+        # the overlay + LAD. Runs at this single read point — never re-reads the
+        # file (see CLAUDE.md "array is source of truth"). The DISTANCE fallback
+        # compares against the scanner origin in the SAME frame as `positions`, so
+        # shift the (true-world) origin by world_shift when one was applied.
+        _miss_origin = scan_meta["origin"] if (scan_meta and scan_meta.get("origin") is not None) else None
+        if _miss_origin is not None and world_shift_arr is not None:
+            _miss_origin = (np.asarray(_miss_origin, dtype=np.float64) - world_shift_arr).tolist()
+        autodetected_misses = _autodetect_misses(
+            positions, extras, extra_dims_meta,
+            origin=_miss_origin,
+            distance_threshold=request.miss_distance_threshold,
+        )
+
         n = int(len(positions))
         sess = CloudSession(
             session_id=session_id,
@@ -13789,6 +14315,19 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     miss_info: dict = {"has_misses": has_misses, "miss_slug": _MISS_SLUG}
     if has_misses:
         miss_info["miss_count"] = int(np.count_nonzero(miss_arr != 0))
+    # When misses were recovered (no explicit is_miss column), report it so the
+    # detection is never silent — the user sees that far-field points were
+    # reclassified as sky and pulled out of the bounding box / octree.
+    if autodetected_misses > 0:
+        miss_info["autodetected_misses"] = autodetected_misses
+        _by = ("their target_index == 99 sentinel"
+               if extras.get('target_index') is not None
+               else "their far-field distance from the scanner")
+        miss_info.setdefault("warnings", []).append(
+            f"Detected {autodetected_misses} sky/miss point(s) by {_by} and tagged "
+            "them (the scan carried no explicit is_miss column). They are excluded "
+            "from the displayed cloud and used for the miss overlay + LAD."
+        )
     if scan_meta and scan_meta.get("origin") is not None:
         miss_info["scan_origin"] = scan_meta["origin"]
     # Full scan-pattern params (origin + angular sweep + grid resolution) when
@@ -13806,12 +14345,12 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     if scan_meta and scan_meta.get("unplaceable_miss_count"):
         upc = int(scan_meta["unplaceable_miss_count"])
         miss_info["unplaceable_miss_count"] = upc
-        miss_info["warnings"] = [
+        miss_info.setdefault("warnings", []).append(
             f"{upc} sky/miss point(s) were flagged but could not be placed at "
             "import (the scanner zeroed invalid-cell coordinates and the file "
             "carries no scan angles). They are kept and tagged; their beam "
             "directions are recovered from the scan grid during LAD."
-        ]
+        )
 
     # Echo the applied global shift so the renderer persists it on the cloud's
     # OctreeRef (provenance + world-coord readouts). null when no shift was applied.
@@ -13836,10 +14375,10 @@ async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
       is honest and never shifts.
 
     - **Origin supplied** (scan params define a scanner): project each miss onto
-      a sphere centred on the origin, with radius = the farthest hit's distance
-      from that origin plus a small margin, so misses always lie just BEYOND any
-      hit point. This keeps them visible against the cloud without depending on
-      anything but the stored beam direction and the origin.
+      a sphere centred on the origin, with radius set CLEARLY beyond the farthest
+      hit (margin scaled to the cloud's radial depth), so the miss shell sits
+      visibly outside the cloud rather than interleaving with the hit points.
+      Depends only on the stored beam direction and the origin.
 
     Returns {count, total, origin, radius, positions} where positions is a flat
     [x,y,z, x,y,z, ...] list (empty when none). `count` is how many are drawn;
@@ -13874,14 +14413,21 @@ async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
         }
 
     # Origin defined: project each miss onto a sphere centred on the origin, at a
-    # radius just beyond the farthest hit so misses always sit outside the cloud.
+    # radius CLEARLY beyond the farthest hit so the miss shell sits visibly
+    # outside the cloud — not abutting or interleaving with the hit points.
     origin = np.array([origin_x, origin_y, origin_z], dtype=np.float64)
-    # Radius = farthest hit distance FROM THE ORIGIN (not the hit centre — the
-    # projection is origin-centred, so the enclosing radius must be too), plus a
-    # 5% margin to guarantee misses clear every hit point.
-    _MISS_SPHERE_MARGIN = 1.05
     if hit_pos.shape[0] > 0:
-        radius = float(np.max(np.linalg.norm(hit_pos - origin, axis=1))) * _MISS_SPHERE_MARGIN
+        hit_dists = np.linalg.norm(hit_pos - origin, axis=1)
+        far = float(np.max(hit_dists))
+        near = float(np.min(hit_dists))
+        # The radius must clear the FARTHEST hit by a generous margin so the miss
+        # shell reads as a distinct halo well outside the cloud — not a band
+        # hugging its far surface. The margin scales with the cloud's own radial
+        # depth (far − near) so it adapts to scene size, with a multiplicative
+        # floor and a small absolute floor for near-zero-depth clouds. Tuned up
+        # from earlier (depth*0.25 / *1.15) which still sat too close.
+        depth = max(far - near, 0.0)
+        radius = max(far + 1.0 * depth, far * 1.4, far + 1.0)
     else:
         radius = 1.0
     if radius <= 0:

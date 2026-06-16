@@ -24,8 +24,9 @@ present when you run the tool, Phytograph warns you (but still runs).
 1. **Import** your scan (see [Import & export](import-export.md)) and, if needed,
    run [Segment ground points](segment-ground.md) and keep the non-ground cloud.
 2. **Select** the cloud in the scan list.
-3. Open the **Segment Trees** tool from the toolbar (the sprout icon) or the
-   command palette (`Cmd/Ctrl-K` → "Segment Trees").
+3. Open the **Segment Trees** tool from the toolbar (the trees/forest icon in
+   the **Tools** › Segmentation group) or the command palette
+   (`Cmd/Ctrl-K` → "Segment Trees").
 4. Adjust parameters if needed:
     - **3D reg. strength (λ₁)** — regularization for the initial 3D
       segmentation. Default `1.0`.

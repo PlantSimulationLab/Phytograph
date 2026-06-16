@@ -734,7 +734,7 @@ describe('parsePointCloudFromPath', () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toContain('/api/cloud/session/create');
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null });
+    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null });
   });
 
   it('forwards ascii_format to create_cloud_session when provided', async () => {

@@ -24,21 +24,22 @@ and delete.
 
 A vertical column down the left side. At the top are the **view** controls
 (reset camera, command-palette search) and the **snap-view** gizmo. Below
-those are three always-visible blocks — **Create**, **Simulate**, and
-**Tools**:
+those are two always-visible blocks — **Create** and **Tools**:
 
 | Block | Buttons |
 |---|---|
-| **Create** (build the scene) | Generate Plant, Import Model, Create Voxel Grid, Add Scan |
-| **Simulate** (synthetic scanning) | Run Synthetic Scan |
+| **Create** (build the scene) | Generate Plant, Import Model, Create Voxel Grid, Create Plane, Add Scan |
 | **Tools** › Pre-processing | Translate, Crop, Erase, Filter, Resample, Move to Origin, Align (ICP), Stitch |
 | **Tools** › Segmentation | Segment Ground, Segment Wood / Leaf, Segment Trees |
 | **Tools** › Reconstruction | Triangulate, Extract Skeleton, Build QSM, Leaf Area Density |
 
-**Create** and **Simulate** are kept separate from **Tools** on purpose:
-Create and Simulate *build* a scene (generating geometry, placing scanners,
-synthesizing scans), whereas Tools *operate on data you already have*. The
-Tools block holds only the three analysis stages of a typical pipeline.
+**Create** is kept separate from **Tools** on purpose: Create *builds* a
+scene (generating geometry, placing scanners), whereas Tools *operate on
+data you already have*. The Tools block holds only the three analysis
+stages of a typical pipeline. Synthetic scanning (**Simulate**) has no
+left-column block of its own — run it from the **Simulate** menu (**Run
+Synthetic Scan**) or the **Run Synthetic LiDAR Scan** button at the top of
+the **Scans** panel once a scanner is placed.
 
 Hover any button to see its name. Buttons no longer appear and disappear
 with your selection — they're always shown so you can see what's available.
@@ -46,10 +47,10 @@ with your selection — they're always shown so you can see what's available.
 - **Single-input tools** (Filter, Segment Ground, Triangulate, …) act on the
   selected cloud. They're greyed out until you select one; the tooltip tells
   you what to pick.
-- **Multi-input tools** (Align, Stitch, Leaf Area Density, Run Synthetic
-  Scan) stay enabled and open a dialog where you pick their inputs explicitly
-  — for example, Leaf Area Density lets you choose the scans and the voxel
-  grid. If a needed input doesn't exist yet, the dialog tells you.
+- **Multi-input tools** (Align, Stitch, Leaf Area Density) stay enabled and
+  open a dialog where you pick their inputs explicitly — for example, Leaf
+  Area Density lets you choose the scans and the voxel grid. If a needed
+  input doesn't exist yet, the dialog tells you.
 
 Everything in these blocks is also in the menu bar — under the **Tools**,
 **Create**, and **Simulate** menus, grouped the same way — and in the

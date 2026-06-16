@@ -17,7 +17,7 @@ surface.
 ## Steps
 
 1. **Select the scan(s)** in the Scans panel first, then **create the
-   voxel grid.** Click **Create Voxel** (the box icon in the Create group).
+   voxel grid.** Click **Create Voxel Grid** (the box icon in the Create group).
    A 1×1×1 m box appears at the origin and the Transform panel opens; the
    scan selection is kept so you can fit the box in one click.
     - Click **Fit to selected scan(s)** in the Transform panel to resize
@@ -48,6 +48,13 @@ surface.
       are hidden (they're locked to the mesh). Choose **Run a new triangulation**
       to set everything yourself instead. (This selector only appears when a
       reusable Helios triangulation exists — one built with a voxel grid.)
+
+        !!! note "You don't need a Helios mesh first"
+            The inversion always re-triangulates the scans server-side, so it
+            never depends on how (or whether) you triangulated in the viewer. A
+            **Run a new triangulation** with your scans + grid is the full
+            workflow on its own — reuse is just a shortcut that locks the
+            settings to an existing Helios mesh so you don't re-enter them.
     - Pick the **voxel grid** to use (required — no auto-grid). *(New
       triangulation only.)*
     - **Max Edge Length (Lmax)** and **Max Aspect Ratio** control the

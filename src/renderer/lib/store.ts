@@ -50,6 +50,13 @@ export interface AppSettings {
   // make markers easier to spot against large scans, lower it to de-emphasise
   // them. Applied to every marker's fitted scale when it's built.
   scanMarkerScale: number;
+  // Far-field distance (m) used ONLY by miss auto-detection's distance fallback:
+  // when an imported scan carries far-field sky/miss points but no is_miss column
+  // AND no target_index sentinel, points this far (>=0.98x) from the scanner are
+  // tagged as misses (and pulled out of the bounding box). Defaults to Helios's
+  // LIDAR_RAYTRACE_MISS_T = 1001 m. The primary signal (target_index == 99) needs
+  // neither this nor a scanner origin, so most Helios scans ignore this value.
+  missDistanceThreshold: number;
 }
 
 export interface StoreData {
@@ -63,6 +70,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   defaultBackgroundColor: 'black',
   defaultPointSize: 1,
   scanMarkerScale: 1,
+  missDistanceThreshold: 1001,
 };
 
 const hasElectron = (): boolean => typeof window !== 'undefined' && !!window.electronAPI;

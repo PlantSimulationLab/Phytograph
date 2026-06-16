@@ -504,8 +504,19 @@ describe('generateShapeMesh', () => {
     expect(mesh.vertices.length).toBe(mesh.vertexCount * 3);
   });
 
+  it('produces a 2-triangle quad for a plane', () => {
+    const mesh = generateShapeMesh('plane');
+    expect(mesh.triangleCount).toBe(2);
+    expect(mesh.vertexCount).toBe(6);
+    expect(mesh.indices.length).toBe(6);
+    expect(mesh.normals).toBeInstanceOf(Float32Array);
+    expect(mesh.vertices.length).toBe(mesh.vertexCount * 3);
+    // Every coordinate is finite (no NaN from the geometry extraction).
+    expect(Array.from(mesh.vertices).every(Number.isFinite)).toBe(true);
+  });
+
   it('produces non-empty meshes for every shape type', () => {
-    for (const shape of ['sphere', 'cylinder', 'cone'] as const) {
+    for (const shape of ['sphere', 'cylinder', 'cone', 'plane'] as const) {
       const mesh = generateShapeMesh(shape);
       expect(mesh.vertexCount).toBeGreaterThan(0);
       expect(mesh.triangleCount).toBeGreaterThan(0);

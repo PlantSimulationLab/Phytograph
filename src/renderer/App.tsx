@@ -18,6 +18,7 @@ import { resolveTargets } from "./lib/bulkActions";
 import { FeedbackDialog } from "./components/FeedbackDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { getSettings } from "./lib/store";
 import type { FeedbackMode } from "./lib/feedback";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
@@ -183,8 +184,13 @@ function App() {
     color: string,
   ): Promise<Scan> => {
     const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, worldShift } = result;
+    // Far-field miss-detection threshold is a user setting; thread it into the
+    // import so the backend's distance fallback honours it (the primary
+    // target_index==99 signal ignores it).
+    const missDistanceThreshold = (await getSettings()).missDistanceThreshold;
     const data = await parsePointCloudFromPath(
       input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift, continuousSlugs,
+      missDistanceThreshold,
     );
     for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
     for (const slug of continuousSlugs) registerContinuousSlug(slug);

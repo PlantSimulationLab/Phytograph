@@ -12,7 +12,8 @@ You need a generated plant already in the scene. See
 ## Open the morph panel
 
 1. Select the plant's mesh in the Scene panel.
-2. Click **Morph** (DNA icon) in the toolbar. The Morph popup opens.
+2. Open the command palette (<kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+<kbd>K</kbd>) and
+   run **Morph Plant**. The Morph popup opens.
 
 ## What you can change
 

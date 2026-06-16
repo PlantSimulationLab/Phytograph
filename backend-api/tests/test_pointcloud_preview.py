@@ -190,6 +190,62 @@ def test_preview_headerless_xyz_positional(client, tmp_path: Path):
     assert body["columns"][3]["type_hint"] == "categorical"
 
 
+def test_preview_headerless_six_col_rgb_detected(client, tmp_path: Path):
+    # No header; 6 columns whose 4th-6th look like 8-bit colour (0-255 ints) →
+    # the positional fallback assigns r255/g255/b255.
+    f = tmp_path / "rgb.xyz"
+    f.write_text(
+        "0.1 0.2 0.3 200 100 50\n"
+        "0.4 0.5 0.6 12 250 0\n"
+        "0.7 0.8 0.9 255 0 128\n"
+    )
+    res = client.post("/api/pointcloud/preview", json={"file_path": str(f)})
+    assert res.status_code == 200, res.text
+    roles = [c["detected_role"] for c in res.json()["columns"]]
+    assert roles[:6] == ["x", "y", "z", "r255", "g255", "b255"]
+
+
+def test_preview_headerless_multireturn_not_mistaken_for_rgb(client, tmp_path: Path):
+    # Helios multi-return XYZ (`x y z timestamp intensity return#`), no header.
+    # Column 4 is a GPS timestamp of order 1e5 — far outside 0-255 — so the
+    # positional fallback must NOT tag cols 4-6 as r255/g255/b255. Instead they
+    # drop to 'skip', which the wizard surfaces as reassignable scalars.
+    f = tmp_path / "leafcube_multi.xyz"
+    f.write_text(
+        "984.2437 108.2988 108.5248 297972.0000 99 1\n"
+        "984.6583 108.3442 104.6110 297973.0000 99 1\n"
+        "985.0575 108.3879 100.6957 297974.0000 99 1\n"
+    )
+    res = client.post("/api/pointcloud/preview", json={"file_path": str(f)})
+    assert res.status_code == 200, res.text
+    cols = res.json()["columns"]
+    roles = [c["detected_role"] for c in cols]
+    assert roles[:3] == ["x", "y", "z"]
+    # No RGB mislabel — cols 4-6 are reassignable scalars, not colour.
+    assert "r255" not in roles and "g255" not in roles and "b255" not in roles
+    for i in (3, 4, 5):
+        assert cols[i]["detected_role"] == "skip"
+        assert cols[i]["remappable"] is True
+        assert cols[i]["suggested_slug"] == f"col_{i + 1}"
+
+
+def test_columns_look_like_rgb255_unit():
+    # In range (0-255 ints) → RGB.
+    assert main._columns_look_like_rgb255(
+        [[0.0, 0.0, 0.0, 200, 100, 50], [0.0, 0.0, 0.0, 255, 0, 128]], (3, 4, 5))
+    # A timestamp column (>255) disqualifies it.
+    assert not main._columns_look_like_rgb255(
+        [[0.0, 0.0, 0.0, 297972.0, 99, 1]], (3, 4, 5))
+    # Non-integer (0-1 float colour) is not 8-bit RGB either.
+    assert not main._columns_look_like_rgb255(
+        [[0.0, 0.0, 0.0, 0.5, 0.2, 0.1]], (3, 4, 5))
+    # Negative disqualifies.
+    assert not main._columns_look_like_rgb255(
+        [[0.0, 0.0, 0.0, -1, 10, 20]], (3, 4, 5))
+    # No sample → don't guess.
+    assert not main._columns_look_like_rgb255([], (3, 4, 5))
+
+
 def test_preview_never_500s_on_garbage(client, tmp_path: Path):
     f = tmp_path / "junk.xyz"
     f.write_bytes(b"\x00\x01\x02 not really a point cloud \xff")

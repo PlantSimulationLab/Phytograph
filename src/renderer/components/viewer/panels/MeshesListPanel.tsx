@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
-import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle } from 'lucide-react';
+import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle, Maximize2 } from 'lucide-react';
 import type { MeshEntry, MeshColorMode, PointCloudEntry } from '../../../lib/pointCloudTypes';
 import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS } from '../../../lib/pointCloudTypes';
 import { meshHasScanColors } from '../../../lib/pointCloudHelpers';
+import type { TriangleFilterEstimate } from '../../../lib/triangleFilter';
 import { ColormapName, COLORMAP_NAMES } from '../../../lib/colormaps';
 
 // How long to wait after the last keystroke before re-deriving the filtered
@@ -16,27 +17,32 @@ const FILTER_DEBOUNCE_MS = 350;
 // the stored candidate set). Commits are debounced so the re-filter only runs
 // once the user pauses typing; Enter/blur commit immediately. The "Auto" button
 // re-applies the Otsu estimate.
-function HeliosFilterControls({
+function TriangleFilterControls({
   mesh,
   onChange,
+  onCheckSpacing,
 }: {
   mesh: MeshEntry;
   onChange: (id: string, next: { lmax: number; maxAspectRatio: number }) => void;
+  onCheckSpacing: (id: string) => void;
 }) {
-  const filter = mesh.heliosFilter!;
-  const estimate = mesh.heliosUnfiltered!.estimate;
-  const cap = mesh.heliosUnfiltered!.cap;
+  const filter = mesh.triangleFilter!;
+  const estimate = mesh.unfilteredMesh!.estimate;
+  const cap = mesh.unfilteredMesh!.cap;
   const estLmax = estimate.lmax;
   const hasEst = estLmax != null && Number.isFinite(estLmax);
-  const [lmaxStr, setLmaxStr] = useState(String(filter.lmax));
-  const [aspectStr, setAspectStr] = useState(String(filter.maxAspectRatio));
+  const [lmaxStr, setLmaxStr] = useState(formatLmax(filter.lmax));
+  // The aspect filter is "off" at the wide-open cap sentinel — show it blank then
+  // (an empty "no limit" field) rather than a giant 1e9 number. Open3D meshes
+  // start here; the user types a real ratio to enable aspect filtering.
+  const [aspectStr, setAspectStr] = useState(formatAspect(filter.maxAspectRatio));
   // Toggles the "how to read these" popover next to the separation readout.
   const [showHelp, setShowHelp] = useState(false);
 
   // Resync the inputs when the filter is changed elsewhere (e.g. the Auto button
   // or a fresh estimate), so the displayed values track the mesh's actual filter.
   useEffect(() => { setLmaxStr(formatLmax(filter.lmax)); }, [filter.lmax]);
-  useEffect(() => { setAspectStr(String(filter.maxAspectRatio)); }, [filter.maxAspectRatio]);
+  useEffect(() => { setAspectStr(formatAspect(filter.maxAspectRatio)); }, [filter.maxAspectRatio]);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clearPending = () => {
@@ -51,8 +57,10 @@ function HeliosFilterControls({
   const commitNow = (lmaxValue: string, aspectValue: string) => {
     clearPending();
     const lmax = parseFloat(lmaxValue);
-    const maxAspectRatio = parseFloat(aspectValue);
-    if (!(lmax > 0) || !(maxAspectRatio > 0)) return; // ignore empty / partial input
+    // A blank aspect field means "no aspect limit" — commit at the cap sentinel.
+    const aspectTrimmed = aspectValue.trim();
+    const maxAspectRatio = aspectTrimmed === '' ? cap.maxAspectRatio : parseFloat(aspectTrimmed);
+    if (!(lmax > 0) || !(maxAspectRatio > 0)) return; // ignore partial input
     onChange(mesh.id, { lmax, maxAspectRatio });
   };
 
@@ -84,7 +92,7 @@ function HeliosFilterControls({
     : 'text-neutral-400';
 
   return (
-    <div className="space-y-1.5" data-testid="mesh-helios-filter">
+    <div className="space-y-1.5" data-testid="mesh-tri-filter">
       <div className="text-[10px] text-neutral-400 flex items-center gap-1">
         <Filter className="w-3 h-3" />
         Filter
@@ -93,7 +101,7 @@ function HeliosFilterControls({
         <div>
           <label className="text-[9px] text-neutral-500 block mb-0.5">L<sub>max</sub> (m)</label>
           <input
-            data-testid="mesh-helios-lmax"
+            data-testid="mesh-tri-lmax"
             type="number"
             step="0.01"
             min="0.001"
@@ -109,7 +117,7 @@ function HeliosFilterControls({
         <div>
           <label className="text-[9px] text-neutral-500 block mb-0.5">Max aspect</label>
           <input
-            data-testid="mesh-helios-aspect"
+            data-testid="mesh-tri-aspect"
             type="number"
             step="0.5"
             min="1"
@@ -122,26 +130,28 @@ function HeliosFilterControls({
           />
         </div>
       </div>
-      <div className="flex items-center justify-between">
+      {/* Auto button + separation readout — Helios meshes only (they carry the
+          backend Otsu estimate). Open3D meshes have no estimate (hasEst false),
+          so this whole row is hidden and the panel shows just the Lmax / aspect
+          inputs above. */}
+      {hasEst && (
+      <div className="flex items-start justify-between gap-2">
         <button
-          data-testid="mesh-helios-auto"
+          data-testid="mesh-tri-auto"
           onClick={(e) => {
             e.stopPropagation();
             if (!hasEst) return;
             setLmaxStr(formatLmax(estLmax!));
             commitNow(String(estLmax), aspectStr);
           }}
-          disabled={!hasEst}
           title="Auto-estimate Lmax from the candidate edge-length distribution"
-          className={`flex items-center gap-1 text-[10px] transition-colors ${
-            hasEst ? 'text-green-400 hover:text-green-300' : 'text-neutral-600 cursor-not-allowed'
-          }`}
+          className="flex flex-shrink-0 items-center gap-1 text-[10px] text-green-400 hover:text-green-300 transition-colors"
         >
           <Wand2 className="w-3 h-3" /> Auto
         </button>
         {estimate.label !== 'n/a' && (
-          <div className="relative flex items-center gap-1">
-            <span data-testid="mesh-helios-separation" className={`text-[10px] ${confidenceClass}`}>
+          <div className="relative flex min-w-0 items-start gap-1">
+            <span data-testid="mesh-tri-separation" className={`text-[10px] text-right ${confidenceClass}`}>
               Separation: {estimate.label} (η {estimate.eta.toFixed(2)})
               {estimate.sepRatio != null && (
                 <span className={separationRatioClass}>
@@ -150,16 +160,16 @@ function HeliosFilterControls({
               )}
             </span>
             <button
-              data-testid="mesh-helios-separation-help"
+              data-testid="mesh-tri-separation-help"
               onClick={(e) => { e.stopPropagation(); setShowHelp((v) => !v); }}
               aria-label="How to read the separation metrics"
-              className="text-neutral-500 hover:text-neutral-200 transition-colors"
+              className="flex-shrink-0 mt-px text-neutral-500 hover:text-neutral-200 transition-colors"
             >
               <HelpCircle className="w-3 h-3" />
             </button>
             {showHelp && (
               <div
-                data-testid="mesh-helios-separation-help-popover"
+                data-testid="mesh-tri-separation-help-popover"
                 onClick={(e) => e.stopPropagation()}
                 className="absolute right-0 top-5 z-20 w-60 space-y-1.5 rounded border border-neutral-600 bg-neutral-800 p-2 text-[9px] leading-snug text-neutral-300 shadow-lg"
               >
@@ -189,10 +199,76 @@ function HeliosFilterControls({
           </div>
         )}
       </div>
+      )}
       {estimate.merged && (
         <div className="flex gap-1 rounded px-1.5 py-1 border bg-amber-500/10 border-amber-500/40 text-[9px] text-amber-200">
           <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
           <span>Looks like a merged multi-scan cloud — triangulate each scan position separately for a clean result.</span>
+        </div>
+      )}
+      <SpacingCheck mesh={mesh} estimate={estimate} onCheckSpacing={onCheckSpacing} />
+    </div>
+  );
+}
+
+// Opt-in point-spacing cross-check, rendered under the filter controls. The
+// edge-based auto-Lmax (Otsu) can silently overshoot on a sparsely-sampled
+// surface — it bridges across the gaps, which corrupts the leaf normals and
+// G(theta) — and the candidate-edge distribution can't self-diagnose that (the
+// split looks clean even when its lower mode is still bridges). So when the Otsu
+// indicators aren't BOTH High, we offer a button that measures the real
+// nearest-neighbor spacing of the in-grid points (an independent signal) and
+// compares it to the current Lmax. It's a button, not automatic, because the
+// measurement is a KD-tree pass that can take tens of seconds on a
+// tens-of-millions-of-points cloud — the user opts into that cost. The verdict
+// only warns; it never changes Lmax (that stays the user's call).
+function SpacingCheck({
+  mesh,
+  estimate,
+  onCheckSpacing,
+}: {
+  mesh: MeshEntry;
+  estimate: TriangleFilterEstimate;
+  onCheckSpacing: (id: string) => void;
+}) {
+  // Only offer the check when the auto-estimate is suspect: an estimate exists
+  // and either indicator is below High. High/High means the edge distribution
+  // is cleanly bimodal AND the modes are far apart — the case where the
+  // edge-based Lmax is trustworthy and the (expensive) cross-check adds nothing.
+  const bothHigh = estimate.label === 'High' && estimate.sepLabel === 'High';
+  const offer = estimate.label !== 'n/a' && !bothHigh;
+  const check = mesh.heliosSpacingCheck;
+  if (!offer && !check) return null;
+
+  const running = check?.status === 'running';
+  const verdictClass =
+    check?.status === 'error' ? 'bg-red-500/10 border-red-500/40 text-red-200'
+    : check?.likelyBridging ? 'bg-amber-500/10 border-amber-500/40 text-amber-200'
+    : 'bg-green-500/10 border-green-500/40 text-green-200';
+
+  return (
+    <div className="space-y-1">
+      <button
+        data-testid="mesh-tri-check-spacing"
+        onClick={(e) => { e.stopPropagation(); if (!running) onCheckSpacing(mesh.id); }}
+        disabled={running}
+        title="Measure the real point spacing inside the grid and compare it to Lmax (can be slow on large clouds)"
+        className={`flex items-center gap-1 text-[10px] transition-colors ${
+          running ? 'text-neutral-500 cursor-wait' : 'text-sky-400 hover:text-sky-300'
+        }`}
+      >
+        <Maximize2 className="w-3 h-3" />
+        {running ? 'Checking point spacing…' : 'Check point spacing'}
+      </button>
+      {check && check.status !== 'running' && check.message && (
+        <div
+          data-testid="mesh-tri-spacing-verdict"
+          className={`flex gap-1 rounded px-1.5 py-1 border text-[9px] leading-snug ${verdictClass}`}
+        >
+          {(check.status === 'error' || check.likelyBridging) && (
+            <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+          )}
+          <span>{check.message}</span>
         </div>
       )}
     </div>
@@ -202,6 +278,15 @@ function HeliosFilterControls({
 // Compact Lmax display: enough precision to be useful without a noisy tail.
 function formatLmax(v: number): string {
   if (!Number.isFinite(v)) return '';
+  return Number(v.toPrecision(4)).toString();
+}
+
+// Format the aspect-ratio filter for its input. The wide-open cap sentinel
+// (>= 1e8, used when no aspect filtering is applied — the default for Open3D
+// meshes) renders as blank so the field reads as "no limit" instead of a giant
+// number; a real ratio renders normally.
+function formatAspect(v: number): string {
+  if (!Number.isFinite(v) || v >= 1e8) return '';
   return Number(v.toPrecision(4)).toString();
 }
 
@@ -246,6 +331,12 @@ interface MeshesListPanelProps {
   onToggleVisibility: (id: string) => void;
   onRequestDelete: (id: string, name: string) => void;
   onToggleExpanded: (id: string) => void;
+  // The mesh whose floating Transform panel is currently open (or null). Drives
+  // the active highlight on each row's transform button.
+  transformMeshId: string | null;
+  // Select this mesh and toggle its floating Transform panel (position /
+  // rotation / scale + gizmos).
+  onToggleTransform: (id: string) => void;
   onRename: (id: string, value: string) => void;
   onRenamingChange: (id: string | null, value: string) => void;
   // Opens the color popover for a mesh, anchored to the swatch's screen rect.
@@ -259,6 +350,9 @@ interface MeshesListPanelProps {
   onOpenLeafAngles: (id: string) => void;
   // Apply the interactive Lmax / aspect filter to a Helios triangulation mesh.
   onHeliosFilterChange: (id: string, next: { lmax: number; maxAspectRatio: number }) => void;
+  // Run the opt-in point-spacing cross-check on a Helios mesh (offered when the
+  // Otsu indicators aren't both High). Writes the verdict to mesh.heliosSpacingCheck.
+  onCheckSpacing: (id: string) => void;
 }
 
 export function MeshesListPanel({
@@ -288,6 +382,8 @@ export function MeshesListPanel({
   onToggleVisibility,
   onRequestDelete,
   onToggleExpanded,
+  transformMeshId,
+  onToggleTransform,
   onRename,
   onRenamingChange,
   onOpenColorPopover,
@@ -298,6 +394,7 @@ export function MeshesListPanel({
   onWireframeChange,
   onOpenLeafAngles,
   onHeliosFilterChange,
+  onCheckSpacing,
 }: MeshesListPanelProps) {
   return (
     <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
@@ -456,6 +553,18 @@ export function MeshesListPanel({
                 )}
               </button>
               <button
+                data-testid="mesh-transform-toggle"
+                onClick={(e) => { e.stopPropagation(); onToggleTransform(mesh.id); }}
+                className={`p-1 rounded ${
+                  transformMeshId === mesh.id
+                    ? 'bg-blue-600 text-white'
+                    : 'hover:bg-neutral-600 text-neutral-400'
+                }`}
+                title="Transform (move / rotate / scale)"
+              >
+                <Maximize2 className="w-3 h-3" />
+              </button>
+              <button
                 onClick={(e) => { e.stopPropagation(); onRequestDelete(mesh.id, displayName); }}
                 className="p-1 hover:bg-red-600/30 rounded"
                 title="Remove"
@@ -486,7 +595,8 @@ export function MeshesListPanel({
                     {mesh.triangulationParams.lmax !== undefined && (
                       <div>L<sub>max</sub>: {formatLmax(mesh.triangulationParams.lmax)} m</div>
                     )}
-                    {mesh.triangulationParams.maxAspectRatio !== undefined && (
+                    {mesh.triangulationParams.maxAspectRatio !== undefined
+                      && mesh.triangulationParams.maxAspectRatio < 1e8 && (
                       <div>Max aspect ratio: {mesh.triangulationParams.maxAspectRatio}</div>
                     )}
                     {mesh.triangulationParams.scanCount !== undefined && (
@@ -508,10 +618,13 @@ export function MeshesListPanel({
                     )}
                   </div>
                 )}
-                {/* Interactive Helios filter — only on unfiltered Helios
-                    triangulation meshes (those carry the candidate metrics). */}
-                {mesh.heliosFilter && mesh.heliosUnfiltered && (
-                  <HeliosFilterControls mesh={mesh} onChange={onHeliosFilterChange} />
+                {/* Interactive Lmax / aspect filter — on any triangulated mesh
+                    that carries the candidate metrics (Helios meshes from the
+                    backend; Open3D meshes get them computed client-side at build
+                    time). Helios meshes additionally show the Auto / separation
+                    diagnostics; Open3D meshes show just the Lmax / aspect inputs. */}
+                {mesh.triangleFilter && mesh.unfilteredMesh && (
+                  <TriangleFilterControls mesh={mesh} onChange={onHeliosFilterChange} onCheckSpacing={onCheckSpacing} />
                 )}
                 {canColorByTriangle && (
                 <div className="space-y-1.5">
@@ -568,9 +681,11 @@ export function MeshesListPanel({
                     />
                   </div>
                 )}
-                {/* Leaf-angle distribution — Helios meshes only (they carry the
-                    grid + scan provenance the plot reads). */}
-                {mesh.method === 'helios' && (
+                {/* Leaf-angle distribution — any triangulated mesh (Helios or the
+                    Open3D methods). The plot is pure triangle geometry; it reads
+                    per-voxel cells when the mesh carries a grid, else falls back
+                    to a single whole-mesh distribution. */}
+                {isTriangulated(mesh) && (
                   <button
                     data-testid="mesh-leaf-angles"
                     onClick={(e) => { e.stopPropagation(); onOpenLeafAngles(mesh.id); }}

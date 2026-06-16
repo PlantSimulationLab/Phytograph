@@ -54,22 +54,21 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
       await expect(rows.nth(i)).toHaveAttribute('data-selected', 'true');
     }
 
-    // Open the Helios triangulation popup.
+    // Open the unified Triangulation modal. All four sphere scans carry params,
+    // so the modal defaults to the Helios method (grid selector + filter note).
     await page.getByTestId('tool-triangulate').click();
-    // The static Triangulate tool opens the panel; with 2+ clouds (or the Helios
-    // method) it shows a Setup button that opens the multi-scan Helios dialog.
-    await page.getByTestId('triangulation-setup-button').click();
-    const heliosPopup = page.getByTestId('helios-triangulation-popup');
-    await expect(heliosPopup).toBeVisible();
+    const modal = page.getByTestId('triangulation-popup');
+    await expect(modal).toBeVisible();
+    await expect(modal.getByTestId('triangulation-method')).toHaveValue('helios');
 
     // No voxel box exists, so the grid selector defaults to the auto (all
     // points) option and shows the all-points warning. Triangulation now runs
-    // unfiltered — there are no Lmax/aspect inputs in the popup, just the note
+    // unfiltered — there are no Lmax/aspect inputs in the modal, just the note
     // that the filter is applied (and auto-estimated) afterwards in the panel.
-    await expect(page.getByTestId('helios-grid-allpoints-warning')).toBeVisible();
-    await expect(page.getByTestId('helios-filter-note')).toBeVisible();
+    await expect(modal.getByTestId('helios-grid-allpoints-warning')).toBeVisible();
+    await expect(modal.getByTestId('helios-filter-note')).toBeVisible();
 
-    await page.getByTestId('helios-triangulate-button').click();
+    await modal.getByTestId('triangulation-run-button').click();
 
     // The mesh row appears once the live backend returns. Sphere fixture is
     // small (a few hundred points/scan) so this is quick. The displayed count is
@@ -91,7 +90,7 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
     // --- Interactive Lmax filter (replaces the old pre-run inputs) ----------
     // The auto-estimate reports a separation confidence; the four sphere scans
     // are each single-viewpoint, so the merged-cloud guard must NOT fire.
-    const separation = page.getByTestId('mesh-helios-separation');
+    const separation = page.getByTestId('mesh-tri-separation');
     await expect(separation).toContainText(/Separation/);
     // The coarse sphere is the canonical "clean Otsu split, but the two modes
     // are barely apart" case: eta reads High while the mode-separation ratio is
@@ -103,8 +102,8 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
     // Open the whole mesh up: a large Lmax (clamped to the candidate set's max
     // edge — the sphere has no triangles longer than ~0.2 m) + aspect 5 keeps
     // every candidate, reproducing the C++ self-test (~383 primitives).
-    await page.getByTestId('mesh-helios-lmax').fill('1.0');
-    await page.getByTestId('mesh-helios-aspect').fill('5');
+    await page.getByTestId('mesh-tri-lmax').fill('1.0');
+    await page.getByTestId('mesh-tri-aspect').fill('5');
 
     await expect.poll(async () => {
       const s = await meshRow.getAttribute('data-triangle-count');
@@ -128,12 +127,12 @@ test('Helios triangulates the multi-scan sphere fixture via the UI', async () =>
 
     // Tightening the filter live drops triangles (no re-triangulation) — proves
     // the interactive filter works — then loosen back to the full mesh.
-    await page.getByTestId('mesh-helios-lmax').fill('0.02');
+    await page.getByTestId('mesh-tri-lmax').fill('0.02');
     await expect.poll(async () => {
       const s = await meshRow.getAttribute('data-triangle-count');
       return s ? parseInt(s, 10) : 0;
     }, { timeout: 10_000 }).toBeLessThan(triangles);
-    await page.getByTestId('mesh-helios-lmax').fill('1.0');
+    await page.getByTestId('mesh-tri-lmax').fill('1.0');
     await expect.poll(async () => {
       const s = await meshRow.getAttribute('data-triangle-count');
       return s ? parseInt(s, 10) : 0;

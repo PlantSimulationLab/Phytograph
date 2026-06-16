@@ -24,19 +24,23 @@ There are three ways to bring a mesh into Phytograph:
 | **Delaunay** | Quick previews, mostly-flat surfaces | Fast |
 | **Ball Pivot** | Branch surfaces with consistent point density | Medium |
 | **Poisson** | Watertight surfaces from dense clouds | Slow |
-| **Helios Triangulation** | Multi-scan TLS data with known scanner positions | Medium |
+| **Alpha Shape** | Wrapping concave shapes tightly | Medium |
+| **Helios** | Multi-scan TLS data with known scanner positions | Medium |
 
-**Helios Triangulation** is unique: it uses the scan geometry (where the
-scanner was, and the angular sweep) to triangulate only the rays that
-actually returned, producing accurate branch surfaces without the
-"shrink-wrap" artifacts that come from cloud-only methods. See
-[Triangulate a mesh: Helios](../workflows/triangulate.md#helios-triangulation).
+All five live in one **Triangulation Setup** modal (pick the method from
+its dropdown). The **Helios** method is unique: it uses the scan geometry
+(where the scanner was, and the angular sweep) to triangulate only the
+rays that actually returned, producing accurate branch surfaces without
+the "shrink-wrap" artifacts that come from cloud-only methods. See
+[Triangulate a mesh: Helios](../workflows/triangulate.md#helios-method).
 
 ## What you can do with a mesh
 
 | Operation | Workflow |
 |---|---|
-| Translate / rotate / scale | Right-click the mesh → Transform |
+| Filter triangles (Lmax / aspect) | Expand the mesh row → **Filter** — drops long or mis-shapen triangles live; works on any triangulation method |
+| Plot leaf angles | Expand the mesh row → **Leaf angles…** — inclination PDF + azimuth rose + de Wit fit from the triangle normals; works on any triangulation method ([details](../workflows/triangulate.md#filter-triangles-and-plot-leaf-angles-any-method)) |
+| Translate / rotate / scale | Click the **⤢** (double-arrow) button on the mesh's row in the Meshes panel to open its Transform panel |
 | Scan it into a point cloud | [Synthetic LiDAR scan](../workflows/simulate-scan.md) |
 | Align two meshes (ICP) | [Register & compare: M2M](../workflows/register-compare.md#mesh-to-mesh-icp) |
 | Compare a cloud to a mesh | [Register & compare: C2M](../workflows/register-compare.md#cloud-to-mesh) |

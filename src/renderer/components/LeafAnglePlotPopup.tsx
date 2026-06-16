@@ -6,7 +6,7 @@ import {
 import type { MeshEntry } from '../lib/pointCloudTypes';
 import {
   computeInclinationPdf, computeAzimuthHistogram, fitDeWit, deWitCurve, deWitLabel,
-  fitBeta, betaCurve, meshCellIds, triangleCountByCell,
+  fitBeta, betaCurve, computeGTheta, meshCellIds, triangleCountByCell,
 } from '../lib/leafAngleDistribution';
 import { buildRoseGeometry, polarToXY } from '../lib/azimuthRose';
 
@@ -115,13 +115,17 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
   // Per-cell fits for the parameters table: each visible cell's own de Wit
   // archetype and Beta(alpha,beta). Both can be null for a degenerate cell
   // (e.g. all triangles coplanar) — the table shows "—" then.
+  // gtheta is measured directly from the mesh geometry (per-triangle normal vs.
+  // its beam direction — the scanner when known, else nadir), so it needs
+  // `data` + cell id, not the PDF.
   const cellFits = useMemo(
     () => inclPdfs.map(({ cell, pdf }) => ({
       cell,
       deWit: fitDeWit(pdf),
       beta: fitBeta(pdf),
+      gtheta: data ? computeGTheta(data, cell.id === -1 ? undefined : cell.id) : null,
     })),
-    [inclPdfs],
+    [inclPdfs, data],
   );
 
   // Recharts data: one row per inclination bin, a key per visible cell, the
@@ -313,11 +317,15 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                           <th className="font-medium py-0.5 px-2 text-right" title="Beta shape parameter β">β</th>
                           <th className="font-medium py-0.5 px-2 text-right" title="Mean inclination">mean θ (°)</th>
                           <th className="font-medium py-0.5 px-2 text-right" title="Beta fit R²">R²</th>
+                          <th
+                            className="font-medium py-0.5 px-2 text-right"
+                            title="G(θ): area-weighted mean |normal · beam direction| — the leaf-projection coefficient. Beam is the scanner direction when known, else nadir (straight down)."
+                          >G(θ)</th>
                           <th className="font-medium py-0.5 pl-2">de Wit</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {cellFits.map(({ cell, deWit: cd, beta }) => (
+                        {cellFits.map(({ cell, deWit: cd, beta, gtheta }) => (
                           <tr
                             key={cell.id}
                             data-testid="beta-fit-row"
@@ -337,6 +345,7 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                             <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.beta.toFixed(2) : '—'}</td>
                             <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.meanIncl.toFixed(1) : '—'}</td>
                             <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.r2.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{gtheta != null ? gtheta.toFixed(3) : '—'}</td>
                             <td className="py-0.5 pl-2">{cd ? deWitLabel(cd.best) : '—'}</td>
                           </tr>
                         ))}

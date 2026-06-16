@@ -3,9 +3,9 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Undo2, Redo2, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -15,15 +15,17 @@ import {
   COLORMAP_LABELS,
 } from '../lib/colormaps';
 import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenerationPopup';
-import { HeliosTriangulationPopup, type GridOption } from './HeliosTriangulationPopup';
+import { TriangulationPopup, type TriangulationStartArgs } from './TriangulationPopup';
+import type { GridOption } from '../lib/gridOption';
 import { LADPopup, type LADTriangulationOption } from './LADPopup';
 import { Toolbar } from './Toolbar';
 import { StitchDialog } from './StitchDialog';
 import { AlignDialog } from './AlignDialog';
-import { type ToolCommand, type SelectionState, isCommandAvailable, requiresText as toolRequiresText, CREATE_GROUPS, SIMULATE_GROUPS } from '../lib/toolCommands';
+import { type ToolCommand, type SelectionState, isCommandAvailable, requiresText as toolRequiresText, CREATE_GROUPS } from '../lib/toolCommands';
 import { LeafAnglePlotPopup } from './LeafAnglePlotPopup';
 import { QSMResultsPopup } from './QSMResultsPopup';
 import { AddLeavesPopup } from './AddLeavesPopup';
+import { CreatePlanePopup, type CreatePlaneParams } from './CreatePlanePopup';
 import { AdjustLeafAnglesPopup } from './AdjustLeafAnglesPopup';
 import { MorphPopup } from './MorphPopup';
 import { ScanParametersPopup } from './ScanParametersPopup';
@@ -34,6 +36,7 @@ import { ScannerMarker } from './ScannerMarker';
 import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
+import StatusPill from './StatusPill';
 import { type ScanParameters } from '../lib/scanParameters';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName } from '../lib/scan';
@@ -65,10 +68,11 @@ import {
   cloneFlatPointCloudData,
   computeDisplayOffset,
   displayViewToWorldView,
+  buildLADRequest,
   type Vec3Like,
 } from '../lib/pointCloudHelpers';
-import { applyHeliosFilter, computeHeliosMetrics, heliosFilterCounts } from '../lib/heliosFilter';
-import type { HeliosFilterEstimate } from '../lib/heliosFilter';
+import { applyTriangleFilter, computeTriangleMetrics, triangleFilterCounts } from '../lib/triangleFilter';
+import type { TriangleFilterEstimate } from '../lib/triangleFilter';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
 import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, GROUND_CLASS_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
@@ -97,7 +101,6 @@ import { PolygonCameraSnapshotter } from './viewer/gizmos/PolygonCameraSnapshott
 import { OrthoProjectionOverride } from './viewer/gizmos/OrthoProjectionOverride';
 import { EraseBrush } from './viewer/gizmos/EraseBrush';
 import { EraseBrushOctree, type EraseSquareFrame } from './viewer/gizmos/EraseBrushOctree';
-import { TriangulationPanel } from './viewer/panels/TriangulationPanel';
 import { GroundSegmentPanel } from './viewer/panels/GroundSegmentPanel';
 import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode, type WoodMethod } from './viewer/panels/WoodSegmentPanel';
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
@@ -308,7 +311,7 @@ function nextSelection(
 
 // Build the `triangulationParams` provenance block for a Helios mesh under a
 // given interactive filter. The kept/dropped counts come from the unfiltered
-// candidate metrics (heliosFilterCounts), so the mesh-list breakdown updates
+// candidate metrics (triangleFilterCounts), so the mesh-list breakdown updates
 // live as the user adjusts Lmax/aspect. `candidateTriangles` includes the
 // degenerate triangles the backend already excluded, so the displayed total
 // reconciles: candidates === kept + droppedLmax + droppedAspect + degenerate.
@@ -321,7 +324,7 @@ function buildHeliosTriParams(
   sourceScanIds: string[] = [],
   gridMeshId?: string,
 ): NonNullable<MeshEntry['triangulationParams']> {
-  const c = heliosFilterCounts(unfilteredData, lmax, maxAspectRatio);
+  const c = triangleFilterCounts(unfilteredData, lmax, maxAspectRatio);
   return {
     lmax,
     maxAspectRatio,
@@ -332,6 +335,36 @@ function buildHeliosTriParams(
     droppedDegenerate,
     sourceScanIds: sourceScanIds.length > 0 ? sourceScanIds : undefined,
     gridMeshId,
+  };
+}
+
+// Attach the interactive triangle-filter state to an Open3D mesh so the Meshes
+// panel shows the Lmax / aspect controls (the same panel the Helios path drives).
+// Open3D meshes carry no backend Otsu estimate, so we compute the per-triangle
+// metrics client-side, derive the cap from the longest edge, store the 'n/a'
+// estimate sentinel (which makes the panel hide the Auto button / separation /
+// spacing-check), and seed the filter wide open (Lmax = cap) so the mesh starts
+// unfiltered. Returns the fields to spread onto the MeshEntry; `data` itself is
+// unchanged (the seed filter is a no-op at the cap).
+function buildOpen3DTriangleFilter(data: MeshData): Pick<MeshEntry, 'unfilteredMesh' | 'triangleFilter'> {
+  const { triEdgeMax, triAspect } = computeTriangleMetrics(data);
+  const withMetrics: MeshData = { ...data, triEdgeMax, triAspect };
+  let capLmax = 0;
+  for (let i = 0; i < triEdgeMax.length; i++) if (triEdgeMax[i] > capLmax) capLmax = triEdgeMax[i];
+  if (!Number.isFinite(capLmax) || capLmax <= 0) capLmax = 1.0;
+  const capAspect = 1.0e9;
+  const estimate: TriangleFilterEstimate = {
+    lmax: null,
+    eta: 0,
+    label: 'n/a',
+    sepRatio: null,
+    sepLabel: 'n/a',
+    merged: false,
+    mergedMessage: null,
+  };
+  return {
+    unfilteredMesh: { data: withMetrics, estimate, cap: { lmax: capLmax, maxAspectRatio: capAspect } },
+    triangleFilter: { lmax: capLmax, maxAspectRatio: capAspect },
   };
 }
 
@@ -519,15 +552,16 @@ export default function PointCloudViewer({
   const [colorPopoverScanId, setColorPopoverScanId] = useState<string | null>(null);
   const [scanColorPopoverAnchor, setScanColorPopoverAnchor] = useState<{ top: number; left: number } | null>(null);
 
-  // Triangulation state
-  const [showTriangulationPanel, setShowTriangulationPanel] = useState(false);
-  const [triangulationMethod, setTriangulationMethod] = useState<TriangulationMethod>('ball_pivoting');
+  // Triangulation state. The unified TriangulationPopup owns the method + per-
+  // method parameters (radius / depth / alpha) as local form state; the viewer
+  // only tracks whether the modal is open and the run's in-progress / error state.
+  const [showTriangulationPopup, setShowTriangulationPopup] = useState(false);
   const [triangulationInProgress, setTriangulationInProgress] = useState(false);
   const [triangulationError, setTriangulationError] = useState<string | null>(null);
-
-  // Triangulation parameters
-  const [poissonDepth, setPoissonDepth] = useState(8);
-  const [alphaValue, setAlphaValue] = useState<number | null>(null);  // null = auto
+  // Per-stage progress shared by the Open3D and Helios triangulation handlers;
+  // which pill renders is gated by triangulationInProgress / isHeliosRunning.
+  const [triProgress, setTriProgress] = useState<{ label: string; value: number | null } | null>(null);
+  const triAbortRef = useRef<AbortController | null>(null);
 
   // Ground segmentation state (Cloth Simulation Filter)
   const [showGroundSegmentPanel, setShowGroundSegmentPanel] = useState(false);
@@ -943,13 +977,14 @@ export default function PointCloudViewer({
   // Plant generation state
   const [isGeneratingPlant, setIsGeneratingPlant] = useState(false);
   const [showPlantPopup, setShowPlantPopup] = useState(false);
+  const [showPlanePopup, setShowPlanePopup] = useState(false);
   // Live build progress (0-1) + phase message, shown in the popup's progress bar.
   const [plantProgress, setPlantProgress] = useState<number | null>(null);
   const [plantProgressMsg, setPlantProgressMsg] = useState('');
   // Abort controller for an in-flight streaming build (Cancel button).
   const plantAbortRef = useRef<AbortController | null>(null);
-  // Helios triangulation popup + background task state
-  const [showHeliosPopup, setShowHeliosPopup] = useState(false);
+  // Helios triangulation background task state (the setup UI is now the unified
+  // TriangulationPopup; isHeliosRunning gates the in-flight Helios run).
   const [isHeliosRunning, setIsHeliosRunning] = useState(false);
   // Which mesh's leaf-angle distribution plot is open (null = closed).
   const [showLeafAngleMeshId, setShowLeafAngleMeshId] = useState<string | null>(null);
@@ -1336,7 +1371,7 @@ export default function PointCloudViewer({
       setShowResamplePanel(false);
       setResamplePreview(null); // Clear resample preview when closing resample panel
     }
-    if (except !== 'triangulation') setShowTriangulationPanel(false);
+    if (except !== 'triangulation') setShowTriangulationPopup(false);
     if (except !== 'ground-segment') setShowGroundSegmentPanel(false);
     if (except !== 'wood-segment') setShowWoodSegmentPanel(false);
     if (except !== 'tree-segment') { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }
@@ -3065,7 +3100,7 @@ export default function PointCloudViewer({
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
 
       // ── Reconstruction & analysis ───────────────────────────────────
-      { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPanel(!showTriangulationPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Triangle, testId: 'tool-triangulate', isActive: () => showTriangulationPanel },
+      { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPopup(true); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Triangle, testId: 'tool-triangulate', isActive: () => showTriangulationPopup },
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Dna, testId: 'tool-skeleton', isActive: () => showSkeletonPanel },
       { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPanel(!showQSMPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: QsmIcon, testId: 'tool-qsm', isActive: () => showQSMPanel },
       { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
@@ -3074,15 +3109,16 @@ export default function PointCloudViewer({
       { id: 'create-plant', name: 'Generate Plant', keywords: ['helios', 'leaf', 'vegetation', 'build', 'geometry'], action: () => setShowPlantPopup(true), category: 'Create', requires: null, toolGroup: 'create', icon: Sprout, testId: 'tool-plant-generate' },
       { id: 'import-model', name: 'Import Model', keywords: ['mesh', 'obj', 'ply', 'load', 'geometry'], action: () => { (window as any).__importMesh?.(); }, category: 'Create', requires: null, toolGroup: 'create', icon: FileUp },
       { id: 'create-voxel', name: 'Create Voxel Grid', keywords: ['cube', 'box', 'shape', 'grid', 'lad'], action: () => handleCreateShape('voxel'), category: 'Create', requires: null, toolGroup: 'create', icon: Box, testId: 'tool-create-voxel' },
+      { id: 'create-plane', name: 'Create Plane', keywords: ['surface', 'ground', 'quad', 'flat', 'reference'], action: () => setShowPlanePopup(true), category: 'Create', requires: null, toolGroup: 'create', icon: Square, testId: 'tool-create-plane' },
       { id: 'add-scan', name: 'Add Scan', keywords: ['scanner', 'lidar', 'marker', 'sensor'], action: () => openAddScanPopup(), category: 'Create', requires: null, toolGroup: 'create', icon: Radio, testId: 'tool-add-scan' },
 
       // ── Simulate (synthetic scanning) ───────────────────────────────
       { id: 'lidar-scan', name: 'Run Synthetic Scan', keywords: ['scan', 'lidar', 'simulate', 'points', 'point cloud', 'ray'], action: () => handleRunScan(), category: 'Simulate', toolGroup: 'simulate', icon: Compass, testId: 'tool-lidar-scan', multiInput: true },
 
-      // Mesh tools — Transform sits in pre-processing (it's the mesh analogue of
-      // translate/resize); the alignment variants are palette/menu only since
+      // Mesh tools — the per-mesh Transform (move / rotate / scale) is reached
+      // from the double-arrow button on each row in the Meshes list panel, not
+      // from the toolbar. The alignment variants are palette/menu only since
       // they're selection-driven multi-object operations.
-      { id: 'mesh-transform', name: 'Transform Mesh', keywords: ['translate', 'move', 'position', 'rotate', 'turn', 'spin', 'resize', 'scale', 'size'], action: () => setShowResizePanel(!showResizePanel), category: 'Mesh', requires: 'mesh', toolGroup: 'preprocess', icon: Move, testId: 'tool-mesh-transform', isActive: () => showResizePanel },
       { id: 'mesh-cloud-align', name: 'Align Mesh to Cloud', keywords: ['icp', 'register', 'fit', 'compare', 'distance'], action: () => { void handleAlignmentCompute(); }, category: 'Mesh' },
       { id: 'mesh-mesh-align', name: 'Align Mesh to Mesh (ICP)', keywords: ['icp', 'register', 'fit'], action: () => { void handleMeshToMeshICP(); }, category: 'Mesh', requires: 'multiple-meshes' },
 
@@ -3112,7 +3148,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPanel, showGroundSegmentPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPanel, showExportPanel, showResizePanel, showPlantGrowthPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPanel, showExportPanel, showPlantGrowthPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
 
   // Bridge for the native Tools menu (src/main/menu.ts → App.tsx) to run a tool
   // by id. A ref keeps the latest `commands` (with fresh action closures) so the
@@ -4853,137 +4889,253 @@ export default function PointCloudViewer({
     setShowExportPanel(false);
   }, [skeletons, clouds, downloadFile, skeletonShowAsCylinders, skeletonTubeRadius]);
 
-  // Triangulate selected point cloud
-  const handleTriangulate = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
+  // Seed identity transforms for a freshly-created mesh so transform shortcuts
+  // read a real origin (shared by both triangulation paths).
+  const seedMeshTransforms = useCallback((meshId: string) => {
+    setMeshPositions(prev => new Map(prev).set(meshId, { x: 0, y: 0, z: 0 }));
+    setMeshScales(prev => new Map(prev).set(meshId, { x: 1, y: 1, z: 1 }));
+    setMeshRotations(prev => new Map(prev).set(meshId, { x: 0, y: 0, z: 0 }));
+  }, []);
+
+  // Open3D triangulation (ball_pivoting / poisson / alpha_shape / delaunay),
+  // driven by the unified TriangulationPopup. Supports multiple selected scans,
+  // either per-scan (one mesh each) or merged (selected scans' points fused into
+  // one mesh). Helios goes through handleHeliosTriangulate instead.
+  const handleTriangulateOpen3D = useCallback(async (args: {
+    method: Exclude<TriangulationMethod, 'helios'>;
+    scanIds: string[];
+    merge: boolean;
+    depth?: number;
+    alpha?: number | null;
+    radii?: number[];
+    cropBox?: { min: [number, number, number]; max: [number, number, number] };
+  }) => {
+    const { method, scanIds, merge, depth, alpha, radii, cropBox } = args;
+    // Flatten the optional crop AABB to the backend's [minx,miny,minz,maxx,maxy,maxz].
+    const cropBoxArr = cropBox
+      ? [cropBox.min[0], cropBox.min[1], cropBox.min[2], cropBox.max[0], cropBox.max[1], cropBox.max[2]]
+      : undefined;
+    const targets = scanIds
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => c != null);
+    if (targets.length === 0) return;
 
     setTriangulationInProgress(true);
     setTriangulationError(null);
+    setTriProgress({ label: 'Triangulating…', value: null });
+    const abort = new AbortController();
+    triAbortRef.current = abort;
+
+    // Method-specific request fields, applied identically to every request.
+    const applyMethodParams = (request: Parameters<typeof triangulatePointCloud>[0]) => {
+      if (method === 'poisson' && depth != null) request.depth = depth;
+      else if (method === 'alpha_shape' && alpha != null) request.alpha = alpha;
+      else if (method === 'ball_pivoting' && radii && radii.length > 0) request.radii = radii;
+    };
+    const methodParamProvenance = (p: NonNullable<MeshEntry['triangulationParams']>) => {
+      if (method === 'poisson' && depth != null) p.depth = depth;
+      else if (method === 'alpha_shape' && alpha != null) p.alpha = alpha;
+      else if (method === 'ball_pivoting' && radii && radii.length > 0) p.radii = radii;
+    };
 
     try {
-      const ps = buildPointSource(cloud);
-
-      // Build triangulation request. Octree clouds send a source descriptor
-      // capped at the global triangulateMaxPoints setting (open3d holds all
-      // points in RAM); flat clouds send inline points.
-      const request: Parameters<typeof triangulatePointCloud>[0] = {
-        method: triangulationMethod,
-        estimate_normals: true,
-        normal_radius: 0.1,
-        normal_max_nn: 30,
-      };
-
-      if (ps.kind === 'source') {
-        request.source = { ...ps.source, max_points: triangulateMaxPoints };
-      } else {
-        const displayData = ps.data;
+      if (merge) {
+        // Merged: fuse every selected cloud into one mesh. Octree-backed clouds
+        // hold their points in the backend session (cloud.data.positions is
+        // empty — they stream from the octree), so they can't be merged on the
+        // client; we send each as a source descriptor in `sources[]` and the
+        // backend reads + vstacks them (per-source max_points caps each). Flat
+        // clouds (inline data) fold in via `points`. The backend honors session
+        // deletions, so this stays consistent with "array is source of truth".
+        const sources: NonNullable<Parameters<typeof triangulatePointCloud>[0]['sources']> = [];
         const points: number[][] = [];
-        for (let i = 0; i < displayData.pointCount; i++) {
-          points.push([
-            displayData.positions[i * 3],
-            displayData.positions[i * 3 + 1],
-            displayData.positions[i * 3 + 2],
-          ]);
+        for (const cloud of targets) {
+          const ps = buildPointSource(cloud);
+          if (ps.kind === 'source') {
+            sources.push({ ...ps.source, max_points: triangulateMaxPoints });
+          } else {
+            const d = ps.data;
+            for (let i = 0; i < d.pointCount; i++) {
+              const idx = i * 3;
+              points.push([d.positions[idx], d.positions[idx + 1], d.positions[idx + 2]]);
+            }
+          }
         }
-        request.points = points;
+
+        const request: Parameters<typeof triangulatePointCloud>[0] = {
+          method,
+          estimate_normals: true,
+          normal_radius: 0.1,
+          normal_max_nn: 30,
+          ...(sources.length > 0 ? { sources } : {}),
+          ...(points.length > 0 ? { points } : {}),
+          ...(cropBoxArr ? { crop_box: cropBoxArr } : {}),
+        };
+        applyMethodParams(request);
+
+        const response = await triangulatePointCloud(request, abort.signal, (p, msg) =>
+          setTriProgress({ label: msg, value: p }));
+        if (!response.success) throw new Error(response.error || 'Triangulation failed');
+
+        const meshData: MeshData = {
+          vertices: response.vertices,
+          indices: response.triangles,
+          normals: response.normals,
+          vertexCount: response.numVertices,
+          triangleCount: response.numTriangles,
+          surfaceArea: response.surfaceArea,
+        };
+        const triangulationParams: NonNullable<MeshEntry['triangulationParams']> = {
+          normalRadius: request.normal_radius,
+          normalMaxNn: request.normal_max_nn,
+          pointsUsed: response.pointsUsed,
+          scanCount: targets.length,
+        };
+        methodParamProvenance(triangulationParams);
+
+        const meshEntry: MeshEntry = {
+          id: crypto.randomUUID(),
+          sourceCloudId: targets[0].id,
+          data: meshData,
+          visible: true,
+          color: targets[0].color,
+          method,
+          triangulationParams,
+          ...buildOpen3DTriangleFilter(meshData),
+        };
+        setMeshes(prev => [...prev, meshEntry]);
+        seedMeshTransforms(meshEntry.id);
+        setShowTriangulationPopup(false);
+        for (const c of targets) onHideScan(c.id);
+
+        const totalPoints = targets.reduce((sum, c) => sum + c.data.pointCount, 0);
+        if (typeof response.pointsUsed === 'number' && response.pointsUsed < totalPoints) {
+          showToast({
+            type: 'warning',
+            title: 'Merged cloud downsampled for triangulation',
+            message: `Triangulated ${response.pointsUsed.toLocaleString()} of ${totalPoints.toLocaleString()} merged points (Settings → Triangulate max points). Raise the cap for more detail.`,
+          });
+        }
+        showToast({
+          type: 'success',
+          title: 'Triangulation Complete',
+          message: `Created mesh from ${targets.length} scans with ${meshData.triangleCount.toLocaleString()} triangles`,
+        });
+        return;
       }
 
-      // Add method-specific parameters
-      if (triangulationMethod === 'poisson') {
-        request.depth = poissonDepth;
-      } else if (triangulationMethod === 'alpha_shape' && alphaValue !== null) {
-        request.alpha = alphaValue;
+      // Per-scan: one mesh per selected cloud. Octree clouds send a source
+      // descriptor capped at the global max; flat clouds send inline points.
+      const newMeshes: MeshEntry[] = [];
+      let totalTriangles = 0;
+      let downsampledNote: string | null = null;
+      for (let cloudIdx = 0; cloudIdx < targets.length; cloudIdx++) {
+        const cloud = targets[cloudIdx];
+        const ps = buildPointSource(cloud);
+        const request: Parameters<typeof triangulatePointCloud>[0] = {
+          method,
+          estimate_normals: true,
+          normal_radius: 0.1,
+          normal_max_nn: 30,
+          ...(cropBoxArr ? { crop_box: cropBoxArr } : {}),
+        };
+        if (ps.kind === 'source') {
+          request.source = { ...ps.source, max_points: triangulateMaxPoints };
+        } else {
+          const displayData = ps.data;
+          const points: number[][] = [];
+          for (let i = 0; i < displayData.pointCount; i++) {
+            const idx = i * 3;
+            points.push([displayData.positions[idx], displayData.positions[idx + 1], displayData.positions[idx + 2]]);
+          }
+          request.points = points;
+        }
+        applyMethodParams(request);
+
+        // Fold the backend's per-cloud fraction into overall progress across the
+        // N clouds; prefix the stage label with [N/M] when there's more than one.
+        const response = await triangulatePointCloud(request, abort.signal, (p, msg) => {
+          const frac = p == null ? null : (cloudIdx + p) / targets.length;
+          const label = targets.length > 1 ? `[${cloudIdx + 1}/${targets.length}] ${msg}` : msg;
+          setTriProgress({ label, value: frac });
+        });
+        if (!response.success) throw new Error(response.error || 'Triangulation failed');
+
+        const meshData: MeshData = {
+          vertices: response.vertices,
+          indices: response.triangles,
+          normals: response.normals,
+          vertexCount: response.numVertices,
+          triangleCount: response.numTriangles,
+          surfaceArea: response.surfaceArea,
+        };
+        const triangulationParams: NonNullable<MeshEntry['triangulationParams']> = {
+          normalRadius: request.normal_radius,
+          normalMaxNn: request.normal_max_nn,
+          pointsUsed: response.pointsUsed,
+        };
+        methodParamProvenance(triangulationParams);
+
+        newMeshes.push({
+          id: crypto.randomUUID(),
+          sourceCloudId: cloud.id,
+          data: meshData,
+          visible: true,
+          color: cloud.color,
+          method,
+          triangulationParams,
+          ...buildOpen3DTriangleFilter(meshData),
+        });
+        totalTriangles += meshData.triangleCount;
+
+        if (
+          ps.kind === 'source' &&
+          typeof response.pointsUsed === 'number' &&
+          response.pointsUsed < cloud.data.pointCount
+        ) {
+          downsampledNote = `${response.pointsUsed.toLocaleString()} of ${cloud.data.pointCount.toLocaleString()} points (Settings → Triangulate max points)`;
+        }
       }
 
-      const response = await triangulatePointCloud(request);
+      setMeshes(prev => [...prev, ...newMeshes]);
+      for (const m of newMeshes) seedMeshTransforms(m.id);
+      setShowTriangulationPopup(false);
+      for (const c of targets) onHideScan(c.id);
 
-      if (!response.success) {
-        throw new Error(response.error || 'Triangulation failed');
-      }
-
-      // The big arrays arrive as zero-copy typed-array views over the binary
-      // frame — used directly (no .flat()).
-      const meshData: MeshData = {
-        vertices: response.vertices,
-        indices: response.triangles,
-        normals: response.normals,
-        vertexCount: response.numVertices,
-        triangleCount: response.numTriangles,
-        surfaceArea: response.surfaceArea,
-      };
-
-      // Capture the parameters actually used, for provenance + default naming.
-      // Only method-relevant fields are recorded (poisson→depth, alpha_shape→alpha).
-      const triangulationParams: NonNullable<MeshEntry['triangulationParams']> = {
-        normalRadius: request.normal_radius,
-        normalMaxNn: request.normal_max_nn,
-        pointsUsed: response.pointsUsed,
-      };
-      if (triangulationMethod === 'poisson') {
-        triangulationParams.depth = poissonDepth;
-      } else if (triangulationMethod === 'alpha_shape' && alphaValue !== null) {
-        triangulationParams.alpha = alphaValue;
-      }
-
-      // Create mesh entry
-      const meshEntry: MeshEntry = {
-        id: crypto.randomUUID(),
-        sourceCloudId: cloud.id,
-        data: meshData,
-        visible: true,
-        color: cloud.color,
-        method: triangulationMethod,
-        triangulationParams,
-      };
-
-      // Add to meshes
-      console.log('Creating mesh entry:', meshEntry);
-      setMeshes(prev => [...prev, meshEntry]);
-      // Seed identity transforms so transform shortcuts read a real origin.
-      setMeshPositions(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
-      setMeshScales(prev => new Map(prev).set(meshEntry.id, { x: 1, y: 1, z: 1 }));
-      setMeshRotations(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
-      setShowTriangulationPanel(false);
-      // Hide the source scan so its points don't obscure the new mesh (mirrors
-      // the QSM build). The cloud stays in the list and can be re-shown.
-      onHideScan(cloud.id);
-      console.log('Triangulation completed successfully!');
-
-      // Warn when the global triangulate cap downsampled a streamed cloud.
-      if (
-        ps.kind === 'source' &&
-        typeof response.pointsUsed === 'number' &&
-        response.pointsUsed < cloud.data.pointCount
-      ) {
+      if (downsampledNote) {
         showToast({
           type: 'warning',
           title: 'Cloud downsampled for triangulation',
-          message: `Triangulated ${response.pointsUsed.toLocaleString()} of ${cloud.data.pointCount.toLocaleString()} points (Settings → Triangulate max points). Raise the cap for more detail.`,
+          message: `Triangulated ${downsampledNote}. Raise the cap for more detail.`,
         });
       }
-
       showToast({
         type: 'success',
         title: 'Triangulation Complete',
-        message: `Created mesh with ${meshData.triangleCount.toLocaleString()} triangles`,
+        message: newMeshes.length === 1
+          ? `Created mesh with ${totalTriangles.toLocaleString()} triangles`
+          : `Created ${newMeshes.length} meshes with ${totalTriangles.toLocaleString()} triangles total`,
       });
     } catch (error) {
-      console.error('Triangulation error:', error);
-      console.error('Error stack:', error instanceof Error ? error.stack : 'No stack');
-      const errorMessage = error instanceof Error ? error.message : 'Triangulation failed';
-      setTriangulationError(errorMessage);
-      showToast({
-        type: 'error',
-        title: 'Triangulation Failed',
-        message: errorMessage,
-      });
+      // User-initiated cancel (pill X) aborts the fetch — not an error to surface.
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setTriangulationError(null);
+      } else {
+        console.error('Triangulation error:', error);
+        const errorMessage = error instanceof Error ? error.message : 'Triangulation failed';
+        setTriangulationError(errorMessage);
+        showToast({
+          type: 'error',
+          title: 'Triangulation Failed',
+          message: errorMessage,
+        });
+      }
     } finally {
       setTriangulationInProgress(false);
+      setTriProgress(null);
+      triAbortRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, triangulationMethod, poissonDepth, alphaValue, triangulateMaxPoints, onHideScan]);
+  }, [clouds, buildPointSource, triangulateMaxPoints, onHideScan, seedMeshTransforms]);
 
   // Segment ground vs plant points (Cloth Simulation Filter). Writes a
   // `ground_class` scalar attribute (1=ground, 2=plant) and colors by it.
@@ -7579,6 +7731,7 @@ export default function PointCloudViewer({
       cylinder: '#4ade80', // green
       sphere: '#f472b6', // pink
       cone: '#fbbf24', // amber
+      plane: '#a78bfa', // violet
     };
 
     const newMeshId = crypto.randomUUID();
@@ -7630,6 +7783,54 @@ export default function PointCloudViewer({
     }, 50);
   }, [shapeCounter, onDeselectAll]);
 
+  // Create a plane mesh from the dialog's center / size / Euler-rotation values.
+  // Mirrors handleCreateShape but seeds the transform maps from the supplied
+  // params instead of the origin/unit/identity defaults. The base geometry is a
+  // unit quad; width/length map to X/Y scale, rotation is in degrees.
+  const handleCreatePlane = useCallback((params: CreatePlaneParams) => {
+    const meshData = generateShapeMesh('plane');
+    const newMeshId = crypto.randomUUID();
+    const newMesh: MeshEntry = {
+      id: newMeshId,
+      sourceCloudId: `shape-plane-${shapeCounter}`,
+      data: meshData,
+      visible: true,
+      color: '#a78bfa', // violet — distinct from the other primitives
+      method: 'delaunay', // placeholder; planes aren't from triangulation
+      isPlane: true, // apply ground-grid polygon offset (avoids z-fighting at z=0)
+    };
+
+    setMeshes(prev => [...prev, newMesh]);
+    setShapeCounter(prev => prev + 1);
+
+    setMeshPositions(prev => {
+      const next = new Map(prev);
+      next.set(newMeshId, { ...params.center });
+      return next;
+    });
+    setMeshRotations(prev => {
+      const next = new Map(prev);
+      next.set(newMeshId, { ...params.rotation });
+      return next;
+    });
+    setMeshScales(prev => {
+      const next = new Map(prev);
+      next.set(newMeshId, { ...params.scale });
+      return next;
+    });
+
+    // Auto-select the new plane. The transform was set in the creation dialog,
+    // so we don't open the Transform panel — the ⤢ button on the row reveals it
+    // if the user wants to tweak it afterward.
+    setSelectedMeshIds(new Set([newMeshId]));
+    setSelectedSkeletonIds(new Set());
+    onDeselectAll();
+
+    setTimeout(() => {
+      (window as any).__resetPointCloudCamera?.();
+    }, 50);
+  }, [shapeCounter, onDeselectAll]);
+
   // Voxel boxes the user can pick as the Helios triangulation grid. A voxel
   // mesh carries `gridSubdivisions`; its world center/size come from the
   // mesh's position/scale transforms. Other shapes (sphere, cylinder…) and
@@ -7668,10 +7869,10 @@ export default function PointCloudViewer({
       const grid = m.data.grid;
       const scanIds = m.triangulationParams?.sourceScanIds;
       if (!grid || !scanIds || scanIds.length === 0) continue;
-      // The current filter is what feeds the inversion (heliosFilter), falling
+      // The current filter is what feeds the inversion (triangleFilter), falling
       // back to the build-time params if no live filter is recorded.
-      const lmax = m.heliosFilter?.lmax ?? m.triangulationParams?.lmax ?? 0.1;
-      const maxAspectRatio = m.heliosFilter?.maxAspectRatio ?? m.triangulationParams?.maxAspectRatio ?? 4.0;
+      const lmax = m.triangleFilter?.lmax ?? m.triangulationParams?.lmax ?? 0.1;
+      const maxAspectRatio = m.triangleFilter?.maxAspectRatio ?? m.triangulationParams?.maxAspectRatio ?? 4.0;
       // The voxel box this mesh was triangulated in (recorded at build time), but
       // only if it's still in the scene — so the LAD run can hide it to avoid
       // z-fighting. Drops to undefined if the box was deleted.
@@ -7689,6 +7890,50 @@ export default function PointCloudViewer({
     }
     return options;
   }, [meshes, displayNameOfMesh]);
+
+  // Opt-in cross-check of a Helios mesh's current Lmax against the real in-grid
+  // point spacing — offered by the filter panel when the Otsu indicators aren't
+  // both High (the case where the edge-based auto-Lmax can silently bridge a
+  // sparse surface and wreck G(theta)). Rebuilds the SAME scans + grid the LAD
+  // reuse path uses, runs them through the request builder, and stores the
+  // verdict (or error) back on the mesh. The backend KD-tree pass can be slow on
+  // huge clouds, so the mesh carries a 'running' status the panel reflects.
+  const handleCheckSpacing = useCallback(async (meshId: string) => {
+    const mesh = meshes.find(m => m.id === meshId);
+    if (!mesh || mesh.method !== 'helios') return;
+    const grid = mesh.data.grid;
+    const scanIds = mesh.triangulationParams?.sourceScanIds;
+    if (!grid || !scanIds || scanIds.length === 0) return;
+    const lmax = mesh.triangleFilter?.lmax ?? mesh.triangulationParams?.lmax ?? 0.1;
+    const maxAspectRatio =
+      mesh.triangleFilter?.maxAspectRatio ?? mesh.triangulationParams?.maxAspectRatio ?? 4.0;
+
+    const scanObjs = scanIds
+      .map(id => scans.find(s => s.id === id))
+      .filter((s): s is Scan => !!s && hasParams(s));
+    if (scanObjs.length === 0) {
+      setMeshes(prev => prev.map(m => m.id === meshId ? { ...m, heliosSpacingCheck: {
+        status: 'error',
+        message: 'The triangulation’s source scans are no longer available to measure spacing.',
+      } } : m));
+      return;
+    }
+
+    const request = buildLADRequest(scanObjs, grid, { lmax, maxAspectRatio, minVoxelHits: 5 });
+    setMeshes(prev => prev.map(m => m.id === meshId
+      ? { ...m, heliosSpacingCheck: { status: 'running' } } : m));
+    try {
+      const r = await checkTriangulationSpacing(request);
+      setMeshes(prev => prev.map(m => m.id === meshId ? { ...m, heliosSpacingCheck: r.success
+        ? { status: 'done', medianSpacing: r.medianSpacing, ratio: r.ratio,
+            likelyBridging: r.likelyBridging, message: r.message }
+        : { status: 'error', message: r.error || 'Spacing check failed' } } : m));
+    } catch (err) {
+      setMeshes(prev => prev.map(m => m.id === meshId ? { ...m, heliosSpacingCheck: {
+        status: 'error', message: err instanceof Error ? err.message : 'Spacing check failed',
+      } } : m));
+    }
+  }, [meshes, scans]);
 
   // Cache of the non-indexed POSITIONS buffer per mesh, keyed by mesh id and
   // pinned to the mesh's data identity. Positions are mode-independent, so we
@@ -7832,9 +8077,11 @@ export default function PointCloudViewer({
     const abort = new AbortController();
     heliosAbortRef.current = abort;
     setIsHeliosRunning(true);
+    setTriProgress({ label: 'Helios triangulating…', value: null });
 
     try {
-      const response = await heliosTriangulate(request, abort.signal);
+      const response = await heliosTriangulate(request, abort.signal, (p, msg) =>
+        setTriProgress({ label: msg, value: p }));
 
       if (abort.signal.aborted) return;
 
@@ -7924,19 +8171,19 @@ export default function PointCloudViewer({
         triangleCellIds,
         grid,
       };
-      const metrics = computeHeliosMetrics(returnedData);
+      const metrics = computeTriangleMetrics(returnedData);
       returnedData.triEdgeMax = metrics.triEdgeMax;
       returnedData.triAspect = metrics.triAspect;
 
       // The backend auto-estimate (Otsu separability + merged-cloud guard),
       // computed over the FULL candidate distribution. Seeds the default filter.
       const dto = response.estimate;
-      const estimate: HeliosFilterEstimate = {
+      const estimate: TriangleFilterEstimate = {
         lmax: dto?.lmax ?? null,
         eta: dto?.eta ?? 0,
-        label: (dto?.label as HeliosFilterEstimate['label']) ?? 'n/a',
+        label: (dto?.label as TriangleFilterEstimate['label']) ?? 'n/a',
         sepRatio: dto?.sep_ratio ?? null,
-        sepLabel: (dto?.sep_label as HeliosFilterEstimate['sepLabel']) ?? 'n/a',
+        sepLabel: (dto?.sep_label as TriangleFilterEstimate['sepLabel']) ?? 'n/a',
         merged: dto?.merged ?? false,
         mergedMessage: dto?.merged_message ?? null,
       };
@@ -7960,7 +8207,7 @@ export default function PointCloudViewer({
 
       // The displayed mesh is the filtered view; all consumers of `mesh.data`
       // (rendering, leaf angles, exports, LAD) see the chosen filter.
-      const filteredData = applyHeliosFilter(returnedData, seedLmax, seedAspect);
+      const filteredData = applyTriangleFilter(returnedData, seedLmax, seedAspect);
 
       const meshEntry: MeshEntry = {
         id: crypto.randomUUID(),
@@ -7969,12 +8216,12 @@ export default function PointCloudViewer({
         visible: true,
         color: '#22c55e',
         method: 'helios',
-        heliosUnfiltered: {
+        unfilteredMesh: {
           data: returnedData,
           estimate,
           cap: { lmax: capLmax, maxAspectRatio: capAspect },
         },
-        heliosFilter: { lmax: seedLmax, maxAspectRatio: seedAspect },
+        triangleFilter: { lmax: seedLmax, maxAspectRatio: seedAspect },
         // Provenance for the mesh list — the filter breakdown updates live as the
         // user adjusts Lmax/aspect (counts derived from the returned set).
         // sourceScanIds + gridMeshId let the LAD tool reuse this triangulation
@@ -7988,7 +8235,7 @@ export default function PointCloudViewer({
       setMeshPositions(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
       setMeshScales(prev => new Map(prev).set(meshEntry.id, { x: 1, y: 1, z: 1 }));
       setMeshRotations(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
-      setShowTriangulationPanel(false);
+      setShowTriangulationPopup(false);
       // Hide the contributing scans so their points don't obscure the new mesh
       // (mirrors the QSM build). The scans stay in the list and can be re-shown.
       for (const id of sourceScanIds) onHideScan(id);
@@ -8047,13 +8294,34 @@ export default function PointCloudViewer({
     } finally {
       setIsHeliosRunning(false);
       heliosAbortRef.current = null;
+      setTriProgress(null);
     }
   }, [isHeliosRunning, onHideScan]);
+
+  // Dispatcher wired to the unified TriangulationPopup. Branches on the result
+  // kind: Helios goes to the (multi-scan, grid-aware) Helios handler; everything
+  // else to the Open3D handler. The modal closes itself on submit.
+  const handleStartTriangulate = useCallback((r: TriangulationStartArgs) => {
+    if (r.kind === 'helios') {
+      handleHeliosTriangulate(r.request, r.scanColors, r.sourceScanIds, r.gridMeshId);
+    } else {
+      handleTriangulateOpen3D({
+        method: r.method,
+        scanIds: r.scanIds,
+        merge: r.merge,
+        depth: r.depth,
+        alpha: r.alpha,
+        radii: r.radii,
+        cropBox: r.cropBox,
+      });
+    }
+  }, [handleHeliosTriangulate, handleTriangulateOpen3D]);
 
   const cancelHeliosTriangulation = useCallback(() => {
     heliosAbortRef.current?.abort();
     setIsHeliosRunning(false);
     heliosAbortRef.current = null;
+    setTriProgress(null);
   }, []);
 
   // Re-apply the interactive Helios filter (Lmax / aspect) to a mesh, deriving a
@@ -8064,25 +8332,31 @@ export default function PointCloudViewer({
   const handleHeliosFilterChange = useCallback(
     (meshId: string, next: { lmax: number; maxAspectRatio: number }) => {
       setMeshes(prev => prev.map(m => {
-        if (m.id !== meshId || !m.heliosUnfiltered) return m;
+        if (m.id !== meshId || !m.unfilteredMesh) return m;
         // Clamp to the returned set's loosening cap — triangles past it weren't
         // returned (would need a re-run), so a larger Lmax/aspect can't add them.
-        const cap = m.heliosUnfiltered.cap;
+        const cap = m.unfilteredMesh.cap;
         const lmax = Math.min(next.lmax, cap.lmax);
         const maxAspectRatio = Math.min(next.maxAspectRatio, cap.maxAspectRatio);
-        const data = applyHeliosFilter(m.heliosUnfiltered.data, lmax, maxAspectRatio);
+        const data = applyTriangleFilter(m.unfilteredMesh.data, lmax, maxAspectRatio);
         return {
           ...m,
           data,
-          heliosFilter: { lmax, maxAspectRatio },
-          triangulationParams: buildHeliosTriParams(
-            m.heliosUnfiltered.data, lmax, maxAspectRatio,
-            m.triangulationParams?.scanCount ?? 0,
-            m.triangulationParams?.droppedDegenerate ?? 0,
-            // Preserve the recorded source scans + grid box across live filter
-            // edits so the mesh stays reusable by the LAD tool.
-            m.triangulationParams?.sourceScanIds ?? [],
-            m.triangulationParams?.gridMeshId),
+          triangleFilter: { lmax, maxAspectRatio },
+          // Spread the existing params first so method-specific provenance
+          // (depth / alpha / radii / normalRadius / pointsUsed on Open3D meshes)
+          // survives a filter edit; the filter-breakdown fields are overlaid on top.
+          triangulationParams: {
+            ...m.triangulationParams,
+            ...buildHeliosTriParams(
+              m.unfilteredMesh.data, lmax, maxAspectRatio,
+              m.triangulationParams?.scanCount ?? 0,
+              m.triangulationParams?.droppedDegenerate ?? 0,
+              // Preserve the recorded source scans + grid box across live filter
+              // edits so the mesh stays reusable by the LAD tool.
+              m.triangulationParams?.sourceScanIds ?? [],
+              m.triangulationParams?.gridMeshId),
+          },
         };
       }));
     },
@@ -9490,6 +9764,9 @@ export default function PointCloudViewer({
                   // transparent pass so its volume tint survives every view
                   // angle (fixes the +X-view "full green" bug).
                   renderOrder={mesh.gridSubdivisions ? 1 : 0}
+                  // A ground plane usually sits at z=0, coplanar with the ground
+                  // grid; bias its depth so it doesn't z-fight the grid.
+                  polygonOffset={mesh.isPlane}
                 />
               )}
               {mesh.gridSubdivisions &&
@@ -10303,49 +10580,34 @@ export default function PointCloudViewer({
           cancel button — the crop apply isn't cancelable today. Shown while
           the backend crop round-trip runs (octree re-conversion is ~15-20s);
           the to-be-cropped points stay hidden via isApplyingCrop. */}
-      {isApplyingCrop && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/80 backdrop-blur-sm rounded-full border border-neutral-700/50 z-20">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
-          </span>
-          <span className="text-[11px] text-neutral-300">Cropping…</span>
-        </div>
+      {isApplyingCrop && <StatusPill label="Cropping…" />}
+
+      {/* Open3D triangulation status indicator (ball pivoting / poisson / etc.) */}
+      {triangulationInProgress && !isHeliosRunning && (
+        <StatusPill
+          testId="triangulation-running"
+          label={triProgress?.label ?? 'Triangulating…'}
+          progress={triProgress?.value ?? null}
+          onCancel={() => triAbortRef.current?.abort()}
+        />
       )}
 
       {/* Helios triangulation status indicator */}
       {isHeliosRunning && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/80 backdrop-blur-sm rounded-full border border-neutral-700/50 z-20">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
-          </span>
-          <span className="text-[11px] text-neutral-300">Helios triangulating...</span>
-          <button
-            onClick={cancelHeliosTriangulation}
-            className="ml-1 p-0.5 rounded hover:bg-neutral-600/60 transition-colors"
-            title="Cancel triangulation"
-          >
-            <X className="w-3 h-3 text-neutral-400 hover:text-neutral-200" />
-          </button>
-        </div>
+        <StatusPill
+          testId="helios-running"
+          label={triProgress?.label ?? 'Helios triangulating…'}
+          progress={triProgress?.value ?? null}
+          onCancel={cancelHeliosTriangulation}
+        />
       )}
 
       {isLadRunning && (
-        <div data-testid="lad-running" className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/80 backdrop-blur-sm rounded-full border border-neutral-700/50 z-20">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
-          </span>
-          <span className="text-[11px] text-neutral-300">Computing leaf area density...</span>
-          <button
-            onClick={cancelLAD}
-            className="ml-1 p-0.5 rounded hover:bg-neutral-600/60 transition-colors"
-            title="Cancel"
-          >
-            <X className="w-3 h-3 text-neutral-400 hover:text-neutral-200" />
-          </button>
-        </div>
+        <StatusPill
+          testId="lad-running"
+          label="Computing leaf area density..."
+          onCancel={cancelLAD}
+        />
       )}
 
       {/* Modal transform indicator (Blender-style T/S) */}
@@ -10851,6 +11113,19 @@ export default function PointCloudViewer({
               if (next.has(id)) next.delete(id); else next.add(id);
               return next;
             })}
+            // The floating Transform panel acts on the (first) selected mesh, so
+            // tie the row's transform button to selection: highlight it only
+            // when the panel is open AND this is the mesh it's editing.
+            transformMeshId={showResizePanel ? selectedMeshId : null}
+            onToggleTransform={(id) => {
+              if (showResizePanel && selectedMeshId === id) {
+                setShowResizePanel(false);
+                return;
+              }
+              setSelectedMeshIds(new Set([id]));
+              setSelectedSkeletonIds(new Set());
+              setShowResizePanel(true);
+            }}
             onRename={handleRenameMesh}
             onRenamingChange={(id, value) => { setRenamingMeshId(id); setRenamingMeshValue(value); }}
             onOpenColorPopover={(id, anchor) => { setColorPopoverAnchor(anchor); setColorPopoverMeshId(id); }}
@@ -10866,6 +11141,7 @@ export default function PointCloudViewer({
             onWireframeChange={setMeshWireframe}
             onOpenLeafAngles={setShowLeafAngleMeshId}
             onHeliosFilterChange={handleHeliosFilterChange}
+            onCheckSpacing={handleCheckSpacing}
           />
         )}
 
@@ -11109,47 +11385,14 @@ export default function PointCloudViewer({
         {/* Create — geometry generation (scene-building, not analysis). */}
         <Toolbar commands={commands} selection={toolSelection} title="Create" groups={CREATE_GROUPS} />
 
-        {/* Simulate — scanner setup + synthetic scanning. */}
-        <Toolbar commands={commands} selection={toolSelection} title="Simulate" groups={SIMULATE_GROUPS} />
-
         {/* Tools — analysis operations on existing data. Renders from the single
             command registry; unavailable single-input tools grey out, multi-input
-            tools stay enabled. (See lib/toolCommands.ts.) */}
+            tools stay enabled. (See lib/toolCommands.ts.)
+            Note: synthetic scanning (Simulate) is reached from the Simulate menu
+            and the Scans panel, so it has no dedicated left-toolbar block.
+            Undo/redo are Ctrl+Z / Ctrl+Y and the Edit menu; per-item delete lives
+            in the Meshes / Skeletons list panels. */}
         <Toolbar commands={commands} selection={toolSelection} />
-
-        {/* History + delete footer (global; not part of the tool groups). */}
-        <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg flex gap-1">
-          <button onClick={handleUndo} disabled={historyIndex < 0 && !canUndoStitch?.()} className={`p-2 rounded flex-1 flex items-center justify-center ${historyIndex >= 0 || canUndoStitch?.() ? 'hover:bg-neutral-700' : 'opacity-40 cursor-not-allowed'}`} title="Undo (Ctrl+Z)">
-            <Undo2 className="w-4 h-4 text-neutral-300" />
-          </button>
-          <button onClick={handleRedo} disabled={historyIndex >= history.length - 1} className={`p-2 rounded flex-1 flex items-center justify-center ${historyIndex < history.length - 1 ? 'hover:bg-neutral-700' : 'opacity-40 cursor-not-allowed'}`} title="Redo (Ctrl+Y)">
-            <Redo2 className="w-4 h-4 text-neutral-300" />
-          </button>
-          {selectionType === 'mesh' && selectedMesh && (
-            <button
-              onClick={() => {
-                const sourceName = displayNameOfMesh(selectedMesh);
-                setDeleteConfirm({ type: 'mesh', ids: [selectedMesh.id], label: sourceName });
-              }}
-              className="p-2 rounded flex-1 flex items-center justify-center hover:bg-red-600/30"
-              title="Delete Mesh"
-            >
-              <Trash2 className="w-4 h-4 text-neutral-300 hover:text-red-400" />
-            </button>
-          )}
-          {selectionType === 'skeleton' && selectedSkeleton && (
-            <button
-              onClick={() => {
-                const sourceName = clouds.find(c => c.id === selectedSkeleton.sourceCloudId)?.data.fileName || 'Skeleton';
-                setDeleteConfirm({ type: 'skeleton', ids: [selectedSkeleton.id], label: sourceName });
-              }}
-              className="p-2 rounded flex-1 flex items-center justify-center hover:bg-red-600/30"
-              title="Delete Skeleton"
-            >
-              <Trash2 className="w-4 h-4 text-neutral-300 hover:text-red-400" />
-            </button>
-          )}
-        </div>
       </div>
 
       {/* Crop Panel — single panel handles Box, Rect, and Polygon modes
@@ -11639,23 +11882,17 @@ export default function PointCloudViewer({
         );
       })()}
 
-      {/* Triangulation Panel */}
-      {showTriangulationPanel && selectedIds.size >= 1 && (
-        <TriangulationPanel
-          method={triangulationMethod}
-          inProgress={triangulationInProgress}
-          error={triangulationError}
-          poissonDepth={poissonDepth}
-          alphaValue={alphaValue}
-          useSetup={triangulationMethod === 'helios' || selectedIds.size > 1}
-          onClose={() => setShowTriangulationPanel(false)}
-          onMethodChange={setTriangulationMethod}
-          onPoissonDepthChange={setPoissonDepth}
-          onAlphaValueChange={setAlphaValue}
-          onSetup={() => setShowHeliosPopup(true)}
-          onTriangulate={handleTriangulate}
-        />
-      )}
+      {/* Unified Triangulation Setup modal (Open3D methods + Helios). */}
+      <TriangulationPopup
+        isOpen={showTriangulationPopup}
+        onClose={() => setShowTriangulationPopup(false)}
+        onStartTriangulate={handleStartTriangulate}
+        scans={scans}
+        gridOptions={heliosGridOptions}
+        initialSelectedIds={selectedScanIds}
+        inProgress={triangulationInProgress || isHeliosRunning}
+        error={triangulationError}
+      />
 
       {/* Ground Segmentation Panel */}
       {showGroundSegmentPanel && selectedIds.size === 1 && (
@@ -12660,18 +12897,11 @@ export default function PointCloudViewer({
         onCancelGenerate={handleCancelPlantGenerate}
       />
 
-      {/* Helios Triangulation Popup */}
-      <HeliosTriangulationPopup
-        isOpen={showHeliosPopup}
-        onClose={() => setShowHeliosPopup(false)}
-        scans={scans}
-        gridOptions={heliosGridOptions}
-        onStartTriangulate={handleHeliosTriangulate}
-        initialSelectedIds={selectedScanIds}
-        onOpenScanParams={(id) => {
-          setShowHeliosPopup(false);
-          setScanPopupState({ kind: 'edit', id });
-        }}
+      {/* Create Plane Popup */}
+      <CreatePlanePopup
+        isOpen={showPlanePopup}
+        onClose={() => setShowPlanePopup(false)}
+        onCreate={handleCreatePlane}
       />
 
       {/* Leaf Angle Distribution Popup */}
@@ -12736,12 +12966,8 @@ export default function PointCloudViewer({
         triangulationOptions={ladTriangulationOptions}
         onStartLAD={handleComputeLAD}
         initialSelectedIds={selectedScanIds}
-        defaultLmax={[...meshes].reverse().find(m => m.heliosFilter)?.heliosFilter?.lmax}
-        defaultMaxAspectRatio={[...meshes].reverse().find(m => m.heliosFilter)?.heliosFilter?.maxAspectRatio}
-        onOpenScanParams={(id) => {
-          setShowLADPopup(false);
-          setScanPopupState({ kind: 'edit', id });
-        }}
+        defaultLmax={[...meshes].reverse().find(m => m.triangleFilter)?.triangleFilter?.lmax}
+        defaultMaxAspectRatio={[...meshes].reverse().find(m => m.triangleFilter)?.triangleFilter?.maxAspectRatio}
       />
 
       {/* Multi-input tool dialogs — pick their own inputs, seeded from the

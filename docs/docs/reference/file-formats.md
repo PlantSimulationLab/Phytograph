@@ -64,7 +64,12 @@ layout: a header row's column names — whether plain or written as a
 leading `#` comment — are matched to roles where recognised (so
 `XYZ[0][m]`/`XYZ[1][m]`/`XYZ[2][m]` map to x/y/z and the rest become
 scalar fields), otherwise it falls back to a positional guess (xyz, then
-RGB at six columns, then intensity at seven).
+RGB at six columns, then intensity at seven). The positional RGB guess is
+range-checked: columns 4–6 are only assigned to red/green/blue when their
+sampled values actually look like 8-bit colour (0–255 integers), so a
+six-column file whose extra columns hold timestamps or return counts (e.g.
+Helios multi-return `x y z timestamp intensity return#`) is left as
+reassignable scalars rather than silently mislabelled as colour.
 
 `.ply` clouds are parsed directly (not via open3d), so arbitrary per-vertex
 scalar properties — intensity, reflectance, and any custom numeric field —
@@ -186,7 +191,7 @@ visualization in Blender or MeshLab.
 
 ## Scan position files
 
-For the [Helios Triangulation](../workflows/triangulate.md#helios-triangulation)
+For the [Helios Triangulation](../workflows/triangulate.md#helios-method)
 workflow and bulk scan import:
 
 | Format | Use | Layout |

@@ -9,6 +9,7 @@ import {
   deWitCurve,
   fitBeta,
   betaCurve,
+  computeGTheta,
   meshCellIds,
   triangleCountByCell,
   DE_WIT_MODELS,
@@ -406,5 +407,82 @@ describe('betaCurve overlays on the empirical density scale', () => {
     expect(curve[1]).toBeGreaterThan(curve[0]);
     expect(curve[1]).toBeGreaterThan(curve[2]);
     expect(curve[0]).toBeCloseTo(curve[2], 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeGTheta — measured leaf-projection coefficient
+// ---------------------------------------------------------------------------
+
+// Attach scan provenance to a mesh: one scanner origin, all triangles seen by
+// it (scan id 0). computeGTheta needs both buffers or it returns null.
+function withScanner(data: MeshData, origin: [number, number, number]): MeshData {
+  return {
+    ...data,
+    triangleScanIds: Uint32Array.from(new Array(data.triangleCount).fill(0)),
+    scanOrigins: Float32Array.from(origin),
+  };
+}
+
+describe('computeGTheta (measured projection coefficient)', () => {
+  it('falls back to the nadir view when the mesh has no scan origins', () => {
+    // No provenance ⇒ beam = +Z (straight down), so G = mean |cos(inclination)|.
+    // Horizontal leaf (incl 0): |cos 0| = 1.
+    expect(computeGTheta(meshFromTris([triFromNormal(0, 0, 1)]))!).toBeCloseTo(1, 3);
+    // Vertical leaf (incl 90): |cos 90| = 0.
+    expect(computeGTheta(meshFromTris([triFromNormal(90, 0, 1)]))!).toBeCloseTo(0, 3);
+    // 60° leaf: |cos 60| = 0.5.
+    expect(computeGTheta(meshFromTris([triFromNormal(60, 0, 1)]))!).toBeCloseTo(0.5, 3);
+  });
+
+  it('returns null only when there are no usable triangles', () => {
+    // Empty mesh — nothing to average, even with the nadir fallback.
+    expect(computeGTheta(meshFromTris([]))).toBeNull();
+  });
+
+  it('is 1 when the beam looks straight down the normal (face-on)', () => {
+    // Horizontal triangle (normal ‖ +Z), scanner directly above its centroid:
+    // beam direction is +Z, |n̂·v̂| = 1.
+    const tri = triFromNormal(0, 0, 1);
+    // Centroid of triFromNormal(0,…) lies in the z=0 plane; put the scanner high
+    // above the origin so the beam is essentially vertical.
+    const mesh = withScanner(meshFromTris([tri]), [0, 0, 1000]);
+    expect(computeGTheta(mesh)!).toBeCloseTo(1, 3);
+  });
+
+  it('is ~0 when the beam grazes the leaf edge-on', () => {
+    // Vertical triangle (normal in the XY plane, pointing +X), scanner far away
+    // along +Z so the beam (≈+Z) is perpendicular to the normal: |n̂·v̂| ≈ 0.
+    const tri = triFromNormal(90, 0, 1);
+    const mesh = withScanner(meshFromTris([tri]), [0, 0, 1e6]);
+    expect(computeGTheta(mesh)!).toBeCloseTo(0, 3);
+  });
+
+  it('equals |cos 45°| ≈ 0.707 for a leaf tilted 45° to a vertical beam', () => {
+    // Normal at 45° zenith (azimuth 0 ⇒ tilts toward +X), scanner far up +Z so
+    // the beam is +Z. |n̂·v̂| = |cos 45°|.
+    const tri = triFromNormal(45, 0, 1);
+    const mesh = withScanner(meshFromTris([tri]), [0, 0, 1e6]);
+    expect(computeGTheta(mesh)!).toBeCloseTo(Math.SQRT1_2, 3);
+  });
+
+  it('is area-weighted across triangles', () => {
+    // Big face-on triangle (proj 1) + small edge-on triangle (proj 0). The mean
+    // is weighted by area, so a 9× larger face-on triangle pulls G toward 1.
+    const faceOn = triFromNormal(0, 0, 9);    // area 9, proj 1
+    const edgeOn = triFromNormal(90, 0, 1);   // area 1, proj ~0
+    const mesh = withScanner(meshFromTris([faceOn, edgeOn]), [0, 0, 1e6]);
+    // (9·1 + 1·0) / (9 + 1) = 0.9.
+    expect(computeGTheta(mesh)!).toBeCloseTo(0.9, 2);
+  });
+
+  it('respects the cell-id filter', () => {
+    // Two cells: cell 0 is face-on (G=1), cell 1 is edge-on (G=0).
+    const mesh = withScanner(
+      meshFromTris([triFromNormal(0, 0, 1), triFromNormal(90, 0, 1)], [0, 1]),
+      [0, 0, 1e6],
+    );
+    expect(computeGTheta(mesh, 0)!).toBeCloseTo(1, 3);
+    expect(computeGTheta(mesh, 1)!).toBeCloseTo(0, 3);
   });
 });

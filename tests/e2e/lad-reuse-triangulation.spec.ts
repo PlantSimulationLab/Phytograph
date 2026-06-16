@@ -47,14 +47,16 @@ test('LAD reuses an existing Helios triangulation (scans + grid locked to the me
       await rows.nth(i).getByTestId('scan-row-name').click({ modifiers: ['ControlOrMeta'] });
     }
 
-    // Triangulate with the voxel grid selected (not the auto-fit option).
+    // Triangulate with the voxel grid selected (not the auto-fit option). Scans
+    // carry params, so the unified Triangulation modal defaults to Helios.
     await page.getByTestId('tool-triangulate').click();
-    await page.getByTestId('triangulation-setup-button').click();
-    await expect(page.getByTestId('helios-triangulation-popup')).toBeVisible();
-    const heliosGrid = page.getByTestId('helios-grid-select');
+    const triModal = page.getByTestId('triangulation-popup');
+    await expect(triModal).toBeVisible();
+    await expect(triModal.getByTestId('triangulation-method')).toHaveValue('helios');
+    const heliosGrid = triModal.getByTestId('helios-grid-select');
     await heliosGrid.selectOption({ index: 1 }); // index 0 = auto; index 1 = our voxel box
-    await expect(page.getByTestId('helios-grid-summary')).toBeVisible();
-    await page.getByTestId('helios-triangulate-button').click();
+    await expect(triModal.getByTestId('helios-grid-summary')).toBeVisible();
+    await triModal.getByTestId('triangulation-run-button').click();
 
     const meshRow = page.getByTestId('mesh-row').first();
     await expect(meshRow).toBeVisible({ timeout: 60_000 });

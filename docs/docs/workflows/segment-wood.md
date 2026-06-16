@@ -25,8 +25,9 @@ There are three methods (see **Method** below):
 1. Crop the ground first (see [Segment ground points](segment-ground.md)) —
    the tool expects a cloud of plant material, not soil.
 2. Select a single point cloud.
-3. Click **Segment Wood / Leaf** (the tree icon in the tool column), or open
-   the command palette and choose **Segment Wood / Leaf**.
+3. Click **Segment Wood / Leaf** (the branch / git-branch icon in the
+   **Tools** › Segmentation group), or open the command palette and choose
+   **Segment Wood / Leaf**.
 4. Adjust the parameters if needed (the defaults work across broadleaf and
    conifer scans):
     - **Method** — **Branch-segment** (default; segment-wise cylinder-fit, best on

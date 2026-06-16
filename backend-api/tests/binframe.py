@@ -9,10 +9,18 @@ import numpy as np
 
 
 def decode_bin_frame(content: bytes):
-    """Decode a PHB1 frame body into (meta: dict, buffers: dict[str, np.ndarray])."""
+    """Decode a PHB1 frame body into (meta: dict, buffers: dict[str, np.ndarray]).
+
+    Skips leading whitespace keepalives and PHP1 progress markers (see
+    main._pack_progress_marker) that precede the frame on streaming endpoints."""
     i = 0
-    while i < len(content) and content[i] in (0x20, 0x09, 0x0A, 0x0D):
-        i += 1
+    while True:
+        while i < len(content) and content[i] in (0x20, 0x09, 0x0A, 0x0D):
+            i += 1
+        if content[i:i + 4] != b"PHP1":
+            break
+        marker_len = struct.unpack_from("<I", content, i + 4)[0]
+        i += 8 + marker_len
     assert content[i:i + 4] == b"PHB1", "not a PHB1 frame"
     header_len = struct.unpack_from("<I", content, i + 4)[0]
     header = json.loads(content[i + 8:i + 8 + header_len].decode("utf-8"))
@@ -24,6 +32,22 @@ def decode_bin_frame(content: bytes):
         buffers[d["name"]] = np.frombuffer(content, dtype=dtype, count=n, offset=off).copy()
         off += n * 4
     return header["meta"], buffers
+
+
+def decode_progress_markers(content: bytes):
+    """Return the list of PHP1 progress markers ({"progress","message"}) that
+    precede the PHB1 frame in a streaming response body."""
+    markers = []
+    i = 0
+    while True:
+        while i < len(content) and content[i] in (0x20, 0x09, 0x0A, 0x0D):
+            i += 1
+        if content[i:i + 4] != b"PHP1":
+            break
+        marker_len = struct.unpack_from("<I", content, i + 4)[0]
+        markers.append(json.loads(content[i + 8:i + 8 + marker_len].decode("utf-8")))
+        i += 8 + marker_len
+    return markers
 
 
 def decode_lidar_scan(content: bytes) -> dict:

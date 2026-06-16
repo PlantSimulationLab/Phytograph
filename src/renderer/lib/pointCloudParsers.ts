@@ -760,6 +760,10 @@ export async function parsePointCloudFromPath(
   categoricalAttributes?: string[],
   worldShift?: [number, number, number] | null,
   continuousAttributes?: string[],
+  // Far-field distance (m) for miss auto-detection's distance fallback, sourced
+  // from AppSettings by the importer. Forwarded to createCloudSession; null →
+  // backend default (1001 m). Only the octree path consumes it.
+  missDistanceThreshold?: number | null,
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -771,7 +775,9 @@ export async function parsePointCloudFromPath(
     // then route through delete_region; downstream ops read the masked array.
     // The optional CloudCompare-style global shift is subtracted at session
     // create (the array + octree get small coords); the backend echoes it back.
-    const meta = await createCloudSession(path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null);
+    const meta = await createCloudSession(
+      path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null, missDistanceThreshold ?? null,
+    );
     return buildPointCloudFromOctree(
       meta, path, name, asciiFormat, columnPlan, categoricalAttributes, meta.session_id,
       meta.world_shift ?? null, continuousAttributes,

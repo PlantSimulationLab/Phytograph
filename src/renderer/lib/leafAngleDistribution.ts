@@ -114,6 +114,71 @@ export function computeAzimuthHistogram(data: MeshData, opts: PdfOptions = {}): 
   return areaWeightedHistogram(data, opts.cellId, g => g.azimuth, 0, 360, binCount);
 }
 
+// ---------------------------------------------------------------------------
+// G(θ) — leaf-projection coefficient (Ross's G-function), measured directly
+// ---------------------------------------------------------------------------
+
+// G is the mean projection of unit leaf area onto the plane perpendicular to a
+// beam: the fraction of a leaf that a beam "sees". We measure it directly from
+// the mesh rather than assuming a distribution — G(θ) is the AREA-WEIGHTED mean
+// of |n̂ · v̂| over the triangles, where n̂ is the unit face normal and v̂ the
+// unit beam direction. (|·| because a leaf projects the same area whichever face
+// the beam hits.) This is the same quantity Helios reports per voxel in the LAD
+// inversion, here computed straight from the geometry.
+//
+// Beam direction per triangle:
+//   - If the mesh carries scan provenance, v̂ points from the triangle centroid
+//     toward the scanner that saw it (scan origin − centroid) — the true sensor
+//     geometry.
+//   - Otherwise (e.g. a triangulated plant model, no scanner) we use the
+//     conventional NADIR view, v̂ = +Z (straight down). G(θ) then reduces to the
+//     area-weighted mean of |cos(inclination)|, the standard nadir projection
+//     coefficient — well-defined for any mesh.
+//
+// Returns null only when there's genuinely nothing to average (no triangles
+// with finite area in the cell).
+export function computeGTheta(data: MeshData, cellId?: number): number | null {
+  const refFor = outwardRefForMesh(data);  // null ⇒ no scan provenance ⇒ nadir
+
+  const { vertices, indices, triangleCount, triangleCellIds } = data;
+  let weighted = 0;  // Σ area·|n̂·v̂|
+  let totalArea = 0;
+  for (let t = 0; t < triangleCount; t++) {
+    if (cellId !== undefined && triangleCellIds && triangleCellIds[t] !== cellId) continue;
+
+    const i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
+    const ax = vertices[i0 * 3], ay = vertices[i0 * 3 + 1], az = vertices[i0 * 3 + 2];
+    const bx = vertices[i1 * 3], by = vertices[i1 * 3 + 1], bz = vertices[i1 * 3 + 2];
+    const cx = vertices[i2 * 3], cy = vertices[i2 * 3 + 1], cz = vertices[i2 * 3 + 2];
+    // n = (b - a) × (c - a); |n| = 2·area; direction = face normal.
+    const nx = (by - ay) * (cz - az) - (bz - az) * (cy - ay);
+    const ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
+    const nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    const nlen = Math.hypot(nx, ny, nz);
+    if (nlen < 1e-20) continue;  // degenerate sliver, no normal
+    const area = 0.5 * nlen;
+
+    // Beam direction: triangle centroid → scanner when known, else nadir (+Z).
+    let vx = 0, vy = 0, vz = 1;
+    const ref = refFor ? refFor(t) : null;
+    if (ref) {
+      const gx = (ax + bx + cx) / 3, gy = (ay + by + cy) / 3, gz = (az + bz + cz) / 3;
+      vx = ref.x - gx; vy = ref.y - gy; vz = ref.z - gz;
+      const vlen = Math.hypot(vx, vy, vz);
+      if (vlen < 1e-20) { vx = 0; vy = 0; vz = 1; }  // scanner at centroid → nadir
+      else { vx /= vlen; vy /= vlen; vz /= vlen; }
+    }
+
+    // |n̂·v̂| — projection magnitude, sign-independent (either leaf face).
+    const proj = Math.abs((nx * vx + ny * vy + nz * vz) / nlen);
+    weighted += area * proj;
+    totalArea += area;
+  }
+
+  if (totalArea <= 0) return null;
+  return weighted / totalArea;
+}
+
 // The distinct grid cell ids present in a mesh (sorted), excluding the
 // outside-grid sentinel. Returns [] when the mesh carries no cell ids (e.g.
 // non-Helios) — callers then treat the whole mesh as a single distribution.

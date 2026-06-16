@@ -25,7 +25,7 @@ metadata was lost. Most analyses still work:
 - **Stitching with other data-bearing scans**
 
 Analyses that need per-pulse direction (notably the
-[Helios triangulation](../workflows/triangulate.md#helios-triangulation)
+[Helios triangulation](../workflows/triangulate.md#helios-method)
 mode) are disabled until parameters are added. Click the radio icon
 on the row to add them — the origin pre-fills to the scan's bounds
 centre as a starting point.

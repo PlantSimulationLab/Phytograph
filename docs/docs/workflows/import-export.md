@@ -74,6 +74,18 @@ dropdowns in; you correct anything that's wrong before importing:
   it keeps the `is_miss` slug (LAD still works) but colors as a continuous 0–1
   gradient with a numeric legend — useful when you'd rather see the raw flag
   value than the named classes.
+
+    !!! tip "Misses are auto-detected even without a Miss Flag column"
+        A Helios synthetic scan exported to plain ASCII often *drops* the
+        `is_miss` column but keeps a **Target Index** column, where misses carry
+        the sentinel value `99`. On import, Phytograph recovers the miss flag
+        from that sentinel — so the misses appear under the row's **sky/miss**
+        toggle, stay out of the displayed cloud's bounding box, and feed
+        leaf-area-density — with nothing to configure. If the scan has no
+        target-index column either, a distance fallback tags points farther than
+        the **Miss detection distance** setting (default 1001 m, the Helios
+        placeholder distance) from the scanner. An explicit `is_miss` column
+        always takes precedence over auto-detection.
 - **RGB range** — when an RGB role is present, choose whether the values are
   **0–255 integers** or **0–1 floats**, so colors import at the right
   brightness.

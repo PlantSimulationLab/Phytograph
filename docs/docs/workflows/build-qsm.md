@@ -39,9 +39,9 @@ first:
 ## Run the build
 
 1. Select the cloud in the **Scans** panel.
-2. Click **Build QSM** (the DNA-helix icon in the left toolbar), or open
-   the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) and search for
-   *Build QSM*.
+2. Click **Build QSM** (the branching-tree icon in the **Tools** ›
+   Reconstruction group of the left toolbar), or open the command palette
+   (<kbd>Ctrl</kbd>+<kbd>K</kbd>) and search for *Build QSM*.
 3. The **Build QSM** panel opens on the right.
 
 ![The Build QSM panel](../assets/screenshots/qsm-01-panel.png)

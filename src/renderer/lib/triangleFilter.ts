@@ -1,12 +1,19 @@
-// Front-end side of the interactive Helios triangulation filter.
+// Front-end side of the interactive triangle filter (Lmax + aspect ratio).
 //
-// The backend triangulates, auto-estimates the Lmax (Otsu separability) and
-// returns a BOUNDED mesh — small candidate sets whole, large ones pre-filtered
-// to the estimate + capped so the JSON payload stays parseable. It does NOT
-// send per-triangle metrics (two float arrays per million triangles would blow
-// past V8's ~512 MB string limit). So here we recompute the per-triangle
-// max-edge / aspect from the returned geometry once, then apply the Lmax +
-// aspect filter as an instant post-processing step.
+// Pure geometry — works on ANY triangulated mesh (Helios spherical Delaunay or
+// the Open3D methods). We compute per-triangle max-edge / aspect once from the
+// mesh geometry, then apply the Lmax + aspect filter as an instant
+// post-processing step (rebuilding only the index, sharing the vertex buffer).
+//
+// For Helios meshes the backend triangulates, auto-estimates the Lmax (Otsu
+// separability), and returns a BOUNDED mesh — small candidate sets whole, large
+// ones pre-filtered to the estimate + capped so the JSON payload stays parseable
+// (it does NOT send per-triangle metrics — two float arrays per million
+// triangles would blow past V8's ~512 MB string limit, so we recompute them
+// here). Open3D meshes carry no such backend estimate; their cap is derived
+// client-side (max edge length) and the filter starts wide open (no Otsu /
+// separation diagnostics — those are Helios-only and degrade to the 'n/a'
+// estimate sentinel).
 //
 // This reproduces the C++ single-return filter in LiDAR.cpp:
 //   drop if  maxEdge > lmax          (any of the 3 edges > Lmax)
@@ -20,9 +27,12 @@ import type { MeshData } from './pointCloudTypes';
 
 export type SeparationLabel = 'High' | 'Medium' | 'Low' | 'n/a';
 
-// Auto-estimate returned by the backend (camelCased), shown in the filter panel
-// and used to seed the default Lmax.
-export interface HeliosFilterEstimate {
+// Auto-estimate for the filter panel. For Helios meshes this is the backend's
+// Otsu estimate (camelCased), used to seed the default Lmax and show separation
+// diagnostics. For Open3D meshes there is no backend estimate, so the 'n/a'
+// sentinel ({ lmax: null, label: 'n/a', … }) is stored and the panel hides the
+// Auto button / separation readout / spacing check.
+export interface TriangleFilterEstimate {
   lmax: number | null;        // suggested Lmax (m); null when too little spread
   eta: number;                // separation confidence in [0, 1]
   label: SeparationLabel;     // High (η≥0.7) / Medium (η≥0.5) / Low / n/a
@@ -38,7 +48,7 @@ export interface HeliosFilterEstimate {
 }
 
 // Per-Lmax/aspect filter breakdown for the mesh provenance readout.
-export interface HeliosFilterCounts {
+export interface TriangleFilterCounts {
   candidates: number;
   kept: number;
   droppedLmax: number;
@@ -48,7 +58,7 @@ export interface HeliosFilterCounts {
 // Compute per-triangle max-edge length and aspect ratio (maxEdge/minEdge) from
 // indexed geometry. Done once when the mesh arrives; the results are cached on
 // the mesh (MeshData.triEdgeMax / triAspect) and reused by every filter change.
-export function computeHeliosMetrics(
+export function computeTriangleMetrics(
   data: MeshData,
 ): { triEdgeMax: Float32Array; triAspect: Float32Array } {
   const { vertices, indices, triangleCount } = data;
@@ -77,8 +87,8 @@ function dist(v: Float32Array, a: number, b: number): number {
 }
 
 // Whether a mesh carries the per-triangle metrics needed for interactive
-// filtering (populated by computeHeliosMetrics on arrival).
-export function hasHeliosFilterMetrics(data: MeshData): boolean {
+// filtering (populated by computeTriangleMetrics on arrival).
+export function hasTriangleFilterMetrics(data: MeshData): boolean {
   return !!data.triEdgeMax
     && !!data.triAspect
     && data.triEdgeMax.length === data.triangleCount
@@ -88,11 +98,11 @@ export function hasHeliosFilterMetrics(data: MeshData): boolean {
 // Count how the Lmax / aspect filter partitions the triangles, for the
 // provenance readout. droppedLmax takes priority over droppedAspect, matching
 // the C++ attribution order.
-export function heliosFilterCounts(
+export function triangleFilterCounts(
   data: MeshData,
   lmax: number,
   maxAspectRatio: number,
-): HeliosFilterCounts {
+): TriangleFilterCounts {
   const edgeMax = data.triEdgeMax;
   const aspect = data.triAspect;
   const candidates = data.triangleCount;
@@ -116,7 +126,7 @@ export function heliosFilterCounts(
 // so it's cheap and doesn't re-upload positions on the indexed render path.
 // surfaceArea is recomputed from the kept triangles. Returned unchanged when
 // the mesh has no metrics.
-export function applyHeliosFilter(
+export function applyTriangleFilter(
   data: MeshData,
   lmax: number,
   maxAspectRatio: number,
