@@ -440,27 +440,45 @@ export default function PointCloudViewer({
     if (meshList.length === 0) return;
     scene.commit({ label, actions: meshList.map(m => ({ t: 'add' as const, kind: 'mesh' as const, id: m.id, object: m, transform: meshTransform() })) });
   }, [scene]);
-  // Remove N meshes as ONE undoable transaction (a single Cmd+Z restores them
-  // all). Captures each mesh's index + transform so undo reinstates it exactly.
-  const removeMeshes = useCallback((ids: string[]) => {
+  // Remove N objects of one kind (mesh/skeleton/qsm/lad) as ONE undoable
+  // transaction — a single Cmd+Z restores the whole batch. Captures each object's
+  // index (+ transform for mesh/skeleton) so undo reinstates exactly.
+  const removeObjects = useCallback((kind: 'mesh' | 'skeleton' | 'qsm' | 'lad', ids: string[]) => {
     const s = scene.state;
+    const list = kind === 'mesh' ? s.meshes : kind === 'skeleton' ? s.skeletons : kind === 'qsm' ? s.qsms : s.ladResults;
     const actions = ids
-      .map(id => {
-        const index = s.meshes.findIndex(m => m.id === id);
+      .map((id) => {
+        const index = list.findIndex((o) => o.id === id);
         if (index < 0) return null;
-        const mesh = s.meshes[index];
-        return {
-          t: 'remove' as const, kind: 'mesh' as const, id, index, object: mesh,
-          transform: {
+        const object = list[index];
+        if (kind === 'mesh') {
+          return { t: 'remove' as const, kind, id, index, object, transform: {
             position: s.meshPositions.get(id) ?? { x: 0, y: 0, z: 0 },
             rotation: s.meshRotations.get(id) ?? { x: 0, y: 0, z: 0 },
             scale: s.meshScales.get(id) ?? { x: 1, y: 1, z: 1 },
-          },
-        };
+          } };
+        }
+        if (kind === 'skeleton') {
+          return { t: 'remove' as const, kind, id, index, object, transform: { position: s.skeletonPositions.get(id) ?? { x: 0, y: 0, z: 0 } } };
+        }
+        return { t: 'remove' as const, kind, id, index, object };
       })
       .filter((a): a is NonNullable<typeof a> => a !== null);
     if (actions.length === 0) return;
-    scene.commit({ label: ids.length > 1 ? `Delete ${ids.length} meshes` : 'Delete mesh', actions });
+    const noun = kind === 'lad' ? 'LAD result' : kind;
+    scene.commit({ label: ids.length > 1 ? `Delete ${ids.length} ${noun}s` : `Delete ${noun}`, actions });
+  }, [scene]);
+
+  // Undoable add/remove for skeletons (position-only transform), QSMs and LAD
+  // results (no transform). Same shape as the mesh helpers (Phase C).
+  const addSkeleton = useCallback((skeleton: SkeletonEntry, label = 'Add skeleton') => {
+    scene.commit({ label, actions: [{ t: 'add', kind: 'skeleton', id: skeleton.id, object: skeleton, transform: { position: { x: 0, y: 0, z: 0 } } }] });
+  }, [scene]);
+  const addQSM = useCallback((qsm: QSMEntry, label = 'Build QSM') => {
+    scene.commit({ label, actions: [{ t: 'add', kind: 'qsm', id: qsm.id, object: qsm }] });
+  }, [scene]);
+  const addLad = useCallback((lad: LADResultEntry, label = 'Compute LAD') => {
+    scene.commit({ label, actions: [{ t: 'add', kind: 'lad', id: lad.id, object: lad }] });
   }, [scene]);
 
   // Legacy internal aliases. The bulk of this file was written against
@@ -681,8 +699,9 @@ export default function PointCloudViewer({
   const [treeMergeB, setTreeMergeB] = useState(2);
   const [treeSplitId, setTreeSplitId] = useState(1);
 
-  // Skeleton state
-  const [skeletons, setSkeletons] = useState<SkeletonEntry[]>([]);
+  // Skeleton state — store-owned so add/remove are undoable (Phase C).
+  const skeletons = scene.state.skeletons;
+  const setSkeletons = useMemo(() => makeFieldSetter('skeletons'), [makeFieldSetter]);
   const [skeletonTubeRadius, setSkeletonTubeRadius] = useState(0.02);
   const [skeletonColorByBranchOrder, setSkeletonColorByBranchOrder] = useState(false);
   const [skeletonShowAsCylinders, setSkeletonShowAsCylinders] = useState(true);
@@ -749,7 +768,9 @@ export default function PointCloudViewer({
   // When >1 scan is selected: fuse them into one QSM ('aggregate', for multi-view
   // scans of a single tree) or build one QSM per scan ('per-scan', separate trees).
   const [qsmMultiMode, setQSMMultiMode] = useState<'aggregate' | 'per-scan'>('per-scan');
-  const [qsms, setQSMs] = useState<QSMEntry[]>([]);
+  // QSM state — store-owned so add/remove are undoable (Phase C).
+  const qsms = scene.state.qsms;
+  const setQSMs = useMemo(() => makeFieldSetter('qsms'), [makeFieldSetter]);
   // The QSM id whose Add-Leaves modal is open (null = closed).
   const [addLeavesQSMId, setAddLeavesQSMId] = useState<string | null>(null);
   // The QSM id whose Adjust-Leaf-Angles modal is open (null = closed).
@@ -800,8 +821,8 @@ export default function PointCloudViewer({
       ...skeleton,
       id: crypto.randomUUID(),
     };
-    setSkeletons(prev => [...prev, newSkeleton]);
-  }, []);
+    addSkeleton(newSkeleton, 'Import skeleton');
+  }, [addSkeleton]);
 
   // Bulk-import scans + grids parsed from a Helios scan XML. This is the shared
   // workhorse behind every XML entry point: the Add-Scan popup's "Import from
@@ -1067,7 +1088,9 @@ export default function PointCloudViewer({
   const [showStitchDialog, setShowStitchDialog] = useState(false);
   // Leaf area density popup + results + background task state
   const [showLADPopup, setShowLADPopup] = useState(false);
-  const [ladResults, setLadResults] = useState<LADResultEntry[]>([]);
+  // LAD results — store-owned so add/remove are undoable (Phase C).
+  const ladResults = scene.state.ladResults;
+  const setLadResults = useMemo(() => makeFieldSetter('ladResults'), [makeFieldSetter]);
   const [isLadRunning, setIsLadRunning] = useState(false);
   const ladAbortRef = useRef<AbortController | null>(null);
   // The LAD voxel currently under the cursor (for the value readout tooltip).
@@ -6597,7 +6620,7 @@ export default function PointCloudViewer({
         color: '#f59e0b',  // Amber color for skeleton
       };
 
-      setSkeletons(prev => [...prev, skeletonEntry]);
+      addSkeleton(skeletonEntry, 'Extract skeleton');
       setShowSkeletonPanel(false);
       showToast({
         type: 'success',
@@ -6741,7 +6764,7 @@ export default function PointCloudViewer({
           metrics: response.metrics,
           visible: true,
         };
-        setQSMs(prev => [...prev, entry]);
+        addQSM(entry, 'Build QSM');
         // Hide every contributing scan so the new QSM isn't obscured by the
         // dense point cloud it was fused from.
         for (const t of targets) onHideScan(t.id);
@@ -6780,7 +6803,7 @@ export default function PointCloudViewer({
             metrics: response.metrics,
             visible: true,
           };
-          setQSMs(prev => [...prev, entry]);
+          addQSM(entry, 'Build QSM');
           // Hide the source scan so its points don't obscure the new QSM.
           onHideScan(cloud.id);
           succeeded++;
@@ -6821,10 +6844,6 @@ export default function PointCloudViewer({
     }
   }, [selectedIds, clouds, buildPointSource, getEditState, qsmTwigRadiusMm, qsmMultiMode, showToast, onHideScan]);
 
-  // Remove a QSM.
-  const handleRemoveQSM = useCallback((qsmId: string) => {
-    setQSMs(prev => prev.filter(q => q.id !== qsmId));
-  }, []);
 
   const handleToggleQSMVisibility = useCallback((qsmId: string) => {
     setQSMs(prev => prev.map(q => (q.id === qsmId ? { ...q, visible: !q.visible } : q)));
@@ -6947,26 +6966,22 @@ export default function PointCloudViewer({
     }
   }, [qsms, qsmDisplayLabel, showToast]);
 
-  // Remove a skeleton
-  const handleRemoveSkeleton = useCallback((skeletonId: string) => {
-    setSkeletons(prev => prev.filter(s => s.id !== skeletonId));
-  }, []);
 
   // Confirm and execute deletion
   const handleConfirmDelete = useCallback(() => {
     if (!deleteConfirm) return;
     const { type, ids } = deleteConfirm;
 
+    // Each kind deletes as ONE undoable transaction → a single Cmd+Z restores all.
     if (type === 'mesh') {
-      // One transaction for the whole selection → a single Cmd+Z restores all.
-      removeMeshes(ids);
+      removeObjects('mesh', ids);
       setSelectedMeshIds(prev => {
         const next = new Set(prev);
         ids.forEach(id => next.delete(id));
         return next;
       });
     } else if (type === 'skeleton') {
-      ids.forEach(id => handleRemoveSkeleton(id));
+      removeObjects('skeleton', ids);
       setSelectedSkeletonIds(prev => {
         const next = new Set(prev);
         ids.forEach(id => next.delete(id));
@@ -6977,7 +6992,7 @@ export default function PointCloudViewer({
       // session and prunes selectedScanIds, so looping here frees every session.
       ids.forEach(id => onRemoveCloud(id));
     } else if (type === 'qsm') {
-      ids.forEach(id => handleRemoveQSM(id));
+      removeObjects('qsm', ids);
       setSelectedQSMIds(prev => {
         const next = new Set(prev);
         ids.forEach(id => next.delete(id));
@@ -6986,7 +7001,7 @@ export default function PointCloudViewer({
     }
 
     setDeleteConfirm(null);
-  }, [deleteConfirm, removeMeshes, handleRemoveSkeleton, handleRemoveQSM, onRemoveCloud]);
+  }, [deleteConfirm, removeObjects, onRemoveCloud]);
 
   // Toggle skeleton visibility
   const handleToggleSkeletonVisibility = useCallback((skeletonId: string) => {
@@ -8576,7 +8591,7 @@ export default function PointCloudViewer({
         } : {}),
       };
 
-      setLadResults(prev => [...prev, entry]);
+      addLad(entry, 'Compute LAD');
       setSelectedLadId(entry.id);
 
       // Auto-hide the voxel-box grid mesh the result was computed on: the LAD
@@ -8619,9 +8634,9 @@ export default function PointCloudViewer({
   }, []);
 
   const removeLadResult = useCallback((id: string) => {
-    setLadResults(prev => prev.filter(r => r.id !== id));
+    removeObjects('lad', [id]);
     setSelectedLadId(prev => (prev === id ? null : prev));
-  }, []);
+  }, [removeObjects]);
 
   const toggleLadVisible = useCallback((id: string) => {
     setLadResults(prev => prev.map(r => r.id === id ? { ...r, visible: !r.visible } : r));

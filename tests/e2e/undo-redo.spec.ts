@@ -5,6 +5,7 @@ import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
+const TREE_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 
 // Generalized undo/redo (Phase B): a mesh ADD is undoable, and undo/redo are
 // reversible. Drives the real UI against the live backend per CLAUDE.md rules:
@@ -83,6 +84,45 @@ test('mesh delete is undoable', async () => {
     // Undo restores the deleted mesh.
     await page.keyboard.press('ControlOrMeta+z');
     await expect(meshRow).toHaveCount(1, { timeout: 10_000 });
+  } finally {
+    await close();
+  }
+});
+
+// Phase C: skeleton extraction is undoable. Uses the Y-shaped tree fixture and
+// non-default extraction params (matching skeleton-extract.spec) so the BFS
+// actually produces a skeleton, then Cmd+Z removes it and redo restores it.
+test('skeleton extraction is undoable', async () => {
+  const { app, page, close } = await launchApp();
+
+  try {
+    await importFiles(app, page, 'import-point-cloud', TREE_FIXTURE);
+    await completeImportWizard(page);
+
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+
+    await page.getByTestId('tool-skeleton').click();
+    const panel = page.getByTestId('skeleton-panel');
+    await expect(panel).toBeVisible();
+    await page.getByTestId('skeleton-search-radius').fill('0.04');
+    await page.getByTestId('skeleton-min-points').fill('1');
+    await page.getByTestId('skeleton-extract-button').click();
+
+    const skelRow = page.getByTestId('skeleton-row');
+    await expect(skelRow.first()).toBeVisible({ timeout: 60_000 });
+    await expect(skelRow).toHaveCount(1);
+
+    // The skeleton panel auto-closes on successful extraction; wait for it to be
+    // gone so the keyboard undo reaches the viewer's window listener.
+    await expect(panel).toHaveCount(0);
+
+    // Undo removes the skeleton; redo restores it.
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect(skelRow).toHaveCount(0, { timeout: 10_000 });
+    await page.keyboard.press('ControlOrMeta+Shift+z');
+    await expect(skelRow).toHaveCount(1, { timeout: 10_000 });
   } finally {
     await close();
   }
