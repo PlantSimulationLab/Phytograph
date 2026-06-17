@@ -181,27 +181,9 @@ export type PendingDeleteRegion =
       invert?: boolean;
     };
 
-// State snapshot for mesh/skeleton
-export interface ObjectState {
-  position: { x: number; y: number; z: number };
-  rotation?: { x: number; y: number; z: number };
-  scale?: { x: number; y: number; z: number };
-}
-
-// History entry for undo/redo (supports all object types)
-export interface HistoryEntry {
-  type: 'cloud' | 'mesh' | 'skeleton';
-  id: string;
-  // Before and after states for proper undo/redo
-  before: {
-    cloudState?: CloudEditState;
-    objectState?: ObjectState;
-  };
-  after: {
-    cloudState?: CloudEditState;
-    objectState?: ObjectState;
-  };
-}
+// (Undo/redo history types now live in src/renderer/state/sceneActions.ts —
+// the old HistoryEntry/ObjectState snapshots were replaced by the unified
+// scene-store action model.)
 
 // Mesh data from triangulation
 export interface MeshData {
