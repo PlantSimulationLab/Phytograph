@@ -9,7 +9,8 @@ import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./compon
 import type { Scan } from "./lib/scan";
 import { scanParametersFromFile, type ScanParameters } from "./lib/scanParameters";
 import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from "./lib/pointCloudParsers";
-import { importTexturedMesh, deleteCloudSession, type MeshImportResponse } from "./utils/backendApi";
+import { importTexturedMesh, type MeshImportResponse } from "./utils/backendApi";
+import { useScene } from "./state/sceneStore";
 import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
 import { registerCategoricalSlug, registerContinuousSlug } from "./lib/classification";
@@ -68,7 +69,49 @@ function App() {
   // Bumped each time the settings dialog closes so the always-mounted viewer can
   // re-read persisted settings (e.g. scan-marker scale) and apply them live.
   const [settingsEpoch, setSettingsEpoch] = useState(0);
-  const [scans, setScans] = useState<Scan[]>([]);
+  // Scans are now owned by the scene store so add/remove are undoable and the
+  // stitch undo folds into the unified history (Phase D). Reads keep array
+  // syntax; non-history .map mutations (visibility/label/color/params/misses)
+  // keep setScans(prev => ...) via the adapter; add/remove/stitch commit
+  // transactions. selectedScanIds stays local (selection is out of undo scope).
+  const scene = useScene();
+  const scans = scene.state.scans;
+  const setScans = useCallback(
+    (update: Scan[] | ((prev: Scan[]) => Scan[])) => {
+      scene.dispatch({
+        c: 'replaceCollection',
+        apply: (s) => ({ scans: typeof update === 'function' ? (update as (p: Scan[]) => Scan[])(s.scans) : update }),
+      });
+    },
+    [scene],
+  );
+  // Undoable scan add/remove. A removed scan's octree session is NOT freed here
+  // — it carries `sessionId` on the remove action and the store frees it only
+  // when that action is EVICTED off the history tail or purged by a boundary
+  // (see freeSession wiring in main.tsx / the SceneProvider). This lets undo
+  // resurrect the scan with its backend session (and unbaked edits) intact.
+  const addScanTx = useCallback((scan: Scan, label = 'Add scan') => {
+    scene.commit({ label, actions: [{ t: 'add', kind: 'scan', id: scan.id, object: scan }] });
+  }, [scene]);
+  const addScansTx = useCallback((newScans: Scan[], label = 'Add scans') => {
+    if (newScans.length === 0) return;
+    scene.commit({ label, actions: newScans.map(s => ({ t: 'add' as const, kind: 'scan' as const, id: s.id, object: s })) });
+  }, [scene]);
+  const removeScanTx = useCallback((id: string) => {
+    const s = scene.state;
+    const index = s.scans.findIndex(sc => sc.id === id);
+    if (index < 0) return;
+    const scan = s.scans[index];
+    scene.commit({
+      label: 'Delete scan',
+      actions: [{
+        t: 'remove', kind: 'scan', id, index, object: scan,
+        editState: s.editStates.get(id),
+        filters: s.cloudFilters.get(id),
+        sessionId: scan.data?.octree?.sessionId ?? null,
+      }],
+    });
+  }, [scene]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
   // Progress shown over the viewer while an import (drag-drop or the
   // File → Import menu) is in flight. Reuses BulkImportProgress so every
@@ -114,14 +157,6 @@ function App() {
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, []);
-
-  // Stitch history for undo. We snapshot the full Scan objects (including any
-  // params) so undo restores the original scans exactly as they were.
-  interface StitchHistoryEntry {
-    originalScans: Scan[];
-    stitchedScanId: string;
-  }
-  const stitchHistoryRef = useRef<StitchHistoryEntry[]>([]);
 
   // Auto-select the current value when any numeric input gains focus so
   // the user can type to replace it. Paired with the
@@ -440,7 +475,7 @@ function App() {
           if (!results || results.length === 0) return; // user cancelled
           setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
           const newScan = await buildScanFromWizardResult(results[0], getNextColor());
-          setScans(prev => [...prev, newScan]);
+          addScanTx(newScan, 'Import scan');
           setSelectedScanIds(new Set([newScan.id]));
           setSettingsOpen(false);
           showToast({ title: `Loaded ${newScan.data!.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
@@ -456,7 +491,7 @@ function App() {
             data,
             sourcePath,
           };
-          setScans(prev => [...prev, newScan]);
+          addScanTx(newScan, 'Import scan');
           setSelectedScanIds(new Set([newScan.id]));
           setSettingsOpen(false);
           showToast({ title: `Loaded ${data.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
@@ -678,7 +713,7 @@ function App() {
     }
 
     if (newScans.length > 0) {
-      setScans(prev => [...prev, ...newScans]);
+      addScansTx(newScans, newScans.length > 1 ? 'Import scans' : 'Import scan');
       setSelectedScanIds(new Set(newScans.map(e => e.id)));
     }
 
@@ -745,20 +780,16 @@ function App() {
   });
 
   const handleRemoveScan = useCallback((id: string) => {
-    setScans(prev => {
-      // Free the cloud's backend session (release its in-RAM array) when it's
-      // removed from the scene. Best-effort — deleteCloudSession never throws.
-      const removed = prev.find(s => s.id === id);
-      const sessionId = removed?.data?.octree?.sessionId;
-      if (sessionId) void deleteCloudSession(sessionId);
-      return prev.filter(s => s.id !== id);
-    });
+    // Undoable remove. The octree backend session is NOT freed here — it's freed
+    // by the store when this remove is evicted/purged (deferred-free), so undo
+    // can resurrect the scan with its session + unbaked edits intact.
+    removeScanTx(id);
     setSelectedScanIds(prev => {
       const next = new Set(prev);
       next.delete(id);
       return next;
     });
-  }, []);
+  }, [removeScanTx]);
 
   const handleToggleScanVisibility = useCallback((id: string) => {
     setScans(prev => prev.map(s =>
@@ -876,15 +907,15 @@ function App() {
   }, []);
 
   const handleAddScan = useCallback((scan: Scan) => {
-    setScans(prev => [...prev, scan]);
+    addScanTx(scan, 'Add scan');
     setSelectedScanIds(new Set([scan.id]));
-  }, []);
+  }, [addScanTx]);
 
   const handleAddScans = useCallback((newOnes: Scan[]) => {
     if (newOnes.length === 0) return;
-    setScans(prev => [...prev, ...newOnes]);
+    addScansTx(newOnes, newOnes.length > 1 ? 'Add scans' : 'Add scan');
     setSelectedScanIds(new Set(newOnes.map(s => s.id)));
-  }, []);
+  }, [addScansTx]);
 
   // Stitch multiple data-bearing scans into one. The result is data-only —
   // a merged cloud has no single defined origin, so any source params are
@@ -968,14 +999,26 @@ function App() {
       // No params on the merged scan — origin is no longer meaningful.
     };
 
-    stitchHistoryRef.current.push({
-      originalScans: scansToStitch.map(s => ({ ...s })),
-      stitchedScanId: newScan.id,
+    // One unified-history transaction: remove each original scan (carrying its
+    // session for deferred-free, so undo can restore it intact) + add the
+    // stitched scan. A single Cmd+Z reverses the whole stitch. This subsumes the
+    // old separate stitchHistoryRef stack.
+    const cur = scene.state.scans;
+    const removeActions = scansToStitch.map((s) => {
+      const index = cur.findIndex((x) => x.id === s.id);
+      return {
+        t: 'remove' as const, kind: 'scan' as const, id: s.id, index, object: s,
+        editState: scene.state.editStates.get(s.id),
+        filters: scene.state.cloudFilters.get(s.id),
+        sessionId: s.data?.octree?.sessionId ?? null,
+      };
     });
-
-    setScans(prev => {
-      const filtered = prev.filter(s => !ids.includes(s.id));
-      return [...filtered, newScan];
+    scene.commit({
+      label: `Stitch ${scansToStitch.length} scans`,
+      actions: [
+        ...removeActions,
+        { t: 'add', kind: 'scan', id: newScan.id, object: newScan },
+      ],
     });
 
     setSelectedScanIds(new Set([newScan.id]));
@@ -985,31 +1028,7 @@ function App() {
       title: 'Scans Stitched',
       message: `Combined ${scansToStitch.length} scans into ${totalPoints.toLocaleString()} points`,
     });
-  }, [scans]);
-
-  const handleUndoStitch = useCallback(() => {
-    const lastStitch = stitchHistoryRef.current.pop();
-    if (!lastStitch) return false;
-
-    setScans(prev => {
-      const filtered = prev.filter(s => s.id !== lastStitch.stitchedScanId);
-      return [...filtered, ...lastStitch.originalScans];
-    });
-
-    setSelectedScanIds(new Set(lastStitch.originalScans.map(s => s.id)));
-
-    showToast({
-      type: 'info',
-      title: 'Stitch Undone',
-      message: `Restored ${lastStitch.originalScans.length} original scans`,
-    });
-
-    return true;
-  }, []);
-
-  const canUndoStitch = useCallback(() => {
-    return stitchHistoryRef.current.length > 0;
-  }, []);
+  }, [scans, scene]);
 
   const handleSavePointCloud = useCallback((data: PointCloudData, fileName: string) => {
     // Convert point cloud data to XYZ format
@@ -1330,8 +1349,6 @@ function App() {
           onAddScan={handleAddScan}
           onAddScans={handleAddScans}
           onStitchScans={handleStitchScans}
-          onUndoStitch={handleUndoStitch}
-          canUndoStitch={canUndoStitch}
           importRefsCallback={handleImportRefsCallback}
           onPendingDeletesChange={handlePendingDeletesChange}
           onViewerContentChange={setViewerHasContent}

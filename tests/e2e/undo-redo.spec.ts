@@ -127,3 +127,72 @@ test('skeleton extraction is undoable', async () => {
     await close();
   }
 });
+
+// Phase D: deleting a scan (octree-backed cloud) is undoable. This is the
+// deferred-free regression guard — the backend session must NOT be freed on
+// delete, so undo can resurrect the scan with its data intact. We assert the
+// row returns with the same point count after undo.
+test('scan delete is undoable (octree cloud survives undo)', async () => {
+  const { app, page, close } = await launchApp();
+
+  try {
+    await importFiles(app, page, 'import-auto', FIXTURE);
+    await completeImportWizard(page);
+
+    const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await expect(row).toHaveAttribute('data-point-count', '60');
+    await expect(row).toHaveAttribute('data-selected', 'true');
+
+    // Delete via the Scans panel header (one confirm).
+    await page.getByTestId('scans-bulk-delete').click();
+    await page.getByTestId('confirm-delete').click();
+    await expect(page.locator('[data-testid="scan-row"]')).toHaveCount(0, { timeout: 10_000 });
+    await expect(page.getByTestId('confirm-delete')).toHaveCount(0);
+
+    // Undo restores the scan with its original point count — proving the octree
+    // session was kept alive (deferred-free), not torn down on delete.
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect(row).toBeVisible({ timeout: 10_000 });
+    await expect(row).toHaveAttribute('data-point-count', '60');
+  } finally {
+    await close();
+  }
+});
+
+// Phase D: stitching two scans, then undo restores the two originals and removes
+// the stitched scan — proving the old separate stitch stack was folded into the
+// unified history (one Cmd+Z reverses the stitch).
+test('stitch is undoable via the unified history', async () => {
+  const { app, page, close } = await launchApp();
+
+  try {
+    // Import two clouds (the multi-pointcloud fixture path). Reuse tiny.xyz twice
+    // by importing the two-file set if available; otherwise import tiny then tree.
+    await importFiles(app, page, 'import-auto', [FIXTURE, TREE_FIXTURE]);
+    await completeImportWizard(page);
+
+    const rows = page.locator('[data-testid="scan-row"]');
+    await expect(rows).toHaveCount(2, { timeout: 20_000 });
+
+    // Select both, open the stitch dialog, run it.
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ['ControlOrMeta'] });
+    await expect(page.locator('[data-testid="scan-row"][data-selected="true"]')).toHaveCount(2);
+
+    await page.getByTestId('tool-cloud-stitch').click();
+    const dialog = page.getByTestId('stitch-dialog');
+    await expect(dialog).toBeVisible();
+    await dialog.getByTestId('stitch-run').click();
+
+    // One stitched scan replaces the two originals.
+    await expect(rows).toHaveCount(1, { timeout: 20_000 });
+    await expect(dialog).toHaveCount(0);
+
+    // Undo the stitch → the two originals return, stitched gone.
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect(rows).toHaveCount(2, { timeout: 10_000 });
+  } finally {
+    await close();
+  }
+});

@@ -250,8 +250,6 @@ interface PointCloudViewerProps {
   onAddScan?: (scan: Scan) => void;
   onAddScans?: (scans: Scan[]) => void;
   onStitchScans?: (ids: string[]) => void;
-  onUndoStitch?: () => boolean;
-  canUndoStitch?: () => boolean;
   className?: string;
   importRefsCallback?: (refs: ImportRefs) => void;
   // Fired when the number of session clouds with UNBAKED deletions changes, so
@@ -388,8 +386,6 @@ export default function PointCloudViewer({
   onAddScan,
   onAddScans,
   onStitchScans,
-  onUndoStitch,
-  canUndoStitch,
   className = '',
   importRefsCallback,
   onPendingDeletesChange,
@@ -1641,16 +1637,14 @@ export default function PointCloudViewer({
     }
   }, [selectedIds, startHistoryEntry]);
 
-  // Undo - first check for stitch operations (Phase D folds stitch into the
-  // unified store), then the store's edit history.
+  // Undo via the unified store. Stitch is now just another transaction in the
+  // same history (Phase D folded the old separate stitch stack in), so there's
+  // no longer a special-cased stitch-first branch.
   const handleUndo = useCallback(() => {
-    if (canUndoStitch?.() && onUndoStitch?.()) {
-      return;
-    }
     isUndoingRef.current = true;
     scene.undo();
     setTimeout(() => { isUndoingRef.current = false; }, 0);
-  }, [canUndoStitch, onUndoStitch, scene]);
+  }, [scene]);
 
   // Redo
   const handleRedo = useCallback(() => {

@@ -6,7 +6,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./App.css";
 import { SceneProvider } from "./state/sceneStore";
-import { initBackendUrl } from "./utils/backendApi";
+import { initBackendUrl, deleteCloudSession } from "./utils/backendApi";
 import { installConsoleForwarding } from "./lib/logger";
 
 // Forward console.error/warn into the unified session log file (via main) so a
@@ -21,7 +21,11 @@ installConsoleForwarding();
 function mount() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <SceneProvider>
+      {/* freeSession releases a removed cloud's backend octree session, but only
+          when its `remove` transaction is evicted off the history tail or purged
+          by a destructive boundary — never on the remove itself, so undo can
+          resurrect the scan with its session (and unbaked edits) intact. */}
+      <SceneProvider freeSession={(sessionId) => { void deleteCloudSession(sessionId); }}>
         <App />
       </SceneProvider>
     </React.StrictMode>,
