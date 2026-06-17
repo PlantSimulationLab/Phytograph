@@ -77,6 +77,33 @@ describe('add action', () => {
   });
 });
 
+describe('index preservation', () => {
+  it('undo of a delete re-inserts the object at its original list position', () => {
+    const meshes = [makeMesh('a'), makeMesh('b'), makeMesh('c')];
+    let s = makeInitialSceneState();
+    s = { ...s, meshes };
+    // remove the MIDDLE mesh (index 1)
+    const removeAction: SceneAction = { t: 'remove', kind: 'mesh', id: 'b', index: 1, object: meshes[1] };
+    s = run(s, { c: 'commit', tx: tx('del b', [removeAction]) });
+    expect(s.meshes.map((m) => m.id)).toEqual(['a', 'c']);
+
+    s = run(s, { c: 'undo' });
+    // 'b' restored between 'a' and 'c', not appended at the end
+    expect(s.meshes.map((m) => m.id)).toEqual(['a', 'b', 'c']);
+
+    // redo removes it again at the right spot
+    s = run(s, { c: 'redo' });
+    expect(s.meshes.map((m) => m.id)).toEqual(['a', 'c']);
+  });
+
+  it('a normal add (no index) appends', () => {
+    let s = makeInitialSceneState();
+    s = { ...s, meshes: [makeMesh('a')] };
+    s = run(s, { c: 'commit', tx: tx('add b', [{ t: 'add', kind: 'mesh', id: 'b', object: makeMesh('b') }]) });
+    expect(s.meshes.map((m) => m.id)).toEqual(['a', 'b']);
+  });
+});
+
 describe('remove action', () => {
   it('removes; undo restores object with editState + filters intact', () => {
     const scan = makeScan('s1');

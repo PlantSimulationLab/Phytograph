@@ -52,12 +52,16 @@ export type TransformKind = 'mesh' | 'skeleton' | 'cloud';
 // A single primitive mutation. Each is self-inverting given the data it carries.
 export type SceneAction =
   // Object created. Undo removes it; redo re-adds `object` (+ seeded transform).
+  // `index` is set only when this add is the inverse of a remove (undo of a
+  // delete) — it re-inserts at the object's original list position; a normal
+  // create leaves it undefined and appends.
   | {
       t: 'add';
       kind: ObjectKind;
       id: string;
       object: SceneObject;
       transform?: TransformState;
+      index?: number;
     }
   // Object removed. Undo re-inserts `object` at `index` and restores its
   // transform / editState / filters. `sessionId` (octree clouds only) is held so
@@ -161,9 +165,9 @@ export function invert(action: SceneAction): SceneAction {
         t: 'remove',
         kind: action.kind,
         id: action.id,
-        // index/object are reinstated by redo's `add`; on undo we only need id +
-        // kind to remove. index 0 is a placeholder — remove ignores it.
-        index: 0,
+        // Preserve the object's current list index so a later redo (this remove's
+        // own inverse) re-inserts it where it was. Falls back to its add index.
+        index: action.index ?? 0,
         object: action.object,
         transform: action.transform,
       };
@@ -174,6 +178,8 @@ export function invert(action: SceneAction): SceneAction {
         id: action.id,
         object: action.object,
         transform: action.transform,
+        // Re-insert at the original position on undo of a delete.
+        index: action.index,
       };
     case 'transform':
       return { ...action, before: action.after, after: action.before };

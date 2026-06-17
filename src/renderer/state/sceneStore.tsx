@@ -121,23 +121,30 @@ function applyAction(state: SceneState, action: SceneAction): SceneState {
   }
 }
 
+// Insert `obj` at `index` (clamped) when provided, else append. Used so undo of a
+// delete restores the object at its original list position.
+function insertAt<T>(arr: T[], obj: T, index?: number): T[] {
+  if (index == null || index < 0 || index >= arr.length) return [...arr, obj];
+  return [...arr.slice(0, index), obj, ...arr.slice(index)];
+}
+
 function applyAdd(state: SceneState, action: Extract<SceneAction, { t: 'add' }>): SceneState {
   const next = { ...state };
   switch (action.kind) {
     case 'scan':
-      next.scans = [...state.scans, action.object as Scan];
+      next.scans = insertAt(state.scans, action.object as Scan, action.index);
       break;
     case 'mesh':
-      next.meshes = [...state.meshes, action.object as MeshEntry];
+      next.meshes = insertAt(state.meshes, action.object as MeshEntry, action.index);
       break;
     case 'skeleton':
-      next.skeletons = [...state.skeletons, action.object as SkeletonEntry];
+      next.skeletons = insertAt(state.skeletons, action.object as SkeletonEntry, action.index);
       break;
     case 'qsm':
-      next.qsms = [...state.qsms, action.object as QSMEntry];
+      next.qsms = insertAt(state.qsms, action.object as QSMEntry, action.index);
       break;
     case 'lad':
-      next.ladResults = [...state.ladResults, action.object as LADResultEntry];
+      next.ladResults = insertAt(state.ladResults, action.object as LADResultEntry, action.index);
       break;
   }
   if (action.transform) {

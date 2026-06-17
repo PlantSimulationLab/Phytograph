@@ -398,18 +398,17 @@ export default function PointCloudViewer({
   onOpenSettings,
   settingsEpoch,
 }: PointCloudViewerProps) {
-  // Unified scene store: single owner of editStates + the transform maps, and of
-  // the undo/redo history. `makeMapSetter` returns a React-setter-shaped adapter
-  // (value or updater) that dispatches a non-history `replaceCollection` on one
-  // map field — so the ~99 existing `setX(prev => ...)` call sites keep their
-  // exact syntax while the store owns the data. History is recorded explicitly
-  // via scene.commit in commitHistoryEntry (NOT by these setters). See the scene
-  // store / action model in src/renderer/state/.
+  // Unified scene store: single owner of the migrated collections (transform
+  // maps, editStates, meshes, …) and of the undo/redo history. `makeFieldSetter`
+  // returns a React-setter-shaped adapter (value or updater) that dispatches a
+  // NON-history `replaceCollection` on one SceneState field — so existing
+  // `setX(prev => ...)` call sites keep their exact syntax while the store owns
+  // the data. History is recorded explicitly via scene.commit (object add/remove
+  // in the relevant handlers, transforms/mask edits in commitHistoryEntry), NOT
+  // by these setters. See the scene store / action model in src/renderer/state/.
   const scene = useScene();
-  const makeMapSetter = useCallback(
-    <K extends 'meshPositions' | 'meshRotations' | 'meshScales' | 'skeletonPositions' | 'editStates'>(
-      field: K,
-    ) =>
+  const makeFieldSetter = useCallback(
+    <K extends keyof SceneState>(field: K) =>
       (update: SceneState[K] | ((prev: SceneState[K]) => SceneState[K])) => {
         scene.dispatch({
           c: 'replaceCollection',
@@ -423,6 +422,46 @@ export default function PointCloudViewer({
       },
     [scene],
   );
+
+  // Undoable mesh add helpers. Each commits an `add` action (with the transform
+  // folded in, so the reducer seeds meshPositions/Rotations/Scales) — replacing
+  // the old `setMeshes(prev => [...prev, m])` + 3 transform-seed setters. Undo of
+  // a create removes the mesh (and its seeded transform); redo re-adds it.
+  const meshTransform = (t?: { position?: { x: number; y: number; z: number }; rotation?: { x: number; y: number; z: number }; scale?: { x: number; y: number; z: number } }): TransformState => ({
+    position: t?.position ?? { x: 0, y: 0, z: 0 },
+    rotation: t?.rotation ?? { x: 0, y: 0, z: 0 },
+    scale: t?.scale ?? { x: 1, y: 1, z: 1 },
+  });
+  const addMesh = useCallback((mesh: MeshEntry, transform?: TransformState, label = 'Add mesh') => {
+    scene.commit({ label, actions: [{ t: 'add', kind: 'mesh', id: mesh.id, object: mesh, transform: transform ?? meshTransform() }] });
+  }, [scene]);
+  // Several meshes in ONE undoable transaction (multi-triangulate).
+  const addMeshes = useCallback((meshList: MeshEntry[], label = 'Add meshes') => {
+    if (meshList.length === 0) return;
+    scene.commit({ label, actions: meshList.map(m => ({ t: 'add' as const, kind: 'mesh' as const, id: m.id, object: m, transform: meshTransform() })) });
+  }, [scene]);
+  // Remove N meshes as ONE undoable transaction (a single Cmd+Z restores them
+  // all). Captures each mesh's index + transform so undo reinstates it exactly.
+  const removeMeshes = useCallback((ids: string[]) => {
+    const s = scene.state;
+    const actions = ids
+      .map(id => {
+        const index = s.meshes.findIndex(m => m.id === id);
+        if (index < 0) return null;
+        const mesh = s.meshes[index];
+        return {
+          t: 'remove' as const, kind: 'mesh' as const, id, index, object: mesh,
+          transform: {
+            position: s.meshPositions.get(id) ?? { x: 0, y: 0, z: 0 },
+            rotation: s.meshRotations.get(id) ?? { x: 0, y: 0, z: 0 },
+            scale: s.meshScales.get(id) ?? { x: 1, y: 1, z: 1 },
+          },
+        };
+      })
+      .filter((a): a is NonNullable<typeof a> => a !== null);
+    if (actions.length === 0) return;
+    scene.commit({ label: ids.length > 1 ? `Delete ${ids.length} meshes` : 'Delete mesh', actions });
+  }, [scene]);
 
   // Legacy internal aliases. The bulk of this file was written against
   // `clouds` / `selectedIds` / `onUpdateCloud` etc., and assumes every entry
@@ -553,8 +592,12 @@ export default function PointCloudViewer({
   const [bgColor, setBgColor] = useState<'black' | 'white'>('black');
   const [bgStyle, setBgStyle] = useState<'solid' | 'gradient'>('solid');
 
-  // Mesh state
-  const [meshes, setMeshes] = useState<MeshEntry[]>([]);
+  // Mesh state — now store-owned so add/remove are undoable. Reads keep array
+  // syntax; non-history `.map(...)` mutations (visibility, color, spacing checks,
+  // grid, morph) keep `setMeshes(prev => ...)` via the adapter; genuine add/remove
+  // go through scene.commit in their handlers.
+  const meshes = scene.state.meshes;
+  const setMeshes = useMemo(() => makeFieldSetter('meshes'), [makeFieldSetter]);
   // Per-mesh opacity (0.1–1). Absent entry means MESH_DEFAULT_OPACITY. Only
   // surfaced for meshes where blending is meaningful — i.e. solid / vertex-
   // colored surfaces, not textured plants whose alpha-cutout leaf materials
@@ -743,15 +786,14 @@ export default function PointCloudViewer({
       ...mesh,
       id: crypto.randomUUID(),
     };
-    setMeshes(prev => [...prev, newMesh]);
-    // Seed transforms so the first translate/scale/rotate reads a real origin
-    // instead of a fallback (matches the shape/plant creation paths). Callers
-    // may supply an initial transform (e.g. a voxel grid placed at the Helios
-    // <grid> center/size/rotation); otherwise identity.
-    setMeshPositions(prev => new Map(prev).set(newMesh.id, transform?.position ?? { x: 0, y: 0, z: 0 }));
-    setMeshScales(prev => new Map(prev).set(newMesh.id, transform?.scale ?? { x: 1, y: 1, z: 1 }));
-    setMeshRotations(prev => new Map(prev).set(newMesh.id, transform?.rotation ?? { x: 0, y: 0, z: 0 }));
-  }, []);
+    // One undoable `add`, with the transform seeded so the first translate/scale/
+    // rotate reads a real origin (matches the shape/plant creation paths).
+    addMesh(newMesh, {
+      position: transform?.position ?? { x: 0, y: 0, z: 0 },
+      rotation: transform?.rotation ?? { x: 0, y: 0, z: 0 },
+      scale: transform?.scale ?? { x: 1, y: 1, z: 1 },
+    });
+  }, [addMesh]);
 
   const importSkeleton = useCallback((skeleton: Omit<SkeletonEntry, 'id'>) => {
     const newSkeleton: SkeletonEntry = {
@@ -1081,19 +1123,19 @@ export default function PointCloudViewer({
   const mainCameraRef = useRef<THREE.Camera | null>(null);
   // Transform maps now live in the scene store (single owner; enables undo of
   // adds/removes that seed transforms). Reads keep the `.get(id)` syntax; writes
-  // keep the `setX(prev => ...)` syntax via the makeMapSetter adapter above.
+  // keep the `setX(prev => ...)` syntax via the makeFieldSetter adapter above.
   // Mesh scales - per mesh id, default {x:1,y:1,z:1}
   const meshScales = scene.state.meshScales;
-  const setMeshScales = useMemo(() => makeMapSetter('meshScales'), [makeMapSetter]);
+  const setMeshScales = useMemo(() => makeFieldSetter('meshScales'), [makeFieldSetter]);
   // Mesh positions - per mesh id, default {x:0,y:0,z:0}
   const meshPositions = scene.state.meshPositions;
-  const setMeshPositions = useMemo(() => makeMapSetter('meshPositions'), [makeMapSetter]);
+  const setMeshPositions = useMemo(() => makeFieldSetter('meshPositions'), [makeFieldSetter]);
   // Mesh rotations - per mesh id in degrees, default {x:0,y:0,z:0}
   const meshRotations = scene.state.meshRotations;
-  const setMeshRotations = useMemo(() => makeMapSetter('meshRotations'), [makeMapSetter]);
+  const setMeshRotations = useMemo(() => makeFieldSetter('meshRotations'), [makeFieldSetter]);
   // Skeleton positions - per skeleton id, default {x:0,y:0,z:0}
   const skeletonPositions = scene.state.skeletonPositions;
-  const setSkeletonPositions = useMemo(() => makeMapSetter('skeletonPositions'), [makeMapSetter]);
+  const setSkeletonPositions = useMemo(() => makeFieldSetter('skeletonPositions'), [makeFieldSetter]);
   // Show resize panel when a mesh is selected
   const [showResizePanel, setShowResizePanel] = useState(false);
   // Lock per-axis scale so edits apply uniformly to X/Y/Z
@@ -1132,7 +1174,7 @@ export default function PointCloudViewer({
   // Cloud edit states (translation + erased indices + pending deletes) now live
   // in the scene store. Reads keep `.get(id)`; writes keep `setEditStates(prev => ...)`.
   const editStates = scene.state.editStates;
-  const setEditStates = useMemo(() => makeMapSetter('editStates'), [makeMapSetter]);
+  const setEditStates = useMemo(() => makeFieldSetter('editStates'), [makeFieldSetter]);
 
   // Report the count of clouds with unbaked deletions up to App (drives the
   // before-quit warning). Only erase deletes accumulate as pendingDeletes;
@@ -5026,13 +5068,6 @@ export default function PointCloudViewer({
     setShowExportPanel(false);
   }, [skeletons, clouds, downloadFile, skeletonShowAsCylinders, skeletonTubeRadius]);
 
-  // Seed identity transforms for a freshly-created mesh so transform shortcuts
-  // read a real origin (shared by both triangulation paths).
-  const seedMeshTransforms = useCallback((meshId: string) => {
-    setMeshPositions(prev => new Map(prev).set(meshId, { x: 0, y: 0, z: 0 }));
-    setMeshScales(prev => new Map(prev).set(meshId, { x: 1, y: 1, z: 1 }));
-    setMeshRotations(prev => new Map(prev).set(meshId, { x: 0, y: 0, z: 0 }));
-  }, []);
 
   // Open3D triangulation (ball_pivoting / poisson / alpha_shape / delaunay),
   // driven by the unified TriangulationPopup. Supports multiple selected scans,
@@ -5140,8 +5175,7 @@ export default function PointCloudViewer({
           triangulationParams,
           ...buildOpen3DTriangleFilter(meshData),
         };
-        setMeshes(prev => [...prev, meshEntry]);
-        seedMeshTransforms(meshEntry.id);
+        addMesh(meshEntry, undefined, 'Triangulate');
         setShowTriangulationPopup(false);
         for (const c of targets) onHideScan(c.id);
 
@@ -5234,8 +5268,7 @@ export default function PointCloudViewer({
         }
       }
 
-      setMeshes(prev => [...prev, ...newMeshes]);
-      for (const m of newMeshes) seedMeshTransforms(m.id);
+      addMeshes(newMeshes, 'Triangulate');
       setShowTriangulationPopup(false);
       for (const c of targets) onHideScan(c.id);
 
@@ -5272,7 +5305,7 @@ export default function PointCloudViewer({
       setTriProgress(null);
       triAbortRef.current = null;
     }
-  }, [clouds, buildPointSource, triangulateMaxPoints, onHideScan, seedMeshTransforms]);
+  }, [clouds, buildPointSource, triangulateMaxPoints, onHideScan, addMesh, addMeshes]);
 
   // Segment ground vs plant points (Cloth Simulation Filter). Writes a
   // `ground_class` scalar attribute (1=ground, 2=plant) and colors by it.
@@ -6412,10 +6445,6 @@ export default function PointCloudViewer({
     }
   }, [selectedMeshIds, meshes, meshPositions, setMeshPositions]);
 
-  // Remove a mesh
-  const handleRemoveMesh = useCallback((meshId: string) => {
-    setMeshes(prev => prev.filter(m => m.id !== meshId));
-  }, []);
 
   // Toggle mesh visibility
   const handleToggleMeshVisibility = useCallback((meshId: string) => {
@@ -6929,7 +6958,8 @@ export default function PointCloudViewer({
     const { type, ids } = deleteConfirm;
 
     if (type === 'mesh') {
-      ids.forEach(id => handleRemoveMesh(id));
+      // One transaction for the whole selection → a single Cmd+Z restores all.
+      removeMeshes(ids);
       setSelectedMeshIds(prev => {
         const next = new Set(prev);
         ids.forEach(id => next.delete(id));
@@ -6956,7 +6986,7 @@ export default function PointCloudViewer({
     }
 
     setDeleteConfirm(null);
-  }, [deleteConfirm, handleRemoveMesh, handleRemoveSkeleton, handleRemoveQSM, onRemoveCloud]);
+  }, [deleteConfirm, removeMeshes, handleRemoveSkeleton, handleRemoveQSM, onRemoveCloud]);
 
   // Toggle skeleton visibility
   const handleToggleSkeletonVisibility = useCallback((skeletonId: string) => {
@@ -7882,28 +7912,13 @@ export default function PointCloudViewer({
       ...(shapeType === 'voxel' ? { gridSubdivisions: { x: 1, y: 1, z: 1 } } : {}),
     };
 
-    setMeshes(prev => [...prev, newMesh]);
-    setShapeCounter(prev => prev + 1);
-
     // Every shape (including the voxel grid) starts as a unit box at the origin.
     // The voxel grid is fitted to scans on demand via the "Fit to selected
     // scan(s)" button in the resize panel — we don't auto-fit on creation, so
-    // that button stays meaningful and nothing resizes "on its own".
-    setMeshScales(prev => {
-      const next = new Map(prev);
-      next.set(newMeshId, { x: 1, y: 1, z: 1 });
-      return next;
-    });
-    setMeshPositions(prev => {
-      const next = new Map(prev);
-      next.set(newMeshId, { x: 0, y: 0, z: 0 });
-      return next;
-    });
-    setMeshRotations(prev => {
-      const next = new Map(prev);
-      next.set(newMeshId, { x: 0, y: 0, z: 0 });
-      return next;
-    });
+    // that button stays meaningful and nothing resizes "on its own". One undoable
+    // add seeds those identity transforms via the reducer.
+    addMesh(newMesh, undefined, 'Create shape');
+    setShapeCounter(prev => prev + 1);
 
     // Auto-select the new mesh and show resize panel.
     setSelectedMeshIds(new Set([newMeshId]));
@@ -7937,24 +7952,13 @@ export default function PointCloudViewer({
       isPlane: true, // apply ground-grid polygon offset (avoids z-fighting at z=0)
     };
 
-    setMeshes(prev => [...prev, newMesh]);
+    // One undoable add carrying the plane's dialog-chosen transform.
+    addMesh(newMesh, {
+      position: { ...params.center },
+      rotation: { ...params.rotation },
+      scale: { ...params.scale },
+    }, 'Create plane');
     setShapeCounter(prev => prev + 1);
-
-    setMeshPositions(prev => {
-      const next = new Map(prev);
-      next.set(newMeshId, { ...params.center });
-      return next;
-    });
-    setMeshRotations(prev => {
-      const next = new Map(prev);
-      next.set(newMeshId, { ...params.rotation });
-      return next;
-    });
-    setMeshScales(prev => {
-      const next = new Map(prev);
-      next.set(newMeshId, { ...params.scale });
-      return next;
-    });
 
     // Auto-select the new plane. The transform was set in the creation dialog,
     // so we don't open the Transform panel — the ⤢ button on the row reveals it
@@ -8367,11 +8371,9 @@ export default function PointCloudViewer({
           returnedData, seedLmax, seedAspect, request.scans.length, 0, sourceScanIds, gridMeshId),
       };
 
-      setMeshes(prev => [...prev, meshEntry]);
-      // Seed identity transforms so transform shortcuts read a real origin.
-      setMeshPositions(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
-      setMeshScales(prev => new Map(prev).set(meshEntry.id, { x: 1, y: 1, z: 1 }));
-      setMeshRotations(prev => new Map(prev).set(meshEntry.id, { x: 0, y: 0, z: 0 }));
+      // One undoable add (seeds identity transforms so transform shortcuts read
+      // a real origin).
+      addMesh(meshEntry, undefined, 'Triangulate');
       setShowTriangulationPopup(false);
       // Hide the contributing scans so their points don't obscure the new mesh
       // (mirrors the QSM build). The scans stay in the list and can be re-shown.
@@ -8736,29 +8738,13 @@ export default function PointCloudViewer({
         sampleIndex: [meshData.indices[0], meshData.indices[1], meshData.indices[2]],
       });
 
-      setMeshes(prev => [...prev, newMesh]);
+      // One undoable add (seeds identity transforms via the reducer).
+      addMesh(newMesh, undefined, 'Generate plant');
       setShapeCounter(prev => prev + 1);
       console.log('[Plant] Mesh added to state');
 
       // Mesh is in the scene — close the popup now.
       setShowPlantPopup(false);
-
-      // Initialize transforms for this mesh
-      setMeshScales(prev => {
-        const next = new Map(prev);
-        next.set(newMeshId, { x: 1, y: 1, z: 1 });
-        return next;
-      });
-      setMeshPositions(prev => {
-        const next = new Map(prev);
-        next.set(newMeshId, { x: 0, y: 0, z: 0 });
-        return next;
-      });
-      setMeshRotations(prev => {
-        const next = new Map(prev);
-        next.set(newMeshId, { x: 0, y: 0, z: 0 });
-        return next;
-      });
 
       // Auto-select the new mesh
       setSelectedMeshIds(new Set([newMeshId]));
