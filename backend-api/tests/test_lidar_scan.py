@@ -312,26 +312,26 @@ class TestScanOptions:
         # Centroid moves by a non-trivial amount once the scanner is tilted 20°.
         assert np.linalg.norm(lc - tc) > 1e-2
 
-    def test_azimuth_offset_is_accepted_but_not_yet_consumed(self, client):
-        # The renderer sends scan_azimuth_offset_deg (initial scanner heading), but
-        # helios-core / PyHelios don't expose the field yet, so the backend accepts
-        # it and IGNORES it (see the TODO(scanAzimuthOffset) blocks in main.py). This
-        # pins that documented behavior: the request must succeed, and the hit cloud
-        # must be IDENTICAL to one without the field — proving it is truly a no-op
-        # today. When Helios gains the field and the placeholders are wired up, this
-        # test should start failing (geometry will differ) and be replaced with a
-        # real "heading rotates the hit pattern" assertion, mirroring the tilt test.
-        base = self._scan_full(client, [_scanner("a")])["results"][0]
+    def test_azimuth_offset_rotates_the_hit_pattern(self, client):
+        # scan_azimuth_offset_deg (initial scanner heading) is applied by the
+        # synthetic-scan generator via PyHelios addScan scan_azimuth_offset
+        # (v0.1.23+), a right-hand rotation of the azimuth sweep about world +z.
+        # A full 360° sweep is rotation-invariant about +z, so use a NARROW phi
+        # window (a beam fan covering one sector): a 90° heading offset then
+        # sweeps a different sector and steers the fan onto different geometry of
+        # the (asymmetric) tetrahedron, moving the hit centroid — mirroring the
+        # tilt test.
+        fanned = {**_scanner("a"), "phi_min_deg": 0.0, "phi_max_deg": 90.0}
+        base = self._scan_full(client, [fanned])["results"][0]
         headed = self._scan_full(
-            client, [{**_scanner("a"), "scan_azimuth_offset_deg": 90.0}]
+            client, [{**fanned, "scan_azimuth_offset_deg": 90.0}]
         )["results"][0]
 
-        assert base["num_points"] > 0
-        assert headed["num_points"] == base["num_points"]
-        bc = np.asarray(base["points"], dtype=np.float64)
-        hc = np.asarray(headed["points"], dtype=np.float64)
-        # Same beams in the same order → identical hits (field ignored for now).
-        assert np.allclose(bc, hc)
+        assert base["num_points"] > 0 and headed["num_points"] > 0
+        bc = np.asarray(base["points"], dtype=np.float64).mean(axis=0)
+        hc = np.asarray(headed["points"], dtype=np.float64).mean(axis=0)
+        # Centroid moves once the scanner heading is offset 90°.
+        assert np.linalg.norm(bc - hc) > 1e-2
 
     def test_record_misses_builds_a_session_with_is_miss(self, client):
         # A scanner sweeping the full sphere from above mostly misses the small

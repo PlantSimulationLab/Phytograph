@@ -17,7 +17,7 @@ extensions you can drop here: `.las`, `.laz`, `.ply`, `.pcd`, `.xyz`,
 
 ## Import the file
 
-You have three ways to import:
+You have four ways to import:
 
 === "Drag and drop"
 
@@ -35,6 +35,14 @@ You have three ways to import:
 
     Press <kbd>⌘</kbd>+<kbd>K</kbd> (macOS) or <kbd>Ctrl</kbd>+<kbd>K</kbd>
     (Windows) and type "import".
+
+=== "Open with Phytograph"
+
+    From your file manager, right-click the file and choose **Open With →
+    Phytograph** (macOS / Windows / Linux). Phytograph launches if needed
+    and auto-imports the file; if it's already open, the file loads into the
+    current scene. See
+    [Import & export](../workflows/import-export.md#import) for details.
 
 A progress indicator appears while the file is parsed. ASCII files in
 the multi-million-point range typically import in a few seconds; LAS/LAZ

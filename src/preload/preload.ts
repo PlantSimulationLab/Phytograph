@@ -10,6 +10,7 @@ import {
   type MessageBoxOptions,
   type MessageBoxResult,
   type OpenDialogOptions,
+  type OpenFilesPayload,
   type SaveDialogOptions,
 } from '../shared/ipc.js';
 
@@ -75,6 +76,16 @@ const api = {
     ipcRenderer.on(IPC.MenuCommand, listener);
     return () => ipcRenderer.removeListener(IPC.MenuCommand, listener);
   },
+  // OS "Open With" / file-association events: main hands us the paths the OS
+  // asked Phytograph to open, to be auto-imported by the renderer.
+  onOpenFiles: (handler: (payload: OpenFilesPayload) => void): (() => void) => {
+    const listener = (_e: unknown, payload: OpenFilesPayload) => handler(payload);
+    ipcRenderer.on(IPC.OpenFiles, listener);
+    return () => ipcRenderer.removeListener(IPC.OpenFiles, listener);
+  },
+  // Tell main the renderer has mounted and can receive OpenFiles; main flushes
+  // any paths queued before this (the window/backend take ~10-20s to come up).
+  notifyRendererReady: (): void => ipcRenderer.send(IPC.RendererReady),
   onBackendStatus: (handler: (payload: BackendStatusPayload) => void): (() => void) => {
     const listener = (_e: unknown, payload: BackendStatusPayload) => handler(payload);
     ipcRenderer.on(IPC.BackendStatus, listener);

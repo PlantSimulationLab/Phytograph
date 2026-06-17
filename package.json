@@ -1,7 +1,7 @@
 {
   "name": "phytograph",
   "private": true,
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Phytograph desktop app.",
   "author": "Phytograph",
   "main": "dist-main/main.js",
@@ -93,6 +93,22 @@
       "dist-preload/**/*",
       "dist-renderer/**/*",
       "package.json"
+    ],
+    "fileAssociations": [
+      { "ext": "xyz", "name": "XYZ Point Cloud", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "pts", "name": "PTS Point Cloud", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "asc", "name": "ASC Point Cloud", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "pcd", "name": "PCD Point Cloud", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "ply", "name": "PLY Point Cloud / Mesh", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "las", "name": "LAS LiDAR Point Cloud", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "laz", "name": "LAZ Compressed LiDAR", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "e57", "name": "E57 Structured Scan", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "obj", "name": "OBJ Mesh", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "stl", "name": "STL Mesh", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "txt", "name": "Text Point Cloud", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "csv", "name": "CSV Point Cloud", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "json", "name": "Phytograph Skeleton", "role": "Viewer", "icon": "build/icon" },
+      { "ext": "xml", "name": "Helios Scan XML", "role": "Viewer", "icon": "build/icon" }
     ],
     "extraResources": [
       {

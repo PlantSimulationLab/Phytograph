@@ -246,6 +246,77 @@ def test_columns_look_like_rgb255_unit():
     assert not main._columns_look_like_rgb255([], (3, 4, 5))
 
 
+def test_leading_integer_index_columns_shift_xyz(tmp_path: Path):
+    # Terrestrial-scanner export: `row col x y z r g b reflectance` with no
+    # header. The first two columns are entirely integers (scan-pattern row /
+    # column index), the coordinates start at column 2 with fractional
+    # precision, columns 5-7 are 0-255 RGB, and the trailing reflectance ranges
+    # above 255 (so it must NOT be mistaken for colour). Auto-detect should
+    # recognise the index pair, anchor xyz at column 2, tag the RGB triple, and
+    # carry the reflectance as intensity.
+    f = tmp_path / "scanner.xyz"
+    f.write_text(
+        "1 433 -0.1758 0.0009 134.2800 82 95 201 255\n"
+        "2 7890 -0.0295 -0.0124 127.1345 83 96 206 151\n"
+        "3 2269 -0.1659 0.0411 129.0143 82 94 206 243\n"
+        "6 6812 0.0620 0.0651 139.1888 80 97 205 287\n"
+    )
+    assert main._autodetect_xyz_columns(str(f)) == [
+        "row_index", "column_index", "x", "y", "z",
+        "r255", "g255", "b255", "intensity"]
+
+
+def test_single_leading_integer_index_column_shift_xyz(tmp_path: Path):
+    # One leading integer index column (`point_id x y z`): xyz anchors at
+    # column 1, the index is the canonical row_index slug, no RGB.
+    f = tmp_path / "indexed.xyz"
+    f.write_text(
+        "1 0.10 0.20 0.30\n"
+        "2 0.40 0.50 0.60\n"
+        "3 0.70 0.80 0.90\n"
+    )
+    assert main._autodetect_xyz_columns(str(f)) == [
+        "row_index", "x", "y", "z"]
+
+
+def test_all_integer_cloud_keeps_xyz_at_column_zero(tmp_path: Path):
+    # A cloud whose coordinates happen to be whole numbers (e.g. voxel indices
+    # written as `x y z`) has no fractional column to anchor on — xyz must stay
+    # at column 0 rather than being shifted by the integer-index heuristic.
+    f = tmp_path / "integer_xyz.xyz"
+    f.write_text("0 0 0\n1 2 3\n4 5 6\n")
+    assert main._autodetect_xyz_columns(str(f)) == ["x", "y", "z"]
+
+
+def test_rgb_triple_after_xyz_when_no_index(tmp_path: Path):
+    # `x y z r g b reflectance` (7 cols, no leading index): RGB triple right
+    # after xyz is detected, reflectance carried as the lone intensity column.
+    f = tmp_path / "xyzrgbi.xyz"
+    f.write_text(
+        "0.10 0.20 0.30 200 100 50 12\n"
+        "0.40 0.50 0.60 12 250 0 240\n"
+        "0.70 0.80 0.90 255 0 128 99\n"
+    )
+    assert main._autodetect_xyz_columns(str(f)) == [
+        "x", "y", "z", "r255", "g255", "b255", "intensity"]
+
+
+def test_columns_are_all_integers_unit():
+    s = [[1.0, 433.0, -0.17], [2.0, 7890.0, -0.02]]
+    assert main._columns_are_all_integers(s, (0, 1))
+    assert not main._columns_are_all_integers(s, (2,))   # fractional column
+    assert not main._columns_are_all_integers(s, (5,))   # out of range
+    assert not main._columns_are_all_integers([], (0,))  # no sample
+
+
+def test_any_column_has_decimals_unit():
+    s = [[1.0, 433.0, -0.17], [2.0, 7890.0, -0.02]]
+    assert main._any_column_has_decimals(s, (2,))        # fractional column
+    assert not main._any_column_has_decimals(s, (0, 1))  # both integer
+    assert not main._any_column_has_decimals(s, (9,))    # out of range only
+    assert not main._any_column_has_decimals([], (0,))   # no sample
+
+
 def test_preview_never_500s_on_garbage(client, tmp_path: Path):
     f = tmp_path / "junk.xyz"
     f.write_bytes(b"\x00\x01\x02 not really a point cloud \xff")

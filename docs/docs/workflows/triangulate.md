@@ -378,6 +378,23 @@ spread (all triangles coplanar) shows **—** for the Beta columns. (With more
 than 24 cells visible the table collapses to a single **All visible** row
 summarizing the combined distribution, matching the combined plot.)
 
+Two export buttons in the window header write CSV files for analysis outside
+Phytograph, both reflecting the **currently visible** cells:
+
+- **Parameters CSV** — the fitted-parameters table exactly as shown: one row per
+  visible cell (or the single **All visible** row in combined mode) with the
+  α, β, mean θ, R², G(θ), and de Wit columns.
+- **Distributions CSV** — the empirical inclination probability density curves
+  plotted in the chart: one row per visible cell (or a single combined row in
+  combined mode), with one column per inclination bin (the column headers are
+  the bin-midpoint angles in degrees). Densities are normalized so that the sum
+  over bins × bin width equals 1.
+
+Both files also include the cell's **center** and **dimensions** (each an
+*(x, y, z)* triple in metres) read from the triangulation grid, so every row is
+located in space. These are blank for a non-grid **Whole mesh** mesh and for the
+combined **All visible** row, which span no single grid box.
+
 The **G(θ)** column is the area-weighted mean of *|n̂ · v̂|* over the cell's
 triangles, where *n̂* is each triangle's face normal and *v̂* is the beam
 direction — the leaf-projection coefficient Ross's *G*-function describes, here

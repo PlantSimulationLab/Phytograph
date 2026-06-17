@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
-import { X, Leaf } from 'lucide-react';
+import { X, Leaf, Download } from 'lucide-react';
+import { downloadFile } from '../utils/fileDownload';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts';
@@ -44,6 +45,10 @@ interface PlotCell {
   label: string;
   triangleCount: number;
   color: string;
+  // World-space center and dimensions (m) of this cell's grid box, when the mesh
+  // carries grid geometry. Absent for a non-grid "Whole mesh" entry.
+  center?: [number, number, number];
+  size?: [number, number, number];
 }
 
 export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAnglePlotPopupProps) {
@@ -61,19 +66,41 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
       return [{ id: -1, label: 'Whole mesh', triangleCount: data.triangleCount, color: cellColor(0, 1) }];
     }
     const counts = triangleCountByCell(data);
-    const nx = mesh?.data.grid?.nx ?? 0;
-    const ny = mesh?.data.grid?.ny ?? 0;
+    const grid = mesh?.data.grid;
+    const nx = grid?.nx ?? 0;
+    const ny = grid?.ny ?? 0;
+    const nz = grid?.nz ?? 0;
+    // Per-cell box: uniform dimensions = grid size / subdivisions; the box runs
+    // from (grid center − size/2). Cell (ix,iy,iz) center sits half a cell in.
+    const cellSize: [number, number, number] | null =
+      grid && nx > 0 && ny > 0 && nz > 0
+        ? [grid.size[0] / nx, grid.size[1] / ny, grid.size[2] / nz]
+        : null;
+    const gridMin: [number, number, number] | null = grid
+      ? [grid.center[0] - grid.size[0] / 2, grid.center[1] - grid.size[1] / 2, grid.center[2] - grid.size[2] / 2]
+      : null;
     return ids.map((id, i) => {
       // Decode row-major index back to (i,j,k) for a readable label when we know
       // the grid shape; fall back to the flat index otherwise.
       let label = `Cell ${id}`;
+      let center: [number, number, number] | undefined;
       if (nx > 0 && ny > 0) {
         const ix = id % nx;
         const iy = Math.floor(id / nx) % ny;
         const iz = Math.floor(id / (nx * ny));
         label = `Cell (${ix}, ${iy}, ${iz})`;
+        if (cellSize && gridMin) {
+          center = [
+            gridMin[0] + (ix + 0.5) * cellSize[0],
+            gridMin[1] + (iy + 0.5) * cellSize[1],
+            gridMin[2] + (iz + 0.5) * cellSize[2],
+          ];
+        }
       }
-      return { id, label, triangleCount: counts.get(id) ?? 0, color: cellColor(i, ids.length) };
+      return {
+        id, label, triangleCount: counts.get(id) ?? 0, color: cellColor(i, ids.length),
+        center, size: cellSize ?? undefined,
+      };
     });
   }, [data, mesh]);
 
@@ -161,6 +188,84 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
     return area > 0 ? weighted / area : null;
   }, [inclPdfs, dists]);
 
+  // Format a 3-vector (cell center or dimensions, in metres) as "(x, y, z)" for
+  // a CSV cell — quoting handles the embedded commas. Blank when absent (a
+  // non-grid whole-mesh / combined row has no single box).
+  const vec3 = (v?: [number, number, number]) =>
+    v ? `(${v[0].toFixed(3)}, ${v[1].toFixed(3)}, ${v[2].toFixed(3)})` : '';
+
+  // Export the fitted-parameters table exactly as shown: per-cell rows while
+  // overlaying, otherwise the single combined row. Mirrors the JSX table below
+  // (same columns, same null→"—" handling, here as an empty CSV field), with the
+  // cell's grid-box center and dimensions (m) appended.
+  const exportParamsCsv = () => {
+    const header = [
+      'Cell', 'center_xyz_m', 'dimensions_xyz_m',
+      'alpha', 'beta', 'mean_inclination_deg', 'R2', 'G_theta', 'de_Wit',
+    ];
+    const num = (v: number | null | undefined, digits: number) => (v != null ? v.toFixed(digits) : '');
+    // Quote a field if it contains a comma, quote, or newline (the cell labels
+    // like "Cell (0, 0, 0)" and the "(x, y, z)" vectors contain commas).
+    const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+    const rows: string[][] = overlayPerCell
+      ? cellFits.map(({ cell, deWit: cd, beta, gtheta }) => [
+          cell.label,
+          vec3(cell.center),
+          vec3(cell.size),
+          num(beta?.alpha, 2),
+          num(beta?.beta, 2),
+          num(beta?.meanIncl, 1),
+          num(beta?.r2, 2),
+          num(gtheta, 3),
+          cd ? deWitLabel(cd.best) : '',
+        ])
+      : [[
+          `All visible (${visibleCells.length} cells)`,
+          '',
+          '',
+          num(combinedBeta?.alpha, 2),
+          num(combinedBeta?.beta, 2),
+          num(combinedBeta?.meanIncl, 1),
+          num(combinedBeta?.r2, 2),
+          num(combinedGTheta, 3),
+          deWit ? deWitLabel(deWit.best) : '',
+        ]];
+    const csv = [header, ...rows].map(r => r.map(esc).join(',')).join('\n') + '\n';
+    const safeName = (meshName || 'mesh').replace(/[^\w.-]+/g, '_');
+    void downloadFile(csv, `${safeName}_leaf_angle_parameters.csv`);
+  };
+
+  // Export the inclination probability density curves themselves (the empirical
+  // data plotted in the chart): one row per series — each visible cell while
+  // overlaying, or a single combined row otherwise — with one column per
+  // inclination bin. The header names each column by its bin-center angle
+  // (degrees). Same source data as `chartData`, so the CSV matches the cell
+  // lines on screen. Density units: area fraction per ° (sum over bins × bin
+  // width = 1).
+  const exportDistributionsCsv = () => {
+    if (inclPdfs.length === 0) return;
+    const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+    const centers = inclPdfs[0].pdf.binCenters;
+    // One row per series: [label, center, dimensions, density-per-bin]. The
+    // trailing columns are the bin-center angles. Center/dimensions are blank for
+    // the non-grid combined row.
+    const series: { label: string; cell?: PlotCell; values: number[] }[] = overlayPerCell
+      ? inclPdfs.map(({ cell, pdf }) => ({ label: cell.label, cell, values: pdf.density }))
+      : combinedPdf
+        ? [{ label: `All visible (${visibleCells.length} cells)`, values: combinedPdf.density }]
+        : [];
+    const header = ['cell', 'center_xyz_m', 'dimensions_xyz_m', ...centers.map(a => a.toFixed(2))];
+    const rows = series.map(s => [
+      s.label,
+      vec3(s.cell?.center),
+      vec3(s.cell?.size),
+      ...centers.map((_, b) => (s.values[b] != null ? s.values[b].toExponential(6) : '')),
+    ]);
+    const csv = [header, ...rows].map(r => r.map(esc).join(',')).join('\n') + '\n';
+    const safeName = (meshName || 'mesh').replace(/[^\w.-]+/g, '_');
+    void downloadFile(csv, `${safeName}_leaf_angle_distributions.csv`);
+  };
+
   // Recharts data: one row per inclination bin, a key per visible cell, the
   // combined best-fit de Wit curve, and (when toggled on) a per-cell Beta curve.
   const chartData = useMemo(() => {
@@ -243,9 +348,31 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
             <Leaf className="w-4 h-4 text-green-400" />
             <h2 className="text-sm font-semibold text-white">Leaf Angle Distribution — {meshName}</h2>
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-neutral-700 transition-colors">
-            <X className="w-4 h-4 text-neutral-400" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              data-testid="export-params-csv"
+              onClick={exportParamsCsv}
+              disabled={cellFits.length === 0}
+              title="Export the fitted parameters table to a CSV file"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-neutral-300 hover:bg-neutral-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Parameters CSV
+            </button>
+            <button
+              data-testid="export-distributions-csv"
+              onClick={exportDistributionsCsv}
+              disabled={inclPdfs.length === 0}
+              title="Export the inclination probability density curves to a CSV file"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-neutral-300 hover:bg-neutral-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Distributions CSV
+            </button>
+            <button onClick={onClose} className="p-1 rounded hover:bg-neutral-700 transition-colors">
+              <X className="w-4 h-4 text-neutral-400" />
+            </button>
+          </div>
         </div>
 
         <div className="p-4 max-h-[78vh] overflow-y-auto">

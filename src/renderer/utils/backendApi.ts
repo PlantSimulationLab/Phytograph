@@ -1353,10 +1353,8 @@ export interface LidarScanScanner {
   // it's sent for every scan regardless of return type. 0/0 = level.
   tilt_roll_deg: number;
   tilt_pitch_deg: number;
-  // Initial scanner heading (degrees). Sent so it's ready the moment Helios can
-  // consume it; the backend currently ACCEPTS BUT IGNORES it (the helios-core
-  // scan struct has no scanAzimuthOffset field yet). See the TODO(scanAzimuthOffset)
-  // blocks in backend-api/main.py.
+  // Initial scanner heading (degrees). Applied by the backend synthetic-scan
+  // generator (PyHelios addScan/addScanMultibeam scan_azimuth_offset, v0.1.23+).
   scan_azimuth_offset_deg: number;
   // Synthetic measurement-error model (0 disables). Applies to single + multi.
   range_noise_m: number;       // Gaussian along-beam range noise stddev (meters)
@@ -1534,10 +1532,9 @@ export interface ScanExportEntry {
   phi_max?: number;
   beam_exit_diameter?: number;
   beam_divergence?: number;
-  // Initial scanner heading (degrees). Carried so it round-trips into the XML,
-  // but the backend cannot yet write a <scanAzimuthOffset> tag (PyHelios
-  // exportScans serializes from a struct that lacks the field). See the
-  // TODO(scanAzimuthOffset) note in backend-api/main.py _do_scan_export_xml.
+  // Initial scanner heading (degrees). Round-trips into the XML: the backend
+  // writes a <scanAzimuthOffset> tag via PyHelios exportScans (v0.1.23+) and
+  // reads it back on import.
   scan_azimuth_offset?: number;
   session_id?: string;
   points?: number[][];

@@ -17,7 +17,9 @@
 
 ### ASCII format details
 
-- First three columns: x, y, z (required).
+- First three columns: x, y, z (required) — unless up to two leading
+  **all-integer** index columns precede the fractional coordinates, in which
+  case they're read as the scan row/column index and xyz follow.
 - Additional columns become scalar fields. If the file has a header row,
   column names become field names. Otherwise fields are named
   `field_0`, `field_1`, ….
@@ -63,13 +65,19 @@ When no `<ASCII_format>` hint is given, Phytograph auto-detects the
 layout: a header row's column names — whether plain or written as a
 leading `#` comment — are matched to roles where recognised (so
 `XYZ[0][m]`/`XYZ[1][m]`/`XYZ[2][m]` map to x/y/z and the rest become
-scalar fields), otherwise it falls back to a positional guess (xyz, then
-RGB at six columns, then intensity at seven). The positional RGB guess is
-range-checked: columns 4–6 are only assigned to red/green/blue when their
-sampled values actually look like 8-bit colour (0–255 integers), so a
-six-column file whose extra columns hold timestamps or return counts (e.g.
-Helios multi-return `x y z timestamp intensity return#`) is left as
-reassignable scalars rather than silently mislabelled as colour.
+scalar fields), otherwise it falls back to a positional guess. The
+positional path first locates where the coordinates start: up to two leading
+**all-integer** columns sitting before the first column with fractional
+precision are read as the scan row/column index (so a `row col x y z …`
+terrestrial-scanner export isn't mistaken for `x y z …`). An all-integer
+cloud, with no fractional column to anchor on, keeps xyz at column 0. After
+xyz, a 0–255 integer triple is taken as RGB and a lone trailing column as
+intensity. The RGB guess is range-checked: those three columns are only
+assigned to red/green/blue when their sampled values actually look like 8-bit
+colour (0–255 integers), so columns that hold timestamps, return counts, or a
+reflectance that ranges above 255 (e.g. Helios multi-return
+`x y z timestamp intensity return#`) are left as reassignable scalars rather
+than silently mislabelled as colour.
 
 `.ply` clouds are parsed directly (not via open3d), so arbitrary per-vertex
 scalar properties — intensity, reflectance, and any custom numeric field —

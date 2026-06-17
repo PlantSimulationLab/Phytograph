@@ -60,9 +60,9 @@ export interface ScanParameters {
   // scanner's forward axis points along before the sweep begins. CCW-from-+X
   // positive (0 = +X). A real property of how the instrument was set up on the
   // tripod, independent of the azimuth *sweep* bounds below. Maps to Helios
-  // <scanAzimuthOffset> (degrees) and (once the struct lands) pyhelios
-  // scan_azimuth_offset (radians). 0 = default heading. Also orients the
-  // scanner marker mesh in the viewer.
+  // <scanAzimuthOffset> (degrees) and pyhelios scan_azimuth_offset (radians,
+  // v0.1.23+). 0 = default heading. Also orients the scanner marker mesh in
+  // the viewer.
   azimuthOffsetDeg: number;
   // Spinning-multibeam only. Per-channel beam elevation angles in degrees above
   // the horizon — the manufacturer-spec convention (positive = above horizon).

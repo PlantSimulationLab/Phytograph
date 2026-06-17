@@ -34,6 +34,12 @@ export const IPC = {
   FileDropEvent: 'fileDrop:event',
   // Menu commands (main -> renderer)
   MenuCommand: 'menu:command',
+  // OS "Open With" file-association events (main -> renderer): paths the OS
+  // handed us at launch / via a second-instance, to be auto-imported.
+  OpenFiles: 'app:openFiles',
+  // Renderer -> main (one-way): the renderer has mounted and can receive
+  // OpenFiles. Main queues any paths that arrive before this and flushes on it.
+  RendererReady: 'app:rendererReady',
   // Backend supervisor status (main -> renderer): crash/restart lifecycle
   BackendStatus: 'backend:status',
 } as const;
@@ -106,6 +112,11 @@ export interface MessageBoxOptions {
 export interface MessageBoxResult {
   /** Index into `buttons` of the button the user clicked. */
   response: number;
+}
+
+/** Paths the OS asked Phytograph to open (file association / "Open With"). */
+export interface OpenFilesPayload {
+  paths: string[];
 }
 
 export type FileDropPayload =

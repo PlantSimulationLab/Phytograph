@@ -119,10 +119,10 @@ You need geometry in the scene to scan: typically a generated
 9. **Scanner heading** — the initial azimuth the scanner faces in the
    horizontal plane, in degrees (`0` is the default heading; counter-clockwise
    positive). Like tilt, it's a property of the scan and editable later. The
-   heading rotates the scanner **marker** in the 3D view so it points the right
-   way. *Note:* the synthetic-scan geometry does not yet rotate by heading — the
-   simulated rays are unaffected for now, pending a Helios update; the field is
-   stored and round-trips through XML regardless.
+   heading rotates both the scanner **marker** in the 3D view and the
+   synthetic-scan **rays** — the simulated sweep is offset about the vertical
+   axis so a partial-azimuth scan points where the marker faces. The field is
+   stored and round-trips through XML (`<scanAzimuthOffset>`).
 
 10. Click **Add Scan** to place the scanner. A marker — the selected
    instrument's shape, or a sphere for a generic scanner — appears in the

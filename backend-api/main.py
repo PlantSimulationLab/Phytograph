@@ -135,6 +135,70 @@ if (_PYHELIOS_SRC / "pyhelios" / "__init__.py").exists():
             "Likely a libhelios/wrapper mismatch (stale lib missing an FFI symbol).",
         )
 
+
+# ── Refuse to serve PyHelios "mock mode" ──────────────────────────────────────
+# `import pyhelios` succeeding is NOT sufficient: the loader and each native-
+# function wrapper independently fall back to no-op MOCK stubs when the compiled
+# libhelios is absent, fails to dlopen, OR is missing an FFI symbol the (newer)
+# Python wrapper expects (a stale-lib mismatch). In mock mode every LiDAR / plant
+# call raises at use-time or silently yields nothing — which in practice meant
+# Helios scans/triangulation/LAD returned ZERO points while the app looked like it
+# "worked". That is never acceptable outside unit tests: a packaged build, the dev
+# backend, and ESPECIALLY E2E must fail loudly, not serve mock results.
+#
+# This check is unconditional (runs in dev AND packaged builds, unlike the dev-only
+# auto-rebuild block above) and fails hard. The ONLY escape is PYHELIOS_ALLOW_MOCK=1,
+# which the pytest harness sets for backend unit tests that don't need native code.
+def _assert_pyhelios_native() -> None:
+    if os.environ.get("PYHELIOS_ALLOW_MOCK") == "1":
+        return  # explicit opt-in — unit tests only
+
+    bar = "=" * 74
+
+    def _fatal(detail: str) -> None:
+        print(
+            f"\n{bar}\n[pyhelios] FATAL: running in MOCK mode — native LiDAR/plant "
+            f"library not usable\n{bar}\n{detail}\n{bar}\n"
+            "Helios scans, triangulation, LAD, and plant generation would silently "
+            "produce NO results.\nRefusing to start. Rebuild the native library:\n"
+            "    node scripts/build-pyhelios.mjs        # recompile libhelios\n"
+            "    npm run build:backend                  # repackage the bundle (for E2E/installers)\n"
+            "If you are running backend UNIT TESTS that don't need native code, set "
+            "PYHELIOS_ALLOW_MOCK=1.\n" + bar,
+            flush=True,
+        )
+        raise SystemExit(1)
+
+    try:
+        from pyhelios.plugins import get_library_info
+        from pyhelios.wrappers import ULiDARWrapper, UPlantArchitectureWrapper
+    except Exception as _e:  # noqa: BLE001
+        _fatal(f"could not import pyhelios native wrappers: {_e!r}")
+        return
+
+    info = get_library_info()
+    if info.get("is_mock"):
+        _fatal(f"library loader reports mock mode (no native lib found). info={info!r}")
+
+    # The library can load while an individual wrapper still mocked itself because
+    # the lib was missing one of that wrapper's FFI symbols (the exact stale-lib
+    # failure mode). Check the wrappers the app actually depends on.
+    if not getattr(ULiDARWrapper, "_LIDAR_FUNCTIONS_AVAILABLE", False):
+        _fatal(
+            "the LiDAR wrapper fell back to mock — libhelios is missing one or more "
+            "LiDAR FFI symbols the Python wrapper expects (stale/incomplete build)."
+        )
+    if not getattr(UPlantArchitectureWrapper, "_PLANTARCHITECTURE_FUNCTIONS_AVAILABLE", False):
+        _fatal(
+            "the PlantArchitecture wrapper fell back to mock — libhelios is missing "
+            "one or more plant-architecture FFI symbols (stale/incomplete build)."
+        )
+
+    print("[pyhelios] native LiDAR + plant-architecture wrappers verified (not mock)", flush=True)
+
+
+_assert_pyhelios_native()
+
 # Unicode subscript to ASCII conversion for phytorch compatibility
 SUBSCRIPT_TO_ASCII = {
     '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
@@ -156,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.24.0"
+BACKEND_VERSION = "0.25.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -4143,10 +4207,9 @@ class ScanExportEntry(BaseModel):
     phi_max: float = 360.0
     beam_exit_diameter: Optional[float] = None   # meters
     beam_divergence: Optional[float] = None      # milliradians
-    # Initial scanner heading (degrees). Carried so it round-trips into the XML,
-    # but PyHelios exportScans() does NOT yet serialize a <scanAzimuthOffset> tag
-    # (the helios-core struct lacks the field), so this is currently ACCEPTED BUT
-    # NOT WRITTEN. See the TODO(scanAzimuthOffset) block at the addScan call below.
+    # Initial scanner heading (degrees). Round-trips into the XML via PyHelios
+    # exportScans() (v0.1.23+), which writes a <scanAzimuthOffset> tag the renderer
+    # reads back on import.
     scan_azimuth_offset: Optional[float] = None
     # Point source (one of):
     session_id: Optional[str] = None             # live edited session (honors deletions)
@@ -4619,13 +4682,10 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
             n_phi = max(int(_math.sqrt(xyz.shape[0] / max(aspect, 0.01))), 10)
             n_theta = max(int(xyz.shape[0] / n_phi), 10)
         column_format = ['x', 'y', 'z'] + labels
-        # TODO(scanAzimuthOffset): scan_entry.scan_azimuth_offset carries the initial
-        # heading, but PyHelios exportScans() serializes the XML from the helios-core
-        # ScanMetadata struct, which has no scanAzimuthOffset field yet — so it is NOT
-        # written to the <scan> element today. FUTURE AGENT: once addScan/addScanMultibeam
-        # accept `scan_azimuth_offset` AND exportScans() writes <scanAzimuthOffset>, pass
-        # it in both branches below and delete this note. (The renderer already reads the
-        # tag on import; only the write half is blocked.)
+        # Initial scanner heading (degrees -> radians). PyHelios exportScans() (v0.1.23+)
+        # serializes this as a <scanAzimuthOffset> tag when non-zero, and the renderer
+        # reads it back on import, so it round-trips.
+        azimuth_offset_rad = _math.radians(float(scan_entry.scan_azimuth_offset or 0.0))
         if scan_entry.scan_pattern == "spinning_multibeam":
             # Re-loadable multibeam scan: exportScans writes <scanPattern> +
             # <beamElevationAngles>. Convert elevation (deg) -> zenith (rad).
@@ -4642,6 +4702,7 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
                 exit_diameter=float(scan_entry.beam_exit_diameter or 0.0),
                 beam_divergence=float(scan_entry.beam_divergence or 0.0) / 1000.0,
                 column_format=column_format,
+                scan_azimuth_offset=azimuth_offset_rad,
             )
         else:
             cloud.addScan(
@@ -4653,6 +4714,7 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
                 exit_diameter=float(scan_entry.beam_exit_diameter or 0.0),
                 beam_divergence=float(scan_entry.beam_divergence or 0.0) / 1000.0,
                 column_format=column_format,
+                scan_azimuth_offset=azimuth_offset_rad,
             )
         sid = cloud.getScanCount() - 1
         if xyz.shape[0] > 0:
@@ -4750,11 +4812,9 @@ class LidarScanScanner(BaseModel):
     # radians pyhelios expects below.
     tilt_roll_deg: float = 0.0
     tilt_pitch_deg: float = 0.0
-    # Initial scanner heading in the horizontal plane (degrees). The renderer
-    # already sends this, but PyHelios/helios-core do NOT yet expose a
-    # scan_azimuth_offset parameter, so it is currently ACCEPTED BUT IGNORED here.
-    # See the flagged TODO(scanAzimuthOffset) blocks at the addScan / addScanMultibeam
-    # call sites below.
+    # Initial scanner heading in the horizontal plane (degrees). Applied by the
+    # synthetic-scan generator via PyHelios addScan/addScanMultibeam
+    # scan_azimuth_offset (v0.1.23+) at the call sites below.
     scan_azimuth_offset_deg: float = 0.0
 
 
@@ -4894,13 +4954,7 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                             angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
                             scan_tilt_roll=math.radians(s.tilt_roll_deg),
                             scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
-                            # TODO(scanAzimuthOffset): pass the initial heading once the
-                            # helios-core ScanMetadata struct + PyHelios bindings expose it.
-                            # Until then s.scan_azimuth_offset_deg is accepted but ignored.
-                            # FUTURE AGENT: if `scan_azimuth_offset` is now a real kwarg of
-                            # addScanMultibeam, WIRE IT UP and delete this note — the renderer
-                            # already sends the value:
-                            # scan_azimuth_offset=math.radians(s.scan_azimuth_offset_deg),
+                            scan_azimuth_offset=math.radians(s.scan_azimuth_offset_deg),
                         )
                     else:
                         lidar.addScan(
@@ -4916,13 +4970,7 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                             angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
                             scan_tilt_roll=math.radians(s.tilt_roll_deg),
                             scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
-                            # TODO(scanAzimuthOffset): pass the initial heading once the
-                            # helios-core ScanMetadata struct + PyHelios bindings expose it.
-                            # Until then s.scan_azimuth_offset_deg is accepted but ignored.
-                            # FUTURE AGENT: if `scan_azimuth_offset` is now a real kwarg of
-                            # addScan, WIRE IT UP and delete this note — the renderer already
-                            # sends the value:
-                            # scan_azimuth_offset=math.radians(s.scan_azimuth_offset_deg),
+                            scan_azimuth_offset=math.radians(s.scan_azimuth_offset_deg),
                         )
 
                 # Crop-to-grid: scan_grid_only restricts ray-tracing to the cells
@@ -10824,25 +10872,57 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
             if len(sample) >= 64:
                 break
 
-    if ncols >= 6:
-        # Positional convention assumes cols 4-6 are r255/g255/b255 — but only
-        # if those columns actually look like 8-bit colour. A column of GPS
-        # timestamps or return counts (Helios multi-return XYZ:
-        # `x y z timestamp intensity return#`) is order 1e5, nowhere near 0-255,
-        # so blindly tagging it 'red' silently mislabels the data. When the
-        # range check fails, drop the RGB guess and leave those columns 'skip'
-        # so the import wizard surfaces them as reassignable scalars instead.
-        if _columns_look_like_rgb255(sample, (3, 4, 5)):
-            if ncols >= 7:
-                return ['x', 'y', 'z', 'r255', 'g255', 'b255', 'intensity']
-            return ['x', 'y', 'z', 'r255', 'g255', 'b255']
-        # Not colour: keep xyz, carry the rest as reassignable extras.
-        return ['x', 'y', 'z'] + ['skip'] * (ncols - 3)
-    if ncols >= 4:
-        return ['x', 'y', 'z', 'intensity']
-    if ncols >= 3:
+    if ncols < 3:
         return ['x', 'y', 'z']
-    return ['x', 'y', 'z']
+
+    # Where do the coordinates start? Most exports lead with xyz, but some
+    # terrestrial-scanner ASCII dumps prepend grid bookkeeping — e.g. a scan
+    # row/column index pair (`row col x y z r g b reflectance`). Those leading
+    # columns are *entirely integers* while the coordinates carry fractional
+    # precision, so we step past a run of leading pure-integer columns to find
+    # x — but only while a later column with decimals exists to anchor xyz. If
+    # column 0 already has decimals, or no column does (an all-integer cloud),
+    # xyz starts at 0 as usual, so genuine integer-valued coordinates are never
+    # mis-shifted.
+    max_shift = min(2, ncols - 3)  # at most two leading index columns; leave xyz room
+    xyz_start = 0
+    while (xyz_start < max_shift
+           and _columns_are_all_integers(sample, (xyz_start,))
+           and _any_column_has_decimals(sample, range(xyz_start + 1, ncols))):
+        xyz_start += 1
+
+    # Recognised structured-scan index spellings for up to two leading columns.
+    index_roles = ['row_index', 'column_index']
+    roles: List[str] = [index_roles[i] if i < len(index_roles) else 'skip'
+                        for i in range(xyz_start)]
+    roles += ['x', 'y', 'z']
+    rest_start = xyz_start + 3
+    rest = ncols - rest_start
+
+    # An RGB triple — three consecutive 0-255 integer columns — typically
+    # follows xyz when present. Tagging it r255/g255/b255 saves the user three
+    # manual reassignments; the range check (via `_columns_look_like_rgb255`)
+    # rejects timestamp / return-count columns, so we never mislabel non-colour.
+    if rest >= 3 and _columns_look_like_rgb255(
+            sample, (rest_start, rest_start + 1, rest_start + 2)):
+        roles += ['r255', 'g255', 'b255']
+        after_rgb = rest_start + 3
+        trailing = ncols - after_rgb
+        # One trailing column after RGB is conventionally intensity/reflectance;
+        # more than one is ambiguous, so leave them reassignable.
+        if trailing == 1:
+            roles += ['intensity']
+        else:
+            roles += ['skip'] * trailing
+        return roles
+
+    # No RGB: a lone trailing column is positionally intensity; anything wider
+    # is carried as reassignable extras rather than guessed.
+    if rest == 1:
+        roles += ['intensity']
+    else:
+        roles += ['skip'] * rest
+    return roles
 
 
 def _columns_look_like_rgb255(sample: List[List[float]], idxs) -> bool:
@@ -10865,6 +10945,43 @@ def _columns_look_like_rgb255(sample: List[List[float]], idxs) -> bool:
             if v < 0 or v > 255 or v != int(v):
                 return False
     return True
+
+
+def _columns_are_all_integers(sample: List[List[float]], idxs) -> bool:
+    """Do the given columns hold only integer-valued numbers across the sample?
+
+    A leading scan-pattern row/column index is an integer counter, whereas
+    coordinate columns carry fractional precision. We require every sampled
+    value in each column to be exactly integral. An out-of-range index or an
+    empty sample returns False — without evidence we don't claim integrality.
+    """
+    if not sample:
+        return False
+    for row in sample:
+        for i in idxs:
+            if i >= len(row):
+                return False
+            if row[i] != int(row[i]):
+                return False
+    return True
+
+
+def _any_column_has_decimals(sample: List[List[float]], idxs) -> bool:
+    """Does any of the given columns carry fractional precision in the sample?
+
+    Used to confirm that real (fractional) coordinates lie ahead before
+    shifting xyz past a run of pure-integer leading index columns. Real LiDAR
+    coordinates almost always have sub-unit decimals; an all-integer file has
+    none, so we leave xyz at column 0 rather than mistake a coordinate column
+    for an index. Out-of-range indices are skipped; an empty sample is False.
+    """
+    if not sample:
+        return False
+    for row in sample:
+        for i in idxs:
+            if i < len(row) and row[i] != int(row[i]):
+                return True
+    return False
 
 
 def _first_data_row_has_letters(file_path: str) -> bool:

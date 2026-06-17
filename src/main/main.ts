@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startBackend, stopBackend, setBackendWindowGetter, setBackendFailedHandler } from './backend.js';
@@ -6,7 +7,7 @@ import { registerIpc } from './ipc.js';
 import { installApplicationMenu } from './menu.js';
 import { setupAutoUpdater } from './updater.js';
 import { IPC, type FileDropPayload } from '../shared/ipc.js';
-import { RENDERER_DEV_PORT } from '../shared/constants.js';
+import { RENDERER_DEV_PORT, IMPORTABLE_EXTENSIONS } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
 import { initLogging, getLogDir, setFatalErrorHandler } from './logger.js';
 import { installCrashHandlers, showBackendFailedDialog, showFatalMainErrorDialog } from './crashDialog.js';
@@ -98,6 +99,64 @@ if (!isE2E) {
 }
 
 let mainWindow: BrowserWindow | null = null;
+
+// ── OS "Open With" / file-association handling ─────────────────────────────
+// The OS can hand us files three ways: macOS fires 'open-file'; Windows/Linux
+// pass paths in argv on a cold launch, and deliver a second launch's argv to
+// the already-running first instance via 'second-instance'. All funnel into
+// handleOpenPaths(), which queues anything that arrives before the renderer is
+// ready (the window/backend take ~10-20s) and flushes on IPC.RendererReady.
+
+// Single-instance lock: the user's chosen behavior is "import into the existing
+// window" rather than spawning a second app (each would launch its own Python
+// backend). Skipped under E2E — the Playwright suite launches several apps that
+// all run `electron .` from the same userData dir, so a lock would make every
+// app after the first quit immediately and break the suite.
+if (!isE2E) {
+  const gotLock = app.requestSingleInstanceLock();
+  if (!gotLock) {
+    // Another instance owns the lock; it will receive our argv via
+    // 'second-instance'. Quit this one immediately.
+    app.quit();
+  }
+}
+
+let pendingOpenPaths: string[] = [];
+let rendererReady = false;
+
+function isImportablePath(p: string): boolean {
+  const ext = p.toLowerCase().split('.').pop() ?? '';
+  return (IMPORTABLE_EXTENSIONS as readonly string[]).includes(ext);
+}
+
+// Extract importable file paths from a process argv array. The executable and
+// any leading `electron .`/flag tokens are not files; in dev, argv also includes
+// the entry script path. Filtering to known importable extensions + existence on
+// disk is a robust, platform-agnostic way to pick out genuine file arguments.
+function extractFilePathsFromArgv(argv: string[]): string[] {
+  return argv.filter((a) => !a.startsWith('-') && isImportablePath(a) && existsSync(a));
+}
+
+function handleOpenPaths(paths: string[]): void {
+  const importable = paths.filter(isImportablePath);
+  if (importable.length === 0) return;
+  if (rendererReady && mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    mainWindow.webContents.send(IPC.OpenFiles, { paths: importable });
+  } else {
+    // Window/backend not up yet — queue; flushed on IPC.RendererReady.
+    pendingOpenPaths.push(...importable);
+  }
+}
+
+// macOS delivers file-association opens here. Register at top level (not inside
+// whenReady) because on a cold launch macOS can fire this before the app is
+// ready; queuing handles that. e.preventDefault() tells Electron we handled it.
+app.on('open-file', (e, path) => {
+  e.preventDefault();
+  handleOpenPaths([path]);
+});
 
 function createWindow(): void {
   // E2E tests assume a known, stable 1200x800 window. The display-aware sizing
@@ -247,11 +306,34 @@ app.whenReady().then(async () => {
   markSessionStarted();
 
   // Bridge: main can broadcast file-drop events to the focused window.
-  // (No-op placeholder for now; native drag/drop happens in the renderer.
-  // Wire native OS file-association open events here later.)
+  // (No-op placeholder for now; native drag/drop happens in the renderer.)
   ipcMain.on('__file-drop-broadcast', (_e, payload: FileDropPayload) => {
     mainWindow?.webContents.send(IPC.FileDropEvent, payload);
   });
+
+  // OS "Open With": the renderer signals it has mounted and can receive imports.
+  // Mark ready and flush any paths the OS handed us before the window was up.
+  ipcMain.on(IPC.RendererReady, () => {
+    rendererReady = true;
+    if (pendingOpenPaths.length > 0 && mainWindow) {
+      mainWindow.webContents.send(IPC.OpenFiles, { paths: pendingOpenPaths });
+      pendingOpenPaths = [];
+    }
+  });
+
+  // Windows/Linux: a second launch (e.g. double-clicking a file while the app is
+  // already running) delivers its argv here, to the first instance. Focus the
+  // existing window and import. (Never fires under the E2E no-lock path.)
+  app.on('second-instance', (_e, argv) => {
+    handleOpenPaths(extractFilePathsFromArgv(argv));
+  });
+
+  // Windows/Linux cold launch: file paths arrive in this process's argv. macOS
+  // uses 'open-file' instead, so this is a no-op there. Gate on isPackaged so a
+  // dev `electron .` run doesn't misread its own entry-script path as a file.
+  if (app.isPackaged) {
+    handleOpenPaths(extractFilePathsFromArgv(process.argv));
+  }
 
   // Give the supervisor a way to reach the renderer with crash/restart status.
   // (Safe to set before the window exists: emitBackendStatus no-ops on null.)

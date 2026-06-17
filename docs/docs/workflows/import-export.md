@@ -2,7 +2,7 @@
 
 ## Import
 
-Two entry points. Both accept the same set of formats — see
+Three entry points. All accept the same set of formats — see
 **[File formats](../reference/file-formats.md)** for the full list.
 
 === "Drag and drop"
@@ -40,6 +40,29 @@ Two entry points. Both accept the same set of formats — see
     drag-and-drop, point clouds open the [import wizard](#the-import-wizard)
     before loading.
 
+=== "Open with Phytograph"
+
+    Phytograph registers itself with the operating system as a handler for
+    every importable format, so you can start from your file manager instead
+    of from the app:
+
+    - **macOS** — right-click the file in Finder → **Open With → Phytograph**
+      (or set Phytograph as the default for that type via **Get Info**).
+    - **Windows** — right-click → **Open with → Phytograph** (or
+      double-click once Phytograph is the default for the extension).
+    - **Linux** — right-click → **Open With** → Phytograph in file managers
+      that honour the desktop entry.
+
+    The file is **auto-detected** by extension (the same as drag-and-drop), so
+    point clouds open the [import wizard](#the-import-wizard) and meshes,
+    skeletons, and Helios scan XML each load as their type. Opening several
+    files at once steps through them in the wizard.
+
+    If Phytograph is **already open**, the file imports into the **current
+    scene** — it does not launch a second copy of the app. On a cold launch the
+    file is imported as soon as the app and its compute backend finish starting
+    up.
+
 ### The import wizard
 
 Every point-cloud import opens an **import wizard** before the cloud is
@@ -63,7 +86,11 @@ dropdowns in; you correct anything that's wrong before importing:
   raster layout, which the gap-filling / miss-reconstruction tools use to
   rebuild missing pulses within the scan pattern. They carry through as
   scalar fields (slugs `row_index` / `column_index`) and auto-detect from
-  common headers like `Row` / `Column` / `row_index`.
+  common headers like `Row` / `Column` / `row_index`. With no header, up to two
+  leading **all-integer** columns sitting before the (fractional) coordinates
+  are recognized as the row/column index pair, so a `row col x y z …` scanner
+  export lands xyz on the right columns instead of mistaking the indices for
+  coordinates.
 - **Miss Flag** — a per-pulse 0/1 indicator of whether the laser returned
   nothing (`0` = hit, `1` = sky/miss). Mapping it preserves the scan's miss
   rays, which leaf-area-density inversion needs to measure gap fraction. It
@@ -172,13 +199,17 @@ meshes carry no textures.
 
 ### Importing ASCII clouds with custom columns
 
-For `.xyz`, `.txt`, and `.csv` files, auto-detection treats the first three
-columns as x, y, z and stores additional columns as **scalar fields** named
-after the column header (or `Column N` if there's no header). The
-[import wizard](#the-import-wizard) is where you correct that mapping when
-the file uses a non-standard column order, RGB stored as 0–1 floats, or a
-class column that should be categorical. You can color the cloud by any
-scalar field later — see **[Color modes](../reference/color-modes.md)**.
+For `.xyz`, `.txt`, and `.csv` files, auto-detection maps columns by header
+name when one is present. Without a header it falls back to position: the
+coordinates are the first three columns (or, if up to two **all-integer**
+columns lead the fractional coordinates, the row/column scan indices come
+first and xyz follow); a 0–255 integer triple right after xyz is taken as
+**RGB**; and a lone trailing column as **intensity**. Anything else is stored
+as a **scalar field** named after the column header (or `Column N` if there's
+no header). The [import wizard](#the-import-wizard) is where you correct that
+mapping when the file uses a non-standard column order, RGB stored as 0–1
+floats, or a class column that should be categorical. You can color the cloud
+by any scalar field later — see **[Color modes](../reference/color-modes.md)**.
 
 ### Importing scans with sky/miss points
 

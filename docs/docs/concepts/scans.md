@@ -63,8 +63,8 @@ per-pulse directions from `(point − origin)`.
 - **Scanner tilt** — residual roll/pitch lean away from level (degrees)
 - **Scanner heading** — initial azimuth the scanner faces in the
   horizontal plane (degrees; 0 is the default heading). Orients the
-  scanner marker in the 3D view and round-trips through XML
-  (`<scanAzimuthOffset>`)
+  scanner marker in the 3D view, offsets the synthetic-scan sweep about
+  the vertical axis, and round-trips through XML (`<scanAzimuthOffset>`)
 
 ## Importing scans
 
