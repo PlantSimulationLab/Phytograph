@@ -895,16 +895,16 @@ function App() {
   }, []);
 
   const handleUpdateScanLabel = useCallback((id: string, label: string) => {
-    setScans(prev => prev.map(s =>
-      s.id === id ? { ...s, label } : s
-    ));
-  }, []);
+    const before = scene.state.scans.find(s => s.id === id)?.label;
+    if (before === label) return;
+    scene.commit({ label: 'Rename scan', actions: [{ t: 'property', kind: 'scan', id, key: 'label', before, after: label }] });
+  }, [scene]);
 
   const handleUpdateScanColor = useCallback((id: string, color: string) => {
-    setScans(prev => prev.map(s =>
-      s.id === id ? { ...s, color } : s
-    ));
-  }, []);
+    const before = scene.state.scans.find(s => s.id === id)?.color;
+    if (before === color) return;
+    scene.commit({ label: 'Change scan color', actions: [{ t: 'property', kind: 'scan', id, key: 'color', before, after: color }] });
+  }, [scene]);
 
   const handleAddScan = useCallback((scan: Scan) => {
     addScanTx(scan, 'Add scan');

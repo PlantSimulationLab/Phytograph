@@ -165,9 +165,15 @@ close.
 ## Undo / redo
 
 <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> undoes the last edit;
-<kbd>⌘/Ctrl</kbd>+<kbd>Y</kbd> redoes it. Most destructive
-operations — crop, erase, stitch, transform — are undoable. Importing,
-exporting, and switching color modes are not (they're not destructive).
+<kbd>⌘/Ctrl</kbd>+<kbd>Y</kbd> redoes it. Undo covers the whole scene:
+adding objects (import, triangulate, generate plant, extract skeleton, build
+QSM, compute LAD), deleting them, transforms (move/rotate/scale), pre-bake
+erase/crop edits, stitching, and renaming/recoloring. Deleting several selected
+objects undoes in a single step. View settings (visibility, color mode, point
+size, camera) are not undoable. A few destructive operations that rewrite point
+data or recreate a backend session — baking edits, segmentation, ICP
+registration, and plant morph/age changes — are one-way: instead of being
+reversible they clear the undo history for the affected object.
 
 ## What's next
 

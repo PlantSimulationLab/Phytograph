@@ -476,6 +476,12 @@ export default function PointCloudViewer({
   const addLad = useCallback((lad: LADResultEntry, label = 'Compute LAD') => {
     scene.commit({ label, actions: [{ t: 'add', kind: 'lad', id: lad.id, object: lad }] });
   }, [scene]);
+  // Undoable single-property edit (rename / color / opacity / colorMode). No-op
+  // when before === after so a no-change commit doesn't clutter history.
+  const commitProperty = useCallback((kind: 'scan' | 'mesh' | 'skeleton' | 'qsm' | 'lad', id: string, key: 'label' | 'color' | 'opacity' | 'colorMode', before: string | number | undefined, after: string | number | undefined, label?: string) => {
+    if (before === after) return;
+    scene.commit({ label: label ?? `Change ${key}`, actions: [{ t: 'property', kind, id, key, before, after }] });
+  }, [scene]);
 
   // Legacy internal aliases. The bulk of this file was written against
   // `clouds` / `selectedIds` / `onUpdateCloud` etc., and assumes every entry
@@ -6472,16 +6478,17 @@ export default function PointCloudViewer({
   // (plant type/age, or source filename) is shown again.
   const handleRenameMesh = useCallback((meshId: string, name: string) => {
     const trimmed = name.trim();
-    setMeshes(prev => prev.map(m =>
-      m.id === meshId ? { ...m, name: trimmed.length > 0 ? trimmed : undefined } : m
-    ));
-  }, []);
+    const next = trimmed.length > 0 ? trimmed : undefined;
+    const before = scene.state.meshes.find(m => m.id === meshId)?.name;
+    commitProperty('mesh', meshId, 'label', before, next, 'Rename mesh');
+  }, [scene, commitProperty]);
 
-  // Set a mesh's solid color. Ignored for textured meshes at render time
-  // (TexturedPlantMesh draws the texture and does not read mesh.color).
+  // Set a mesh's solid color (undoable). Ignored for textured meshes at render
+  // time (TexturedPlantMesh draws the texture and does not read mesh.color).
   const handleSetMeshColor = useCallback((meshId: string, color: string) => {
-    setMeshes(prev => prev.map(m => m.id === meshId ? { ...m, color } : m));
-  }, []);
+    const before = scene.state.meshes.find(m => m.id === meshId)?.color;
+    commitProperty('mesh', meshId, 'color', before, color, 'Change mesh color');
+  }, [scene, commitProperty]);
 
   // Extract skeleton from selected point cloud
   const handleExtractSkeleton = useCallback(async () => {
@@ -6867,11 +6874,14 @@ export default function PointCloudViewer({
         q.id === qsmId
           ? { ...q, leaves: { data, plantMaterials, leafCount: resp.leaf_count, request }, leavesVisible: true }
           : q));
+      // Boundary: leaf placement mutates the QSM entry's geometry; clear its
+      // forward history so undo can't restore a pre-leaf state out of sync.
+      scene.boundary([qsmId]);
       showToast({ title: `Added ${resp.leaf_count.toLocaleString()} leaves`, type: 'success' });
     } catch (err) {
       showToast({ title: err instanceof Error ? err.message : 'Failed to add leaves', type: 'error' });
     }
-  }, [showToast]);
+  }, [showToast, scene]);
 
   // Phase 2: adjust a QSM's leaves to match a measured per-cell leaf-angle
   // distribution (from a leaf-on Helios triangulation). Replaces the leaf mesh
@@ -6888,11 +6898,12 @@ export default function PointCloudViewer({
         q.id === qsmId && q.leaves
           ? { ...q, leaves: { ...q.leaves, data, plantMaterials, leafCount: resp.leaf_count } }
           : q));
+      scene.boundary([qsmId]);
       showToast({ title: `Adjusted ${resp.leaf_count.toLocaleString()} leaf angles`, type: 'success' });
     } catch (err) {
       showToast({ title: err instanceof Error ? err.message : 'Failed to adjust leaf angles', type: 'error' });
     }
-  }, [showToast]);
+  }, [showToast, scene]);
 
   // Display label for a QSM, matching the results panel + delete dialog:
   // sourceLabel override (aggregate) → source scan fileName → 'QSM'.
@@ -8840,6 +8851,11 @@ export default function PointCloudViewer({
         return m;
       }));
 
+      // Destructive boundary: morph replaced the mesh geometry and recreated the
+      // backend plant session, so any prior undo history for this mesh would
+      // restore stale geometry pointing at a freed session. Clear it.
+      scene.boundary([selectedMeshId]);
+
       console.log(`[Morph] Plant morphed: ${response.vertex_count} vertices, session ${response.session_id}`);
       showToast({ title: `Plant morphed successfully (${response.vertex_count} vertices)`, type: 'success' });
 
@@ -8849,7 +8865,7 @@ export default function PointCloudViewer({
     } finally {
       setIsMorphing(false);
     }
-  }, [meshes, selectedMeshIds]);
+  }, [meshes, selectedMeshIds, scene]);
 
   // Handle advancing plant age using session-based approach for consistent plants
   const handleAdvancePlantAge = useCallback(async (meshId: string, dt: number) => {
@@ -8872,6 +8888,9 @@ export default function PointCloudViewer({
     }
 
     setIsAdvancingAge(true);
+    // Destructive boundary: advancing age replaces the mesh geometry (and may
+    // recreate the backend session), so clear this mesh's undo history up front.
+    scene.boundary([meshId]);
 
     try {
       // Session-based approach: Use advanceTime for forward growth (keeps plant consistent)
@@ -8993,7 +9012,7 @@ export default function PointCloudViewer({
     } finally {
       setIsAdvancingAge(false);
     }
-  }, [meshes, isAdvancingAge]);
+  }, [meshes, isAdvancingAge, scene]);
 
   // Handle growth animation - steps from start age to end age
   const handleStartGrowthAnimation = useCallback(async (meshId: string) => {

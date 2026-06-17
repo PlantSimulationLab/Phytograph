@@ -263,9 +263,12 @@ function applyProperty(
     meshColorModes.set(id, value as MeshColorMode);
     return { ...state, meshColorModes };
   }
-  // label/color on the entry
+  // label/color live on the entry object. The display-name field differs by
+  // kind: scans use `label`, mesh/skeleton/qsm use `name`. Map the logical
+  // 'label' key to the concrete field; 'color' is uniform.
+  const field = key === 'label' ? (kind === 'scan' ? 'label' : 'name') : key;
   const setField = <T extends { id: string }>(arr: T[]): T[] =>
-    arr.map((o) => (o.id === id ? { ...o, [key]: value } : o));
+    arr.map((o) => (o.id === id ? { ...o, [field]: value } : o));
   switch (kind) {
     case 'scan':
       return { ...state, scans: setField(state.scans) };

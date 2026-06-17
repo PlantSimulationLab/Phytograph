@@ -186,6 +186,23 @@ describe('property action', () => {
     s = run(s, { c: 'undo' });
     expect(s.meshColorModes.get('m1')).toBe('solid');
   });
+
+  it("maps the 'label' key to the entry's display-name field per kind", () => {
+    // mesh uses `name`
+    let s = makeInitialSceneState();
+    s = { ...s, meshes: [makeMesh('m1', { name: 'old' })] };
+    s = run(s, { c: 'commit', tx: tx('rename', [{ t: 'property', kind: 'mesh', id: 'm1', key: 'label', before: 'old', after: 'new' }]) });
+    expect(s.meshes[0].name).toBe('new');
+    s = run(s, { c: 'undo' });
+    expect(s.meshes[0].name).toBe('old');
+
+    // scan uses `label`
+    s = { ...s, scans: [makeScan('sc1', { label: 'A' })] };
+    s = run(s, { c: 'commit', tx: tx('rename scan', [{ t: 'property', kind: 'scan', id: 'sc1', key: 'label', before: 'A', after: 'B' }]) });
+    expect(s.scans[0].label).toBe('B');
+    s = run(s, { c: 'undo' });
+    expect(s.scans[0].label).toBe('A');
+  });
 });
 
 describe('maskEdit action', () => {
