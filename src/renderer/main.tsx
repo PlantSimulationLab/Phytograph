@@ -5,6 +5,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./App.css";
+import { SceneProvider } from "./state/sceneStore";
 import { initBackendUrl } from "./utils/backendApi";
 import { installConsoleForwarding } from "./lib/logger";
 
@@ -20,7 +21,9 @@ installConsoleForwarding();
 function mount() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <App />
+      <SceneProvider>
+        <App />
+      </SceneProvider>
     </React.StrictMode>,
   );
 }

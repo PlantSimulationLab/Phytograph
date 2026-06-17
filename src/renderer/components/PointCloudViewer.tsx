@@ -43,6 +43,8 @@ import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/point
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
 import { dirname } from '../lib/pathUtils';
+import { useScene, type SceneState } from '../state/sceneStore';
+import type { TransformState } from '../state/sceneActions';
 import {
   pointInPolygon,
   projectWorldToCanvasPixel,
@@ -132,7 +134,6 @@ import type {
   PointCloudEntry,
   CloudEditState,
   PendingDeleteRegion,
-  HistoryEntry,
   MeshData,
   MeshEntry,
   SkeletonData,
@@ -397,6 +398,32 @@ export default function PointCloudViewer({
   onOpenSettings,
   settingsEpoch,
 }: PointCloudViewerProps) {
+  // Unified scene store: single owner of editStates + the transform maps, and of
+  // the undo/redo history. `makeMapSetter` returns a React-setter-shaped adapter
+  // (value or updater) that dispatches a non-history `replaceCollection` on one
+  // map field — so the ~99 existing `setX(prev => ...)` call sites keep their
+  // exact syntax while the store owns the data. History is recorded explicitly
+  // via scene.commit in commitHistoryEntry (NOT by these setters). See the scene
+  // store / action model in src/renderer/state/.
+  const scene = useScene();
+  const makeMapSetter = useCallback(
+    <K extends 'meshPositions' | 'meshRotations' | 'meshScales' | 'skeletonPositions' | 'editStates'>(
+      field: K,
+    ) =>
+      (update: SceneState[K] | ((prev: SceneState[K]) => SceneState[K])) => {
+        scene.dispatch({
+          c: 'replaceCollection',
+          apply: (s) => ({
+            [field]:
+              typeof update === 'function'
+                ? (update as (prev: SceneState[K]) => SceneState[K])(s[field])
+                : update,
+          }),
+        });
+      },
+    [scene],
+  );
+
   // Legacy internal aliases. The bulk of this file was written against
   // `clouds` / `selectedIds` / `onUpdateCloud` etc., and assumes every entry
   // has a `data` payload. We adapt the unified Scan list at the boundary so
@@ -1052,14 +1079,21 @@ export default function PointCloudViewer({
   const [gifProgress, setGifProgress] = useState<{ current: number; total: number; phase: 'frames' | 'encoding' } | null>(null);
   const gifAbortRef = useRef(false);
   const mainCameraRef = useRef<THREE.Camera | null>(null);
-  // Mesh scales - stored per mesh id, default is {x: 1, y: 1, z: 1}
-  const [meshScales, setMeshScales] = useState<Map<string, { x: number; y: number; z: number }>>(new Map());
-  // Mesh positions - stored per mesh id, default is {x: 0, y: 0, z: 0}
-  const [meshPositions, setMeshPositions] = useState<Map<string, { x: number; y: number; z: number }>>(new Map());
-  // Mesh rotations - stored per mesh id in degrees, default is {x: 0, y: 0, z: 0}
-  const [meshRotations, setMeshRotations] = useState<Map<string, { x: number; y: number; z: number }>>(new Map());
-  // Skeleton positions - stored per skeleton id, default is {x: 0, y: 0, z: 0}
-  const [skeletonPositions, setSkeletonPositions] = useState<Map<string, { x: number; y: number; z: number }>>(new Map());
+  // Transform maps now live in the scene store (single owner; enables undo of
+  // adds/removes that seed transforms). Reads keep the `.get(id)` syntax; writes
+  // keep the `setX(prev => ...)` syntax via the makeMapSetter adapter above.
+  // Mesh scales - per mesh id, default {x:1,y:1,z:1}
+  const meshScales = scene.state.meshScales;
+  const setMeshScales = useMemo(() => makeMapSetter('meshScales'), [makeMapSetter]);
+  // Mesh positions - per mesh id, default {x:0,y:0,z:0}
+  const meshPositions = scene.state.meshPositions;
+  const setMeshPositions = useMemo(() => makeMapSetter('meshPositions'), [makeMapSetter]);
+  // Mesh rotations - per mesh id in degrees, default {x:0,y:0,z:0}
+  const meshRotations = scene.state.meshRotations;
+  const setMeshRotations = useMemo(() => makeMapSetter('meshRotations'), [makeMapSetter]);
+  // Skeleton positions - per skeleton id, default {x:0,y:0,z:0}
+  const skeletonPositions = scene.state.skeletonPositions;
+  const setSkeletonPositions = useMemo(() => makeMapSetter('skeletonPositions'), [makeMapSetter]);
   // Show resize panel when a mesh is selected
   const [showResizePanel, setShowResizePanel] = useState(false);
   // Lock per-axis scale so edits apply uniformly to X/Y/Z
@@ -1095,7 +1129,10 @@ export default function PointCloudViewer({
 
   // Edit mode and per-cloud edit states
   const [editMode, setEditMode] = useState<EditMode>('none');
-  const [editStates, setEditStates] = useState<Map<string, CloudEditState>>(new Map());
+  // Cloud edit states (translation + erased indices + pending deletes) now live
+  // in the scene store. Reads keep `.get(id)`; writes keep `setEditStates(prev => ...)`.
+  const editStates = scene.state.editStates;
+  const setEditStates = useMemo(() => makeMapSetter('editStates'), [makeMapSetter]);
 
   // Report the count of clouds with unbaked deletions up to App (drives the
   // before-quit warning). Only erase deletes accumulate as pendingDeletes;
@@ -1204,9 +1241,9 @@ export default function PointCloudViewer({
   // to avoid importing potree-core's class into this already-large module.
   const eraseOctreeRef = useRef<{ pick: (...args: unknown[]) => unknown } | null>(null);
 
-  // History for undo/redo
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
+  // Undo/redo history now lives in the scene store (scene.commit / scene.undo /
+  // scene.redo / scene.boundary). isUndoingRef still guards capture during replay
+  // so applying a store undo doesn't re-record a new transaction.
   const isUndoingRef = useRef(false);
 
   // Refs to track latest positions synchronously (for history capture during drag)
@@ -1475,159 +1512,87 @@ export default function PointCloudViewer({
     });
   }, [selectedIds]);
 
-  // Save to history - supports cloud, mesh, and skeleton
-  // Ref to store pending history entry (before state captured on drag start)
-  const pendingHistoryRef = useRef<{ type: 'cloud' | 'mesh' | 'skeleton'; id: string; before: HistoryEntry['before'] } | null>(null);
+  // Undo/redo now flows through the scene store. These wrappers keep their
+  // original names + signatures so the ~15 drag/gizmo/keyboard call sites are
+  // unchanged. The two-phase pattern (start captures BEFORE, commit pairs with
+  // AFTER and emits one transaction) is preserved; per-frame drag updates still
+  // mutate the synchronous refs only — history is recorded on commit.
+  const pendingHistoryRef = useRef<{ type: 'cloud' | 'mesh' | 'skeleton'; id: string; before: TransformState | CloudEditState } | null>(null);
 
-  // Capture current state for an object (uses refs for synchronous capture during drag)
-  const captureState = useCallback((type: 'cloud' | 'mesh' | 'skeleton', id: string): HistoryEntry['before'] => {
+  // Capture current state for an object (uses refs for synchronous capture during
+  // drag). Returns a flat TransformState for mesh/skeleton, a cloned
+  // CloudEditState for cloud.
+  const captureTransform = useCallback((type: 'cloud' | 'mesh' | 'skeleton', id: string): TransformState | CloudEditState => {
     if (type === 'mesh') {
-      // Use refs for mesh state to get synchronous values during drag
       const pos = meshPositionsRef.current.get(id) || { x: 0, y: 0, z: 0 };
       const rot = meshRotationsRef.current.get(id) || { x: 0, y: 0, z: 0 };
       const scl = meshScalesRef.current.get(id) || { x: 1, y: 1, z: 1 };
-      return {
-        objectState: {
-          position: { ...pos },
-          rotation: { ...rot },
-          scale: { ...scl },
-        }
-      };
+      return { position: { ...pos }, rotation: { ...rot }, scale: { ...scl } };
     } else if (type === 'skeleton') {
-      // Use ref for skeleton position
       const pos = skeletonPositionsRef.current.get(id) || { x: 0, y: 0, z: 0 };
-      return {
-        objectState: {
-          position: { ...pos },
-        }
-      };
+      return { position: { ...pos } };
     } else {
-      const state = editStates.get(id);
-      // Deep clone the cloudState, including the erasedIndices Set
-      return { cloudState: state ? {
-        ...state,
-        erasedIndices: new Set(state.erasedIndices)  // Clone the Set
-      } : undefined };
+      const state = editStates.get(id) || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+      // Deep clone, including the erasedIndices Set (snapshots must not share it).
+      return { ...state, erasedIndices: new Set(state.erasedIndices), pendingDeletes: state.pendingDeletes ? state.pendingDeletes.map(r => ({ ...r })) : undefined };
     }
   }, [editStates]);
 
-  // Start a history entry (call before operation begins)
+  // Start a history entry (call before operation begins).
   const startHistoryEntry = useCallback((type: 'cloud' | 'mesh' | 'skeleton', id: string) => {
     if (isUndoingRef.current) return;
-    pendingHistoryRef.current = {
-      type,
-      id,
-      before: captureState(type, id),
-    };
-  }, [captureState]);
+    pendingHistoryRef.current = { type, id, before: captureTransform(type, id) };
+  }, [captureTransform]);
 
-  // Commit a history entry (call after operation completes)
+  // Commit a history entry (call after operation completes): pair BEFORE with the
+  // current AFTER and push one transaction to the store.
   const commitHistoryEntry = useCallback(() => {
     if (isUndoingRef.current || !pendingHistoryRef.current) return;
-
     const { type, id, before } = pendingHistoryRef.current;
-    const after = captureState(type, id);
-
-    const entry: HistoryEntry = { type, id, before, after };
-
-    setHistory(prev => {
-      // Defensive check: ensure prev is an array
-      if (!Array.isArray(prev)) {
-        console.warn('[commitHistoryEntry] History state corrupted, resetting to empty array');
-        return [entry];
-      }
-      const newHistory = prev.slice(0, historyIndex + 1);
-      newHistory.push(entry);
-      if (newHistory.length > 100) newHistory.splice(0, newHistory.length - 100);
-      return newHistory;
-    });
-    setHistoryIndex(prev => Math.min(prev + 1, 99));
+    const after = captureTransform(type, id);
+    if (type === 'cloud') {
+      scene.commit({ label: 'edit cloud', actions: [{ t: 'maskEdit', id, before: before as CloudEditState, after: after as CloudEditState }] });
+    } else {
+      scene.commit({ label: `move ${type}`, actions: [{ t: 'transform', kind: type, id, before: before as TransformState, after: after as TransformState }] });
+    }
     pendingHistoryRef.current = null;
-  }, [captureState, historyIndex]);
+  }, [captureTransform, scene]);
 
-  // Save to history in one step (for immediate operations like move-to-origin)
+  // Save to history in one step (for immediate operations like move-to-origin).
+  // Captures BEFORE; the caller mutates then calls commitHistoryEntry. For a
+  // multi-cloud move this records only the FIRST selected cloud (pre-existing
+  // limitation; full multi-object batching arrives with the store's transactions
+  // in a later phase).
   const saveToHistory = useCallback((overrideType?: 'cloud' | 'mesh' | 'skeleton', overrideId?: string) => {
     if (isUndoingRef.current) return;
-
-    // For mesh/skeleton with override, capture before state now
     if (overrideType && overrideId) {
       startHistoryEntry(overrideType, overrideId);
     } else if (selectedIds.size > 0) {
-      // For clouds, save each selected cloud
+      // Only one pendingHistoryRef exists, so the last write wins — matching the
+      // pre-store behavior where each startHistoryEntry overwrote the pending entry.
       for (const id of selectedIds) {
         startHistoryEntry('cloud', id);
       }
     }
   }, [selectedIds, startHistoryEntry]);
 
-  // Apply a state snapshot to an object
-  const applyState = useCallback((type: 'cloud' | 'mesh' | 'skeleton', id: string, state: HistoryEntry['before']) => {
-    if (type === 'cloud' && state.cloudState) {
-      setEditStates(prev => {
-        const next = new Map(prev);
-        next.set(id, { ...state.cloudState! });
-        return next;
-      });
-    } else if (type === 'mesh' && state.objectState) {
-      setMeshPositions(prev => {
-        const next = new Map(prev);
-        next.set(id, { ...state.objectState!.position });
-        return next;
-      });
-      if (state.objectState.rotation) {
-        setMeshRotations(prev => {
-          const next = new Map(prev);
-          next.set(id, { ...state.objectState!.rotation! });
-          return next;
-        });
-      }
-      if (state.objectState.scale) {
-        setMeshScales(prev => {
-          const next = new Map(prev);
-          next.set(id, { ...state.objectState!.scale! });
-          return next;
-        });
-      }
-    } else if (type === 'skeleton' && state.objectState) {
-      setSkeletonPositions(prev => {
-        const next = new Map(prev);
-        next.set(id, { ...state.objectState!.position });
-        return next;
-      });
-    }
-  }, []);
-
-  // Undo - first check for stitch operations, then local edit history
+  // Undo - first check for stitch operations (Phase D folds stitch into the
+  // unified store), then the store's edit history.
   const handleUndo = useCallback(() => {
-    // First try to undo a stitch operation
     if (canUndoStitch?.() && onUndoStitch?.()) {
       return;
     }
-
-    // Then try local edit history
-    if (historyIndex < 0) return;
-
-    const entry = history[historyIndex];
-    if (entry) {
-      isUndoingRef.current = true;
-      applyState(entry.type, entry.id, entry.before);
-      setHistoryIndex(prev => prev - 1);
-      setTimeout(() => { isUndoingRef.current = false; }, 0);
-    }
-  }, [history, historyIndex, canUndoStitch, onUndoStitch, applyState]);
+    isUndoingRef.current = true;
+    scene.undo();
+    setTimeout(() => { isUndoingRef.current = false; }, 0);
+  }, [canUndoStitch, onUndoStitch, scene]);
 
   // Redo
   const handleRedo = useCallback(() => {
-    if (historyIndex >= history.length - 1) return;
-
-    const entry = history[historyIndex + 1];
-    if (entry) {
-      isUndoingRef.current = true;
-      applyState(entry.type, entry.id, entry.after);
-      setHistoryIndex(prev => prev + 1);
-      setTimeout(() => { isUndoingRef.current = false; }, 0);
-    }
-  }, [history, historyIndex, applyState]);
+    isUndoingRef.current = true;
+    scene.redo();
+    setTimeout(() => { isUndoingRef.current = false; }, 0);
+  }, [scene]);
 
   // Expose viewer-scoped actions on window so the application menu (wired in
   // src/main/menu.ts) can dispatch to them via App.tsx without prop-drilling.
@@ -1850,8 +1815,9 @@ export default function PointCloudViewer({
           }
           return next;
         });
-        setHistory(prev => prev.filter(entry => !touchedCloudIds.includes(entry.id)));
-        setHistoryIndex(prev => Math.max(-1, prev - touchedCloudIds.length));
+        // Destructive boundary: the cropped point arrays are the new ground
+        // truth, so drop any undo history that touches these clouds.
+        scene.boundary(touchedCloudIds);
 
         // Post-apply confirmation toast. Mirrors the "Loaded N points"
         // toast from import — gives the user a concrete signal that the
@@ -2361,9 +2327,8 @@ export default function PointCloudViewer({
       return next;
     });
 
-    // Clear history entries for this cloud since data changed
-    setHistory(prev => prev.filter(entry => entry.id !== cloud.id));
-    setHistoryIndex(prev => Math.max(-1, prev - 1));
+    // Destructive boundary: data changed, so drop this cloud's undo history.
+    scene.boundary([cloud.id]);
 
     setEditMode('none');
   }, [editMode, selectedIds, clouds, editStates, onUpdateCloud, eraseFrame, eraseBrushPx]);
@@ -2413,7 +2378,8 @@ export default function PointCloudViewer({
         if (cur) next.set(cloud.id, { ...cur, pendingDeletes: [], pendingDeletedCount: 0 });
         return next;
       });
-      setHistory(prev => prev.filter(entry => entry.id !== cloud.id));
+      // Destructive boundary: baked deletions are now the ground truth.
+      scene.boundary([cloud.id]);
       showToast({ title: `Applied deletions — ${baked.point_count.toLocaleString()} points remain`, type: 'success' });
     } catch (err) {
       showToast({
@@ -2485,8 +2451,8 @@ export default function PointCloudViewer({
       next.delete(cloudId);
       return next;
     });
-    setHistory(prev => prev.filter(entry => entry.id !== cloudId));
-    setHistoryIndex(prev => Math.max(-1, prev - 1));
+    // Destructive boundary: filter/segment rewrote this cloud's data.
+    scene.boundary([cloudId]);
     setShowFilterPanel(false);
   }, []);
 

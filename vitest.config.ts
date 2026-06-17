@@ -29,6 +29,9 @@ export default defineConfig({
         'src/renderer/lib/**/*.ts',
         'src/renderer/utils/**/*.ts',
         'src/renderer/hooks/**/*.ts',
+        // Scene store: the reducer/action model is pure logic (unit-tested);
+        // the thin Provider/hook glue is exercised by E2E.
+        'src/renderer/state/**/*.{ts,tsx}',
       ],
       exclude: [
         '**/*.test.*',
