@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { X, Radio } from 'lucide-react';
 import {
   DEFAULT_SYNTHETIC_SCAN_OPTIONS,
@@ -6,14 +6,24 @@ import {
   coerceSyntheticScanOptions,
   type SyntheticScanOptions,
 } from '../lib/syntheticScanOptions';
+import { scanDisplayName, type Scan } from '../lib/scan';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 
 interface SyntheticScanOptionsPopupProps {
   isOpen: boolean;
   onClose: () => void;
-  // Called with the chosen options when the user confirms the run. The caller
-  // proceeds with the scan (and its overwrite-confirm flow) from here.
-  onRun: (options: SyntheticScanOptions) => void;
+  // Called with the chosen options + the IDs of the scan positions to run when
+  // the user confirms. The caller proceeds with the scan (and its
+  // overwrite-confirm flow) from here, restricted to those scanners.
+  onRun: (options: SyntheticScanOptions, scannerIds: string[]) => void;
+  // Candidate scan positions (every scan with scanner parameters, regardless of
+  // visibility/selection). Each can be toggled off so the run only ray-traces
+  // the chosen subset.
+  scanners: Scan[];
+  // Whether the scene has at least one visible scannable mesh to ray-trace.
+  // When false the modal still opens (so you can review positions/options) but
+  // explains the missing geometry and keeps Run disabled.
+  hasGeometry: boolean;
   // Whether any active scanner is multi-return — gates the full-waveform fields.
   hasMultiReturn: boolean;
   // Whether exactly one voxel grid is visible — gates the crop-to-grid toggle.
@@ -28,10 +38,15 @@ export function SyntheticScanOptionsPopup({
   isOpen,
   onClose,
   onRun,
+  scanners,
+  hasGeometry,
   hasMultiReturn,
   gridAvailable,
 }: SyntheticScanOptionsPopupProps) {
   const [opts, setOpts] = useState<SyntheticScanOptions>(DEFAULT_SYNTHETIC_SCAN_OPTIONS);
+  // Which scan positions to ray-trace. Defaults to all; reset whenever the
+  // popup opens (the candidate set can change between runs).
+  const [selectedScannerIds, setSelectedScannerIds] = useState<Set<string>>(new Set());
 
   // Load the remembered options each time the popup opens.
   useEffect(() => {
@@ -48,6 +63,26 @@ export function SyntheticScanOptionsPopup({
     return () => { cancelled = true; };
   }, [isOpen]);
 
+  // Seed the scan-position selection (all on) each time the popup opens.
+  useEffect(() => {
+    if (!isOpen) return;
+    setSelectedScannerIds(new Set(scanners.map(s => s.id)));
+    // Keyed on isOpen only: re-seeding on every `scanners` identity change would
+    // clobber the user's toggles mid-session. The candidate set is fixed for the
+    // lifetime of one open popup.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  // Only count selections that still correspond to a candidate scanner.
+  // NOTE: this hook must run on every render, so it lives ABOVE the
+  // `if (!isOpen) return null` early return — putting a hook after a
+  // conditional return violates the Rules of Hooks and crashes the component
+  // the first time `isOpen` flips.
+  const selectedCount = useMemo(
+    () => scanners.reduce((n, s) => n + (selectedScannerIds.has(s.id) ? 1 : 0), 0),
+    [scanners, selectedScannerIds],
+  );
+
   if (!isOpen) return null;
 
   // DebouncedNumberInput owns each field's text draft and only commits finite
@@ -62,8 +97,20 @@ export function SyntheticScanOptionsPopup({
     setOpts(o => ({ ...o, raysPerPulse: v }));
   };
 
+  const toggleScanner = (id: string) =>
+    setSelectedScannerIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  const selectAllScanners = () => setSelectedScannerIds(new Set(scanners.map(s => s.id)));
+  const deselectAllScanners = () => setSelectedScannerIds(new Set());
+
   const handleRun = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!hasGeometry) return;  // guarded by the disabled Run button too
+    const scannerIds = scanners.filter(s => selectedScannerIds.has(s.id)).map(s => s.id);
+    if (scannerIds.length === 0) return;  // guarded by the disabled Run button too
     // crop-to-grid can't apply without exactly one visible grid — never persist
     // or send it set in that case.
     const finalOpts: SyntheticScanOptions = {
@@ -71,7 +118,7 @@ export function SyntheticScanOptionsPopup({
       cropToGrid: opts.cropToGrid && gridAvailable,
     };
     void window.electronAPI.store.set(SYNTHETIC_SCAN_OPTIONS_STORE_KEY, finalOpts);
-    onRun(finalOpts);
+    onRun(finalOpts, scannerIds);
   };
 
   const inputCls =
@@ -100,6 +147,98 @@ export function SyntheticScanOptionsPopup({
         </div>
 
         <form onSubmit={handleRun} className="p-4 space-y-4 overflow-y-auto">
+          {/* Missing-geometry notice — the modal opens even with nothing to
+              scan (e.g. just-loaded scanner positions) so you can review the
+              positions and options, but a scan can't run without a mesh. */}
+          {!hasGeometry && (
+            <div
+              data-testid="scan-opt-no-geometry"
+              className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300"
+            >
+              No scannable geometry in the scene — add a plant or import a mesh
+              (and make it visible) to run a scan. You can still review your scan
+              positions and options below.
+            </div>
+          )}
+
+          {/* Scan positions — each scanner can be toggled off so the run only
+              ray-traces the chosen subset (mirrors the triangulation / LAD
+              source pickers). */}
+          <div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-neutral-300">Scan positions</label>
+                <span className="text-[10px] text-neutral-500">
+                  ({selectedCount}/{scanners.length} selected)
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={selectAllScanners}
+                  className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
+                >
+                  All
+                </button>
+                <span className="text-neutral-600 text-[10px]">|</span>
+                <button
+                  type="button"
+                  onClick={deselectAllScanners}
+                  className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
+                >
+                  None
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-1.5 border border-neutral-700 rounded-lg overflow-hidden">
+              <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-2 px-3 py-2 bg-neutral-900/80 border-b border-neutral-700 items-center">
+                <div className="w-4" />
+                <span className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider">Scanner</span>
+                <span className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider w-14 text-center">X</span>
+                <span className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider w-14 text-center">Y</span>
+                <span className="text-[10px] font-medium text-neutral-500 uppercase tracking-wider w-14 text-center">Z</span>
+              </div>
+              <div className="max-h-[28vh] overflow-y-auto">
+                {scanners.map(scan => {
+                  const isSelected = selectedScannerIds.has(scan.id);
+                  const origin = scan.params?.origin;
+                  return (
+                    <label
+                      key={scan.id}
+                      data-testid="scan-opt-scanner-row"
+                      data-scan-id={scan.id}
+                      className={`grid grid-cols-[auto_1fr_auto_auto_auto] gap-2 px-3 py-2 items-center border-b border-neutral-700/50 cursor-pointer transition-colors ${
+                        isSelected ? 'bg-neutral-700/30' : 'bg-neutral-800/50 opacity-60'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleScanner(scan.id)}
+                        className="w-3.5 h-3.5 rounded border-neutral-600 bg-neutral-700 text-blue-500 focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                      />
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: scan.color }} />
+                        <span className="text-xs text-white truncate" title={scanDisplayName(scan)}>
+                          {scanDisplayName(scan)}
+                        </span>
+                      </div>
+                      <span className="w-14 px-1 py-1 text-[11px] text-neutral-300 text-center font-mono">{origin ? origin.x.toFixed(2) : '—'}</span>
+                      <span className="w-14 px-1 py-1 text-[11px] text-neutral-300 text-center font-mono">{origin ? origin.y.toFixed(2) : '—'}</span>
+                      <span className="w-14 px-1 py-1 text-[11px] text-neutral-300 text-center font-mono">{origin ? origin.z.toFixed(2) : '—'}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            {selectedCount === 0 && (
+              <p className="mt-1 text-[11px] text-amber-300">
+                Select at least one scan position to run.
+              </p>
+            )}
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">
               Measurement noise
@@ -204,10 +343,15 @@ export function SyntheticScanOptionsPopup({
           <button
             data-testid="scan-opt-run"
             type="submit"
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-white font-medium transition-colors"
+            disabled={selectedCount === 0 || !hasGeometry}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-600 disabled:cursor-not-allowed rounded-lg text-white font-medium transition-colors"
           >
             <Radio className="w-4 h-4" />
-            Run scan
+            {!hasGeometry
+              ? 'Add geometry to scan'
+              : selectedCount > 0
+                ? `Run scan (${selectedCount} position${selectedCount === 1 ? '' : 's'})`
+                : 'Run scan'}
           </button>
         </form>
       </div>

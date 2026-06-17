@@ -365,10 +365,11 @@ class TestScanOptions:
         r = client.get(f"/api/cloud/session/{sid}/misses",
                        params={"origin_x": 0.0, "origin_y": 0.0, "origin_z": 3.0})
         assert r.status_code == 200, r.text
-        misses = r.json()
-        assert misses["total"] > 0
-        assert misses["count"] > 0  # placeable (have a beam direction from origin)
-        assert len(misses["positions"]) == misses["count"] * 3
+        # /misses now returns a PHB1 binary frame (meta counts + positions buffer).
+        misses_meta, misses_buffers = decode_bin_frame(r.content)
+        assert misses_meta["total"] > 0
+        assert misses_meta["count"] > 0  # placeable (have a beam direction from origin)
+        assert len(misses_buffers["positions"]) == misses_meta["count"] * 3
 
     def test_no_session_when_misses_not_recorded(self, client):
         # Default (record_misses off): plain in-memory cloud, no session created.

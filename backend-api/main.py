@@ -45,6 +45,35 @@ if (_PYHELIOS_SRC / "pyhelios" / "__init__.py").exists():
         _lib_name = "libhelios.so"
     _lib_path = _PYHELIOS_SRC / "pyhelios_build" / "build" / "lib" / _lib_name
 
+    # A failed/required rebuild is FATAL by default, not a warning. Falling back to
+    # a stale/absent libhelios was a long-lived silent footgun: after a helios-core
+    # bump the auto-rebuild would fail (e.g. a missing include path) yet the backend
+    # kept running native code older than the source for days, because the failure
+    # was a single WARNING line and the eager import below then loaded the stale lib
+    # and printed a reassuring "loaded at startup". We refuse to start instead. The
+    # escape hatch (PHYTOGRAPH_ALLOW_STALE_PYHELIOS=1) downgrades fatal→loud-warning
+    # for the rare case of knowingly working on non-pyhelios code with a broken build.
+    _allow_stale = os.environ.get("PHYTOGRAPH_ALLOW_STALE_PYHELIOS") == "1"
+
+    def _pyhelios_fatal(title: str, detail: str) -> None:
+        bar = "=" * 74
+        waived = " (waived by PHYTOGRAPH_ALLOW_STALE_PYHELIOS=1)" if _allow_stale else ""
+        print(
+            f"\n{bar}\n"
+            f"[pyhelios] {'STALE NATIVE LIB' if _allow_stale else 'FATAL'}: {title}{waived}\n"
+            f"{bar}\n{detail}\n{bar}\n"
+            + ("Continuing on the EXISTING (stale/broken) libhelios because the escape\n"
+               "hatch is set. Native C++ behavior may not match the current source.\n"
+               if _allow_stale else
+               "Refusing to start on stale/broken native code — your results would not\n"
+               "reflect the current C++ source. Fix the build above, then restart. To\n"
+               "run on the existing lib anyway, set PHYTOGRAPH_ALLOW_STALE_PYHELIOS=1.\n")
+            + bar,
+            flush=True,
+        )
+        if not _allow_stale:
+            raise SystemExit(1)
+
     _needs_build = False
     if not _lib_path.exists():
         print(f"[pyhelios] native library not found at {_lib_path}", flush=True)
@@ -63,15 +92,25 @@ if (_PYHELIOS_SRC / "pyhelios" / "__init__.py").exists():
 
     if _needs_build:
         _build_script = _PYHELIOS_SRC.parent / "scripts" / "build-pyhelios.mjs"
-        if _build_script.exists():
+        if not _build_script.exists():
+            _pyhelios_fatal(
+                "native rebuild required but build script is missing",
+                f"Expected build-pyhelios.mjs at {_build_script}.",
+            )
+        else:
             print("[pyhelios] building from source (this may take a few minutes)...", flush=True)
+            # Output is NOT captured: the compiler error streams live to this log so
+            # it's visible above the fatal banner (and so a slow build shows progress).
             _result = subprocess.run(["node", str(_build_script)], cwd=str(_build_script.parent.parent), timeout=1800)
             if _result.returncode == 0 and _lib_path.exists():
                 print("[pyhelios] build complete", flush=True)
             else:
-                print("[pyhelios] WARNING: build failed; PyHelios features may be unavailable", flush=True)
-        else:
-            print(f"[pyhelios] WARNING: build script not found at {_build_script}", flush=True)
+                _pyhelios_fatal(
+                    "native rebuild FAILED",
+                    f"build-pyhelios.mjs exited {_result.returncode}; libhelios "
+                    f"{'exists but may be stale' if _lib_path.exists() else 'is MISSING'} "
+                    f"at {_lib_path}.\nThe compiler error is in the build output above.",
+                )
 
     # Eagerly load libhelios NOW, at module import, before any endpoint imports
     # open3d. libhelios links the Homebrew OpenMP runtime; open3d (and torch /
@@ -80,14 +119,21 @@ if (_PYHELIOS_SRC / "pyhelios" / "__init__.py").exists():
     # binds to open3d's libomp and dies on a missing symbol
     # (e.g. ___kmpc_dispatch_deinit). Importing pyhelios here makes libhelios +
     # its correct libomp bind first, so subsequent open3d use is harmless.
-    # Best-effort: a failure here is non-fatal (the lazy per-endpoint imports
-    # still surface a clear error), so packaged builds / odd setups don't break.
+    #
+    # A failure here is also fatal (this block is dev-only — packaged builds skip
+    # it entirely since the submodule is absent). It typically means the compiled
+    # lib is incompatible with the current pyhelios Python wrapper — e.g. a missing
+    # FFI symbol because the lib is stale even though its mtime looked fresh — which
+    # is exactly the stale-lib state we don't want to serve silently.
     try:
         import pyhelios as _pyhelios_preload  # noqa: F401
         print("[pyhelios] native library loaded at startup", flush=True)
     except Exception as _e:  # noqa: BLE001
-        print(f"[pyhelios] WARNING: startup load failed ({_e}); "
-              "will retry lazily per request", flush=True)
+        _pyhelios_fatal(
+            "native library failed to load",
+            f"import pyhelios raised: {_e!r}\n"
+            "Likely a libhelios/wrapper mismatch (stale lib missing an FFI symbol).",
+        )
 
 # Unicode subscript to ASCII conversion for phytorch compatibility
 SUBSCRIPT_TO_ASCII = {
@@ -110,7 +156,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.23.0"
+BACKEND_VERSION = "0.24.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -3334,8 +3380,8 @@ async def triangulate_check_spacing(request: HeliosTriangulationRequest):
 
     An OPT-IN diagnostic (the renderer offers it as a button when the Otsu
     indicators aren't both High). Potentially expensive — a KD-tree over up to
-    tens of millions of points — so it streams keepalive whitespace like
-    /api/lad/compute to survive WebKit's ~60s stall timeout, then yields the JSON
+    tens of millions of points — so it streams keepalive whitespace to survive
+    WebKit's ~60s stall timeout, then yields the JSON
     verdict. Reuses HeliosTriangulationRequest so the renderer sends the exact
     scans + grid + lmax it triangulated with."""
     import asyncio
@@ -3568,7 +3614,7 @@ def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
     return xyz, dirs, labels, vals, flags
 
 
-def _do_lad_computation(request: "LADComputeRequest") -> dict:
+def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
     """Compute per-voxel leaf area density via PyHelios. Returns a result dict.
 
     LAD is NOT a sum of triangle areas. The triangulation supplies the per-cell
@@ -3588,6 +3634,10 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
     import math
     import os
     import numpy as np
+
+    def _report(fraction, message):
+        if progress is not None:
+            progress(fraction, message)
 
     warnings: List[str] = []
     try:
@@ -3631,7 +3681,12 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
         # Points are then culled to the grid's beam frustum before ingest.
         scans_arrays = []
         scan_xyz_for_counts = []
-        for scan_entry in request.scans:
+        n_scans = max(len(request.scans), 1)
+        _report(0.05, "Reading scans")
+        for scan_idx, scan_entry in enumerate(request.scans):
+            # Step 0.05 → 0.35 across scans so multi-scan ingest visibly advances.
+            _report(0.05 + 0.30 * (scan_idx / n_scans),
+                    f"Reading scan {scan_idx + 1} of {n_scans}")
             origin = scan_entry.origin
             if len(origin) != 3:
                 raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
@@ -3761,6 +3816,7 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
         # Build the cloud entirely in RAM: one scan + bulk hit ingest per scan,
         # then the grid — no XML, no ASCII file. addScan takes radians; our
         # angles are degrees. Beam divergence is supplied in milliradians.
+        _report(0.45, "Building voxel grid")
         cloud = LiDARCloud()
         cloud.disableMessages()
         for entry, scan_entry in zip(scans_arrays, request.scans):
@@ -3780,6 +3836,7 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
         cloud.addGrid(center=grid_center, size=grid_size,
                       ndiv=[grid_nx, grid_ny, grid_nz])
 
+        _report(0.55, "Triangulating hit points")
         cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
         if cloud.getTriangleCount() == 0:
             return {
@@ -3793,6 +3850,7 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
 
         recovered_misses = 0
         if do_gapfill:
+            _report(0.70, "Recovering miss points")
             # Recover sky/miss points from timestamp gaps so they're accounted for
             # in the Beer's-law transmission probability. gapfillMisses() needs
             # only a per-hit timestamp (target_index/target_count optional), so
@@ -3844,6 +3902,7 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
                 "threshold; defaulted to 5. Set 'Min Voxel Hits' to control which "
                 "voxels are solved."
             )
+        _report(0.80, "Inverting Beer's law")
         with Context() as ctx:
             cloud.calculateLeafArea(ctx, min_hits, element_width)
 
@@ -3851,6 +3910,7 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
             """NaN -> None so the value survives JSON serialization."""
             return None if (x != x) else x
 
+        _report(0.92, "Collecting voxel results")
         # Per-cell hit counts: Helios exposes no getter, so bin the points into
         # the grid AABBs ourselves. Reads each scan file once (positions only).
         n_cells = cloud.getGridCellCount()
@@ -3929,6 +3989,7 @@ def _do_lad_computation(request: "LADComputeRequest") -> dict:
         bb_lo = [grid_center[k] - grid_size[k] / 2 for k in range(3)]
         bb_hi = [grid_center[k] + grid_size[k] / 2 for k in range(3)]
 
+        _report(1.0, "Done")
         return {
             "success": True,
             "cells": cells,
@@ -4039,24 +4100,16 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
 async def lad_compute(request: LADComputeRequest):
     """Compute per-voxel leaf area density via PyHelios.
 
-    Like /api/triangulate/helios, uses a StreamingResponse with periodic
-    keepalive whitespace to survive WebKit's ~60s stall timeout on long runs.
+    Streams PHP1 progress markers (see _bin_frame_streaming_response) ahead of
+    the JSON result so the renderer shows a real per-stage progress bar, and the
+    keepalive cadence still survives WebKit's ~60s stall timeout on long runs.
+    The body is leading markers + the trailing JSON payload (no PHB1 frame); the
+    renderer drains the markers and parses the JSON tail.
     """
-    import asyncio
-
-    def compute_and_serialize():
-        result = _do_lad_computation(request)
-        return json.dumps(result)
-
-    async def stream_result():
-        loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(None, compute_and_serialize)
-        while not future.done():
-            yield " "
-            await asyncio.sleep(5)
-        yield await future
-
-    return StreamingResponse(stream_result(), media_type="application/json")
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_lad_computation(request, progress=progress)
+        ).encode("utf-8"))
 
 
 # ==================== SCAN EXPORT (Helios XML + per-scan ASCII) ====================
@@ -4790,6 +4843,13 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
         # hits; only the extra fields need it (the standard keys are always recorded).
         column_format = extra_fields if extra_fields else None
 
+        # Phase timing — set PHYTOGRAPH_SCAN_PROFILE=1 to print where scan time
+        # goes (mesh load / ray trace / hit extraction / post-processing). The
+        # split matters: ray-trace cost scales with ray count, extraction with
+        # hit count, so the profile says which knob (resolution vs. fields) helps.
+        _prof_on = os.environ.get("PHYTOGRAPH_SCAN_PROFILE") == "1"
+        _prof = {"start": time.perf_counter()}
+
         with Context() as ctx:
             # Load every mesh into the scannable scene.
             for mesh in request.meshes:
@@ -4803,6 +4863,8 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                 if mesh.colors and len(mesh.colors) == len(verts):
                     colors = np.asarray(mesh.colors, dtype=np.float32)
                 ctx.addTrianglesFromArrays(verts, tris, colors=colors)
+
+            _prof["mesh_load"] = time.perf_counter()
 
             with LiDARCloud() as lidar:
                 lidar.disableMessages()
@@ -4880,6 +4942,7 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                 # nothing are kept (far-field placeholder points flagged via
                 # isHitMiss below) so the miss overlay + LAD can use them.
                 record_misses = bool(request.record_misses)
+                _prof["add_scans"] = time.perf_counter()
                 if want_waveform:
                     lidar.syntheticScan(
                         ctx,
@@ -4897,48 +4960,60 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                         append=False,
                     )
 
-                # Prepare per-scanner accumulators keyed by Helios scanID (= index).
+                _prof["raytrace"] = time.perf_counter()
+
+                # ---- Bulk extraction. This was a per-hit Python loop doing ~13×N
+                # FFI crossings (getHitScanID/getHitXYZ/getHitColor/isHitMiss +
+                # doesHitDataExist/getHitData per field), which dominated scan time
+                # on million-hit clouds. Pull every quantity for ALL hits in a
+                # handful of FFI calls, then partition per scanner with numpy masks.
                 fields_to_read = _LIDAR_STANDARD_HIT_FIELDS + extra_fields
-                results = [
-                    {
+                n = lidar.getHitCount()
+                if n > 0:
+                    all_xyz, all_rgb = lidar.getHitsXYZRGBArrays()   # (n,3),(n,3) f32
+                    all_scan_ids = lidar.getHitScanIDArray()         # (n,) int32
+                    # isHitMiss is only meaningful when misses were recorded; skip
+                    # the FFI pass otherwise (every hit is a real return).
+                    all_miss = (lidar.getHitMissArray() if record_misses
+                                else np.zeros(n, dtype=np.int32))    # (n,) int32, 1==miss
+                    # Each field is (n,) f32, NaN where the label is absent for a hit.
+                    all_fields = {f: lidar.getHitDataArray(f) for f in fields_to_read}
+                else:
+                    all_xyz = np.empty((0, 3), np.float32)
+                    all_rgb = np.empty((0, 3), np.float32)
+                    all_scan_ids = np.empty((0,), np.int32)
+                    all_miss = np.empty((0,), np.int32)
+                    all_fields = {f: np.empty((0,), np.float32) for f in fields_to_read}
+
+                # intensity is a signed beam·normal dot product; surface its
+                # magnitude so it reads as a 0..1-ish value (matches the old loop).
+                if "intensity" in all_fields:
+                    all_fields["intensity"] = np.abs(all_fields["intensity"])
+
+                # Partition per scanner by Helios scanID (== request index). Hits
+                # with an out-of-range scanID match no mask and are dropped, exactly
+                # as the old `sid < 0 or sid >= len` guard did.
+                results = []
+                for sid, s in enumerate(request.scanners):
+                    sel = (all_scan_ids == sid)
+                    results.append({
                         "scanner_id": s.id,
                         "origin": [float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
-                        "points": [],
-                        "colors": [],
-                        "scalars": {f: [] for f in fields_to_read},
-                        "is_miss": [],  # 1.0 == sky/miss, 0.0 == real return
-                    }
-                    for s in request.scanners
-                ]
+                        "points": all_xyz[sel],                       # (m,3) f32
+                        "colors": all_rgb[sel],                       # (m,3) f32
+                        "scalars": {f: arr[sel] for f, arr in all_fields.items()},
+                        "is_miss": all_miss[sel].astype(np.float32),  # (m,) f32, 1==miss
+                    })
 
-                n = lidar.getHitCount()
-                for i in range(n):
-                    sid = lidar.getHitScanID(i)
-                    if sid < 0 or sid >= len(results):
-                        continue
-                    bucket = results[sid]
-                    xyz = lidar.getHitXYZ(i)
-                    bucket["points"].append([float(xyz.x), float(xyz.y), float(xyz.z)])
-                    c = lidar.getHitColor(i)
-                    bucket["colors"].append([float(c.r), float(c.g), float(c.b)])
-                    # When misses are recorded, flag each hit so the renderer/LAD
-                    # can separate sky returns from real surface hits.
-                    bucket["is_miss"].append(1.0 if (record_misses and lidar.isHitMiss(i)) else 0.0)
-                    for f in fields_to_read:
-                        if lidar.doesHitDataExist(i, f):
-                            v = float(lidar.getHitData(i, f))
-                            # intensity is a signed dot product; surface its magnitude.
-                            bucket["scalars"][f].append(abs(v) if f == "intensity" else v)
-                        else:
-                            bucket["scalars"][f].append(float("nan"))
-
+        _prof["extract"] = time.perf_counter()
         out = []
         for r in results:
             # When this scan recorded any miss, build a cloud session for it so the
             # existing session-based miss overlay + LAD work. The session is built
             # from the FULL `r` (hits + misses): its octree is hits-only, and the
             # misses live in the session's is_miss extra dim for the overlay + LAD.
-            has_misses = record_misses and len(r["points"]) and any(v != 0 for v in r["is_miss"])
+            is_miss = r["is_miss"]  # (m,) f32, 1==miss
+            has_misses = bool(record_misses and is_miss.size and np.any(is_miss != 0))
             session = None
             if has_misses:
                 try:
@@ -4957,22 +5032,22 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
             # zoom back in. They'd also be drawn twice (here + the MissOverlay).
             # The misses are preserved in the session above (its octree is already
             # hits-only), so the renderer only needs the hits.
-            keep = [i for i, m in enumerate(r["is_miss"]) if m == 0] if has_misses else None
-            if keep is not None:
-                points = [r["points"][i] for i in keep]
-                colors = [r["colors"][i] for i in keep]
-                raw_scalars = {k: [v[i] for i in keep] for k, v in r["scalars"].items()}
+            if has_misses:
+                keep = (is_miss == 0)
+                points = r["points"][keep]
+                colors = r["colors"][keep]
+                raw_scalars = {k: v[keep] for k, v in r["scalars"].items()}
             else:
                 points = r["points"]
                 colors = r["colors"]
                 raw_scalars = r["scalars"]
 
-            npts = len(points)
+            npts = int(points.shape[0])
             # Drop scalar fields that never resolved (all-NaN) so the renderer
             # doesn't offer a dead color-by option.
             scalars = {
                 k: v for k, v in raw_scalars.items()
-                if any(val == val for val in v)  # any non-NaN
+                if v.size and not np.all(np.isnan(v))
             }
             entry = {
                 "scanner_id": r["scanner_id"],
@@ -4984,6 +5059,23 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
             if session is not None:
                 entry["session"] = session
             out.append(entry)
+
+        _prof["post"] = time.perf_counter()
+        if _prof_on:
+            _total = _prof["post"] - _prof["start"]
+            _hits = int(sum(e["num_points"] for e in out))
+            _seg = lambda a, b: _prof[b] - _prof[a]
+            print(
+                "[scan-profile] "
+                f"total={_total:.2f}s  "
+                f"mesh_load={_seg('start','mesh_load'):.2f}s  "
+                f"add_scans={_seg('mesh_load','add_scans'):.2f}s  "
+                f"raytrace={_seg('add_scans','raytrace'):.2f}s  "
+                f"extract={_seg('raytrace','extract'):.2f}s  "
+                f"post={_seg('extract','post'):.2f}s  "
+                f"(hits_kept={_hits:,}, record_misses={record_misses})",
+                flush=True,
+            )
 
         return {"success": True, "results": out}
 
@@ -5012,9 +5104,12 @@ def _create_lidar_scan_session(r: dict) -> dict:
     n = int(positions.shape[0])
 
     # Colors: scan colors are 0..1 floats; LAS sessions store uint16 (0..65535).
+    # `r["colors"]` is a numpy (m,3) array — guard with `is not None`/size, not
+    # truthiness (a numpy array has no unambiguous bool).
     colors = None
-    if r.get("colors"):
-        c = np.asarray(r["colors"], dtype=np.float64)
+    rc = r.get("colors")
+    if rc is not None and len(rc):
+        c = np.asarray(rc, dtype=np.float64)
         if c.shape == (n, 3):
             colors = np.clip(c * 65535.0, 0, 65535).astype(np.uint16)
 
@@ -11298,12 +11393,16 @@ def _bin_frame_streaming_response(build_frame) -> StreamingResponse:
     def _run():
         return build_frame(_report) if wants_progress else build_frame()
 
-    # In progress mode poll frequently so each stage flushes as its own stream
-    # chunk (rather than collapsing into the final drain on a fast compute) —
-    # this drives a smooth client-side bar. Emit a whitespace keepalive only
-    # every ~5s of genuine silence so the stall timeout never fires. Without a
-    # progress reporter, fall back to the plain 5s keepalive cadence.
-    poll = 0.02 if wants_progress else 5.0
+    # Poll the executor future frequently in BOTH modes so the finished frame is
+    # flushed as soon as the off-thread build returns — `poll` is the re-check
+    # granularity, NOT the keepalive cadence. (Keepalives are gated separately by
+    # `silence_keepalive_after`.) In progress mode the fine poll also lets each
+    # stage flush as its own chunk for a smooth bar. The earlier non-progress
+    # value of 5.0 conflated the two: a build that finished mid-`sleep(5.0)` —
+    # e.g. the misses overlay, whose frame is prebuilt before the wrapper even
+    # runs — sat idle for the rest of the interval, adding a ~5 s stall to every
+    # fast binary-frame response. A 0.1 s poll while waiting costs nothing.
+    poll = 0.02 if wants_progress else 0.1
     silence_keepalive_after = 5.0
 
     async def stream():
@@ -14359,11 +14458,28 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             **miss_info, **meta}
 
 
+def _misses_binary_response(count: int, total: int, origin, radius: float, positions_flat):
+    """Pack a miss-overlay result as a PHB1 binary frame. The miss positions ride
+    a single `positions` f32 buffer ([x,y,z,...]); counts/origin/radius live in
+    meta. Previously this endpoint returned `positions` as a JSON float list,
+    which for a full-sphere scan with misses recorded is tens of millions of
+    floats — multi-second to encode server-side and re-parse in JS (the ~10s
+    "show misses" stall). The binary buffer is decoded zero-copy by the renderer."""
+    meta = {
+        "count": int(count),
+        "total": int(total),
+        "origin": list(origin),
+        "radius": float(radius),
+    }
+    frame = _bin_frame_bytes(meta, [("positions", np.asarray(positions_flat, dtype=np.float32), "f32")])
+    return _bin_frame_streaming_response(lambda: frame)
+
+
 @app.get("/api/cloud/session/{session_id}/misses")
 async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
                            origin_y: Optional[float] = None,
                            origin_z: Optional[float] = None):
-    """Return the session's sky/miss points for display.
+    """Return the session's sky/miss points for display, as a PHB1 binary frame.
 
     Misses are stored at their true coordinates (typically far-field, ~20 km,
     along the real beam direction). Two display modes, chosen by whether the
@@ -14380,16 +14496,17 @@ async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
       visibly outside the cloud rather than interleaving with the hit points.
       Depends only on the stored beam direction and the origin.
 
-    Returns {count, total, origin, radius, positions} where positions is a flat
-    [x,y,z, x,y,z, ...] list (empty when none). `count` is how many are drawn;
-    `total` includes any miss that couldn't be placed (sitting AT the origin
-    with no beam direction yet — awaiting Helios grid recovery).
+    The frame's meta carries {count, total, origin, radius} and the `positions`
+    buffer is a flat [x,y,z, x,y,z, ...] f32 array (empty when none). `count` is
+    how many are drawn; `total` includes any miss that couldn't be placed
+    (sitting AT the origin with no beam direction yet — awaiting Helios grid
+    recovery).
     """
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
         miss_arr = sess.extras.get(_MISS_SLUG)
         if miss_arr is None:
-            return {"count": 0, "total": 0, "origin": [0.0, 0.0, 0.0], "radius": 0.0, "positions": []}
+            return _misses_binary_response(0, 0, [0.0, 0.0, 0.0], 0.0, np.empty(0, np.float32))
         keep = ~sess.deleted
         is_miss = (miss_arr != 0) & keep
         hits = (~(miss_arr != 0)) & keep
@@ -14397,20 +14514,17 @@ async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
         hit_pos = np.ascontiguousarray(sess.positions[hits], dtype=np.float64)
 
     if miss_pos.shape[0] == 0:
-        return {"count": 0, "total": 0, "origin": [0.0, 0.0, 0.0], "radius": 0.0, "positions": []}
+        return _misses_binary_response(0, 0, [0.0, 0.0, 0.0], 0.0, np.empty(0, np.float32))
 
     has_origin = None not in (origin_x, origin_y, origin_z)
 
     # No scanner origin defined: draw misses at their TRUE stored coordinates.
     # Don't relocate — the array is the source of truth for display too.
     if not has_origin:
-        return {
-            "count": int(miss_pos.shape[0]),
-            "total": int(miss_pos.shape[0]),
-            "origin": [0.0, 0.0, 0.0],
-            "radius": 0.0,
-            "positions": miss_pos.astype(np.float32).ravel().tolist(),
-        }
+        return _misses_binary_response(
+            int(miss_pos.shape[0]), int(miss_pos.shape[0]),
+            [0.0, 0.0, 0.0], 0.0, miss_pos.astype(np.float32).ravel(),
+        )
 
     # Origin defined: project each miss onto a sphere centred on the origin, at a
     # radius CLEARLY beyond the farthest hit so the miss shell sits visibly
@@ -14443,16 +14557,13 @@ async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
     d = d[drawable]
     n = n[drawable]
     relocated = origin + (d / n[:, None]) * radius
-    return {
-        # `count` is how many misses are DRAWN (placeable). `total` includes the
-        # unplaceable ones (sitting at origin, awaiting C++ grid recovery) that
-        # are flagged in the data but not shown in the overlay.
-        "count": int(relocated.shape[0]),
-        "total": int(miss_pos.shape[0]),
-        "origin": origin.tolist(),
-        "radius": radius,
-        "positions": relocated.astype(np.float32).ravel().tolist(),
-    }
+    # `count` is how many misses are DRAWN (placeable). `total` includes the
+    # unplaceable ones (sitting at origin, awaiting C++ grid recovery) that are
+    # flagged in the data but not shown in the overlay.
+    return _misses_binary_response(
+        int(relocated.shape[0]), int(miss_pos.shape[0]),
+        origin.tolist(), radius, relocated.astype(np.float32).ravel(),
+    )
 
 
 @app.post("/api/cloud/session/{session_id}/delete_region")

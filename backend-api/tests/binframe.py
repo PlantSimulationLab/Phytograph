@@ -50,6 +50,26 @@ def decode_progress_markers(content: bytes):
     return markers
 
 
+async def decode_misses(response) -> dict:
+    """Drain the /misses endpoint's StreamingResponse and decode its PHB1 frame
+    into the flat dict the overlay consumes: {count, total, origin, radius,
+    positions}. `positions` is a Python list (flat [x,y,z,...]), so an empty
+    result compares `== []`. Tests call the endpoint coroutine directly, so they
+    get a StreamingResponse rather than a TestClient body."""
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
+    meta, buffers = decode_bin_frame(b"".join(chunks))
+    pos = buffers.get("positions")
+    return {
+        "count": meta.get("count", 0),
+        "total": meta.get("total", 0),
+        "origin": meta.get("origin", [0.0, 0.0, 0.0]),
+        "radius": meta.get("radius", 0.0),
+        "positions": pos.tolist() if pos is not None else [],
+    }
+
+
 def decode_lidar_scan(content: bytes) -> dict:
     """Reconstruct the per-scanner LiDAR scan result (old dict shape) from a PHB1
     frame, so the scan tests can assert on points (N,3) / colors / scalars."""

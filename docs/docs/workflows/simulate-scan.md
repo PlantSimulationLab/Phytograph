@@ -169,13 +169,16 @@ layout in the file header.
 ## Run the scan
 
 The **Synthetic LiDAR Scan** action runs a true ray-traced scan through
-the PyHelios `lidar` plugin: every visible scanner traces its rays
+the PyHelios `lidar` plugin: the scan positions you pick trace their rays
 against the scene geometry, so the result respects occlusion, scanner
 position, field of view, and resolution — not a uniform random sprinkle
 of points over the surface.
 
-1. Make sure the scan markers you want to use are visible (eye icon on);
-   hidden scanners are skipped.
+1. The options dialog lists **every** scan position, whether or not it's
+   currently visible or selected — visibility (the eye icon) only affects
+   the 3D view, not which positions can scan. Toggle the positions you
+   want to ray-trace in the dialog; you don't need to make hidden
+   scanners visible first.
 2. Make sure the geometry to scan is visible. Only **plant models** and
    **meshes imported from file** are scanned — triangulation results,
    the voxel grid, and generated primitive shapes are ignored.
@@ -186,10 +189,15 @@ of points over the surface.
 
 ### Synthetic scan options
 
-Running opens the **Synthetic Scan Options** dialog. Unlike a scan's
-properties (origin, sweep, tilt — set per scan), these are simulation
-settings chosen per run; your last-used values are remembered and
-pre-filled next time:
+Running opens the **Synthetic Scan Options** dialog as soon as at least
+one scanner position exists — you don't need geometry in the scene yet.
+If there's nothing to scan, the dialog still opens so you can review your
+scan positions and settings, but it shows a notice to add a plant or
+mesh and keeps **Run** disabled until scannable geometry is visible.
+
+Unlike a scan's properties (origin, sweep, tilt — set per scan), these
+are simulation settings chosen per run; your last-used values are
+remembered and pre-filled next time:
 
 - **Measurement noise** — Gaussian noise added during ray-tracing, to
   mimic a real instrument's error. **Range** (mm) displaces each hit
@@ -209,7 +217,7 @@ pre-filled next time:
 Click **Run scan** to proceed.
 
 Phytograph loads all visible scannable geometry into one Helios scene,
-ray-traces it once from every visible scanner, then writes each
+ray-traces it once from each scan position you selected, then writes each
 scanner's hit points back **onto that scanner's own scan** — the row's
 subtitle changes from `params · origin (…)` to include the point count,
 and the scan now carries both its parameters and the point data. Each
@@ -222,7 +230,7 @@ If a scanner already holds point data (e.g. an imported scan), Phytograph
 asks whether to **overwrite** it, **keep the original and add a duplicate**
 scan for the synthetic points, or **cancel**.
 
-If no visible scanner exists, or no scannable geometry is visible, the
+If no scanner exists at all, or no scannable geometry is visible, the
 app shows a message explaining what's missing instead of scanning.
 
 !!! note "Scanned colors"

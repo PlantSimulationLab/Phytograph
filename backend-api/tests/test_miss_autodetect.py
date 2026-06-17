@@ -27,6 +27,8 @@ import pytest
 
 import main
 
+from tests.binframe import decode_bin_frame
+
 
 # leafcube_multi.xyz: x y z timestamp target_index target_count. 9301 rows,
 # 2779 of them misses (target_index == 99) placed at 1001 m from origin
@@ -180,11 +182,13 @@ def test_miss_overlay_projects_beyond_all_hits_as_thin_shell(client, cache_root)
     res = client.get(f"/api/cloud/session/{sid}/misses",
                      params={"origin_x": ox, "origin_y": oy, "origin_z": oz})
     assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["count"] == EXPECTED_MISS_COUNT
+    # The /misses endpoint returns a PHB1 binary frame (count/total/origin/radius
+    # in meta; the miss positions in a flat `positions` f32 buffer).
+    meta, buffers = decode_bin_frame(res.content)
+    assert meta["count"] == EXPECTED_MISS_COUNT
 
     origin = np.array(LEAFCUBE_ORIGIN)
-    pos = np.array(body["positions"]).reshape(-1, 3)
+    pos = buffers["positions"].reshape(-1, 3)
     r = np.linalg.norm(pos - origin, axis=1)
 
     # Farthest hit distance from the origin (the cloud's outer radius).

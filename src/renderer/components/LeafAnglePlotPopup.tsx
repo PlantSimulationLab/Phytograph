@@ -5,9 +5,10 @@ import {
 } from 'recharts';
 import type { MeshEntry } from '../lib/pointCloudTypes';
 import {
-  computeInclinationPdf, computeAzimuthHistogram, fitDeWit, deWitCurve, deWitLabel,
-  fitBeta, betaCurve, computeGTheta, meshCellIds, triangleCountByCell,
+  computeCellDistributions, fitDeWit, deWitCurve, deWitLabel,
+  fitBeta, betaCurve, meshCellIds, triangleCountByCell,
 } from '../lib/leafAngleDistribution';
+import type { Histogram } from '../lib/leafAngleDistribution';
 import { buildRoseGeometry, polarToXY } from '../lib/azimuthRose';
 
 interface LeafAnglePlotPopupProps {
@@ -22,6 +23,13 @@ const DEFAULT_INCL_BINS = 18;   // 5° bins over 0..90
 const AZ_BINS = 36;             // 10° sectors
 // Selectable inclination bin counts (bins over 0..90° → bin width in °).
 const INCL_BIN_OPTIONS = [9, 18, 30, 45, 90];
+
+// Above this many VISIBLE cells we stop drawing one overlay per cell — hundreds
+// of Recharts <Line> series / SVG petals / table rows make the panel both
+// unreadable and slow to render. Instead we show the single combined
+// distribution over the visible cells; narrowing the selection (right-hand
+// tick-boxes) back to ≤ this many restores the per-cell overlays.
+const MAX_OVERLAY_CELLS = 24;
 
 // Distinct, evenly-spread hues for the per-cell overlay lines.
 function cellColor(i: number, n: number): string {
@@ -82,14 +90,27 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
 
   const visibleCells = useMemo(() => cells.filter(c => !hidden.has(c.id)), [cells, hidden]);
 
+  // When too many cells are visible to overlay individually, fall back to a
+  // single combined curve (see MAX_OVERLAY_CELLS).
+  const overlayPerCell = visibleCells.length <= MAX_OVERLAY_CELLS;
+
+  // ALL per-cell distributions in ONE pass over the mesh triangles — inclination
+  // PDF, azimuth histogram, and G(θ) bucketed by cell. This is the fix for the
+  // multi-second freeze: the old code called computeInclinationPdf /
+  // computeAzimuthHistogram / computeGTheta once per visible cell, each
+  // rescanning every triangle (O(cells × triangles)). Now toggling visibility is
+  // a cheap Map lookup; only changing the mesh or the bin count recomputes.
+  const dists = useMemo(() => {
+    if (!data) return new Map<number, { inclPdf: Histogram; azHist: Histogram; gtheta: number | null }>();
+    const ids = cells.map(c => c.id);
+    return computeCellDistributions(data, ids, inclBins, AZ_BINS);
+  }, [data, cells, inclBins]);
+
   // Per-cell inclination PDFs (only the visible ones) for the overlaid lines.
-  const inclPdfs = useMemo(() => {
-    if (!data) return [];
-    return visibleCells.map(c => ({
-      cell: c,
-      pdf: computeInclinationPdf(data, { binCount: inclBins, cellId: c.id === -1 ? undefined : c.id }),
-    }));
-  }, [data, visibleCells, inclBins]);
+  const inclPdfs = useMemo(
+    () => visibleCells.map(c => ({ cell: c, pdf: dists.get(c.id)!.inclPdf })).filter(x => x.pdf),
+    [visibleCells, dists],
+  );
 
   // Combined PDF over all VISIBLE triangles, for the de Wit fit + reference
   // curve. Built by area-weighted union of the visible per-cell PDFs (the
@@ -123,10 +144,22 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
       cell,
       deWit: fitDeWit(pdf),
       beta: fitBeta(pdf),
-      gtheta: data ? computeGTheta(data, cell.id === -1 ? undefined : cell.id) : null,
+      gtheta: dists.get(cell.id)?.gtheta ?? null,
     })),
-    [inclPdfs, data],
+    [inclPdfs, dists],
   );
+
+  // Combined fit/projection over all VISIBLE cells, for the summary row shown
+  // when there are too many cells to list per-cell.
+  const combinedBeta = useMemo(() => (combinedPdf ? fitBeta(combinedPdf) : null), [combinedPdf]);
+  const combinedGTheta = useMemo(() => {
+    let weighted = 0, area = 0;
+    for (const { cell, pdf } of inclPdfs) {
+      const gt = dists.get(cell.id)?.gtheta;
+      if (gt != null && pdf.totalArea > 0) { weighted += gt * pdf.totalArea; area += pdf.totalArea; }
+    }
+    return area > 0 ? weighted / area : null;
+  }, [inclPdfs, dists]);
 
   // Recharts data: one row per inclination bin, a key per visible cell, the
   // combined best-fit de Wit curve, and (when toggled on) a per-cell Beta curve.
@@ -134,30 +167,51 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
     if (inclPdfs.length === 0) return [];
     const centers = inclPdfs[0].pdf.binCenters;
     const fitCurve = deWit && combinedPdf ? deWitCurve(deWit.best, centers) : null;
-    const betaCurves = showBeta
+    const betaCurves = overlayPerCell && showBeta
       ? cellFits.map(f => ({ id: f.cell.id, curve: f.beta ? betaCurve(f.beta.alpha, f.beta.beta, centers) : null }))
       : [];
     return centers.map((angle, b) => {
       const row: Record<string, number> = { angle: Math.round(angle) };
-      for (const { cell, pdf } of inclPdfs) row[`c${cell.id}`] = pdf.density[b];
+      // One series per cell while overlaying; a single combined series otherwise
+      // (building 1000 keys per row would be as slow as drawing 1000 lines).
+      if (overlayPerCell) {
+        for (const { cell, pdf } of inclPdfs) row[`c${cell.id}`] = pdf.density[b];
+      } else if (combinedPdf) {
+        row.combined = combinedPdf.density[b];
+      }
       if (fitCurve) row.fit = fitCurve[b];
       for (const bc of betaCurves) if (bc.curve) row[`bf${bc.id}`] = bc.curve[b];
       return row;
     });
-  }, [inclPdfs, deWit, combinedPdf, showBeta, cellFits]);
+  }, [inclPdfs, deWit, combinedPdf, showBeta, cellFits, overlayPerCell]);
 
   // Azimuth rose: per-cell petals sharing one radial scale so cells compare.
-  const azHists = useMemo(() => {
-    if (!data) return [];
-    return visibleCells.map(c => ({
-      cell: c,
-      hist: computeAzimuthHistogram(data, { binCount: AZ_BINS, cellId: c.id === -1 ? undefined : c.id }),
-    }));
-  }, [data, visibleCells]);
+  const azHists = useMemo(
+    () => visibleCells.map(c => ({ cell: c, hist: dists.get(c.id)!.azHist })).filter(x => x.hist),
+    [visibleCells, dists],
+  );
+
+  // Combined azimuth histogram over the visible cells (area-weighted union),
+  // mirroring combinedPdf — drawn as a single petal when there are too many
+  // cells to draw one each.
+  const combinedAz = useMemo(() => {
+    if (azHists.length === 0) return null;
+    const { binCenters, binWidth } = azHists[0].hist;
+    const weights = new Array(binCenters.length).fill(0);
+    let totalArea = 0;
+    for (const { hist } of azHists) {
+      for (let b = 0; b < weights.length; b++) weights[b] += hist.density[b] * hist.totalArea * binWidth;
+      totalArea += hist.totalArea;
+    }
+    if (totalArea <= 0) return null;
+    return { binCenters, binWidth, density: weights.map(w => w / (totalArea * binWidth)), totalArea };
+  }, [azHists]);
 
   const roseMax = useMemo(
-    () => Math.max(1e-30, ...azHists.flatMap(a => a.hist.density)),
-    [azHists],
+    () => overlayPerCell
+      ? Math.max(1e-30, ...azHists.flatMap(a => a.hist.density))
+      : Math.max(1e-30, ...(combinedAz?.density ?? [])),
+    [azHists, combinedAz, overlayPerCell],
   );
 
   const toggleCell = (id: number) => {
@@ -229,18 +283,27 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                     </select>
                   </div>
                   <label
-                    className="flex items-center gap-1.5 text-[10px] text-neutral-400 cursor-pointer select-none"
-                    title="Overlay each visible cell's fitted Beta curve (dashed)"
+                    className={`flex items-center gap-1.5 text-[10px] cursor-pointer select-none ${overlayPerCell ? 'text-neutral-400' : 'text-neutral-600 cursor-not-allowed'}`}
+                    title={overlayPerCell
+                      ? "Overlay each visible cell's fitted Beta curve (dashed)"
+                      : `Available when ≤ ${MAX_OVERLAY_CELLS} cells are visible`}
                   >
                     <input
                       type="checkbox"
                       data-testid="show-beta-fit"
-                      checked={showBeta}
+                      checked={showBeta && overlayPerCell}
+                      disabled={!overlayPerCell}
                       onChange={(e) => setShowBeta(e.target.checked)}
                     />
                     Show Beta fit
                   </label>
                 </div>
+                {!overlayPerCell && (
+                  <p data-testid="combined-mode-note" className="text-[10px] text-amber-300/90 mb-1 max-w-prose">
+                    {visibleCells.length} cells visible — showing the combined distribution over them.
+                    Select ≤ {MAX_OVERLAY_CELLS} cells (right) to overlay per-cell curves.
+                  </p>
+                )}
                 <div style={{ width: '100%', height: 260 }} data-testid="incl-chart">
                   {/* Explicit numeric height (not the default height="100%"):
                       ResponsiveContainer seeds its size state to -1×-1 and only
@@ -268,7 +331,7 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                         labelStyle={{ color: '#e4e4e7' }}
                         formatter={(v) => (typeof v === 'number' ? v.toExponential(2) : String(v))}
                       />
-                      {inclPdfs.map(({ cell }) => (
+                      {overlayPerCell ? inclPdfs.map(({ cell }) => (
                         <Line
                           key={cell.id} type="linear" dataKey={`c${cell.id}`} name={cell.label}
                           stroke={cell.color} strokeWidth={1.5}
@@ -276,7 +339,15 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                           activeDot={{ r: 3.5 }}
                           isAnimationActive={false}
                         />
-                      ))}
+                      )) : (
+                        <Line
+                          type="linear" dataKey="combined" name={`All visible (${visibleCells.length} cells)`}
+                          stroke="#a3e635" strokeWidth={2}
+                          dot={{ r: 2.5, fill: '#a3e635', strokeWidth: 0 }}
+                          activeDot={{ r: 3.5 }}
+                          isAnimationActive={false}
+                        />
+                      )}
                       {deWit && (
                         <Line
                           type="linear" dataKey="fit" name={`de Wit: ${deWitLabel(deWit.best)}`}
@@ -306,6 +377,9 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                     <h4 className="text-[11px] font-medium text-neutral-300 mb-1">
                       Fitted distribution parameters
                     </h4>
+                    {/* Bounded + scrollable so a many-cell grid can't overrun the
+                        layout (and so we never mount hundreds of rows tall). */}
+                    <div className="max-h-64 overflow-y-auto">
                     <table
                       data-testid="beta-fit-table"
                       className="w-full text-[11px] text-neutral-300 border-collapse"
@@ -325,7 +399,10 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                         </tr>
                       </thead>
                       <tbody>
-                        {cellFits.map(({ cell, deWit: cd, beta, gtheta }) => (
+                        {/* Per-cell rows while overlaying; a single combined row
+                            otherwise (hundreds of rows = the same overrun we're
+                            avoiding in the chart). */}
+                        {overlayPerCell ? cellFits.map(({ cell, deWit: cd, beta, gtheta }) => (
                           <tr
                             key={cell.id}
                             data-testid="beta-fit-row"
@@ -348,9 +425,32 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                             <td className="py-0.5 px-2 text-right tabular-nums">{gtheta != null ? gtheta.toFixed(3) : '—'}</td>
                             <td className="py-0.5 pl-2">{cd ? deWitLabel(cd.best) : '—'}</td>
                           </tr>
-                        ))}
+                        )) : (
+                          <tr
+                            data-testid="beta-fit-row"
+                            data-cell-id="combined"
+                            className="border-t border-neutral-700/60"
+                          >
+                            <td className="py-0.5 pr-2">
+                              <span className="inline-flex items-center gap-1.5 min-w-0">
+                                <span
+                                  className="inline-block w-2.5 h-2.5 rounded-sm border border-neutral-600 shrink-0"
+                                  style={{ backgroundColor: '#a3e635' }}
+                                />
+                                <span className="truncate">All visible ({visibleCells.length} cells)</span>
+                              </span>
+                            </td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.alpha.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.beta.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.meanIncl.toFixed(1) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.r2.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{combinedGTheta != null ? combinedGTheta.toFixed(3) : '—'}</td>
+                            <td className="py-0.5 pl-2">{deWit ? deWitLabel(deWit.best) : '—'}</td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
+                    </div>
                   </div>
                 )}
               </div>
@@ -381,8 +481,9 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                       </g>
                     );
                   })}
-                  {/* One petal per visible cell */}
-                  {azHists.map(({ cell, hist }) => {
+                  {/* One petal per visible cell, or a single combined petal when
+                      there are too many cells to draw individually. */}
+                  {overlayPerCell ? azHists.map(({ cell, hist }) => {
                     const g = buildRoseGeometry(hist.density, hist.binCenters, cx, cy, rOuter, { maxDensity: roseMax });
                     return (
                       <path
@@ -390,7 +491,12 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                         stroke={cell.color} strokeWidth={1.5}
                       />
                     );
-                  })}
+                  }) : combinedAz && (
+                    <path
+                      d={buildRoseGeometry(combinedAz.density, combinedAz.binCenters, cx, cy, rOuter, { maxDensity: roseMax }).path}
+                      fill="#a3e635" fillOpacity={0.18} stroke="#a3e635" strokeWidth={1.5}
+                    />
+                  )}
                 </svg>
               </div>
             </div>

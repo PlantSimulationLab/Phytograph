@@ -52,19 +52,23 @@ export interface SelectionState {
   hasPlantMesh: boolean;
   cloudCount: number;
   meshCount: number;
-  /** Clouds present in the scene, regardless of selection. */
-  totalCloudCount: number;
+  /**
+   * Scans present in the scene (data-bearing clouds AND param-only scanner
+   * markers), regardless of selection. Gates multi-input tools.
+   */
+  totalScanCount: number;
 }
 
 /**
  * Whether a command can act given the current selection. Multi-input tools pick
- * their own inputs in a dialog, so they don't need a *selected* cloud — but they
- * still need at least one cloud to EXIST in the scene to operate on (an empty
- * scene leaves nothing to stitch/align/invert). Everything else is gated on
- * `requires` against the selection.
+ * their own inputs in a dialog (the modal owns a scan picker), so they don't
+ * need a *selected* cloud — but they still need at least one scan to EXIST in
+ * the scene to have anything to pick (an empty scene leaves nothing to mesh /
+ * stitch / align / invert / scan). Everything else is gated on `requires`
+ * against the selection.
  */
 export function isCommandAvailable(cmd: ToolCommand, sel: SelectionState): boolean {
-  if (cmd.multiInput) return sel.totalCloudCount >= 1;
+  if (cmd.multiInput) return sel.totalScanCount >= 1;
   switch (cmd.requires) {
     case 'cloud': return sel.hasCloud;
     case 'mesh': return sel.hasMesh;

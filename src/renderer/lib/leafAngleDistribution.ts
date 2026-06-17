@@ -25,7 +25,7 @@
 // unit test: the sampler emits triangles ∝ g(θ), i.e. ∝ sin θ for spherical.)
 
 import type { MeshData } from './pointCloudTypes';
-import { triangleGeometry, outwardRefForMesh } from './pointCloudHelpers';
+import { triangleGeometry, triangleGeometryInto, outwardRefForMesh } from './pointCloudHelpers';
 
 // ---------------------------------------------------------------------------
 // Empirical histograms (area-weighted)
@@ -177,6 +177,139 @@ export function computeGTheta(data: MeshData, cellId?: number): number | null {
 
   if (totalArea <= 0) return null;
   return weighted / totalArea;
+}
+
+// ---------------------------------------------------------------------------
+// Single-pass per-cell distributions
+// ---------------------------------------------------------------------------
+
+// Everything the leaf-angle plot needs for one cell.
+export interface CellDistribution {
+  inclPdf: Histogram;
+  azHist: Histogram;
+  gtheta: number | null;
+}
+
+// Compute the inclination PDF, azimuth histogram, and G(θ) for many cells in a
+// SINGLE pass over the mesh triangles.
+//
+// The naive approach — calling computeInclinationPdf / computeAzimuthHistogram /
+// computeGTheta once per cell — rescans EVERY triangle for EVERY cell (each does
+// its own full loop, filtering by cell id), i.e. O(cells × triangles). On a
+// 1000-cell grid with tens of thousands of triangles that's tens of millions of
+// triangle-geometry evaluations on panel open — the ~30 s UI freeze. Here each
+// triangle is visited once and routed to its own cell's accumulators, so the
+// whole thing is O(triangles) regardless of cell count.
+//
+// `cellIds` are the cells to bucket into. Pass a single id (e.g. [-1]) for a
+// whole-mesh aggregate over ALL triangles with no cell filter; pass the occupied
+// grid cell ids to split per cell (triangles outside those cells, or carrying
+// the outside-grid sentinel, are dropped — matching the per-cell functions).
+// Binning, area-weighting, and the G(θ) projection match
+// computeInclinationPdf / computeAzimuthHistogram / computeGTheta exactly.
+export function computeCellDistributions(
+  data: MeshData,
+  cellIds: number[],
+  inclBins: number,
+  azBins: number,
+): Map<number, CellDistribution> {
+  const { vertices, indices, triangleCount, triangleCellIds } = data;
+  const refFor = outwardRefForMesh(data);
+
+  // When a single cell is requested we treat the whole mesh as that cell (no
+  // per-triangle filtering) — the "Whole mesh" entry the UI shows for a mesh
+  // with no usable per-triangle cell structure.
+  const wholeMesh = cellIds.length <= 1;
+  const wholeId = cellIds.length ? cellIds[0] : -1;
+
+  const inclWidth = 90 / inclBins;
+  const azWidth = 360 / azBins;
+
+  interface Acc {
+    inclWeights: number[]; inclArea: number;
+    azWeights: number[]; azArea: number;
+    gWeighted: number; gArea: number;
+  }
+  const accs = new Map<number, Acc>();
+  const makeAcc = (): Acc => ({
+    inclWeights: new Array(inclBins).fill(0), inclArea: 0,
+    azWeights: new Array(azBins).fill(0), azArea: 0,
+    gWeighted: 0, gArea: 0,
+  });
+  for (const id of (wholeMesh ? [wholeId] : cellIds)) accs.set(id, makeAcc());
+
+  const g = { inclination: 0, azimuth: 0, area: 0 };
+  for (let t = 0; t < triangleCount; t++) {
+    let acc: Acc | undefined;
+    if (wholeMesh) {
+      acc = accs.get(wholeId);
+    } else if (triangleCellIds) {
+      acc = accs.get(triangleCellIds[t]);  // undefined ⇒ sentinel/other cell ⇒ skip
+    }
+    if (!acc) continue;
+
+    triangleGeometryInto(vertices, indices, t, refFor ? refFor(t) : null, g);
+    if (!(g.area > 0)) continue;
+
+    // Inclination histogram (NaN azimuth faces still count here).
+    if (Number.isFinite(g.inclination)) {
+      let b = Math.floor(g.inclination / inclWidth);
+      if (b < 0) b = 0; else if (b >= inclBins) b = inclBins - 1;
+      acc.inclWeights[b] += g.area;
+      acc.inclArea += g.area;
+    }
+    // Azimuth histogram (near-horizontal faces have NaN azimuth → excluded).
+    if (Number.isFinite(g.azimuth)) {
+      let b = Math.floor(g.azimuth / azWidth);
+      if (b < 0) b = 0; else if (b >= azBins) b = azBins - 1;
+      acc.azWeights[b] += g.area;
+      acc.azArea += g.area;
+    }
+
+    // G(θ): area-weighted mean |n̂·v̂| (recompute the raw normal + beam, exactly
+    // as computeGTheta does — orientation-independent via the abs).
+    const i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
+    const ax = vertices[i0 * 3], ay = vertices[i0 * 3 + 1], az = vertices[i0 * 3 + 2];
+    const bx = vertices[i1 * 3], by = vertices[i1 * 3 + 1], bz = vertices[i1 * 3 + 2];
+    const cx = vertices[i2 * 3], cy = vertices[i2 * 3 + 1], cz = vertices[i2 * 3 + 2];
+    const nx = (by - ay) * (cz - az) - (bz - az) * (cy - ay);
+    const ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
+    const nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    const nlen = Math.hypot(nx, ny, nz);
+    if (nlen >= 1e-20) {
+      let vx = 0, vy = 0, vz = 1;
+      const ref = refFor ? refFor(t) : null;
+      if (ref) {
+        const gx = (ax + bx + cx) / 3, gy = (ay + by + cy) / 3, gz = (az + bz + cz) / 3;
+        vx = ref.x - gx; vy = ref.y - gy; vz = ref.z - gz;
+        const vlen = Math.hypot(vx, vy, vz);
+        if (vlen < 1e-20) { vx = 0; vy = 0; vz = 1; }
+        else { vx /= vlen; vy /= vlen; vz /= vlen; }
+      }
+      const proj = Math.abs((nx * vx + ny * vy + nz * vz) / nlen);
+      acc.gWeighted += (0.5 * nlen) * proj;
+      acc.gArea += 0.5 * nlen;
+    }
+  }
+
+  const out = new Map<number, CellDistribution>();
+  const inclCenters = new Array(inclBins);
+  for (let b = 0; b < inclBins; b++) inclCenters[b] = (b + 0.5) * inclWidth;
+  const azCenters = new Array(azBins);
+  for (let b = 0; b < azBins; b++) azCenters[b] = (b + 0.5) * azWidth;
+
+  for (const [id, acc] of accs) {
+    const inclDensity = new Array(inclBins).fill(0);
+    if (acc.inclArea > 0) for (let b = 0; b < inclBins; b++) inclDensity[b] = acc.inclWeights[b] / (acc.inclArea * inclWidth);
+    const azDensity = new Array(azBins).fill(0);
+    if (acc.azArea > 0) for (let b = 0; b < azBins; b++) azDensity[b] = acc.azWeights[b] / (acc.azArea * azWidth);
+    out.set(id, {
+      inclPdf: { binCenters: inclCenters, binWidth: inclWidth, density: inclDensity, totalArea: acc.inclArea },
+      azHist: { binCenters: azCenters, binWidth: azWidth, density: azDensity, totalArea: acc.azArea },
+      gtheta: acc.gArea > 0 ? acc.gWeighted / acc.gArea : null,
+    });
+  }
+  return out;
 }
 
 // The distinct grid cell ids present in a mesh (sorted), excluding the

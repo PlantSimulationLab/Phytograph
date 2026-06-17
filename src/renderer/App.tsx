@@ -307,6 +307,9 @@ function App() {
       }
 
       if (shouldImportAsMesh) {
+        // The default hint talks about "large scans" — wrong for a mesh. Swap
+        // in mesh wording while keeping the same in-flight label.
+        setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, hint: 'Reading mesh from disk…' });
         if (!importRefsRef.current) {
           showToast({ title: 'Viewer not ready for mesh import', type: 'error' });
         } else {
@@ -390,6 +393,8 @@ function App() {
           }
         }
       } else if (shouldImportAsSkeleton) {
+        // Mesh-style hint; "large scans" wording is wrong for a skeleton too.
+        setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, hint: 'Reading skeleton from disk…' });
         // Parse as skeleton
         const skeletonData = await parseSkeleton(file);
         if (importRefsRef.current) {

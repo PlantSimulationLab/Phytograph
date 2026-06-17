@@ -71,10 +71,22 @@ test('generates a plant, scans it, and a point cloud appears', async () => {
     await scanButton.click();
 
     // The Synthetic Scan Options popup opens before the scan runs (noise,
-    // misses, full-waveform tuning). Accept the defaults and run.
+    // misses, full-waveform tuning). It lists each scan position as a toggle:
+    // the "overhead" scanner appears, disabling it disables Run, and
+    // re-enabling restores it. Then accept the defaults and run.
     const scanOptions = page.getByTestId('synthetic-scan-options-popup');
     await expect(scanOptions).toBeVisible();
-    await page.getByTestId('scan-opt-run').click();
+    const positionRows = scanOptions.getByTestId('scan-opt-scanner-row');
+    await expect(positionRows).toHaveCount(1);
+    await expect(positionRows.first()).toContainText('overhead');
+    const runOptBtn = page.getByTestId('scan-opt-run');
+    // Toggle the only position off → Run is disabled (nothing to scan)…
+    await positionRows.first().click();
+    await expect(runOptBtn).toBeDisabled();
+    // …toggle it back on → Run is enabled again.
+    await positionRows.first().click();
+    await expect(runOptBtn).toBeEnabled();
+    await runOptBtn.click();
     await expect(scanOptions).not.toBeVisible();
 
     // ── 4. Point data must land ON THE SCANNER'S OWN ROW ─────────────────

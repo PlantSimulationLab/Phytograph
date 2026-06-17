@@ -14,11 +14,11 @@ const EMPTY: SelectionState = {
   hasPlantMesh: false,
   cloudCount: 0,
   meshCount: 0,
-  totalCloudCount: 0,
+  totalScanCount: 0,
 };
 
-// A scene that holds one cloud, but with nothing selected.
-const SCENE_WITH_CLOUD: SelectionState = { ...EMPTY, totalCloudCount: 1 };
+// A scene that holds one scan, but with nothing selected.
+const SCENE_WITH_CLOUD: SelectionState = { ...EMPTY, totalScanCount: 1 };
 
 function makeCommands(overrides: Partial<ToolCommand>[] = []): ToolCommand[] {
   const base: ToolCommand[] = [

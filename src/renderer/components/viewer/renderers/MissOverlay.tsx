@@ -35,7 +35,8 @@ export function MissOverlay({ sessionId, origin, pointSize = 0.05, refreshKey }:
     getCloudMisses(sessionId, origin ?? null)
       .then((res) => {
         if (cancelled) return;
-        setPositions(res.positions.length ? new Float32Array(res.positions) : new Float32Array(0));
+        // res.positions is already a Float32Array (zero-copy from the PHB1 frame).
+        setPositions(res.positions);
         // Don't let the toggle look like a silent no-op. When the scan has misses
         // but none can be drawn yet, say why instead of rendering nothing.
         if (res.count === 0 && res.total > 0) {

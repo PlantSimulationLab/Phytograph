@@ -591,43 +591,21 @@ export interface LADResponse {
 
 /**
  * Compute per-voxel leaf area density via the PyHelios LiDAR plugin.
- * Mirrors heliosTriangulate: long timeout, StreamingResponse body parsed as JSON.
+ * Mirrors heliosTriangulate: long timeout, and the StreamingResponse body is
+ * leading PHP1 progress markers (reported via `onProgress`) followed by the JSON
+ * result. See fetchJsonWithProgress.
  */
 export async function computeLAD(
   request: LADRequest,
   signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
 ): Promise<LADResponse> {
-  const baseUrl = getBackendUrl();
   console.log('LAD compute - scans:', request.scans.length,
     'grid:', `${request.grid.nx}×${request.grid.ny}×${request.grid.nz}`);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
-
-  if (signal) {
-    signal.addEventListener('abort', () => controller.abort());
-  }
-
   try {
-    const response = await fetch(`${baseUrl}/api/lad/compute`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
+    return await fetchJsonWithProgress<LADResponse>(
+      '/api/lad/compute', request, signal, 600000, onProgress);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('LAD computation failed:', error);
     throw error;
   }
@@ -2064,6 +2042,75 @@ function concatBytes(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+// POST a JSON request to an endpoint whose body is leading PHP1 progress markers
+// followed by a JSON payload (see _bin_frame_streaming_response in
+// backend-api/main.py). The body is read incrementally: leading markers are
+// parsed and reported via `onProgress` as they arrive (refreshing the abort
+// timeout each chunk so an actively-streaming long compute isn't aborted), then
+// the trailing JSON is parsed. Mirrors fetchBinaryFrame but returns parsed JSON
+// instead of decoding a PHB1 frame. Always strips leading markers, so it works
+// whether or not the caller supplies `onProgress`.
+export async function fetchJsonWithProgress<T>(
+  path: string,
+  request: unknown,
+  signal?: AbortSignal,
+  timeoutMs = 600000,
+  onProgress?: BinaryFrameProgress,
+): Promise<T> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  let timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const refreshTimeout = () => {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  };
+  if (signal) signal.addEventListener('abort', () => controller.abort());
+  try {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      clearTimeout(timeoutId);
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    if (!response.body) {
+      // No streaming body available — strip any leading markers/whitespace from
+      // the buffered bytes, then parse the JSON tail.
+      clearTimeout(timeoutId);
+      const all = new Uint8Array(await response.arrayBuffer());
+      const { consumed } = parseProgressMarkers(all, 0);
+      return JSON.parse(new TextDecoder().decode(all.subarray(consumed))) as T;
+    }
+
+    // Streaming path: accumulate bytes, draining leading PHP1 markers as they
+    // arrive; whatever remains after the leading markers is the JSON payload.
+    const reader = response.body.getReader();
+    let pending = new Uint8Array(0); // unparsed leading bytes (markers + JSON tail)
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        refreshTimeout();
+        const merged = concatBytes([pending, value]);
+        const { markers, consumed } = parseProgressMarkers(merged, 0);
+        if (onProgress) for (const m of markers) onProgress(m.progress, m.message);
+        pending = merged.subarray(consumed);
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+      clearTimeout(timeoutId);
+    }
+    return JSON.parse(new TextDecoder().decode(pending)) as T;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
+}
+
 /**
  * Import a LAS or LAZ file via the backend.
  * Uses laspy with lazrs for LAZ decompression.
@@ -2490,7 +2537,8 @@ export interface CloudMissesResult {
   total: number;
   origin: [number, number, number];
   radius: number;
-  positions: number[];
+  // Flat [x,y,z, ...] miss positions, decoded zero-copy from the PHB1 frame.
+  positions: Float32Array;
 }
 
 /**
@@ -2498,6 +2546,11 @@ export interface CloudMissesResult {
  * (the scan's params.origin), the backend projects each miss onto a sphere
  * centred on that origin, just beyond the farthest hit. When omitted, the
  * misses are returned at their true stored coordinates (no relocation).
+ *
+ * The response is a PHB1 binary frame (not JSON): a full-sphere scan can record
+ * tens of millions of misses, and a JSON float list of that size took ~10s to
+ * encode + parse (the "show misses" stall). The positions ride a single f32
+ * buffer decoded zero-copy here.
  */
 export async function getCloudMisses(
   sessionId: string,
@@ -2515,7 +2568,14 @@ export async function getCloudMisses(
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
-    return (await response.json()) as CloudMissesResult;
+    const { meta, buffers } = decodeBinaryFrame(await response.arrayBuffer());
+    return {
+      count: (meta.count as number) ?? 0,
+      total: (meta.total as number) ?? 0,
+      origin: (meta.origin as [number, number, number]) ?? [0, 0, 0],
+      radius: (meta.radius as number) ?? 0,
+      positions: (buffers['positions'] as Float32Array) ?? new Float32Array(0),
+    };
   } catch (error) {
     console.error('get_cloud_misses failed:', error);
     throw describeBackendError(error, 'Misses');

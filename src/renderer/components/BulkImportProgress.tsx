@@ -11,6 +11,11 @@ export interface BulkImportProgressState {
   // Filename or scan label currently being processed. Shown below the bar.
   // Optional so a generic "Preparing…" state can render the same modal.
   label?: string;
+  // Per-import override for the bottom-left hint. The point-cloud/scan default
+  // ("large scans can take 30s+") is wrong for mesh/skeleton imports, so those
+  // pathways set their own wording here. Takes precedence over the component's
+  // `hint` prop when present.
+  hint?: string;
 }
 
 interface Props {
@@ -73,7 +78,7 @@ export function BulkImportProgress({
         </div>
         <div className="flex items-center justify-between mt-2">
           <span className="text-[10px] text-neutral-500">
-            {hint}
+            {progress.hint ?? hint}
           </span>
           <span
             data-testid="bulk-import-progress-count"

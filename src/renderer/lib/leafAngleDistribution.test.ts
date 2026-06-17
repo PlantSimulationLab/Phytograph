@@ -10,6 +10,7 @@ import {
   fitBeta,
   betaCurve,
   computeGTheta,
+  computeCellDistributions,
   meshCellIds,
   triangleCountByCell,
   DE_WIT_MODELS,
@@ -484,5 +485,70 @@ describe('computeGTheta (measured projection coefficient)', () => {
     );
     expect(computeGTheta(mesh, 0)!).toBeCloseTo(1, 3);
     expect(computeGTheta(mesh, 1)!).toBeCloseTo(0, 3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeCellDistributions — single-pass parity with the per-cell functions
+// ---------------------------------------------------------------------------
+
+describe('computeCellDistributions (single pass)', () => {
+  // A mesh spanning three cells (0,1,2) plus an outside-grid triangle (-1),
+  // varied inclinations/azimuths, with scan provenance so the G(θ) path uses the
+  // real scanner-beam direction (not just the nadir fallback).
+  const tris = [
+    triFromNormal(10, 20, 3), triFromNormal(80, 200, 1),   // cell 0
+    triFromNormal(45, 90, 2), triFromNormal(45, 270, 2),   // cell 1
+    triFromNormal(0, 0, 5),                                 // cell 2 (horizontal)
+    triFromNormal(60, 130, 1),                              // outside grid (-1)
+  ];
+  const base = meshFromTris(tris, [0, 0, 1, 1, 2, -1]);
+  const mesh = withScanner(base, [2, -3, 50]);
+  const cellIds = meshCellIds(mesh);  // [0,1,2]
+
+  it('per-cell PDFs/histograms/G(θ) match the one-cell-at-a-time functions', () => {
+    const dists = computeCellDistributions(mesh, cellIds, 18, 36);
+    expect([...dists.keys()].sort((a, b) => a - b)).toEqual(cellIds);
+
+    for (const id of cellIds) {
+      const d = dists.get(id)!;
+      const incl = computeInclinationPdf(mesh, { binCount: 18, cellId: id });
+      const az = computeAzimuthHistogram(mesh, { binCount: 36, cellId: id });
+      const g = computeGTheta(mesh, id);
+
+      expect(d.inclPdf.totalArea).toBeCloseTo(incl.totalArea, 6);
+      expect(d.azHist.totalArea).toBeCloseTo(az.totalArea, 6);
+      d.inclPdf.density.forEach((v, b) => expect(v).toBeCloseTo(incl.density[b], 6));
+      d.azHist.density.forEach((v, b) => expect(v).toBeCloseTo(az.density[b], 6));
+      expect(d.gtheta!).toBeCloseTo(g!, 6);
+    }
+  });
+
+  it('honors a non-default inclination bin count', () => {
+    const dists = computeCellDistributions(mesh, cellIds, 9, 36);
+    const d = dists.get(0)!;
+    expect(d.inclPdf.density).toHaveLength(9);
+    const incl = computeInclinationPdf(mesh, { binCount: 9, cellId: 0 });
+    d.inclPdf.density.forEach((v, b) => expect(v).toBeCloseTo(incl.density[b], 6));
+  });
+
+  it('a single requested id aggregates the WHOLE mesh (no cell filter)', () => {
+    // The "Whole mesh" entry the UI shows when there is no per-cell structure:
+    // every triangle — including the outside-grid one — contributes.
+    const dists = computeCellDistributions(mesh, [-1], 18, 36);
+    const whole = dists.get(-1)!;
+    const incl = computeInclinationPdf(mesh, { binCount: 18 });  // no cellId
+    const g = computeGTheta(mesh);                               // no cellId
+    expect(whole.inclPdf.totalArea).toBeCloseTo(incl.totalArea, 6);
+    whole.inclPdf.density.forEach((v, b) => expect(v).toBeCloseTo(incl.density[b], 6));
+    expect(whole.gtheta!).toBeCloseTo(g!, 6);
+  });
+
+  it('empty mesh yields zero-density, null-G(θ) cells (no NaNs)', () => {
+    const dists = computeCellDistributions(meshFromTris([]), [-1], 18, 36);
+    const d = dists.get(-1)!;
+    expect(d.inclPdf.totalArea).toBe(0);
+    expect(d.inclPdf.density.every(v => v === 0)).toBe(true);
+    expect(d.gtheta).toBeNull();
   });
 });

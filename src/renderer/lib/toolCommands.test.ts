@@ -23,7 +23,7 @@ const EMPTY: SelectionState = {
   hasPlantMesh: false,
   cloudCount: 0,
   meshCount: 0,
-  totalCloudCount: 0,
+  totalScanCount: 0,
 };
 
 describe('isCommandAvailable', () => {
@@ -55,14 +55,15 @@ describe('isCommandAvailable', () => {
     expect(isCommandAvailable(mm, { ...EMPTY, meshCount: 3 })).toBe(true);
   });
 
-  it('enables multi-input tools without a selection, but only if a cloud exists', () => {
-    // Multi-input tools (stitch/align/LAD) pick inputs in a dialog, so they don't
-    // need a *selected* cloud — but an empty scene has nothing to operate on, so
-    // they grey out until at least one cloud exists.
+  it('enables multi-input tools without a selection, but only if a scan exists', () => {
+    // Multi-input tools (triangulate/stitch/align/LAD) pick inputs in a dialog,
+    // so they don't need a *selected* cloud — but an empty scene has nothing to
+    // operate on, so they grey out until at least one scan exists. Param-only
+    // scanner markers (no point data) still count toward totalScanCount.
     const c = cmd({ multiInput: true, requires: 'multiple-clouds' });
-    expect(isCommandAvailable(c, EMPTY)).toBe(false);                          // 0 clouds → disabled
-    expect(isCommandAvailable(c, { ...EMPTY, totalCloudCount: 1 })).toBe(true); // 1 cloud, none selected → enabled
-    expect(isCommandAvailable(c, { ...EMPTY, totalCloudCount: 3 })).toBe(true);
+    expect(isCommandAvailable(c, EMPTY)).toBe(false);                          // 0 scans → disabled
+    expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 1 })).toBe(true); // 1 scan, none selected → enabled
+    expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 3 })).toBe(true);
   });
 });
 

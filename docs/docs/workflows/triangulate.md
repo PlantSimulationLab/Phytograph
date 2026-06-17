@@ -18,21 +18,23 @@ with the result.
 
 All five methods live in one **Triangulation Setup** modal:
 
-1. Select one or more point clouds in the Scene panel.
-2. Click **Triangulate** (triangle icon) — the modal opens.
-3. **Method** — pick the algorithm from the dropdown. The parameters and
+1. Click **Triangulate** (triangle icon) — the modal opens. It's available
+   whenever at least one scan exists in the scene; you don't need a scan
+   selected first. Any scans you *do* have selected are pre-ticked in the
+   modal's **Scans** picker (step 3) as a convenience.
+2. **Method** — pick the algorithm from the dropdown. The parameters and
    options below update to match. The default is **Helios** when any
    listed scan carries scan parameters, otherwise **Ball Pivot**.
-4. **Scans** — tick which scans to triangulate. Each row shows the scan's
+3. **Scans** — tick which scans to triangulate. Each row shows the scan's
    color, point count, and (when it has parameters) its scanner origin.
    Use **All / None** to select in bulk. To change a scan's parameters,
    edit it from the Scans panel before opening this modal.
-5. **Output** *(non-Helios methods)* — choose **Triangulate each scan
+4. **Output** *(non-Helios methods)* — choose **Triangulate each scan
    separately** (one mesh per scan) or **Merge selected scans into one
    mesh** (their points are fused before meshing). Helios always fuses its
    selected scans, so this toggle is hidden for it.
-6. Set the method-specific **Parameters** (below).
-7. Click **Triangulate**.
+5. Set the method-specific **Parameters** (below).
+6. Click **Triangulate**.
 
 While the mesh builds, a small **progress pill** appears at the top of the
 viewer for every method (not just Helios). It names the current stage —
@@ -337,12 +339,19 @@ window opens with:
 ### Per-cell overlays
 
 If the mesh was triangulated inside a **voxel grid** (rather than the auto
-single-cell grid), the window splits the distribution **per grid cell**. Every
-cell's inclination curve is overlaid by default, each in its own color, with a
-checkbox list on the right. Untick a cell to drop it from both plots, or use
-**All / None** to toggle them in bulk — useful for comparing canopy layers
-(e.g. top vs. bottom voxels) or isolating one region. With the auto grid the
-list collapses to a single **Whole mesh** entry.
+single-cell grid), the window splits the distribution **per grid cell**. Each
+cell's inclination curve is overlaid in its own color, with a checkbox list on
+the right. Untick a cell to drop it from both plots, or use **All / None** to
+toggle them in bulk — useful for comparing canopy layers (e.g. top vs. bottom
+voxels) or isolating one region. With the auto grid the list collapses to a
+single **Whole mesh** entry.
+
+When **more than 24 cells are visible** (a fine grid quickly has hundreds of
+occupied voxels), the window shows a single **combined** curve over all visible
+cells instead of one line per cell — overlaying hundreds of curves is neither
+readable nor fast. Narrow the selection (untick cells, or click **None** and
+tick the handful you want) to ≤ 24 visible cells and the per-cell overlays,
+the per-cell parameters table, and the **Show Beta fit** option come back.
 
 ### Canonical de Wit fit
 
@@ -365,7 +374,9 @@ variance of the normalized inclination *t = θ/90*), alongside the mean
 inclination **mean θ** in degrees, the fit **R²**, the leaf-projection
 coefficient **G(θ)** (see below), and that cell's best de Wit archetype, so you
 can read every visible curve's parameters at a glance. A cell with no usable
-spread (all triangles coplanar) shows **—** for the Beta columns.
+spread (all triangles coplanar) shows **—** for the Beta columns. (With more
+than 24 cells visible the table collapses to a single **All visible** row
+summarizing the combined distribution, matching the combined plot.)
 
 The **G(θ)** column is the area-weighted mean of *|n̂ · v̂|* over the cell's
 triangles, where *n̂* is each triangle's face normal and *v̂* is the beam
@@ -381,7 +392,8 @@ every mesh.
 
 Tick **Show Beta fit** above the chart to overlay each cell's fitted Beta curve
 as a dashed line in the cell's color. It's off by default to keep the plot
-readable when many cells are visible.
+readable when many cells are visible, and is disabled while the combined view is
+active (more than 24 cells visible).
 
 ## Produce a point cloud from a mesh
 

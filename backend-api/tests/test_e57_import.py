@@ -19,6 +19,8 @@ import pytest
 
 import main
 
+from tests.binframe import decode_misses
+
 pye57 = pytest.importorskip("pye57")
 laspy = pytest.importorskip("laspy")
 
@@ -263,8 +265,8 @@ async def test_misses_endpoint_projects_just_beyond_farthest_hit(tmp_path, monke
     res = await main.create_cloud_session(req)
     sid = res["session_id"]
 
-    out = await main.get_cloud_misses(
-        sid, origin_x=_ORIGIN[0], origin_y=_ORIGIN[1], origin_z=_ORIGIN[2])
+    out = await decode_misses(await main.get_cloud_misses(
+        sid, origin_x=_ORIGIN[0], origin_y=_ORIGIN[1], origin_z=_ORIGIN[2]))
     assert out["count"] == 2
     # Radius clears the farthest hit by a depth-scaled margin so the miss shell
     # reads as a distinct halo well outside the cloud, not a band hugging its far
@@ -294,7 +296,7 @@ async def test_misses_endpoint_no_origin_returns_true_coords(tmp_path, monkeypat
     res = await main.create_cloud_session(main.CloudSessionCreateRequest(source_path=str(src)))
     sid = res["session_id"]
 
-    out = await main.get_cloud_misses(sid)  # no origin params
+    out = await decode_misses(await main.get_cloud_misses(sid))  # no origin params
     assert out["count"] == 2
     assert out["radius"] == 0.0  # signals "true coords, not a projection"
     pos = np.array(out["positions"]).reshape(-1, 3)
@@ -323,8 +325,8 @@ async def test_unplaceable_misses_warned_and_not_drawn(tmp_path, monkeypatch):
 
     # The frontend always passes the scan origin (params.origin / scan_origin).
     o = res["scan_origin"]
-    out = await main.get_cloud_misses(
-        res["session_id"], origin_x=o[0], origin_y=o[1], origin_z=o[2])
+    out = await decode_misses(await main.get_cloud_misses(
+        res["session_id"], origin_x=o[0], origin_y=o[1], origin_z=o[2]))
     # None drawn (all unplaceable sit AT the scan origin) but total is reported.
     assert out["count"] == 0
     assert out["total"] == 2

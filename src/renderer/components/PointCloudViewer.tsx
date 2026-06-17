@@ -1,7 +1,6 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
-import { Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass} from 'lucide-react';
 import GIF from 'gif.js';
@@ -91,6 +90,7 @@ import { QSM3D, type QSMColorMode } from './viewer/renderers/QSM3D';
 import { QsmIcon } from './icons/QsmIcon';
 import { SkeletonPoints } from './viewer/renderers/SkeletonPoints';
 import { CameraController } from './viewer/scene/CameraController';
+import { GroundGrid } from './viewer/scene/GroundGrid';
 import { ViewportAxesGizmo } from './viewer/scene/ViewportAxesGizmo';
 import { SceneBackground } from './viewer/scene/SceneBackground';
 import { CameraCapture } from './viewer/scene/CameraCapture';
@@ -562,6 +562,8 @@ export default function PointCloudViewer({
   // which pill renders is gated by triangulationInProgress / isHeliosRunning.
   const [triProgress, setTriProgress] = useState<{ label: string; value: number | null } | null>(null);
   const triAbortRef = useRef<AbortController | null>(null);
+  // Per-stage progress for the leaf-area-density inversion (mirrors triProgress).
+  const [ladProgress, setLadProgress] = useState<{ label: string; value: number | null } | null>(null);
 
   // Ground segmentation state (Cloth Simulation Filter)
   const [showGroundSegmentPanel, setShowGroundSegmentPanel] = useState(false);
@@ -1009,6 +1011,14 @@ export default function PointCloudViewer({
   const [isApplyingCrop, setIsApplyingCrop] = useState(false);
   // Synthetic LiDAR scan state
   const [isScanning, setIsScanning] = useState(false);
+  // AbortController for the in-flight scan request, so the user can cancel a
+  // hung/long scan. Aborting tears down the HTTP request and frees the UI; the
+  // backend discards the result (the C++ ray trace itself can't be interrupted
+  // mid-pass, but the user is no longer blocked waiting on it).
+  const scanAbortRef = useRef<AbortController | null>(null);
+  const cancelScan = useCallback(() => {
+    scanAbortRef.current?.abort();
+  }, []);
   // Pending scan awaiting the user's choice when ≥1 target scanner already holds
   // point data (overwrite / duplicate / cancel). Null when no prompt is open.
   // Carries the chosen synthetic-scan options so the run proceeds with them.
@@ -1285,8 +1295,34 @@ export default function PointCloudViewer({
         setTimeout(() => {
           const snapToView = (window as any).__snapToView;
           if (snapToView) {
-            const bounds = computeBoundsFromPositions(newMesh.data.vertices, newMesh.data.vertexCount);
-            snapToView('iso', bounds);
+            // Frame the mesh in WORLD space. computeBoundsFromPositions on the raw
+            // local vertices ignores the mesh transform, which for a Helios <grid>
+            // voxel (a unit cube placed at [center] with [size] scale) collapses to
+            // a ±0.5 box at the origin and makes snapToView zoom to near-zero
+            // distance, culling everything. Transform first (scale -> rotate Euler
+            // XYZ -> translate, matching extractMeshWorldGeometry).
+            const pos = meshPositionsRef.current.get(newMesh.id) || { x: 0, y: 0, z: 0 };
+            const scl = meshScalesRef.current.get(newMesh.id) || { x: 1, y: 1, z: 1 };
+            const rot = meshRotationsRef.current.get(newMesh.id) || { x: 0, y: 0, z: 0 };
+            const rotX = rot.x * Math.PI / 180, rotY = rot.y * Math.PI / 180, rotZ = rot.z * Math.PI / 180;
+            const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+            const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+            const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
+            const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+            const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+            const v = newMesh.data.vertices;
+            for (let i = 0; i < newMesh.data.vertexCount; i++) {
+              const x = v[i * 3] * scl.x, y = v[i * 3 + 1] * scl.y, z = v[i * 3 + 2] * scl.z;
+              const y1 = y * cosX - z * sinX, z1 = y * sinX + z * cosX;
+              const x2 = x * cosY + z1 * sinY, z2 = -x * sinY + z1 * cosY;
+              const x3 = x2 * cosZ - y1 * sinZ, y3 = x2 * sinZ + y1 * cosZ;
+              const wx = x3 + pos.x, wy = y3 + pos.y, wz = z2 + pos.z;
+              min.x = Math.min(min.x, wx); min.y = Math.min(min.y, wy); min.z = Math.min(min.z, wz);
+              max.x = Math.max(max.x, wx); max.y = Math.max(max.y, wy); max.z = Math.max(max.z, wz);
+            }
+            const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+            const size = new THREE.Vector3().subVectors(max, min);
+            snapToView('iso', { center, size });
           }
         }, 50);
       }
@@ -2857,17 +2893,39 @@ export default function PointCloudViewer({
       max.z = Math.max(max.z, cloud.data.bounds.max.z + editState.translation.z);
     }
 
-    // Include mesh bounds
+    // Include mesh bounds. Vertices are stored in the mesh's local space; apply
+    // the same world transform the renderer uses (scale -> rotate(Euler XYZ) ->
+    // translate, see extractMeshWorldGeometry) before accumulating. Skipping the
+    // transform collapses e.g. a Helios <grid> voxel — a unit cube placed at
+    // [center] with [size] scale — back to a ±0.5 box at the origin, which makes
+    // fit-to-view zoom to near-zero distance and cull everything.
     for (const mesh of meshes) {
       if (!mesh.visible) continue;
       const { vertices, vertexCount } = mesh.data;
+      const pos = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
+      const scl = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
+      const rot = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 };
+      const rotX = rot.x * Math.PI / 180, rotY = rot.y * Math.PI / 180, rotZ = rot.z * Math.PI / 180;
+      const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+      const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+      const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
       for (let i = 0; i < vertexCount; i++) {
-        min.x = Math.min(min.x, vertices[i * 3]);
-        min.y = Math.min(min.y, vertices[i * 3 + 1]);
-        min.z = Math.min(min.z, vertices[i * 3 + 2]);
-        max.x = Math.max(max.x, vertices[i * 3]);
-        max.y = Math.max(max.y, vertices[i * 3 + 1]);
-        max.z = Math.max(max.z, vertices[i * 3 + 2]);
+        const x = vertices[i * 3] * scl.x;
+        const y = vertices[i * 3 + 1] * scl.y;
+        const z = vertices[i * 3 + 2] * scl.z;
+        const y1 = y * cosX - z * sinX;
+        const z1 = y * sinX + z * cosX;
+        const x2 = x * cosY + z1 * sinY;
+        const z2 = -x * sinY + z1 * cosY;
+        const x3 = x2 * cosZ - y1 * sinZ;
+        const y3 = x2 * sinZ + y1 * cosZ;
+        const wx = x3 + pos.x, wy = y3 + pos.y, wz = z2 + pos.z;
+        min.x = Math.min(min.x, wx);
+        min.y = Math.min(min.y, wy);
+        min.z = Math.min(min.z, wz);
+        max.x = Math.max(max.x, wx);
+        max.y = Math.max(max.y, wy);
+        max.z = Math.max(max.z, wz);
       }
     }
 
@@ -2910,7 +2968,7 @@ export default function PointCloudViewer({
     const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
     const size = new THREE.Vector3().subVectors(max, min);
     return { min, max, center, size };
-  }, [clouds, meshes, skeletons, qsms, getEditState]);
+  }, [clouds, meshes, skeletons, qsms, meshPositions, meshScales, meshRotations, getEditState]);
 
   // Open the add-scan popup with sensible defaults: next label and current
   // scene center as origin. Shared by the toolbar Radio button (Create
@@ -2951,36 +3009,29 @@ export default function PointCloudViewer({
       ...clouds.map(c => c.id),
       ...meshes.map(m => m.id),
       ...skeletons.map(s => s.id),
+      // Scanner markers carry no geometry but still occupy the scene; include
+      // their ids so adding a scan re-grounds the grid (and so a scans-only
+      // scene isn't treated as empty).
+      ...scansWithParams.map(s => s.id),
     ]);
     const prevIds = prevStaticBoundsIdsRef.current;
     const hasNewIds = [...allIds].some(id => !prevIds.has(id));
-    const hasRemovedIds = [...prevIds].some(id => !allIds.has(id));
-    const isEmpty = allIds.size === 0;
-
-    // Only removals (no new objects added): keep stable bounds even if scene is now empty.
-    // This prevents the grid and axes from jumping when objects are deleted.
-    if (hasRemovedIds && !hasNewIds) {
-      prevStaticBoundsIdsRef.current = allIds;
-      return stableStaticBoundsRef.current;
-    }
-
     prevStaticBoundsIdsRef.current = allIds;
 
-    // Scene empty (initial state, no removal): use defaults
-    if (isEmpty) {
-      const defaults = {
-        min: new THREE.Vector3(-5, -5, -5),
-        max: new THREE.Vector3(5, 5, 5),
-        center: new THREE.Vector3(0, 0, 0),
-        size: new THREE.Vector3(10, 10, 10),
-      };
-      stableStaticBoundsRef.current = defaults;
-      return defaults;
+    // Recompute bounds ONLY when a new object enters the scene. Pure removals,
+    // and pure transform edits (a Translate/Rotate/Scale drag or Fit-to-scans,
+    // which mutate meshPositions/Rotations/Scales without changing the id set),
+    // keep the latched bounds so the ground grid and axes never jump mid-edit.
+    // meshPositions/Rotations/Scales are in the dep array only so a freshly
+    // imported object's transform is available on the same render it appears.
+    if (!hasNewIds) {
+      return stableStaticBoundsRef.current;
     }
 
     // New objects added: recompute bounds from all current objects
     const min = new THREE.Vector3(Infinity, Infinity, Infinity);
     const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+    const corner = new THREE.Vector3();
 
     // Include cloud bounds (original positions only, no translations)
     for (const cloud of clouds) {
@@ -2993,18 +3044,63 @@ export default function PointCloudViewer({
       max.z = Math.max(max.z, cloud.data.bounds.max.z);
     }
 
-    // Include mesh bounds (original vertex data, no positions/scales)
+    // Include mesh bounds in WORLD space. A mesh's vertices are authored in
+    // local space — an imported Helios <grid> is a UNIT cube — and placed in
+    // the world by its position/rotation/scale group transform at render time
+    // (see the mesh <group> below). We must apply that same transform here, or
+    // the bounds (and the ground grid pinned to staticBounds.min.z) land at the
+    // untransformed local origin instead of where the mesh actually renders.
+    // Compute the local AABB, then transform its 8 corners and expand.
     for (const mesh of meshes) {
       if (!mesh.visible) continue;
       const { vertices, vertexCount } = mesh.data;
+      if (vertexCount === 0) continue;
+      const lmin = new THREE.Vector3(Infinity, Infinity, Infinity);
+      const lmax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
       for (let i = 0; i < vertexCount; i++) {
-        min.x = Math.min(min.x, vertices[i * 3]);
-        min.y = Math.min(min.y, vertices[i * 3 + 1]);
-        min.z = Math.min(min.z, vertices[i * 3 + 2]);
-        max.x = Math.max(max.x, vertices[i * 3]);
-        max.y = Math.max(max.y, vertices[i * 3 + 1]);
-        max.z = Math.max(max.z, vertices[i * 3 + 2]);
+        lmin.x = Math.min(lmin.x, vertices[i * 3]);
+        lmin.y = Math.min(lmin.y, vertices[i * 3 + 1]);
+        lmin.z = Math.min(lmin.z, vertices[i * 3 + 2]);
+        lmax.x = Math.max(lmax.x, vertices[i * 3]);
+        lmax.y = Math.max(lmax.y, vertices[i * 3 + 1]);
+        lmax.z = Math.max(lmax.z, vertices[i * 3 + 2]);
       }
+      const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
+      const r = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 };
+      const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
+      // T * R * S — matches Object3D's matrix (and the render group's
+      // position / rotation[deg→rad] / scale).
+      const matrix = new THREE.Matrix4().compose(
+        new THREE.Vector3(p.x, p.y, p.z),
+        new THREE.Quaternion().setFromEuler(
+          new THREE.Euler(
+            (r.x * Math.PI) / 180,
+            (r.y * Math.PI) / 180,
+            (r.z * Math.PI) / 180,
+          ),
+        ),
+        new THREE.Vector3(s.x, s.y, s.z),
+      );
+      for (let cx = 0; cx < 2; cx++) {
+        for (let cy = 0; cy < 2; cy++) {
+          for (let cz = 0; cz < 2; cz++) {
+            corner
+              .set(cx ? lmax.x : lmin.x, cy ? lmax.y : lmin.y, cz ? lmax.z : lmin.z)
+              .applyMatrix4(matrix);
+            min.min(corner);
+            max.max(corner);
+          }
+        }
+      }
+    }
+
+    // Include scanner-marker origins (world coords). Keeps a scans-only Helios
+    // import grounded at the rig height instead of the unit fallback.
+    for (const scan of scansWithParams) {
+      if (!scan.visible) continue;
+      const o = scan.params.origin;
+      min.min(corner.set(o.x, o.y, o.z));
+      max.max(corner);
     }
 
     // Include skeleton bounds (original points, no positions)
@@ -3037,7 +3133,7 @@ export default function PointCloudViewer({
     const result = { min, max, center, size };
     stableStaticBoundsRef.current = result;
     return result;
-  }, [clouds, meshes, skeletons]);
+  }, [clouds, meshes, skeletons, scansWithParams, meshPositions, meshRotations, meshScales]);
 
   // Render-only display offset (Layer 2 precision safety net). Derived from the
   // world-space scene center, rounded to integers, zero below ~1e4 magnitude.
@@ -3055,8 +3151,38 @@ export default function PointCloudViewer({
   const displayOffsetRef = useRef<Vec3Like>(displayOffset);
   displayOffsetRef.current = displayOffset;
 
-  // Determine what's currently selected
-  const hasCloudSelected = selectedIds.size > 0;
+  // World-space coordinate of the ground-grid plane along the up-axis (z for
+  // z-up, y for y-up). The natural ground reference in a local coordinate system
+  // is 0, so we SNAP to 0 whenever 0 is a plausible floor near the geometry —
+  // i.e. the scene's up-axis span is within half a scene-diagonal of the origin.
+  // That covers the common case where geometry sits a little above 0 (e.g. a
+  // scan rig mounted ~1.25 m up, with the real ground at 0). Only when the whole
+  // scene lives far from the origin — a UTM-style coordinate system where 0 is
+  // hundreds/thousands of metres below everything — do we fall back to the
+  // computed extent floor, since 0 there is meaningless (and invisible).
+  const gridFloor = useMemo(() => {
+    const upAxis = gridPlane === 'z-up' ? 'z' : 'y';
+    const floor = staticBounds.min[upAxis];
+    const ceil = staticBounds.max[upAxis];
+    const sceneScale = Math.max(staticBounds.size.length(), 1e-6);
+    // Distance from 0 to the geometry's up-axis span (0 if the span straddles 0).
+    const distFromZero =
+      floor <= 0 && ceil >= 0 ? 0 : Math.min(Math.abs(floor), Math.abs(ceil));
+    return distFromZero <= sceneScale * 0.5 ? 0 : floor;
+  }, [staticBounds, gridPlane]);
+
+  // Determine what's currently selected. A cloud tool needs an actual
+  // data-bearing cloud, not a param-only scanner marker: loading a Helios scan
+  // XML (e.g. almond.xml) creates param-only scans that share the selection set
+  // but carry no points. Counting those as "selected clouds" made cloud tools
+  // (Segment Ground/Trees, Extract Skeleton, …) look clickable while their
+  // panels — which require a single *data* cloud — never opened. Gate on
+  // selected scans that actually have data instead.
+  const selectedCloudCount = useMemo(
+    () => clouds.reduce((n, c) => (selectedIds.has(c.id) ? n + 1 : n), 0),
+    [clouds, selectedIds],
+  );
+  const hasCloudSelected = selectedCloudCount > 0;
   const hasMeshSelected = selectedMeshIds.size > 0;
   const hasSkeletonSelected = selectedSkeletonId !== null;
   const hasPlantMeshSelected = hasMeshSelected && meshes.find(m => selectedMeshIds.has(m.id))?.isPlant;
@@ -3100,7 +3226,10 @@ export default function PointCloudViewer({
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
 
       // ── Reconstruction & analysis ───────────────────────────────────
-      { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPopup(true); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Triangle, testId: 'tool-triangulate', isActive: () => showTriangulationPopup },
+      // Triangulate opens a popup with its own scan picker (seeded from the
+      // current selection but not requiring one), so it stays clickable whenever
+      // any cloud exists in the scene — like the other picker-driven tools.
+      { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPopup(true); }, category: 'Point Cloud', toolGroup: 'reconstruct', icon: Triangle, testId: 'tool-triangulate', multiInput: true, isActive: () => showTriangulationPopup },
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Dna, testId: 'tool-skeleton', isActive: () => showSkeletonPanel },
       { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPanel(!showQSMPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: QsmIcon, testId: 'tool-qsm', isActive: () => showQSMPanel },
       { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
@@ -3113,7 +3242,11 @@ export default function PointCloudViewer({
       { id: 'add-scan', name: 'Add Scan', keywords: ['scanner', 'lidar', 'marker', 'sensor'], action: () => openAddScanPopup(), category: 'Create', requires: null, toolGroup: 'create', icon: Radio, testId: 'tool-add-scan' },
 
       // ── Simulate (synthetic scanning) ───────────────────────────────
-      { id: 'lidar-scan', name: 'Run Synthetic Scan', keywords: ['scan', 'lidar', 'simulate', 'points', 'point cloud', 'ray'], action: () => handleRunScan(), category: 'Simulate', toolGroup: 'simulate', icon: Compass, testId: 'tool-lidar-scan', multiInput: true },
+      // Synthetic scan consumes scannable meshes + scanner markers and PRODUCES
+      // a cloud — it must not require a cloud to already exist (that's backwards),
+      // so it stays always-clickable and handleRunScan toasts what's missing
+      // (no scannable geometry / no scanner positions).
+      { id: 'lidar-scan', name: 'Run Synthetic Scan', keywords: ['scan', 'lidar', 'simulate', 'points', 'point cloud', 'ray'], action: () => handleRunScan(), category: 'Simulate', requires: null, toolGroup: 'simulate', icon: Compass, testId: 'tool-lidar-scan' },
 
       // Mesh tools — the per-mesh Transform (move / rotate / scale) is reached
       // from the double-arrow button on each row in the Meshes list panel, not
@@ -3156,9 +3289,16 @@ export default function PointCloudViewer({
   // matching the __handleUndo / __snapToView pattern.
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
+  // Latest selection so the menu bridge gates on availability identically to the
+  // toolbar/palette — otherwise a menu click with an unmet prerequisite would
+  // still fire the action (e.g. toggle a panel that never renders).
+  const toolSelectionRef = useRef<SelectionState | null>(null);
   useEffect(() => {
     (window as any).__runToolCommand = (id: string) => {
-      commandsRef.current.find(c => c.id === id)?.action();
+      const cmd = commandsRef.current.find(c => c.id === id);
+      if (!cmd) return;
+      if (toolSelectionRef.current && !isCommandAvailable(cmd, toolSelectionRef.current)) return;
+      cmd.action();
     };
     return () => { delete (window as any).__runToolCommand; };
   }, []);
@@ -3170,12 +3310,17 @@ export default function PointCloudViewer({
     hasMesh: hasMeshSelected,
     hasSkeleton: hasSkeletonSelected,
     hasPlantMesh: !!hasPlantMeshSelected,
-    cloudCount: selectedIds.size,
+    cloudCount: selectedCloudCount,
     meshCount: selectedMeshIds.size,
-    // Clouds present in the scene (with data), regardless of selection — gates
-    // multi-input tools (stitch/align/LAD) so they grey out in an empty scene.
-    totalCloudCount: clouds.length,
-  }), [hasCloudSelected, hasMeshSelected, hasSkeletonSelected, hasPlantMeshSelected, selectedIds.size, selectedMeshIds.size, clouds.length]);
+    // Every scan present in the scene (data clouds + param-only scanner
+    // markers), regardless of selection — gates picker-driven multi-input tools
+    // (triangulate / stitch / align / LAD) so they stay clickable whenever any
+    // scan exists and only grey out in a truly empty scene. Loading a Helios
+    // scan XML (e.g. almond.xml) creates param-only scans with no point data;
+    // those still count, so the tools' own modals can take over from there.
+    totalScanCount: scans.length,
+  }), [hasCloudSelected, hasMeshSelected, hasSkeletonSelected, hasPlantMeshSelected, selectedCloudCount, selectedMeshIds.size, scans.length]);
+  toolSelectionRef.current = toolSelection;
 
   // Filter and sort commands based on search
   const filteredCommands = useMemo(() => {
@@ -4393,10 +4538,14 @@ export default function PointCloudViewer({
   // a user would scan). isTriangulatedMesh already excludes plants and matches
   // triangulation/helios meshes; we additionally drop voxel grids and shapes.
   const isScannableMesh = useCallback((mesh: MeshEntry): boolean => {
-    if (mesh.gridSubdivisions) return false;            // voxel grid overlay
-    if (mesh.sourceCloudId.startsWith('shape-')) return false;  // generated shapes
+    if (mesh.gridSubdivisions) return false;            // voxel grid overlay (incl. shape-voxel)
     if (isTriangulatedMesh(mesh)) return false;         // triangulation / helios
-    return true;                                        // plants + imported meshes
+    // Generated primitives (plane/sphere/cube/cylinder/cone) ARE real surfaces a
+    // user may want to scan — e.g. a manually-added ground plane. They used to be
+    // blanket-excluded here, which silently dropped a ground plane from the scan
+    // geometry (no ground hits). The only generated shape that must NOT be scanned
+    // is the voxel grid, already excluded by the gridSubdivisions check above.
+    return true;                                        // plants + imported meshes + solid shapes
   }, [isTriangulatedMesh]);
 
   // Whether a mesh renders through the textured material-group path (plant /
@@ -4611,6 +4760,8 @@ export default function PointCloudViewer({
         }
       }
 
+      const controller = new AbortController();
+      scanAbortRef.current = controller;
       const response = await runLidarScan({
         meshes: requestMeshes,
         scanners: requestScanners,
@@ -4619,7 +4770,7 @@ export default function PointCloudViewer({
         record_misses: options.includeMisses,
         scan_grid_only: grid !== undefined,
         grid,
-      });
+      }, controller.signal);
       if (!response.success) {
         showToast({ title: response.error || 'Scan failed', type: 'error' });
         return;
@@ -4667,9 +4818,16 @@ export default function PointCloudViewer({
         type: 'success',
       });
     } catch (error) {
+      // User-initiated cancel (AbortController) isn't a failure — fetch rejects
+      // with an AbortError. Surface it as a neutral notice and bail.
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        showToast({ title: 'Scan cancelled', type: 'info' });
+        return;
+      }
       console.error('Synthetic LiDAR scan failed:', error);
       showToast({ title: `Scan failed: ${error instanceof Error ? error.message : 'Unknown error'}`, type: 'error' });
     } finally {
+      scanAbortRef.current = null;
       setIsScanning(false);
     }
   }, [extractMeshWorldGeometry, buildScanCloudData, onUpdateScanData, onAddScan, meshes, meshPositions, meshScales]);
@@ -4677,26 +4835,39 @@ export default function PointCloudViewer({
   // Entry point: validate the targets, then open the Synthetic Scan Options popup
   // (the actual run happens from handleScanOptionsRun once the user confirms).
   const handleRunScan = useCallback(async () => {
-    const targetMeshes = meshes.filter(m => m.visible && isScannableMesh(m));
-    if (targetMeshes.length === 0) {
-      showToast({ title: 'No scannable geometry — add a plant or import a mesh, and make it visible', type: 'error' });
-      return;
-    }
-    const activeScanners = scans.filter(s => s.visible && s.params);
+    // Scanner positions are what the options modal lets you pick, so we need at
+    // least one to EXIST to have anything to show. Visibility is NOT a gate —
+    // the picker lists every scan position with scanner parameters whether or
+    // not it is currently visible/selected (a hidden scanner is still a valid
+    // origin to ray-trace from). Geometry is NOT pre-checked here — the modal
+    // opens regardless (e.g. right after loading a scan XML that placed scanners
+    // but no mesh) and surfaces the missing-geometry requirement inside,
+    // disabling Run until a scannable mesh exists.
+    const activeScanners = scans.filter(s => s.params);
     if (activeScanners.length === 0) {
-      showToast({ title: 'No active scanner — place a scanner marker and make it visible', type: 'error' });
+      showToast({ title: 'No scanner — place a scanner marker to define a scan position', type: 'error' });
       return;
     }
+    const targetMeshes = meshes.filter(m => m.visible && isScannableMesh(m));
     setPendingScan({ targetMeshes, activeScanners });
   }, [meshes, scans, isScannableMesh]);
 
   // After the options popup confirms: either scan immediately or prompt about
   // scanners that already hold point data (overwrite / duplicate / cancel).
-  const handleScanOptionsRun = useCallback(async (options: SyntheticScanOptions) => {
+  // `selectedScannerIds` is the subset of scan positions the user kept enabled
+  // in the popup; everything downstream operates on that subset only.
+  const handleScanOptionsRun = useCallback(async (options: SyntheticScanOptions, selectedScannerIds: string[]) => {
     const pending = pendingScan;
     setPendingScan(null);
     if (!pending) return;
-    const { targetMeshes, activeScanners } = pending;
+    const { targetMeshes } = pending;
+    if (targetMeshes.length === 0) {  // popup disables Run without geometry; guard anyway
+      showToast({ title: 'No scannable geometry — add a plant or import a mesh, and make it visible', type: 'error' });
+      return;
+    }
+    const idSet = new Set(selectedScannerIds);
+    const activeScanners = pending.activeScanners.filter(s => idSet.has(s.id));
+    if (activeScanners.length === 0) return;  // popup disables Run in this case
 
     // If any participating scanner already has point data, ask first.
     const withData = activeScanners.filter(hasData);
@@ -8372,9 +8543,11 @@ export default function PointCloudViewer({
     const abort = new AbortController();
     ladAbortRef.current = abort;
     setIsLadRunning(true);
+    setLadProgress(null);
 
     try {
-      const response = await computeLAD(request, abort.signal);
+      const response = await computeLAD(request, abort.signal, (p, msg) =>
+        setLadProgress({ label: msg, value: p }));
       if (abort.signal.aborted) return;
 
       if (!response.success) {
@@ -8465,6 +8638,7 @@ export default function PointCloudViewer({
       });
     } finally {
       setIsLadRunning(false);
+      setLadProgress(null);
       ladAbortRef.current = null;
     }
   }, [isLadRunning]);
@@ -8472,6 +8646,7 @@ export default function PointCloudViewer({
   const cancelLAD = useCallback(() => {
     ladAbortRef.current?.abort();
     setIsLadRunning(false);
+    setLadProgress(null);
     ladAbortRef.current = null;
   }, []);
 
@@ -10236,36 +10411,30 @@ export default function PointCloudViewer({
           </group>
         )}
 
-        {/* Grid - uses staticBounds so it stays fixed when objects are moved */}
+        {/* Grid - uses staticBounds so it stays fixed when objects are moved.
+            Render-only precision safety net: positioned at world − displayOffset
+            so the drei geometry renders near the origin (it kinked/vanished at
+            UTM magnitudes). fadeDistance tracks the camera each frame inside
+            GroundGrid so the grid reads as an infinite ground plane at any zoom. */}
         {showGrid && (
-          <Grid
-            args={[100, 100]}
+          <GroundGrid
             cellSize={staticBounds.size.length() / 20}
-            cellThickness={0.5}
-            cellColor="#404040"
             sectionSize={staticBounds.size.length() / 4}
-            sectionThickness={1}
-            sectionColor="#525252"
-            // Render-only precision safety net: the grid is drei geometry built
-            // at world coords (this is what kinked/vanished at UTM magnitudes), so
-            // position it at world − displayOffset to render near the origin.
             position={
               gridPlane === 'z-up'
                 ? [
                     staticBounds.center.x - displayOffset.x,
                     staticBounds.center.y - displayOffset.y,
-                    staticBounds.min.z - displayOffset.z,
+                    gridFloor - displayOffset.z,
                   ]
                 : [
                     staticBounds.center.x - displayOffset.x,
-                    staticBounds.min.y - displayOffset.y,
+                    gridFloor - displayOffset.y,
                     staticBounds.center.z - displayOffset.z,
                   ]
             }
             rotation={gridPlane === 'z-up' ? [-Math.PI / 2, 0, 0] : [0, 0, 0]}
-            fadeDistance={staticBounds.size.length() * 5}
-            infiniteGrid
-            side={THREE.DoubleSide}
+            baseFadeDistance={staticBounds.size.length() * 5}
           />
         )}
 
@@ -10605,7 +10774,8 @@ export default function PointCloudViewer({
       {isLadRunning && (
         <StatusPill
           testId="lad-running"
-          label="Computing leaf area density..."
+          label={ladProgress?.label ?? 'Computing leaf area density…'}
+          progress={ladProgress?.value ?? null}
           onCancel={cancelLAD}
         />
       )}
@@ -10782,30 +10952,42 @@ export default function PointCloudViewer({
               <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
             </button>
           </div>
-          {/* Run a synthetic LiDAR scan from all visible scanners against all
-              visible plant/imported geometry. Shown whenever any scanner exists
-              so the action is discoverable right where scanners are placed. */}
+          {/* Run a synthetic LiDAR scan from a chosen subset of scan positions
+              (picked in the options popup, visible or not) against all visible
+              plant/imported geometry. Shown whenever any scanner exists so the
+              action is discoverable right where scanners are placed. */}
           {scansWithParams.length > 0 && (
             <div className="px-2 pt-2">
-              <button
-                data-testid="run-synthetic-scan"
-                onClick={() => handleRunScan()}
-                disabled={isScanning}
-                className="w-full px-2 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-600 disabled:cursor-not-allowed rounded text-xs text-white flex items-center justify-center gap-1.5"
-                title="Ray-trace every visible scanner against the visible plant/imported geometry"
-              >
-                {isScanning ? (
-                  <>
+              {isScanning ? (
+                // While a scan is running, the run button is replaced by a
+                // status indicator + a Cancel button so a long/hung scan can be
+                // abandoned without force-quitting the app.
+                <div className="flex items-center gap-1.5">
+                  <div className="flex-1 px-2 py-1.5 bg-neutral-600 rounded text-xs text-white flex items-center justify-center gap-1.5">
                     <Loader2 className="w-3 h-3 animate-spin" />
                     Scanning…
-                  </>
-                ) : (
-                  <>
-                    <Radio className="w-3 h-3" />
-                    Run Synthetic LiDAR Scan
-                  </>
-                )}
-              </button>
+                  </div>
+                  <button
+                    data-testid="cancel-synthetic-scan"
+                    onClick={() => cancelScan()}
+                    className="px-2 py-1.5 bg-red-600 hover:bg-red-500 rounded text-xs text-white flex items-center justify-center gap-1.5"
+                    title="Cancel the running scan"
+                  >
+                    <X className="w-3 h-3" />
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  data-testid="run-synthetic-scan"
+                  onClick={() => handleRunScan()}
+                  className="w-full px-2 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs text-white flex items-center justify-center gap-1.5"
+                  title="Ray-trace the chosen scan positions against the visible plant/imported geometry"
+                >
+                  <Radio className="w-3 h-3" />
+                  Run Synthetic LiDAR Scan
+                </button>
+              )}
             </div>
           )}
           <div className="overflow-y-auto flex-1 p-1">
@@ -13063,7 +13245,9 @@ export default function PointCloudViewer({
       <SyntheticScanOptionsPopup
         isOpen={pendingScan !== null}
         onClose={() => setPendingScan(null)}
-        onRun={(options) => { void handleScanOptionsRun(options); }}
+        onRun={(options, scannerIds) => { void handleScanOptionsRun(options, scannerIds); }}
+        scanners={pendingScan?.activeScanners ?? []}
+        hasGeometry={(pendingScan?.targetMeshes.length ?? 0) > 0}
         hasMultiReturn={pendingHasMultiReturn}
         gridAvailable={pendingGridAvailable}
       />
