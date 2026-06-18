@@ -44,6 +44,26 @@ The full picture — points plus the scanner origin that produced them.
 Every analysis is available, and Helios triangulation can reconstruct
 per-pulse directions from `(point − origin)`.
 
+## Sky/miss points
+
+When a scanner fires a pulse that never hits anything — it passes through
+a gap in the canopy and on into open sky — that's a **miss** (also called
+a sky point). Misses carry no surface coordinate, but they record that a
+beam was transmitted along a known direction. They matter for
+[leaf area density](leaf-area-density.md): the inversion compares beams
+that *returned* against beams that *passed through* a voxel, and the
+misses are that second population — without them a fully transparent gap
+and a fully occluding leaf wall look identical.
+
+Some formats keep misses (E57, structured PLY). Many don't, but retain
+enough to **reconstruct** them — a per-return `timestamp` and/or
+scan-grid `row`/`column` indices — by inferring which grid cells of the
+scan raster had no return. The [Backfill Misses](../workflows/backfill-misses.md)
+step does that recovery and stores the misses on the scan, where the
+**"Show misses"** toggle in the Scans panel draws them (relocated onto the
+scan's bounding sphere, since their true coordinates are far-field). LAD
+requires misses to be present and does not recover them silently.
+
 ## What's in the parameters
 
 - **Origin** — (x, y, z) position of the scanner head in metres

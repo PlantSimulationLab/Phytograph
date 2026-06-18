@@ -2599,6 +2599,52 @@ export async function getCloudMisses(
   }
 }
 
+/** Result of a Backfill Misses call. `backfilled` is how many sky/miss points
+ * were recovered and persisted in the session; `already_had_misses` is true when
+ * the scan already retained real misses (nothing to do). `error` is present (with
+ * the other fields zeroed) when reconstruction failed — e.g. a grid too sparse to
+ * gap-fill — so the caller surfaces it as a toast rather than treating it as a
+ * success. */
+export interface BackfillMissesResult {
+  backfilled: number;
+  miss_count: number;
+  has_misses: boolean;
+  scan_origin: [number, number, number];
+  already_had_misses: boolean;
+  error?: string;
+}
+
+/**
+ * Explicitly recover a session's sky/miss points (beams that returned nothing)
+ * and persist them in the backend session, so they can be visualised via the
+ * misses overlay and consumed by LAD (which no longer gapfills silently).
+ *
+ * `origin` is the scanner position (per-beam miss directions are reconstructed
+ * from it). `trajectory` (the backend `PoseStream` wire shape, built via
+ * poseStreamToWire()) marks a moving-platform scan. Eligible only when the scan
+ * carries a per-pulse timestamp and/or scan-grid row/column indices; the backend
+ * 400s otherwise.
+ *
+ * The backend streams PHP1 progress markers ahead of the JSON tail (the build +
+ * gapfill is slow for a dense scan), so this takes an optional `onProgress`
+ * callback and an `AbortSignal` for cancellation — mirroring `computeLAD`.
+ */
+export async function backfillMisses(
+  sessionId: string,
+  origin: [number, number, number],
+  trajectory?: unknown,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+): Promise<BackfillMissesResult> {
+  return await fetchJsonWithProgress<BackfillMissesResult>(
+    `/api/cloud/session/${sessionId}/backfill-misses`,
+    { origin, trajectory },
+    signal,
+    600000,
+    onProgress,
+  );
+}
+
 /** Result of a delete_region / reset_edits call — counts only (no rebuild). */
 export interface CloudSessionEditResult {
   session_id: string;

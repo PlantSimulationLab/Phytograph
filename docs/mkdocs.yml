@@ -111,6 +111,7 @@ nav:
           - Viewer navigation: workflows/viewer-navigation.md
       - 1. Pre-processing:
           - Clean a point cloud: workflows/clean-point-cloud.md
+          - Backfill misses: workflows/backfill-misses.md
           - Register & compare: workflows/register-compare.md
       - 2. Segmentation:
           - Segment ground points: workflows/segment-ground.md

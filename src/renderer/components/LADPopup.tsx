@@ -4,7 +4,7 @@ import { LADRequest } from '../utils/backendApi';
 import type { GridOption } from '../lib/gridOption';
 import type { HeliosGrid } from '../utils/backendApi';
 import type { Scan } from '../lib/scan';
-import { hasData, hasParams } from '../lib/scan';
+import { hasData, hasParams, isBackfillEligible } from '../lib/scan';
 import { isMovingScan } from '../lib/scanParameters';
 import { buildLADRequest } from '../lib/pointCloudHelpers';
 
@@ -48,6 +48,11 @@ interface LADPopupProps {
   // editable here. Omitted → fall back to the standard defaults.
   defaultLmax?: number;
   defaultMaxAspectRatio?: number;
+  // Invoked when the user clicks "Backfill Misses" in the in-modal banner (a
+  // selected scan has no misses yet). Closes the modal and runs the backfill for
+  // the eligible scans; the user reopens LAD afterward. Omitted → the banner
+  // shows the requirement but offers no in-place action.
+  onBackfill?: (scanIds: string[]) => void;
 }
 
 // Per-voxel leaf area density setup. Models HeliosTriangulationPopup but the
@@ -65,6 +70,7 @@ export function LADPopup({
   triangulationOptions = [],
   defaultLmax,
   defaultMaxAspectRatio,
+  onBackfill,
 }: LADPopupProps) {
   const eligible = useMemo(() => scans.filter(s => hasData(s) && hasParams(s)), [scans]);
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
@@ -233,7 +239,19 @@ export function LADPopup({
 
   const totalPoints = selectedScans.reduce((sum, s) => sum + s.data!.pointCount, 0);
   const ineligibleScans = scans.filter(s => hasData(s) && !hasParams(s));
-  const canCompute = selectedScans.length > 0 && (reuseTri != null || selectedGrid != null);
+
+  // LAD now HARD-REQUIRES miss points (the Beer's-law transmission denominator).
+  // Selected scans that don't yet carry misses block Compute. Split them into
+  // those we can recover (run Backfill Misses) and those we can't (no timestamp /
+  // grid — re-import a miss-retaining format).
+  const needsBackfill = selectedScans.filter(s => s.data?.octree?.hasMisses !== true);
+  const recoverable = needsBackfill.filter(s => isBackfillEligible(s));
+  const unrecoverable = needsBackfill.filter(s => !isBackfillEligible(s));
+
+  const canCompute =
+    selectedScans.length > 0 &&
+    (reuseTri != null || selectedGrid != null) &&
+    needsBackfill.length === 0;
 
   return (
     <div
@@ -252,6 +270,7 @@ export function LADPopup({
             <h2 className="text-sm font-semibold text-white">Leaf Area Density Setup</h2>
           </div>
           <button
+            data-testid="lad-close"
             onClick={onClose}
             className="p-1 rounded hover:bg-neutral-700 transition-colors"
           >
@@ -573,6 +592,38 @@ export function LADPopup({
             </>
             )}
           </div>
+
+          {needsBackfill.length > 0 && (
+            <div
+              className="text-[10px] text-amber-300 bg-amber-500/5 border border-amber-500/30 rounded px-2 py-1.5 space-y-1.5"
+              data-testid="lad-backfill-hint"
+            >
+              {recoverable.length > 0 && (
+                <div className="flex items-center justify-between gap-2">
+                  <span>
+                    {recoverable.length === 1 ? 'This scan has' : `${recoverable.length} selected scans have`}{' '}
+                    no sky/miss points yet. LAD needs them — recover them first.
+                  </span>
+                  {onBackfill && (
+                    <button
+                      data-testid="lad-backfill-button"
+                      onClick={() => { onBackfill(recoverable.map(s => s.id)); onClose(); }}
+                      className="shrink-0 px-2 py-1 text-[10px] rounded font-medium bg-amber-600 hover:bg-amber-500 text-white"
+                    >
+                      Backfill Misses
+                    </button>
+                  )}
+                </div>
+              )}
+              {unrecoverable.length > 0 && (
+                <div>
+                  {unrecoverable.length === 1 ? 'A selected scan' : `${unrecoverable.length} selected scans`}{' '}
+                  cannot recover misses (no timestamp or row/column grid). Re-import a
+                  scan that retains misses (E57 / structured PLY) to run LAD on it.
+                </div>
+              )}
+            </div>
+          )}
 
           {error && (
             <div className="p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">

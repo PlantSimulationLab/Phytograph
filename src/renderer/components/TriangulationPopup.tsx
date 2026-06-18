@@ -122,21 +122,32 @@ export function TriangulationPopup({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
-  // Whenever the eligible set changes (open, or method switch toggling the
-  // params requirement), keep the selection within it; seed from initial ids.
+  // On OPEN, (re)seed from the caller's ids (the live Scans-panel selection),
+  // intersected with eligibility; fall back to all eligible when that's empty.
+  // Keyed on `isOpen` only so reopening with a different panel selection picks up
+  // the new one (not a prior session's — the stale-reseed bug).
+  useEffect(() => {
+    if (!isOpen) return;
+    const seed = initialSelectedIds ?? new Set<string>();
+    const filtered = new Set<string>();
+    for (const id of seed) if (eligible.some(s => s.id === id)) filtered.add(id);
+    setSelectedScanIds(filtered.size > 0 ? filtered : new Set(eligible.map(s => s.id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  // When the eligible set changes WHILE OPEN (e.g. switching method between Helios
+  // — which needs params — and Open3D), prune any now-ineligible ids from the
+  // current selection. Pure prune: never re-expand, so it can't clobber the user's
+  // pick. (Skipped on the initial open; the seed effect above owns that.)
   useEffect(() => {
     if (!isOpen) return;
     setSelectedScanIds(prev => {
-      // First time / method switch: prefer the caller's ids, then all eligible.
-      const seed = prev.size > 0 ? prev : (initialSelectedIds ?? new Set<string>());
-      const filtered = new Set<string>();
-      for (const id of seed) {
-        if (eligible.some(s => s.id === id)) filtered.add(id);
-      }
-      return filtered.size > 0 ? filtered : new Set(eligible.map(s => s.id));
+      const kept = new Set<string>();
+      for (const id of prev) if (eligible.some(s => s.id === id)) kept.add(id);
+      return kept.size === prev.size ? prev : kept;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, eligible]);
+  }, [eligible]);
 
   useEffect(() => {
     if (!isOpen) return;

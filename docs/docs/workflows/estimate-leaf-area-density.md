@@ -13,6 +13,14 @@ surface.
   from XML**) or attach parameters from the Scans panel. A scan with only
   point data and no parameters cannot be used.
 - A **voxel grid** — LAD requires one (unlike triangulation).
+- **Sky/miss points.** LAD needs the beams that passed through the canopy
+  without returning (the Beer's-law transmission denominator), so each
+  scan must carry misses. Formats like E57 and structured PLY retain them;
+  others can [reconstruct them](backfill-misses.md) from a per-return
+  `timestamp` and/or scan-grid row/column indices. LAD no longer recovers
+  misses silently — run **Backfill Misses** first when a scan has none (the
+  dialog tells you and offers a button). A scan with no misses and no way to
+  recover them can't be used until re-imported in a miss-retaining format.
 
 ## Steps
 
@@ -35,11 +43,19 @@ surface.
       [import](import-export.md#importing-several-files-at-once) — no
       need to build it by hand.
 
-2. **Open the LAD tool** (the grid icon, next to Triangulate). The button
+2. **Backfill misses if needed.** If a selected scan has no sky/miss points
+   yet, run **Backfill Misses** (Pre-processing group) to recover them —
+   see [Backfill misses](backfill-misses.md). The LAD dialog also surfaces
+   this: it disables **Compute LAD** and shows a banner with a one-click
+   **Backfill Misses** button for any selected scan still missing them.
+   Scans imported from a miss-retaining format (E57 / structured PLY) skip
+   this step.
+
+3. **Open the LAD tool** (the grid icon, next to Triangulate). The button
    is disabled until both a parameterized scan is selected *and* a voxel
    box exists — the tooltip tells you which is missing.
 
-3. **In the dialog:**
+4. **In the dialog:**
     - **Triangulation.** If you've already run a
       [Helios triangulation](triangulate.md) over a voxel grid, choose
       **Reuse: \<that mesh\>** here. The inversion then reuses *exactly* the
@@ -74,7 +90,7 @@ surface.
       parameters. Multi-return scans need per-pulse metadata in the source
       (see [the concept page](../concepts/leaf-area-density.md#single-vs-multi-return-scans)).
 
-4. **Click Compute LAD.** The calculation runs on the backend (the first
+5. **Click Compute LAD.** The calculation runs on the backend (the first
    run can take a while as PyHelios warms up). A **Leaf Area Density**
    entry appears in the scene panel when it finishes.
 
@@ -106,7 +122,8 @@ so instead of estimating *G(θ)* from a triangulation it uses a **supplied
 mean G(θ)** (0.5 for a spherical / randomly-oriented leaf-angle
 distribution; set it to match the canopy if known). The point cloud must
 carry a per-return `timestamp` column (for the trajectory join) and miss
-points (or a timestamp from which they can be recovered), as for any LAD.
+points — run [Backfill Misses](backfill-misses.md) first if the scan has a
+timestamp but no recorded misses, as for any LAD.
 
 ## Tips
 

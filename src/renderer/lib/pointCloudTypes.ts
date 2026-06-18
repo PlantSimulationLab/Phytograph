@@ -80,6 +80,11 @@ export interface OctreeRef {
   // beam apex used to project the overlay. See getCloudMisses / MissOverlay.
   hasMisses?: boolean;
   scanOrigin?: [number, number, number] | null;
+  // Bumped each time the session's misses change (e.g. after Backfill Misses
+  // recovers and persists new ones). The misses overlay keys its refetch on
+  // `${cacheId}:${missRefresh}` so a backfill that doesn't change `cacheId`
+  // still forces the overlay to reload. Absent/0 means never refreshed.
+  missRefresh?: number;
   // Full scan-pattern parameters recovered from the source file (E57 pose +
   // angular sweep + grid resolution; PCD VIEWPOINT origin), when present. The
   // import path turns this into the Scan's ScanParameters so a lone-file import

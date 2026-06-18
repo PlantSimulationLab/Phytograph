@@ -49,30 +49,38 @@ export function Toolbar({ commands, selection, title = 'Tools', groups = TOOL_GR
             <div className="grid grid-cols-3 gap-1">
               {groupCmds.map(cmd => {
                 const available = isCommandAvailable(cmd, selection);
+                const busy = cmd.isBusy?.() ?? false;
                 const active = cmd.isActive?.() ?? false;
                 const Icon = cmd.icon;
-                const title = available
+                const title = busy
                   ? cmd.name
-                  : cmd.multiInput
-                    ? `${cmd.name} — import a point cloud first`
-                    : `${cmd.name} — select ${requiresText(cmd.requires ?? null)} first`;
+                  : available
+                    ? cmd.name
+                    : cmd.multiInput
+                      ? `${cmd.name} — import a point cloud first`
+                      : `${cmd.name} — select ${requiresText(cmd.requires ?? null)} first`;
                 return (
                   <button
                     key={cmd.id}
                     data-testid={cmd.testId ?? `tool-${cmd.id}`}
-                    onClick={() => { if (available) cmd.action(); }}
-                    disabled={!available}
+                    // While busy the action is in flight — ignore clicks so it
+                    // can't be re-triggered, but keep the button enabled so its
+                    // spinner stays full-opacity (disabled would grey it out).
+                    onClick={() => { if (available && !busy) cmd.action(); }}
+                    disabled={!available && !busy}
                     title={title}
                     className={`p-2 rounded transition-colors flex items-center justify-center ${
-                      !available
+                      !available && !busy
                         ? 'opacity-40 cursor-not-allowed'
-                        : active
-                          ? 'bg-green-600 text-white'
-                          : 'hover:bg-neutral-700'
+                        : busy
+                          ? 'bg-green-600 text-white cursor-progress'
+                          : active
+                            ? 'bg-green-600 text-white'
+                            : 'hover:bg-neutral-700'
                     }`}
                   >
                     {Icon ? (
-                      <Icon className={`w-4 h-4 ${active ? 'text-white' : 'text-neutral-300'}`} />
+                      <Icon className={`w-4 h-4 ${busy ? 'text-white animate-spin' : active ? 'text-white' : 'text-neutral-300'}`} />
                     ) : (
                       <span className="text-[10px] text-neutral-300">{cmd.name.slice(0, 2)}</span>
                     )}

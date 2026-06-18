@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { duplicateScanName, hasData, hasParams, scanDisplayName, type Scan } from './scan';
+import {
+  duplicateScanName, hasData, hasParams, scanDisplayName,
+  missColumnsAvailable, isBackfillEligible, scanHasKnownOrigin, missReconSources, type Scan,
+} from './scan';
 import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
-import type { PointCloudData } from './pointCloudTypes';
+import type { PointCloudData, OctreeRef, ScalarField } from './pointCloudTypes';
 
 function makeData(fileName?: string): PointCloudData {
   return {
@@ -16,6 +19,28 @@ function makeData(fileName?: string): PointCloudData {
     },
     fileName,
   };
+}
+
+// Build a scan whose cloud carries the given column slugs (as octree attribute
+// labels) and an optional hasMisses flag — the surface isBackfillEligible reads.
+function makeScanWithColumns(
+  slugs: string[],
+  opts: { hasMisses?: boolean; flat?: boolean } = {},
+): Scan {
+  const data = makeData('scan.las');
+  if (opts.flat) {
+    const fields: Record<string, ScalarField> = {};
+    for (const s of slugs) fields[s] = { values: new Float32Array([0]), min: 0, max: 0 };
+    data.scalarFields = fields;
+  } else {
+    const octree: OctreeRef = {
+      cacheId: 'c', sourceXyzPath: '', sessionId: 'sess',
+      hasMisses: opts.hasMisses,
+      attributeLabels: Object.fromEntries(slugs.map((s) => [s, s])),
+    };
+    data.octree = octree;
+  }
+  return { id: '1', label: 'a', visible: true, color: '#000', data };
 }
 
 describe('hasData / hasParams predicates', () => {
@@ -81,5 +106,105 @@ describe('duplicateScanName', () => {
   it('treats the base independently of unrelated names in the set', () => {
     expect(duplicateScanName('Scan A', ['Scan B', 'Scan B (copy)']))
       .toBe('Scan A (copy)');
+  });
+});
+
+describe('missColumnsAvailable', () => {
+  it('is true when a timestamp column is present', () => {
+    expect(missColumnsAvailable(makeScanWithColumns(['timestamp']))).toBe(true);
+  });
+
+  it('is true when BOTH grid indices are present', () => {
+    expect(missColumnsAvailable(makeScanWithColumns(['row_index', 'column_index']))).toBe(true);
+  });
+
+  it('is false when only ONE grid index is present (need both)', () => {
+    expect(missColumnsAvailable(makeScanWithColumns(['row_index']))).toBe(false);
+    expect(missColumnsAvailable(makeScanWithColumns(['column_index']))).toBe(false);
+  });
+
+  it('is false for a plain xyz cloud (no reconstructable columns)', () => {
+    expect(missColumnsAvailable(makeScanWithColumns(['intensity']))).toBe(false);
+  });
+
+  it('reads columns from a flat cloud scalarFields too', () => {
+    expect(missColumnsAvailable(makeScanWithColumns(['timestamp'], { flat: true }))).toBe(true);
+    expect(missColumnsAvailable(makeScanWithColumns(['intensity'], { flat: true }))).toBe(false);
+  });
+});
+
+describe('missReconSources', () => {
+  it('reports timestamp only, preferred = timestamp', () => {
+    expect(missReconSources(makeScanWithColumns(['timestamp']))).toEqual({
+      hasTimestamp: true, hasGrid: false, preferred: 'timestamp',
+    });
+  });
+
+  it('reports grid only, preferred = grid', () => {
+    expect(missReconSources(makeScanWithColumns(['row_index', 'column_index']))).toEqual({
+      hasTimestamp: false, hasGrid: true, preferred: 'grid',
+    });
+  });
+
+  it('reports both, but PREFERS timestamp (matches backend path choice)', () => {
+    expect(missReconSources(makeScanWithColumns(['timestamp', 'row_index', 'column_index']))).toEqual({
+      hasTimestamp: true, hasGrid: true, preferred: 'timestamp',
+    });
+  });
+
+  it('one grid index alone is not a usable grid', () => {
+    expect(missReconSources(makeScanWithColumns(['row_index']))).toEqual({
+      hasTimestamp: false, hasGrid: false, preferred: null,
+    });
+  });
+
+  it('reports no sources for a plain cloud (preferred null)', () => {
+    expect(missReconSources(makeScanWithColumns(['intensity']))).toEqual({
+      hasTimestamp: false, hasGrid: false, preferred: null,
+    });
+  });
+});
+
+describe('isBackfillEligible', () => {
+  it('is true: has data, no misses yet, reconstructable columns', () => {
+    expect(isBackfillEligible(makeScanWithColumns(['timestamp']))).toBe(true);
+    expect(isBackfillEligible(makeScanWithColumns(['row_index', 'column_index']))).toBe(true);
+  });
+
+  it('is false when the scan already has misses (E57 / structured PLY)', () => {
+    expect(isBackfillEligible(makeScanWithColumns(['timestamp'], { hasMisses: true }))).toBe(false);
+  });
+
+  it('is false when no column lets misses be reconstructed', () => {
+    expect(isBackfillEligible(makeScanWithColumns(['intensity']))).toBe(false);
+  });
+
+  it('is false when the scan has no data at all', () => {
+    const scan: Scan = { id: '1', label: 'a', visible: true, color: '#000' };
+    expect(isBackfillEligible(scan)).toBe(false);
+  });
+});
+
+describe('scanHasKnownOrigin', () => {
+  it('is true when the octree records a scanOrigin (e.g. E57 pose)', () => {
+    const scan = makeScanWithColumns(['timestamp']);
+    scan.data!.octree!.scanOrigin = [0, 0, 127];
+    expect(scanHasKnownOrigin(scan)).toBe(true);
+  });
+
+  it('is true when the scan carries scan parameters (XML / file header)', () => {
+    const scan = makeScanWithColumns(['timestamp']);
+    scan.params = DEFAULT_SCAN_PARAMETERS;  // params present => a real origin
+    expect(scanHasKnownOrigin(scan)).toBe(true);
+  });
+
+  it('is false when no scanOrigin and no params (plain XYZ import)', () => {
+    const scan = makeScanWithColumns(['timestamp']);  // octree present, no scanOrigin, no params
+    expect(scanHasKnownOrigin(scan)).toBe(false);
+  });
+
+  it('is false when the scan has no data', () => {
+    const scan: Scan = { id: '1', label: 'a', visible: true, color: '#000' };
+    expect(scanHasKnownOrigin(scan)).toBe(false);
   });
 });

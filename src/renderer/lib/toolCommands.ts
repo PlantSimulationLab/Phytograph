@@ -42,6 +42,13 @@ export interface ToolCommand {
   multiInput?: boolean;
   /** Toggled-state predicate so the toolbar can highlight an open panel/mode. */
   isActive?: () => boolean;
+  /**
+   * Running-state predicate for a long async action. When true the toolbar shows
+   * the icon spinning and ignores clicks, mirroring the synthetic-scan run
+   * button's inline busy state (no toast). Distinct from `isActive`, which is a
+   * sticky open/selected highlight.
+   */
+  isBusy?: () => boolean;
 }
 
 /** Live selection counts the availability check reads. */

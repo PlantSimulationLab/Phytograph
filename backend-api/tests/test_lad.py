@@ -214,7 +214,10 @@ class TestLADRequestShaping:
         assert "gapfill" not in [c[0] for c in cloud.calls]
         assert "calculateLeafArea" not in [c[0] for c in cloud.calls]
 
-    def test_multi_return_with_columns_gapfills(self, tmp_path, stub_pyhelios):
+    def test_multi_return_with_timestamp_but_no_misses_now_errors(self, tmp_path, stub_pyhelios):
+        # LAD no longer gapfills silently. A multi-return scan that carries a
+        # timestamp but no miss points must be backfilled FIRST (the explicit
+        # Backfill Misses step); fed straight to LAD it errors actionably.
         f = tmp_path / "scan.xyz"
         f.write_text("0.1 0.1 0.5 1.0 0 1\n0.0 0.0 0.6 1.0 0 1\n")
         fmt = "x y z timestamp target_index target_count"
@@ -226,19 +229,18 @@ class TestLADRequestShaping:
             lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
         result = main._do_lad_computation(req)
 
-        assert result["success"] is True
-        assert result["return_mode"] == "multi"
-        assert result["is_multi_return"] is True
+        assert result["success"] is False
+        assert "miss" in result["error"].lower()
+        assert "backfill" in result["error"].lower()
         cloud = stub_pyhelios.instances[-1]
         names = [c[0] for c in cloud.calls]
-        # gapfill must run, and before calculateLeafArea.
-        assert "gapfill" in names
-        assert names.index("gapfill") < names.index("calculateLeafArea")
+        # No silent gapfill, and the inversion is never attempted.
+        assert "gapfill" not in names
+        assert "calculateLeafArea" not in names
 
-    def test_single_return_with_timestamp_gapfills_and_reports(self, tmp_path, stub_pyhelios):
-        # A single-return scan that carries a timestamp (but no target_*) is
-        # gapfillable: misses are recovered from the timestamp gaps. Widening the
-        # old multi-return-only trigger. The recovered count is surfaced.
+    def test_single_return_with_timestamp_but_no_misses_now_errors(self, tmp_path, stub_pyhelios):
+        # Same contract for single-return: a timestamp alone is not misses. LAD
+        # directs the user to Backfill Misses rather than recovering them inline.
         f = tmp_path / "scan.xyz"
         f.write_text("0.1 0.1 0.5 1.0\n0.0 0.0 0.6 2.0\n0.2 -0.1 0.4 3.0\n")
         scan = main.HeliosScanEntry(
@@ -250,13 +252,12 @@ class TestLADRequestShaping:
             lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
         result = main._do_lad_computation(req)
 
-        assert result["success"] is True
-        # Single-return mode, but gapfill still runs (timestamp present).
-        assert result["return_mode"] == "single"
+        assert result["success"] is False
+        assert "miss" in result["error"].lower()
+        assert "backfill" in result["error"].lower()
         cloud = stub_pyhelios.instances[-1]
-        assert "gapfill" in [c[0] for c in cloud.calls]
-        assert result["gapfilled_misses"] == 2
-        assert any("Recovered 2" in w for w in result["warnings"])
+        assert "gapfill" not in [c[0] for c in cloud.calls]
+        assert "calculateLeafArea" not in [c[0] for c in cloud.calls]
 
     def test_no_misses_no_timestamp_fails_clearly(self, tmp_path, stub_pyhelios):
         # Neither miss points nor a timestamp: can't account for transmitted beams,
@@ -673,45 +674,24 @@ class TestLeafCubeMultiReturnLAD:
             grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
             lmax=0.04, max_aspect_ratio=10, min_voxel_hits=1)
 
-    def test_file_path_runs_multireturn_algorithm(self):
+    def test_file_path_multireturn_without_misses_now_errors(self):
+        # The multi-return fixture carries timestamp/target_* but NO recorded
+        # misses. LAD no longer gapfills silently, and the file_path path has no
+        # Backfill Misses step (that's session-only), so it must hard-fail with the
+        # actionable no-misses error rather than auto-recovering.
         pytest.importorskip("pyhelios")
         result = main._do_lad_computation(self._file_request())
-        assert result["success"] is True, result.get("error")
-        # The multi-return algorithm actually ran (not the single-return fallback).
-        assert result["is_multi_return"] is True
-        assert result["return_mode"] == "multi"
-        # No fallback warning — the per-pulse columns were present.
-        assert not result.get("warnings"), result.get("warnings")
-        cell = result["cells"][0]
-        assert cell["lad"] == pytest.approx(2.0, rel=0.15)
-        # G(theta)=0.5 for the spherical distribution. The multi-return fixture
-        # uses a lower angular resolution + finite beam, which biases the
-        # triangulated G estimate a little more than the single-return case, so
-        # allow ~20% here (still tight enough to catch a wrong G-function).
-        assert cell["gtheta"] == pytest.approx(0.5, rel=0.20)
-        assert cell["hit_count"] > 0
+        assert result["success"] is False
+        assert "miss" in result["error"].lower()
 
-    def test_synthetic_scalar_columns_runs_multireturn_algorithm(self):
+    def test_synthetic_scalar_columns_without_misses_now_errors(self):
+        # Same contract for the inline-points (synthetic) path: timestamp present,
+        # misses absent → hard-fail. A synthetic cloud must record misses at
+        # generation time to be LAD-ready.
         pytest.importorskip("pyhelios")
         result = main._do_lad_computation(self._synthetic_request())
-        assert result["success"] is True, result.get("error")
-        assert result["is_multi_return"] is True
-        assert result["return_mode"] == "multi"
-        cell = result["cells"][0]
-        assert cell["lad"] == pytest.approx(2.0, rel=0.15)
-
-    def test_repeated_runs_are_stable(self):
-        """Regression guard for the fixed non-deterministic loadXML crash: the
-        multi-return path must succeed on every run, not ~5 in 12."""
-        pytest.importorskip("pyhelios")
-        lads = []
-        for _ in range(8):
-            result = main._do_lad_computation(self._file_request())
-            assert result["success"] is True, result.get("error")
-            assert result["is_multi_return"] is True
-            lads.append(result["cells"][0]["lad"])
-        # Deterministic input → identical result every run.
-        assert max(lads) - min(lads) < 1e-6, f"LAD not stable across runs: {lads}"
+        assert result["success"] is False
+        assert "miss" in result["error"].lower()
 
 
 @pytest.mark.skipif(not os.path.isfile(_MULTI_XYZ),
@@ -768,9 +748,12 @@ class TestMultiReturnImportColumnMapping:
 
     def test_session_path_recovers_multireturn_lad(self, tmp_path):
         """End-to-end through the SESSION feed (the real UI path): import the
-        fixture via the column plan, build a session, then run LAD with
-        session_id. Must run the multi-return algorithm and recover LAD ~2.0 —
-        not the ~0.11 the zeroed-column regression produced."""
+        fixture via the column plan, build a session, run the explicit Backfill
+        Misses step (the fixture carries a timestamp but no recorded misses, and
+        LAD no longer gapfills silently), then run LAD with session_id. Must run
+        the multi-return algorithm and recover LAD ~2.0 — not the ~0.11 the
+        zeroed-column regression produced."""
+        import asyncio
         pytest.importorskip("pyhelios")
         import laspy  # noqa: F401  (session create needs it)
 
@@ -810,6 +793,31 @@ class TestMultiReturnImportColumnMapping:
         with main._cloud_session_lock:
             main._cloud_sessions["testmr01"] = sess
         try:
+            # Backfill Misses first: recover the sky points from the timestamp and
+            # persist them in the session, the way the UI step does. The endpoint
+            # streams PHP1 markers + a JSON tail; drain it to the result dict.
+            import json as _json
+            resp = asyncio.run(main.backfill_cloud_misses(
+                "testmr01",
+                main.BackfillMissesRequest(
+                    origin=_FIXTURE_ORIGIN, n_theta=800, n_phi=1600,
+                    theta_min=0, theta_max=180, phi_min=0, phi_max=360)))
+
+            async def _collect():
+                return b"".join([c if isinstance(c, (bytes, bytearray)) else c.encode()
+                                 async for c in resp.body_iterator])
+            raw = asyncio.run(_collect())
+            i = 0
+            while i + 8 <= len(raw) and raw[i:i + 4] == b"PHP1":
+                mlen = int.from_bytes(raw[i + 4:i + 8], "little")
+                i += 8 + mlen
+            while i < len(raw) and raw[i:i + 1] in (b" ", b"\n", b"\t"):
+                i += 1
+            bf = _json.loads(raw[i:])
+            assert bf["has_misses"] is True
+            assert bf["backfilled"] > 0
+            assert sess.backfilled_misses is not None
+
             scan = main.HeliosScanEntry(
                 session_id="testmr01", origin=_FIXTURE_ORIGIN,
                 n_theta=800, n_phi=1600, theta_min=0, theta_max=180,
@@ -824,7 +832,6 @@ class TestMultiReturnImportColumnMapping:
 
         assert result["success"] is True, result.get("error")
         assert result["return_mode"] == "multi"
-        assert not result.get("warnings"), result.get("warnings")
         assert result["cells"][0]["lad"] == pytest.approx(2.0, rel=0.15)
 
 

@@ -2,9 +2,9 @@ import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -17,6 +17,7 @@ import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenera
 import { TriangulationPopup, type TriangulationStartArgs } from './TriangulationPopup';
 import type { GridOption } from '../lib/gridOption';
 import { LADPopup, type LADTriangulationOption } from './LADPopup';
+import { BackfillMissesPopup } from './BackfillMissesPopup';
 import { Toolbar } from './Toolbar';
 import { StitchDialog } from './StitchDialog';
 import { AlignDialog } from './AlignDialog';
@@ -39,7 +40,7 @@ import StatusPill from './StatusPill';
 import { type ScanParameters } from '../lib/scanParameters';
 import { poseStreamToWire } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
-import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName } from '../lib/scan';
+import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, isBackfillEligible, scanHasKnownOrigin } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -1063,6 +1064,15 @@ export default function PointCloudViewer({
   const lastMeshPositionRef = useRef<string>(''); // Track mesh position for debounced updates
   // ICP (Iterative Closest Point) snap-to-fit state
   const [isRunningICP, setIsRunningICP] = useState(false);
+  // Backfill Misses: a setup modal (scan picker) + a streamed StatusPill progress
+  // bar, mirroring the Triangulation / LAD pattern.
+  const [showBackfillPopup, setShowBackfillPopup] = useState(false);
+  const [isBackfillRunning, setIsBackfillRunning] = useState(false);
+  const [backfillProgress, setBackfillProgress] = useState<{ label: string; value: number | null } | null>(null);
+  const backfillAbortRef = useRef<AbortController | null>(null);
+  // Stops the synthetic-progress ticker for the opaque gapfill stage. Set while a
+  // backfill runs so Cancel can clear the interval, not just abort the fetch.
+  const backfillSynthStopRef = useRef<(() => void) | null>(null);
 
   // Shift key tracking for mixed selection (cloud + mesh together)
   const isShiftHeldRef = useRef(false);
@@ -2459,6 +2469,155 @@ export default function PointCloudViewer({
     }
   }, [clouds, onUpdateCloud]);
 
+  // Recover sky/miss points (beams that returned nothing) for the selected
+  // session-backed scans and persist them in the backend session, so they can be
+  // visualised and consumed by LAD (which no longer gapfills silently). Misses are
+  // reconstructed from the scan's timestamp and/or row/column grid. This mutates
+  // the backend session in place — a destructive boundary, not a reversible
+  // transaction. Per-scan loop with an aggregate skip summary for multi-select.
+  // Run by the Backfill Misses modal (and the LAD banner). Recovers sky/miss
+  // points for the given scans, streaming per-stage progress into a StatusPill
+  // like Triangulation / LAD. `showAfter` reveals the overlay on completion (only
+  // for scans with a known scanner origin — the modal already gates it).
+  const handleBackfillMisses = useCallback(async (scanIds: string[], showAfter: boolean) => {
+    if (isBackfillRunning) return;
+    const eligible = scanIds
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => !!c)
+      .filter(c => isBackfillEligible(c) && c.data.octree?.sessionId);
+    if (eligible.length === 0) {
+      showToast({ title: 'No selected scan can be backfilled', type: 'info' });
+      return;
+    }
+
+    const abort = new AbortController();
+    backfillAbortRef.current = abort;
+    setIsBackfillRunning(true);
+    setBackfillProgress({ label: 'Backfilling misses…', value: 0 });
+
+    const n = eligible.length;
+    let totalRecovered = 0;
+    let failed = 0;
+    let anyUnplaceable = false;
+    // Last real fraction reported by the backend, so a synthetic creep (below) can
+    // resume from it and a real marker can snap the bar back onto truth.
+    let lastValue = 0;
+    // Drives the synthetic progress during the opaque gapfill stage (one C++ call,
+    // reported as null). Cleared whenever a real marker arrives or the run ends.
+    let synthTimer: ReturnType<typeof setInterval> | null = null;
+    const stopSynth = () => { if (synthTimer) { clearInterval(synthTimer); synthTimer = null; } };
+    backfillSynthStopRef.current = stopSynth;
+    try {
+      for (let i = 0; i < n; i++) {
+        const cloud = eligible[i];
+        const oct = cloud.data.octree!;
+        const origin: [number, number, number] =
+          cloud.params?.origin
+            ? [cloud.params.origin.x, cloud.params.origin.y, cloud.params.origin.z]
+            : (oct.scanOrigin ?? [0, 0, 0]);
+        const hadKnownOrigin = scanHasKnownOrigin(cloud);
+        const prefix = n > 1 ? `Scan ${i + 1} of ${n} — ` : '';
+        // The gapfill stage occupies ~[0.15, 0.9] of a scan's fraction. Map that to
+        // an overall band; the synthetic creep eases from the band's start toward
+        // (just shy of) its end, paced by the point count.
+        const bandStart = (i + 0.15) / n;
+        const bandEnd = (i + 0.85) / n;
+        // Benchmark: ~35 s for 14M points. We pace the creep a bit FASTER than the
+        // real wall-clock (~23 s for 14M here) and front-load the curve, so the bar
+        // is near the band end when the gapfill actually finishes — minimising the
+        // forward jump when the real "Storing" marker snaps it onward. Floored so a
+        // tiny cloud still animates briefly rather than snapping.
+        const estimatedMs = Math.max(1200, cloud.data.pointCount / 600);
+
+        // Blend the per-scan index with the streamed stage fraction into one
+        // overall 0..1 bar. A real fraction snaps the bar onto truth (and stops any
+        // synthetic creep); a null fraction (the opaque gapfill) starts the creep.
+        const report = (p: number | null, msg: string) => {
+          if (p != null) {
+            stopSynth();
+            lastValue = (i + p) / n;
+            setBackfillProgress({ label: `${prefix}${msg}`, value: lastValue });
+            return;
+          }
+          // Indeterminate stage → ease asymptotically from bandStart toward bandEnd
+          // over ~estimatedMs, never quite reaching the end (real completion does).
+          const t0 = performance.now();
+          const span = bandEnd - bandStart;
+          setBackfillProgress({ label: `${prefix}${msg}`, value: Math.max(lastValue, bandStart) });
+          stopSynth();
+          synthTimer = setInterval(() => {
+            const elapsed = performance.now() - t0;
+            // 1 - e^(-t/τ) approaches 1 asymptotically; τ = estimatedMs/3 reaches
+            // ~95% of the band at the (already-shortened) estimate, ~98% at 1.5×
+            // over — so the bar sits close to the band end before the real marker.
+            const eased = 1 - Math.exp(-elapsed / (estimatedMs / 3));
+            const value = bandStart + span * eased;
+            setBackfillProgress({ label: `${prefix}${msg}`, value });
+          }, 100);
+        };
+        try {
+          const res = await backfillMisses(oct.sessionId!, origin, undefined, abort.signal, report);
+          stopSynth();  // the request resolved — no more synthetic creep for this scan
+          if (abort.signal.aborted) return;
+          if (res.error) {
+            failed += 1;
+            showToast({ title: `Backfill Misses failed for ${cloud.data.fileName ?? cloud.id}`, message: res.error, type: 'error' });
+            continue;
+          }
+          totalRecovered += res.backfilled;
+          // Reflect the recovered misses on the scan: gate the overlay toggle and
+          // bump missRefresh so MissOverlay refetches even though cacheId is
+          // unchanged. Don't fabricate a scanOrigin from a placeholder.
+          report(1.0, 'Loading miss overlay…');
+          onUpdateCloud(cloud.id, {
+            ...cloud.data,
+            octree: { ...oct, hasMisses: true, missRefresh: (oct.missRefresh ?? 0) + 1 },
+          });
+          // Auto-enable the overlay only when requested AND drawable (known origin).
+          if (showAfter && hadKnownOrigin) {
+            if (!cloud.showMisses) onToggleMisses?.(cloud.id);
+          } else if (!hadKnownOrigin) {
+            anyUnplaceable = true;
+          }
+          // Destructive boundary: the backend session now holds the misses.
+          scene.boundary([cloud.id]);
+        } catch (err) {
+          stopSynth();
+          if (abort.signal.aborted) return;
+          failed += 1;
+          showToast({
+            title: `Backfill Misses failed for ${cloud.data.fileName ?? cloud.id}: ${err instanceof Error ? err.message : String(err)}`,
+            type: 'error',
+          });
+        }
+      }
+    } finally {
+      stopSynth();
+      backfillSynthStopRef.current = null;
+      setIsBackfillRunning(false);
+      setBackfillProgress(null);
+      backfillAbortRef.current = null;
+    }
+
+    if (failed < n) {
+      showToast({
+        title: `Recovered ${totalRecovered.toLocaleString()} sky/miss point(s)`,
+        message: anyUnplaceable
+          ? 'Misses are ready for leaf-area density. They can’t be shown in the viewer without a scanner origin — add scan parameters to visualize them.'
+          : undefined,
+        type: 'success',
+      });
+    }
+  }, [clouds, isBackfillRunning, onUpdateCloud, onToggleMisses]);
+
+  const cancelBackfill = useCallback(() => {
+    backfillSynthStopRef.current?.();
+    backfillAbortRef.current?.abort();
+    setIsBackfillRunning(false);
+    setBackfillProgress(null);
+    backfillAbortRef.current = null;
+  }, []);
+
   // Build the crop_octree args (region + scalarFilters + translation) for an
   // octree-backed cloud from its active filters. X/Y/Z range filters become a
   // box region (full extent on any disabled axis); enabled scalar filters
@@ -3291,6 +3450,7 @@ export default function PointCloudViewer({
       { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
       { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
       { id: 'cloud-move-origin', name: 'Move to Origin', keywords: ['center', 'zero', 'reset position'], action: () => handleMoveToOrigin(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: CircleDot },
+      { id: 'cloud-backfill-misses', name: 'Backfill Misses', keywords: ['sky', 'miss', 'gapfill', 'lad', 'leaf area', 'transmission', 'recover', 'beam'], action: () => { closeAllToolPanels(); setShowBackfillPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'preprocess', icon: CloudFog, testId: 'tool-backfill-misses', multiInput: true },
       { id: 'cloud-align', name: 'Align Clouds (ICP)', keywords: ['register', 'icp', 'alignment', 'fit'], action: () => setShowAlignDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Globe, multiInput: true },
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true },
 
@@ -9917,7 +10077,7 @@ export default function PointCloudViewer({
                 sessionId={oct.sessionId}
                 origin={originPt}
                 pointSize={pointSize}
-                refreshKey={oct.cacheId}
+                refreshKey={`${oct.cacheId}:${oct.missRefresh ?? 0}`}
               />
             </group>
           );
@@ -10820,6 +10980,15 @@ export default function PointCloudViewer({
         />
       )}
 
+      {isBackfillRunning && (
+        <StatusPill
+          testId="backfill-running"
+          label={backfillProgress?.label ?? 'Backfilling misses…'}
+          progress={backfillProgress?.value ?? null}
+          onCancel={cancelBackfill}
+        />
+      )}
+
       {/* Modal transform indicator (Blender-style T/S) */}
       {transformModal && (() => {
         const axisLabel: Record<typeof transformModal.axis, string> = {
@@ -11192,18 +11361,29 @@ export default function PointCloudViewer({
                         <EyeOff className="w-3 h-3 text-neutral-600" />
                       )}
                     </button>
-                    {scan.data?.octree?.hasMisses && onToggleMisses && (
-                      <button
-                        data-testid={`scan-toggle-misses-${scan.id}`}
-                        onClick={(e) => { e.stopPropagation(); onToggleMisses(scan.id); }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title={scan.showMisses ? 'Hide sky/miss points' : 'Show sky/miss points'}
-                      >
-                        <CircleDot
-                          className={`w-3 h-3 ${scan.showMisses ? 'text-amber-500' : 'text-neutral-600'}`}
-                        />
-                      </button>
-                    )}
+                    {scan.data?.octree?.hasMisses && onToggleMisses && (() => {
+                      // Misses can only be drawn when the scan has a known scanner
+                      // origin (the overlay relocates them onto a sphere about that
+                      // apex). Without one — e.g. a plain XYZ import whose misses
+                      // were backfilled — the toggle is shown but disabled, with a
+                      // tooltip explaining the misses exist but can't be placed.
+                      const canShow = scanHasKnownOrigin(scan);
+                      return (
+                        <button
+                          data-testid={`scan-toggle-misses-${scan.id}`}
+                          onClick={(e) => { e.stopPropagation(); if (canShow) onToggleMisses(scan.id); }}
+                          disabled={!canShow}
+                          className={`p-1 rounded ${canShow ? 'hover:bg-neutral-600 cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
+                          title={canShow
+                            ? (scan.showMisses ? 'Hide sky/miss points' : 'Show sky/miss points')
+                            : 'Sky/miss points were computed but can’t be visualized without scanner origin info. Add scan parameters (scanner position) to enable.'}
+                        >
+                          <CircleDot
+                            className={`w-3 h-3 ${scan.showMisses && canShow ? 'text-amber-500' : 'text-neutral-600'}`}
+                          />
+                        </button>
+                      );
+                    })()}
                     {!scanHasData && (
                       <button
                         data-testid={`scan-attach-data-${scan.id}`}
@@ -13229,6 +13409,15 @@ export default function PointCloudViewer({
         initialSelectedIds={selectedScanIds}
         defaultLmax={[...meshes].reverse().find(m => m.triangleFilter)?.triangleFilter?.lmax}
         defaultMaxAspectRatio={[...meshes].reverse().find(m => m.triangleFilter)?.triangleFilter?.maxAspectRatio}
+        onBackfill={(ids) => { void handleBackfillMisses(ids, /* showAfter */ false); }}
+      />
+      <BackfillMissesPopup
+        isOpen={showBackfillPopup}
+        onClose={() => setShowBackfillPopup(false)}
+        scans={scans}
+        initialSelectedIds={selectedIds}
+        inProgress={isBackfillRunning}
+        onStart={(ids, showAfter) => { void handleBackfillMisses(ids, showAfter); }}
       />
 
       {/* Multi-input tool dialogs — pick their own inputs, seeded from the

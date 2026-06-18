@@ -184,6 +184,7 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
             { label: 'Filter Points', click: () => send({ kind: 'tool', toolId: 'cloud-filter' }) },
             { label: 'Resample Point Cloud', click: () => send({ kind: 'tool', toolId: 'cloud-resample' }) },
             { label: 'Move to Origin', click: () => send({ kind: 'tool', toolId: 'cloud-move-origin' }) },
+            { label: 'Backfill Misses', click: () => send({ kind: 'tool', toolId: 'cloud-backfill-misses' }) },
             { type: 'separator' },
             { label: 'Align Clouds (ICP)…', click: () => send({ kind: 'tool', toolId: 'cloud-align' }) },
             { label: 'Stitch Clouds…', click: () => send({ kind: 'tool', toolId: 'cloud-stitch' }) },

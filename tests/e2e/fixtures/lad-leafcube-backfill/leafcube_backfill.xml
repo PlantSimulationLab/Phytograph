@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+
+<!--
+  Full-waveform synthetic scan of the lidar plugin's
+  leaf_cube_LAI2_lw0_01_spherical geometry (LAI=2), with the sky/miss returns
+  REMOVED. Derived from lad-leafcube-multi/leafcube_multi.xyz by dropping every
+  row tagged target_index == 99 (the Helios miss sentinel). So the scan carries
+  per-pulse timestamps but NO recorded misses and NO miss sentinel — import does
+  not auto-detect any, and the "Show misses" toggle is absent until the explicit
+  Backfill Misses step reconstructs them from the timestamp grid (~42k misses).
+
+  Used by tests/e2e/backfill-misses.spec.ts to drive the Backfill Misses → LAD
+  workflow. The 1x1x1 m voxel at (0,0,0.5) has true LAD=2.0 m^2/m^3.
+-->
+
+<helios>
+
+<scan>
+  <filename> leafcube_backfill.xyz </filename>
+  <ASCII_format> x y z timestamp target_index target_count </ASCII_format>
+  <origin> -5.000000 0.000000 0.500000 </origin>
+  <size> 800 1600 </size>
+</scan>
+
+</helios>

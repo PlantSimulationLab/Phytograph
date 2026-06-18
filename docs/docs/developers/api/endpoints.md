@@ -198,7 +198,20 @@ sessions from the array. All of it is file-read-free after import.
 | POST | `/api/cloud/session/{id}/extract` | `main.py` | Create a NEW child session from the filter-selected points, parent untouched. Powers ground/tree "split into clouds" |
 | POST | `/api/cloud/session/{id}/segment_ground` | `main.py` | Run CSF on the array, append a `ground_class` column, rebuild from arrays |
 | POST | `/api/cloud/session/{id}/segment_trees` | `main.py` | Run TreeIso on the array, append a `tree_instance` column, rebuild from arrays |
+| GET | `/api/cloud/session/{id}/misses` | `main.py` | Return the session's sky/miss points for the overlay as a PHB1 binary frame. With an `origin_*` query, projects each miss onto a sphere just beyond the farthest hit; without, returns true stored coords. Unions any explicitly backfilled misses |
+| POST | `/api/cloud/session/{id}/backfill-misses` | `main.py` | Recover sky/miss points and persist them in a lightweight per-session buffer (`CloudSession.backfilled_misses`). Builds an ephemeral PyHelios cloud from the surviving points, runs `gapfillMisses()` (auto-selects the row/column or timestamp path; `row_index`/`column_index` are relabelled to the bare `row`/`column` keys the C++ dispatcher probes), and slices the synthesised misses via the bulk getters. Hit arrays are untouched. Session-resolve + eligibility run up front (404 / 400-when-no-timestamp-or-grid); the heavy build/gapfill/extract **streams PHP1 progress markers** ahead of the JSON tail (`_do_backfill_misses` + `_bin_frame_streaming_response`) so the renderer shows a per-stage progress bar. Short-circuits (plain JSON) when the scan already has misses; a Helios reconstruction failure (too-sparse grid) returns an `error` field in the JSON tail rather than a 500 |
 | DELETE | `/api/cloud/session/{id}` | `main.py` | Free the session's in-RAM arrays (called when a cloud is removed from the scene) |
+
+!!! note "LAD requires misses — no silent gapfill"
+    `/api/lad/compute` no longer recovers misses on the fly. A scan must already
+    carry sky/miss points — retained by the source format (E57 / structured PLY)
+    or recovered up front via `backfill-misses`, which persists them so
+    `_session_to_lad_arrays` appends them to the LAD cloud. If none are present
+    the endpoint returns a structured `success: false` error directing the user
+    to Backfill Misses (the Helios C++ `calculateLeafArea` fail-fast still
+    backstops). This applies to every LAD source path, including the
+    non-session `file_path` / inline-`points` paths, which have no backfill step
+    and therefore must ship recorded misses.
 
 ## Registration & comparison
 
