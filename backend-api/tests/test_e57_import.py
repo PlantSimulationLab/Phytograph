@@ -19,8 +19,6 @@ import pytest
 
 import main
 
-from tests.binframe import decode_misses
-
 pye57 = pytest.importorskip("pye57")
 laspy = pytest.importorskip("laspy")
 
@@ -222,12 +220,16 @@ async def test_create_session_keeps_misses_out_of_octree(tmp_path, monkeypatch):
     def _fake_build(las_path, extra_dims_meta):
         with laspy.open(str(las_path)) as r:
             las = r.read()
-        captured["n"] = len(las.x)
-        captured["bbox"] = (
-            float(np.min(las.x)), float(np.max(las.x)),
-            float(np.min(las.y)), float(np.max(las.y)),
-            float(np.min(las.z)), float(np.max(las.z)),
-        )
+        # Create builds TWO octrees: the hits octree first (this capture), then a
+        # separate projected-miss octree. Capture only the FIRST (hits) build —
+        # that's the one this test asserts is hits-only and tightly bounded.
+        if "n" not in captured:
+            captured["n"] = len(las.x)
+            captured["bbox"] = (
+                float(np.min(las.x)), float(np.max(las.x)),
+                float(np.min(las.y)), float(np.max(las.y)),
+                float(np.min(las.z)), float(np.max(las.z)),
+            )
         return "fakecache", tmp_path / "cache", {"point_count": len(las.x)}
 
     monkeypatch.setattr(main, "_build_octree_from_las", _fake_build)
@@ -252,9 +254,10 @@ async def test_create_session_keeps_misses_out_of_octree(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_misses_endpoint_projects_just_beyond_farthest_hit(tmp_path, monkeypatch):
     """With a scanner origin supplied, misses are projected onto a sphere centred
-    on that origin at a radius JUST BEYOND the farthest hit (so they always clear
-    the cloud), using the stored beam direction. The fixture's hits sit 5.0 from
-    the origin; misses must land at 5.0 * the 5% margin."""
+    on that origin at a radius JUST BEYOND the farthest hit — a THIN halo hugging
+    the cloud (so the LOD-streamed miss octree stays inside the camera's framing
+    of the hits and isn't frustum-culled). The fixture's hits sit 5.0 from the
+    origin; misses land at 5.0 + a small margin."""
     src = tmp_path / "scan.e57"
     _write_e57(src, with_misses=True)
     monkeypatch.setattr(
@@ -265,18 +268,16 @@ async def test_misses_endpoint_projects_just_beyond_farthest_hit(tmp_path, monke
     res = await main.create_cloud_session(req)
     sid = res["session_id"]
 
-    out = await decode_misses(await main.get_cloud_misses(
-        sid, origin_x=_ORIGIN[0], origin_y=_ORIGIN[1], origin_z=_ORIGIN[2]))
-    assert out["count"] == 2
-    # Radius clears the farthest hit by a depth-scaled margin so the miss shell
-    # reads as a distinct halo well outside the cloud, not a band hugging its far
-    # surface: radius = max(far + depth, far*1.4, far + 1.0). All hits here sit at
-    # exactly 5.0 from the origin (depth == 0), so the far*1.4 floor wins → 7.0.
+    sess = main._cloud_sessions[sid]
+    pos, radius = main._gather_miss_positions(sess, list(_ORIGIN))
+    assert pos.shape[0] == 2
+    # radius = far + max(0.05*depth, 0.05*far, 0.05). All hits here sit at exactly
+    # 5.0 from the origin (depth == 0), so the 0.05*far term wins → 5.0 + 0.25.
     far = 5.0
-    assert out["radius"] == pytest.approx(far * 1.4, rel=1e-4)
-    pos = np.array(out["positions"]).reshape(-1, 3)
+    margin = max(0.05 * 0.0, 0.05 * far, 0.05)
+    assert radius == pytest.approx(far + margin, rel=1e-4)
     dist = np.linalg.norm(pos - _ORIGIN, axis=1)
-    assert np.allclose(dist, out["radius"], rtol=1e-4)
+    assert np.allclose(dist, radius, rtol=1e-4)
     assert float(dist.min()) > far  # strictly outside the farthest hit
 
 
@@ -296,10 +297,10 @@ async def test_misses_endpoint_no_origin_returns_true_coords(tmp_path, monkeypat
     res = await main.create_cloud_session(main.CloudSessionCreateRequest(source_path=str(src)))
     sid = res["session_id"]
 
-    out = await decode_misses(await main.get_cloud_misses(sid))  # no origin params
-    assert out["count"] == 2
-    assert out["radius"] == 0.0  # signals "true coords, not a projection"
-    pos = np.array(out["positions"]).reshape(-1, 3)
+    sess = main._cloud_sessions[sid]
+    pos, radius = main._gather_miss_positions(sess, None)  # no origin
+    assert pos.shape[0] == 2
+    assert radius == 0.0  # signals "true coords, not a projection"
     # Misses keep their true far-field range (~20 km), NOT the hit radius (~5.0).
     dist = np.linalg.norm(pos - _ORIGIN, axis=1)
     assert np.allclose(dist, main._MISS_GAP_DISTANCE, rtol=1e-4)
@@ -325,12 +326,12 @@ async def test_unplaceable_misses_warned_and_not_drawn(tmp_path, monkeypatch):
 
     # The frontend always passes the scan origin (params.origin / scan_origin).
     o = res["scan_origin"]
-    out = await decode_misses(await main.get_cloud_misses(
-        res["session_id"], origin_x=o[0], origin_y=o[1], origin_z=o[2]))
-    # None drawn (all unplaceable sit AT the scan origin) but total is reported.
-    assert out["count"] == 0
-    assert out["total"] == 2
-    assert out["positions"] == []
+    sess = main._cloud_sessions[res["session_id"]]
+    pos, _radius = main._gather_miss_positions(sess, list(o))
+    # None placeable (all unplaceable sit AT the scan origin, no beam direction),
+    # so the miss octree would be empty — and the create response already carried
+    # the warning + flagged total above.
+    assert pos.shape[0] == 0
 
 
 def test_e57_preview_omits_is_miss_but_shows_intensity(tmp_path):

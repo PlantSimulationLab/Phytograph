@@ -7,7 +7,7 @@ import {
 } from './scannerModels';
 
 describe('scannerModels catalog', () => {
-  it('exposes generic plus the six bundled instruments', () => {
+  it('exposes generic plus the seven bundled instruments', () => {
     const ids = SCANNER_MODELS.map(m => m.id);
     expect(ids).toEqual([
       'generic',
@@ -17,6 +17,7 @@ describe('scannerModels catalog', () => {
       'leica_blk360_g2',
       'faro_focus_s350',
       'velodyne_hdl32e',
+      'riegl_minivux3uav',
     ]);
   });
 
@@ -113,5 +114,38 @@ describe('scannerModels catalog', () => {
     }
     expect(v.azimuthMinDeg).toBe(0);
     expect(v.azimuthMaxDeg).toBe(360);
+  });
+
+  it('models the RIEGL miniVUX-3UAV as a single-channel spinning multibeam', () => {
+    const m = getScannerModel('riegl_minivux3uav').preset;
+    // One laser through a rotating mirror = the one-channel multibeam case:
+    // a single 0°-elevation beam whose azimuth sweep is the mirror rotation.
+    expect(m.pattern).toBe('spinning_multibeam');
+    expect(m.beamElevationAnglesDeg).toEqual([0]);
+    // Waveform LiDAR, up to 5 echoes/pulse → full-waveform multi-return.
+    expect(m.returnType).toBe('multi');
+    // 1.6 × 0.5 mrad divergence → scalar field takes the wide axis, as the
+    // HDL-32E does. Datasheet quotes a footprint, not an exit aperture, so —
+    // like the VZ-400i — no beam diameter is preset.
+    expect(m.beamDivergenceMrad).toBeCloseTo(1.6);
+    expect(m.beamExitDiameterM).toBeUndefined();
+    // 100 kHz PRR mode → full 360° azimuth FOV.
+    expect(m.azimuthMinDeg).toBe(0);
+    expect(m.azimuthMaxDeg).toBe(360);
+    expect(m.pulseRateHz).toBe(100000);
+    // Δφ 0.018°–0.36° selectable → 1,000–20,000 pts/rev; preset the ~0.1° mid.
+    expect(m.azimuthPoints).toBe(3600);
+  });
+
+  it('presets a datasheet-faithful azimuth resolution for both spinning sensors', () => {
+    // Spinning sensors pin a per-revolution angular step, so unlike the
+    // terrestrial rasters they preset points/revolution (still editable).
+    const velo = getScannerModel('velodyne_hdl32e').preset;
+    expect(velo.azimuthPoints).toBe(1800); // 10 Hz ≈ 0.2° setting (0.1°–0.4° range)
+    const minivux = getScannerModel('riegl_minivux3uav').preset;
+    expect(minivux.azimuthPoints).toBe(3600); // ~0.1° step
+    // The terrestrial rasters leave resolution to the user — no azimuthPoints.
+    expect(getScannerModel('riegl_vz400i').preset.azimuthPoints).toBeUndefined();
+    expect(getScannerModel('leica_p40').preset.azimuthPoints).toBeUndefined();
   });
 });

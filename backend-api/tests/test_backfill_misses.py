@@ -23,6 +23,16 @@ import pytest
 import main
 
 
+def _converter_available() -> bool:
+    """True when the PotreeConverter binary is present, so the miss-octree build
+    (which runs it) can be asserted. Off it, the build returns None by design."""
+    try:
+        main._resolve_potree_converter_path()
+        return True
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Fake PyHelios cloud modelling the gapfill contract
 # ---------------------------------------------------------------------------
@@ -224,6 +234,14 @@ def test_grid_only_session_relabels_row_column(stub_pyhelios):
     assert "row" in cloud._labels_seen and "column" in cloud._labels_seen
     assert "row_index" not in cloud._labels_seen
     assert "column_index" not in cloud._labels_seen
+    # The row/column backfill must also BUILD the projected-miss octree and return
+    # its id, so the renderer can stream the shell. (Regression: the row/col path
+    # recovered misses but showed none, because the build/return was missing or the
+    # display gated on a live scanner origin the backfilled scan didn't have.)
+    if _converter_available():
+        assert resp["miss_octree_cache_id"], "row/col backfill built no miss octree"
+        assert sess.miss_octree_cache_id == resp["miss_octree_cache_id"]
+        assert sess.backfilled_misses_stale is False
 
 
 def test_timestamp_preferred_over_grid_drops_grid_columns(stub_pyhelios):
@@ -394,12 +412,11 @@ def test_orphaned_session_404(stub_pyhelios):
 # Reader integration: the buffer flows into the misses overlay + LAD arrays
 # ---------------------------------------------------------------------------
 
-def test_get_cloud_misses_caps_overlay_count(stub_pyhelios, monkeypatch):
-    # The overlay is a display aid: a dense scan can backfill millions of misses,
-    # which bogs the renderer. get_cloud_misses subsamples to _MISS_OVERLAY_CAP.
-    # Lower the cap and hand-build a buffer above it to prove the drawn set is
-    # capped while `total` reports the full population.
-    monkeypatch.setattr(main, "_MISS_OVERLAY_CAP", 100)
+def test_gather_miss_positions_no_cap(stub_pyhelios):
+    # The miss octree streams via LOD, so there is NO subsample cap (unlike the
+    # old overlay). _gather_miss_positions must return the FULL placeable set —
+    # well above the old 200k cap conceptually; here we use a count that would
+    # have been capped by any small stride and assert every point survives.
     n = 1000
     rng = np.arange(n, dtype=np.float64)
     miss_pos = np.column_stack([rng, np.zeros(n), np.full(n, 50.0)])  # spread out
@@ -412,30 +429,18 @@ def test_get_cloud_misses_caps_overlay_count(stub_pyhelios, monkeypatch):
     }
     _register(sess)
 
-    # With an origin the misses are relocated onto a sphere AND capped. The
-    # endpoint streams a PHB1 frame; consume the iterator and decode the header to
-    # read the drawn `count` vs the full `total`.
-    import json
-
-    async def _collect():
-        resp = await main.get_cloud_misses(
-            sess.session_id, origin_x=0.0, origin_y=0.0, origin_z=5.0)
-        chunks = [chunk async for chunk in resp.body_iterator]
-        return b"".join(
-            c if isinstance(c, (bytes, bytearray)) else c.encode() for c in chunks)
-
-    body = asyncio.run(_collect())
-    # The frame may be preceded by PHP1 keepalive/progress markers; skip to PHB1.
-    idx = body.index(b"PHB1")
-    header_len = int.from_bytes(body[idx + 4:idx + 8], "little")
-    header = json.loads(body[idx + 8:idx + 8 + header_len])
-    meta = header["meta"]
-    assert meta["total"] == n            # full placeable population reported
-    assert meta["count"] <= 100          # drawn set capped
-    assert meta["count"] < n             # actually subsampled
+    # With an origin every miss is projected onto a sphere of the computed radius;
+    # none are dropped (all have a beam direction), and the FULL count is returned.
+    origin = [0.0, 0.0, 5.0]
+    relocated, radius = main._gather_miss_positions(sess, origin)
+    assert relocated.shape[0] == n          # no cap, no subsample
+    assert radius > 0
+    dists = np.linalg.norm(relocated - np.asarray(origin), axis=1)
+    assert np.allclose(dists, radius, rtol=1e-6)  # all on the sphere
 
 
-def test_get_cloud_misses_returns_buffered_positions(stub_pyhelios):
+def test_gather_miss_positions_true_coords_no_origin(stub_pyhelios):
+    # No origin → misses returned at their true stored coordinates, untouched.
     sess = _make_session(
         _TS_POSITIONS,
         {"timestamp": [1.0, 2.0, 3.0]},
@@ -444,12 +449,10 @@ def test_get_cloud_misses_returns_buffered_positions(stub_pyhelios):
     _register(sess)
     _call(sess.session_id, origin=[0, 0, 5])
 
-    # No-origin mode returns misses at their true stored coordinates.
-    resp = asyncio.run(main.get_cloud_misses(sess.session_id))
-    # The PHB1 frame body is bytes; assert the count via the buffer directly,
-    # which the overlay reads. (Frame meta count == buffer length.)
-    assert sess.backfilled_misses["positions"].shape[0] == _FakeCloud.SYNTH
-    assert resp is not None
+    positions, radius = main._gather_miss_positions(sess, None)
+    assert radius == 0.0
+    assert positions.shape[0] == _FakeCloud.SYNTH
+    assert np.allclose(positions, sess.backfilled_misses["positions"])
 
 
 def test_session_to_lad_arrays_appends_buffer_as_misses(stub_pyhelios):

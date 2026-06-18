@@ -27,8 +27,6 @@ import pytest
 
 import main
 
-from tests.binframe import decode_bin_frame
-
 
 # leafcube_multi.xyz: x y z timestamp target_index target_count. 9301 rows,
 # 2779 of them misses (target_index == 99) placed at 1001 m from origin
@@ -168,27 +166,23 @@ def test_import_autodetects_misses_and_keeps_bbox_tight(client, cache_root):
 @pytest.mark.skipif(not _converter_available(),
                     reason="PotreeConverter binary not found; npm run build:potree-converter")
 def test_miss_overlay_projects_beyond_all_hits_as_thin_shell(client, cache_root):
-    """The /misses overlay (origin supplied) must place every miss on a sphere
-    that sits CLEARLY beyond the farthest hit — not abutting/interleaving the
-    cloud — and the shell must be geometrically thin. Regression for the reported
-    "misses sit on the hit points" + "shell has thickness" bugs."""
+    """The projected misses (origin supplied) must land on a sphere that sits
+    CLEARLY beyond the farthest hit — not abutting/interleaving the cloud — and
+    the shell must be geometrically thin. Regression for the reported "misses sit
+    on the hit points" + "shell has thickness" bugs. The projection now feeds the
+    miss octree via `_gather_miss_positions` (no /misses overlay endpoint), so we
+    assert the geometry directly on that helper."""
     create = client.post(
         "/api/cloud/session/create",
         json={"source_path": str(LEAFCUBE_XYZ), "ascii_format": LEAFCUBE_FORMAT},
     ).json()
     sid = create["session_id"]
 
-    ox, oy, oz = LEAFCUBE_ORIGIN
-    res = client.get(f"/api/cloud/session/{sid}/misses",
-                     params={"origin_x": ox, "origin_y": oy, "origin_z": oz})
-    assert res.status_code == 200, res.text
-    # The /misses endpoint returns a PHB1 binary frame (count/total/origin/radius
-    # in meta; the miss positions in a flat `positions` f32 buffer).
-    meta, buffers = decode_bin_frame(res.content)
-    assert meta["count"] == EXPECTED_MISS_COUNT
+    sess = main._cloud_sessions[sid]
+    pos, radius = main._gather_miss_positions(sess, list(LEAFCUBE_ORIGIN))
+    assert pos.shape[0] == EXPECTED_MISS_COUNT
 
     origin = np.array(LEAFCUBE_ORIGIN)
-    pos = buffers["positions"].reshape(-1, 3)
     r = np.linalg.norm(pos - origin, axis=1)
 
     # Farthest hit distance from the origin (the cloud's outer radius).
@@ -196,11 +190,14 @@ def test_miss_overlay_projects_beyond_all_hits_as_thin_shell(client, cache_root)
     hits = sess.positions[sess.extras[main._MISS_SLUG] == 0]
     far_hit = float(np.max(np.linalg.norm(hits - origin, axis=1)))
 
-    # Every projected miss is strictly beyond the farthest hit, with a GENEROUS
-    # halo (not a band hugging the cloud's far surface). For the leaf cube the
-    # margin is ~2 m on a ~5.5 m cloud; require well over 1 m so a regression to
-    # the old tiny multiplier is caught.
+    # Every projected miss is strictly beyond the farthest hit, but as a THIN halo
+    # HUGGING the cloud — not a generous shell parked far outside it. The far shell
+    # was the bug: the LOD-streamed miss octree is frustum-culled like any cloud,
+    # so a shell beyond the camera's framing of the hits renders nothing. The
+    # margin is small + bounded (radius = far + max(0.05*depth, 0.05*far, 0.05)).
     assert r.min() > far_hit, "misses interleave with the hit cloud"
-    assert (r.min() - far_hit) > 1.0, "miss shell sits too close to the cloud"
+    margin = r.min() - far_hit
+    assert margin > 0.0
+    assert margin < 0.25 * far_hit, "miss shell too far out — would be frustum-culled"
     # And the shell is thin: all misses share one radius (a sphere, not a slab).
     assert (r.max() - r.min()) < 1e-3

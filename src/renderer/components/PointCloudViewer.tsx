@@ -40,7 +40,7 @@ import StatusPill from './StatusPill';
 import { type ScanParameters } from '../lib/scanParameters';
 import { poseStreamToWire } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
-import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, isBackfillEligible, scanHasKnownOrigin } from '../lib/scan';
+import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, isBackfillEligible } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -82,7 +82,7 @@ import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalS
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
-import { MissOverlay } from './viewer/renderers/MissOverlay';
+import { MissOctree } from './viewer/renderers/MissOctree';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
 import { VoxelGridOverlay } from './viewer/renderers/VoxelGridOverlay';
@@ -1769,21 +1769,37 @@ export default function PointCloudViewer({
   // only the derived octree was rebuilt). Pass `sessionIdOverride` for a NEW
   // child cloud (split leftover / extracted class) so it routes its own edits.
   const buildSessionOctreeData = useCallback((
-    result: OctreeMetadata & { cache_id: string; point_count: number },
+    result: OctreeMetadata & { cache_id: string; point_count: number; miss_octree_cache_id?: string | null },
     octreeInfo: NonNullable<PointCloudData['octree']>,
     fileName: string,
     sessionIdOverride?: string | null,
-  ): PointCloudData => buildPointCloudFromOctree(
-    { ...result, cache_dir: result.cache_dir ?? '', cached: false },
-    octreeInfo.sourceXyzPath,
-    fileName,
-    octreeInfo.asciiFormat ?? null,
-    octreeInfo.columnPlan ?? null,
-    octreeInfo.categoricalAttributes,
-    sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
-    octreeInfo.worldShift ?? null,
-    octreeInfo.continuousAttributes,
-  ), []);
+  ): PointCloudData => {
+    const data = buildPointCloudFromOctree(
+      { ...result, cache_dir: result.cache_dir ?? '', cached: false },
+      octreeInfo.sourceXyzPath,
+      fileName,
+      octreeInfo.asciiFormat ?? null,
+      octreeInfo.columnPlan ?? null,
+      octreeInfo.categoricalAttributes,
+      sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
+      octreeInfo.worldShift ?? null,
+      octreeInfo.continuousAttributes,
+    );
+    // A bake/filter/segment result carries the new hits octree (+ miss octree id)
+    // but NOT has_misses/scanOrigin/scanParams — those are scan-level facts set at
+    // create. Carry them forward from the prior OctreeRef so a bake never drops
+    // the "Show misses" toggle or the projection origin. The miss octree id comes
+    // from the result when present (bake/backfill rebuild it), else is preserved.
+    if (data.octree) {
+      data.octree.hasMisses = octreeInfo.hasMisses;
+      data.octree.scanOrigin = octreeInfo.scanOrigin;
+      data.octree.scanParams = octreeInfo.scanParams;
+      data.octree.missOctreeCacheId = 'miss_octree_cache_id' in result
+        ? (result.miss_octree_cache_id ?? null)
+        : octreeInfo.missOctreeCacheId;
+    }
+    return data;
+  }, []);
 
   // Duplicate a scan — its point data AND any scan-parameter metadata — into a
   // fully independent copy. Three flavors:
@@ -2059,6 +2075,17 @@ export default function PointCloudViewer({
             if (result.remaining_count === 0) {
               emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
               return;
+            }
+            // A crop that touched a cloud with separately-backfilled misses leaves
+            // them stale (gap-filled against the pre-crop hits). We keep them but
+            // warn so the user re-runs Backfill Misses before LAD.
+            if (result.backfilled_misses_stale) {
+              showToast({
+                type: 'warning',
+                title: 'Sky/miss points are now stale',
+                message: `Misses for ${src.fileName || 'this cloud'} were computed before this crop. `
+                  + 'Re-run Backfill Misses on the cropped cloud before estimating leaf-area density.',
+              });
             }
             const baked = await bakeCloudSession(sessionId);
             onUpdateCloud(cloud.id, buildSessionOctreeData(baked, octreeInfo, src.fileName ?? cloud.id));
@@ -2515,7 +2542,6 @@ export default function PointCloudViewer({
           cloud.params?.origin
             ? [cloud.params.origin.x, cloud.params.origin.y, cloud.params.origin.z]
             : (oct.scanOrigin ?? [0, 0, 0]);
-        const hadKnownOrigin = scanHasKnownOrigin(cloud);
         // Forward the scan's REAL angular raster so the C++ gapfiller reconstructs
         // misses over the actual scan grid/sweep — not a point-count estimate that
         // assumes a full 0–180°/0–360° sweep (which fabricates a 360° ring of sky
@@ -2585,18 +2611,27 @@ export default function PointCloudViewer({
             continue;
           }
           totalRecovered += res.backfilled;
-          // Reflect the recovered misses on the scan: gate the overlay toggle and
-          // bump missRefresh so MissOverlay refetches even though cacheId is
-          // unchanged. Don't fabricate a scanOrigin from a placeholder.
-          report(1.0, 'Loading miss overlay…');
+          // Reflect the recovered misses on the scan: gate the toggle and adopt
+          // the rebuilt miss octree (its fresh sha1 remounts MissOctree even
+          // though the hits cacheId is unchanged). Don't fabricate a scanOrigin
+          // from a placeholder.
+          report(1.0, 'Loading miss points…');
+          const rebuiltMissCacheId = res.miss_octree_cache_id ?? oct.missOctreeCacheId ?? null;
           onUpdateCloud(cloud.id, {
             ...cloud.data,
-            octree: { ...oct, hasMisses: true, missRefresh: (oct.missRefresh ?? 0) + 1 },
+            octree: {
+              ...oct,
+              hasMisses: true,
+              missOctreeCacheId: rebuiltMissCacheId,
+            },
           });
-          // Auto-enable the overlay only when requested AND drawable (known origin).
-          if (showAfter && hadKnownOrigin) {
+          // Auto-enable the shell when requested AND the miss octree was actually
+          // built (row/col + timestamp paths both build it; the projection is
+          // baked in, so a live scanner origin is no longer required to show it).
+          // It's only undrawable when every recovered miss was unplaceable.
+          if (showAfter && rebuiltMissCacheId) {
             if (!cloud.showMisses) onToggleMisses?.(cloud.id);
-          } else if (!hadKnownOrigin) {
+          } else if (!rebuiltMissCacheId) {
             anyUnplaceable = true;
           }
           // Destructive boundary: the backend session now holds the misses.
@@ -2623,7 +2658,7 @@ export default function PointCloudViewer({
       showToast({
         title: `Recovered ${totalRecovered.toLocaleString()} sky/miss point(s)`,
         message: anyUnplaceable
-          ? 'Misses are ready for leaf-area density. They can’t be shown in the viewer without a scanner origin — add scan parameters to visualize them.'
+          ? 'Misses are ready for leaf-area density. Some scans’ misses couldn’t be placed for display (no recovered beam direction), so the viewer shows none for those.'
           : undefined,
         type: 'success',
       });
@@ -4913,10 +4948,10 @@ export default function PointCloudViewer({
     }
 
     // When the backend recorded misses it routed this scan through a cloud
-    // session; attach a minimal octree ref carrying the session id + miss flag so
-    // the existing MissOverlay (auto sphere-projection) and session-backed ops
-    // (LAD, crop) work. Unlike imported octree clouds, the synthetic cloud still
-    // renders from its in-memory `positions` above — the session is only the
+    // session; attach a minimal octree ref carrying the session id + miss flag +
+    // the projected-miss octree id so the MissOctree overlay and session-backed
+    // ops (LAD, crop) work. Unlike imported octree clouds, the synthetic cloud
+    // still renders from its in-memory `positions` above — the session is only the
     // source of truth for misses/LAD, not the primary render.
     let octree: PointCloudData['octree'];
     const session = result.session;
@@ -4927,6 +4962,7 @@ export default function PointCloudViewer({
         sessionId: session.session_id,
         hasMisses: Boolean(session.has_misses),
         scanOrigin: session.scan_origin ?? null,
+        missOctreeCacheId: session.miss_octree_cache_id ?? null,
       };
     }
 
@@ -10064,42 +10100,29 @@ export default function PointCloudViewer({
           );
         })}
 
-        {/* Sky/miss overlays. Misses live in the backend session (not the
-            octree), so they're drawn here as a separate point set relocated onto
-            the hit cloud's bounding sphere. Rendered at absolute coordinates
-            (not inside the per-cloud translated group) so they line up with the
-            octree, which also takes its offset by prop rather than the group.
-            Shown only when the user toggles "Show misses" on a scan that has
-            miss info. */}
+        {/* Sky/miss octrees. Misses live in their OWN projected octree (not the
+            hits octree, whose bbox they'd poison), streamed flat-orange with full
+            LOD. Attached to the scene root and offset by prop (matching the hits
+            octree), so the two line up under the Translate tool. Shown only when
+            the user toggles "Show misses" on a scan that has placeable misses. */}
         {clouds.map(cloud => {
           if (!cloud.visible || !cloud.showMisses) return null;
           const oct = cloud.data?.octree;
-          if (!oct?.hasMisses || !oct.sessionId) return null;
+          if (!oct?.hasMisses) return null;
+          // Misses flagged but no octree → none were placeable (all sat at the
+          // scanner origin with no recovered beam direction). The toggle would
+          // otherwise be a silent no-op; the toast fired at toggle time explains
+          // why (see onToggleMisses). Render nothing here.
+          if (!oct.missOctreeCacheId) return null;
           const editState = getEditState(cloud.id);
-          // Prefer the scan's true scanner origin; fall back to the source's
-          // recorded scanOrigin (e.g. E57 pose). The overlay relocation is
-          // computed backend-side; passing the origin makes it project along the
-          // real beam direction.
-          // Pass the TRUE (untranslated) origin: the backend relocates misses in
-          // the cloud's own coordinate frame, and the wrapping <group> applies
-          // the same translation the octree gets, so the two stay aligned under
-          // the Translate tool.
-          const originPt = cloud.params?.origin
-            ?? (oct.scanOrigin
-              ? { x: oct.scanOrigin[0], y: oct.scanOrigin[1], z: oct.scanOrigin[2] }
-              : null);
           return (
-            <group
-              key={`miss-${cloud.id}`}
-              position={[editState.translation.x, editState.translation.y, editState.translation.z]}
-            >
-              <MissOverlay
-                sessionId={oct.sessionId}
-                origin={originPt}
-                pointSize={pointSize}
-                refreshKey={`${oct.cacheId}:${oct.missRefresh ?? 0}`}
-              />
-            </group>
+            <MissOctree
+              key={`miss-${cloud.id}-${oct.missOctreeCacheId}`}
+              missCacheId={oct.missOctreeCacheId}
+              pointSize={pointSize}
+              translation={editState.translation}
+              displayOffset={displayOffset}
+            />
           );
         })}
 
@@ -11382,21 +11405,27 @@ export default function PointCloudViewer({
                       )}
                     </button>
                     {scan.data?.octree?.hasMisses && onToggleMisses && (() => {
-                      // Misses can only be drawn when the scan has a known scanner
-                      // origin (the overlay relocates them onto a sphere about that
-                      // apex). Without one — e.g. a plain XYZ import whose misses
-                      // were backfilled — the toggle is shown but disabled, with a
-                      // tooltip explaining the misses exist but can't be placed.
-                      const canShow = scanHasKnownOrigin(scan);
+                      // The misses live in their own projected octree (built at
+                      // create/bake/backfill) — the projection is baked in, so the
+                      // toggle works whenever that octree exists, regardless of
+                      // whether a live scanner origin is still attached. The toggle
+                      // is disabled only when the misses are flagged but NO octree
+                      // was built (all unplaceable: zeroed coords, no recovered beam
+                      // direction — run Backfill Misses to recover them).
+                      const canShow = scan.data?.octree?.missOctreeCacheId != null;
                       return (
                         <button
                           data-testid={`scan-toggle-misses-${scan.id}`}
-                          onClick={(e) => { e.stopPropagation(); if (canShow) onToggleMisses(scan.id); }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!canShow) return;
+                            onToggleMisses(scan.id);
+                          }}
                           disabled={!canShow}
                           className={`p-1 rounded ${canShow ? 'hover:bg-neutral-600 cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
                           title={canShow
                             ? (scan.showMisses ? 'Hide sky/miss points' : 'Show sky/miss points')
-                            : 'Sky/miss points were computed but can’t be visualized without scanner origin info. Add scan parameters (scanner position) to enable.'}
+                            : 'Sky/miss points are flagged but have no recovered beam direction yet. Run Backfill Misses to reconstruct them from the scan grid.'}
                         >
                           <CircleDot
                             className={`w-3 h-3 ${scan.showMisses && canShow ? 'text-amber-500' : 'text-neutral-600'}`}

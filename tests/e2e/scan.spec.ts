@@ -112,6 +112,58 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
   }
 });
 
+// The azimuth point-count input can be toggled between "# points per
+// revolution" and "angular resolution (°/ray)". The stored value is always
+// azimuthPoints, so flipping the unit auto-converts the displayed number using
+// the azimuth sweep span. With a 0–360° raster sweep, 180 points ⇄ 2°/ray;
+// committing a 0.5°/ray resolution converts back to 720 points.
+test('azimuth resolution toggle converts between points and degrees per ray', async () => {
+  const { page, close } = await launchApp();
+
+  try {
+    await page.getByTestId('tool-add-scan').click();
+    const popup = page.getByTestId('scan-parameters-popup');
+    await expect(popup).toBeVisible();
+
+    // Default raster pattern, full 0–360° azimuth sweep. Set 180 points/rev.
+    const points = page.getByTestId('scan-azimuth-points');
+    await points.fill('180');
+    await points.blur();
+
+    // Toggle to °/ray: 360° / 180 = 2°/ray.
+    await page.getByTestId('scan-azimuth-mode-toggle').click();
+    const resolution = page.getByTestId('scan-azimuth-resolution');
+    await expect(resolution).toBeVisible();
+    expect(parseFloat(await resolution.inputValue())).toBeCloseTo(2, 5);
+    // The points field is hidden in resolution mode; a helper line shows the
+    // equivalent ray count over the sweep.
+    await expect(page.getByTestId('scan-azimuth-points')).toHaveCount(0);
+
+    // Type a finer resolution: 0.5°/ray over 360° ⇒ 720 points.
+    await resolution.fill('0.5');
+    await resolution.blur();
+
+    // Toggle back to points and confirm the converted count.
+    await page.getByTestId('scan-azimuth-mode-toggle').click();
+    await expect(points).toBeVisible();
+    expect(parseInt(await points.inputValue(), 10)).toBe(720);
+
+    // Submit and confirm the scan persisted the converted azimuth count
+    // (50 zenith × 720 azimuth shows in the expanded row).
+    await page.getByTestId('scan-zenith-points').fill('50');
+    await page.getByTestId('scan-label-input').fill('Resolution Scan');
+    await page.getByTestId('scan-submit').click();
+    await expect(popup).not.toBeVisible();
+
+    const row = page.getByTestId('scans-panel').locator('[data-testid="scan-row"]').first();
+    const scanId = await row.getAttribute('data-scan-id');
+    await page.getByTestId(`scan-expand-${scanId}`).click();
+    await expect(page.getByTestId(`scan-expanded-${scanId}`)).toContainText('50 × 720');
+  } finally {
+    await close();
+  }
+});
+
 // A plain click on the row that is *already the sole selection* toggles it
 // off, and clicking again re-selects it. Regression guard: the scanner-marker
 // glow used to keep its own toggle state separate from the row highlight, so

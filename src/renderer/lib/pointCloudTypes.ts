@@ -73,18 +73,20 @@ export interface OctreeRef {
   // suppressed for this cloud. See classification.ts registerContinuousSlug.
   continuousAttributes?: string[];
   // Sky/miss points (laser pulses that returned nothing). They live in the
-  // backend session for LAD but are NOT in this octree (their ~20 km coords
-  // would poison its bounding box), so they're fetched on demand and drawn as a
-  // separate overlay relocated onto the bounding sphere. `hasMisses` gates the
-  // "Show misses" toggle; `scanOrigin` (when the source carried it) is the true
-  // beam apex used to project the overlay. See getCloudMisses / MissOverlay.
+  // backend session for LAD but are NOT in THIS (hits) octree (their ~20 km
+  // coords would poison its bounding box). The backend builds them into their
+  // OWN projected octree (`missOctreeCacheId`), streamed with full LOD just like
+  // the hits — see MissOctree. `hasMisses` gates the "Show misses" toggle;
+  // `scanOrigin` (when the source carried it) is the true beam apex used both for
+  // the projection and as the Backfill Misses origin.
   hasMisses?: boolean;
   scanOrigin?: [number, number, number] | null;
-  // Bumped each time the session's misses change (e.g. after Backfill Misses
-  // recovers and persists new ones). The misses overlay keys its refetch on
-  // `${cacheId}:${missRefresh}` so a backfill that doesn't change `cacheId`
-  // still forces the overlay to reload. Absent/0 means never refreshed.
-  missRefresh?: number;
+  // sha1 of the derived projected-miss octree (built alongside the hits octree at
+  // create / bake / backfill). Streamed via app://octree/<id>/ and rendered
+  // flat-orange by MissOctree. null/absent when the scan has no placeable misses;
+  // it changes on backfill, so keying the MissOctree loader on it remounts the
+  // shell when the miss set changes (replacing the old missRefresh mechanism).
+  missOctreeCacheId?: string | null;
   // Full scan-pattern parameters recovered from the source file (E57 pose +
   // angular sweep + grid resolution; PCD VIEWPOINT origin), when present. The
   // import path turns this into the Scan's ScanParameters so a lone-file import

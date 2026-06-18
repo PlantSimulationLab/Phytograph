@@ -22,16 +22,26 @@ You need geometry in the scene to scan: typically a generated
 
 3. **Scanner model** — pick the instrument the scan represents. Choosing
    a specific model (RIEGL VZ-400i, Leica ScanStation P40, Leica BLK360
-   (G1), Leica BLK360 (G2), FARO Focus S350, or Velodyne HDL-32E) does
-   two things:
+   (G1), Leica BLK360 (G2), FARO Focus S350, Velodyne HDL-32E, or RIEGL
+   miniVUX-3UAV) does two things:
 
     - **Marks the position with that instrument's shape**, drawn to its
       real-world size (a Velodyne puck is ~14 cm; a Leica P40 ~40 cm).
     - **Auto-fills the instrument-fixed parameters** — beam optics
       (diameter and divergence), scan pattern, return type, per-channel
-      beam elevations (for the Velodyne), and the maximum angular sweep —
-      from the manufacturer's datasheet. Resolution (point counts) is
-      yours to set, and every auto-filled value stays editable.
+      beam elevations (for spinning sensors), and the maximum angular
+      sweep — from the manufacturer's datasheet. Resolution (point
+      counts) is yours to set, and every auto-filled value stays editable.
+
+    The RIEGL miniVUX-3UAV is the **single-channel** spinning case: one
+    laser folded through a 45° rotating mirror that sweeps a flat 360°
+    **plane** (not a tilted cone — that conical geometry is the separate
+    miniVUX-1DL), modelled as a spinning multibeam with a single 0° beam
+    elevation. Its datasheet pins the azimuth resolution (a 0.018°–0.36°
+    step, so 1,000–20,000 points per revolution), so unlike the
+    terrestrial scanners it also presets a points-per-revolution starting
+    value (~3,600 ≈ 0.1°). Like the Velodyne, it is a moving-platform
+    sensor and so requires a trajectory.
 
     Leave it on **Generic / custom** for an unknown or hand-tuned
     scanner; the position is marked with a plain sphere and no values are
@@ -75,6 +85,12 @@ You need geometry in the scene to scan: typically a generated
           **Azimuth points** (rays horizontally). For reference: a Riegl
           VZ-400 at fine resolution is roughly 20,000 × 30,000 rays. For
           preview work, 500 × 1000 is fast and produces a usable cloud.
+          The azimuth field has a **use °/ray** toggle: switch it to enter
+          the horizontal **angular resolution** (degrees between rays)
+          instead of a point count — handy for transcribing a datasheet
+          that quotes a step width. The two are equivalent (points =
+          sweep ÷ resolution) and the value auto-converts when you
+          toggle.
         - **Angular sweep** — min and max angular positions of the sweep;
           the range is the difference between them, so asymmetric sweeps
           are supported:
@@ -89,7 +105,11 @@ You need geometry in the scene to scan: typically a generated
         - **Azimuth (per rev)** — number of azimuth steps in one full
           revolution (the angular resolution). A spinning sensor always
           rotates a full 360°, so there is **no azimuth min/max range** —
-          just this per-revolution count.
+          just this per-revolution count. A **use °/ray** toggle lets you
+          enter the step width in degrees instead (e.g. a Velodyne
+          HDL-32E's ~0.2° at 10 Hz); over the full 360° revolution that
+          converts to points = 360 ÷ resolution, and the value
+          auto-converts when you toggle.
         - **Beam elevation angles** — a comma- or space-separated list of
           per-channel elevation angles, in **degrees above the horizon**
           (positive = above horizon, the convention on manufacturer spec

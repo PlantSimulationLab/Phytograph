@@ -869,6 +869,12 @@ export function buildPointCloudFromOctree(
       scanOrigin: 'scan_origin' in meta
         ? ((meta as { scan_origin?: [number, number, number] }).scan_origin ?? null)
         : undefined,
+      // sha1 of the projected-miss octree the backend built alongside the hits
+      // octree; streamed by MissOctree when "Show misses" is on. null when the
+      // scan has no placeable misses.
+      missOctreeCacheId: 'miss_octree_cache_id' in meta
+        ? ((meta as { miss_octree_cache_id?: string | null }).miss_octree_cache_id ?? null)
+        : undefined,
       // Full scan-pattern params recovered from the file header (E57/PCD), used
       // to auto-populate the Scan's ScanParameters at import. Absent for plain
       // OctreeMetadata callers and for files that carried no scan metadata.

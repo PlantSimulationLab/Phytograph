@@ -60,9 +60,12 @@ enough to **reconstruct** them — a per-return `timestamp` and/or
 scan-grid `row`/`column` indices — by inferring which grid cells of the
 scan raster had no return. The [Backfill Misses](../workflows/backfill-misses.md)
 step does that recovery and stores the misses on the scan, where the
-**"Show misses"** toggle in the Scans panel draws them (relocated onto the
-scan's bounding sphere, since their true coordinates are far-field). LAD
-requires misses to be present and does not recover them silently.
+**"Show misses"** toggle in the Scans panel draws them. Because their true
+coordinates are far-field (~20 km), the misses are projected onto a sphere
+just beyond the cloud and streamed as their own level-of-detail octree (the
+same streaming the hit cloud uses), so even a dense sky shell stays smooth and
+never bogs the viewer. LAD requires misses to be present and does not recover
+them silently.
 
 ## What's in the parameters
 

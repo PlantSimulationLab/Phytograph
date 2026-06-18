@@ -2530,6 +2530,10 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   miss_count?: number;
   miss_slug?: string;
   scan_origin?: [number, number, number];
+  // sha1 of the projected-miss octree the backend built alongside the hits
+  // octree (null when the scan has no placeable misses). The renderer streams it
+  // via app://octree/<id>/ with MissOctree, gated behind "Show misses".
+  miss_octree_cache_id?: string | null;
   // Full scan-pattern parameters recovered from the source file (E57 pose +
   // angular sweep + grid resolution; PCD VIEWPOINT origin). Present only when
   // the format carried them; each field is independently optional. The renderer
@@ -2542,62 +2546,6 @@ export interface CloudSessionMetadata extends OctreeMetadata {
 // scanParameters.ts (alongside the converter that turns it into ScanParameters)
 // and re-exported here so backendApi consumers get it without a second import.
 export type { ScanParamsFromFile } from '../lib/scanParameters';
-
-/** Sky/miss points for a session. With NO origin, returned at their true stored
- * coordinates; with an origin, projected onto a sphere centred on the origin at
- * a radius just beyond the farthest hit. `positions` is a flat [x,y,z, ...]
- * triple list. `count` is how many are DRAWN (placeable); `total` includes
- * unplaceable misses (flagged but with no direction yet — awaiting Helios grid
- * recovery), which are not drawn. */
-export interface CloudMissesResult {
-  count: number;
-  total: number;
-  origin: [number, number, number];
-  radius: number;
-  // Flat [x,y,z, ...] miss positions, decoded zero-copy from the PHB1 frame.
-  positions: Float32Array;
-}
-
-/**
- * Fetch a session's sky/miss points for the overlay. When an origin is passed
- * (the scan's params.origin), the backend projects each miss onto a sphere
- * centred on that origin, just beyond the farthest hit. When omitted, the
- * misses are returned at their true stored coordinates (no relocation).
- *
- * The response is a PHB1 binary frame (not JSON): a full-sphere scan can record
- * tens of millions of misses, and a JSON float list of that size took ~10s to
- * encode + parse (the "show misses" stall). The positions ride a single f32
- * buffer decoded zero-copy here.
- */
-export async function getCloudMisses(
-  sessionId: string,
-  origin?: { x: number; y: number; z: number } | null,
-): Promise<CloudMissesResult> {
-  const baseUrl = getBackendUrl();
-  const q = origin
-    ? `?origin_x=${origin.x}&origin_y=${origin.y}&origin_z=${origin.z}`
-    : '';
-  try {
-    const response = await fetch(
-      `${baseUrl}/api/cloud/session/${sessionId}/misses${q}`,
-    );
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    const { meta, buffers } = decodeBinaryFrame(await response.arrayBuffer());
-    return {
-      count: (meta.count as number) ?? 0,
-      total: (meta.total as number) ?? 0,
-      origin: (meta.origin as [number, number, number]) ?? [0, 0, 0],
-      radius: (meta.radius as number) ?? 0,
-      positions: (buffers['positions'] as Float32Array) ?? new Float32Array(0),
-    };
-  } catch (error) {
-    console.error('get_cloud_misses failed:', error);
-    throw describeBackendError(error, 'Misses');
-  }
-}
 
 /** Result of a Backfill Misses call. `backfilled` is how many sky/miss points
  * were recovered and persisted in the session; `already_had_misses` is true when
@@ -2612,6 +2560,10 @@ export interface BackfillMissesResult {
   scan_origin: [number, number, number];
   already_had_misses: boolean;
   error?: string;
+  // sha1 of the rebuilt projected-miss octree (the newly recovered misses stream
+  // in via MissOctree once the cloud's OctreeRef adopts it). Absent on the
+  // no-op/error paths, where the existing miss octree is unchanged.
+  miss_octree_cache_id?: string | null;
 }
 
 /** The angular raster of the scan being backfilled, forwarded to the backend so
@@ -2673,6 +2625,10 @@ export interface CloudSessionEditResult {
   deleted_count: number;
   remaining_count: number;
   total_count: number;
+  // True when this crop invalidated a SEPARATELY backfilled-miss buffer (it was
+  // gap-filled against the pre-crop hits, so its ratio no longer matches). The
+  // misses are kept; the renderer warns the user to re-run Backfill Misses.
+  backfilled_misses_stale?: boolean;
 }
 
 /** Result of a bake — fresh octree metadata for the survivor set. `baked` is
@@ -2681,6 +2637,10 @@ export interface CloudSessionBakeResult extends OctreeMetadata {
   session_id: string;
   point_count: number;
   baked: boolean;
+  // sha1 of the miss octree rebuilt from the baked survivors (null when no misses
+  // survive). The renderer adopts it onto the cloud's OctreeRef so the miss shell
+  // tracks the baked cloud.
+  miss_octree_cache_id?: string | null;
   // Non-fatal advisories from the operation (e.g. wood/leaf connectivity warning
   // that the base looks like un-removed ground). Surfaced as a warning toast.
   warnings?: string[];

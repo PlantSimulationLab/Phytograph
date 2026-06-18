@@ -38,16 +38,30 @@ test('imports an E57, excludes misses from the octree, and toggles the miss over
     const missToggle = page.getByTestId(`scan-toggle-misses-${scanId}`);
     await expect(missToggle).toBeVisible();
 
-    // Toggling it on must not error and must flip the control's state. The
-    // overlay itself fetches /misses and renders 5 points; we assert the toggle
-    // reflects "on" (its title switches to "Hide sky/miss points").
+    // Toggling it on streams the projected-miss OCTREE (its own app://octree/
+    // cache) into the scene. MissOctree registers the loaded cloud under
+    // window.__missOctrees keyed by its cache id, so we assert the shell actually
+    // loaded — not merely that the toggle flipped (a "didn't throw" non-test).
     await expect(missToggle).toHaveAttribute('title', 'Show sky/miss points');
     await missToggle.click();
     await expect(missToggle).toHaveAttribute('title', 'Hide sky/miss points');
+    // The octree loads + streams asynchronously; poll until the hook appears.
+    await expect
+      .poll(() => page.evaluate(() => {
+        const reg = (window as unknown as { __missOctrees?: Record<string, boolean> }).__missOctrees;
+        return reg ? Object.keys(reg).length : 0;
+      }), { timeout: 15_000 })
+      .toBeGreaterThan(0);
 
-    // And back off.
+    // And back off — the shell unmounts and its hook entry is cleaned up.
     await missToggle.click();
     await expect(missToggle).toHaveAttribute('title', 'Show sky/miss points');
+    await expect
+      .poll(() => page.evaluate(() => {
+        const reg = (window as unknown as { __missOctrees?: Record<string, boolean> }).__missOctrees;
+        return reg ? Object.keys(reg).length : 0;
+      }), { timeout: 15_000 })
+      .toBe(0);
 
     await expect(page.getByTestId('mesh-row')).toHaveCount(0);
   } finally {

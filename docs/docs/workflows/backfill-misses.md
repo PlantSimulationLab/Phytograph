@@ -43,7 +43,8 @@ re-import the scan in a format that keeps them (E57 / structured PLY).
 5. When **Show misses** was on, the **"Show misses"** toggle on each
    backfilled scan row turns on automatically and the recovered sky points
    are drawn (in a distinct colour, projected onto the scan's bounding
-   sphere). Toggle it off once you've confirmed them.
+   sphere and streamed as a level-of-detail octree, so a dense sky shell
+   stays smooth). Toggle it off once you've confirmed them.
 
 You can also trigger backfill from the **Leaf Area Density** dialog: when a
 selected scan has no misses, Compute is disabled and a banner offers a
@@ -58,6 +59,12 @@ one-click **Backfill Misses** button. See
   from the scan's points, so a sparse scan that is mostly sky doesn't
   bloat memory. They aren't exported with the point cloud; they exist to
   drive (and let you verify) the LAD inversion.
+- **Cropping a scan after backfilling marks the recovered misses stale.**
+  They were reconstructed against the pre-crop hits, so their hit/miss ratio
+  no longer matches the surviving points. Phytograph keeps them but warns you
+  — at crop time and again in the LAD result — to **re-run Backfill Misses**
+  on the cropped cloud before estimating leaf-area density. (A crop never
+  deletes sky/miss points themselves; it only removes hits.)
 - For [moving-platform scans](../concepts/scans.md#moving-platform-scans),
   misses are reconstructed from the per-return timestamps (the row/column
   path doesn't apply to a moving sweep).

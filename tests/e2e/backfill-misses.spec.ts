@@ -114,6 +114,16 @@ test('Backfill Misses recovers sky points and unblocks LAD', async () => {
     const missToggle = page.getByTestId(`scan-toggle-misses-${scanId}`);
     await expect(missToggle).toBeVisible();
     await expect(missToggle).toHaveAttribute('title', 'Hide sky/miss points');
+    // The recovered misses must actually STREAM IN as their projected octree —
+    // not just flip the toggle. MissOctree registers the loaded cloud under
+    // window.__missOctrees, so assert a shell is present (regression: backfilled
+    // misses built the octree but the viewer showed none).
+    await expect
+      .poll(() => page.evaluate(() => {
+        const reg = (window as unknown as { __missOctrees?: Record<string, boolean> }).__missOctrees;
+        return reg ? Object.keys(reg).length : 0;
+      }), { timeout: 15_000 })
+      .toBeGreaterThan(0);
 
     // --- LAD is now UNBLOCKED ----------------------------------------------
     // Re-select the scan (single-select toggles off when the scan is the whole

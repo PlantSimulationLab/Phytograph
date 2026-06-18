@@ -132,5 +132,9 @@ timestamp but no recorded misses, as for any LAD.
   triangulation; this doesn't apply to them.)
 - Segment out ground and trunk first if you only want foliage density —
   the inversion counts every return inside the grid.
+- If you **crop a scan after backfilling its misses**, the result warns that
+  the misses are stale (they were computed against the pre-crop hits, so the
+  hit/miss ratio is off). Re-run [Backfill Misses](backfill-misses.md) on the
+  cropped cloud before trusting the LAD.
 - For a single canopy-wide LAI, use a 1×1×1-cell grid sized to the whole
   canopy and read the single voxel's LAD × its height.

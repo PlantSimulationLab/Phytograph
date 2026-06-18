@@ -96,6 +96,14 @@ export function ScanParametersPopup({
   const [elevationText, setElevationText] = useState<string>(
     () => seedParams().beamElevationAnglesDeg.join(', '),
   );
+  // The azimuth ray count can be entered two equivalent ways: as a raw point
+  // count PER REVOLUTION, or as an angular step resolution (degrees between
+  // consecutive rays). Manufacturer datasheets quote the latter, so this lets a
+  // user transcribe a spec directly. The stored value is always
+  // `azimuthPoints`; this is a display-only mode, so toggling it just re-derives
+  // the shown number from the same underlying points (an auto-convert).
+  const [azimuthInputMode, setAzimuthInputMode] =
+    useState<'points' | 'resolution'>('points');
 
   // Reset form (and clear any stale import error) whenever the popup is
   // reopened so editing the same scan twice doesn't carry over stale state.
@@ -107,6 +115,7 @@ export function ScanParametersPopup({
       setElevationText(seeded.beamElevationAnglesDeg.join(', '));
       setImportError(null);
       setSubmitError(null);
+      setAzimuthInputMode('points');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initial, defaults]);
@@ -201,6 +210,34 @@ export function ScanParametersPopup({
     setParams(p => ({ ...p, [key]: Number.isFinite(v) ? Math.max(min, v) : min }));
   };
 
+  // The azimuth sweep (degrees) the point count is spread over: a full 360° for
+  // a spinning multibeam (it always completes a revolution), else the raster's
+  // azimuth min↔max span. Used to convert between a points-per-rev count and an
+  // angular step resolution (degrees/ray). Guard a degenerate zero/negative span
+  // so conversion never divides by zero.
+  const azimuthSpanDeg =
+    params.pattern === 'spinning_multibeam'
+      ? 360
+      : Math.abs(params.azimuthMaxDeg - params.azimuthMinDeg) || 360;
+  // Angular resolution (deg/ray) implied by the current point count, for display
+  // in 'resolution' mode. span / points; finer when points is larger.
+  const azimuthResolutionDeg =
+    params.azimuthPoints > 0 ? azimuthSpanDeg / params.azimuthPoints : 0;
+  // Commit a typed angular resolution by converting back to a point count
+  // (points = span / resolution, ≥ 1). DebouncedNumberInput only hands us finite
+  // values, and a non-positive resolution is meaningless, so floor those to the
+  // minimum single ray.
+  const setAzimuthResolution = (deg: number) => {
+    setParams(p => {
+      const span =
+        p.pattern === 'spinning_multibeam'
+          ? 360
+          : Math.abs(p.azimuthMaxDeg - p.azimuthMinDeg) || 360;
+      const points = deg > 0 ? Math.max(1, Math.round(span / deg)) : 1;
+      return { ...p, azimuthPoints: points };
+    });
+  };
+
   // Angular sweep min/max commit on blur/Enter (via DebouncedNumberInput), so a
   // user can type a full number like "130" without it being clamped against the
   // other field mid-keystroke. We only clamp to the physical [lo, hi] range here;
@@ -245,10 +282,12 @@ export function ScanParametersPopup({
 
   // Selecting a scanner model records the choice (drives the marker mesh) and
   // overwrites the instrument-fixed parameters with that model's preset. The
-  // preset only touches optics/pattern/return/elevations/sweep — origin, tilt,
-  // heading, and resolution (point counts) are user choices and stay as-is. Everything
-  // remains editable afterward. 'generic' carries an empty preset, so picking it
-  // just sets the mesh back to the sphere without disturbing current values.
+  // preset touches optics/pattern/return/elevations/sweep — and, for a spinning
+  // sensor whose datasheet pins a per-revolution step width, azimuthPoints too.
+  // Origin, tilt, heading, and the zenith point count are user choices and stay
+  // as-is. Everything remains editable afterward. 'generic' carries an empty
+  // preset, so picking it just sets the mesh back to the sphere without
+  // disturbing current values.
   const setModel = (id: ScannerModelId) => {
     const preset = getScannerModel(id).preset;
     setParams(p => {
@@ -559,18 +598,56 @@ export function ScanParametersPopup({
                 </div>
               )}
               <div>
-                <label className="block text-xs text-neutral-500 mb-1">
-                  {params.trajectory ? 'Azimuth (per rev)' : showRaster ? 'Azimuth' : 'Azimuth (Nphi)'}
-                </label>
-                <input
-                  data-testid="scan-azimuth-points"
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={params.azimuthPoints}
-                  onChange={setInt('azimuthPoints')}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs text-neutral-500">
+                    {azimuthInputMode === 'resolution'
+                      ? 'Azimuth (°/ray)'
+                      : params.trajectory ? 'Azimuth (per rev)' : showRaster ? 'Azimuth' : 'Azimuth (Nphi)'}
+                  </label>
+                  {/* Toggle the unit the azimuth ray count is entered in. The
+                      stored value is always azimuthPoints, so flipping the mode
+                      auto-converts the displayed number (count ⇄ deg/ray). */}
+                  <button
+                    type="button"
+                    data-testid="scan-azimuth-mode-toggle"
+                    onClick={() =>
+                      setAzimuthInputMode(m => (m === 'points' ? 'resolution' : 'points'))
+                    }
+                    title={
+                      azimuthInputMode === 'points'
+                        ? 'Entering points per revolution — switch to angular resolution (°/ray)'
+                        : 'Entering angular resolution (°/ray) — switch to points per revolution'
+                    }
+                    className="text-[11px] text-blue-400 hover:text-blue-300 focus:outline-none"
+                  >
+                    {azimuthInputMode === 'points' ? 'use °/ray' : 'use # points'}
+                  </button>
+                </div>
+                {azimuthInputMode === 'points' ? (
+                  <input
+                    data-testid="scan-azimuth-points"
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={params.azimuthPoints}
+                    onChange={setInt('azimuthPoints')}
+                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                  />
+                ) : (
+                  <DebouncedNumberInput
+                    data-testid="scan-azimuth-resolution"
+                    min={0}
+                    step="any"
+                    value={azimuthResolutionDeg}
+                    onCommit={setAzimuthResolution}
+                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                  />
+                )}
+                {azimuthInputMode === 'resolution' && (
+                  <p className="text-[11px] text-neutral-500 mt-1">
+                    ≈ {params.azimuthPoints.toLocaleString()} rays over {azimuthSpanDeg}°
+                  </p>
+                )}
               </div>
             </div>
           </div>

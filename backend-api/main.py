@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import io
 import json
-from typing import Optional, List, Dict, Any, Literal, Sequence
+from typing import Optional, List, Dict, Any, Literal, Sequence, Union, Iterable
 from scipy.optimize import curve_fit, minimize
 import re
 import math
@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.29.0"
+BACKEND_VERSION = "0.30.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -3688,6 +3688,11 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
             and np.asarray(backfilled["positions"]).shape[0] > 0):
         xyz, dirs, labels, vals, flags = _append_backfilled_misses(
             xyz, dirs, labels, vals, flags, backfilled)
+        # The backfilled buffer was computed against the hits as they were at
+        # backfill time. If a later crop removed hits, the buffer is stale (its
+        # miss ratio no longer matches the surviving hits) — surface that so the
+        # LAD endpoint can warn. Only meaningful when the buffer is actually used.
+        flags["misses_stale"] = bool(getattr(sess, "backfilled_misses_stale", False))
 
     return xyz, dirs, labels, vals, flags
 
@@ -4087,6 +4092,17 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
                     "likely to be inaccurate. Re-import a scan that carries miss "
                     "points (E57 / structured PLY) or a timestamp column so misses "
                     "can be recovered by gapfilling."
+                )
+            # Backfilled misses that predate a later crop reflect the pre-crop
+            # hits, so their ratio against the surviving hits is off and the
+            # inversion may be inaccurate. (Set by delete_region; carried through
+            # _session_to_lad_arrays.) Warn so the user re-runs Backfill Misses.
+            if scan_flags.get("misses_stale"):
+                warnings.append(
+                    f"Scan '{scan_label}' has sky/miss points that were computed "
+                    "before a later crop, so the leaf-area-density result may be "
+                    "inaccurate. Re-run Backfill Misses on the cropped cloud to "
+                    "recompute them against the current points."
                 )
 
             # Ntheta/Nphi describe the scanner's angular raster, not the surviving
@@ -5615,6 +5631,7 @@ def _create_lidar_scan_session(r: dict) -> dict:
         "miss_slug": _MISS_SLUG,
         "miss_count": miss_count,
         "scan_origin": r.get("origin"),
+        "miss_octree_cache_id": None,
     }
 
     # Build the octree from a hits-only LAS (drop ~20 km misses so the bbox /
@@ -5631,6 +5648,16 @@ def _create_lidar_scan_session(r: dict) -> dict:
     except Exception:
         import traceback
         traceback.print_exc()
+
+    # Build the SECOND (projected-miss) octree so the synthetic scan's misses
+    # stream + toggle exactly like an imported scan's. The scan origin is the
+    # scanner head; synthetic clouds carry no world shift, so it's already in the
+    # session frame. Best-effort + only when misses exist (returns None otherwise).
+    if miss_count > 0:
+        scan_origin = r.get("origin")
+        sess.miss_octree_origin = list(scan_origin) if scan_origin is not None else None
+        sess.miss_octree_cache_id = _build_miss_octree(sess, sess.miss_octree_origin)
+        out["miss_octree_cache_id"] = sess.miss_octree_cache_id
 
     return out
 
@@ -10944,13 +10971,6 @@ _LAS_MULTIRETURN_SRC = ('return_number', 'number_of_returns', 'gps_time')
 # reads them for free. The slug is pinned (case-insensitive aliases accepted on
 # import) so the renderer and LAD find it deterministically.
 _MISS_SLUG = 'is_miss'
-
-# Max sky/miss points drawn in the overlay (a display aid). A dense scan can
-# backfill millions; rendering them all drops the viewport to ~1 fps. The overlay
-# subsamples to this cap with an even stride so the shell still reads as a full
-# dome. LAD always consumes the FULL set (a separate path), so this never affects
-# the inversion — only what's drawn.
-_MISS_OVERLAY_CAP = 200_000
 _MISS_LABEL = 'Miss'
 # Aliases a source column may use for the miss flag (PLY property / E57 field).
 _MISS_ALIASES = {'is_miss', 'miss', 'sky', 'ismiss'}
@@ -13555,18 +13575,29 @@ def _dir_total_size(p: _Path) -> int:
     return total
 
 
-def _evict_octree_cache(max_bytes: int, keep: Optional[_Path] = None) -> List[str]:
+def _evict_octree_cache(max_bytes: int,
+                        keep: "Optional[Union[_Path, Iterable[_Path]]]" = None) -> List[str]:
     """Trim the octree cache to at most `max_bytes` of regular file content,
     removing oldest-accessed cache directories first. Returns the cache_ids
     that were evicted.
 
-    `keep`, if provided, is never evicted — pass the cache dir we just wrote
-    so a single fresh convert doesn't immediately drop itself when the cache
-    is at the limit.
+    `keep`, if provided, is one path OR an iterable of paths that are never
+    evicted — pass the cache dir(s) we just wrote (e.g. a hits octree AND its
+    sibling miss octree) so a fresh convert doesn't immediately drop itself when
+    the cache is at the limit.
     """
     root = _octree_cache_root()
     if not root.is_dir():
         return []
+
+    # Normalise `keep` to a set of resolved paths so callers can pass one path
+    # or several (the hits + miss octrees built in the same bake).
+    if keep is None:
+        keep_set: set = set()
+    elif isinstance(keep, _Path):
+        keep_set = {keep.resolve()}
+    else:
+        keep_set = {p.resolve() for p in keep}
 
     # Skip the .staging dirs and any non-sha1 entries (defensive against
     # files dropped in here by other tools).
@@ -13595,7 +13626,7 @@ def _evict_octree_cache(max_bytes: int, keep: Optional[_Path] = None) -> List[st
     for _, candidate in entries:
         if total <= max_bytes:
             break
-        if keep is not None and candidate.resolve() == keep.resolve():
+        if candidate.resolve() in keep_set:
             continue
         size = _dir_total_size(candidate)
         try:
@@ -14673,6 +14704,24 @@ class CloudSession:
     #   origins    (M,3) float64 — per-pulse emission points (moving scans only)
     # `is_miss` is implicitly 1 for every row, so no flag array is stored.
     backfilled_misses: Optional[dict] = None
+    # Derived projected-miss octree built alongside the hits octree (create / bake
+    # / backfill). Streamed via app://octree/<id>/ exactly like the hits octree but
+    # rendered flat-orange. None when the scan has no placeable misses, or stale
+    # until the next bake. See `_build_miss_octree`. Defaulted so the existing
+    # direct CloudSession(...) constructions need no change.
+    miss_octree_cache_id: Optional[str] = None
+    # Scanner origin (in the session's frame, world-shift already subtracted) used
+    # to project the misses onto the display sphere. Captured at create so a later
+    # bake can reproject the surviving misses without re-deriving it. None for a
+    # scan with no origin (the miss octree is then built at true coordinates).
+    miss_octree_origin: Optional[List[float]] = None
+    # True when the separate `backfilled_misses` buffer was computed BEFORE a later
+    # crop, so it reflects pre-crop geometry and would skew LAD's hit/miss ratio.
+    # Set by `delete_region` when a crop touches a cloud that has backfilled misses;
+    # cleared when Backfill Misses recomputes them. Surfaced to the user at crop
+    # time (toast) and at LAD time (warning). Only the backfilled buffer can go
+    # stale — interleaved is_miss points live in `extras` and are subset by bake.
+    backfilled_misses_stale: bool = False
 
 
 def _get_cloud_session(session_id: str) -> "CloudSession":
@@ -14826,6 +14875,123 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
             writer.header.mins = (pos.min(axis=0) - pad).tolist()
             writer.header.maxs = (pos.max(axis=0) + pad).tolist()
     return n
+
+
+def _gather_miss_positions(sess: "CloudSession",
+                           origin: Optional[List[float]]) -> tuple[np.ndarray, float]:
+    """Surviving sky/miss positions for the miss octree, in display form.
+
+    Gathers the session's interleaved misses (`extras[is_miss] != 0`, honoring
+    `~deleted`) UNION the separate `backfilled_misses` buffer — the same union
+    the old miss overlay drew. Then:
+
+    - `origin` is None → return the positions verbatim (true far-field coords),
+      radius 0. The miss octree is built at true coordinates; its own bbox keeps
+      the ~20 km extent from ever touching the hits octree's framing.
+    - `origin` supplied → project each placeable miss onto a sphere centred on
+      the origin at `radius = max(far + depth, far*1.4, far + 1.0)` (far/near are
+      the max/min HIT distance from the origin, depth = far − near), exactly the
+      projection the overlay used. Misses sitting AT the origin (no beam
+      direction yet) are dropped.
+
+    This is the projection math factored out of the former `get_cloud_misses`
+    endpoint, MINUS the _MISS_OVERLAY_CAP stride — the octree streams via LOD, so
+    there is no cap and no aliasing. Returns (positions (M,3) float64, radius).
+    """
+    with _cloud_session_lock:
+        keep = ~sess.deleted
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        if miss_arr is not None:
+            is_miss = (miss_arr != 0) & keep
+            hits = (~(miss_arr != 0)) & keep
+            miss_pos = np.ascontiguousarray(sess.positions[is_miss], dtype=np.float64)
+        else:
+            hits = keep.copy()
+            miss_pos = np.empty((0, 3), np.float64)
+        hit_pos = np.ascontiguousarray(sess.positions[hits], dtype=np.float64)
+        backfilled = sess.backfilled_misses
+        if backfilled is not None and backfilled.get("positions") is not None:
+            bf = np.ascontiguousarray(backfilled["positions"], dtype=np.float64)
+            if bf.shape[0] > 0:
+                miss_pos = np.vstack([miss_pos, bf]) if miss_pos.shape[0] else bf
+
+    if miss_pos.shape[0] == 0:
+        return np.empty((0, 3), np.float64), 0.0
+
+    if origin is None:
+        return miss_pos, 0.0
+
+    origin_arr = np.asarray(origin, dtype=np.float64)
+    if hit_pos.shape[0] > 0:
+        hit_dists = np.linalg.norm(hit_pos - origin_arr, axis=1)
+        far = float(np.max(hit_dists))
+        near = float(np.min(hit_dists))
+        # The radius must clear the FARTHEST hit by a generous margin so the miss
+        # shell reads as a distinct halo well outside the cloud — not a band
+        # hugging its far surface. The margin scales with the cloud's own radial
+        # depth (far − near) so it adapts to scene size, with a multiplicative
+        # floor (far*1.4 ≈ a 40% buffer) and a small absolute floor for near-zero-
+        # depth clouds.
+        depth = max(far - near, 0.0)
+        radius = max(far + 1.0 * depth, far * 1.4, far + 1.0)
+    else:
+        radius = 1.0
+    if radius <= 0:
+        radius = 1.0
+
+    d = miss_pos - origin_arr
+    n = np.linalg.norm(d, axis=1)
+    drawable = n > 1e-9  # drop misses at the origin (no beam direction yet)
+    d = d[drawable]
+    n = n[drawable]
+    relocated = origin_arr + (d / n[:, None]) * radius
+    return np.ascontiguousarray(relocated, dtype=np.float64), float(radius)
+
+
+def _miss_positions_to_las(positions: np.ndarray, out_las: _Path) -> int:
+    """Write position-only miss points to a LAS for PotreeConverter. The miss
+    octree renders flat-orange, so it carries no colours/intensity/extra-dims.
+    Mirrors `_session_to_las`'s header (pt fmt 3, 1 mm scale, offset = floor(min)
+    so far-field coords don't overflow the LAS int32). Returns the count."""
+    import laspy
+    n = int(positions.shape[0])
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = (np.floor(positions.min(axis=0)) if n else np.zeros(3, dtype=np.float64))
+    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
+    if n:
+        record.x = positions[:, 0]
+        record.y = positions[:, 1]
+        record.z = positions[:, 2]
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        writer.write_points(record)
+        if n > 0:
+            pad = 0.001
+            writer.header.mins = (positions.min(axis=0) - pad).tolist()
+            writer.header.maxs = (positions.max(axis=0) + pad).tolist()
+    return n
+
+
+def _build_miss_octree(sess: "CloudSession",
+                       origin: Optional[List[float]]) -> Optional[str]:
+    """Build a projected-miss octree for the session and return its cache id, or
+    None when the session has no placeable misses. Failures are logged and
+    swallowed (return None) — a miss-octree build must never abort the caller
+    (session create, bake, or backfill); the hits octree and LAD are the
+    priority. Eager but cheap: when there are no misses, no PotreeConverter runs."""
+    import tempfile
+    try:
+        positions, _radius = _gather_miss_positions(sess, origin)
+        if positions.shape[0] == 0:
+            return None
+        with tempfile.TemporaryDirectory() as td:
+            miss_las = _Path(td) / "octree_misses.las"
+            _miss_positions_to_las(positions, miss_las)
+            cache_key, _cache_dir, _meta = _build_octree_from_las(miss_las, [])
+        return cache_key
+    except Exception:
+        logger.exception("Miss octree build failed for session %s", sess.session_id)
+        return None
 
 
 def _build_octree_from_las(las_path: _Path, extra_dims_meta: List[dict]) -> tuple[str, _Path, dict]:
@@ -15020,6 +15186,14 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         _session_to_las(sess, hits_las, exclude_misses=True)
         cache_key, cache_dir, meta = _build_octree_from_las(hits_las, extra_dims_meta)
         sess.octree_cache_id = cache_key
+        # Build a SECOND octree from the projected (or true-coord, when no origin)
+        # misses, so the renderer streams them with LOD just like the hits —
+        # replacing the flat, stride-subsampled overlay (no slowdown, no Moiré).
+        # `_miss_origin` is already in the session's frame (world_shift subtracted).
+        # The projection radius is baked in here; bake reprojects from the stored
+        # origin. None when the scan has no placeable misses.
+        sess.miss_octree_origin = _miss_origin
+        sess.miss_octree_cache_id = _build_miss_octree(sess, _miss_origin)
 
     _sweep_cloud_sessions()
     with _cloud_session_lock:
@@ -15033,7 +15207,8 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     # E57 pose) lets the renderer place the scan params + the display relocation.
     miss_arr = extras.get(_MISS_SLUG)
     has_misses = bool(miss_arr is not None and np.any(miss_arr != 0))
-    miss_info: dict = {"has_misses": has_misses, "miss_slug": _MISS_SLUG}
+    miss_info: dict = {"has_misses": has_misses, "miss_slug": _MISS_SLUG,
+                       "miss_octree_cache_id": sess.miss_octree_cache_id}
     if has_misses:
         miss_info["miss_count"] = int(np.count_nonzero(miss_arr != 0))
     # When misses were recovered (no explicit is_miss column), report it so the
@@ -15079,137 +15254,6 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     return {"session_id": session_id, "point_count": n, "world_shift": world_shift_out,
             **miss_info, **meta}
 
-
-def _misses_binary_response(count: int, total: int, origin, radius: float, positions_flat):
-    """Pack a miss-overlay result as a PHB1 binary frame. The miss positions ride
-    a single `positions` f32 buffer ([x,y,z,...]); counts/origin/radius live in
-    meta. Previously this endpoint returned `positions` as a JSON float list,
-    which for a full-sphere scan with misses recorded is tens of millions of
-    floats — multi-second to encode server-side and re-parse in JS (the ~10s
-    "show misses" stall). The binary buffer is decoded zero-copy by the renderer."""
-    meta = {
-        "count": int(count),
-        "total": int(total),
-        "origin": list(origin),
-        "radius": float(radius),
-    }
-    frame = _bin_frame_bytes(meta, [("positions", np.asarray(positions_flat, dtype=np.float32), "f32")])
-    return _bin_frame_streaming_response(lambda: frame)
-
-
-@app.get("/api/cloud/session/{session_id}/misses")
-async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
-                           origin_y: Optional[float] = None,
-                           origin_z: Optional[float] = None):
-    """Return the session's sky/miss points for display, as a PHB1 binary frame.
-
-    Misses are stored at their true coordinates (typically far-field, ~20 km,
-    along the real beam direction). Two display modes, chosen by whether the
-    caller supplies a scanner origin:
-
-    - **No origin** (scan has no params yet): return the misses at their TRUE
-      stored coordinates, untouched. The data is the source of truth; we don't
-      invent positions. Far-field misses will sit far from the tree, but that
-      is honest and never shifts.
-
-    - **Origin supplied** (scan params define a scanner): project each miss onto
-      a sphere centred on the origin, with radius set CLEARLY beyond the farthest
-      hit (margin scaled to the cloud's radial depth), so the miss shell sits
-      visibly outside the cloud rather than interleaving with the hit points.
-      Depends only on the stored beam direction and the origin.
-
-    The frame's meta carries {count, total, origin, radius} and the `positions`
-    buffer is a flat [x,y,z, x,y,z, ...] f32 array (empty when none). `count` is
-    how many are drawn; `total` includes any miss that couldn't be placed
-    (sitting AT the origin with no beam direction yet — awaiting Helios grid
-    recovery).
-    """
-    sess = _get_cloud_session(session_id)
-    with _cloud_session_lock:
-        keep = ~sess.deleted
-        hits = keep.copy()
-        miss_arr = sess.extras.get(_MISS_SLUG)
-        if miss_arr is not None:
-            is_miss = (miss_arr != 0) & keep
-            hits = (~(miss_arr != 0)) & keep
-            miss_pos = np.ascontiguousarray(sess.positions[is_miss], dtype=np.float64)
-        else:
-            miss_pos = np.empty((0, 3), np.float64)
-        hit_pos = np.ascontiguousarray(sess.positions[hits], dtype=np.float64)
-        # Union in explicitly backfilled misses (separate buffer). Real interleaved
-        # misses and backfilled misses never co-occur — we only ever backfill when
-        # the scan had none — so this is a concat, not a merge with overlap.
-        backfilled = sess.backfilled_misses
-        if backfilled is not None and backfilled.get("positions") is not None:
-            bf = np.ascontiguousarray(backfilled["positions"], dtype=np.float64)
-            if bf.shape[0] > 0:
-                miss_pos = np.vstack([miss_pos, bf]) if miss_pos.shape[0] else bf
-
-    if miss_pos.shape[0] == 0:
-        return _misses_binary_response(0, 0, [0.0, 0.0, 0.0], 0.0, np.empty(0, np.float32))
-
-    has_origin = None not in (origin_x, origin_y, origin_z)
-
-    # No scanner origin defined: draw misses at their TRUE stored coordinates.
-    # Don't relocate — the array is the source of truth for display too. Still
-    # cap the drawn set (see _MISS_OVERLAY_CAP) so a dense backfilled scan can't
-    # bog the renderer.
-    if not has_origin:
-        total = int(miss_pos.shape[0])
-        drawn = miss_pos
-        if total > _MISS_OVERLAY_CAP:
-            stride = int(np.ceil(total / _MISS_OVERLAY_CAP))
-            drawn = miss_pos[::stride]
-        return _misses_binary_response(
-            int(drawn.shape[0]), total,
-            [0.0, 0.0, 0.0], 0.0, drawn.astype(np.float32).ravel(),
-        )
-
-    # Origin defined: project each miss onto a sphere centred on the origin, at a
-    # radius CLEARLY beyond the farthest hit so the miss shell sits visibly
-    # outside the cloud — not abutting or interleaving with the hit points.
-    origin = np.array([origin_x, origin_y, origin_z], dtype=np.float64)
-    if hit_pos.shape[0] > 0:
-        hit_dists = np.linalg.norm(hit_pos - origin, axis=1)
-        far = float(np.max(hit_dists))
-        near = float(np.min(hit_dists))
-        # The radius must clear the FARTHEST hit by a generous margin so the miss
-        # shell reads as a distinct halo well outside the cloud — not a band
-        # hugging its far surface. The margin scales with the cloud's own radial
-        # depth (far − near) so it adapts to scene size, with a multiplicative
-        # floor and a small absolute floor for near-zero-depth clouds. Tuned up
-        # from earlier (depth*0.25 / *1.15) which still sat too close.
-        depth = max(far - near, 0.0)
-        radius = max(far + 1.0 * depth, far * 1.4, far + 1.0)
-    else:
-        radius = 1.0
-    if radius <= 0:
-        radius = 1.0
-
-    d = miss_pos - origin
-    n = np.linalg.norm(d, axis=1)
-    # Skip unplaceable misses (sitting AT the scanner origin, no direction yet —
-    # those get their direction from the grid in Helios C++). Drawing them would
-    # pile a degenerate dot on the scanner. Only relocate misses with a real
-    # beam direction.
-    drawable = n > 1e-9
-    d = d[drawable]
-    n = n[drawable]
-    relocated = origin + (d / n[:, None]) * radius
-    # The misses overlay is a DISPLAY AID, not data — a dense scan can backfill
-    # millions of sky points, and drawing them all bogs the renderer to ~1 fps.
-    # Cap the drawn set to an even-stride subsample so the shell still reads as a
-    # full dome but stays smooth; LAD reads the FULL set via _session_to_lad_arrays
-    # (a separate path), so accuracy is unaffected. `count` reports the drawn
-    # subset, `total` the full placeable population, so the UI can note the cap.
-    placeable = int(relocated.shape[0])
-    if placeable > _MISS_OVERLAY_CAP:
-        stride = int(np.ceil(placeable / _MISS_OVERLAY_CAP))
-        relocated = relocated[::stride]
-    return _misses_binary_response(
-        int(relocated.shape[0]), int(miss_pos.shape[0]),
-        origin.tolist(), radius, relocated.astype(np.float32).ravel(),
-    )
 
 
 def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=None) -> dict:
@@ -15348,7 +15392,18 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
 
     with _cloud_session_lock:
         sess.backfilled_misses = buffer if count > 0 else None
+        # Freshly computed against the current hits — no longer stale, and the
+        # scan origin is now known for the display projection.
+        sess.backfilled_misses_stale = False
+        if count > 0:
+            sess.miss_octree_origin = list(origin)
         sess.last_accessed = time.time()
+
+    # Rebuild the miss octree so the newly recovered sky points stream in (fresh
+    # sha1 → the renderer remounts on the changed cache id). None when count == 0.
+    miss_cache_id = _build_miss_octree(sess, list(origin)) if count > 0 else None
+    with _cloud_session_lock:
+        sess.miss_octree_cache_id = miss_cache_id
 
     _report(1.0, "Done")
     return {
@@ -15357,6 +15412,7 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         "has_misses": count > 0,
         "scan_origin": list(origin),
         "already_had_misses": False,
+        "miss_octree_cache_id": miss_cache_id,
     }
 
 
@@ -15433,6 +15489,15 @@ async def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
     # session's deleted mask so deletions accumulate.
     with _cloud_session_lock:
         select = _region_mask(sess.positions, region_dict)
+        # NEVER crop sky/miss points. A crop box is drawn around hits; a miss
+        # point falling inside it (its far-field/projected coords landing in the
+        # box) is a coordinate accident, not user intent — and deleting it would
+        # silently corrupt LAD's beam set. Exclude is_miss points from the
+        # selection so a crop only ever deletes hits. (Bake already subsets the
+        # is_miss extras column; this stops crop from SELECTING misses at all.)
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        if miss_arr is not None:
+            select = select & (miss_arr == 0)
         sess.deleted |= select
         # Record the post-delete mask snapshot so undo can pop back to it. We
         # store the boolean mask per applied delete (cheap: 1 bit/point) rather
@@ -15444,14 +15509,27 @@ async def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
         if len(sess.deleted_history) > _MAX_DELETED_HISTORY:
             sess.deleted_history = sess.deleted_history[-_MAX_DELETED_HISTORY:]
         sess.octree_cache_id = None  # derived octree is now stale until bake
+        # A crop that actually removed hits invalidates any SEPARATELY backfilled
+        # misses: they were gap-filled against the pre-crop hits, so their
+        # hit/miss ratio no longer matches and would skew LAD. Per the product
+        # decision we KEEP them (don't discard the user's compute) but flag them
+        # stale so the renderer warns at crop time and LAD warns at compute time.
+        # Interleaved is_miss points (in extras) aren't affected — only the
+        # separate backfilled buffer can drift out of sync.
+        cropped_hits = bool(select.any())
+        if (cropped_hits and sess.backfilled_misses is not None
+                and sess.backfilled_misses.get("positions") is not None):
+            sess.backfilled_misses_stale = True
         deleted_count = int(sess.deleted.sum())
         total = int(len(sess.positions))
+        backfilled_misses_stale = sess.backfilled_misses_stale
 
     return {
         "session_id": session_id,
         "deleted_count": deleted_count,
         "remaining_count": total - deleted_count,
         "total_count": total,
+        "backfilled_misses_stale": backfilled_misses_stale,
     }
 
 
@@ -15544,13 +15622,25 @@ async def bake_cloud_session(session_id: str):
         sess.octree_cache_id = cache_key
         remaining = int(len(sess.positions))
 
+    # Rebuild the miss octree from the surviving misses so the displayed shell
+    # tracks the baked cloud (a crop that removed hits also reprojects the misses
+    # against the new far hit). Reprojected from the stored origin; None if no
+    # misses survive. Note the backfilled-miss DATA can still be flagged stale
+    # (see delete_region) — this only keeps the rendered shell current.
+    miss_cache_id = _build_miss_octree(sess, sess.miss_octree_origin)
+    with _cloud_session_lock:
+        sess.miss_octree_cache_id = miss_cache_id
+
     try:
         max_bytes = int(_os.environ.get(
             "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES", _DEFAULT_OCTREE_CACHE_MAX_BYTES,
         ))
     except ValueError:
         max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
-    _evict_octree_cache(max_bytes, keep=cache_dir)
+    keep_dirs = [cache_dir]
+    if miss_cache_id:
+        keep_dirs.append(_octree_cache_root() / miss_cache_id)
+    _evict_octree_cache(max_bytes, keep=keep_dirs)
 
     return {
         "session_id": session_id,
@@ -15558,6 +15648,7 @@ async def bake_cloud_session(session_id: str):
         "baked": True,
         "cache_id": cache_key,
         "cache_dir": str(cache_dir),
+        "miss_octree_cache_id": miss_cache_id,
         **meta,
     }
 

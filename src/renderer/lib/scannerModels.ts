@@ -54,6 +54,28 @@
 //                      divergence ~2.79 mrad from a rectangular ~1/2″ × 1/4″
 //                      source spot (wide axis 12.7 mm); ~144 mm tall.
 //                      Velodyne HDL-32E datasheet / user manual.
+//   - RIEGL miniVUX-3UAV: a single-channel airborne profiler — one laser folded
+//                      through a 45°-tilted *rotating mirror* spinning about a
+//                      horizontal axis (mounted perpendicular to the flight
+//                      line). That sweeps the beam through a flat PLANE (a 360°
+//                      planar line scan), not a tilted cone — the conical 46°-FOV
+//                      scan is the separate miniVUX-1DL, a different model. So it
+//                      is the one-channel degenerate of a spinning multibeam: a
+//                      single beam at 0° elevation whose azimuth sweep IS the
+//                      mirror rotation. Modelled as spinning_multibeam with a
+//                      one-element beamElevationAngles = [0]. Angular step width
+//                      Δφ 0.018°–0.36° selectable → 1,000–20,000 points/rev; we
+//                      preset the ~0.1° mid-setting (3,600 pts/rev). Selectable
+//                      100/200/300 kHz PRR maps to 360°/180°/120° FOV — we preset
+//                      the 360° @ 100 kHz mode (azimuth 0–360°, pulseRate 100 kHz).
+//                      Waveform LiDAR, up to 5 target echoes/pulse → multi
+//                      return. Beam divergence 1.6 × 0.5 mrad (footprint 160 ×
+//                      50 mm @ 100 m); the scalar field takes the wide axis
+//                      1.6 mrad (the divergence the footprint is keyed to), as
+//                      with the HDL-32E. The datasheet quotes no exit aperture
+//                      (only a footprint at range), so beam diameter is left at
+//                      the form default, as with the VZ-400i. Body 243 × 99 ×
+//                      85 mm, ~1.55 kg. RIEGL miniVUX-3UAV datasheet (2025-10-03).
 
 import type { ScanParameters } from './scanParameters';
 
@@ -63,6 +85,7 @@ import leicaP40Url from '../assets/models/LeicaP40.obj?url';
 import leicaBlk360Url from '../assets/models/Leica_BLK360.obj?url';
 import velodyneHdlUrl from '../assets/models/Velodyn_HDL.obj?url';
 import rieglVzUrl from '../assets/models/riegl_vz.obj?url';
+import rieglMiniVuxUrl from '../assets/models/riegl_miniVUX.obj?url';
 
 export type ScannerModelId =
   | 'generic'
@@ -71,12 +94,16 @@ export type ScannerModelId =
   | 'leica_blk360'
   | 'leica_blk360_g2'
   | 'faro_focus_s350'
-  | 'velodyne_hdl32e';
+  | 'velodyne_hdl32e'
+  | 'riegl_minivux3uav';
 
 export type ScannerMeshFormat = 'ply' | 'obj';
 
-// The subset of ScanParameters an instrument fixes. Resolution (zenithPoints /
-// azimuthPoints) and placement (origin, tilt) are never part of a preset.
+// The subset of ScanParameters an instrument fixes. Placement (origin, tilt)
+// and the zenith point count are never part of a preset. Resolution is normally
+// the user's choice too, but a spinning sensor whose datasheet pins an angular
+// step width per revolution may preset `azimuthPoints` (points/revolution) as a
+// datasheet-faithful starting value — still freely editable afterward.
 export type ScannerModelPreset = Partial<
   Pick<
     ScanParameters,
@@ -89,6 +116,7 @@ export type ScannerModelPreset = Partial<
     | 'zenithMaxDeg'
     | 'azimuthMinDeg'
     | 'azimuthMaxDeg'
+    | 'azimuthPoints'
     | 'pulseRateHz'
   >
 >;
@@ -273,8 +301,45 @@ export const SCANNER_MODELS: ScannerModel[] = [
       beamElevationAnglesDeg: hdl32eElevations(),
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // Azimuth resolution is 0.1°–0.4° (datasheet) over the 5–20 Hz spin range
+      // (finer when slower); preset the typical 10 Hz setting ≈ 0.2° → 1,800
+      // points/rev. Editable like every resolution field.
+      azimuthPoints: 1800,
       // ~695 kHz: 32 channels firing at ~21.7 kHz each (datasheet, single return).
       pulseRateHz: 695000,
+    },
+  },
+  {
+    id: 'riegl_minivux3uav',
+    label: 'RIEGL miniVUX-3UAV',
+    meshUrl: rieglMiniVuxUrl,
+    meshFormat: 'obj',
+    // Body 85 mm tall (243 × 99 × 85 mm without the cooling fan).
+    heightMeters: 0.085,
+    preset: {
+      // A single laser folded through a 45°-tilted rotating mirror whose spin
+      // axis lies horizontal (mounted perpendicular to the flight line). That
+      // geometry sweeps the beam through a *flat plane* — a 360° planar line
+      // scan, NOT a tilted cone. (The conical 46°-FOV scan belongs to the
+      // separate miniVUX-1DL, a different instrument.) So in the multibeam
+      // convention this is the one-channel case: a single beam at 0° elevation
+      // sweeping the plane normal to the spin axis, the spin being the azimuth.
+      pattern: 'spinning_multibeam',
+      beamElevationAnglesDeg: [0],
+      // Waveform LiDAR with up to 5 target echoes per pulse (datasheet).
+      returnType: 'multi',
+      beamDivergenceMrad: 1.6, // 1.6 × 0.5 mrad → wide axis (footprint 160 × 50 mm @ 100 m)
+      // Datasheet gives a footprint at range, not an exit aperture, so leave the
+      // beam diameter at the form default rather than invent a figure.
+      // 100 kHz PRR mode → full 360° FOV (180° @ 200 kHz, 120° @ 300 kHz).
+      azimuthMinDeg: 0,
+      azimuthMaxDeg: 360,
+      // Angular step width Δφ is 0.018°–0.36° selectable (datasheet) → 1,000–
+      // 20,000 points/revolution. Preset the ~0.1° mid-setting (3,600 pts/rev)
+      // as a datasheet-faithful default; editable like every resolution field.
+      azimuthPoints: 3600,
+      // Selectable PRR; the 100 kHz mode is the one that yields the 360° FOV.
+      pulseRateHz: 100000,
     },
   },
 ];

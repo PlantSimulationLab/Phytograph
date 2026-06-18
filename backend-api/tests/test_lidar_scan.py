@@ -396,16 +396,15 @@ class TestScanOptions:
         # (10 m) so even one stray far point fails — not the 1 km miss distance.
         assert np.abs(pts).max() < 10.0, "miss point (~1 km) leaked into render cloud"
 
-        # The session-based miss overlay endpoint must find those misses and
-        # project them onto the bounding sphere around the scanner origin.
-        r = client.get(f"/api/cloud/session/{sid}/misses",
-                       params={"origin_x": 0.0, "origin_y": 0.0, "origin_z": 3.0})
-        assert r.status_code == 200, r.text
-        # /misses now returns a PHB1 binary frame (meta counts + positions buffer).
-        misses_meta, misses_buffers = decode_bin_frame(r.content)
-        assert misses_meta["total"] > 0
-        assert misses_meta["count"] > 0  # placeable (have a beam direction from origin)
-        assert len(misses_buffers["positions"]) == misses_meta["count"] * 3
+        # The session must hold those misses, and the miss-octree projection
+        # (_gather_miss_positions) must find them and place them on the bounding
+        # sphere around the scanner origin (every one strictly outside the hits).
+        sess = main._cloud_sessions[sid]
+        pos, radius = main._gather_miss_positions(sess, [0.0, 0.0, 3.0])
+        assert pos.shape[0] > 0  # placeable (have a beam direction from origin)
+        assert radius > 0
+        dist = np.linalg.norm(pos - np.array([0.0, 0.0, 3.0]), axis=1)
+        assert np.allclose(dist, radius, rtol=1e-4)  # all on the sphere
 
     def test_no_session_when_misses_not_recorded(self, client):
         # Default (record_misses off): plain in-memory cloud, no session created.
