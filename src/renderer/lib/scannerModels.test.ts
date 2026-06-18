@@ -7,12 +7,14 @@ import {
 } from './scannerModels';
 
 describe('scannerModels catalog', () => {
-  it('exposes generic plus the four bundled instruments', () => {
+  it('exposes generic plus the six bundled instruments', () => {
     const ids = SCANNER_MODELS.map(m => m.id);
     expect(ids).toEqual([
       'generic',
       'riegl_vz400i',
       'leica_p40',
+      'leica_blk360',
+      'leica_blk360_g2',
       'faro_focus_s350',
       'velodyne_hdl32e',
     ]);
@@ -62,6 +64,28 @@ describe('scannerModels catalog', () => {
     expect(leica.returnType).toBe('single');
     expect(leica.zenithMinDeg).toBe(0);
     expect(leica.zenithMaxDeg).toBe(145);
+
+    // Leica BLK360 (G1): 0.4 mrad FWHM divergence, ⌀ 2.25 mm at front window;
+    // 300° vertical FOV → mirror reaches zenith 0–150°; single-return, 360 kHz.
+    const blk = getScannerModel('leica_blk360').preset;
+    expect(blk.beamDivergenceMrad).toBeCloseTo(0.4);
+    expect(blk.beamExitDiameterM).toBeCloseTo(0.00225);
+    expect(blk.returnType).toBe('single');
+    expect(blk.zenithMinDeg).toBe(0);
+    expect(blk.zenithMaxDeg).toBe(150);
+    expect(blk.pulseRateHz).toBe(360000);
+
+    // Leica BLK360 (G2): same laser front-end as the G1 (identical beam optics +
+    // single return), but the detector redesign ~doubles the point rate to
+    // 680 kHz AND the vertical FOV narrows to 270° → zenith 0–135° (vs the G1's
+    // 300° → 0–150°). Those two are the preset values distinguishing it.
+    const blk2 = getScannerModel('leica_blk360_g2').preset;
+    expect(blk2.beamDivergenceMrad).toBeCloseTo(0.4);
+    expect(blk2.beamExitDiameterM).toBeCloseTo(0.00225);
+    expect(blk2.returnType).toBe('single');
+    expect(blk2.zenithMinDeg).toBe(0);
+    expect(blk2.zenithMaxDeg).toBe(135);
+    expect(blk2.pulseRateHz).toBe(680000);
 
     // FARO S350: 300° vertical FOV given as 2×150° → zenith 0–150°.
     const faro = getScannerModel('faro_focus_s350').preset;

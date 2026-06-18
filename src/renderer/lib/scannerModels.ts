@@ -29,6 +29,22 @@
 //   - Leica P40:       beam divergence < 0.23 mrad FWHM, ⌀ ≤ 3.5 mm at front
 //                      window; vertical FOV 290° (mirror sweep → zenith 0–145°),
 //                      horizontal 360°; ~395 mm tall. Leica P30/P40 datasheet.
+//   - Leica BLK360 (G1): beam divergence 0.4 mrad FWHM (full angle), ⌀ 2.25 mm
+//                      at the front window (FWHM); vertical FOV 300° (mirror
+//                      sweep → zenith 0–150°), horizontal 360°; single-return WFD
+//                      time-of-flight, up to 360 kpts/s (830 nm, Class 1,
+//                      2.16 MHz PRF); ⌀ 100 mm × 165 mm tall, ~1 kg. Leica BLK360
+//                      G1 spec sheet + user manual (laser system performance).
+//   - Leica BLK360 (G2): same laser front-end as the G1 — 830 nm, Class 1,
+//                      0.4 mrad FWHM divergence, ⌀ 2.25 mm at the front window,
+//                      single-return WFD. The G2 redesign is in the detector/
+//                      electronics + imaging/VIS: the point rate ~doubles to
+//                      680 kpts/s, range drops to 45 m (no preset field), and —
+//                      unlike the G1 — the *vertical FOV is narrower*: 360°×270°
+//                      (zenith 0–135°), not the G1's 360°×300°. Slightly smaller
+//                      body (⌀ 80 mm × 155 mm, 0.85 kg). Reuses the same OBJ
+//                      marker as the G1 (near-identical silhouette). Leica BLK360
+//                      (G2) official spec sheet, 2022.
 //   - FARO Focus S350: beam divergence 0.3 mrad @ 1/e, ⌀ 2.12 mm at exit @ 1/e;
 //                      vertical FOV 300° given as 2×150° (→ zenith 0–150°),
 //                      horizontal 360°; ~191 mm tall body. FARO Focus M/S tech
@@ -44,6 +60,7 @@ import type { ScanParameters } from './scanParameters';
 import sphereUrl from '../assets/models/sphere.ply?url';
 import faroFocusUrl from '../assets/models/FaroFocus.obj?url';
 import leicaP40Url from '../assets/models/LeicaP40.obj?url';
+import leicaBlk360Url from '../assets/models/Leica_BLK360.obj?url';
 import velodyneHdlUrl from '../assets/models/Velodyn_HDL.obj?url';
 import rieglVzUrl from '../assets/models/riegl_vz.obj?url';
 
@@ -51,6 +68,8 @@ export type ScannerModelId =
   | 'generic'
   | 'riegl_vz400i'
   | 'leica_p40'
+  | 'leica_blk360'
+  | 'leica_blk360_g2'
   | 'faro_focus_s350'
   | 'velodyne_hdl32e';
 
@@ -156,6 +175,56 @@ export const SCANNER_MODELS: ScannerModel[] = [
       azimuthMaxDeg: 360,
       // ~1 MHz effective scan rate (datasheet).
       pulseRateHz: 1000000,
+    },
+  },
+  {
+    id: 'leica_blk360',
+    label: 'Leica BLK360 (G1)',
+    meshUrl: leicaBlk360Url,
+    meshFormat: 'obj',
+    heightMeters: 0.165,
+    preset: {
+      pattern: 'raster',
+      returnType: 'single', // single-return WFD time-of-flight
+      beamDivergenceMrad: 0.4, // 0.4 mrad FWHM, full angle (user manual)
+      beamExitDiameterM: 0.00225, // 2.25 mm at front window, FWHM (user manual)
+      // Vertical FOV 300°, horizontal 360°. The single vertical mirror sweeps
+      // 300° of arc, so combined with the 360° head rotation it reaches from
+      // straight up (zenith 0°) to 300/2 = 150° from vertical — 60° below
+      // horizon — leaving a ~60° blind cone under the instrument (zenith
+      // 150–180°).
+      zenithMinDeg: 0,
+      zenithMaxDeg: 150,
+      azimuthMinDeg: 0,
+      azimuthMaxDeg: 360,
+      // Up to 360,000 points/s (datasheet measurement rate).
+      pulseRateHz: 360000,
+    },
+  },
+  {
+    id: 'leica_blk360_g2',
+    label: 'Leica BLK360 (G2)',
+    // Reuses the G1 OBJ — the G2 is near-identical in silhouette. It is slightly
+    // smaller (⌀ 80 mm × 155 mm vs the G1's ⌀ 100 × 165), reflected in the height.
+    meshUrl: leicaBlk360Url,
+    meshFormat: 'obj',
+    heightMeters: 0.155,
+    preset: {
+      // Same laser front-end as the G1 (830 nm, Class 1): identical beam optics
+      // and single-return. The G2 redesign is the detector/electronics, which
+      // ~doubles the point rate.
+      pattern: 'raster',
+      returnType: 'single',
+      beamDivergenceMrad: 0.4, // 0.4 mrad FWHM, full angle (same optics as G1)
+      beamExitDiameterM: 0.00225, // 2.25 mm at front window, FWHM (same as G1)
+      // Vertical FOV 270° (NOT the G1's 300°) → mirror reaches zenith 0–135°,
+      // a 90° blind cone under the instrument. Horizontal 360°. (G2 spec sheet)
+      zenithMinDeg: 0,
+      zenithMaxDeg: 135,
+      azimuthMinDeg: 0,
+      azimuthMaxDeg: 360,
+      // Up to 680,000 points/s — ~1.9× the G1 (G2 spec sheet).
+      pulseRateHz: 680000,
     },
   },
   {

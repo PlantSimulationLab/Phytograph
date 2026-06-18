@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.27.0"
+BACKEND_VERSION = "0.29.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -3595,8 +3595,10 @@ def _cull_to_grid(xyz: "np.ndarray", origin, grid_center, grid_size,
 # `_do_lad_computation` can decide whether to gapfill (timestamp present, no
 # misses yet), whether the cloud already carries miss points (skip gapfill), and
 # whether to warn that the inversion will be inaccurate (no misses, no timestamp).
-def _lad_flags(has_timestamp: bool, is_multi: bool, has_misses: bool) -> dict:
-    return {"has_timestamp": has_timestamp, "multi": is_multi, "has_misses": has_misses}
+def _lad_flags(has_timestamp: bool, is_multi: bool, has_misses: bool,
+               has_grid: bool = False) -> dict:
+    return {"has_timestamp": has_timestamp, "multi": is_multi,
+            "has_misses": has_misses, "has_grid": has_grid}
 
 
 def _lad_labels_vals(column_getter, n: int):
@@ -3644,6 +3646,8 @@ def _lad_labels_vals(column_getter, n: int):
     # Forward the structured-grid indices when present so the C++ grid-based
     # direction recovery (for unplaceable misses) has the raster to interpolate
     # over. Carried only when the source provided them (E57 row/column index).
+    has_grid = (column_getter('row_index') is not None
+                and column_getter('column_index') is not None)
     for grid_slug in ('row_index', 'column_index'):
         gcol = column_getter(grid_slug)
         if gcol is not None:
@@ -3651,16 +3655,22 @@ def _lad_labels_vals(column_getter, n: int):
             cols.append(np.asarray(gcol, dtype=np.float64))
 
     vals = np.column_stack(cols).astype(np.float64) if cols else None
-    return labels, vals, _lad_flags(has_timestamp, is_multi, has_misses)
+    return labels, vals, _lad_flags(has_timestamp, is_multi, has_misses, has_grid)
 
 
-def _session_to_lad_arrays(sess: "CloudSession", origin):
+def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: bool = True):
     """Surviving session points as in-RAM arrays for the LAD path — no disk, no
     source-file read.
 
     Returns (xyz float64 (N,3), dirs float32 (N,3), labels list[str],
     vals float64 (N,k)|None, flags). Honors ~sess.deleted. `flags` (see
     `_lad_flags`) tells the caller whether to gapfill / warn.
+
+    When `include_backfilled` is True (the default — the LAD read path) and the
+    session has an explicit miss buffer (see CloudSession.backfilled_misses), its
+    rows are APPENDED as extra hits tagged `is_miss`=1, and `has_misses` is set
+    True. The backfill endpoint itself passes False so it gapfills over the raw
+    hits only, never re-feeding already-recovered misses.
     """
     import numpy as np
 
@@ -3672,6 +3682,61 @@ def _session_to_lad_arrays(sess: "CloudSession", origin):
         return sess.extras[slug][keep] if slug in sess.extras else None
 
     labels, vals, flags = _lad_labels_vals(_get, xyz.shape[0])
+
+    backfilled = sess.backfilled_misses if include_backfilled else None
+    if (backfilled is not None and backfilled.get("positions") is not None
+            and np.asarray(backfilled["positions"]).shape[0] > 0):
+        xyz, dirs, labels, vals, flags = _append_backfilled_misses(
+            xyz, dirs, labels, vals, flags, backfilled)
+
+    return xyz, dirs, labels, vals, flags
+
+
+def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
+    """Append a session's backfilled-miss buffer to assembled LAD hit arrays.
+
+    Hits carry `is_miss`=0; the appended misses carry `is_miss`=1 (creating the
+    column if the hits lacked it). Direction rows come from the buffer; timestamp/
+    origin columns are filled where both the hit arrays and the buffer carry them
+    (else 0 for the miss rows, which Helios ignores for sky points). Returns the
+    extended (xyz, dirs, labels, vals, flags) with `has_misses` True.
+    """
+    import numpy as np
+
+    m_xyz = np.ascontiguousarray(backfilled["positions"], dtype=np.float64)
+    m_dirs = np.ascontiguousarray(
+        backfilled.get("directions", _directions_from_origin(m_xyz, m_xyz)),
+        dtype=np.float32)
+    n_hits = xyz.shape[0]
+    n_miss = m_xyz.shape[0]
+
+    labels = list(labels)
+    # Materialise hit vals as a (N,k) float64 matrix (or an empty (N,0) when the
+    # hits had no columns) so we can stack miss rows column-aligned.
+    hit_vals = (np.asarray(vals, dtype=np.float64) if vals is not None
+                else np.empty((n_hits, 0), np.float64))
+    if _MISS_SLUG not in labels:
+        labels.append(_MISS_SLUG)
+        hit_vals = np.column_stack([hit_vals, np.zeros(n_hits, np.float64)])
+
+    miss_cols = []
+    for slug in labels:
+        if slug == _MISS_SLUG:
+            miss_cols.append(np.ones(n_miss, np.float64))
+        elif slug == 'timestamp' and backfilled.get("timestamp") is not None:
+            miss_cols.append(np.asarray(backfilled["timestamp"], dtype=np.float64))
+        elif slug in ('origin_x', 'origin_y', 'origin_z') and backfilled.get("origins") is not None:
+            axis = {'origin_x': 0, 'origin_y': 1, 'origin_z': 2}[slug]
+            miss_cols.append(np.asarray(backfilled["origins"], dtype=np.float64)[:, axis])
+        else:
+            miss_cols.append(np.zeros(n_miss, np.float64))
+    miss_vals = np.column_stack(miss_cols) if miss_cols else np.empty((n_miss, 0), np.float64)
+
+    xyz = np.vstack([xyz, m_xyz])
+    dirs = np.vstack([dirs, m_dirs]).astype(np.float32)
+    vals = np.vstack([hit_vals, miss_vals])
+    flags = dict(flags)
+    flags["has_misses"] = True
     return xyz, dirs, labels, vals, flags
 
 
@@ -3789,6 +3854,34 @@ def _apply_trajectory_origins(xyz, dirs, labels, vals, trajectory, shift=None):
     vals = (np.column_stack([vals, origin_cols]) if vals is not None
             else origin_cols)
     return dirs, labels, vals, origins
+
+
+def _run_gapfill_extract(cloud):
+    """Recover sky/miss points on a built PyHelios cloud and return the synthesised
+    ones as (synth_xyz (M,3) float64, count int).
+
+    gapfillMisses() (which auto-selects the row/column or timestamp path in C++)
+    APPENDS the reconstructed misses to the cloud, each flagged as a miss. We slice
+    them out via the BULK numpy getters — getHitMissArray() (the per-hit miss flag,
+    1 == sky/miss) selects the rows, getHitsXYZRGBArrays() supplies their coords —
+    never the per-hit getHitXYZ loop, which would be millions of FFI crossings at
+    10M scale. Because we only call this on a cloud built from a scan with NO real
+    misses (the endpoint guards on that), every miss-flagged row is a synthesised
+    one. The real hits are left behind — the session already holds them.
+    """
+    import numpy as np
+
+    cloud.gapfillMisses()
+    miss_flag = np.asarray(cloud.getHitMissArray(), dtype=np.int32)
+    xyz, _rgb = cloud.getHitsXYZRGBArrays()
+    xyz = np.asarray(xyz, dtype=np.float64)
+    if miss_flag.shape[0] != xyz.shape[0]:
+        # Defensive: bulk getters must agree on hit count. If they don't, recover
+        # nothing rather than mis-slice.
+        return np.empty((0, 3), np.float64), 0
+    mask = miss_flag != 0
+    synth_xyz = np.ascontiguousarray(xyz[mask], dtype=np.float64)
+    return synth_xyz, int(mask.sum())
 
 
 def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
@@ -4025,14 +4118,12 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
 
         is_multi = any(s["multi"] for s in scans_arrays)
         return_mode = "multi" if is_multi else "single"
-        # Gapfill recovers miss points from timestamp gaps. Run it when ANY scan
-        # carries a timestamp but does NOT already have miss points — this widens
-        # the old multi-return-only trigger to single-return timestamped scans.
-        # Skip entirely when misses are already present (E57/structured PLY), so
-        # we don't synthesise duplicates on top of real misses.
+        # Misses must already be present — either retained by the source format
+        # (E57 / structured PLY) or recovered up front via the explicit Backfill
+        # Misses step (which persists them in the session and surfaces them through
+        # _session_to_lad_arrays). LAD no longer gapfills silently; if a scan has
+        # no misses the guard below stops here with an actionable error.
         any_has_misses = any(s["has_misses"] for s in scans_arrays)
-        can_gapfill = any(s["has_timestamp"] for s in scans_arrays)
-        do_gapfill = can_gapfill and not any_has_misses
 
         # Build the cloud entirely in RAM: one scan + bulk hit ingest per scan,
         # then the grid — no XML, no ASCII file. addScan takes radians; our
@@ -4086,43 +4177,24 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
                     "warnings": warnings,
                 }
 
-        recovered_misses = 0
-        if do_gapfill:
-            _report(0.70, "Recovering miss points")
-            # Recover sky/miss points from timestamp gaps so they're accounted for
-            # in the Beer's-law transmission probability. gapfillMisses() needs
-            # only a per-hit timestamp (target_index/target_count optional), so
-            # this works for single-return timestamped scans too — not just
-            # full-waveform data. Synthesised misses are tagged in-cloud with
-            # gapfillMisses_code == 1.0; count them to report back to the user.
-            cloud.gapfillMisses()
-            try:
-                codes = cloud.getHitDataAll("gapfillMisses_code")
-                recovered_misses = int(sum(1 for c in codes if c and c == c and c >= 1.0))
-            except Exception:
-                recovered_misses = 0
-            if recovered_misses > 0:
-                warnings.append(
-                    f"Recovered {recovered_misses} sky/miss point(s) via gapfilling "
-                    "(no miss points were present, but a timestamp column was)."
-                )
-
         # calculateLeafArea() needs miss points (transmitted beams) for the
-        # Beer's-law denominator and fail-fasts without them. If the cloud carried
-        # no misses AND gapfilling couldn't run (no timestamp to gap-fill from),
-        # there is no way to obtain them — surface a clear, actionable error here
-        # rather than letting the raw Helios exception bubble up through the generic
-        # handler below. (When gapfill did run, trust it; the C++ check still backstops.)
-        if not any_has_misses and not do_gapfill:
+        # Beer's-law denominator and fail-fasts without them. LAD no longer
+        # synthesises misses on the fly — they must already be present (retained
+        # by the source format, or recovered via the explicit Backfill Misses
+        # step). If none are present, stop here with an actionable error rather
+        # than letting the raw Helios exception bubble up through the generic
+        # handler below. The C++ check still backstops.
+        if not any_has_misses:
             return {
                 "success": False,
                 "cells": [],
                 "method_used": "helios",
                 "error": "This scan has no sky/miss points, so leaf area density "
                          "cannot be computed — the inversion needs beams that passed "
-                         "through the canopy without returning. Re-import a scan that "
-                         "retains misses (E57 / structured PLY) or carries a timestamp "
-                         "column so misses can be recovered by gapfilling.",
+                         "through the canopy without returning. Run Backfill Misses "
+                         "first to recover them (if the scan carries a timestamp or "
+                         "row/column grid), or re-import a scan that retains misses "
+                         "(E57 / structured PLY).",
                 "warnings": warnings,
             }
 
@@ -4256,7 +4328,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
             "group_lad_ci_upper": group_lad_ci_upper,
             "confidence_level": conf_level,
             "element_width": element_width,
-            "gapfilled_misses": recovered_misses,
+            "gapfilled_misses": 0,  # LAD no longer gapfills; misses come from Backfill Misses / source
             "had_miss_points": any_has_misses,
             "method_used": "helios",
             "warnings": warnings,
@@ -10872,6 +10944,13 @@ _LAS_MULTIRETURN_SRC = ('return_number', 'number_of_returns', 'gps_time')
 # reads them for free. The slug is pinned (case-insensitive aliases accepted on
 # import) so the renderer and LAD find it deterministically.
 _MISS_SLUG = 'is_miss'
+
+# Max sky/miss points drawn in the overlay (a display aid). A dense scan can
+# backfill millions; rendering them all drops the viewport to ~1 fps. The overlay
+# subsamples to this cap with an even stride so the shell still reads as a full
+# dome. LAD always consumes the FULL set (a separate path), so this never affects
+# the inversion — only what's drawn.
+_MISS_OVERLAY_CAP = 200_000
 _MISS_LABEL = 'Miss'
 # Aliases a source column may use for the miss flag (PLY property / E57 field).
 _MISS_ALIASES = {'is_miss', 'miss', 'sky', 'ismiss'}
@@ -11077,8 +11156,37 @@ class PointCloudPreviewResponse(BaseModel):
 
 
 def _tokenize_ascii_format(fmt: str) -> List[str]:
-    return [tok.lower() if tok.lower() in _XYZ_KNOWN_ROLES else 'skip'
-            for tok in fmt.split()]
+    """Map each whitespace-separated <ASCII_format> token to a column role.
+
+    A Helios <ASCII_format> (e.g. 'row col x y z r255 g255 b255 reflectance')
+    is the scan's column legend. It's the *only* source of column meaning when
+    the referenced .xyz has no header comment, so we resolve each token the same
+    way a real header column name would resolve (`_role_from_header_name`): that
+    accepts the richer alias set ('row'→row_index, 'col'→column_index,
+    'red'→r255, 'reflectivity'→reflectance, …) the bare `_XYZ_KNOWN_ROLES`
+    membership test missed — so 'row col …' no longer silently drops to 'skip'.
+
+    Resolution order per token:
+      1. `_role_from_header_name` alias (covers all the spellings above);
+      2. a literal token already in `_XYZ_KNOWN_ROLES` (e.g. 'deviation',
+         'is_miss', the canonical multi-return/grid slugs);
+      3. otherwise the token text itself, lower-cased — carried through so
+         `_plan_columns` can label/slug the extra column from the legend rather
+         than dropping it. Only a blank token becomes 'skip'.
+    """
+    roles: List[str] = []
+    for tok in fmt.split():
+        low = tok.lower()
+        mapped = _role_from_header_name(tok)
+        if mapped is not None:
+            roles.append(mapped)
+        elif low in _XYZ_KNOWN_ROLES:
+            roles.append(low)
+        elif low:
+            roles.append(low)
+        else:
+            roles.append('skip')
+    return roles
 
 
 def _first_nonblank_ascii_line(file_path: str) -> Optional[tuple]:
@@ -11586,6 +11694,14 @@ def _plan_columns(roles: List[str], header_names: Optional[List[str]]):
         if header_names is not None and i < len(header_names) and header_names[i]:
             label = _humanize_extra_dim_label(header_names[i])
             base = _sanitize_extra_dim_name(header_names[i])
+        elif role != 'skip':
+            # No file header, but the role token carries meaning — it came from a
+            # Helios <ASCII_format> legend word (e.g. 'deviation', or any custom
+            # scalar name) that `_tokenize_ascii_format` passed through verbatim.
+            # Use it as the column's label/slug so the legend names the column,
+            # instead of a meaningless positional 'Column N'.
+            label = _humanize_extra_dim_label(role)
+            base = _sanitize_extra_dim_name(role)
         else:
             label = f"Column {i + 1}"
             base = f"col_{i + 1}"
@@ -13595,6 +13711,16 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
     roles = (_tokenize_ascii_format(ascii_format)
              if ascii_format
              else _autodetect_xyz_columns(file_path))
+
+    # The name shown as each column's heading in the wizard. Prefer a real file
+    # header; otherwise, if the XML supplied an <ASCII_format> legend, use its
+    # raw tokens so the heading reads the legend word (e.g. 'row', 'reflectance')
+    # exactly as it would for a commented '# x y z ...' header. The file genuinely
+    # has no header row, so `has_header` and the sample-row skipping above stay
+    # bound to the real file — this only names the columns for display.
+    display_names = header_names
+    if display_names is None and ascii_format:
+        display_names = ascii_format.split()
     # Determine column count from the widest of (roles, header, first row).
     ncols = len(roles)
     if header_names:
@@ -13646,13 +13772,19 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
             if header_names is not None and i < len(header_names) and header_names[i]:
                 suggested_label = _humanize_extra_dim_label(header_names[i])
                 suggested_slug = _sanitize_extra_dim_name(header_names[i])
+            elif role != 'skip':
+                # No file header, but the role token is a passed-through
+                # <ASCII_format> legend word — label/slug the column from it so
+                # the wizard's suggestion matches import (see `_plan_columns`).
+                suggested_label = _humanize_extra_dim_label(role)
+                suggested_slug = _sanitize_extra_dim_name(role)
             else:
                 suggested_label = f"Column {i + 1}"
                 suggested_slug = f"col_{i + 1}"
         col_values = [r[i] for r in sample_rows if i < len(r)]
         columns.append(PreviewColumn(
             index=i,
-            header_name=(header_names[i] if header_names and i < len(header_names) else None),
+            header_name=(display_names[i] if display_names and i < len(display_names) else None),
             detected_role=detected_role,
             suggested_label=suggested_label,
             suggested_slug=suggested_slug,
@@ -14527,6 +14659,20 @@ class CloudSession:
     # so direct constructions that predate this field (tests, internal helpers)
     # need no change — a session with no shift behaves exactly as before.
     world_shift: Optional[np.ndarray] = None  # (3,) float64 | None
+    # Explicitly recovered sky/miss points (see POST .../backfill-misses). A
+    # SEPARATE lightweight buffer rather than rows interleaved into `positions`/
+    # `extras`, so a sparse scan that is 30-50% sky doesn't pad every scalar
+    # column with millions of miss rows. Populated only when the scan had NO real
+    # misses but carried the data to reconstruct them (timestamp and/or row/column
+    # grid). None until Backfill Misses runs. Stored in the SAME frame as
+    # `positions` (no world-shift applied here — _session_to_lad_arrays keeps that
+    # frame too). Keys:
+    #   positions  (M,3) float64 — far-field miss coordinates
+    #   directions (M,3) float32 — [radius, elevation, azimuth] for LAD beams
+    #   timestamp  (M,)  float64 — when the source carried it (optional)
+    #   origins    (M,3) float64 — per-pulse emission points (moving scans only)
+    # `is_miss` is implicitly 1 for every row, so no flag array is stored.
+    backfilled_misses: Optional[dict] = None
 
 
 def _get_cloud_session(session_id: str) -> "CloudSession":
@@ -14751,6 +14897,29 @@ class DeleteRegionRequest(BaseModel):
     region: CropOctreeRegion
 
 
+class BackfillMissesRequest(BaseModel):
+    """Explicitly recover a session's sky/miss points and persist them (see
+    POST .../backfill-misses).
+
+    Mirrors the LAD-relevant subset of HeliosScanEntry so the backfill cloud is
+    built on the exact same array + addScan path as `/api/lad/compute`. `origin`
+    is the scanner position (per-beam directions are reconstructed from it); the
+    optional angular raster (n_theta/n_phi/theta_*/phi_*) sets the scan grid the
+    gapfiller reconstructs misses over, falling back to a count-based estimate
+    when omitted. `trajectory` marks a moving-platform scan (per-pulse origins
+    joined by timestamp), which forces the timestamp gapfill path."""
+    origin: List[float]                 # [x, y, z] scanner position
+    n_theta: Optional[int] = None
+    n_phi: Optional[int] = None
+    theta_min: Optional[float] = None   # degrees
+    theta_max: Optional[float] = None
+    phi_min: Optional[float] = None
+    phi_max: Optional[float] = None
+    beam_exit_diameter: Optional[float] = None   # meters
+    beam_divergence: Optional[float] = None       # milliradians
+    trajectory: Optional[PoseStream] = None
+
+
 @app.post("/api/cloud/session/create")
 async def create_cloud_session(request: CloudSessionCreateRequest):
     """Load a source cloud FULLY into an in-RAM session (the complete source of
@@ -14957,14 +15126,24 @@ async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
     """
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
-        miss_arr = sess.extras.get(_MISS_SLUG)
-        if miss_arr is None:
-            return _misses_binary_response(0, 0, [0.0, 0.0, 0.0], 0.0, np.empty(0, np.float32))
         keep = ~sess.deleted
-        is_miss = (miss_arr != 0) & keep
-        hits = (~(miss_arr != 0)) & keep
-        miss_pos = np.ascontiguousarray(sess.positions[is_miss], dtype=np.float64)
+        hits = keep.copy()
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        if miss_arr is not None:
+            is_miss = (miss_arr != 0) & keep
+            hits = (~(miss_arr != 0)) & keep
+            miss_pos = np.ascontiguousarray(sess.positions[is_miss], dtype=np.float64)
+        else:
+            miss_pos = np.empty((0, 3), np.float64)
         hit_pos = np.ascontiguousarray(sess.positions[hits], dtype=np.float64)
+        # Union in explicitly backfilled misses (separate buffer). Real interleaved
+        # misses and backfilled misses never co-occur — we only ever backfill when
+        # the scan had none — so this is a concat, not a merge with overlap.
+        backfilled = sess.backfilled_misses
+        if backfilled is not None and backfilled.get("positions") is not None:
+            bf = np.ascontiguousarray(backfilled["positions"], dtype=np.float64)
+            if bf.shape[0] > 0:
+                miss_pos = np.vstack([miss_pos, bf]) if miss_pos.shape[0] else bf
 
     if miss_pos.shape[0] == 0:
         return _misses_binary_response(0, 0, [0.0, 0.0, 0.0], 0.0, np.empty(0, np.float32))
@@ -14972,11 +15151,18 @@ async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
     has_origin = None not in (origin_x, origin_y, origin_z)
 
     # No scanner origin defined: draw misses at their TRUE stored coordinates.
-    # Don't relocate — the array is the source of truth for display too.
+    # Don't relocate — the array is the source of truth for display too. Still
+    # cap the drawn set (see _MISS_OVERLAY_CAP) so a dense backfilled scan can't
+    # bog the renderer.
     if not has_origin:
+        total = int(miss_pos.shape[0])
+        drawn = miss_pos
+        if total > _MISS_OVERLAY_CAP:
+            stride = int(np.ceil(total / _MISS_OVERLAY_CAP))
+            drawn = miss_pos[::stride]
         return _misses_binary_response(
-            int(miss_pos.shape[0]), int(miss_pos.shape[0]),
-            [0.0, 0.0, 0.0], 0.0, miss_pos.astype(np.float32).ravel(),
+            int(drawn.shape[0]), total,
+            [0.0, 0.0, 0.0], 0.0, drawn.astype(np.float32).ravel(),
         )
 
     # Origin defined: project each miss onto a sphere centred on the origin, at a
@@ -15010,13 +15196,228 @@ async def get_cloud_misses(session_id: str, origin_x: Optional[float] = None,
     d = d[drawable]
     n = n[drawable]
     relocated = origin + (d / n[:, None]) * radius
-    # `count` is how many misses are DRAWN (placeable). `total` includes the
-    # unplaceable ones (sitting at origin, awaiting C++ grid recovery) that are
-    # flagged in the data but not shown in the overlay.
+    # The misses overlay is a DISPLAY AID, not data — a dense scan can backfill
+    # millions of sky points, and drawing them all bogs the renderer to ~1 fps.
+    # Cap the drawn set to an even-stride subsample so the shell still reads as a
+    # full dome but stays smooth; LAD reads the FULL set via _session_to_lad_arrays
+    # (a separate path), so accuracy is unaffected. `count` reports the drawn
+    # subset, `total` the full placeable population, so the UI can note the cap.
+    placeable = int(relocated.shape[0])
+    if placeable > _MISS_OVERLAY_CAP:
+        stride = int(np.ceil(placeable / _MISS_OVERLAY_CAP))
+        relocated = relocated[::stride]
     return _misses_binary_response(
         int(relocated.shape[0]), int(miss_pos.shape[0]),
         origin.tolist(), radius, relocated.astype(np.float32).ravel(),
     )
+
+
+def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=None) -> dict:
+    """Build an ephemeral PyHelios cloud from a session's hits, gap-fill the misses,
+    and persist them in `sess.backfilled_misses`. Returns the result dict.
+
+    The heavy worker behind the backfill endpoint, factored out so it can run
+    off-thread under `_bin_frame_streaming_response` and report per-stage progress
+    via `progress(fraction, message)` (mirroring `_do_lad_computation`'s `_report`).
+    The caller has already resolved the session, assembled the hit arrays, and
+    checked eligibility — this only does the expensive build/gapfill/extract.
+
+    On a Helios reconstruction failure (sparse/degenerate grid) it returns an
+    `{error: ...}` dict in place of raising, so the streaming JSON tail carries a
+    clean, actionable message the renderer can surface as a toast.
+    """
+    import math
+    import numpy as np
+
+    def _report(fraction, message):
+        if progress is not None:
+            progress(fraction, message)
+
+    origin = request.origin
+
+    # Moving-platform: reconstruct per-beam emission origins so the timestamp
+    # gapfill path (the only one valid for moving scans) groups beams correctly.
+    moving = request.trajectory is not None
+    origins = None
+    if moving:
+        dirs, labels, vals, origins = _apply_trajectory_origins(
+            xyz, dirs, labels, vals, request.trajectory)
+
+    # Choose the reconstruction path by what we feed the cloud. The C++ dispatcher
+    # auto-selects row/column whenever BOTH 'row'/'column' and 'timestamp' exist,
+    # but the row/column path is brittle — it errors when the grid is too sparse
+    # ("too few populated scan rows"). The timestamp path reconstructs the grid
+    # from per-hit times and is far more robust, so PREFER it:
+    #   - has_timestamp        -> feed timestamp only; DROP the grid columns so the
+    #                             dispatcher takes the timestamp path.
+    #   - grid only (no time)  -> relabel row_index/column_index -> the bare
+    #                             'row'/'column' keys the dispatcher probes, so the
+    #                             row/column path triggers (its only option here).
+    # addHitPointsWithData passes labels through verbatim as the C++ data-map keys.
+    prefer_timestamp = flags["has_timestamp"]
+    cloud_labels: List[str] = []
+    keep_cols: List[int] = []
+    for i, l in enumerate(labels):
+        if l in ('row_index', 'column_index'):
+            if prefer_timestamp:
+                continue  # drop the grid column; timestamp path will be used
+            cloud_labels.append('row' if l == 'row_index' else 'column')
+            keep_cols.append(i)
+        else:
+            cloud_labels.append(l)
+            keep_cols.append(i)
+    cloud_vals = (vals[:, keep_cols] if vals is not None and len(keep_cols) < vals.shape[1]
+                  else vals)
+
+    # Resolve the scan's angular raster: prefer the supplied values, else estimate
+    # from the point count over a default full-hemisphere sweep (mirrors
+    # _do_lad_computation's _resolution). The raster sets the grid gapfillMisses()
+    # reconstructs over, so it must reflect the scanner, not the surviving points.
+    theta_min = request.theta_min if request.theta_min is not None else 0.0
+    theta_max = request.theta_max if request.theta_max is not None else 180.0
+    phi_min = request.phi_min if request.phi_min is not None else 0.0
+    phi_max = request.phi_max if request.phi_max is not None else 360.0
+    n_pts = xyz.shape[0]
+    if request.n_theta and request.n_phi:
+        n_theta, n_phi = int(request.n_theta), int(request.n_phi)
+    else:
+        aspect = (theta_max - theta_min) / max(phi_max - phi_min, 1e-10)
+        n_phi = max(int(math.sqrt(n_pts / max(aspect, 0.01))), 10)
+        n_theta = max(int(n_pts / n_phi), 10)
+
+    try:
+        from pyhelios import LiDARCloud
+    except Exception as exc:  # pragma: no cover - native import guarded at startup
+        return {"backfilled": 0, "miss_count": 0, "has_misses": False,
+                "scan_origin": list(origin), "already_had_misses": False,
+                "error": f"PyHelios unavailable: {exc}"}
+
+    _report(0.05, "Reading scan")
+    cloud = LiDARCloud()
+    cloud.disableMessages()
+    sid = cloud.addScan(
+        origin=list(origin),
+        Ntheta=n_theta,
+        theta_range=(math.radians(theta_min), math.radians(theta_max)),
+        Nphi=n_phi,
+        phi_range=(math.radians(phi_min), math.radians(phi_max)),
+        exit_diameter=(request.beam_exit_diameter or 0.0),
+        beam_divergence=((request.beam_divergence or 0.0) / 1000.0),
+    )
+    if n_pts > 0:
+        _report(0.15, f"Building cloud ({n_pts:,} points)")
+        cloud.addHitPointsWithData(sid, xyz, dirs, cloud_labels, cloud_vals)
+
+    # The gapfill itself is one opaque C++ call — report an INDETERMINATE stage
+    # (None fraction → pulsing bar, like LAD's ray-trace step) so the UI shows
+    # activity while it runs.
+    _report(None, "Reconstructing misses")
+    try:
+        synth_xyz, count = _run_gapfill_extract(cloud)
+    except Exception as exc:
+        # Helios raises (HeliosRuntimeError) when it can't reconstruct the scan
+        # grid — e.g. a sparse row/column raster ("too few populated scan rows"),
+        # or returns/timestamps too degenerate to group. Return a clean, actionable
+        # error in the JSON tail rather than breaking the stream with a raw 500.
+        msg = str(exc).split("ERROR (")[-1].rstrip(") ") or str(exc)
+        return {"backfilled": 0, "miss_count": 0, "has_misses": False,
+                "scan_origin": list(origin), "already_had_misses": False,
+                "error": ("Could not reconstruct sky/miss points for this scan: "
+                          f"{msg}. The scan grid is too sparse or irregular to "
+                          "gap-fill. If it carries a timestamp, ensure each return "
+                          "keeps it; otherwise re-import a format that retains "
+                          "misses (E57 / structured PLY).")}
+
+    _report(0.9, "Storing misses")
+    # Reconstruct per-beam directions for the synthesised misses so LAD's beam
+    # path can re-emit them. For a moving scan we lack each synthetic miss's own
+    # origin, so fall back to the scan origin (the timestamp grouping already
+    # placed the miss in the right direction relative to it).
+    synth_dirs = _directions_from_origin(synth_xyz, origin)
+
+    buffer = {
+        "positions": synth_xyz,
+        "directions": synth_dirs,
+    }
+    if moving and origins is not None and synth_xyz.shape[0] > 0:
+        # Per-pulse origins aren't recoverable per synthetic miss here; store the
+        # scan-origin broadcast so the LAD reader has an origin column. Refined
+        # only if a future bulk getter exposes per-miss origins.
+        buffer["origins"] = np.tile(np.asarray(origin, dtype=np.float64),
+                                    (synth_xyz.shape[0], 1))
+
+    with _cloud_session_lock:
+        sess.backfilled_misses = buffer if count > 0 else None
+        sess.last_accessed = time.time()
+
+    _report(1.0, "Done")
+    return {
+        "backfilled": count,
+        "miss_count": count,
+        "has_misses": count > 0,
+        "scan_origin": list(origin),
+        "already_had_misses": False,
+    }
+
+
+@app.post("/api/cloud/session/{session_id}/backfill-misses")
+async def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest):
+    """Explicitly recover sky/miss points for a session and persist them.
+
+    LAD needs miss points (beams that returned nothing) for the Beer's-law
+    transmission denominator. Some formats retain them (E57 / structured PLY);
+    others don't but carry the data to RECONSTRUCT them — a per-hit timestamp
+    and/or scan-grid row/column indices. This endpoint builds an ephemeral
+    PyHelios cloud from the session's surviving points, runs gapfillMisses()
+    (which auto-selects the row/column or timestamp path in C++), extracts the
+    synthesised misses, and stores them in a lightweight per-session buffer
+    (`sess.backfilled_misses`) — leaving the hit arrays untouched.
+
+    Session resolve + array assembly + eligibility run up front (so a bad request
+    is a clean 404/400); the heavy build/gapfill/extract streams PHP1 progress
+    markers ahead of the JSON tail (see `_bin_frame_streaming_response`) so the
+    renderer shows a per-stage progress bar. The JSON tail is
+    {backfilled, miss_count, has_misses, scan_origin, already_had_misses} on
+    success, or carries `error` when reconstruction failed.
+    """
+    sess = _get_cloud_session(session_id)
+    origin = request.origin
+    if len(origin) != 3:
+        raise HTTPException(status_code=400, detail="origin must have 3 elements")
+
+    with _cloud_session_lock:
+        xyz, dirs, labels, vals, flags = _session_to_lad_arrays(
+            sess, origin, include_backfilled=False)
+
+    # Already carries real misses (E57 / structured PLY): nothing to recover. A
+    # trivial no-op — return a plain JSON response (no streaming needed).
+    if flags["has_misses"]:
+        return JSONResponse({
+            "backfilled": 0,
+            "miss_count": 0,
+            "has_misses": True,
+            "scan_origin": list(origin),
+            "already_had_misses": True,
+        })
+
+    # Eligibility: gapfillMisses() reconstructs miss directions from EITHER a
+    # per-hit timestamp OR the native scan-grid row/column indices. With neither,
+    # there's no way to recover them — 400 with an actionable message instead of
+    # letting Helios raise.
+    if not (flags["has_timestamp"] or flags["has_grid"]):
+        raise HTTPException(
+            status_code=400,
+            detail=("This scan has no sky/miss points and no way to reconstruct "
+                    "them: it carries neither a per-pulse timestamp nor scan-grid "
+                    "row/column indices. Re-import a scan that retains misses "
+                    "(E57 / structured PLY) or one of those columns."),
+        )
+
+    # Stream the heavy build/gapfill/extract with per-stage progress markers.
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags,
+                                progress=progress)).encode("utf-8"))
 
 
 @app.post("/api/cloud/session/{session_id}/delete_region")

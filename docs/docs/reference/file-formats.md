@@ -44,13 +44,19 @@ column tokens are `x`, `y`, `z`, `r`/`g`/`b` (0–1 range),
 `r255`/`g255`/`b255` (0–255 range, normalised to 0–1 on read),
 `intensity`, `reflectance`, `timestamp`, `target_index`, `target_count`,
 `row`/`column` (structured-scan grid indices), `is_miss`/`miss`/`sky`
-(sky/miss flag), `deviation`. Any other numeric columns are carried through as named
-**scalar fields** (color-mappable in the viewer) rather than discarded —
+(sky/miss flag), `deviation`. Token spellings are matched the same way header
+column names are, so aliases like `col`, `red`, `easting`, or `reflectivity`
+resolve to their role too. Any other token is carried through as a named
+**scalar field** (color-mappable in the viewer) rather than discarded —
 on large octree-streamed clouds they travel into the octree as extra
 attributes. Field names come from the file's header row when present
-(e.g. `Reflectance[dB]` → `Reflectance [dB]`), else a positional
-fallback. The hint is ignored for PLY/PCD because those formats encode
-their column layout in-file.
+(e.g. `Reflectance[dB]` → `Reflectance [dB]`); when the file has **no**
+header, the `<ASCII_format>` token itself names the field — so a headerless
+`.xyz` referenced by an XML whose legend reads
+`row col x y z r255 g255 b255 reflectance` (as in
+`example-datasets/BPPtree_scaninds.xml`) imports with every column labelled,
+not a positional `Column N` fallback. The hint is ignored for PLY/PCD because
+those formats encode their column layout in-file.
 
 `intensity` and `reflectance` are read at whatever scale the source uses —
 Helios reflectance in **dB** (negative), `[0, 1]` floats, `[0, 255]` bytes, or

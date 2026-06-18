@@ -21,8 +21,9 @@ You need geometry in the scene to scan: typically a generated
    The label appears on the scanner marker in the 3D view.
 
 3. **Scanner model** — pick the instrument the scan represents. Choosing
-   a specific model (RIEGL VZ-400i, Leica ScanStation P40, FARO Focus
-   S350, or Velodyne HDL-32E) does two things:
+   a specific model (RIEGL VZ-400i, Leica ScanStation P40, Leica BLK360
+   (G1), Leica BLK360 (G2), FARO Focus S350, or Velodyne HDL-32E) does
+   two things:
 
     - **Marks the position with that instrument's shape**, drawn to its
       real-world size (a Velodyne puck is ~14 cm; a Leica P40 ~40 cm).
