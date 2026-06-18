@@ -2614,16 +2614,37 @@ export interface BackfillMissesResult {
   error?: string;
 }
 
+/** The angular raster of the scan being backfilled, forwarded to the backend so
+ * the C++ gapfiller reconstructs misses over the scan's REAL grid (Ntheta/Nphi)
+ * and sweep (theta/phi range) — not a point-count estimate. Mirrors the
+ * LAD-relevant subset of the scan params (see buildLADRequest). When omitted the
+ * backend falls back to its estimate, which silently mismatches the true grid and
+ * over-fills misses (e.g. a full-360° ring of sky points). `beam_*` are only sent
+ * for multi-return scans. */
+export interface BackfillMissesRaster {
+  n_theta?: number;
+  n_phi?: number;
+  theta_min?: number;        // degrees
+  theta_max?: number;
+  phi_min?: number;
+  phi_max?: number;
+  beam_exit_diameter?: number;  // meters (multi-return only)
+  beam_divergence?: number;     // milliradians (multi-return only)
+}
+
 /**
  * Explicitly recover a session's sky/miss points (beams that returned nothing)
  * and persist them in the backend session, so they can be visualised via the
  * misses overlay and consumed by LAD (which no longer gapfills silently).
  *
  * `origin` is the scanner position (per-beam miss directions are reconstructed
- * from it). `trajectory` (the backend `PoseStream` wire shape, built via
- * poseStreamToWire()) marks a moving-platform scan. Eligible only when the scan
- * carries a per-pulse timestamp and/or scan-grid row/column indices; the backend
- * 400s otherwise.
+ * from it). `raster` is the scan's angular grid/sweep — ALWAYS forward it when
+ * the scan has params; without it the backend estimates the grid from point
+ * count and assumes a full 0–180°/0–360° sweep, which mismatches the real
+ * scanner and fabricates misses outside the scan pattern. `trajectory` (the
+ * backend `PoseStream` wire shape, built via poseStreamToWire()) marks a
+ * moving-platform scan. Eligible only when the scan carries a per-pulse timestamp
+ * and/or scan-grid row/column indices; the backend 400s otherwise.
  *
  * The backend streams PHP1 progress markers ahead of the JSON tail (the build +
  * gapfill is slow for a dense scan), so this takes an optional `onProgress`
@@ -2632,13 +2653,14 @@ export interface BackfillMissesResult {
 export async function backfillMisses(
   sessionId: string,
   origin: [number, number, number],
+  raster?: BackfillMissesRaster,
   trajectory?: unknown,
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
 ): Promise<BackfillMissesResult> {
   return await fetchJsonWithProgress<BackfillMissesResult>(
     `/api/cloud/session/${sessionId}/backfill-misses`,
-    { origin, trajectory },
+    { origin, ...(raster ?? {}), trajectory },
     signal,
     600000,
     onProgress,

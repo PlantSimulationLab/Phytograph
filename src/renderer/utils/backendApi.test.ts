@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   advancePlantSession,
+  backfillMisses,
   computeAlignmentDistance,
   createCloudSession,
   createPlantSession,
@@ -1148,5 +1149,48 @@ describe('decodeBinaryFrame with leading progress markers', () => {
 
   it('throws cleanly on a truncated frame', () => {
     expect(() => decodeBinaryFrame(new Uint8Array([0x50, 0x48]).buffer)).toThrow();
+  });
+});
+
+describe('backfillMisses', () => {
+  const okBody = {
+    backfilled: 5, miss_count: 5, has_misses: true,
+    scan_origin: [0, 0, 5], already_had_misses: false,
+  };
+
+  async function sentBody(...args: Parameters<typeof backfillMisses>) {
+    const spy = mockFetchOk(okBody);
+    await backfillMisses(...args);
+    const init = spy.mock.calls[0][1] as RequestInit;
+    return JSON.parse(init.body as string);
+  }
+
+  it('forwards the scan raster into the request body so the gapfiller uses the real grid/sweep', async () => {
+    // Regression for the 360° miss-ring bug: a limited-zenith row/column scan
+    // (thetaMax 150, 3415×8122 grid) must reach the backend with its true raster,
+    // not be estimated from point count over a full 0–180°/0–360° sweep.
+    const body = await sentBody('sess1', [0, 0, 5], {
+      n_theta: 3415, n_phi: 8122,
+      theta_min: 0, theta_max: 150, phi_min: 0, phi_max: 360,
+    });
+    expect(body).toMatchObject({
+      origin: [0, 0, 5],
+      n_theta: 3415, n_phi: 8122,
+      theta_min: 0, theta_max: 150, phi_min: 0, phi_max: 360,
+    });
+  });
+
+  it('forwards multi-return beam fields when present', async () => {
+    const body = await sentBody('sess1', [0, 0, 5], {
+      n_theta: 100, n_phi: 720, theta_max: 130,
+      beam_exit_diameter: 0.01, beam_divergence: 3,
+    });
+    expect(body.beam_exit_diameter).toBe(0.01);
+    expect(body.beam_divergence).toBe(3);
+  });
+
+  it('omits raster fields when no raster is supplied (backend falls back to its estimate)', async () => {
+    const body = await sentBody('sess1', [0, 0, 5]);
+    expect(body).toEqual({ origin: [0, 0, 5] });
   });
 });

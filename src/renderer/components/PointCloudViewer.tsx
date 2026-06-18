@@ -4,7 +4,7 @@ import { Canvas } from '@react-three/fiber';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -2516,6 +2516,26 @@ export default function PointCloudViewer({
             ? [cloud.params.origin.x, cloud.params.origin.y, cloud.params.origin.z]
             : (oct.scanOrigin ?? [0, 0, 0]);
         const hadKnownOrigin = scanHasKnownOrigin(cloud);
+        // Forward the scan's REAL angular raster so the C++ gapfiller reconstructs
+        // misses over the actual scan grid/sweep — not a point-count estimate that
+        // assumes a full 0–180°/0–360° sweep (which fabricates a 360° ring of sky
+        // misses for a limited-zenith or partial-azimuth scan). Mirrors the raster
+        // LAD already forwards via buildLADRequest; omit it when the scan has no
+        // params (the backend then falls back to its estimate).
+        const p = cloud.params;
+        const raster: BackfillMissesRaster | undefined = p
+          ? {
+              n_theta: p.zenithPoints,
+              n_phi: p.azimuthPoints,
+              theta_min: p.zenithMinDeg,
+              theta_max: p.zenithMaxDeg,
+              phi_min: p.azimuthMinDeg,
+              phi_max: p.azimuthMaxDeg,
+              ...(p.returnType === 'multi'
+                ? { beam_exit_diameter: p.beamExitDiameterM, beam_divergence: p.beamDivergenceMrad }
+                : {}),
+            }
+          : undefined;
         const prefix = n > 1 ? `Scan ${i + 1} of ${n} — ` : '';
         // The gapfill stage occupies ~[0.15, 0.9] of a scan's fraction. Map that to
         // an overall band; the synthetic creep eases from the band's start toward
@@ -2556,7 +2576,7 @@ export default function PointCloudViewer({
           }, 100);
         };
         try {
-          const res = await backfillMisses(oct.sessionId!, origin, undefined, abort.signal, report);
+          const res = await backfillMisses(oct.sessionId!, origin, raster, undefined, abort.signal, report);
           stopSynth();  // the request resolved — no more synthetic creep for this scan
           if (abort.signal.aborted) return;
           if (res.error) {

@@ -249,6 +249,68 @@ def test_timestamp_preferred_over_grid_drops_grid_columns(stub_pyhelios):
     assert "row_index" not in cloud._labels_seen
 
 
+def _addscan_kwargs(cloud):
+    """The kwargs of the addScan call captured by the stub cloud."""
+    return next(k for (name, k) in cloud.calls if name == "addScan")
+
+
+def test_supplied_raster_drives_addscan_grid_and_sweep(stub_pyhelios):
+    # The frontend forwards the scan's REAL angular raster (Ntheta/Nphi + the
+    # theta/phi sweep) so the C++ gapfiller reconstructs misses over the actual
+    # scan grid — not a point-count estimate that assumes a full 0–180°/0–360°
+    # sweep. This is the fix for the 360° miss-ring bug: a row/column scan with a
+    # limited zenith (thetaMax 150) and a 3415×8122 grid must build the cloud with
+    # exactly those values, not an estimate.
+    import math
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"row_index": [0, 1, 2], "column_index": [0, 0, 1]},
+        [{"slug": "row_index", "label": "Row Index"},
+         {"slug": "column_index", "label": "Column Index"}],
+    )
+    _register(sess)
+
+    resp = _call(
+        sess.session_id, origin=[0, 0, 5],
+        n_theta=3415, n_phi=8122,
+        theta_min=0.0, theta_max=150.0, phi_min=0.0, phi_max=360.0,
+    )
+
+    assert resp["backfilled"] == _FakeCloud.SYNTH
+    kw = _addscan_kwargs(stub_pyhelios.instances[-1])
+    # Grid dimensions reach addScan verbatim (no estimate).
+    assert kw["Ntheta"] == 3415
+    assert kw["Nphi"] == 8122
+    # Sweep is forwarded in RADIANS — crucially theta_max is 150°, NOT the 180°
+    # default that would over-fill misses into the unscanned polar cap.
+    assert kw["theta_range"][0] == pytest.approx(0.0)
+    assert kw["theta_range"][1] == pytest.approx(math.radians(150.0))
+    assert kw["phi_range"][0] == pytest.approx(0.0)
+    assert kw["phi_range"][1] == pytest.approx(math.radians(360.0))
+
+
+def test_omitted_raster_falls_back_to_estimate(stub_pyhelios):
+    # Backward-compatible default: with no raster supplied, the backend estimates
+    # the grid from point count and assumes a full 0–180°/0–360° sweep. (This is
+    # the legacy behaviour the frontend now overrides; kept as a regression guard
+    # so the fallback isn't accidentally removed.)
+    import math
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"row_index": [0, 1, 2], "column_index": [0, 0, 1]},
+        [{"slug": "row_index", "label": "Row Index"},
+         {"slug": "column_index", "label": "Column Index"}],
+    )
+    _register(sess)
+
+    resp = _call(sess.session_id, origin=[0, 0, 5])  # no raster
+
+    assert resp["backfilled"] == _FakeCloud.SYNTH
+    kw = _addscan_kwargs(stub_pyhelios.instances[-1])
+    assert kw["theta_range"][1] == pytest.approx(math.radians(180.0))
+    assert kw["phi_range"][1] == pytest.approx(math.radians(360.0))
+
+
 def test_helios_gapfill_failure_returns_error_in_json_tail(stub_pyhelios):
     # When Helios can't reconstruct the grid (e.g. a sparse row/column raster), it
     # raises mid-stream. The streamed worker must convert that into a clean,
