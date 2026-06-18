@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useMemo } from 'react';
+import { Suspense, useEffect, useMemo, useRef } from 'react';
 import { useLoader } from '@react-three/fiber';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
@@ -33,6 +33,171 @@ interface ScannerMarkerProps {
   // fit (the user's "Scan marker size" setting). 1 = real-world scale. Applied
   // to the wrapping group, so it scales the fitted mesh as a whole.
   scale?: number;
+  // World-space platform path positions for a moving-platform scan. When present
+  // a polyline is drawn through them (the body marker still renders at `origin`,
+  // the first pose). Undefined → static scan, no path. Positions are in the same
+  // (display-offset-corrected) frame as `origin`.
+  trajectory?: Array<[number, number, number]>;
+  // Full per-pose samples [x, y, z, qx, qy, qz, qw] for the moving-platform
+  // keypoint glyphs (a sphere + an orientation arrow at each pose). Same frame as
+  // `trajectory`. Undefined → no glyphs.
+  poses?: Array<[number, number, number, number, number, number, number]>;
+  // First-pose platform attitude (Hamilton qx,qy,qz,qw) for a moving scan. When
+  // present the marker body is oriented by this instead of the static tilt/
+  // heading (which don't apply to a moving scan). Undefined → use tilt/heading.
+  bodyQuaternion?: [number, number, number, number];
+}
+
+// A thin polyline through the platform trajectory positions. Drawn in world space
+// (NOT inside the posed body group), so it isn't translated/rotated by the scanner
+// pose. Uses the scan color so the path reads as belonging to this scan.
+function TrajectoryPath({ points, color }: {
+  points: Array<[number, number, number]>;
+  color: string;
+}) {
+  // Build the path as consecutive vertex PAIRS and draw with <lineSegments>.
+  // The lowercase r3f intrinsic <line> collides with the SVG/DOM `line` element
+  // and silently fails to render; <lineSegments> is the working primitive used
+  // elsewhere (VoxelGridOverlay, CropBox). Emitting each segment as a pair
+  // (p[i], p[i+1]) makes the disjoint-pairs lineSegments draw a connected path.
+  const geometry = useMemo(() => {
+    const g = new THREE.BufferGeometry();
+    const segCount = Math.max(points.length - 1, 0);
+    const arr = new Float32Array(segCount * 2 * 3);
+    for (let i = 0; i < segCount; i++) {
+      const a = points[i];
+      const b = points[i + 1];
+      arr.set([a[0], a[1], a[2], b[0], b[1], b[2]], i * 6);
+    }
+    g.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    // A hand-built BufferGeometry has no bounding sphere until asked; without one
+    // three.js frustum-culls the whole line whenever the origin leaves the view,
+    // so the path blinks out at certain angles/zooms. Compute it from the verts.
+    g.computeBoundingSphere();
+    return g;
+  }, [points]);
+  // Dispose the geometry when the points change / the path unmounts.
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  if (points.length < 2) return null;
+  return (
+    <lineSegments frustumCulled={false}>
+      <primitive object={geometry} attach="geometry" />
+      <lineBasicMaterial color={color} linewidth={2} transparent opacity={0.9} depthTest={false} />
+    </lineSegments>
+  );
+}
+
+// A small sphere at each trajectory pose plus a short arrow showing the platform
+// orientation there. The individual sample positions read as distinct keypoints
+// (not just a continuous line) and the arrows show which way the scanner was
+// facing. Both are instanced for cheap render of many poses, sized to the
+// trajectory extent so they're visible on a 50 m drone pass and not oversized on
+// a 1 m path. This is the reusable keypoint glyph the future viewport trajectory
+// editor will build on.
+//
+// `poses` are [x, y, z, qx, qy, qz, qw] per sample (Hamilton, body->world). The
+// arrow points along the platform's forward body axis (+Y, matching the marker
+// meshes) rotated by each pose's quaternion.
+function TrajectoryPoses({ poses, color }: {
+  poses: Array<[number, number, number, number, number, number, number]>;
+  color: string;
+}) {
+  const sphereRef = useRef<THREE.InstancedMesh>(null);
+  const arrowRef = useRef<THREE.InstancedMesh>(null);
+
+  // Depend on the POSE COUNT + a cheap content hash, not the array identity —
+  // the parent passes a freshly-mapped array every render, so depending on
+  // `poses` directly would rebuild this GPU geometry on every frame (a steady
+  // GPU-memory leak that can OOM the renderer). The hash changes only when the
+  // path actually changes.
+  const posesKey = useMemo(
+    () => poses.length + ':' + (poses[0]?.join(',') ?? '') + ':' +
+      (poses[poses.length - 1]?.join(',') ?? ''),
+    [poses],
+  );
+
+  // Glyph size scales to the path's diagonal extent. The sphere radius was
+  // shrunk 40% (1.2% → 0.72% of the diagonal); the arrow length is a few sphere
+  // radii so it reads as a direction indicator. Geometry is built here (passed
+  // via args, matching LADVoxelGrid) so it rebuilds with the size + is disposed
+  // on unmount.
+  const { sphereGeo, arrowGeo, arrowLen } = useMemo(() => {
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    for (const p of poses) {
+      for (let i = 0; i < 3; i++) {
+        if (p[i] < min[i]) min[i] = p[i];
+        if (p[i] > max[i]) max[i] = p[i];
+      }
+    }
+    const diag = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+    const radius = Math.max(diag * 0.0072, 0.03);   // 40% smaller than before
+    const len = radius * 5;                          // arrow length
+    // Cone authored along +Y (apex up), its base at the origin so it grows from
+    // the pose outward; per-pose quaternion then aims it along the body forward.
+    const arrow = new THREE.ConeGeometry(radius * 1.2, len, 10);
+    arrow.translate(0, len / 2, 0);
+    return {
+      sphereGeo: new THREE.SphereGeometry(radius, 12, 8),
+      arrowGeo: arrow,
+      arrowLen: len,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [posesKey]);
+  useEffect(() => () => { sphereGeo.dispose(); arrowGeo.dispose(); },
+    [sphereGeo, arrowGeo]);
+
+  // Write one instance matrix per pose, then recompute bounding volumes. Without
+  // explicit bounds three.js keeps the default (origin-centered, tiny) bounding
+  // sphere and frustum-culls the whole instanced mesh once the world origin
+  // leaves view — making the glyphs vanish at certain angles/zooms.
+  useEffect(() => {
+    const sphere = sphereRef.current;
+    const arrow = arrowRef.current;
+    if (!sphere || !arrow) return;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const pos = new THREE.Vector3();
+    const one = new THREE.Vector3(1, 1, 1);
+    poses.forEach((p, i) => {
+      pos.set(p[0], p[1], p[2]);
+      m.makeTranslation(p[0], p[1], p[2]);
+      sphere.setMatrixAt(i, m);
+      // Arrow: same position, rotated by the pose's body->world quaternion so the
+      // cone (authored +Y) points along the platform forward axis.
+      q.set(p[3], p[4], p[5], p[6]).normalize();
+      m.compose(pos, q, one);
+      arrow.setMatrixAt(i, m);
+    });
+    sphere.instanceMatrix.needsUpdate = true;
+    arrow.instanceMatrix.needsUpdate = true;
+    sphere.computeBoundingSphere();
+    sphere.computeBoundingBox();
+    arrow.computeBoundingSphere();
+    arrow.computeBoundingBox();
+  }, [poses, sphereGeo, arrowGeo, arrowLen]);
+
+  if (poses.length === 0) return null;
+  return (
+    <>
+      <instancedMesh
+        ref={sphereRef}
+        key={'s' + poses.length}
+        args={[sphereGeo, undefined, poses.length]}
+        frustumCulled={false}
+      >
+        <meshBasicMaterial color={color} transparent opacity={0.95} depthTest={false} />
+      </instancedMesh>
+      <instancedMesh
+        ref={arrowRef}
+        key={'a' + poses.length}
+        args={[arrowGeo, undefined, poses.length]}
+        frustumCulled={false}
+      >
+        <meshBasicMaterial color={color} transparent opacity={0.85} depthTest={false} />
+      </instancedMesh>
+    </>
+  );
 }
 
 // Tilt component of the marker orientation. With world +Z up and the body forward
@@ -219,26 +384,92 @@ export function ScannerMarker({
   tiltPitchDeg = 0,
   azimuthOffsetDeg = 0,
   scale = 1,
+  trajectory,
+  poses,
+  bodyQuaternion,
 }: ScannerMarkerProps) {
   const resolved = useMemo(() => getScannerModel(model), [model]);
-  // Recompute only when the heading/tilt inputs change. Combines the heading yaw
+  // Orientation: for a moving scan, use the platform's first-pose attitude
+  // (the static tilt/heading don't apply). Otherwise combine the heading yaw
   // (orient the authored +Y-forward body) with the residual tilt.
   const quaternion = useMemo(
-    () => scannerOrientation(tiltRollDeg, tiltPitchDeg, azimuthOffsetDeg),
-    [tiltRollDeg, tiltPitchDeg, azimuthOffsetDeg],
+    () =>
+      bodyQuaternion
+        ? new THREE.Quaternion(bodyQuaternion[0], bodyQuaternion[1],
+            bodyQuaternion[2], bodyQuaternion[3]).normalize()
+        : scannerOrientation(tiltRollDeg, tiltPitchDeg, azimuthOffsetDeg),
+    [bodyQuaternion, tiltRollDeg, tiltPitchDeg, azimuthOffsetDeg],
   );
   // Clamp to a sane positive multiplier so a stray 0/negative setting can't
   // collapse or invert every marker.
   const markerScale = scale > 0 ? scale : 1;
   return (
-    <group position={[origin.x, origin.y, origin.z]} quaternion={quaternion} scale={markerScale}>
-      <Suspense fallback={null}>
-        {resolved.meshFormat === 'ply' ? (
-          <PlyBody model={resolved} color={color} selected={selected} />
-        ) : (
-          <ObjBody model={resolved} color={color} selected={selected} />
-        )}
-      </Suspense>
-    </group>
+    <>
+      {trajectory && trajectory.length >= 2 && (
+        <TrajectoryPath points={trajectory} color={color} />
+      )}
+      {poses && poses.length >= 1 && (
+        <TrajectoryPoses poses={poses} color={color} />
+      )}
+      <group position={[origin.x, origin.y, origin.z]} quaternion={quaternion} scale={markerScale}>
+        <Suspense fallback={null}>
+          {resolved.meshFormat === 'ply' ? (
+            <PlyBody model={resolved} color={color} selected={selected} />
+          ) : (
+            <ObjBody model={resolved} color={color} selected={selected} />
+          )}
+        </Suspense>
+      </group>
+    </>
+  );
+}
+
+// Wrapper that derives the ScannerMarker props from a scan's ScanParameters and
+// MEMOIZES the trajectory-derived arrays on the stable `params.trajectory`
+// reference. Without this, the parent's inline `.map()` produced a fresh
+// positions array every render, rebuilding the trajectory marker's GPU geometry
+// each frame — a steady GPU-memory leak that froze and OOM-crashed the renderer.
+export function ScanMarkerEntry({
+  params,
+  color,
+  selected,
+  markerScale,
+}: {
+  params: import('../lib/scanParameters').ScanParameters;
+  color: string;
+  selected: boolean;
+  markerScale: number;
+}) {
+  const traj = params.trajectory;
+  const trajectory = useMemo(
+    () => traj?.poses.map(p => [p.x, p.y, p.z] as [number, number, number]),
+    [traj],
+  );
+  const poses = useMemo(
+    () => traj?.poses.map(p =>
+      [p.x, p.y, p.z, p.qx, p.qy, p.qz, p.qw] as
+        [number, number, number, number, number, number, number]),
+    [traj],
+  );
+  const bodyQuaternion = useMemo<[number, number, number, number] | undefined>(
+    () => (traj
+      ? [traj.poses[0].qx, traj.poses[0].qy, traj.poses[0].qz, traj.poses[0].qw]
+      : undefined),
+    [traj],
+  );
+  return (
+    <ScannerMarker
+      origin={params.origin}
+      model={params.scannerModel}
+      color={color}
+      selected={selected}
+      tiltRollDeg={params.tiltRollDeg}
+      tiltPitchDeg={params.tiltPitchDeg}
+      azimuthOffsetDeg={params.azimuthOffsetDeg}
+      scale={markerScale}
+      trajectory={trajectory}
+      poses={poses}
+      bodyQuaternion={bodyQuaternion}
+    />
   );
 }

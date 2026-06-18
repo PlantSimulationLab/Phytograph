@@ -1,0 +1,9 @@
+# Low straight pass for the synthetic moving-scan E2E: the platform flies +X at
+# z=2 m directly over a plant at the origin, nadir-looking (heading +X), so a
+# moving scan's per-beam origins span x in [-1.5, 1.5] (vs a static point).
+# t x y z qx qy qz qw  (Hamilton body->world)
+0.0 -1.5 0.0 2.0 0 0 0 1
+0.5 -0.75 0.0 2.0 0 0 0 1
+1.0 0.0 0.0 2.0 0 0 0 1
+1.5 0.75 0.0 2.0 0 0 0 1
+2.0 1.5 0.0 2.0 0 0 0 1

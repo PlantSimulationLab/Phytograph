@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.25.0"
+BACKEND_VERSION = "0.27.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2343,6 +2343,45 @@ async def segment_trees_points(request: TreeSegmentationRequest):
 
 # ==================== HELIOS TRIANGULATION ====================
 
+class PoseSample(BaseModel):
+    """One 6-DOF platform pose sample: time + position + Hamilton (body->world)
+    quaternion (qx, qy, qz, qw, scalar last)."""
+    t: float
+    x: float
+    y: float
+    z: float
+    qx: float
+    qy: float
+    qz: float
+    qw: float
+
+
+class FrameMeta(BaseModel):
+    """Documented frame/CRS so a timestamp join is never silently wrong. `up_axis`
+    is the world up convention ('z' for Phytograph); `body_convention`/`time_ref`
+    are recorded for downstream interoperability (FLU/FRD, GPS-week vs relative)."""
+    crs: Optional[str] = None
+    up_axis: str = "z"
+    body_convention: str = "FLU"
+    time_ref: Optional[str] = None
+
+
+class PoseStream(BaseModel):
+    """A dense timestamped 6-DOF platform trajectory plus its calibration — the
+    canonical moving-platform representation (see backend-api/trajectory.py).
+
+    Quaternions are Hamilton body->world (qx,qy,qz,qw). `lever_arm` (body-frame
+    scanner optical center, meters) and `boresight_rpy` (sensor misalignment
+    roll/pitch/yaw, radians) calibrate the platform->scanner transform; the per-beam
+    emission origin is pos(t) + R(quat(t))·lever_arm. The backend resolver joins
+    this to each return's timestamp (SLERP attitude, linear position)."""
+    poses: List[PoseSample]
+    frame: FrameMeta = FrameMeta()
+    lever_arm: List[float] = [0.0, 0.0, 0.0]      # body-frame [x, y, z] meters
+    boresight_rpy: List[float] = [0.0, 0.0, 0.0]  # [roll, pitch, yaw] radians
+    source_format: str = "pose_csv"
+
+
 class HeliosScanEntry(BaseModel):
     """A single scan with point data (or file path) and scanner position.
 
@@ -2383,6 +2422,14 @@ class HeliosScanEntry(BaseModel):
     # column-name -> per-point values, e.g. timestamp/target_index/target_count).
     session_id: Optional[str] = None
     scalar_columns: Optional[Dict[str, List[float]]] = None
+    # Moving-platform trajectory. When present, this scan is a moving-platform
+    # acquisition: `origin` is only a fallback anchor (it should equal the first
+    # pose's position), and the LAD path reconstructs a PER-BEAM emission origin
+    # for every return by joining its `timestamp` to this trajectory (see
+    # backend-api/trajectory.py). Those per-beam origins drive the beam-based
+    # (Gtheta) leaf-area inversion, which needs no triangulation. Static scans
+    # leave this None and behave exactly as before. Ignored by triangulation.
+    trajectory: Optional[PoseStream] = None
 
 class HeliosGrid(BaseModel):
     """An explicit triangulation grid, derived from a voxel box in the UI.
@@ -2523,6 +2570,13 @@ class LADComputeRequest(BaseModel):
     theta_max: float = 130.0
     phi_min: float = 0.0
     phi_max: float = 360.0
+    # Mean leaf-projection coefficient G(theta), in (0, 1]. Required ONLY for
+    # moving-platform scans: their pulses don't lie on a fixed theta-phi grid, so
+    # they cannot be triangulated to derive G(theta) per cell. Instead the caller
+    # supplies it (0.5 = spherical/random leaf-angle distribution) and the
+    # beam-based inversion uses each return's per-beam origin. Ignored for static
+    # scans, which derive G(theta) from triangulation as before.
+    gtheta: Optional[float] = None
 
 class LADCell(BaseModel):
     """A single voxel result."""
@@ -3476,6 +3530,12 @@ def _directions_from_origin(xyz: "np.ndarray", origin) -> "np.ndarray":
     """Reconstruct per-hit ray directions as Helios's loadASCIIFile does when a
     scan has no zenith/azimuth columns: cart2sphere(xyz - origin).
 
+    `origin` is either a single (3,) scanner position (static scan — every beam
+    shares it) or a per-beam (N,3) array of emission origins (moving-platform
+    scan — each return has its own origin, joined from the trajectory by
+    timestamp). Numpy broadcasting handles both; with all origins equal the
+    per-beam form is bit-identical to the single-origin form.
+
     Returns (N,3) float32 [radius, elevation, azimuth] matching helios
     cart2sphere (global.cpp): radius = ||d||, elevation = asin(dz/radius),
     azimuth = atan2_2pi(dx, dy) which equals np.arctan2(dx, dy) (x first, y
@@ -3502,6 +3562,10 @@ def _cull_to_grid(xyz: "np.ndarray", origin, grid_center, grid_size,
     must be kept. Slab test over t in [0, 1]; axis-parallel beams (d==0) are kept
     only if the origin already lies within that axis's slab. `expand` adds a
     small margin so beams grazing the grid face (finite footprint) aren't dropped.
+
+    `origin` is either a single (3,) position (static) or per-beam (N,3) origins
+    (moving platform); the slab math broadcasts identically for both, and the
+    axis-parallel `origin_in` test becomes per-beam when origins are per-beam.
     """
     import numpy as np
 
@@ -3678,6 +3742,55 @@ def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
     return xyz, dirs, labels, vals, flags
 
 
+def _apply_trajectory_origins(xyz, dirs, labels, vals, trajectory, shift=None):
+    """Convert a static LAD scan into a per-beam (moving-platform) one.
+
+    Given a scan's resolved arrays plus a `trajectory` (Pydantic PoseStream) and an
+    optional local-frame `shift` (3,), reconstruct a PER-BEAM emission origin for
+    every return by joining its `timestamp` column to the trajectory (SLERP
+    attitude, linear position; see trajectory.py), then:
+      - recompute `dirs` as cart2sphere(xyz - per_beam_origin),
+      - append origin_x/origin_y/origin_z to (labels, vals) so they land in each
+        hit's data map — this is exactly what the C++ getHitOrigin() / beam-based
+        (Gtheta) inversion reads.
+
+    `xyz` and the trajectory must already be in the SAME frame; pass `shift` to move
+    BOTH into a local frame for float32 precision (the inversion is frame-invariant).
+    Returns (dirs, labels, vals, origins). Raises if no `timestamp` column exists —
+    a moving scan cannot be reconstructed without the per-return join key.
+    """
+    import numpy as np
+    from trajectory import PoseStream as _TrajPoseStream, origins_for_returns
+
+    if 'timestamp' not in labels:
+        raise ValueError(
+            "Moving-platform LAD requires a per-point 'timestamp' column to join "
+            "returns to the trajectory, but the scan data has none.")
+    ts = np.asarray(vals[:, labels.index('timestamp')], dtype=np.float64)
+
+    poses = trajectory.poses
+    stream = _TrajPoseStream.from_samples(
+        t=[p.t for p in poses],
+        pos=[[p.x, p.y, p.z] for p in poses],
+        rot=[[p.qx, p.qy, p.qz, p.qw] for p in poses],
+        rot_is_quaternion=True,
+        lever_arm=list(trajectory.lever_arm),
+        boresight_rpy=list(trajectory.boresight_rpy),
+        frame_crs=trajectory.frame.crs,
+    )
+    if shift is not None:
+        stream = stream.recentered(np.asarray(shift, dtype=np.float64))
+
+    origins = origins_for_returns(stream, ts)              # (N,3) float64, local frame
+    dirs = _directions_from_origin(xyz, origins)           # per-beam directions
+
+    labels = list(labels) + ['origin_x', 'origin_y', 'origin_z']
+    origin_cols = origins.astype(np.float64)
+    vals = (np.column_stack([vals, origin_cols]) if vals is not None
+            else origin_cols)
+    return dirs, labels, vals, origins
+
+
 def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
     """Compute per-voxel leaf area density via PyHelios. Returns a result dict.
 
@@ -3731,6 +3844,32 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
         grid_center = list(request.grid.center)
         grid_size = list(request.grid.size)
         grid_nx, grid_ny, grid_nz = request.grid.nx, request.grid.ny, request.grid.nz
+
+        # Moving-platform scans carry a 6-DOF trajectory; their per-beam origins are
+        # reconstructed and fed to PyHelios's float32 geometry path. If the
+        # trajectory is in a large (e.g. UTM) frame, float32 loses decimeters, so
+        # recenter EVERYTHING — points, trajectory, grid, and (on the way out) the
+        # result cell centers — by a single local shift. The shift is the floor of
+        # the min corner over the trajectory samples and the grid box, so all
+        # coordinates reaching Helios are small. Static-only requests skip this
+        # entirely (lad_shift is None) and are byte-for-byte unchanged.
+        any_moving = any(s.trajectory is not None for s in request.scans)
+        lad_shift = None
+        if any_moving:
+            mins = []
+            for s in request.scans:
+                if s.trajectory is not None:
+                    for p in s.trajectory.poses:
+                        mins.append([p.x, p.y, p.z])
+            gc = np.asarray(grid_center, dtype=np.float64)
+            gh = np.asarray(grid_size, dtype=np.float64) / 2.0
+            mins.append((gc - gh).tolist())
+            shift = np.floor(np.min(np.asarray(mins, dtype=np.float64), axis=0))
+            # Only bother when coordinates are actually large; a near-origin scene
+            # keeps its coordinates so tests/fixtures read naturally.
+            if np.any(np.abs(shift) > 1.0):
+                lad_shift = shift
+                grid_center = (gc - lad_shift).tolist()
 
         # Each scan resolves to in-RAM arrays (xyz + ray directions + an optional
         # multi-return data map). Multi-return is detected AUTHORITATIVELY from
@@ -3796,13 +3935,30 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
                 raise ValueError("Scan entry has no points, file_path, or session_id")
             scan_multi = scan_flags["multi"]
 
+            # Moving-platform scan: reconstruct a PER-BEAM emission origin for every
+            # return by joining its timestamp to the trajectory, recompute the ray
+            # directions from those per-beam origins, and carry origin_x/y/z so the
+            # beam-based (Gtheta) inversion can read each beam's own origin. Both the
+            # points and the trajectory are recentered by `lad_shift` into a small
+            # local frame for float32 precision (the inversion is frame-invariant;
+            # the grid + output cells are shifted to match below). `cull_origin` is
+            # the per-beam origins so the frustum cull also accounts for motion.
+            scan_moving = scan_entry.trajectory is not None
+            if scan_moving:
+                if lad_shift is not None:
+                    xyz = xyz - lad_shift
+                dirs, labels, vals, cull_origin = _apply_trajectory_origins(
+                    xyz, dirs, labels, vals, scan_entry.trajectory, shift=lad_shift)
+            else:
+                cull_origin = origin
+
             # Cull to the grid's beam frustum: keep only beams (origin -> point)
             # whose segment can pass through the grid AABB. This preserves
             # through-grid miss rays (Beer's law) while dropping far-field points
             # whose beams never touch the grid — the biggest win for a localized
-            # grid in a large scene.
+            # grid in a large scene. For moving scans `cull_origin` is per-beam.
             n_before = xyz.shape[0]
-            keep = _cull_to_grid(xyz, origin, grid_center, grid_size)
+            keep = _cull_to_grid(xyz, cull_origin, grid_center, grid_size)
             if not keep.all():
                 xyz = xyz[keep]
                 dirs = dirs[keep]
@@ -3861,6 +4017,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
                 "phi_min": phi_min,
                 "phi_max": phi_max,
                 "multi": scan_multi,
+                "moving": scan_moving,
                 "has_timestamp": scan_flags["has_timestamp"],
                 "has_misses": scan_flags["has_misses"],
             })
@@ -3900,17 +4057,34 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
         cloud.addGrid(center=grid_center, size=grid_size,
                       ndiv=[grid_nx, grid_ny, grid_nz])
 
-        _report(0.55, "Triangulating hit points")
-        cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
-        if cloud.getTriangleCount() == 0:
-            return {
-                "success": False,
-                "cells": [],
-                "method_used": "helios",
-                "error": "No triangles generated — cannot compute the G-function. "
-                         "Try increasing Lmax or adjusting max_aspect_ratio.",
-                "warnings": warnings,
-            }
+        # Moving-platform scans cannot be triangulated: their pulses don't lie on a
+        # fixed theta-phi grid, so there's no scan raster to mesh and derive the
+        # per-cell G-function from. Instead the caller supplies a mean G(theta) and
+        # the beam-based inversion uses each return's own per-beam origin
+        # (getHitOrigin / origin_x/y/z). When ANY scan is moving we take this path
+        # for the whole cloud. Static-only requests triangulate exactly as before.
+        any_moving = any(s["moving"] for s in scans_arrays)
+        if any_moving:
+            supplied_gtheta = request.gtheta if request.gtheta is not None else 0.5
+            if request.gtheta is None:
+                warnings.append(
+                    "Moving-platform LAD needs a mean leaf-projection coefficient "
+                    "G(theta); defaulted to 0.5 (spherical leaf-angle distribution). "
+                    "Set it to match the canopy if known.")
+            if not (0.0 < supplied_gtheta <= 1.0):
+                raise ValueError("gtheta must be in (0, 1] (0.5 = spherical).")
+        else:
+            _report(0.55, "Triangulating hit points")
+            cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
+            if cloud.getTriangleCount() == 0:
+                return {
+                    "success": False,
+                    "cells": [],
+                    "method_used": "helios",
+                    "error": "No triangles generated — cannot compute the G-function. "
+                             "Try increasing Lmax or adjusting max_aspect_ratio.",
+                    "warnings": warnings,
+                }
 
         recovered_misses = 0
         if do_gapfill:
@@ -3968,7 +4142,13 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
             )
         _report(0.80, "Inverting Beer's law")
         with Context() as ctx:
-            cloud.calculateLeafArea(ctx, min_hits, element_width)
+            if any_moving:
+                # Beam-based inversion: traverses each beam from its own per-beam
+                # origin (getHitOrigin), uses the supplied G(theta), no triangulation.
+                cloud.calculateLeafArea(ctx, min_hits, element_width,
+                                        Gtheta=supplied_gtheta)
+            else:
+                cloud.calculateLeafArea(ctx, min_hits, element_width)
 
         def _clean(x):
             """NaN -> None so the value survives JSON serialization."""
@@ -4008,9 +4188,13 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
             var = float(cloud.getCellLADVariance(i))
             bc = int(cloud.getCellBeamCount(i))
             ci_valid, ci_lo, ci_hi = cloud.getCellLeafAreaConfidenceInterval(i, conf_level)
+            # Cell centers come back in the (possibly recentered) compute frame;
+            # add lad_shift back so results are reported in true world coordinates.
+            center = ([c.x + lad_shift[0], c.y + lad_shift[1], c.z + lad_shift[2]]
+                      if lad_shift is not None else [c.x, c.y, c.z])
             cell = {
                 "index": i,
-                "center": [c.x, c.y, c.z],
+                "center": center,
                 "size": [s.x, s.y, s.z],
                 "leaf_area": la,
                 "lad": lad,
@@ -4816,6 +5000,16 @@ class LidarScanScanner(BaseModel):
     # synthetic-scan generator via PyHelios addScan/addScanMultibeam
     # scan_azimuth_offset (v0.1.23+) at the call sites below.
     scan_azimuth_offset_deg: float = 0.0
+    # Moving-platform trajectory. When present, this scanner is driven by
+    # addScanMoving instead of the static addScan/addScanMultibeam: the scanner
+    # pose walks the trajectory over the sweep, `origin` is ignored (the
+    # trajectory supplies position), and every hit/miss records its own per-pulse
+    # emission origin + real timestamp. `pulse_rate_hz` sets the per-pulse spacing
+    # in time (t = t0 + ordinal / pulse_rate_hz); the Ntheta*Nphi pulse budget
+    # therefore determines how much of the flight the sweep spans. Static scanners
+    # leave this None and behave exactly as before.
+    trajectory: Optional[PoseStream] = None
+    pulse_rate_hz: Optional[float] = None
 
 
 class LidarScanRequest(BaseModel):
@@ -4864,6 +5058,57 @@ class LidarScanResponse(BaseModel):
 # LiDAR.cpp). "intensity" is the beam/normal dot product (can be negative) scaled
 # by reflectivity; we abs() it when surfacing so it reads as a 0..1-ish magnitude.
 _LIDAR_STANDARD_HIT_FIELDS = ["intensity", "distance", "timestamp", "target_index", "target_count"]
+
+# Soft ceiling on a moving scan's total pulse count. A real PRF over a long flight
+# is genuinely millions of pulses (we fire them — physically faithful), but past
+# this we surface a warning so a 60 s flight at 1 MHz (60M pulses) doesn't lock up
+# unannounced. Not a hard cap; the scan still runs.
+_MOVING_SCAN_PULSE_WARN = 20_000_000
+
+
+def _derive_moving_scan_grid(n_theta: int, n_phi_per_rev: int, pulse_rate_hz: float,
+                             traj_t: list) -> dict:
+    """Derive the full-flight scan grid for a moving-platform scan.
+
+    A real spinning sensor fires continuously at its pulse rate (PRF), spinning at
+    a rate set by PRF and its per-revolution resolution, for the whole flight. The
+    user specifies resolution PER REVOLUTION (n_theta channels/zenith rows ×
+    n_phi_per_rev azimuth steps); the PRF is the instrument's fixed laser spec.
+    Everything else follows from the trajectory's duration:
+
+        pulses_per_rev = n_theta * n_phi_per_rev
+        rotation_rate  = PRF / pulses_per_rev          (revolutions / second)
+        duration       = traj_t[-1] - traj_t[0]        (seconds, from the path)
+        n_revolutions  = rotation_rate * duration
+        n_phi_total    = round(n_phi_per_rev * n_revolutions)
+        phi_max        = phi_min + n_revolutions * 2pi  (the head spins that many
+                                                         times across the flight)
+        total_pulses   = n_theta * n_phi_total  (≈ PRF * duration)
+
+    So addScanMoving fires ~PRF*duration pulses spanning [t0, t0+duration] — the
+    cloud covers the entire path. Returns a dict with n_phi_total, phi_max_rad
+    (relative to phi_min=0; caller offsets), rotation_rate_hz, n_revolutions,
+    total_pulses, duration_s.
+    """
+    import math
+    pulses_per_rev = max(int(n_theta) * int(n_phi_per_rev), 1)
+    duration = float(traj_t[-1]) - float(traj_t[0]) if len(traj_t) > 1 else 0.0
+    rotation_rate = float(pulse_rate_hz) / pulses_per_rev
+    n_rev = rotation_rate * duration
+    # A zero-duration (single-pose) trajectory or a degenerate rate falls back to a
+    # single revolution so the scan still produces a sensible static-like sweep.
+    if not (n_rev > 0) or not math.isfinite(n_rev):
+        n_rev = 1.0
+    n_phi_total = max(int(round(int(n_phi_per_rev) * n_rev)), 1)
+    phi_max_rad = n_rev * 2.0 * math.pi
+    return {
+        "n_phi_total": n_phi_total,
+        "phi_max_rad": phi_max_rad,
+        "rotation_rate_hz": rotation_rate,
+        "n_revolutions": n_rev,
+        "total_pulses": int(n_theta) * n_phi_total,
+        "duration_s": duration,
+    }
 
 
 def _do_lidar_scan(request: LidarScanRequest) -> dict:
@@ -4933,30 +5178,88 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                 # Tilt (deg→rad) and noise (range in m verbatim, angle mrad→rad)
                 # are passed per-scan; 0 leaves them disabled.
                 for s in request.scanners:
-                    if s.scan_pattern == "spinning_multibeam":
-                        # One fixed laser channel per elevation angle. Convert each
-                        # elevation (deg above horizon) to a zenith angle in radians
-                        # (zenith = 90 - elevation); Ntheta = number of channels.
-                        elevs = s.beam_elevation_angles_deg or []
-                        if not elevs:
+                    # Moving-platform scanner: the pose walks the trajectory over
+                    # the sweep. addScanMoving takes the raster grid (Ntheta x Nphi)
+                    # plus the trajectory + pulse rate; it fires Ntheta*Nphi pulses
+                    # at t = t0 + ordinal/pulse_rate, interpolating the platform pose
+                    # per pulse and recording each hit/miss's own origin + timestamp.
+                    # (Spinning-multibeam motion is not yet a separate moving entry
+                    # point in pyhelios; a moving scan uses the raster grid form.)
+                    # A spinning-multibeam sensor rotates continuously, so it only
+                    # makes sense as a moving (trajectory-driven) scan — there is no
+                    # coherent "stationary spinning" capture without a time element.
+                    # A truly stationary spinning capture is expressed as a trajectory
+                    # with two coincident poses one revolution-duration apart. Reject
+                    # a multibeam scanner that carries no trajectory.
+                    if s.scan_pattern == "spinning_multibeam" and s.trajectory is None:
+                        return {"success": False,
+                                "error": f"Spinning-multibeam scanner '{s.id}' requires a "
+                                         "trajectory: a rotating sensor is a moving-platform "
+                                         "scan. For a stationary capture, use a trajectory "
+                                         "with two poses at the same position one revolution "
+                                         "apart."}
+                    if s.trajectory is not None:
+                        poses = s.trajectory.poses
+                        if len(poses) == 0:
                             return {"success": False,
-                                    "error": f"Spinning-multibeam scanner '{s.id}' has no beam elevation angles"}
-                        beam_zenith_angles = [math.radians(90.0 - float(e)) for e in elevs]
-                        lidar.addScanMultibeam(
-                            origin=[float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
-                            beam_zenith_angles=beam_zenith_angles,
-                            Nphi=int(s.n_phi),
-                            phi_range=(math.radians(s.phi_min_deg), math.radians(s.phi_max_deg)),
+                                    "error": f"Moving scanner '{s.id}' has an empty trajectory"}
+                        pulse_rate = s.pulse_rate_hz or 0.0
+                        if pulse_rate <= 0.0:
+                            return {"success": False,
+                                    "error": f"Moving scanner '{s.id}' needs a positive pulse_rate_hz (PRF)"}
+                        # Ntheta is the number of zenith rows fired per pulse-column:
+                        # for a spinning-multibeam sensor that's the channel count
+                        # (one row per beam elevation angle); for a raster sensor
+                        # it's the zenith point count. Nphi from the request is the
+                        # azimuth resolution PER REVOLUTION.
+                        if s.scan_pattern == "spinning_multibeam":
+                            elevs = s.beam_elevation_angles_deg or []
+                            if not elevs:
+                                return {"success": False,
+                                        "error": f"Moving multibeam scanner '{s.id}' has no beam elevation angles"}
+                            n_theta = len(elevs)
+                            # Per-channel zenith range; addScanMoving uses a uniform
+                            # theta grid, so span the channels' min..max elevation.
+                            zeniths = [math.radians(90.0 - float(e)) for e in elevs]
+                            theta_range = (min(zeniths), max(zeniths))
+                        else:
+                            n_theta = int(s.n_theta)
+                            theta_range = (math.radians(s.theta_min_deg), math.radians(s.theta_max_deg))
+                        traj_t = [float(p.t) for p in poses]
+                        # Derive the full-flight grid: spin the head at the rate the
+                        # PRF + per-rev resolution imply, for the whole flight, so the
+                        # scan fires ~PRF*duration pulses spanning the trajectory.
+                        grid = _derive_moving_scan_grid(
+                            n_theta=n_theta, n_phi_per_rev=int(s.n_phi),
+                            pulse_rate_hz=float(pulse_rate), traj_t=traj_t)
+                        if grid["total_pulses"] > _MOVING_SCAN_PULSE_WARN:
+                            print(f"[lidar] moving scanner '{s.id}': {grid['total_pulses']:,} "
+                                  f"pulses ({grid['n_revolutions']:.0f} revolutions over "
+                                  f"{grid['duration_s']:.1f}s) — large scan, may be slow",
+                                  flush=True)
+                        phi_min = math.radians(s.phi_min_deg)
+                        lidar.addScanMoving(
+                            Ntheta=n_theta,
+                            theta_range=theta_range,
+                            Nphi=grid["n_phi_total"],
+                            phi_range=(phi_min, phi_min + grid["phi_max_rad"]),
                             exit_diameter=float(s.exit_diameter_m),
                             beam_divergence=float(s.beam_divergence_mrad) * 1e-3,
+                            traj_t=traj_t,
+                            traj_pos=[[float(p.x), float(p.y), float(p.z)] for p in poses],
+                            traj_rot=[[float(p.qx), float(p.qy), float(p.qz), float(p.qw)] for p in poses],
+                            pulse_rate_hz=float(pulse_rate),
+                            rot_is_quaternion=True,
+                            lever_arm=[float(v) for v in s.trajectory.lever_arm],
+                            boresight_rpy=[float(v) for v in s.trajectory.boresight_rpy],
                             column_format=column_format,
                             range_noise_stddev=float(s.range_noise_m),
                             angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
-                            scan_tilt_roll=math.radians(s.tilt_roll_deg),
-                            scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
-                            scan_azimuth_offset=math.radians(s.scan_azimuth_offset_deg),
                         )
                     else:
+                        # Static raster scan (a multibeam scanner without a
+                        # trajectory was already rejected above; spinning multibeam
+                        # is a moving-only pattern).
                         lidar.addScan(
                             origin=[float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
                             Ntheta=int(s.n_theta),
@@ -5016,6 +5319,14 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                 # on million-hit clouds. Pull every quantity for ALL hits in a
                 # handful of FFI calls, then partition per scanner with numpy masks.
                 fields_to_read = _LIDAR_STANDARD_HIT_FIELDS + extra_fields
+                # A moving-platform scan records each beam's own emission origin and
+                # firing index; pull them too so the result cloud carries the
+                # per-beam geometry the leaf-area inversion needs (origin_x/y/z) —
+                # static scans don't write these, so the columns come back all-NaN
+                # and are dropped when the session is built.
+                any_moving_scan = any(s.trajectory is not None for s in request.scanners)
+                if any_moving_scan:
+                    fields_to_read = fields_to_read + ["origin_x", "origin_y", "origin_z", "pulse_id"]
                 n = lidar.getHitCount()
                 if n > 0:
                     all_xyz, all_rgb = lidar.getHitsXYZRGBArrays()   # (n,3),(n,3) f32
@@ -5239,18 +5550,29 @@ def _create_lidar_scan_session(r: dict) -> dict:
     return out
 
 
+# Per-hit scalar columns the RENDERER never displays — only the leaf-area
+# inversion needs them, and it reads them from the session (or re-derives them
+# from the trajectory), not from this frame. A moving scan attaches all of these,
+# which on a multi-million-point cloud add tens of MB to the frame the renderer
+# must transfer + decode + buffer (the "scan hangs" symptom). Excluded from the
+# frame; still kept in the session for LAD / export / the miss overlay.
+_LIDAR_FRAME_EXCLUDE_FIELDS = frozenset({"origin_x", "origin_y", "origin_z", "pulse_id"})
+
+
 def _pack_lidar_scan(result: dict) -> bytes:
     """Pack a _do_lidar_scan result into a PHB1 frame: per-scanner points / colors
     / scalar fields become buffers (named s{i}.points, s{i}.colors, s{i}.scalar{j}),
     and meta carries the per-scanner descriptors (id, count, has_colors, the
-    ordered scalar field names)."""
+    ordered scalar field names). Renderer-irrelevant per-beam columns
+    (_LIDAR_FRAME_EXCLUDE_FIELDS) are dropped from the frame — they stay in the
+    session for LAD/export."""
     if not result.get("success"):
         return _bin_frame_bytes({"success": False, "error": result.get("error")}, [])
     scanners_meta = []
     buffers = []
     for i, r in enumerate(result["results"]):
         npts = int(r["num_points"])
-        fields = list(r["scalars"].keys())
+        fields = [f for f in r["scalars"].keys() if f not in _LIDAR_FRAME_EXCLUDE_FIELDS]
         has_colors = r["colors"] is not None and npts > 0
         entry_meta = {
             "scanner_id": r["scanner_id"], "num_points": npts,

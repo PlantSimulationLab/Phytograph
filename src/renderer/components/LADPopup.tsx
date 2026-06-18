@@ -5,6 +5,7 @@ import type { GridOption } from '../lib/gridOption';
 import type { HeliosGrid } from '../utils/backendApi';
 import type { Scan } from '../lib/scan';
 import { hasData, hasParams } from '../lib/scan';
+import { isMovingScan } from '../lib/scanParameters';
 import { buildLADRequest } from '../lib/pointCloudHelpers';
 
 // An existing Helios triangulation the user can REUSE. Selecting it locks the
@@ -119,6 +120,9 @@ export function LADPopup({
   // uncertainty that the backend computes on every run. Broadleaf ≈ 0.05 m,
   // conifer needles ≈ 0.002 m — presets below set common values.
   const [elementWidthStr, setElementWidthStr] = useState('0.05');
+  // Mean leaf-projection coefficient G(θ), used only for moving-platform scans
+  // (they can't be triangulated to derive it). 0.5 = spherical leaf-angle dist.
+  const [gthetaStr, setGthetaStr] = useState('0.5');
   const [error, setError] = useState<string | null>(null);
 
   // Seed Lmax / aspect from the mesh filter the user dialed in (when provided)
@@ -176,6 +180,13 @@ export function LADPopup({
     [selectedScans],
   );
 
+  // Any moving-platform scan in the selection switches the inversion to the
+  // beam-based (Gtheta) path, which needs a supplied G(θ) and skips triangulation.
+  const anyMoving = useMemo(
+    () => selectedScans.some(s => isMovingScan(s.params!)),
+    [selectedScans],
+  );
+
   const handleCompute = useCallback(() => {
     setError(null);
 
@@ -198,11 +209,16 @@ export function LADPopup({
     const minVoxelHits = Math.max(1, parseInt(minVoxelHitsStr, 10) || 1);
     const elementWidth = Math.max(0, parseFloat(elementWidthStr) || 0.05);
 
+    const gtheta = anyMoving
+      ? Math.min(1, Math.max(1e-3, parseFloat(gthetaStr) || 0.5))
+      : undefined;
+
     const request = buildLADRequest(selectedScans, grid, {
       lmax,
       maxAspectRatio,
       minVoxelHits,
       elementWidth,
+      gtheta,
     });
 
     // The grid mesh to auto-hide so it doesn't z-fight the LAD voxel result. In
@@ -211,7 +227,7 @@ export function LADPopup({
     const gridMeshId = reuseTri ? (reuseTri.gridMeshId ?? '') : (selectedGrid?.id ?? '');
     onStartLAD(request, selectedScans.map(s => s.color), gridMeshId);
     onClose();
-  }, [reuseTri, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, onStartLAD, onClose]);
+  }, [reuseTri, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, gthetaStr, onStartLAD, onClose]);
 
   if (!isOpen) return null;
 
@@ -481,6 +497,41 @@ export function LADPopup({
                 sampling-uncertainty interval reported with the result.
               </p>
             </div>
+
+            {/* G(theta) — only for moving-platform scans, which can't be
+                triangulated to derive it. Supplied mean leaf-projection
+                coefficient; 0.5 = spherical leaf-angle distribution. */}
+            {anyMoving && (
+              <div className="mt-4" data-testid="lad-gtheta-section">
+                <label className="text-[10px] text-neutral-400 block mb-1">
+                  G(θ) — mean leaf-projection coefficient
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    data-testid="lad-input-gtheta"
+                    type="number"
+                    value={gthetaStr}
+                    onChange={(e) => setGthetaStr(e.target.value)}
+                    step="0.05"
+                    min="0.001"
+                    max="1"
+                    className="w-28 px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                  />
+                  <button
+                    data-testid="lad-preset-spherical"
+                    type="button"
+                    onClick={() => setGthetaStr('0.5')}
+                    className="px-2 py-1 text-[10px] rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-700 transition-colors"
+                  >
+                    Spherical (0.5)
+                  </button>
+                </div>
+                <p className="text-[9px] text-neutral-500 mt-0.5">
+                  Required for moving-platform scans (no triangulation to derive
+                  it). 0.5 = spherical/random leaf-angle distribution.
+                </p>
+              </div>
+            )}
 
             {/* Voxel grid — only when running a new triangulation. When reusing,
                 the grid is fixed by the mesh (shown in the reuse summary above). */}

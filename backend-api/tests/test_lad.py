@@ -78,9 +78,10 @@ class _FakeCloud:
             return getattr(self, "_gapfill_codes", [])
         return []
 
-    def calculateLeafArea(self, ctx, min_hits, element_width=None):
+    def calculateLeafArea(self, ctx, min_hits, element_width=None, Gtheta=None):
         # Uncertainty is always on now: _do_lad_computation passes element_width.
-        self.calls.append(("calculateLeafArea", min_hits, element_width))
+        # Gtheta is supplied only on the moving-platform (beam-based) path.
+        self.calls.append(("calculateLeafArea", min_hits, element_width, Gtheta))
 
     def getGridCellCount(self):
         return self.gridcells

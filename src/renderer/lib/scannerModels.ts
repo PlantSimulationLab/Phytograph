@@ -70,6 +70,7 @@ export type ScannerModelPreset = Partial<
     | 'zenithMaxDeg'
     | 'azimuthMinDeg'
     | 'azimuthMaxDeg'
+    | 'pulseRateHz'
   >
 >;
 
@@ -129,6 +130,8 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 130,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // Effective measurement rate up to ~1.2 MHz (datasheet PRR modes).
+      pulseRateHz: 1200000,
     },
   },
   {
@@ -151,6 +154,8 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 145,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // ~1 MHz effective scan rate (datasheet).
+      pulseRateHz: 1000000,
     },
   },
   {
@@ -172,6 +177,8 @@ export const SCANNER_MODELS: ScannerModel[] = [
       zenithMaxDeg: 150,
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // Up to ~976 kHz points/s (datasheet measurement rate).
+      pulseRateHz: 976000,
     },
   },
   {
@@ -192,6 +199,8 @@ export const SCANNER_MODELS: ScannerModel[] = [
       beamElevationAnglesDeg: hdl32eElevations(),
       azimuthMinDeg: 0,
       azimuthMaxDeg: 360,
+      // ~695 kHz: 32 channels firing at ~21.7 kHz each (datasheet, single return).
+      pulseRateHz: 695000,
     },
   },
 ];

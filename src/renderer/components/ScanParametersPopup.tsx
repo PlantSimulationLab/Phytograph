@@ -18,6 +18,12 @@ import {
   type HeliosXmlScan,
   type HeliosXmlGrid,
 } from '../lib/heliosScanXml';
+import {
+  parsePoseStreamCsv,
+  PoseStreamParseError,
+  deriveMovingScanGrid,
+  trajectoryDurationS,
+} from '../lib/poseStream';
 
 // What the popup is doing in this open. Drives the title and submit-button
 // labels — submission semantics are otherwise identical (the caller decides
@@ -145,6 +151,46 @@ export function ScanParametersPopup({
     void onBulkImport?.(parsed.scans, parsed.grids, path);
   };
 
+  // Import a moving-platform trajectory file (t,x,y,z + quaternion or Euler rows).
+  // Stores the parsed PoseStream on params.trajectory and anchors origin to the
+  // first pose (origin is only a fallback anchor for a moving scan). Errors are
+  // surfaced inside the popup, like XML import.
+  const handleImportTrajectory = async () => {
+    setImportError(null);
+    const picked = await window.electronAPI.dialog.open({
+      title: 'Import platform trajectory',
+      filters: [{ name: 'Trajectory (CSV / text)', extensions: ['csv', 'txt', 'tsv', 'traj'] }],
+    });
+    if (!picked) return;
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    try {
+      const text = await window.electronAPI.fs.readText(path);
+      const stream = parsePoseStreamCsv(text, { label: path.split(/[\\/]/).pop() });
+      const first = stream.poses[0];
+      setParams(p => ({
+        ...p,
+        trajectory: stream,
+        origin: { x: first.x, y: first.y, z: first.z },
+        // A moving scan's attitude comes entirely from the trajectory
+        // quaternions (+ boresight); the static tilt/heading no longer apply and
+        // the backend (addScanMoving) REJECTS a non-zero static tilt. Zero them
+        // so importing a trajectory onto a previously-tilted scan can't error.
+        tiltRollDeg: 0,
+        tiltPitchDeg: 0,
+        azimuthOffsetDeg: 0,
+      }));
+    } catch (err) {
+      const msg = err instanceof PoseStreamParseError || err instanceof Error
+        ? err.message
+        : String(err);
+      setImportError(msg);
+    }
+  };
+
+  const clearTrajectory = () => {
+    setParams(p => ({ ...p, trajectory: undefined }));
+  };
+
   const setNum = (key: keyof Omit<ScanParameters, 'origin' | 'returnType'>, min = 0) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = parseFloat(e.target.value);
     setParams(p => ({ ...p, [key]: Number.isFinite(v) ? Math.max(min, v) : min }));
@@ -223,8 +269,46 @@ export function ScanParametersPopup({
       setSubmitError('Enter at least one beam elevation angle for a spinning-multibeam scan.');
       return;
     }
+    // A spinning multibeam rotates continuously — it's a moving-platform pattern.
+    // Require a trajectory (a stationary capture is two coincident poses one
+    // revolution apart). The submit button is also disabled in this state.
+    if (params.pattern === 'spinning_multibeam' && !params.trajectory) {
+      setSubmitError('A spinning-multibeam scan needs a trajectory — import one above. '
+        + 'For a stationary capture, use a trajectory with two poses at the same '
+        + 'position one revolution apart.');
+      return;
+    }
     onSubmit(label, params);
   };
+
+  // A spinning-multibeam scan is only valid with a trajectory (a rotating sensor
+  // is moving-only). Used to gate submit + show an inline prompt.
+  const multibeamNeedsTrajectory =
+    params.pattern === 'spinning_multibeam' && !params.trajectory;
+
+  // Show the raster zenith grid + sweep fields for a raster scan OR any moving
+  // scan: a moving-platform scan walks the trajectory over an Ntheta×Nphi raster
+  // grid regardless of the instrument's static pattern, so it always needs the
+  // zenith point count + sweep (which the multibeam form otherwise hides).
+  const showRaster = params.pattern === 'raster' || params.trajectory != null;
+
+  // For a moving scan, derive what the backend will actually fire: the user sets
+  // azimuth points PER REVOLUTION; with the PRF (a fixed laser spec) and the
+  // trajectory duration we derive the rotation rate, revolutions, and total pulse
+  // count for the WHOLE flight. Ntheta is the channel count for a multibeam
+  // sensor, else the zenith point count. Shown read-only so the user sees the
+  // cost (and that the sweep covers the flight) before running.
+  const movingGrid = params.trajectory
+    ? deriveMovingScanGrid(
+        params.pattern === 'spinning_multibeam'
+          ? Math.max(params.beamElevationAnglesDeg.length, 1)
+          : params.zenithPoints,
+        params.azimuthPoints,
+        params.pulseRateHz ?? 300000,
+        trajectoryDurationS(params.trajectory),
+      )
+    : null;
+  const MOVING_PULSE_WARN = 20_000_000;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -331,27 +415,136 @@ export function ScanParametersPopup({
 
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Origin (m)</label>
-            <div className="grid grid-cols-3 gap-2">
-              {(['x', 'y', 'z'] as const).map(axis => (
-                <div key={axis}>
-                  <label className="block text-xs text-neutral-500 mb-1 uppercase">{axis}</label>
-                  <DebouncedNumberInput
-                    data-testid={`scan-origin-${axis}`}
-                    step="any"
-                    debounceMs={0}
-                    value={params.origin[axis]}
-                    onCommit={setOrigin(axis)}
-                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                  />
-                </div>
-              ))}
-            </div>
+            {params.trajectory ? (
+              // A moving-platform scan has no single origin — each return's beam
+              // origin comes from the trajectory. Show the first-pose anchor
+              // read-only rather than editable fields, which would imply origin
+              // matters (it doesn't, beyond anchoring the marker).
+              <p data-testid="scan-origin-anchor" className="text-xs text-neutral-400">
+                Set by the trajectory — anchored to the first pose
+                {' '}({params.origin.x.toFixed(2)}, {params.origin.y.toFixed(2)},{' '}
+                {params.origin.z.toFixed(2)}). Per-return beam origins come from the
+                trajectory.
+              </p>
+            ) : (
+              <div className="grid grid-cols-3 gap-2">
+                {(['x', 'y', 'z'] as const).map(axis => (
+                  <div key={axis}>
+                    <label className="block text-xs text-neutral-500 mb-1 uppercase">{axis}</label>
+                    <DebouncedNumberInput
+                      data-testid={`scan-origin-${axis}`}
+                      step="any"
+                      debounceMs={0}
+                      value={params.origin[axis]}
+                      onCommit={setOrigin(axis)}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div>
+            <label className="block text-sm font-medium text-neutral-300 mb-1.5">
+              Platform trajectory
+            </label>
+            {params.trajectory ? (
+              <div className="flex items-center justify-between gap-2 px-3 py-2 bg-neutral-700/60 border border-neutral-600 rounded-lg">
+                <div className="min-w-0">
+                  <p className="text-sm text-white truncate" data-testid="scan-trajectory-label">
+                    {params.trajectory.label ?? 'trajectory'}
+                  </p>
+                  <p className="text-xs text-neutral-400">
+                    {params.trajectory.poses.length} poses · t{' '}
+                    {params.trajectory.poses[0].t.toFixed(2)}–
+                    {params.trajectory.poses[params.trajectory.poses.length - 1].t.toFixed(2)} s
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearTrajectory}
+                  data-testid="scan-trajectory-clear"
+                  className="shrink-0 px-2 py-1 text-xs text-neutral-300 hover:text-white border border-neutral-600 rounded-md hover:bg-neutral-600"
+                >
+                  Clear
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handleImportTrajectory}
+                data-testid="scan-trajectory-import"
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm text-neutral-300 hover:text-white border border-dashed border-neutral-600 rounded-lg hover:bg-neutral-700/60"
+              >
+                <FileUp size={14} /> Import trajectory file…
+              </button>
+            )}
+            <p className="mt-1 text-xs text-neutral-500">
+              Optional. A CSV/text file of <code>t x y z</code> + orientation
+              (quaternion or roll/pitch/yaw) turns this into a moving-platform scan;
+              leaf-area inversion then reconstructs a per-beam origin per return.
+            </p>
+          </div>
+
+          {/* Pulse rate (PRF) — a fixed laser spec for a real instrument, set by
+              the scanner model. The scan fires continuously at this rate for the
+              whole flight; the rotation rate + total pulses below are DERIVED from
+              it, the per-revolution resolution, and the trajectory duration. PRF
+              stays editable so a generic/custom scanner can be configured. */}
+          {params.trajectory && movingGrid && (
+            <div>
+              <label className="block text-sm font-medium text-neutral-300 mb-1.5">
+                Pulse rate / PRF (Hz)
+              </label>
+              <DebouncedNumberInput
+                data-testid="scan-pulse-rate"
+                step="any"
+                debounceMs={0}
+                value={params.pulseRateHz ?? 300000}
+                onCommit={(v) => setParams(p => ({ ...p, pulseRateHz: Math.max(1, v) }))}
+                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+              />
+              <p className="mt-1 text-xs text-neutral-500">
+                Laser pulses per second (an instrument property; set by the scanner
+                model). Azimuth points below are <em>per revolution</em>.
+              </p>
+              {/* Derived, read-only: the sensor spins at PRF ÷ (channels × az/rev),
+                  for the trajectory's duration, firing PRF × duration pulses. */}
+              <div data-testid="scan-moving-derived"
+                className="mt-2 rounded-md border border-neutral-700 bg-neutral-800/60 px-3 py-2 text-xs text-neutral-400 space-y-0.5">
+                <div>Flight duration:{' '}
+                  <span className="text-neutral-200">{movingGrid.durationS.toFixed(2)} s</span>
+                </div>
+                <div>Rotation rate:{' '}
+                  <span className="text-neutral-200">{movingGrid.rotationRateHz.toFixed(1)} Hz</span>
+                  {' '}({(movingGrid.rotationRateHz * 60).toFixed(0)} RPM),{' '}
+                  {movingGrid.nRevolutions.toFixed(0)} revolutions
+                </div>
+                <div>Total pulses:{' '}
+                  <span className="text-neutral-200" data-testid="scan-moving-total-pulses">
+                    {movingGrid.totalPulses.toLocaleString()}
+                  </span>
+                </div>
+                {movingGrid.totalPulses > MOVING_PULSE_WARN && (
+                  <div data-testid="scan-moving-warn" className="text-amber-400">
+                    ⚠ Very large scan ({(movingGrid.totalPulses / 1e6).toFixed(0)}M pulses) —
+                    may be slow. Lower the azimuth points or use a shorter trajectory
+                    for a quicker test.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scan size (# points)</label>
-            <div className={`grid gap-2 ${params.pattern === 'raster' ? 'grid-cols-2' : 'grid-cols-1'}`}>
-              {params.pattern === 'raster' && (
+            <div className={`grid gap-2 ${showRaster && !(params.trajectory && params.pattern === 'spinning_multibeam') ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              {/* For a moving MULTIBEAM scan the zenith rows are the laser
+                  channels (set by the elevation-angles list, not editable here),
+                  so hide the zenith point field and let the channel count drive it.
+                  Raster (static or moving) keeps the editable zenith field. */}
+              {showRaster && !(params.trajectory && params.pattern === 'spinning_multibeam') && (
                 <div>
                   <label className="block text-xs text-neutral-500 mb-1">Zenith</label>
                   <input
@@ -367,7 +560,7 @@ export function ScanParametersPopup({
               )}
               <div>
                 <label className="block text-xs text-neutral-500 mb-1">
-                  {params.pattern === 'raster' ? 'Azimuth' : 'Azimuth (Nphi)'}
+                  {params.trajectory ? 'Azimuth (per rev)' : showRaster ? 'Azimuth' : 'Azimuth (Nphi)'}
                 </label>
                 <input
                   data-testid="scan-azimuth-points"
@@ -385,6 +578,10 @@ export function ScanParametersPopup({
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Angular sweep (degrees)</label>
             <div className="space-y-2">
+              {/* The zenith SWEEP applies only to a raster pattern. A spinning
+                  multibeam's zenith coverage is fixed by its per-channel beam
+                  elevation angles, so this field is meaningless there (the
+                  backend derives the zenith range from the channels). */}
               {params.pattern === 'raster' && (
                 <div>
                   <label className="block text-xs text-neutral-500 mb-1">Zenith (θ) min / max</label>
@@ -410,29 +607,35 @@ export function ScanParametersPopup({
                   </div>
                 </div>
               )}
-              <div>
-                <label className="block text-xs text-neutral-500 mb-1">Azimuth (φ) min / max</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <DebouncedNumberInput
-                    data-testid="scan-azimuth-min"
-                    min={0}
-                    max={360}
-                    step="any"
-                    value={params.azimuthMinDeg}
-                    onCommit={setAngle('azimuthMinDeg')}
-                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                  />
-                  <DebouncedNumberInput
-                    data-testid="scan-azimuth-max"
-                    min={0}
-                    max={360}
-                    step="any"
-                    value={params.azimuthMaxDeg}
-                    onCommit={setAngle('azimuthMaxDeg')}
-                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                  />
+              {/* A spinning-multibeam sensor rotates a full 360° per revolution,
+                  so an azimuth sweep RANGE is meaningless for it (its azimuth
+                  control is the per-revolution point count above). Only a raster
+                  scan has a partial azimuth sweep. */}
+              {params.pattern !== 'spinning_multibeam' && (
+                <div>
+                  <label className="block text-xs text-neutral-500 mb-1">Azimuth (φ) min / max</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <DebouncedNumberInput
+                      data-testid="scan-azimuth-min"
+                      min={0}
+                      max={360}
+                      step="any"
+                      value={params.azimuthMinDeg}
+                      onCommit={setAngle('azimuthMinDeg')}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                    />
+                    <DebouncedNumberInput
+                      data-testid="scan-azimuth-max"
+                      min={0}
+                      max={360}
+                      step="any"
+                      value={params.azimuthMaxDeg}
+                      onCommit={setAngle('azimuthMaxDeg')}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                    />
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
 
@@ -457,53 +660,67 @@ export function ScanParametersPopup({
             </div>
           )}
 
-          <div>
-            <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scanner tilt (degrees)</label>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="block text-xs text-neutral-500 mb-1">Roll</label>
-                <DebouncedNumberInput
-                  data-testid="scan-tilt-roll"
-                  step="any"
-                  debounceMs={0}
-                  value={params.tiltRollDeg}
-                  onCommit={setTilt('tiltRollDeg')}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-neutral-500 mb-1">Pitch</label>
-                <DebouncedNumberInput
-                  data-testid="scan-tilt-pitch"
-                  step="any"
-                  debounceMs={0}
-                  value={params.tiltPitchDeg}
-                  onCommit={setTilt('tiltPitchDeg')}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                />
-              </div>
-            </div>
-            <p className="mt-1 text-[11px] text-neutral-500">
-              Residual tilt of the scanner away from level. Roll is applied first (about the
-              scanner's lateral axis), then pitch (about its forward axis). 0 / 0 is perfectly level.
+          {/* Scanner tilt + heading describe the orientation of a STATIC
+              instrument. A moving scan's attitude comes entirely from the
+              trajectory's per-pose quaternions (+ boresight), and the backend
+              rejects a non-zero static tilt for a moving scan — so hide these
+              fields when a trajectory is attached. */}
+          {params.trajectory ? (
+            <p data-testid="scan-attitude-note" className="text-xs text-neutral-500">
+              Scanner tilt &amp; heading come from the trajectory (per-pose
+              orientation), so they aren&apos;t set here for a moving scan.
             </p>
-          </div>
+          ) : (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scanner tilt (degrees)</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-neutral-500 mb-1">Roll</label>
+                    <DebouncedNumberInput
+                      data-testid="scan-tilt-roll"
+                      step="any"
+                      debounceMs={0}
+                      value={params.tiltRollDeg}
+                      onCommit={setTilt('tiltRollDeg')}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-neutral-500 mb-1">Pitch</label>
+                    <DebouncedNumberInput
+                      data-testid="scan-tilt-pitch"
+                      step="any"
+                      debounceMs={0}
+                      value={params.tiltPitchDeg}
+                      onCommit={setTilt('tiltPitchDeg')}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+                <p className="mt-1 text-[11px] text-neutral-500">
+                  Residual tilt of the scanner away from level. Roll is applied first (about the
+                  scanner's lateral axis), then pitch (about its forward axis). 0 / 0 is perfectly level.
+                </p>
+              </div>
 
-          <div>
-            <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scanner heading (degrees)</label>
-            <DebouncedNumberInput
-              data-testid="scan-azimuth-offset"
-              step="any"
-              debounceMs={0}
-              value={params.azimuthOffsetDeg}
-              onCommit={setTilt('azimuthOffsetDeg')}
-              className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-            />
-            <p className="mt-1 text-[11px] text-neutral-500">
-              Initial heading the scanner faces in the horizontal plane (azimuth offset).
-              Orients the scanner marker; 0 points along +Y. Counter-clockwise positive.
-            </p>
-          </div>
+              <div>
+                <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scanner heading (degrees)</label>
+                <DebouncedNumberInput
+                  data-testid="scan-azimuth-offset"
+                  step="any"
+                  debounceMs={0}
+                  value={params.azimuthOffsetDeg}
+                  onCommit={setTilt('azimuthOffsetDeg')}
+                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                />
+                <p className="mt-1 text-[11px] text-neutral-500">
+                  Initial heading the scanner faces in the horizontal plane (azimuth offset).
+                  Orients the scanner marker; 0 points along +Y. Counter-clockwise positive.
+                </p>
+              </div>
+            </>
+          )}
 
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Return type</label>
@@ -555,6 +772,15 @@ export function ScanParametersPopup({
             </div>
           )}
 
+          {multibeamNeedsTrajectory && (
+            <p data-testid="scan-multibeam-needs-trajectory" className="text-xs text-amber-300">
+              A spinning-multibeam sensor rotates continuously, so it needs a
+              trajectory (it&apos;s a moving-platform scan). Import a trajectory
+              file above. For a stationary capture, use a trajectory with two poses
+              at the same position one revolution apart.
+            </p>
+          )}
+
           {submitError && (
             <p data-testid="scan-submit-error" className="text-xs text-red-400">
               {submitError}
@@ -564,7 +790,8 @@ export function ScanParametersPopup({
           <button
             data-testid="scan-submit"
             type="submit"
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-white font-medium transition-colors"
+            disabled={multibeamNeedsTrajectory}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-600 disabled:cursor-not-allowed rounded-lg text-white font-medium transition-colors"
           >
             <Radio className="w-4 h-4" />
             {submitText}

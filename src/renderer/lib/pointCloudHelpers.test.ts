@@ -24,9 +24,14 @@ import {
   displayViewToWorldView,
   worldToDisplay,
   displayToWorld,
+  buildLADRequest,
 } from './pointCloudHelpers';
 import { projectWorldToCanvasPixel } from './cropGeometry';
 import type { MeshData, PointCloudData } from './pointCloudTypes';
+import type { Scan } from './scan';
+import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
+import { parsePoseStreamCsv } from './poseStream';
+import type { HeliosGrid } from '../utils/backendApi';
 import * as THREE from 'three';
 
 // Build a minimal MeshData from a flat vertex list and triangle index list.
@@ -958,5 +963,77 @@ describe('displayViewToWorldView', () => {
       Math.abs(backendPix.x - seenPix.x) < 1 &&
       Math.abs(backendPix.y - seenPix.y) < 1;
     expect(matches).toBe(false);
+  });
+});
+
+describe('buildLADRequest — moving-platform scans', () => {
+  const GRID: HeliosGrid = { center: [0, 0, 0], size: [2, 2, 1], nx: 2, ny: 1, nz: 1 };
+
+  // An inline cloud carrying timestamp + is_miss columns (what a moving scan needs).
+  function makeMovingCloud(): PointCloudData {
+    const positions = new Float32Array([0, 0, 0, 0.5, 0, 0, 1, 0, 5]);
+    return {
+      positions,
+      colors: new Float32Array(9),
+      intensities: null as unknown as Float32Array,
+      scalarFields: {
+        timestamp: { values: new Float32Array([0, 1, 2]), min: 0, max: 2 },
+        is_miss: { values: new Float32Array([0, 0, 1]), min: 0, max: 1 },
+      },
+      pointCount: 3,
+      bounds: {
+        min: new THREE.Vector3(0, 0, 0),
+        max: new THREE.Vector3(1, 0, 5),
+        center: new THREE.Vector3(0.5, 0, 2.5),
+        size: new THREE.Vector3(1, 0, 5),
+      },
+    };
+  }
+
+  function makeMovingScan(): Scan {
+    const trajectory = parsePoseStreamCsv(
+      ['0 0 0 5 0 0 0 1', '1 1 0 5 0 0 0 1', '2 2 0 5 0 0 0 1'].join('\n'),
+    );
+    return {
+      id: 's1',
+      label: 'moving',
+      visible: true,
+      color: '#fff',
+      data: makeMovingCloud(),
+      params: { ...DEFAULT_SCAN_PARAMETERS, trajectory },
+    };
+  }
+
+  it('forwards the trajectory (wire shape) and gtheta', () => {
+    const req = buildLADRequest([makeMovingScan()], GRID, {
+      lmax: 0.1, maxAspectRatio: 4, minVoxelHits: 1, gtheta: 0.42,
+    });
+    expect(req.gtheta).toBe(0.42);
+    const traj = req.scans[0].trajectory as Record<string, unknown>;
+    expect(traj).toBeDefined();
+    expect(traj).toHaveProperty('source_format', 'pose_csv');
+    expect((traj.poses as unknown[]).length).toBe(3);
+  });
+
+  it('carries the timestamp + is_miss columns for the inline moving cloud', () => {
+    const req = buildLADRequest([makeMovingScan()], GRID, {
+      lmax: 0.1, maxAspectRatio: 4, minVoxelHits: 1,
+    });
+    const cols = req.scans[0].scalar_columns!;
+    expect(cols.timestamp).toEqual([0, 1, 2]);
+    expect(cols.is_miss).toEqual([0, 0, 1]);
+  });
+
+  it('omits trajectory and gtheta for a static scan', () => {
+    const scan: Scan = {
+      id: 's2', label: 'static', visible: true, color: '#fff',
+      data: makeMovingCloud(),
+      params: { ...DEFAULT_SCAN_PARAMETERS },  // no trajectory
+    };
+    const req = buildLADRequest([scan], GRID, {
+      lmax: 0.1, maxAspectRatio: 4, minVoxelHits: 1,
+    });
+    expect(req.scans[0].trajectory).toBeUndefined();
+    expect(req.gtheta).toBeUndefined();
   });
 });

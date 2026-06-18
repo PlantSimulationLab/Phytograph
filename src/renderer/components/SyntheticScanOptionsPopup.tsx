@@ -8,6 +8,12 @@ import {
 } from '../lib/syntheticScanOptions';
 import { scanDisplayName, type Scan } from '../lib/scan';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
+import { deriveMovingScanGrid, trajectoryDurationS } from '../lib/poseStream';
+
+// Above this many total pulses a scan starts taking a long time and produces a
+// heavy cloud; warn (but never block) so a huge moving-platform flight isn't run
+// by accident.
+const PULSE_WARN_THRESHOLD = 2_000_000;
 
 interface SyntheticScanOptionsPopupProps {
   isOpen: boolean;
@@ -82,6 +88,30 @@ export function SyntheticScanOptionsPopup({
     () => scanners.reduce((n, s) => n + (selectedScannerIds.has(s.id) ? 1 : 0), 0),
     [scanners, selectedScannerIds],
   );
+
+  // Total pulses the selected scanners will fire — the headline cost of the run.
+  // A static scanner fires Ntheta×Nphi; a moving-platform scanner fires
+  // ~PRF×flight-duration (derived, often millions), which is the figure that can
+  // make a scan slow/heavy, so surface it before the user commits.
+  const totalPulses = useMemo(() => {
+    let total = 0;
+    for (const s of scanners) {
+      if (!selectedScannerIds.has(s.id) || !s.params) continue;
+      const p = s.params;
+      const nTheta = p.pattern === 'spinning_multibeam'
+        ? Math.max(p.beamElevationAnglesDeg.length, 1)
+        : p.zenithPoints;
+      if (p.trajectory) {
+        total += deriveMovingScanGrid(
+          nTheta, p.azimuthPoints, p.pulseRateHz ?? 300000,
+          trajectoryDurationS(p.trajectory),
+        ).totalPulses;
+      } else {
+        total += nTheta * p.azimuthPoints;
+      }
+    }
+    return total;
+  }, [scanners, selectedScannerIds]);
 
   if (!isOpen) return null;
 
@@ -338,6 +368,28 @@ export function SyntheticScanOptionsPopup({
                 />
               </div>
             </div>
+          )}
+
+          {/* Total-pulse estimate for the selected scanners — the run's headline
+              cost. Moving-platform scans can be millions of pulses (≈ PRF ×
+              flight duration); show it (and warn when large) before committing. */}
+          {selectedCount > 0 && hasGeometry && (
+            <div data-testid="scan-opt-pulse-estimate"
+              className="flex items-center justify-between text-[11px]">
+              <span className="text-neutral-400">Total pulses</span>
+              <span data-testid="scan-opt-total-pulses"
+                className={`font-mono ${totalPulses > PULSE_WARN_THRESHOLD ? 'text-amber-300' : 'text-neutral-200'}`}>
+                {totalPulses.toLocaleString()}
+                {totalPulses >= 1_000_000 && ` (${(totalPulses / 1e6).toFixed(1)}M)`}
+              </span>
+            </div>
+          )}
+          {selectedCount > 0 && hasGeometry && totalPulses > PULSE_WARN_THRESHOLD && (
+            <p data-testid="scan-opt-pulse-warn" className="text-[11px] text-amber-300">
+              ⚠ Large scan — this may take a while and produce a heavy point cloud.
+              Lower a moving scanner&apos;s azimuth-per-revolution or use a shorter
+              trajectory for a quicker run.
+            </p>
           )}
 
           <button

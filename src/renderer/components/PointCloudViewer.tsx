@@ -31,12 +31,13 @@ import { ScanParametersPopup } from './ScanParametersPopup';
 import { type HeliosXmlScan, type HeliosXmlGrid } from '../lib/heliosScanXml';
 import { SyntheticScanOptionsPopup } from './SyntheticScanOptionsPopup';
 import { type SyntheticScanOptions } from '../lib/syntheticScanOptions';
-import { ScannerMarker } from './ScannerMarker';
+import { ScanMarkerEntry } from './ScannerMarker';
 import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import StatusPill from './StatusPill';
 import { type ScanParameters } from '../lib/scanParameters';
+import { poseStreamToWire } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
@@ -2897,7 +2898,13 @@ export default function PointCloudViewer({
 
   // Calculate combined bounds (including clouds, meshes, and skeletons)
   const combinedBounds = useMemo(() => {
-    const hasContent = clouds.length > 0 || meshes.length > 0 || skeletons.length > 0 || qsms.length > 0;
+    // A scan with params (scanner marker / moving-platform trajectory) carries no
+    // geometry but DOES occupy the scene — a scans-only import (e.g. a drone
+    // trajectory at z=170) must frame on it, not fall back to the origin box,
+    // which would put the marker off-camera and blank the view.
+    const hasParamsScan = scansWithParams.some(s => s.visible);
+    const hasContent = clouds.length > 0 || meshes.length > 0 ||
+      skeletons.length > 0 || qsms.length > 0 || hasParamsScan;
 
     // Return default bounds when scene is empty
     if (!hasContent) {
@@ -2984,6 +2991,27 @@ export default function PointCloudViewer({
       min.z = Math.min(min.z, box.min[2]); max.z = Math.max(max.z, box.max[2]);
     }
 
+    // Include scanner-marker positions so a scans-only scene frames on them. For
+    // a moving-platform scan use the WHOLE trajectory extent (not just the
+    // first-pose anchor), so a data-less drone pass at z=170 frames its path
+    // instead of collapsing the camera onto the origin (which blanks the view
+    // and hides the ground grid). Mirrors the staticBounds loop.
+    for (const scan of scansWithParams) {
+      if (!scan.visible) continue;
+      if (scan.params.trajectory) {
+        for (const p of scan.params.trajectory.poses) {
+          min.x = Math.min(min.x, p.x); max.x = Math.max(max.x, p.x);
+          min.y = Math.min(min.y, p.y); max.y = Math.max(max.y, p.y);
+          min.z = Math.min(min.z, p.z); max.z = Math.max(max.z, p.z);
+        }
+      } else {
+        const o = scan.params.origin;
+        min.x = Math.min(min.x, o.x); max.x = Math.max(max.x, o.x);
+        min.y = Math.min(min.y, o.y); max.y = Math.max(max.y, o.y);
+        min.z = Math.min(min.z, o.z); max.z = Math.max(max.z, o.z);
+      }
+    }
+
     // Fallback if no visible objects
     if (!isFinite(min.x)) {
       if (clouds.length > 0) return clouds[0].data.bounds;
@@ -2999,7 +3027,7 @@ export default function PointCloudViewer({
     const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
     const size = new THREE.Vector3().subVectors(max, min);
     return { min, max, center, size };
-  }, [clouds, meshes, skeletons, qsms, meshPositions, meshScales, meshRotations, getEditState]);
+  }, [clouds, meshes, skeletons, qsms, scansWithParams, meshPositions, meshScales, meshRotations, getEditState]);
 
   // Open the add-scan popup with sensible defaults: next label and current
   // scene center as origin. Shared by the toolbar Radio button (Create
@@ -3126,12 +3154,23 @@ export default function PointCloudViewer({
     }
 
     // Include scanner-marker origins (world coords). Keeps a scans-only Helios
-    // import grounded at the rig height instead of the unit fallback.
+    // import grounded at the rig height instead of the unit fallback. For a
+    // moving-platform scan, include the WHOLE trajectory extent (not just the
+    // first-pose anchor origin) so a data-less moving scan frames its full path
+    // instead of collapsing the camera onto one far-away point (a drone pass at
+    // z=170 would otherwise blank the viewport and hide the ground grid).
     for (const scan of scansWithParams) {
       if (!scan.visible) continue;
-      const o = scan.params.origin;
-      min.min(corner.set(o.x, o.y, o.z));
-      max.max(corner);
+      if (scan.params.trajectory) {
+        for (const p of scan.params.trajectory.poses) {
+          min.min(corner.set(p.x, p.y, p.z));
+          max.max(corner);
+        }
+      } else {
+        const o = scan.params.origin;
+        min.min(corner.set(o.x, o.y, o.z));
+        max.max(corner);
+      }
     }
 
     // Include skeleton bounds (original points, no positions)
@@ -4774,6 +4813,14 @@ export default function PointCloudViewer({
           scan_azimuth_offset_deg: p.azimuthOffsetDeg,
           range_noise_m: options.rangeNoiseMm / 1000,  // mm → m
           angle_noise_mrad: options.angleNoiseMrad,
+          // Moving-platform scan: forward the trajectory + pulse rate so the
+          // backend drives addScanMoving instead of a static scan from origin.
+          ...(p.trajectory
+            ? {
+                trajectory: poseStreamToWire(p.trajectory),
+                pulse_rate_hz: p.pulseRateHz ?? 300000,
+              }
+            : {}),
         };
       });
 
@@ -9624,7 +9671,15 @@ export default function PointCloudViewer({
   }, [dataRange, colorRanges, colorRangeKey]);
 
   return (
-    <div className={`relative bg-neutral-900 ${className}`}>
+    <div
+      className={`relative bg-neutral-900 ${className}`}
+      // Debug/test hook: the diagonal extent of the scene bounds the camera
+      // frames. Lets tests assert a scans-only scene (e.g. a moving-platform
+      // trajectory) actually expands the bounds instead of falling back to the
+      // default ±5 origin box (size ≈ 17.3), which would blank the viewport.
+      data-scene-bounds-size={combinedBounds.size.length().toFixed(2)}
+      data-scene-center={`${combinedBounds.center.x.toFixed(1)},${combinedBounds.center.y.toFixed(1)},${combinedBounds.center.z.toFixed(1)}`}
+    >
       {/* 3D Canvas */}
       <Canvas
         camera={{ fov: 60, near: 0.01, far: 10000, position: [0, 0, 10] }}
@@ -10041,17 +10096,16 @@ export default function PointCloudViewer({
           const isMarkerSelected = selectedScanIds.has(scan.id);
           return (
             // Render-only precision safety net: the marker's origin is a world
-            // coord, so render it near the origin via a wrapping group.
+            // coord, so render it near the origin via a wrapping group. Markers go
+            // through ScanMarkerEntry so the trajectory-derived arrays are
+            // memoized (a fresh array per render would rebuild the marker's GPU
+            // geometry every frame — a leak that OOM-crashed the renderer).
             <group key={scan.id} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
-              <ScannerMarker
-                origin={scan.params.origin}
-                model={scan.params.scannerModel}
+              <ScanMarkerEntry
+                params={scan.params}
                 color={scan.color}
                 selected={isMarkerSelected}
-                tiltRollDeg={scan.params.tiltRollDeg}
-                tiltPitchDeg={scan.params.tiltPitchDeg}
-                azimuthOffsetDeg={scan.params.azimuthOffsetDeg}
-                scale={scanMarkerScale}
+                markerScale={scanMarkerScale}
               />
             </group>
           );
@@ -10059,7 +10113,7 @@ export default function PointCloudViewer({
 
         <CameraController
           bounds={combinedBounds}
-          hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0 || qsms.length > 0}
+          hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0 || qsms.length > 0 || scansWithParams.some(s => s.visible)}
           enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive}
           displayOffset={displayOffset}
         />
@@ -10985,9 +11039,23 @@ export default function PointCloudViewer({
               const displayName = scanDisplayName(scan);
               const isExpanded = expandedScanIds.has(scan.id);
 
-              // Build subtitle text based on which fields the scan carries.
-              const originText = scanHasParams
+              // Build subtitle text based on which fields the scan carries. A
+              // moving-platform scan (params.trajectory set) shows a "moving"
+              // badge + pose/time-span summary INSTEAD of a single origin —
+              // origin is only a fallback anchor there and showing it is
+              // misleading.
+              const isMovingScanRow = scanHasParams && scan.params.trajectory != null;
+              const originText = scanHasParams && !isMovingScanRow
                 ? `(${scan.params.origin.x.toFixed(2)}, ${scan.params.origin.y.toFixed(2)}, ${scan.params.origin.z.toFixed(2)})`
+                : null;
+              const movingBadge = isMovingScanRow ? (
+                <span data-testid="scan-row-moving"
+                  className="px-1 rounded bg-lime-500/20 text-lime-300 text-[10px] font-medium">
+                  moving
+                </span>
+              ) : null;
+              const trajText = isMovingScanRow
+                ? `${scan.params.trajectory!.poses.length} poses`
                 : null;
               let subtitle: React.ReactNode;
               if (scanHasData && scanHasParams) {
@@ -10995,7 +11063,9 @@ export default function PointCloudViewer({
                   {effectivePointCount.toLocaleString()} pts
                   {hasCloudEdits && <span className="ml-1 text-amber-400">*</span>}
                   <span className="mx-1">·</span>
-                  <span className="font-mono">origin {originText}</span>
+                  {isMovingScanRow
+                    ? <>{movingBadge} <span className="ml-1 font-mono">{trajText}</span></>
+                    : <span className="font-mono">origin {originText}</span>}
                 </>);
               } else if (scanHasData) {
                 subtitle = (<>
@@ -11005,7 +11075,9 @@ export default function PointCloudViewer({
               } else {
                 subtitle = (<>
                   params <span className="mx-1">·</span>
-                  <span className="font-mono">origin {originText}</span>
+                  {isMovingScanRow
+                    ? <>{movingBadge} <span className="ml-1 font-mono">{trajText}</span></>
+                    : <span className="font-mono">origin {originText}</span>}
                 </>);
               }
 
@@ -11018,6 +11090,7 @@ export default function PointCloudViewer({
                     data-point-count={scanHasData ? effectivePointCount : 0}
                     data-has-data={scanHasData ? 'true' : 'false'}
                     data-has-params={scanHasParams ? 'true' : 'false'}
+                    data-moving={isMovingScanRow ? 'true' : 'false'}
                     data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
                     data-selected={isSelected ? 'true' : 'false'}
                     data-visible={scan.visible ? 'true' : 'false'}

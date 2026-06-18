@@ -50,13 +50,18 @@ per-pulse directions from `(point − origin)`.
 - **Scan pattern** — **raster** (a uniform zenith × azimuth grid, the
   classic terrestrial-scanner dome sweep) or **spinning multibeam** (a
   rotating multi-channel sensor like a Velodyne/Ouster/Hesai, where each
-  channel fires at a fixed elevation as the head spins)
+  channel fires at a fixed elevation as the head spins). A spinning sensor
+  rotates continuously, so it is a **moving-platform pattern** and requires
+  a [trajectory](#moving-platform-scans) — see the note below.
 - **Zenith (θ) min / max, points** — vertical sweep bounds (degrees) and
   number of rays (raster only)
 - **Beam elevation angles** (spinning multibeam only) — per-channel
   elevation angles in degrees above the horizon; the channel count sets
   the vertical resolution in place of a zenith point count
-- **Azimuth (φ) min / max, points** — horizontal sweep bounds (degrees) and number of rays
+- **Azimuth (φ) min / max, points** — for a raster scan, the horizontal
+  sweep bounds (degrees) and number of rays. A spinning multibeam has no
+  azimuth *range* (it rotates a full 360° per revolution); its azimuth
+  control is just the **points per revolution** (angular resolution)
 - **Return type** — single (one return per ray) or multi (partial
   returns through foliage)
 - **Beam properties** (multi-return only) — exit diameter, divergence
@@ -65,6 +70,51 @@ per-pulse directions from `(point − origin)`.
   horizontal plane (degrees; 0 is the default heading). Orients the
   scanner marker in the 3D view, offsets the synthetic-scan sweep about
   the vertical axis, and round-trips through XML (`<scanAzimuthOffset>`)
+- **Platform trajectory** (optional) — turns a static scan into a
+  **moving-platform** scan (drone / ground robot / tractor). Imported from
+  a trajectory file; see *Moving-platform scans* below.
+
+## Moving-platform scans
+
+A static scan has one fixed origin. A **moving-platform** scan instead
+carries a *trajectory*: a dense, timestamped 6-DOF path the scanner
+followed (position + orientation over time). When a trajectory is
+attached, each return is reconstructed from its **own** beam origin — the
+platform pose at the moment that pulse was fired — rather than a single
+scanner position. This is what leaf-area inversion needs to trace beam
+paths correctly for a sensor that was moving through the scene.
+
+Attach one with **Import trajectory file…** in the Add Scan popup. The
+file is a CSV / whitespace-delimited table, one pose per row:
+
+- `t x y z qx qy qz qw` — time (seconds), position (metres), and a
+  Hamilton orientation quaternion, or
+- `t x y z roll pitch yaw` — orientation as Tait-Bryan angles (radians;
+  the importer also accepts degrees) in intrinsic Z-Y-X order.
+
+Times must strictly increase. A header row and `#` / `//` comment lines
+are ignored. Once attached, the scan's origin is anchored to the first
+pose, and the trajectory is drawn as a path line in the viewer.
+
+Leaf-area density for a moving-platform scan uses a **beam-based**
+inversion that needs a supplied mean leaf-projection coefficient
+*G(θ)* (it can't triangulate a moving sweep to derive one); see
+[Estimate leaf area density](../workflows/estimate-leaf-area-density.md).
+
+### Spinning multibeam is a moving pattern
+
+A spinning multibeam sensor rotates continuously, so it only makes sense
+as a moving-platform scan — there's no coherent "stationary free-spinning"
+capture without a time element. Selecting the spinning-multibeam pattern
+(or a Velodyne preset) therefore **requires a trajectory** before the scan
+can be added or run.
+
+To simulate a sensor sitting **still** and spinning, give it a trajectory
+with **two poses at the same position**, separated in time by one
+revolution's duration. That produces exactly one full 360° revolution from
+the fixed origin. (The revolution duration is `points-per-revolution ÷
+pulse rate` — but in practice any small time gap that yields one revolution
+works; the scan covers the whole 360° regardless.)
 
 ## Importing scans
 

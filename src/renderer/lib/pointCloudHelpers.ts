@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData } from './pointCloudTypes';
 import type { HeliosGrid, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
+import { poseStreamToWire } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
 
 // Format a numeric range tick so the colorbar labels stay readable across
@@ -712,7 +713,13 @@ const LAD_MULTI_RETURN_FIELDS = ['timestamp', 'target_index', 'target_count'] as
 export function buildLADRequest(
   scans: Scan[],
   grid: HeliosGrid,
-  params: { lmax: number; maxAspectRatio: number; minVoxelHits: number; elementWidth?: number },
+  params: {
+    lmax: number; maxAspectRatio: number; minVoxelHits: number;
+    elementWidth?: number;
+    // Mean leaf-projection coefficient G(theta) — required for moving-platform
+    // scans (no triangulation to derive it), ignored for static scans.
+    gtheta?: number;
+  },
 ): LADRequest {
   const requestScans: LADScanEntry[] = scans.map(scan => {
     const p = scan.params!;
@@ -729,6 +736,14 @@ export function buildLADRequest(
     if (p.returnType === 'multi') {
       entry.beam_exit_diameter = p.beamExitDiameterM;
       entry.beam_divergence = p.beamDivergenceMrad;
+    }
+    // Moving-platform scan: forward the trajectory so the backend reconstructs a
+    // per-beam origin per return (joined by timestamp) and runs the beam-based
+    // (Gtheta) inversion. The point data must carry a `timestamp` column for the
+    // join — session-backed clouds surface it from their extras; for an inline
+    // cloud it must be included in scalar_columns below.
+    if (p.trajectory) {
+      entry.trajectory = poseStreamToWire(p.trajectory);
     }
     // Source priority mirrors the backend's feed resolution:
     //   1. session_id — a session-backed (octree) cloud, fed from its in-RAM
@@ -766,12 +781,24 @@ export function buildLADRequest(
       // backend runs the multi-return algorithm. Attach only when ALL three are
       // present and aligned with the points.
       const fields = scan.data.scalarFields;
+      const cols: Record<string, number[]> = {};
       if (fields && LAD_MULTI_RETURN_FIELDS.every(
         f => fields[f] && fields[f].values.length === scan.data!.pointCount)) {
-        const cols: Record<string, number[]> = {};
         for (const f of LAD_MULTI_RETURN_FIELDS) {
           cols[f] = Array.from(fields[f].values);
         }
+      }
+      // A moving scan needs the per-return timestamp (the trajectory join key) and
+      // is_miss; include whichever columns the inline cloud carries even when the
+      // full multi-return triple is absent (single-return moving clouds).
+      if (p.trajectory && fields) {
+        for (const f of ['timestamp', 'is_miss']) {
+          if (!cols[f] && fields[f] && fields[f].values.length === scan.data!.pointCount) {
+            cols[f] = Array.from(fields[f].values);
+          }
+        }
+      }
+      if (Object.keys(cols).length > 0) {
         entry.scalar_columns = cols;
       }
     }
@@ -786,6 +813,9 @@ export function buildLADRequest(
     min_voxel_hits: params.minVoxelHits,
     // Drives the Pimont (2018) uncertainty; omit to let the backend default it.
     ...(params.elementWidth !== undefined ? { element_width: params.elementWidth } : {}),
+    // G(theta) for moving-platform scans (no-op for static); omit to let the
+    // backend default it to 0.5 (spherical) with a warning.
+    ...(params.gtheta !== undefined ? { gtheta: params.gtheta } : {}),
     // Request-level angular fallbacks (per-scan values above take precedence).
     theta_min: 30,
     theta_max: 130,

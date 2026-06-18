@@ -526,6 +526,12 @@ export interface LADScanEntry extends HeliosScanEntry {
   // per-pulse columns in scalar_columns (timestamp/target_index/target_count).
   session_id?: string | null;
   scalar_columns?: Record<string, number[]>;
+  // Moving-platform trajectory (backend `PoseStream` wire shape). When present
+  // this scan is a moving-platform acquisition: the backend reconstructs a
+  // per-beam emission origin for every return by joining its timestamp to this
+  // trajectory and runs the beam-based (Gtheta) inversion (no triangulation).
+  // `origin` is then only a fallback anchor. Build it via poseStreamToWire().
+  trajectory?: unknown;
 }
 
 export interface LADRequest {
@@ -542,6 +548,10 @@ export interface LADRequest {
   theta_max: number;
   phi_min: number;
   phi_max: number;
+  // Mean leaf-projection coefficient G(theta), in (0, 1] (0.5 = spherical).
+  // Required only for moving-platform scans, whose pulses can't be triangulated
+  // to derive G(theta) per cell. Ignored for static scans.
+  gtheta?: number;
 }
 
 export interface LADVoxelResult {
@@ -1359,6 +1369,13 @@ export interface LidarScanScanner {
   // Synthetic measurement-error model (0 disables). Applies to single + multi.
   range_noise_m: number;       // Gaussian along-beam range noise stddev (meters)
   angle_noise_mrad: number;    // Gaussian beam-pointing jitter stddev (mrad)
+  // Moving-platform scan. When `trajectory` is set the backend drives the scan
+  // with addScanMoving (the pose walks the trajectory over the sweep); `origin`
+  // is then ignored and every hit records its own per-beam origin + timestamp.
+  // `pulse_rate_hz` spaces pulses in time (required when trajectory is set).
+  // Build the trajectory via poseStreamToWire(). Omit both for a static scan.
+  trajectory?: unknown;
+  pulse_rate_hz?: number;
 }
 
 export interface LidarScanRequest {

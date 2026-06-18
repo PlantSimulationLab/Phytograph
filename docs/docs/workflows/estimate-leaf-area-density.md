@@ -95,10 +95,24 @@ surface.
   (foliage no beam ever reached). If the interval falls outside the
   method's validity range, it is not reported.
 
+## Moving-platform scans
+
+If a scan carries a [platform trajectory](../concepts/scans.md#moving-platform-scans),
+LAD is computed with a **beam-based** inversion: every return is traced
+from its own per-beam origin (the platform pose when that pulse fired),
+joined to the trajectory by the return's timestamp. This path does **not**
+triangulate the scan — a moving sweep has no fixed angular grid to mesh —
+so instead of estimating *G(θ)* from a triangulation it uses a **supplied
+mean G(θ)** (0.5 for a spherical / randomly-oriented leaf-angle
+distribution; set it to match the canopy if known). The point cloud must
+carry a per-return `timestamp` column (for the trajectory join) and miss
+points (or a timestamp from which they can be recovered), as for any LAD.
+
 ## Tips
 
 - If no triangles are produced (G-function can't be estimated), increase
-  **Lmax** or loosen **Max Aspect Ratio**.
+  **Lmax** or loosen **Max Aspect Ratio**. (Moving-platform scans skip
+  triangulation; this doesn't apply to them.)
 - Segment out ground and trunk first if you only want foliage density —
   the inversion counts every return inside the grid.
 - For a single canopy-wide LAI, use a 1×1×1-cell grid sized to the whole

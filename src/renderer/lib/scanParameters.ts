@@ -69,6 +69,25 @@ export interface ScanParameters {
   // Length sets Ntheta. Maps to Helios <beamElevationAngles>; the backend
   // converts each to a zenith angle (zenith = 90 - elevation) for pyhelios.
   beamElevationAnglesDeg: number[];
+  // Moving-platform trajectory. When set, this scan is a moving-platform
+  // acquisition (drone / robot / tractor): `origin` is only a fallback anchor
+  // (it should equal the first pose's position), and leaf-area inversion uses a
+  // PER-BEAM origin reconstructed by joining each return's timestamp to this
+  // trajectory. Undefined ⇒ a static (tripod) scan, unchanged. Imported from a
+  // trajectory file; see ./poseStream.
+  trajectory?: import('./poseStream').PoseStream;
+  // Pulse repetition rate in Hz — pulses fired per second. Used ONLY by a
+  // synthetic MOVING scan to space pulses in time along the trajectory
+  // (t = t0 + ordinal / pulseRateHz), which determines how far the platform
+  // moves between pulses and thus how much of the flight the Ntheta×Nphi sweep
+  // covers. Auto-filled from the scanner model preset; editable. Ignored by
+  // static scans and by leaf-area inversion.
+  pulseRateHz?: number;
+}
+
+// A scan is a moving-platform acquisition iff it carries a trajectory.
+export function isMovingScan(p: ScanParameters): boolean {
+  return p.trajectory != null;
 }
 
 export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
@@ -89,6 +108,9 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   azimuthOffsetDeg: 0,
   // A generic 8-channel elevation spread; only used when pattern is multibeam.
   beamElevationAnglesDeg: [15, 10, 5, 0, -5, -10, -15, -20],
+  // Generic moving-scan pulse rate (300 kHz); model presets override it. Only
+  // used by a synthetic moving scan.
+  pulseRateHz: 300000,
 };
 
 export function makeDefaultScanParameters(

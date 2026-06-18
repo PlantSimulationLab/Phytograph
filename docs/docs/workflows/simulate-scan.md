@@ -52,7 +52,14 @@ You need geometry in the scene to scan: typically a generated
         style). Each laser channel fires at a fixed elevation as the head
         spins, so instead of a zenith sweep you list the **beam elevation
         angles** directly (see step 4). The number of channels sets the
-        vertical resolution; the azimuth count and sweep still apply.
+        vertical resolution.
+
+        A spinning sensor rotates **continuously**, so it is a
+        moving-platform pattern and **requires a trajectory** — the popup
+        won't let you add a multibeam scan without one. See
+        [Moving-platform scans](#moving-platform-drone-robot-tractor-scans)
+        below; for a stationary capture, use a trajectory with two poses at
+        the same position one revolution apart.
 
 5. **Origin** — (X, Y, Z) in meters of the scanner head. A typical TLS
    campaign places scanners 1.5–2 m above ground, 3–5 m from the
@@ -78,7 +85,10 @@ You need geometry in the scene to scan: typically a generated
 
     === "Spinning multibeam"
 
-        - **Azimuth (Nphi)** — number of azimuth steps per rotation.
+        - **Azimuth (per rev)** — number of azimuth steps in one full
+          revolution (the angular resolution). A spinning sensor always
+          rotates a full 360°, so there is **no azimuth min/max range** —
+          just this per-revolution count.
         - **Beam elevation angles** — a comma- or space-separated list of
           per-channel elevation angles, in **degrees above the horizon**
           (positive = above horizon, the convention on manufacturer spec
@@ -86,6 +96,10 @@ You need geometry in the scene to scan: typically a generated
           8-channel sensor. The channel count sets the vertical
           resolution; there is no separate zenith point count or zenith
           sweep.
+        - **Trajectory** — required (a spinning sensor is moving-only). The
+          total pulses fired ≈ pulse rate × flight duration; how many
+          revolutions result is derived from those. See
+          [Moving-platform scans](#moving-platform-drone-robot-tractor-scans).
         - **Azimuth (φ) min / max** — horizontal bounds, as for raster.
 
 7. **Return type**:
@@ -153,6 +167,45 @@ If a `<scan>` carries a `<filename>` tag and that file is on disk
 alongside the XML (or in the current working directory), Phytograph
 auto-loads the point data and attaches it to the new scan. Otherwise
 you can attach it later from the row's paperclip button.
+
+## Moving-platform (drone / robot / tractor) scans
+
+A static scanner fires from one fixed position. To simulate a **moving
+platform**, attach a *trajectory* to the scan: in the Add Scan popup,
+click **Import trajectory file…** and pick a CSV/text file of poses (see
+[Scans → Moving-platform scans](../concepts/scans.md#moving-platform-scans)
+for the format — `t x y z` plus a quaternion or roll/pitch/yaw per row).
+
+Once a trajectory is attached:
+
+- The scan is flagged **moving** in the Scans panel, and its path is drawn
+  as a line with a sphere at each pose in the 3D view.
+- The **Origin** field is replaced by a read-only anchor — position now
+  comes from the trajectory, not a single point.
+- A **Pulse rate / PRF (Hz)** field appears, pre-filled from the selected
+  scanner model. This is the laser's fixed pulse repetition rate — a
+  property of the instrument, not something you normally change (editable
+  for a generic/custom scanner).
+- The **azimuth point count** is now interpreted as points **per
+  revolution** (the sensor's angular resolution). For a multibeam sensor
+  the zenith rows are its laser channels (the beam elevation angles), so
+  there is no separate zenith count.
+
+The scan simulates a real spinning sensor: it fires continuously at the
+PRF, the head spins at the rate the PRF and the per-revolution resolution
+imply, and the platform flies the trajectory — **for the entire flight**.
+The popup shows the derived **rotation rate**, **number of revolutions**,
+and **total pulse count** before you run, so you can see the cost. Because
+a real PRF over a multi-second flight is millions of pulses, a warning
+appears for very large scans — lower the azimuth-per-revolution count or
+use a shorter trajectory for a quick test. Unlike a static dome scan, you
+do **not** size a fixed pulse budget; the flight duration sets how many
+revolutions (and total points) result.
+
+The resulting cloud carries each return's per-beam origin and timestamp,
+so it feeds straight into a moving-platform
+[leaf area density](estimate-leaf-area-density.md#moving-platform-scans)
+inversion.
 
 Large scans (anything past a few hundred megabytes — typical for a TLS
 campaign) are parsed by the Python backend rather than in the browser,
