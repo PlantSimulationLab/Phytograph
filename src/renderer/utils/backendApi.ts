@@ -1433,10 +1433,13 @@ export interface LidarScanResponse {
 export async function runLidarScan(
   request: LidarScanRequest,
   signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
 ): Promise<LidarScanResponse> {
   // A high-resolution scan ray-traces Ntheta×Nphi rays per scanner; the points +
   // scalars come back as a PHB1 binary frame (5-min allowance for big scans).
-  const { meta, buffers } = await fetchBinaryFrame('/api/lidar/scan', request, signal, 300000);
+  // When onProgress is supplied the backend streams PHP1 markers ahead of the
+  // frame so the run button can show per-stage progress (mirrors triangulation/LAD).
+  const { meta, buffers } = await fetchBinaryFrame('/api/lidar/scan', request, signal, 300000, onProgress);
   if (!meta.success) {
     return { success: false, error: (meta.error as string) ?? 'LiDAR scan failed', results: [] };
   }

@@ -190,31 +190,72 @@ export function CameraController({
     return () => clearTimeout(timer);
   }, [hasContent, bounds, snapToView]);
 
-  // Adapt the perspective near/far planes to the scene size. The Canvas seeds a
+  // Adapt the perspective near/far planes for depth precision. The Canvas seeds a
   // fixed near=0.01 / far=10000, which is the wrong scale at both extremes: a
-  // large scene clips at the far plane, and (worse) a far plane that dwarfs the
-  // content wastes depth-buffer precision near the camera, so coplanar geometry
-  // like the ground grid z-fights and flickers when orbiting near the origin.
-  // Derive far from the bounding-box diagonal and pin near so the ratio stays
-  // within the depth buffer's usable range (~1e5 for a 24-bit buffer). Runs
-  // whenever bounds change (cloud added / cropped / moved).
+  // large scene clips at the far plane, and (worse) a tiny near against a far that
+  // dwarfs the content wastes depth-buffer precision near the origin, so coplanar
+  // geometry — the ground grid, or two synthetic scans sampling the same z=0
+  // plane — z-fights and flickers when orbiting.
+  //
+  // Two levers, both aimed at shrinking the far/near *ratio* (depth precision is
+  // governed by that ratio, not the absolute planes):
+  //
+  // 1. FAR tracks the scene. The camera orbits at ~2x maxDim out and diag >= maxDim,
+  //    so diag*4 clears any orbit distance with margin — far less wasteful than the
+  //    old diag*10 floored at 1000.
+  // 2. NEAR tracks the camera's distance to its orbit target (see the change-driven
+  //    effect below), pushed as far out as it can go without clipping. A near pinned
+  //    at 0.01 is 100x closer than needed when orbiting a metre-scale scene at
+  //    several metres out, and that tiny near is what crushes precision near z=0.
+  //
+  // This is a pure projection-matrix change — no per-fragment cost. (We deliberately
+  // do NOT use a logarithmic depth buffer: it fixes precision globally but forces
+  // every fragment to write gl_FragDepth, disabling early-Z and collapsing heavy
+  // point clouds to single-digit fps.)
   useEffect(() => {
     const persp = camera as THREE.PerspectiveCamera;
     if (!persp.isPerspectiveCamera) return;
     const diag = bounds.size.length() || 1;
-    // Far must comfortably contain the scene from any orbit distance (the camera
-    // sits ~2x maxDim out); 10x diagonal is generous. Floor at 1000 so tiny
-    // scenes keep a sane far plane and don't clip when zoomed out.
-    const far = Math.max(1000, diag * 10);
-    // Cap far/near at 1e5 to preserve depth precision; never push near past a
-    // sub-centimetre 0.01 (we still want to zoom right up to a surface).
-    const near = Math.min(0.01, far / 1e5);
-    if (persp.far !== far || persp.near !== near) {
+    // Floor at 100 so tiny scenes keep a sane far plane and don't clip when zoomed out.
+    const far = Math.max(100, diag * 4);
+    if (persp.far !== far) {
       persp.far = far;
-      persp.near = near;
       persp.updateProjectionMatrix();
     }
   }, [bounds, camera]);
+
+  // Drive NEAR from the live camera→target distance on every camera move. Pushing
+  // near out as the camera pulls back tightens the far/near ratio (more precision
+  // near z=0); pulling it in as you dolly toward a surface keeps that surface
+  // unclipped. near = dist/1000 is well inside minDistance (0.1) so the orbit
+  // target is never clipped, clamped to [1e-4, 0.1] so it stays sane at the extremes.
+  // Event-driven (OrbitControls 'change'), so it costs nothing while idle.
+  useEffect(() => {
+    const persp = camera as THREE.PerspectiveCamera;
+    if (!persp.isPerspectiveCamera) return;
+    let controls: any = null;
+    const updateNear = () => {
+      if (!controls) return;
+      const dist = persp.position.distanceTo(controls.target);
+      const near = Math.min(0.1, Math.max(1e-4, dist / 1000));
+      if (persp.near !== near) {
+        persp.near = near;
+        persp.updateProjectionMatrix();
+      }
+    };
+    // Defer one tick so OrbitControls is mounted (mirrors the framing effect above,
+    // which has no hard ordering guarantee against the controls' own setTimeout(0)).
+    const timer = setTimeout(() => {
+      controls = controlsRef.current;
+      if (!controls) return;
+      updateNear();
+      controls.addEventListener('change', updateNear);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      if (controls) controls.removeEventListener('change', updateNear);
+    };
+  }, [bounds, camera, hasContent]);
 
   useEffect(() => {
     (window as any).__resetPointCloudCamera = resetCamera;

@@ -74,7 +74,9 @@ describe('scannerModels catalog', () => {
   it('models the Velodyne HDL-32E as a 32-channel spinning multibeam', () => {
     const v = getScannerModel('velodyne_hdl32e').preset;
     expect(v.pattern).toBe('spinning_multibeam');
-    expect(v.returnType).toBe('multi');
+    // Datasheet offers single OR strongest+last dual return — no full-waveform
+    // multi-return — and Helios has no dual mode, so single is the faithful default.
+    expect(v.returnType).toBe('single');
     expect(v.beamElevationAnglesDeg).toHaveLength(32);
     // Rectangular emitter ~1/2″ wide at the source → 12.7 mm on the wide axis.
     expect(v.beamExitDiameterM).toBeCloseTo(0.0127);

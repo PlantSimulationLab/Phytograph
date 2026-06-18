@@ -22,11 +22,11 @@ export interface TriangleMeshProps {
   // to always blend ON TOP of the surface, so the volume tint is preserved
   // regardless of viewing direction. Default 0 = normal distance sorting.
   renderOrder?: number;
-  // Bias this surface's depth toward the camera so a surface that's coplanar
+  // Bias this surface's depth AWAY from the camera so a surface that's coplanar
   // with other geometry (e.g. a ground plane sitting exactly on the ground grid
-  // at z=0) wins the depth test consistently instead of z-fighting. The offset
-  // is in depth-buffer units, not world space, so it doesn't visibly move the
-  // surface. Default false = no offset.
+  // and on scan points at z=0) consistently sits behind it instead of z-fighting.
+  // The offset is in depth-buffer units, not world space, so it doesn't visibly
+  // move the surface. Default false = no offset.
   polygonOffset?: boolean;
 }
 
@@ -144,11 +144,17 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
       side: THREE.DoubleSide,
       flatShading: hasTriangleColors,  // Flat per-face shading for pseudocolor
       vertexColors: useColorAttr,  // Enable the color attribute
-      // Pull coplanar surfaces (e.g. a ground plane on the z=0 grid) toward the
-      // camera in depth so they don't z-fight. Negative units = nearer.
+      // Push coplanar surfaces (e.g. a ground plane on the z=0 grid) AWAY from
+      // the camera in depth so they sit behind anything else at z=0 — most
+      // importantly the scan points that land on the plane in a single-return
+      // ground scan. Positive units = farther. With the plane biased back, the
+      // points (no offset) win the depth test and read cleanly on top; the
+      // opaque plane then occludes the reference grid beneath it, which is the
+      // desired look. (The grid is handled separately by depthWrite=false +
+      // depthFunc=LessDepth in GroundGrid, so it always loses these z=0 ties.)
       polygonOffset,
-      polygonOffsetFactor: polygonOffset ? -1 : 0,
-      polygonOffsetUnits: polygonOffset ? -1 : 0,
+      polygonOffsetFactor: polygonOffset ? 1 : 0,
+      polygonOffsetUnits: polygonOffset ? 1 : 0,
     });
   }, [color, isTranslucent, wireframe, useColorAttr, hasTriangleColors, polygonOffset]);
 

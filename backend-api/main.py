@@ -5111,7 +5111,7 @@ def _derive_moving_scan_grid(n_theta: int, n_phi_per_rev: int, pulse_rate_hz: fl
     }
 
 
-def _do_lidar_scan(request: LidarScanRequest) -> dict:
+def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
     """
     Perform a true ray-traced synthetic LiDAR scan of the supplied geometry.
 
@@ -5129,6 +5129,10 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
     returned **per scanner** — so the renderer can attach each scanner's points to
     its own scan, with intensity + scalar fields for color-by/filter.
     """
+    def _report(fraction, message):
+        if progress is not None:
+            progress(fraction, message)
+
     try:
         if not request.meshes:
             return {"success": False, "error": "No geometry to scan"}
@@ -5141,6 +5145,8 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
             return {"success": False, "error": "Geometry has no triangles"}
 
         from pyhelios import LiDARCloud, Context
+
+        _report(0.05, "Loading geometry")
 
         want_waveform = any(s.return_type == "multi" for s in request.scanners)
         extra_fields = [f for f in request.extra_fields if f]
@@ -5170,6 +5176,7 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                 ctx.addTrianglesFromArrays(verts, tris, colors=colors)
 
             _prof["mesh_load"] = time.perf_counter()
+            _report(0.15, "Configuring scanners")
 
             with LiDARCloud() as lidar:
                 lidar.disableMessages()
@@ -5294,6 +5301,10 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                 # isHitMiss below) so the miss overlay + LAD can use them.
                 record_misses = bool(request.record_misses)
                 _prof["add_scans"] = time.perf_counter()
+                # The ray trace is one uninterruptible C++ pass — report it as
+                # indeterminate (null fraction) so the bar pulses rather than
+                # sitting frozen at a stale percentage during the long step.
+                _report(None, "Ray-tracing scene")
                 if want_waveform:
                     lidar.syntheticScan(
                         ctx,
@@ -5312,6 +5323,7 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                     )
 
                 _prof["raytrace"] = time.perf_counter()
+                _report(0.85, "Extracting hits")
 
                 # ---- Bulk extraction. This was a per-hit Python loop doing ~13×N
                 # FFI crossings (getHitScanID/getHitXYZ/getHitColor/isHitMiss +
@@ -5365,6 +5377,7 @@ def _do_lidar_scan(request: LidarScanRequest) -> dict:
                     })
 
         _prof["extract"] = time.perf_counter()
+        _report(0.95, "Building point clouds")
         out = []
         for r in results:
             # When this scan recorded any miss, build a cloud session for it so the
@@ -5596,7 +5609,8 @@ def _pack_lidar_scan(result: dict) -> bytes:
 async def lidar_scan(request: LidarScanRequest):
     """Ray-traced synthetic LiDAR scan. Returns a PHB1 binary frame (points +
     scalars per scanner can be millions of values)."""
-    return _bin_frame_streaming_response(lambda: _pack_lidar_scan(_do_lidar_scan(request)))
+    return _bin_frame_streaming_response(
+        lambda progress: _pack_lidar_scan(_do_lidar_scan(request, progress=progress)))
 
 
 # ==================== TREE SKELETON EXTRACTION (BFS Graph-Based Algorithm) ====================

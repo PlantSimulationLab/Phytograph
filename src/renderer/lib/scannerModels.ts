@@ -189,7 +189,12 @@ export const SCANNER_MODELS: ScannerModel[] = [
     heightMeters: 0.144,
     preset: {
       pattern: 'spinning_multibeam',
-      returnType: 'multi', // dual-return (strongest + last)
+      // Datasheet: "Single and Dual Returns (Strongest, Last)" — only single OR
+      // strongest+last dual, never arbitrary multi-return. Helios has no
+      // dual-return mode; its 'multi' is full-waveform (many returns/pulse),
+      // which doesn't model the HDL-32E. Single return is the faithful default
+      // and matches the single-return pulse rate below (~695 kHz).
+      returnType: 'single',
       beamDivergenceMrad: 2.79,
       // The HDL-32E emits a rectangular spot ~1/2″ × 1/4″ at the source (12.7 ×
       // 6.35 mm), which is what yields the 2.79 mrad divergence. This field is a

@@ -1106,6 +1106,10 @@ export default function PointCloudViewer({
   const [isApplyingCrop, setIsApplyingCrop] = useState(false);
   // Synthetic LiDAR scan state
   const [isScanning, setIsScanning] = useState(false);
+  // Per-stage progress for the synthetic scan (mirrors triProgress/ladProgress).
+  // value === null renders an indeterminate (pulsing) bar — used for the
+  // uninterruptible C++ ray-trace pass that can't report a fraction.
+  const [scanProgress, setScanProgress] = useState<{ label: string; value: number | null } | null>(null);
   // AbortController for the in-flight scan request, so the user can cancel a
   // hung/long scan. Aborting tears down the HTTP request and frees the UI; the
   // backend discards the result (the C++ ray trace itself can't be interrupted
@@ -4775,6 +4779,7 @@ export default function PointCloudViewer({
     options: SyntheticScanOptions,
   ) => {
     setIsScanning(true);
+    setScanProgress(null);
     // The scanner heading (azimuth offset) orients the marker but is not yet
     // applied to the simulated rays — Helios doesn't consume the field until its
     // struct change lands. Warn once if any participating scanner has a
@@ -4848,7 +4853,7 @@ export default function PointCloudViewer({
         record_misses: options.includeMisses,
         scan_grid_only: grid !== undefined,
         grid,
-      }, controller.signal);
+      }, controller.signal, (p, msg) => setScanProgress({ label: msg, value: p }));
       if (!response.success) {
         showToast({ title: response.error || 'Scan failed', type: 'error' });
         return;
@@ -4907,6 +4912,7 @@ export default function PointCloudViewer({
     } finally {
       scanAbortRef.current = null;
       setIsScanning(false);
+      setScanProgress(null);
     }
   }, [extractMeshWorldGeometry, buildScanCloudData, onUpdateScanData, onAddScan, meshes, meshPositions, meshScales]);
 
@@ -10994,22 +11000,42 @@ export default function PointCloudViewer({
             <div className="px-2 pt-2">
               {isScanning ? (
                 // While a scan is running, the run button is replaced by a
-                // status indicator + a Cancel button so a long/hung scan can be
-                // abandoned without force-quitting the app.
-                <div className="flex items-center gap-1.5">
-                  <div className="flex-1 px-2 py-1.5 bg-neutral-600 rounded text-xs text-white flex items-center justify-center gap-1.5">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    Scanning…
+                // per-stage progress indicator + a Cancel button so a long/hung
+                // scan can be abandoned without force-quitting the app. The
+                // backend streams PHP1 markers (load → configure → ray-trace →
+                // extract → build); the ray-trace stage reports a null fraction,
+                // which renders as an indeterminate (pulsing) bar.
+                <div className="flex flex-col gap-1.5" data-testid="synthetic-scan-running">
+                  <div className="flex items-center gap-1.5">
+                    <div className="flex-1 px-2 py-1.5 bg-neutral-600 rounded text-xs text-white flex items-center justify-center gap-1.5">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span data-testid="synthetic-scan-progress-label">
+                        {scanProgress?.label ?? 'Scanning…'}
+                        {scanProgress?.value != null && ` (${Math.round(scanProgress.value * 100)}%)`}
+                      </span>
+                    </div>
+                    <button
+                      data-testid="cancel-synthetic-scan"
+                      onClick={() => cancelScan()}
+                      className="px-2 py-1.5 bg-red-600 hover:bg-red-500 rounded text-xs text-white flex items-center justify-center gap-1.5"
+                      title="Cancel the running scan"
+                    >
+                      <X className="w-3 h-3" />
+                      Cancel
+                    </button>
                   </div>
-                  <button
-                    data-testid="cancel-synthetic-scan"
-                    onClick={() => cancelScan()}
-                    className="px-2 py-1.5 bg-red-600 hover:bg-red-500 rounded text-xs text-white flex items-center justify-center gap-1.5"
-                    title="Cancel the running scan"
-                  >
-                    <X className="w-3 h-3" />
-                    Cancel
-                  </button>
+                  {/* Thin progress bar: determinate fill when a fraction is
+                      known, full-width pulse while the ray trace runs. */}
+                  <div className="h-1 w-full bg-neutral-700 rounded overflow-hidden">
+                    {scanProgress?.value != null ? (
+                      <div
+                        className="h-full bg-blue-500 transition-all duration-200"
+                        style={{ width: `${Math.round(scanProgress.value * 100)}%` }}
+                      />
+                    ) : (
+                      <div className="h-full w-full bg-blue-500 animate-pulse" />
+                    )}
+                  </div>
                 </div>
               ) : (
                 <button

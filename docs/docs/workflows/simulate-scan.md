@@ -279,6 +279,14 @@ point also gets scalar fields you can color by or filter on: **intensity**
 for multi-return — **target index** and **target count**. Switch the
 viewer's color mode to *Intensity* or any scalar to inspect them.
 
+While the scan runs, the **Run** button is replaced by a progress
+indicator showing the current stage (loading geometry → configuring
+scanners → ray-tracing → extracting hits → building point clouds) with a
+bar that fills as the scan advances. The ray-tracing pass is a single
+uninterruptible step, so the bar pulses (rather than ticking a
+percentage) during it. A **Cancel** button next to the indicator
+abandons a long or hung scan without force-quitting the app.
+
 If a scanner already holds point data (e.g. an imported scan), Phytograph
 asks whether to **overwrite** it, **keep the original and add a duplicate**
 scan for the synthetic points, or **cancel**.

@@ -103,17 +103,30 @@ export function GroundGrid({
     // the coplanar plane composites over it cleanly. depthTest stays on, so the
     // grid is still correctly occluded by geometry above it.
     if (mat && mat.depthWrite) mat.depthWrite = false;
-    // Bias the grid *backwards* in depth so anything sitting exactly on it (a
-    // z=0 ground plane, or scan points that land on a z=0 patch) always wins the
-    // depth test. Without this the transparent grid draws after the opaque
-    // points and — being coplanar with depthTest LESS_EQUAL — paints its lines
-    // over them. A positive polygon offset pushes the grid's tested depth past
-    // the coincident geometry so the data reads cleanly on top of the grid.
+    // Keep the grid behind everything coplanar at z=0 — a created ground plane,
+    // and scan points that land on a z=0 patch in a single-return ground scan —
+    // via two complementary mechanisms:
+    //
+    // 1. polygonOffset (push the grid's tested depth AWAY from the camera). This
+    //    beats the scan POINTS. A depthFunc tie-break alone is not enough against
+    //    points: the grid is one huge perspective-projected quad, so its
+    //    interpolated depth at a pixel differs from a coincident point's vertex
+    //    depth by sub-ULP rasterization noise — not a bit-exact tie. That noise
+    //    straddles zero, so an equal-depth test flips per pixel/frame and the grid
+    //    lines fight the points. A definite offset margin pushes the grid past it.
+    // 2. depthFunc=LessDepth (lose every exact tie). This beats the PLANE, which
+    //    carries the same +1 offset and DOES write depth; without LessDepth the
+    //    grid would pass the equal-depth test at the plane's biased depth and
+    //    paint over it. LessDepth also covers the orthographic crop-tool path,
+    //    where polygon offset behaves differently.
+    //
+    // depthTest stays on, so real geometry above the grid still occludes it.
     if (mat && !mat.polygonOffset) {
       mat.polygonOffset = true;
       mat.polygonOffsetFactor = 1;
       mat.polygonOffsetUnits = 1;
     }
+    if (mat && mat.depthFunc !== THREE.LessDepth) mat.depthFunc = THREE.LessDepth;
   });
 
   return (
