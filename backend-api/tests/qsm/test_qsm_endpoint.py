@@ -10,10 +10,39 @@ backend end-to-end (the same code path a packaged build runs).
 
 from __future__ import annotations
 
+import json
+import struct
+
 import numpy as np
 import pytest
 
 from qsm.validation.synthetic import sample_cloud, simple_tree
+
+
+def _decode_qsm_response(content: bytes) -> dict:
+    """/api/qsm/build streams per-stage PHP1 progress markers ahead of the JSON
+    result (so the renderer can show a progress bar). Mirror the renderer's
+    parseProgressMarkers: skip leading `PHP1<uint32 len><payload>` markers and any
+    4-byte whitespace keepalives, then JSON-parse whatever remains."""
+    off = 0
+    n = len(content)
+    while off < n:
+        if content[off:off + 4] == b"PHP1":
+            (length,) = struct.unpack_from("<I", content, off + 4)
+            off += 8 + length
+        elif content[off:off + 4] == b"    ":  # whitespace keepalive
+            off += 4
+        else:
+            break
+    return json.loads(content[off:].decode("utf-8"))
+
+
+def build_qsm(client, payload: dict) -> dict:
+    """POST /api/qsm/build and return the decoded result dict, draining the
+    streamed progress markers. Use everywhere instead of `.post(...).json()`."""
+    resp = client.post("/api/qsm/build", json=payload)
+    assert resp.status_code == 200
+    return _decode_qsm_response(resp.content)
 
 
 @pytest.fixture(scope="module")
@@ -26,9 +55,7 @@ def cloud_points() -> list[list[float]]:
 
 
 def test_build_qsm_returns_valid_schema(client, cloud_points):
-    resp = client.post("/api/qsm/build", json={"points": cloud_points})
-    assert resp.status_code == 200
-    body = resp.json()
+    body = build_qsm(client, {"points": cloud_points})
     assert body["success"] is True, body.get("error")
     assert body["n_cylinders"] > 0
     assert body["n_shoots"] > 0
@@ -41,7 +68,7 @@ def test_build_qsm_headline_shoot_rank(client, cloud_points):
     """The headline feature: continuous shoots classified by rank. Exactly one
     rank-0 (trunk) shoot, at least one rank-1 (scaffold), and every cylinder
     carries a rank/shoot id."""
-    body = client.post("/api/qsm/build", json={"points": cloud_points}).json()
+    body = build_qsm(client, {"points": cloud_points})
     shoots = body["shoots"]
     rank0 = [s for s in shoots if s["rank"] == 0]
     assert len(rank0) == 1, f"expected one trunk shoot, got {len(rank0)}"
@@ -54,7 +81,7 @@ def test_build_qsm_headline_shoot_rank(client, cloud_points):
 def test_build_qsm_topology_consistent(client, cloud_points):
     """Parent links are valid: exactly one root cylinder (parent -1), and every
     other parent_id references an existing cylinder."""
-    body = client.post("/api/qsm/build", json={"points": cloud_points}).json()
+    body = build_qsm(client, {"points": cloud_points})
     ids = {c["cyl_id"] for c in body["cylinders"]}
     roots = [c for c in body["cylinders"] if c["parent_id"] == -1]
     assert len(roots) == 1, f"expected one root cylinder, got {len(roots)}"
@@ -66,7 +93,7 @@ def test_build_qsm_topology_consistent(client, cloud_points):
 def test_build_qsm_metrics_plausible(client, cloud_points):
     """Metrics track the known simple_tree geometry: trunk ~100mm diameter, height
     ~2 m, positive woody volume split into stem + branch, ~3 scaffolds."""
-    body = client.post("/api/qsm/build", json={"points": cloud_points}).json()
+    body = build_qsm(client, {"points": cloud_points})
     m = body["metrics"]
     assert m is not None
     assert 70.0 < m["trunk_diameter_mm"] < 120.0, m["trunk_diameter_mm"]
@@ -86,7 +113,7 @@ def test_build_qsm_metrics_plausible(client, cloud_points):
 def test_build_qsm_radii_corrected_and_quality_populated(client, cloud_points):
     """Cylinders carry fitted radii + SurfCov (Phase D/E ran): radii are in a
     sane range and most cylinders report a coverage value."""
-    body = client.post("/api/qsm/build", json={"points": cloud_points}).json()
+    body = build_qsm(client, {"points": cloud_points})
     radii = [c["radius"] for c in body["cylinders"]]
     assert all(0.0005 < r < 0.2 for r in radii), (min(radii), max(radii))
     with_cov = [c for c in body["cylinders"] if c["surf_cov"] is not None]
@@ -113,12 +140,7 @@ def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_pa
     a = _write_xyz(tmp_path / "view_a.xyz", pts[:half])
     b = _write_xyz(tmp_path / "view_b.xyz", pts[half:])
 
-    resp = client.post(
-        "/api/qsm/build",
-        json={"sources": [{"source_path": a}, {"source_path": b}]},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
+    body = build_qsm(client, {"sources": [{"source_path": a}, {"source_path": b}]})
     assert body["success"] is True, body.get("error")
     # Every point from BOTH files was used — nothing dropped.
     assert body["points_used"] == len(pts)
@@ -138,18 +160,13 @@ def test_build_qsm_aggregate_sources_plus_inline_points(client, cloud_points, tm
     a = _write_xyz(tmp_path / "octree_view.xyz", pts[:half])
     inline = pts[half:].tolist()
 
-    body = client.post(
-        "/api/qsm/build",
-        json={"sources": [{"source_path": a}], "points": inline},
-    ).json()
+    body = build_qsm(client, {"sources": [{"source_path": a}], "points": inline})
     assert body["success"] is True, body.get("error")
     assert body["points_used"] == len(pts)
 
 
 def test_build_qsm_too_few_points(client):
-    resp = client.post("/api/qsm/build", json={"points": [[0, 0, 0], [0, 0, 1]]})
-    assert resp.status_code == 200
-    body = resp.json()
+    body = build_qsm(client, {"points": [[0, 0, 0], [0, 0, 1]]})
     assert body["success"] is False
     assert "50 points" in body["error"]
 
@@ -157,12 +174,8 @@ def test_build_qsm_too_few_points(client):
 def test_build_qsm_twig_radius_option(client, cloud_points):
     """The twig_radius_mm option flows through (a larger anchor yields >= total
     woody volume, since low-coverage tips lean on the larger-anchored taper)."""
-    small = client.post(
-        "/api/qsm/build", json={"points": cloud_points, "twig_radius_mm": 2.0}
-    ).json()
-    large = client.post(
-        "/api/qsm/build", json={"points": cloud_points, "twig_radius_mm": 10.0}
-    ).json()
+    small = build_qsm(client, {"points": cloud_points, "twig_radius_mm": 2.0})
+    large = build_qsm(client, {"points": cloud_points, "twig_radius_mm": 10.0})
     assert small["success"] and large["success"]
     assert (
         large["metrics"]["total_woody_volume_m3"]
@@ -177,8 +190,7 @@ def test_build_qsm_twig_radius_option(client, cloud_points):
 
 @pytest.fixture(scope="module")
 def built_qsm(client, cloud_points):
-    resp = client.post("/api/qsm/build", json={"points": cloud_points})
-    body = resp.json()
+    body = build_qsm(client, {"points": cloud_points})
     assert body["success"] is True, body.get("error")
     return {"cylinders": body["cylinders"], "shoots": body["shoots"]}
 

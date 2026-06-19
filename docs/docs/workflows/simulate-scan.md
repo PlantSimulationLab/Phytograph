@@ -85,11 +85,11 @@ You need geometry in the scene to scan: typically a generated
           **Azimuth points** (rays horizontally). For reference: a Riegl
           VZ-400 at fine resolution is roughly 20,000 × 30,000 rays. For
           preview work, 500 × 1000 is fast and produces a usable cloud.
-          The azimuth field has a **use °/ray** toggle: switch it to enter
-          the horizontal **angular resolution** (degrees between rays)
-          instead of a point count — handy for transcribing a datasheet
-          that quotes a step width. The two are equivalent (points =
-          sweep ÷ resolution) and the value auto-converts when you
+          The **use °/ray** toggle switches **both** fields to enter the
+          **angular resolution** (degrees between rays) instead of a point
+          count — handy for transcribing a datasheet that quotes a step
+          width for the whole grid. Each axis is equivalent (points =
+          its own sweep ÷ resolution) and both values auto-convert when you
           toggle.
         - **Angular sweep** — min and max angular positions of the sweep;
           the range is the difference between them, so asymmetric sweeps
@@ -253,6 +253,14 @@ the PyHelios `lidar` plugin: the scan positions you pick trace their rays
 against the scene geometry, so the result respects occlusion, scanner
 position, field of view, and resolution — not a uniform random sprinkle
 of points over the surface.
+
+Leaf transparency is honored too. Plant leaves (and textured imported
+meshes) are modelled as flat quads carrying a leaf-shaped texture with a
+transparent background; the scan ray-traces against that texture's alpha
+channel, so rays pass **through** the transparent parts of the quad and
+only return hits where the leaf is actually opaque. A scanned canopy
+therefore samples realistic foliage gaps rather than treating every leaf
+as a solid rectangle.
 
 1. The options dialog lists **every** scan position, whether or not it's
    currently visible or selected — visibility (the eye icon) only affects

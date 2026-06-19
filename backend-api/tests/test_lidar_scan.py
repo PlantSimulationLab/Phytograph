@@ -411,6 +411,50 @@ class TestScanOptions:
         body = self._scan_full(client, [_scanner("n")])
         assert body["results"][0]["session"] is None
 
+    def test_is_miss_partition_uses_compact_dtype(self, client, monkeypatch):
+        # Memory contract: the per-hit miss flag is a 0/1 value, so the per-scanner
+        # partition carries it as uint8 — NOT float32 (4× the bytes on a multi-
+        # million-point scan). The session-build loop consumes `results` before
+        # `_do_lidar_scan` returns, so we capture the partition by intercepting
+        # `_create_lidar_scan_session` (which receives each scanner's raw `r`).
+        pytest.importorskip("pyhelios")
+        seen = {}
+        orig = main._create_lidar_scan_session
+
+        def _spy(r):
+            seen["is_miss_dtype"] = np.asarray(r["is_miss"]).dtype
+            return orig(r)
+
+        monkeypatch.setattr(main, "_create_lidar_scan_session", _spy)
+        req = main.LidarScanRequest(
+            meshes=[main.LidarScanMesh(vertices=_PYRAMID_VERTS, triangles=_PYRAMID_TRIS)],
+            scanners=[main.LidarScanScanner(**_scanner("m"))],
+            record_misses=True,
+        )
+        result = main._do_lidar_scan(req)
+        assert result["success"] is True, result.get("error")
+        # The raw partition's miss flag is the thing under test — a regression that
+        # re-widens it (an `.astype(np.float32)` creeping back) fails here.
+        assert seen["is_miss_dtype"] == np.uint8
+
+    def test_two_scanner_partition_keeps_per_scanner_miss_flags(self, client):
+        # The multi-scanner path partitions one ray pass back to each scanner by
+        # scanID. With record_misses on, each scanner's slice must carry its OWN
+        # is_miss flags (a mix of hits and misses), proving the boolean-mask
+        # partition + uint8 cast didn't cross-contaminate or drop the flag.
+        body = self._scan_full(
+            client,
+            [_scanner("A", origin=(0.0, 0.0, 3.0)), _scanner("B", origin=(3.0, 0.0, 0.3))],
+            record_misses=True,
+        )
+        by_id = {r["scanner_id"]: r for r in body["results"]}
+        assert set(by_id) == {"A", "B"}
+        # Each scanner sweeps the full sphere from its own origin, so each one both
+        # hits the pyramid and misses into empty space → a session with misses.
+        for sid in ("A", "B"):
+            sess_meta = by_id[sid]["session"]
+            assert sess_meta is not None and sess_meta["miss_count"] > 0
+
 
 # A wide, low ground slab so a moving overhead pass produces hits along the whole
 # flight line (not just under one static viewpoint). 8x2 m in x/y, ~0.4 m tall so

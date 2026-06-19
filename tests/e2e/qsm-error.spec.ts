@@ -8,11 +8,11 @@ import { completeImportWizard } from './helpers/importWizard';
 // returns a deterministic build failure. Used to drive the QSM error UI.
 const SPARSE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sparse.xyz');
 
-// A failed single-scan QSM build must show its error inline, and that error must
-// NOT linger after the panel is closed and re-opened (a regression the user hit:
-// a stale failure message survived a close/re-open even after re-importing).
+// A failed single-scan QSM build must surface an error, and that error must NOT
+// linger inside the modal after it's re-opened (a regression the user hit: a
+// stale failure message survived a close/re-open even after re-importing).
 // Drives the LIVE backend (the 50-point floor is a real backend check).
-test('shows a QSM build error and clears it when the panel re-opens', async () => {
+test('shows a QSM build error and clears it when the modal re-opens', async () => {
   const { app, page, close } = await launchApp();
 
   try {
@@ -25,21 +25,22 @@ test('shows a QSM build error and clears it when the panel re-opens', async () =
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-selected', 'true');
 
-    // Build — the backend rejects the 30-point cloud, surfacing an inline error.
+    // Open the modal (scan pre-checked) and build — the backend rejects the
+    // 30-point cloud. The modal closes on start and the failure surfaces as an
+    // error toast.
     await page.getByTestId('tool-qsm').click();
     await expect(page.getByTestId('qsm-panel')).toBeVisible();
     await page.getByTestId('qsm-build-button').click();
+    await expect(page.getByTestId('qsm-panel')).toBeHidden();
 
-    const err = page.getByTestId('qsm-error');
-    await expect(err).toBeVisible({ timeout: 60_000 });
-    await expect(err).toContainText('50 points');
+    const errToast = page.locator('[data-testid="toast-error"]').last();
+    await expect(errToast.getByTestId('toast-title')).toContainText(/QSM build failed/i, { timeout: 60_000 });
     // No QSM was produced.
     await expect(page.getByTestId('qsm-row')).toHaveCount(0);
 
-    // Close the panel, then re-open it: the stale error must be gone.
-    await page.getByTestId('tool-qsm').click();          // toggles panel closed
-    await expect(page.getByTestId('qsm-panel')).toBeHidden();
-    await page.getByTestId('tool-qsm').click();          // re-open
+    // Re-open the modal: it stores the last error (qsmError), but the open-effect
+    // clears it, so no stale failure message is shown inline.
+    await page.getByTestId('tool-qsm').click();
     await expect(page.getByTestId('qsm-panel')).toBeVisible();
     await expect(page.getByTestId('qsm-error')).toHaveCount(0);
   } finally {

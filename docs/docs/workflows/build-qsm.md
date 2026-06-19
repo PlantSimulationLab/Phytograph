@@ -38,27 +38,34 @@ first:
 
 ## Run the build
 
-1. Select the cloud in the **Scans** panel.
-2. Click **Build QSM** (the branching-tree icon in the **Tools** ›
+1. Click **Build QSM** (the branching-tree icon in the **Tools** ›
    Reconstruction group of the left toolbar), or open the command palette
-   (<kbd>Ctrl</kbd>+<kbd>K</kbd>) and search for *Build QSM*.
-3. The **Build QSM** panel opens on the right.
+   (<kbd>Ctrl</kbd>+<kbd>K</kbd>) and search for *Build QSM*. You don't
+   need to select a scan first — the button is always available.
+2. The **Build QSM** dialog opens. It lists every scan that has point
+   data, with a checkbox per scan. If you had scans selected in the
+   **Scans** panel, those are **pre-checked**; otherwise all eligible
+   scans are checked. Use **All / None** to toggle the whole list, or tick
+   individual scans.
 
-![The Build QSM panel](../assets/screenshots/qsm-01-panel.png)
+![The Build QSM dialog](../assets/screenshots/qsm-01-panel.png)
 
-4. Set the **Twig radius** — the diameter the radius taper is anchored to
+3. Set the **Twig radius** — the diameter the radius taper is anchored to
    at the branch tips. This is a per-species number (orchard cultivars
    aren't in any reference database, so you supply it). The default
    **4.23 mm** is a published example value; if you know your species'
    typical twig diameter, set it. It mainly affects the thinnest tips, not
    the trunk or scaffolds.
-5. Click **Build QSM**.
+4. Click **Build QSM**.
 
 The build runs the full pipeline on the backend (skeleton → shoot
-segmentation → cylinder fitting → radius correction → metrics). On a
-typical dormant tree this takes a few seconds to a minute. Large clouds
-are automatically downsampled to 60,000 points first — dormant trees are
-sparse enough that this is plenty for an accurate model.
+segmentation → cylinder fitting → radius correction → metrics). A
+**progress bar** tracks each stage; when several scans are selected it
+shows which scan is building (*"Scan 2 of 3 — Fitting cylinders"*) and you
+can **cancel** mid-run. On a typical dormant tree each tree takes a few
+seconds to a minute. Large clouds are automatically downsampled to 60,000
+points first — dormant trees are sparse enough that this is plenty for an
+accurate model.
 
 !!! tip "Minimum data"
     The build needs at least **50 points**. Below that — or if the cloud
@@ -144,8 +151,8 @@ the full palette.
 ## Multi-view scans of one tree
 
 A single tree is often captured from several scanner positions. You have
-two ways to handle that, shown when you select **more than one scan**
-before opening the panel:
+two ways to handle that, shown in the dialog when **more than one scan**
+is checked:
 
 | Mode | What it does | Use when |
 |---|---|---|

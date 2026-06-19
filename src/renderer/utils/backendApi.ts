@@ -1329,12 +1329,26 @@ export async function morphPlant(
 
 // ==================== SYNTHETIC LIDAR SCAN API ====================
 
+// One textured material on a scan mesh. `texture_data` is a base64-encoded
+// image (PNG/JPG); when it has an alpha channel, Helios uses that channel as a
+// transparency mask during ray tracing (leaf-shaped cutouts), so the scan only
+// returns hits where the leaf is opaque. `triangle_indices` are ordinals into
+// the mesh's `triangles` array that use this material.
+export interface LidarScanMaterial {
+  name: string;
+  texture_data: string;  // base64 PNG/JPG
+  has_alpha: boolean;
+  triangle_indices: number[];
+}
+
 // One mesh to load into the scannable scene (world-space coordinates — the
 // renderer applies each mesh's scale/rotation/translation before sending).
 export interface LidarScanMesh {
   vertices: number[][];  // [[x, y, z], ...]
   triangles: number[][];  // [[i, j, k], ...] - triangle vertex indices
   colors?: number[][];  // [[r, g, b], ...] - per-vertex colors (0-1 range)
+  uv_coordinates?: number[][];  // [[u, v], ...] per-vertex (required when materials set)
+  materials?: LidarScanMaterial[];  // textured material groups (alpha-masked leaves)
 }
 
 // One scanner position + acquisition geometry (mirrors ScanParameters; angles
@@ -3104,32 +3118,24 @@ export interface QSMBuildResponse {
   error?: string;
 }
 
-export async function buildQSM(request: QSMBuildRequest): Promise<QSMBuildResponse> {
-  const baseUrl = getBackendUrl();
+export async function buildQSM(
+  request: QSMBuildRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+): Promise<QSMBuildResponse> {
   // The QSM pipeline (skeleton → segments → IRLS cylinder fit → radius correction
-  // → metrics) is heavier than skeleton extraction, so bound it with the same
-  // 5-minute abort the other long endpoints use — otherwise a large/pathological
-  // cloud leaves the UI stuck in qsmInProgress with no way to recover.
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
-  try {
-    const response = await fetch(`${baseUrl}/api/qsm/build`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('QSM build request failed:', error);
-    throw error;
-  }
+  // → metrics) is heavier than skeleton extraction, so the endpoint streams
+  // per-stage PHP1 progress markers ahead of the JSON result (like triangulation /
+  // backfill). fetchJsonWithProgress drains the markers (firing onProgress) and
+  // parses the trailing JSON, and owns the 5-minute abort/timeout — otherwise a
+  // large/pathological cloud leaves the UI stuck in qsmInProgress with no recovery.
+  return await fetchJsonWithProgress<QSMBuildResponse>(
+    '/api/qsm/build',
+    request,
+    signal,
+    300000, // 5 minutes
+    onProgress,
+  );
 }
 
 // ==================== QSM LEAF RECONSTRUCTION (Phase 1) ====================

@@ -14,9 +14,9 @@ const TREE_VIEW2 = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree-view2.xyz');
 
 // Batch QSM: multi-select two scans and build one QSM per scan in a single
 // run. Drives the LIVE backend (no mocks) through the real UI — multi-select
-// via ctrl/cmd-click, the Build QSM panel button, the progress modal, and the
-// rendered QSM result rows. Asserts TWO separate QSMs land, each named after
-// its own source scan with a real (non-zero) cylinder count.
+// via ctrl/cmd-click, the Build QSM modal, the granular per-scan StatusPill,
+// and the rendered QSM result rows. Asserts TWO separate QSMs land, each named
+// after its own source scan with a real (non-zero) cylinder count.
 test('batch-builds one QSM per selected scan via the UI', async () => {
   const { app, page, close } = await launchApp();
 
@@ -60,7 +60,8 @@ test('batch-builds one QSM per selected scan via the UI', async () => {
     await expect(treeRow).toHaveAttribute('data-selected', 'true');
     await expect(tree2Row).toHaveAttribute('data-selected', 'true');
 
-    // Open the QSM panel — the multi-scan mode chooser must appear.
+    // Open the QSM modal — both selected scans are pre-checked and the
+    // multi-scan mode chooser appears.
     await page.getByTestId('tool-qsm').click();
     const panel = page.getByTestId('qsm-panel');
     await expect(panel).toBeVisible();
@@ -70,15 +71,23 @@ test('batch-builds one QSM per selected scan via the UI', async () => {
     await page.getByTestId('qsm-mode-per-scan').check();
     await expect(page.getByTestId('qsm-build-button')).toContainText('2 scans');
 
-    // Run the batch. The build progress modal appears, counts, then clears.
+    // Run the batch. The shared StatusPill appears with granular per-scan
+    // progress: as each tree builds, its label is prefixed "Scan N of 2 — …".
+    // Poll the live label across the run (the per-scan prefix appears once the
+    // first backend stage streams, which on these tiny clouds is brief) — proving
+    // the bar is genuinely per-scan, not a single indeterminate spinner.
     await page.getByTestId('qsm-build-button').click();
-    await expect(page.getByTestId('bulk-import-progress')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId('bulk-import-progress')).toContainText('Building QSMs');
+    const pill = page.getByTestId('qsm-running');
+    await expect(pill).toBeVisible({ timeout: 10_000 });
+    await expect.poll(
+      async () => (await pill.textContent()) ?? '',
+      { timeout: 120_000 },
+    ).toMatch(/Scan \d of 2/);
 
     // TWO QSM rows land — one per scan — within the batch window.
     const qsmRows = page.getByTestId('qsm-row');
     await expect(qsmRows).toHaveCount(2, { timeout: 120_000 });
-    await expect(page.getByTestId('bulk-import-progress')).toHaveCount(0);
+    await expect(page.getByTestId('qsm-running')).toHaveCount(0);
 
     // Each QSM is named after its own source scan and has real cylinders —
     // proving they were built separately, not a single merged model.

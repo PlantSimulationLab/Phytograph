@@ -96,13 +96,15 @@ export function ScanParametersPopup({
   const [elevationText, setElevationText] = useState<string>(
     () => seedParams().beamElevationAnglesDeg.join(', '),
   );
-  // The azimuth ray count can be entered two equivalent ways: as a raw point
-  // count PER REVOLUTION, or as an angular step resolution (degrees between
-  // consecutive rays). Manufacturer datasheets quote the latter, so this lets a
-  // user transcribe a spec directly. The stored value is always
-  // `azimuthPoints`; this is a display-only mode, so toggling it just re-derives
-  // the shown number from the same underlying points (an auto-convert).
-  const [azimuthInputMode, setAzimuthInputMode] =
+  // The zenith/azimuth ray counts can be entered two equivalent ways: as a raw
+  // point count (per revolution, for azimuth), or as an angular step resolution
+  // (degrees between consecutive rays). Manufacturer datasheets quote the
+  // latter, so this lets a user transcribe a spec directly. The stored values
+  // are always `zenithPoints` / `azimuthPoints`; this is a display-only mode, so
+  // toggling it just re-derives the shown numbers from the same underlying
+  // points (an auto-convert). The mode flips both fields together so a datasheet
+  // angular spec can be entered consistently for the whole grid.
+  const [rayInputMode, setRayInputMode] =
     useState<'points' | 'resolution'>('points');
 
   // Reset form (and clear any stale import error) whenever the popup is
@@ -115,7 +117,7 @@ export function ScanParametersPopup({
       setElevationText(seeded.beamElevationAnglesDeg.join(', '));
       setImportError(null);
       setSubmitError(null);
-      setAzimuthInputMode('points');
+      setRayInputMode('points');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initial, defaults]);
@@ -235,6 +237,23 @@ export function ScanParametersPopup({
           : Math.abs(p.azimuthMaxDeg - p.azimuthMinDeg) || 360;
       const points = deg > 0 ? Math.max(1, Math.round(span / deg)) : 1;
       return { ...p, azimuthPoints: points };
+    });
+  };
+
+  // The zenith counterpart: the point count is spread over the raster's
+  // zenith min↔max span. (A spinning multibeam hides the zenith field — its
+  // zenith coverage comes from the per-channel elevation angles, not a count —
+  // so this only ever applies to a raster grid.) Guard a degenerate span with
+  // the conventional full 180° sweep so the conversion never divides by zero.
+  const zenithSpanDeg =
+    Math.abs(params.zenithMaxDeg - params.zenithMinDeg) || 180;
+  const zenithResolutionDeg =
+    params.zenithPoints > 0 ? zenithSpanDeg / params.zenithPoints : 0;
+  const setZenithResolution = (deg: number) => {
+    setParams(p => {
+      const span = Math.abs(p.zenithMaxDeg - p.zenithMinDeg) || 180;
+      const points = deg > 0 ? Math.max(1, Math.round(span / deg)) : 1;
+      return { ...p, zenithPoints: points };
     });
   };
 
@@ -585,45 +604,65 @@ export function ScanParametersPopup({
                   Raster (static or moving) keeps the editable zenith field. */}
               {showRaster && !(params.trajectory && params.pattern === 'spinning_multibeam') && (
                 <div>
-                  <label className="block text-xs text-neutral-500 mb-1">Zenith</label>
-                  <input
-                    data-testid="scan-zenith-points"
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={params.zenithPoints}
-                    onChange={setInt('zenithPoints')}
-                    className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                  />
+                  <label className="block text-xs text-neutral-500 mb-1">
+                    {rayInputMode === 'resolution' ? 'Zenith (°/ray)' : 'Zenith'}
+                  </label>
+                  {rayInputMode === 'points' ? (
+                    <input
+                      data-testid="scan-zenith-points"
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={params.zenithPoints}
+                      onChange={setInt('zenithPoints')}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                    />
+                  ) : (
+                    <DebouncedNumberInput
+                      data-testid="scan-zenith-resolution"
+                      min={0}
+                      step="any"
+                      value={zenithResolutionDeg}
+                      onCommit={setZenithResolution}
+                      className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                    />
+                  )}
+                  {rayInputMode === 'resolution' && (
+                    <p className="text-[11px] text-neutral-500 mt-1">
+                      ≈ {params.zenithPoints.toLocaleString()} rays over {zenithSpanDeg}°
+                    </p>
+                  )}
                 </div>
               )}
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <label className="block text-xs text-neutral-500">
-                    {azimuthInputMode === 'resolution'
+                    {rayInputMode === 'resolution'
                       ? 'Azimuth (°/ray)'
                       : params.trajectory ? 'Azimuth (per rev)' : showRaster ? 'Azimuth' : 'Azimuth (Nphi)'}
                   </label>
-                  {/* Toggle the unit the azimuth ray count is entered in. The
-                      stored value is always azimuthPoints, so flipping the mode
-                      auto-converts the displayed number (count ⇄ deg/ray). */}
+                  {/* Toggle the unit BOTH ray counts are entered in. The stored
+                      values are always zenithPoints / azimuthPoints, so flipping
+                      the mode auto-converts the displayed numbers for the whole
+                      grid (count ⇄ deg/ray) — a datasheet quoting an angular step
+                      can be transcribed directly for both axes. */}
                   <button
                     type="button"
                     data-testid="scan-azimuth-mode-toggle"
                     onClick={() =>
-                      setAzimuthInputMode(m => (m === 'points' ? 'resolution' : 'points'))
+                      setRayInputMode(m => (m === 'points' ? 'resolution' : 'points'))
                     }
                     title={
-                      azimuthInputMode === 'points'
-                        ? 'Entering points per revolution — switch to angular resolution (°/ray)'
-                        : 'Entering angular resolution (°/ray) — switch to points per revolution'
+                      rayInputMode === 'points'
+                        ? 'Entering ray counts — switch to angular resolution (°/ray)'
+                        : 'Entering angular resolution (°/ray) — switch to ray counts'
                     }
                     className="text-[11px] text-blue-400 hover:text-blue-300 focus:outline-none"
                   >
-                    {azimuthInputMode === 'points' ? 'use °/ray' : 'use # points'}
+                    {rayInputMode === 'points' ? 'use °/ray' : 'use # points'}
                   </button>
                 </div>
-                {azimuthInputMode === 'points' ? (
+                {rayInputMode === 'points' ? (
                   <input
                     data-testid="scan-azimuth-points"
                     type="number"
@@ -643,7 +682,7 @@ export function ScanParametersPopup({
                     className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                   />
                 )}
-                {azimuthInputMode === 'resolution' && (
+                {rayInputMode === 'resolution' && (
                   <p className="text-[11px] text-neutral-500 mt-1">
                     ≈ {params.azimuthPoints.toLocaleString()} rays over {azimuthSpanDeg}°
                   </p>

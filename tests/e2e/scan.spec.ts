@@ -112,12 +112,14 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
   }
 });
 
-// The azimuth point-count input can be toggled between "# points per
-// revolution" and "angular resolution (°/ray)". The stored value is always
-// azimuthPoints, so flipping the unit auto-converts the displayed number using
-// the azimuth sweep span. With a 0–360° raster sweep, 180 points ⇄ 2°/ray;
-// committing a 0.5°/ray resolution converts back to 720 points.
-test('azimuth resolution toggle converts between points and degrees per ray', async () => {
+// The ray-count inputs can be toggled between "# points" and "angular
+// resolution (°/ray)". The stored values are always zenithPoints / azimuthPoints,
+// so flipping the unit auto-converts the displayed numbers using each axis's
+// sweep span. The toggle flips BOTH axes together (regression guard: it used to
+// convert only azimuth, leaving zenith in points). With a 0–180° zenith sweep,
+// 90 points ⇄ 2°/ray; with a 0–360° azimuth sweep, 180 points ⇄ 2°/ray.
+// Committing 0.5°/ray converts zenith→360 and azimuth→720.
+test('ray-count toggle converts both zenith and azimuth between points and degrees per ray', async () => {
   const { page, close } = await launchApp();
 
   try {
@@ -125,32 +127,43 @@ test('azimuth resolution toggle converts between points and degrees per ray', as
     const popup = page.getByTestId('scan-parameters-popup');
     await expect(popup).toBeVisible();
 
-    // Default raster pattern, full 0–360° azimuth sweep. Set 180 points/rev.
+    // Default raster pattern: 0–180° zenith sweep, 0–360° azimuth sweep.
+    const zenithPoints = page.getByTestId('scan-zenith-points');
+    await zenithPoints.fill('90');
+    await zenithPoints.blur();
     const points = page.getByTestId('scan-azimuth-points');
     await points.fill('180');
     await points.blur();
 
-    // Toggle to °/ray: 360° / 180 = 2°/ray.
+    // Toggle to °/ray: zenith 180°/90 = 2°/ray, azimuth 360°/180 = 2°/ray.
     await page.getByTestId('scan-azimuth-mode-toggle').click();
+    const zenithResolution = page.getByTestId('scan-zenith-resolution');
     const resolution = page.getByTestId('scan-azimuth-resolution');
+    await expect(zenithResolution).toBeVisible();
     await expect(resolution).toBeVisible();
+    expect(parseFloat(await zenithResolution.inputValue())).toBeCloseTo(2, 5);
     expect(parseFloat(await resolution.inputValue())).toBeCloseTo(2, 5);
-    // The points field is hidden in resolution mode; a helper line shows the
-    // equivalent ray count over the sweep.
+    // Both points fields are hidden in resolution mode; helper lines show the
+    // equivalent ray counts over each sweep.
+    await expect(page.getByTestId('scan-zenith-points')).toHaveCount(0);
     await expect(page.getByTestId('scan-azimuth-points')).toHaveCount(0);
 
-    // Type a finer resolution: 0.5°/ray over 360° ⇒ 720 points.
+    // Type a finer resolution on each: 0.5°/ray over 180° ⇒ 360 zenith points,
+    // 0.5°/ray over 360° ⇒ 720 azimuth points.
+    await zenithResolution.fill('0.5');
+    await zenithResolution.blur();
     await resolution.fill('0.5');
     await resolution.blur();
 
-    // Toggle back to points and confirm the converted count.
+    // Toggle back to points and confirm both converted counts.
     await page.getByTestId('scan-azimuth-mode-toggle').click();
+    await expect(zenithPoints).toBeVisible();
     await expect(points).toBeVisible();
+    expect(parseInt(await zenithPoints.inputValue(), 10)).toBe(360);
     expect(parseInt(await points.inputValue(), 10)).toBe(720);
 
-    // Submit and confirm the scan persisted the converted azimuth count
-    // (50 zenith × 720 azimuth shows in the expanded row).
-    await page.getByTestId('scan-zenith-points').fill('50');
+    // Submit and confirm the scan persisted both converted counts
+    // (360 zenith × 720 azimuth shows in the expanded row).
     await page.getByTestId('scan-label-input').fill('Resolution Scan');
     await page.getByTestId('scan-submit').click();
     await expect(popup).not.toBeVisible();
@@ -158,7 +171,7 @@ test('azimuth resolution toggle converts between points and degrees per ray', as
     const row = page.getByTestId('scans-panel').locator('[data-testid="scan-row"]').first();
     const scanId = await row.getAttribute('data-scan-id');
     await page.getByTestId(`scan-expand-${scanId}`).click();
-    await expect(page.getByTestId(`scan-expanded-${scanId}`)).toContainText('50 × 720');
+    await expect(page.getByTestId(`scan-expanded-${scanId}`)).toContainText('360 × 720');
   } finally {
     await close();
   }

@@ -55,6 +55,14 @@ that *returned* against beams that *passed through* a voxel, and the
 misses are that second population — without them a fully transparent gap
 and a fully occluding leaf wall look identical.
 
+In a [synthetic scan](../workflows/simulate-scan.md), these gap-misses
+arise naturally: leaves are textured quads with a transparent background,
+and the ray-tracer respects the texture's alpha channel, so a beam aimed
+at the empty space around a leaf's silhouette passes through and becomes a
+miss rather than a spurious hit on the rectangular quad. That alpha
+fidelity is what makes a simulated canopy's gap fraction — and therefore
+its LAD — physically meaningful.
+
 Some formats keep misses (E57, structured PLY). Many don't, but retain
 enough to **reconstruct** them — a per-return `timestamp` and/or
 scan-grid `row`/`column` indices — by inferring which grid cells of the

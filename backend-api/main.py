@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.31.0"
+BACKEND_VERSION = "0.33.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -5078,11 +5078,29 @@ async def scan_export_xml(request: "ScanExportRequest"):
 # resulting hit points are returned as a point cloud — respecting occlusion,
 # scanner position, field of view, and resolution (unlike random surface sampling).
 
+class LidarScanMaterial(BaseModel):
+    """A textured material group on a scan mesh.
+
+    ``texture_data`` is a base64-encoded image (PNG/JPG). When it carries an
+    alpha channel, Helios uses that channel as a transparency mask during ray
+    tracing — leaf textures are leaf-shaped cutouts on a transparent
+    background, so rays only register hits where the leaf is opaque instead of
+    on the full rectangular quad. ``triangle_indices`` are ordinals into the
+    mesh's ``triangles`` array that use this material.
+    """
+    name: str
+    texture_data: str  # base64 PNG/JPG
+    has_alpha: bool = False
+    triangle_indices: List[int]
+
+
 class LidarScanMesh(BaseModel):
     """A single mesh to load into the scannable scene (world-space coordinates)."""
     vertices: List[List[float]]  # [[x, y, z], ...]
     triangles: List[List[int]]   # [[i, j, k], ...] vertex indices
     colors: Optional[List[List[float]]] = None  # per-vertex [[r, g, b], ...] (0-1)
+    uv_coordinates: Optional[List[List[float]]] = None  # per-vertex [[u, v], ...]
+    materials: Optional[List[LidarScanMaterial]] = None  # textured material groups
 
 
 class LidarScanScanner(BaseModel):
@@ -5229,6 +5247,92 @@ def _derive_moving_scan_grid(n_theta: int, n_phi_per_rev: int, pulse_rate_hz: fl
     }
 
 
+def _load_scan_mesh(ctx, mesh: "LidarScanMesh", tmpdir: str) -> None:
+    """Load one scan mesh into the Helios ``ctx``, honoring textured materials.
+
+    Geometry arrives world-space transformed. Triangles belonging to a textured
+    material (a material with ``texture_data`` and per-triangle indices) are
+    loaded via ``addTrianglesFromArraysTextured`` so Helios ray-traces against
+    the texture's alpha channel (leaf-shaped cutouts) instead of the full quad.
+    Any remaining triangles — flat-colored organs, or the whole mesh when it has
+    no textures — go through the color-only ``addTrianglesFromArrays`` path.
+
+    ``tmpdir`` is a directory whose lifetime spans the Context; decoded texture
+    images are written there because Helios requires real files on disk.
+    """
+    import base64
+
+    verts = np.asarray(mesh.vertices, dtype=np.float32)
+    tris = np.asarray(mesh.triangles, dtype=np.int32)
+    if verts.ndim != 2 or verts.shape[1] != 3 or len(verts) < 3:
+        return
+    if tris.ndim != 2 or tris.shape[1] != 3 or len(tris) < 1:
+        return
+
+    colors = None
+    if mesh.colors and len(mesh.colors) == len(verts):
+        colors = np.asarray(mesh.colors, dtype=np.float32)
+
+    # Decide which triangles are textured. We need per-vertex UVs (one [u,v] per
+    # vertex) and at least one material that carries a usable texture image. If
+    # any precondition fails we fall back to the plain color path for the whole
+    # mesh — never silently drop triangles.
+    uvs = None
+    if mesh.uv_coordinates and len(mesh.uv_coordinates) == len(verts):
+        uvs = np.asarray(mesh.uv_coordinates, dtype=np.float32)
+
+    textured_assignment = {}  # triangle ordinal -> material slot index
+    texture_files = []        # slot index -> on-disk texture path
+    if uvs is not None and mesh.materials:
+        for mat in mesh.materials:
+            if not mat.texture_data or not mat.triangle_indices:
+                continue
+            try:
+                img_bytes = base64.b64decode(mat.texture_data)
+            except Exception:
+                continue
+            # Decode to a real file; keep the original extension so Helios reads
+            # the alpha channel correctly (PNG carries alpha; JPG does not).
+            ext = ".png" if mat.has_alpha else ".jpg"
+            slot = len(texture_files)
+            tex_path = os.path.join(tmpdir, f"scan_tex_{id(mesh) & 0xffffff}_{slot}{ext}")
+            try:
+                with open(tex_path, "wb") as fh:
+                    fh.write(img_bytes)
+            except Exception:
+                continue
+            texture_files.append(tex_path)
+            for ti in mat.triangle_indices:
+                if 0 <= ti < len(tris):
+                    textured_assignment[ti] = slot
+
+    if not textured_assignment:
+        # No usable textures — original color-only path for the whole mesh.
+        ctx.addTrianglesFromArrays(verts, tris, colors=colors)
+        return
+
+    textured_tri_idx = np.array(sorted(textured_assignment.keys()), dtype=np.int64)
+    textured_mask = np.zeros(len(tris), dtype=bool)
+    textured_mask[textured_tri_idx] = True
+
+    # Textured triangles: feed per-triangle material_ids (the slot each one
+    # uses) so multi-texture meshes (e.g. leaves + bark) map correctly. UVs are
+    # per-vertex and shared across both sub-meshes.
+    tex_tris = tris[textured_mask]
+    material_ids = np.array(
+        [textured_assignment[int(ti)] for ti in textured_tri_idx], dtype=np.uint32
+    )
+    ctx.addTrianglesFromArraysTextured(
+        verts, tex_tris, uvs, texture_files, material_ids=material_ids
+    )
+
+    # Everything else keeps the flat-color path (stems, flowers, untextured
+    # organs that share the mesh).
+    rest_tris = tris[~textured_mask]
+    if len(rest_tris) > 0:
+        ctx.addTrianglesFromArrays(verts, rest_tris, colors=colors)
+
+
 def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
     """
     Perform a true ray-traced synthetic LiDAR scan of the supplied geometry.
@@ -5279,19 +5383,16 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
         _prof_on = os.environ.get("PHYTOGRAPH_SCAN_PROFILE") == "1"
         _prof = {"start": time.perf_counter()}
 
-        with Context() as ctx:
-            # Load every mesh into the scannable scene.
+        import tempfile
+
+        # Decoded leaf/bark textures must live as real files on disk for the
+        # whole Context lifetime (Helios reads them lazily during ray tracing),
+        # so the temp dir wraps the Context and is cleaned up after it closes.
+        with tempfile.TemporaryDirectory(prefix="phyto_scan_tex_") as _tex_dir, \
+                Context() as ctx:
+            # Load every mesh into the scannable scene (textured-aware).
             for mesh in request.meshes:
-                verts = np.asarray(mesh.vertices, dtype=np.float32)
-                tris = np.asarray(mesh.triangles, dtype=np.int32)
-                if verts.ndim != 2 or verts.shape[1] != 3 or len(verts) < 3:
-                    continue
-                if tris.ndim != 2 or tris.shape[1] != 3 or len(tris) < 1:
-                    continue
-                colors = None
-                if mesh.colors and len(mesh.colors) == len(verts):
-                    colors = np.asarray(mesh.colors, dtype=np.float32)
-                ctx.addTrianglesFromArrays(verts, tris, colors=colors)
+                _load_scan_mesh(ctx, mesh, _tex_dir)
 
             _prof["mesh_load"] = time.perf_counter()
             _report(0.15, "Configuring scanners")
@@ -5476,33 +5577,59 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
 
                 # intensity is a signed beam·normal dot product; surface its
                 # magnitude so it reads as a 0..1-ish value (matches the old loop).
+                # abs in place — a fresh array here is a needless full-size (N f32)
+                # allocation on a multi-million-hit cloud.
                 if "intensity" in all_fields:
-                    all_fields["intensity"] = np.abs(all_fields["intensity"])
+                    np.abs(all_fields["intensity"], out=all_fields["intensity"])
 
                 # Partition per scanner by Helios scanID (== request index). Hits
                 # with an out-of-range scanID match no mask and are dropped, exactly
                 # as the old `sid < 0 or sid >= len` guard did.
+                #
+                # Boolean-mask indexing COPIES, so each scanner's slice duplicates
+                # its share of the data; summed over scanners that reproduces the
+                # whole hitlist a second time while the `all_*` originals are still
+                # live. To cap peak RAM we (a) take a no-copy view when there is a
+                # single scanner whose hits are the entire cloud, and (b) `del` the
+                # `all_*` arrays the moment the partition is built so only one full
+                # copy survives into the session-building phase below.
                 results = []
+                single_scanner = len(request.scanners) == 1
                 for sid, s in enumerate(request.scanners):
-                    sel = (all_scan_ids == sid)
+                    if single_scanner:
+                        sel = slice(None)  # the whole cloud belongs to this scanner
+                    else:
+                        sel = (all_scan_ids == sid)
                     results.append({
                         "scanner_id": s.id,
                         "origin": [float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
                         "points": all_xyz[sel],                       # (m,3) f32
                         "colors": all_rgb[sel],                       # (m,3) f32
                         "scalars": {f: arr[sel] for f, arr in all_fields.items()},
-                        "is_miss": all_miss[sel].astype(np.float32),  # (m,) f32, 1==miss
+                        # is_miss stays compact (uint8); the session re-casts as it
+                        # needs. A float32 flag is 4× the bytes for a 0/1 value.
+                        "is_miss": all_miss[sel].astype(np.uint8),    # (m,) u8, 1==miss
                     })
+                # Release the full-cloud staging arrays now that every scanner owns
+                # its slice. Without this they stay referenced until the function
+                # returns, so they coexist with the f64 session positions + the
+                # laspy records built below — the peak that drove RAM to tens of GB.
+                del all_xyz, all_rgb, all_scan_ids, all_miss, all_fields
 
         _prof["extract"] = time.perf_counter()
         _report(0.95, "Building point clouds")
         out = []
-        for r in results:
+        # Pop from the front so each scanner's raw `r` (hits+misses, all fields)
+        # is released as soon as its render arrays + session are built — otherwise
+        # every scanner's full staging dict stays live alongside the sessions and
+        # laspy records, re-stacking the peak we just trimmed above.
+        while results:
+            r = results.pop(0)
             # When this scan recorded any miss, build a cloud session for it so the
             # existing session-based miss overlay + LAD work. The session is built
             # from the FULL `r` (hits + misses): its octree is hits-only, and the
             # misses live in the session's is_miss extra dim for the overlay + LAD.
-            is_miss = r["is_miss"]  # (m,) f32, 1==miss
+            is_miss = r["is_miss"]  # (m,) u8, 1==miss
             has_misses = bool(record_misses and is_miss.size and np.any(is_miss != 0))
             session = None
             if has_misses:
@@ -5549,6 +5676,11 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
             if session is not None:
                 entry["session"] = session
             out.append(entry)
+            # `entry` now owns the arrays it needs (the has_misses branch copied via
+            # `keep`; the no-miss branch shares them — both keep `r`'s arrays alive
+            # only through `entry`). Drop the staging dict so its hit+miss arrays for
+            # this scanner free before the next iteration builds the next session.
+            del r, points, colors, raw_scalars, scalars, entry
 
         _prof["post"] = time.perf_counter()
         if _prof_on:
@@ -8397,9 +8529,10 @@ class QSMBuildResponse(BaseModel):
     error: Optional[str] = None
 
 
-@app.post("/api/qsm/build", response_model=QSMBuildResponse)
-async def build_qsm(request: QSMBuildRequest):
-    """Build a true QSM from a dormant-tree point cloud.
+def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
+    """Build a true QSM from a dormant-tree point cloud, returning the dict form
+    of QSMBuildResponse. `progress(fraction, message)` (optional) is called as the
+    pipeline advances so the streaming endpoint can surface per-stage progress.
 
     Pipeline (all in the qsm/ package): geodesic level-set skeleton (B) -> segment
     tree + GrowthLength continuation + SHOOT RANK (C) -> robust IRLS cylinder fit +
@@ -8414,7 +8547,12 @@ async def build_qsm(request: QSMBuildRequest):
     from qsm.radius import correct_radii, RadiusCorrectionOptions
     from qsm.metrics import compute_metrics
 
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
     try:
+        _report(0.05, "Reading points")
         if request.sources:
             # Aggregate: read each source and concatenate in world space, plus any
             # inline `points` (a mixed selection of octree-backed and flat clouds
@@ -8434,18 +8572,20 @@ async def build_qsm(request: QSMBuildRequest):
             return QSMBuildResponse(
                 success=False, points_used=len(points),
                 error="Need at least 50 points to build a QSM",
-            )
+            ).dict()
 
         # B: skeleton.
+        _report(0.15, "Extracting skeleton")
         graph = extract_skeleton(points)
         if len(graph) == 0:
             return QSMBuildResponse(
                 success=False, points_used=len(points),
                 error="Skeleton extraction produced no nodes (cloud too sparse "
                       "or disconnected)",
-            )
+            ).dict()
 
         # C: segments + shoot rank (HEADLINE).
+        _report(0.45, "Segmenting shoots")
         qsm = segments_to_qsm(graph, SegmentOptions(
             w_growthlength=request.w_growthlength,
             w_area=request.w_area,
@@ -8453,15 +8593,19 @@ async def build_qsm(request: QSMBuildRequest):
         ))
 
         # D: robust cylinder fit + SurfCov/mad (replaces provisional radii).
+        _report(0.65, "Fitting cylinders")
         qsm = fit_qsm_cylinders(qsm, points)
 
         # E: radius correction (monotone taper + parent cap + twig anchor).
+        _report(0.85, "Correcting radii")
         qsm = correct_radii(qsm, RadiusCorrectionOptions(
             twig_radius=request.twig_radius_mm / 1000.0,
         ))
 
+        _report(0.95, "Computing metrics")
         m = compute_metrics(qsm)
 
+        _report(1.0, "Done")
         return QSMBuildResponse(
             success=True,
             points_used=len(points),
@@ -8503,11 +8647,22 @@ async def build_qsm(request: QSMBuildRequest):
                     for pr in m.per_rank
                 ],
             ),
-        )
+        ).dict()
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return QSMBuildResponse(success=False, error=f"QSM build failed: {e}")
+        return QSMBuildResponse(success=False, error=f"QSM build failed: {e}").dict()
+
+
+@app.post("/api/qsm/build")
+async def build_qsm(request: QSMBuildRequest):
+    """Build a true QSM, streaming per-stage progress as PHP1 markers ahead of the
+    JSON result (mirrors triangulation / backfill). The renderer's
+    fetchJsonWithProgress drains the markers and parses the trailing JSON, which is
+    the same QSMBuildResponse shape _do_qsm_build returns."""
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_qsm_build(request, progress)).encode("utf-8")
+    )
 
 
 # ==================== QSM LEAF RECONSTRUCTION (Phase 1) ====================
@@ -14853,6 +15008,12 @@ def _read_las_into_arrays(
     return positions, colors, intensity, extras, extra_dims_meta
 
 
+# Row block size for the in-RAM → LAS writers. Caps the transient laspy record to
+# one block instead of one record for all N survivors (see `_session_to_las`).
+# 2M matches `_xyz_to_las`'s streaming chunk.
+_LAS_WRITE_CHUNK = 2_000_000
+
+
 def _session_to_las(sess: "CloudSession", out_las: _Path,
                     exclude_misses: bool = False) -> int:
     """Write the session's SURVIVING points (positions[~deleted] + all
@@ -14886,24 +15047,42 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     for ed in sess.extra_dims_meta:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
-    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
-    record.x = pos[:, 0]
-    record.y = pos[:, 1]
-    record.z = pos[:, 2]
-    if sess.colors is not None:
-        c = sess.colors[keep]
-        record.red, record.green, record.blue = c[:, 0], c[:, 1], c[:, 2]
-    if sess.intensity is not None:
-        record.intensity = sess.intensity[keep]
-    for ed in sess.extra_dims_meta:
-        record[ed["slug"]] = sess.extras[ed["slug"]][keep]
+    # bbox over the full selection (cheap — just the f64 xyz), computed before the
+    # chunked write so the header mins/maxs cover every chunk.
+    if n > 0:
+        pos_min = pos.min(axis=0)
+        pos_max = pos.max(axis=0)
 
+    # Write the LAS in row chunks rather than materialising ONE laspy record for
+    # all N survivors. `ScaleAwarePointRecord.zeros(n, header)` allocates a full
+    # structured array (point-format-3 + every float32 extra dim ≈ tens of bytes
+    # per point); on a multi-million-point synthetic scan that's a multi-GB
+    # transient stacked on top of the session arrays. Chunking caps the record to
+    # one block (`_LAS_WRITE_CHUNK` rows) at a time — same bytes on disk, a
+    # fraction of the peak RAM. Mirrors `_xyz_to_las_stream`'s chunked writer.
+    idx = np.flatnonzero(keep)
     with laspy.open(str(out_las), mode="w", header=header) as writer:
-        writer.write_points(record)
+        for start in range(0, n, _LAS_WRITE_CHUNK):
+            block = idx[start:start + _LAS_WRITE_CHUNK]
+            m = block.shape[0]
+            record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
+            bpos = sess.positions[block]
+            record.x = bpos[:, 0]
+            record.y = bpos[:, 1]
+            record.z = bpos[:, 2]
+            if sess.colors is not None:
+                c = sess.colors[block]
+                record.red, record.green, record.blue = c[:, 0], c[:, 1], c[:, 2]
+            if sess.intensity is not None:
+                record.intensity = sess.intensity[block]
+            for ed in sess.extra_dims_meta:
+                record[ed["slug"]] = sess.extras[ed["slug"]][block]
+            writer.write_points(record)
+            del record, bpos
         if n > 0:
             pad = 0.001  # matches header.scales — keeps boundary points in-bbox
-            writer.header.mins = (pos.min(axis=0) - pad).tolist()
-            writer.header.maxs = (pos.max(axis=0) + pad).tolist()
+            writer.header.mins = (pos_min - pad).tolist()
+            writer.header.maxs = (pos_max + pad).tolist()
     return n
 
 
@@ -14988,13 +15167,18 @@ def _miss_positions_to_las(positions: np.ndarray, out_las: _Path) -> int:
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
     header.offsets = (np.floor(positions.min(axis=0)) if n else np.zeros(3, dtype=np.float64))
-    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
-    if n:
-        record.x = positions[:, 0]
-        record.y = positions[:, 1]
-        record.z = positions[:, 2]
+    # Chunk the write so the laspy record is one block, not all M misses at once —
+    # a sparse scan can be 30-50% sky, so the miss set is itself multi-million-row.
+    # See `_session_to_las` for the rationale.
     with laspy.open(str(out_las), mode="w", header=header) as writer:
-        writer.write_points(record)
+        for start in range(0, n, _LAS_WRITE_CHUNK):
+            block = positions[start:start + _LAS_WRITE_CHUNK]
+            record = laspy.ScaleAwarePointRecord.zeros(block.shape[0], header=header)
+            record.x = block[:, 0]
+            record.y = block[:, 1]
+            record.z = block[:, 2]
+            writer.write_points(record)
+            del record
         if n > 0:
             pad = 0.001
             writer.header.mins = (positions.min(axis=0) - pad).tolist()
