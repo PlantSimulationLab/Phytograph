@@ -179,11 +179,14 @@ scan imports at heading 0 — so XML written before this field existed
 still loads.
 A `<scanPattern>spinning_multibeam</scanPattern>` tag imports the scan as
 a spinning-multibeam scan; its per-channel `<beamElevationAngles>` (a
-space-separated list of elevation degrees above the horizon) and
-`<Nphi>` (azimuth steps) populate the pattern's inputs. Without a
-`<scanPattern>` tag the scan imports as a raster scan, as before. Scans
-exported from Phytograph round-trip: a multibeam scan you save as Helios
-XML re-imports as a multibeam scan.
+space-separated list of elevation degrees above the horizon) and the
+azimuth resolution populate the pattern's inputs. The azimuth count comes
+from `<Nphi>`, `<size>`, or `<azimuthStep>` (degrees per firing step —
+the form PyHelios writes for spinning scans, from which Phytograph
+recovers the per-revolution count). Without a `<scanPattern>` tag the
+scan imports as a raster scan, as before. Scans exported from Phytograph
+round-trip: a multibeam scan you save as Helios XML re-imports as a
+multibeam scan.
 If a `<scan>` carries a `<filename>` tag and that file is on disk
 alongside the XML (or in the current working directory), Phytograph
 auto-loads the point data and attaches it to the new scan. Otherwise
@@ -200,7 +203,10 @@ for the format — `t x y z` plus a quaternion or roll/pitch/yaw per row).
 Once a trajectory is attached:
 
 - The scan is flagged **moving** in the Scans panel, and its path is drawn
-  as a line with a sphere at each pose in the 3D view.
+  as a line in the 3D view, with the selected scanner model placed at each
+  pose — posed by that sample's position and orientation and drawn at its
+  real-world size. A generic scanner instead marks each pose with a small
+  sphere and a forward-pointing arrow.
 - The **Origin** field is replaced by a read-only anchor — position now
   comes from the trajectory, not a single point.
 - A **Pulse rate / PRF (Hz)** field appears, pre-filled from the selected

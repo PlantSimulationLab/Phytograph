@@ -256,11 +256,16 @@ class TestMultibeamExport:
     def test_multibeam_bundle_reloads_as_multibeam(self, tmp_path):
         pytest.importorskip("pyhelios")
         from pyhelios import LiDARCloud
-        from pyhelios.LiDARCloud import ScanPattern
+        from pyhelios.LiDARCloud import ScanPattern, ScanMode
 
         res = main._do_scan_export(main.ScanExportRequest(
             scans=[self._multibeam_entry()], base_name="mbrt", include_misses=True))
         assert res["success"] is True, res.get("error")
+        names = [f["name"] for f in res["files"]]
+        # PyHelios v0.1.24's addScanSpinning round-trip emits a trajectory sidecar
+        # CSV per spinning scan (the "spin in place" trajectory), referenced by the
+        # XML's <trajectoryFile>; it must be in the bundle or loadXML can't reload.
+        assert "mbrt_0_traj.csv" in names, names
         for f in res["files"]:
             (tmp_path / f["name"]).write_bytes(base64.b64decode(f["data"]))
         cwd = os.getcwd()
@@ -270,6 +275,7 @@ class TestMultibeamExport:
             cloud.disableMessages()
             cloud.loadXML("mbrt.xml")
             assert cloud.getScanPattern(0) == ScanPattern.SPINNING_MULTIBEAM
+            assert cloud.getScanMode(0) == ScanMode.SPINNING
             # Ntheta == number of channels we exported.
             assert cloud.getScanSizeTheta(0) == 4
         finally:

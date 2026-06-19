@@ -91,6 +91,26 @@ describe('parseHeliosScanXml', () => {
     expect(scans[0].params.beamElevationAnglesDeg).toEqual([2, -2]);
   });
 
+  it('derives the azimuth count from <azimuthStep> (PyHelios v0.1.24 spinning export)', () => {
+    // PyHelios v0.1.24 / helios-core 1.3.76 exports a spinning scan with
+    // <azimuthStep> (degrees per firing step) and no <Nphi>/<size>; the parser
+    // recovers Nphi = round(360 / step) so a Phytograph export re-imports.
+    const xml = `
+      <scan>
+        <scanPattern>spinning_multibeam</scanPattern>
+        <origin>0 0 3</origin>
+        <beamElevationAngles>15 5 -5 -15</beamElevationAngles>
+        <PRF>10.0</PRF>
+        <azimuthStep>36.0</azimuthStep>
+        <trajectoryFile>mb_0_traj.csv</trajectoryFile>
+      </scan>
+    `;
+    const { scans } = parseHeliosScanXml(xml);
+    expect(scans[0].params.pattern).toBe('spinning_multibeam');
+    expect(scans[0].params.azimuthPoints).toBe(10); // round(360 / 36)
+    expect(scans[0].params.beamElevationAnglesDeg).toEqual([15, 5, -5, -15]);
+  });
+
   it('accepts case- and separator-insensitive <scanPattern> spellings', () => {
     for (const spelling of ['spinning-multibeam', 'SpinningMultibeam', 'SPINNING_MULTIBEAM']) {
       const xml = `
@@ -117,7 +137,7 @@ describe('parseHeliosScanXml', () => {
     expect(() => parseHeliosScanXml(xml)).toThrow(/missing required <beamElevationAngles>/);
   });
 
-  it('throws when a multibeam scan has no azimuth count (<Nphi> or <size>)', () => {
+  it('throws when a multibeam scan has no azimuth count (<Nphi>, <size>, or <azimuthStep>)', () => {
     const xml = `
       <scan>
         <scanPattern>spinning_multibeam</scanPattern>

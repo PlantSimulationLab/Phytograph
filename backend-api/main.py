@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.30.0"
+BACKEND_VERSION = "0.31.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -4954,27 +4954,57 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
             n_phi = max(int(_math.sqrt(xyz.shape[0] / max(aspect, 0.01))), 10)
             n_theta = max(int(xyz.shape[0] / n_phi), 10)
         column_format = ['x', 'y', 'z'] + labels
-        # Initial scanner heading (degrees -> radians). PyHelios exportScans() (v0.1.23+)
-        # serializes this as a <scanAzimuthOffset> tag when non-zero, and the renderer
-        # reads it back on import, so it round-trips.
+        # Initial scanner heading (degrees -> radians). For a raster scan PyHelios
+        # exportScans() serializes this as a <scanAzimuthOffset> tag (v0.1.23+); for a
+        # spinning scan addScanSpinning has no offset kwarg, so the heading is folded
+        # into the trajectory orientation below. Either way it round-trips.
         azimuth_offset_rad = _math.radians(float(scan_entry.scan_azimuth_offset or 0.0))
         if scan_entry.scan_pattern == "spinning_multibeam":
-            # Re-loadable multibeam scan: exportScans writes <scanPattern> +
-            # <beamElevationAngles>. Convert elevation (deg) -> zenith (rad).
+            # Re-loadable multibeam scan. PyHelios v0.1.24 removed addScanMultibeam;
+            # a spinning scan is now registered through addScanSpinning, which takes
+            # per-channel ELEVATION angles (rad, above horizon — no zenith conversion),
+            # an azimuth step (rad/firing-step), a PRF, and a trajectory. exportScans
+            # still writes <scanPattern>spinning_multibeam</scanPattern> +
+            # <beamElevationAngles>, and additionally a trajectory sidecar CSV +
+            # <PRF>/<azimuthStep> tags, so the bundle reloads as a SPINNING scan.
             elevs = scan_entry.beam_elevation_angles_deg or []
             if not elevs:
                 return {"success": False,
                         "error": "Spinning-multibeam scan has no beam elevation angles to export"}
-            beam_zenith_angles = [_math.radians(90.0 - float(e)) for e in elevs]
-            cloud.addScanMultibeam(
-                origin=[float(origin[0]), float(origin[1]), float(origin[2])],
-                beam_zenith_angles=beam_zenith_angles,
-                Nphi=int(n_phi),
-                phi_range=(_math.radians(phi_min), _math.radians(phi_max)),
+            beam_elevation_angles = [_math.radians(float(e)) for e in elevs]
+            # Azimuth resolution per firing step from the requested Nphi over the
+            # azimuth sweep. Guard against a degenerate zero-width / zero-count span.
+            phi_span = _math.radians(phi_max) - _math.radians(phi_min)
+            azimuth_step = (phi_span / int(n_phi)) if (n_phi and phi_span > 0) else _math.radians(1.0)
+            if azimuth_step <= 0:
+                azimuth_step = _math.radians(1.0)
+            # These points are already computed; the scan object is just a container
+            # for serialization. addScanSpinning still requires a trajectory, so use
+            # the documented "spin in place" idiom: two coincident poses one
+            # acquisition-duration apart. PyHelios derives steps_per_rev = 2*pi /
+            # azimuth_step and demands PRF * duration >= steps_per_rev (at least one
+            # azimuth step fires). With a 1 s window, PRF = steps_per_rev gives
+            # exactly one revolution. PRF is otherwise immaterial for a pre-supplied
+            # cloud — the stored points are not re-traced.
+            steps_per_rev = max(int(round((2.0 * _math.pi) / azimuth_step)), 1)
+            pulse_rate_hz = float(steps_per_rev)  # over the 1 s trajectory below
+            # The scanner heading (scan_azimuth_offset) has no addScanSpinning kwarg,
+            # so fold it into the platform orientation as a right-hand yaw about +z:
+            # q = (0, 0, sin(h/2), cos(h/2)). It then round-trips via the trajectory.
+            half = 0.5 * azimuth_offset_rad
+            heading_quat = [0.0, 0.0, _math.sin(half), _math.cos(half)]
+            origin_xyz = [float(origin[0]), float(origin[1]), float(origin[2])]
+            cloud.addScanSpinning(
+                beam_elevation_angles=beam_elevation_angles,
+                azimuth_step=azimuth_step,
+                pulse_rate_hz=pulse_rate_hz,
+                traj_t=[0.0, 1.0],
+                traj_pos=[origin_xyz, origin_xyz],
+                traj_rot=[heading_quat, heading_quat],
+                rot_is_quaternion=True,
                 exit_diameter=float(scan_entry.beam_exit_diameter or 0.0),
                 beam_divergence=float(scan_entry.beam_divergence or 0.0) / 1000.0,
                 column_format=column_format,
-                scan_azimuth_offset=azimuth_offset_rad,
             )
         else:
             cloud.addScan(
@@ -5085,11 +5115,11 @@ class LidarScanScanner(BaseModel):
     tilt_roll_deg: float = 0.0
     tilt_pitch_deg: float = 0.0
     # Initial scanner heading in the horizontal plane (degrees). Applied by the
-    # synthetic-scan generator via PyHelios addScan/addScanMultibeam
-    # scan_azimuth_offset (v0.1.23+) at the call sites below.
+    # synthetic-scan generator via PyHelios addScan's scan_azimuth_offset (v0.1.23+)
+    # at the static call site below (moving scans take heading from the trajectory).
     scan_azimuth_offset_deg: float = 0.0
     # Moving-platform trajectory. When present, this scanner is driven by
-    # addScanMoving instead of the static addScan/addScanMultibeam: the scanner
+    # addScanMoving instead of the static addScan: the scanner
     # pose walks the trajectory over the sweep, `origin` is ignored (the
     # trajectory supplies position), and every hit/miss records its own per-pulse
     # emission origin + real timestamp. `pulse_rate_hz` sets the per-pulse spacing

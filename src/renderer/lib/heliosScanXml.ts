@@ -9,8 +9,9 @@
 // A scan may also be a spinning-multibeam scan, flagged by
 // <scanPattern>spinning_multibeam</scanPattern>. Those carry
 // <beamElevationAngles> (space-separated per-channel elevation degrees above
-// the horizon, required) and an azimuth count via <Nphi> (or size[1]) instead
-// of a zenith grid.
+// the horizon, required) and an azimuth count via <Nphi> (or size[1], or
+// <azimuthStep> in degrees/step from PyHelios v0.1.24 exports) instead of a
+// zenith grid.
 //
 // We extract the optional <filename> (relative path to the recorded point
 // data) and <ASCII_format> (column layout descriptor) so the caller can
@@ -164,15 +165,25 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
   }
 
   // Azimuth sample count (Nphi). Multibeam may carry an explicit <Nphi>; both
-  // patterns fall back to size[1].
+  // patterns fall back to size[1]. PyHelios v0.1.24 (helios-core 1.3.76) exports a
+  // spinning scan with <azimuthStep> (degrees per firing step) instead of <Nphi>,
+  // deriving the per-revolution count internally; recover Nphi = round(360/step)
+  // so a Phytograph-exported spinning bundle still re-imports.
   const nPhiTag = parseNumberTag(el, 'Nphi');
+  const azimuthStepDeg = parseNumberTag(el, 'azimuthStep');
   const azimuthPoints =
-    nPhiTag !== null ? nPhiTag : size ? size[1] : null;
+    nPhiTag !== null
+      ? nPhiTag
+      : size
+        ? size[1]
+        : azimuthStepDeg !== null && azimuthStepDeg > 0
+          ? Math.round(360 / azimuthStepDeg)
+          : null;
 
   if (isMultibeam) {
     if (azimuthPoints === null) {
       throw new HeliosXmlParseError(
-        `<scan> at index ${index} is a spinning_multibeam scan but is missing the azimuth count (<Nphi> or <size>).`,
+        `<scan> at index ${index} is a spinning_multibeam scan but is missing the azimuth count (<Nphi>, <size>, or <azimuthStep>).`,
       );
     }
   } else if (!size) {
