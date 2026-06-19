@@ -117,7 +117,12 @@ file is a CSV / whitespace-delimited table, one pose per row:
 
 Times must strictly increase. A header row and `#` / `//` comment lines
 are ignored. Once attached, the scan's origin is anchored to the first
-pose, and the trajectory is drawn as a path line in the viewer.
+pose, and the trajectory is drawn as a path line in the viewer. Each pose
+along the path is shown using the selected scanner model — the instrument's
+shape, posed by that sample's position and orientation and drawn at its
+real-world size — so the path reads as the scanner flown along it. A generic
+scanner instead marks each pose with a small sphere and a forward-pointing
+arrow.
 
 Leaf-area density for a moving-platform scan uses a **beam-based**
 inversion that needs a supplied mean leaf-projection coefficient

@@ -2,6 +2,7 @@ import { Suspense, useEffect, useMemo, useRef } from 'react';
 import { useLoader } from '@react-three/fiber';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import * as THREE from 'three';
 import {
   getScannerModel,
@@ -95,6 +96,10 @@ function TrajectoryPath({ points, color }: {
 // a 1 m path. This is the reusable keypoint glyph the future viewport trajectory
 // editor will build on.
 //
+// Used as the neutral keypoint glyph (generic scan, or any path with no real
+// instrument selected). When a manufacturer model IS selected, `TrajectoryPosesObj`
+// renders that instrument's mesh at each pose instead — see ScannerMarker.
+//
 // `poses` are [x, y, z, qx, qy, qz, qw] per sample (Hamilton, body->world). The
 // arrow points along the platform's forward body axis (+Y, matching the marker
 // meshes) rotated by each pose's quaternion.
@@ -132,10 +137,10 @@ function TrajectoryPoses({ poses, color }: {
     }
     const diag = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
     const radius = Math.max(diag * 0.0072, 0.03);   // 40% smaller than before
-    const len = radius * 5;                          // arrow length
+    const len = radius * 2.5;                         // arrow length (50% shorter)
     // Cone authored along +Y (apex up), its base at the origin so it grows from
     // the pose outward; per-pose quaternion then aims it along the body forward.
-    const arrow = new THREE.ConeGeometry(radius * 1.2, len, 10);
+    const arrow = new THREE.ConeGeometry(radius * 0.6, len, 10);
     arrow.translate(0, len / 2, 0);
     return {
       sphereGeo: new THREE.SphereGeometry(radius, 12, 8),
@@ -197,6 +202,145 @@ function TrajectoryPoses({ poses, color }: {
         <meshBasicMaterial color={color} transparent opacity={0.85} depthTest={false} />
       </instancedMesh>
     </>
+  );
+}
+
+// The manufacturer instrument mesh rendered at every trajectory pose. Replaces the
+// neutral sphere+arrow glyph (TrajectoryPoses) when a real scanner model is
+// selected: each pose shows the actual instrument body, posed by that sample's
+// position and orientation, so a moving-platform path reads as the scanner flown
+// along it. The body is drawn at its full real-world-fitted size — the same size
+// as the static marker — so a moving scan's bodies match a static scan's marker.
+//
+// One InstancedMesh over the OBJ's merged geometry, so N poses cost one draw call.
+// The real-world FIT (scale to heightMeters + recentre on the body's bbox centre)
+// is baked into the merged geometry once; each instance matrix then only carries
+// the pose's translation, rotation, and the user's size multiplier — so the body
+// rotates and scales about its own centre at the pose point, matching the static
+// marker's centring.
+const POSE_MODEL_SCALE = 1; // Full real-world-fitted size (same as the static body).
+
+function TrajectoryPosesObj({ poses, model, color, selected, markerScale }: {
+  poses: Array<[number, number, number, number, number, number, number]>;
+  model: ScannerModel;
+  color: string;
+  selected: boolean;
+  // The user's "Scan marker size" multiplier, same as the static body. The per-
+  // pose bodies are drawn at full real-world size × this multiplier so the global
+  // size setting still applies and a moving scan's bodies track the size of a
+  // static scan's marker.
+  markerScale: number;
+}) {
+  const obj = useLoader(OBJLoader, model.meshUrl);
+  const meshRef = useRef<THREE.InstancedMesh | null>(null);
+
+  // Merge every child mesh of the OBJ into a single fitted, body-centred geometry.
+  // Keep only position+normal (drop uv/other attrs) so heterogeneous OBJ groups
+  // merge cleanly — the standard material needs nothing else. Built once per
+  // (obj, model); disposed on unmount.
+  const geometry = useMemo(() => {
+    const parts: THREE.BufferGeometry[] = [];
+    // Ensure each child's matrixWorld is current before baking it into the geometry
+    // (OBJLoader leaves them stale at identity until asked).
+    obj.updateMatrixWorld(true);
+    obj.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      let g = mesh.geometry.clone();
+      // Bake the child's own transform so multi-part OBJs assemble correctly.
+      g.applyMatrix4(mesh.matrixWorld);
+      // Normalise to NON-indexed + position/normal only, so heterogeneous OBJ
+      // groups (some indexed, some not, varying attribute sets) all merge cleanly
+      // — mergeGeometries() requires a uniform layout or returns null.
+      if (g.index) g = g.toNonIndexed();
+      if (!g.getAttribute('normal')) g.computeVertexNormals();
+      const trimmed = new THREE.BufferGeometry();
+      trimmed.setAttribute('position', g.getAttribute('position'));
+      trimmed.setAttribute('normal', g.getAttribute('normal'));
+      parts.push(trimmed);
+      g.dispose();
+    });
+    const merged =
+      parts.length === 0
+        ? null
+        : parts.length === 1
+          ? parts[0]
+          : mergeGeometries(parts, false);
+    // Degenerate OBJ (no meshes, or a failed merge): fall back to a tiny sphere so
+    // the path still shows keypoints rather than crashing on a null geometry.
+    if (!merged) return new THREE.SphereGeometry(0.05, 8, 6);
+    // Fit to real-world height + recentre the body on the origin, exactly as the
+    // static ObjBody does, then bake it into the vertices so the instance matrix
+    // only has to carry pose + the 50% factor.
+    const box = new THREE.Box3().setFromObject(obj);
+    const { scale, offset } = fitTransform(box, model);
+    merged.scale(scale, scale, scale);
+    merged.translate(offset.x, offset.y, offset.z);
+    // Keep the parts' authored normals (uniform scale + translate preserve their
+    // direction) so shading matches the static ObjBody; don't recompute to flat.
+    return merged;
+  }, [obj, model]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  const material = useMemo(
+    () => makeBodyMaterial(color, selected),
+    [color, selected],
+  );
+  useEffect(() => () => material.dispose(), [material]);
+
+  // Write one instance matrix per pose (the cheap part: CPU matrix math + a
+  // buffer-dirty flag, no GPU reallocation — only the GEOMETRY rebuild above is
+  // expensive and gated). Factored out so it can be driven from BOTH a ref
+  // callback and an effect (below).
+  const writeMatrices = (inst: THREE.InstancedMesh | null) => {
+    if (!inst) return;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const pos = new THREE.Vector3();
+    const f = (markerScale > 0 ? markerScale : 1) * POSE_MODEL_SCALE;
+    const s = new THREE.Vector3(f, f, f);
+    poses.forEach((p, i) => {
+      pos.set(p[0], p[1], p[2]);
+      q.set(p[3], p[4], p[5], p[6]).normalize();
+      m.compose(pos, q, s);
+      inst.setMatrixAt(i, m);
+    });
+    inst.instanceMatrix.needsUpdate = true;
+    // Explicit bounds, or three.js culls the whole instanced mesh once the world
+    // origin leaves view (same trap as TrajectoryPoses).
+    inst.computeBoundingSphere();
+    inst.computeBoundingBox();
+  };
+
+  // The ref callback is the load-bearing fix for the "all bodies snap to the
+  // origin" bug: r3f RECONSTRUCTS the InstancedMesh whenever an `args` element
+  // changes identity — and our `args` carries the merged `geometry`, which is
+  // rebuilt (new object) whenever the OBJ or model resolves anew (e.g. after
+  // another object is added to the scene and the marker subtree re-renders). A
+  // freshly-constructed instanced mesh starts with IDENTITY matrices — every body
+  // collapsed onto the group origin. A dep-gated useEffect can skip rewriting them
+  // (deps unchanged), but the ref callback fires with the NEW instance on every
+  // (re)mount, so matrices are always written onto whatever object is live.
+  const setMeshRef = (inst: THREE.InstancedMesh | null) => {
+    meshRef.current = inst;
+    writeMatrices(inst);
+  };
+
+  // Also rewrite when the pose data / size / geometry changes WITHOUT a remount
+  // (the ref callback doesn't fire then). Together the two cover every case.
+  useEffect(() => {
+    writeMatrices(meshRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [poses, geometry, markerScale]);
+
+  if (poses.length === 0) return null;
+  return (
+    <instancedMesh
+      ref={setMeshRef}
+      key={geometry.uuid + ':' + poses.length}
+      args={[geometry, material, poses.length]}
+      frustumCulled={false}
+    />
   );
 }
 
@@ -403,23 +547,44 @@ export function ScannerMarker({
   // Clamp to a sane positive multiplier so a stray 0/negative setting can't
   // collapse or invert every marker.
   const markerScale = scale > 0 ? scale : 1;
+  // A real manufacturer model renders its OBJ body at each pose; the generic
+  // sphere keeps the neutral sphere+arrow glyph (it has no instrument silhouette
+  // worth instancing).
+  const useObjPoses = resolved.meshFormat === 'obj';
   return (
     <>
       {trajectory && trajectory.length >= 2 && (
         <TrajectoryPath points={trajectory} color={color} />
       )}
       {poses && poses.length >= 1 && (
-        <TrajectoryPoses poses={poses} color={color} />
+        useObjPoses ? (
+          <Suspense fallback={null}>
+            <TrajectoryPosesObj
+              poses={poses}
+              model={resolved}
+              color={color}
+              selected={selected}
+              markerScale={markerScale}
+            />
+          </Suspense>
+        ) : (
+          <TrajectoryPoses poses={poses} color={color} />
+        )
       )}
-      <group position={[origin.x, origin.y, origin.z]} quaternion={quaternion} scale={markerScale}>
-        <Suspense fallback={null}>
-          {resolved.meshFormat === 'ply' ? (
-            <PlyBody model={resolved} color={color} selected={selected} />
-          ) : (
-            <ObjBody model={resolved} color={color} selected={selected} />
-          )}
-        </Suspense>
-      </group>
+      {/* The full-size static body. Suppressed for a moving scan rendered with
+          per-pose OBJ instances — those already draw the instrument at every pose
+          (including the first), so the static body would just double up on pose 0. */}
+      {!(useObjPoses && poses && poses.length >= 1) && (
+        <group position={[origin.x, origin.y, origin.z]} quaternion={quaternion} scale={markerScale}>
+          <Suspense fallback={null}>
+            {resolved.meshFormat === 'ply' ? (
+              <PlyBody model={resolved} color={color} selected={selected} />
+            ) : (
+              <ObjBody model={resolved} color={color} selected={selected} />
+            )}
+          </Suspense>
+        </group>
+      )}
     </>
   );
 }
