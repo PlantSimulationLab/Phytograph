@@ -15,8 +15,10 @@ export interface SyntheticScanOptions {
   // Record sky/miss points (rays that hit nothing). When on, the scan routes
   // through a backend session so the miss overlay + LAD can use them.
   includeMisses: boolean;
-  // Full-waveform only (a scanner with return_type === 'multi'): sub-rays per
-  // pulse, and the distance threshold for aggregating them into returns (m).
+  // Beam-cone sampling: sub-rays fired per pulse across the beam cone, and the
+  // distance threshold for aggregating their hits into discrete returns (m).
+  // Set raysPerPulse to 1 for an idealized exact scan (one ray per pulse, no beam
+  // footprint) — that is why an exact scan is a run option, not a return mode.
   raysPerPulse: number;
   pulseDistanceThresholdM: number;
   // Restrict ray-tracing to the cells of the single visible voxel grid.

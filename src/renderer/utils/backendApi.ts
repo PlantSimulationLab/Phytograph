@@ -1370,8 +1370,15 @@ export interface LidarScanScanner {
   theta_max_deg: number;
   phi_min_deg: number;
   phi_max_deg: number;
-  return_type: 'single' | 'multi';
-  exit_diameter_m: number;
+  // How many returns the pulse reports (an instrument property):
+  //   'single' — one return per pulse (return_selection picks which)
+  //   'multi'  — all returns up to max_returns
+  // For an idealized exact scan, send rays_per_pulse = 1 (a run option), which
+  // collapses the beam cone to one ray for either mode.
+  return_mode: 'single' | 'multi';
+  max_returns?: number;                              // 'multi' only (cap on returns/pulse)
+  return_selection?: 'strongest' | 'first' | 'last'; // 'single' only
+  exit_diameter_m: number;     // beam cone optics (single + multi)
   beam_divergence_mrad: number;
   // Scanner tilt (degrees; backend converts to radians). A scan property, so
   // it's sent for every scan regardless of return type. 0/0 = level.
@@ -1398,8 +1405,11 @@ export interface LidarScanRequest {
   // Extra per-hit scalar fields to record beyond the standard set. Each is also a
   // column-format label, so the scan samples that named primitive data onto hits.
   extra_fields?: string[];
-  rays_per_pulse?: number;  // full-waveform only (return_type === 'multi')
-  pulse_distance_threshold?: number;  // full-waveform only (meters)
+  // Beam-cone sampling: sub-rays fired per pulse across the cone, and the distance
+  // (m) within which their hits merge into one return. rays_per_pulse=1 collapses
+  // the cone to one exact ray per pulse (an idealized scan).
+  rays_per_pulse?: number;
+  pulse_distance_threshold?: number;
   // Synthetic-scan run options (from the Synthetic Scan Options popup):
   record_misses?: boolean;  // include sky/miss points (default backend = false)
   scan_grid_only?: boolean; // restrict ray-tracing to the supplied grid's cells

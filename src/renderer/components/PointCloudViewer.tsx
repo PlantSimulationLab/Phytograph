@@ -2555,9 +2555,10 @@ export default function PointCloudViewer({
               theta_max: p.zenithMaxDeg,
               phi_min: p.azimuthMinDeg,
               phi_max: p.azimuthMaxDeg,
-              ...(p.returnType === 'multi'
-                ? { beam_exit_diameter: p.beamExitDiameterM, beam_divergence: p.beamDivergenceMrad }
-                : {}),
+              // Beam optics drive the cone sampling for single- and multi-return
+              // scans alike (at rays-per-pulse = 1 the cone collapses to one ray).
+              beam_exit_diameter: p.beamExitDiameterM,
+              beam_divergence: p.beamDivergenceMrad,
             }
           : undefined;
         const prefix = n > 1 ? `Scan ${i + 1} of ${n} — ` : '';
@@ -5054,7 +5055,9 @@ export default function PointCloudViewer({
           theta_max_deg: p.zenithMaxDeg,
           phi_min_deg: p.azimuthMinDeg,
           phi_max_deg: p.azimuthMaxDeg,
-          return_type: p.returnType,
+          return_mode: p.returnMode,
+          max_returns: p.maxReturns,
+          return_selection: p.returnSelection,
           exit_diameter_m: p.beamExitDiameterM,
           beam_divergence_mrad: p.beamDivergenceMrad,
           // Tilt is a per-scan property; noise is a per-run simulation option
@@ -5210,13 +5213,6 @@ export default function PointCloudViewer({
     await executeScan(targetMeshes, activeScanners, 'overwrite', options);
   }, [pendingScan, executeScan]);
 
-  // Whether the pending scan has any multi-return scanner (gates the popup's
-  // full-waveform fields) and whether exactly one voxel grid is visible (gates
-  // crop-to-grid).
-  const pendingHasMultiReturn = useMemo(
-    () => (pendingScan?.activeScanners ?? []).some(s => s.params?.returnType === 'multi'),
-    [pendingScan],
-  );
   const pendingGridAvailable = useMemo(
     () => meshes.filter(m => m.visible && m.gridSubdivisions).length === 1,
     [meshes],
@@ -11606,15 +11602,17 @@ export default function PointCloudViewer({
                         </div>
                       )}
                       <div>
-                        return: <span className="text-neutral-300">{scan.params.returnType}</span>
-                        {scan.params.returnType === 'multi' && (
-                          <>
-                            <span className="mx-1">·</span>
-                            beam Ø <span className="font-mono text-neutral-300">{scan.params.beamExitDiameterM} m</span>
-                            <span className="mx-1">·</span>
-                            div <span className="font-mono text-neutral-300">{scan.params.beamDivergenceMrad} mrad</span>
-                          </>
+                        return: <span className="text-neutral-300">{scan.params.returnMode}</span>
+                        {scan.params.returnMode === 'multi' && (
+                          <span> (≤{scan.params.maxReturns})</span>
                         )}
+                        {scan.params.returnMode === 'single' && (
+                          <span> ({scan.params.returnSelection})</span>
+                        )}
+                        <span className="mx-1">·</span>
+                        beam Ø <span className="font-mono text-neutral-300">{scan.params.beamExitDiameterM} m</span>
+                        <span className="mx-1">·</span>
+                        div <span className="font-mono text-neutral-300">{scan.params.beamDivergenceMrad} mrad</span>
                       </div>
                       {(scan.params.tiltRollDeg !== 0 || scan.params.tiltPitchDeg !== 0) && (
                         <div>
@@ -13518,7 +13516,6 @@ export default function PointCloudViewer({
         onRun={(options, scannerIds) => { void handleScanOptionsRun(options, scannerIds); }}
         scanners={pendingScan?.activeScanners ?? []}
         hasGeometry={(pendingScan?.targetMeshes.length ?? 0) > 0}
-        hasMultiReturn={pendingHasMultiReturn}
         gridAvailable={pendingGridAvailable}
       />
 

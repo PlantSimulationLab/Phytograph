@@ -104,7 +104,7 @@ editing, cropping, or deleting one never affects the other. It's handy
 for branching experiments — run two different crops or segmentations off
 the same import, or place a second scanner with the same sweep settings.
 
-A scan can hold point data, scan parameters (origin, sweep, return type),
+A scan can hold point data, scan parameters (origin, sweep, return mode),
 or both — see [Scans](../concepts/scans.md) for details.
 
 Multi-select with <kbd>Shift</kbd>+click (range) or

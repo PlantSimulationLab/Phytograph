@@ -232,7 +232,11 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
     zenithMaxDeg: thetaMaxDeg,
     azimuthMinDeg: phiMinDeg,
     azimuthMaxDeg: phiMaxDeg,
-    returnType: isMulti ? 'multi' : 'single',
+    // The presence of beam optics is our proxy for a multi-return scan (the same
+    // heuristic as before); everything else imports as single-return.
+    returnMode: isMulti ? 'multi' : 'single',
+    maxReturns: DEFAULT_SCAN_PARAMETERS.maxReturns,
+    returnSelection: DEFAULT_SCAN_PARAMETERS.returnSelection,
     beamExitDiameterM: exitDiameterM ?? DEFAULT_SCAN_PARAMETERS.beamExitDiameterM,
     beamDivergenceMrad: beamDivergenceRad !== null
       ? beamDivergenceRad * 1000

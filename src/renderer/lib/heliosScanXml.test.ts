@@ -23,7 +23,7 @@ describe('parseHeliosScanXml', () => {
     // phi 0..360°.
     expect(s0.params.azimuthMinDeg).toBeCloseTo(0, 3);
     expect(s0.params.azimuthMaxDeg).toBeCloseTo(360, 3);
-    expect(s0.params.returnType).toBe('single');
+    expect(s0.params.returnMode).toBe('single');
     expect(s0.filename).toBe('../data/sphere_scan0.xyz');
 
     // Second scan: no thetaMin/thetaMax → defaults to 0..180°.
@@ -159,7 +159,7 @@ describe('parseHeliosScanXml', () => {
     `;
     const { scans } = parseHeliosScanXml(xml);
     expect(scans).toHaveLength(1);
-    expect(scans[0].params.returnType).toBe('multi');
+    expect(scans[0].params.returnMode).toBe('multi');
     expect(scans[0].params.beamExitDiameterM).toBe(0.025);
     // 0.001 rad → 1.0 mrad
     expect(scans[0].params.beamDivergenceMrad).toBeCloseTo(1.0, 6);

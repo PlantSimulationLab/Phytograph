@@ -108,3 +108,90 @@ test('generates a plant, scans it, and a point cloud appears', async () => {
     await close();
   }
 });
+
+// Return type end-to-end: a 'multi' (full-waveform) scan of the same plant from
+// the same position penetrates foliage and reports more returns than an exact
+// single-ray scan (rays per pulse = 1). Drives the live backend through the real
+// UI — sets the return type in the Add-Scan popup, sets rays per pulse in the
+// Synthetic Scan Options popup, runs each scan, and reads the resulting point
+// count off the scanner row — asserting multi > exact.
+test('multi-return scan yields more points than an exact (1 ray/pulse) scan', async () => {
+  const { page, close } = await launchApp();
+
+  try {
+    // ── Generate a leafy plant ───────────────────────────────────────────
+    await page.getByTestId('tool-plant-generate').click();
+    const plantPopup = page.getByTestId('plant-generation-popup');
+    await expect(plantPopup).toBeVisible();
+    await page.getByTestId('plant-species-select').selectOption('bean');
+    await page.getByTestId('plant-age-input').fill('22');
+    await page.getByTestId('plant-generate-button').click();
+    const meshRow = page.getByTestId('mesh-row').first();
+    await expect(meshRow).toBeVisible({ timeout: 120_000 });
+
+    const scanPopup = page.getByTestId('scan-parameters-popup');
+    const scanOptions = page.getByTestId('synthetic-scan-options-popup');
+
+    // Configure the overhead scanner once, choosing a return type each run. Beam
+    // optics are always shown now (both single and multi sample the cone).
+    const configureScanner = async (mode: 'single' | 'multi') => {
+      await page.getByTestId('tool-add-scan').click();
+      await expect(scanPopup).toBeVisible();
+      await page.getByTestId('scan-label-input').fill('overhead');
+      await page.getByTestId('scan-origin-x').fill('0');
+      await page.getByTestId('scan-origin-y').fill('0');
+      await page.getByTestId('scan-origin-z').fill('3');
+      await page.getByTestId('scan-zenith-points').fill('120');
+      await page.getByTestId('scan-azimuth-points').fill('120');
+      await page.getByTestId('scan-zenith-min').fill('0');
+      await page.getByTestId('scan-zenith-max').fill('180');
+      await page.getByTestId(`scan-return-${mode}`).click();
+      await expect(page.getByTestId('scan-beam-fields')).toBeVisible();
+      await page.getByTestId('scan-beam-diameter').fill('0.01');
+      await page.getByTestId('scan-beam-divergence').fill('10');
+      if (mode === 'multi') {
+        await page.getByTestId('scan-max-returns').fill('6');
+      }
+      await page.getByTestId('scan-submit').click();
+      await expect(scanPopup).not.toBeVisible();
+    };
+
+    // raysPerPulse = 1 ⇒ exact single-ray scan; > 1 ⇒ realistic beam cone.
+    const runScanAndReadCount = async (raysPerPulse: number): Promise<number> => {
+      await page.getByTestId('run-synthetic-scan').click();
+      await expect(scanOptions).toBeVisible();
+      // Rays-per-pulse is always available now (it's the universal cone-sampling
+      // knob, and the way to get an idealized exact scan).
+      await page.getByTestId('scan-opt-rays-per-pulse').fill(String(raysPerPulse));
+      await page.getByTestId('scan-opt-run').click();
+      await expect(scanOptions).not.toBeVisible();
+      const row = page.locator('[data-testid="scan-row"][data-scan-name="overhead"]');
+      await expect(row).toHaveAttribute('data-has-data', 'true', { timeout: 120_000 });
+      const countStr = await row.getAttribute('data-point-count');
+      return parseInt(countStr ?? '0', 10);
+    };
+
+    // ── Exact run: single return, one ray per pulse ──────────────────────
+    await configureScanner('single');
+    const exactCount = await runScanAndReadCount(1);
+    expect(exactCount).toBeGreaterThan(100);
+
+    // Remove the scanner before placing the multi one.
+    const scanId = await page
+      .locator('[data-testid="scan-row"][data-scan-name="overhead"]')
+      .getAttribute('data-scan-id');
+    await page.getByTestId(`scan-delete-${scanId}`).click();
+    const confirm = page.getByTestId('confirm-delete');
+    if (await confirm.isVisible().catch(() => false)) await confirm.click();
+
+    // ── Multi run: full-waveform, many rays per pulse ────────────────────
+    await configureScanner('multi');
+    const multiCount = await runScanAndReadCount(100);
+
+    // Full-waveform multi-return resolves extra echoes a single exact ray can't,
+    // so it must report strictly more points than the exact scan.
+    expect(multiCount).toBeGreaterThan(exactCount);
+  } finally {
+    await close();
+  }
+});

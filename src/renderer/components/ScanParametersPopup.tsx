@@ -3,7 +3,8 @@ import { X, Radio, FileUp } from 'lucide-react';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import {
   DEFAULT_SCAN_PARAMETERS,
-  type ReturnType,
+  type PulseReturnMode,
+  type SingleReturnSelection,
   type ScanParameters,
   type ScanPattern,
 } from '../lib/scanParameters';
@@ -202,7 +203,7 @@ export function ScanParametersPopup({
     setParams(p => ({ ...p, trajectory: undefined }));
   };
 
-  const setNum = (key: keyof Omit<ScanParameters, 'origin' | 'returnType'>, min = 0) => (e: React.ChangeEvent<HTMLInputElement>) => {
+  const setNum = (key: keyof Omit<ScanParameters, 'origin' | 'returnMode' | 'returnSelection'>, min = 0) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = parseFloat(e.target.value);
     setParams(p => ({ ...p, [key]: Number.isFinite(v) ? Math.max(min, v) : min }));
   };
@@ -841,52 +842,90 @@ export function ScanParametersPopup({
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Return type</label>
             <div className="flex gap-2">
-              {(['single', 'multi'] as ReturnType[]).map(rt => (
+              {(['single', 'multi'] as PulseReturnMode[]).map(rm => (
                 <button
-                  key={rt}
+                  key={rm}
                   type="button"
-                  data-testid={`scan-return-${rt}`}
-                  onClick={() => setParams(p => ({ ...p, returnType: rt }))}
+                  data-testid={`scan-return-${rm}`}
+                  onClick={() => setParams(p => ({ ...p, returnMode: rm }))}
                   className={`flex-1 px-3 py-2 rounded-lg text-sm capitalize transition-colors ${
-                    params.returnType === rt
+                    params.returnMode === rm
                       ? 'bg-blue-600 text-white'
                       : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
                   }`}
                 >
-                  {rt}-return
+                  {rm}-return
                 </button>
               ))}
             </div>
+            <p className="mt-1.5 text-[11px] text-neutral-500">
+              {params.returnMode === 'single'
+                ? 'One return per pulse, selected below. For an idealized exact scan, set rays per pulse to 1 when you run the scan.'
+                : 'All returns per pulse up to the cap below (full-waveform; penetrates foliage).'}
+            </p>
           </div>
 
-          {params.returnType === 'multi' && (
-            <div data-testid="scan-beam-fields" className="border border-neutral-700 rounded-lg p-3 space-y-3 bg-neutral-800/50">
-              <div>
-                <label className="block text-xs text-neutral-500 mb-1">Beam exit diameter (m)</label>
-                <input
-                  data-testid="scan-beam-diameter"
-                  type="number"
-                  min={0}
-                  step="any"
-                  value={params.beamExitDiameterM}
-                  onChange={setNum('beamExitDiameterM')}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-neutral-500 mb-1">Beam divergence (mrad)</label>
-                <input
-                  data-testid="scan-beam-divergence"
-                  type="number"
-                  min={0}
-                  step="any"
-                  value={params.beamDivergenceMrad}
-                  onChange={setNum('beamDivergenceMrad')}
-                  className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-                />
-              </div>
+          {params.returnMode === 'multi' && (
+            <div>
+              <label className="block text-xs text-neutral-500 mb-1">Max returns per pulse</label>
+              <DebouncedNumberInput
+                data-testid="scan-max-returns"
+                min={1}
+                step={1}
+                debounceMs={0}
+                parse={(s) => parseInt(s, 10)}
+                value={params.maxReturns}
+                onCommit={(v) => setParams(p => ({ ...p, maxReturns: Math.max(1, Math.round(v)) }))}
+                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+              />
             </div>
           )}
+
+          {params.returnMode === 'single' && (
+            <div>
+              <label className="block text-xs text-neutral-500 mb-1">Return selection</label>
+              <select
+                data-testid="scan-return-selection"
+                value={params.returnSelection}
+                onChange={(e) => setParams(p => ({ ...p, returnSelection: e.target.value as SingleReturnSelection }))}
+                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+              >
+                <option value="strongest">Strongest</option>
+                <option value="first">First (nearest)</option>
+                <option value="last">Last (farthest)</option>
+              </select>
+            </div>
+          )}
+
+          {/* Beam optics define the cone the sub-rays sample for both single- and
+              multi-return scans. (At rays-per-pulse = 1 the cone collapses to an
+              exact ray and these are effectively ignored.) */}
+          <div data-testid="scan-beam-fields" className="border border-neutral-700 rounded-lg p-3 space-y-3 bg-neutral-800/50">
+            <div>
+              <label className="block text-xs text-neutral-500 mb-1">Beam exit diameter (m)</label>
+              <input
+                data-testid="scan-beam-diameter"
+                type="number"
+                min={0}
+                step="any"
+                value={params.beamExitDiameterM}
+                onChange={setNum('beamExitDiameterM')}
+                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-neutral-500 mb-1">Beam divergence (mrad)</label>
+              <input
+                data-testid="scan-beam-divergence"
+                type="number"
+                min={0}
+                step="any"
+                value={params.beamDivergenceMrad}
+                onChange={setNum('beamDivergenceMrad')}
+                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+              />
+            </div>
+          </div>
 
           {multibeamNeedsTrajectory && (
             <p data-testid="scan-multibeam-needs-trajectory" className="text-xs text-amber-300">

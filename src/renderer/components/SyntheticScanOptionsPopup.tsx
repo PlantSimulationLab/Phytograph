@@ -30,8 +30,6 @@ interface SyntheticScanOptionsPopupProps {
   // When false the modal still opens (so you can review positions/options) but
   // explains the missing geometry and keeps Run disabled.
   hasGeometry: boolean;
-  // Whether any active scanner is multi-return — gates the full-waveform fields.
-  hasMultiReturn: boolean;
   // Whether exactly one voxel grid is visible — gates the crop-to-grid toggle.
   gridAvailable: boolean;
 }
@@ -46,7 +44,6 @@ export function SyntheticScanOptionsPopup({
   onRun,
   scanners,
   hasGeometry,
-  hasMultiReturn,
   gridAvailable,
 }: SyntheticScanOptionsPopupProps) {
   const [opts, setOpts] = useState<SyntheticScanOptions>(DEFAULT_SYNTHETIC_SCAN_OPTIONS);
@@ -339,36 +336,38 @@ export function SyntheticScanOptionsPopup({
             )}
           </div>
 
-          {hasMultiReturn && (
-            <div data-testid="scan-opt-waveform-fields" className="border border-neutral-700 rounded-lg p-3 space-y-3 bg-neutral-800/50">
-              <p className="text-xs text-neutral-400">Full-waveform (multi-return)</p>
-              <div>
-                <label className="block text-xs text-neutral-500 mb-1">Rays per pulse</label>
-                <DebouncedNumberInput
-                  data-testid="scan-opt-rays-per-pulse"
-                  min={1}
-                  step={1}
-                  debounceMs={0}
-                  parse={(s) => parseInt(s, 10)}
-                  value={opts.raysPerPulse}
-                  onCommit={setRays}
-                  className={inputCls}
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-neutral-500 mb-1">Pulse distance threshold (m)</label>
-                <DebouncedNumberInput
-                  data-testid="scan-opt-pulse-threshold"
-                  min={0}
-                  step="any"
-                  debounceMs={0}
-                  value={opts.pulseDistanceThresholdM}
-                  onCommit={setNum('pulseDistanceThresholdM')}
-                  className={inputCls}
-                />
-              </div>
+          <div data-testid="scan-opt-waveform-fields" className="border border-neutral-700 rounded-lg p-3 space-y-3 bg-neutral-800/50">
+            <p className="text-xs text-neutral-400">Beam-cone sampling</p>
+            <div>
+              <label className="block text-xs text-neutral-500 mb-1">Rays per pulse</label>
+              <DebouncedNumberInput
+                data-testid="scan-opt-rays-per-pulse"
+                min={1}
+                step={1}
+                debounceMs={0}
+                parse={(s) => parseInt(s, 10)}
+                value={opts.raysPerPulse}
+                onCommit={setRays}
+                className={inputCls}
+              />
+              <p className="mt-1 text-[11px] text-neutral-500">
+                Sub-rays fired across each pulse&apos;s beam cone. Set to 1 for an
+                idealized exact scan (one ray per pulse, no beam footprint).
+              </p>
             </div>
-          )}
+            <div>
+              <label className="block text-xs text-neutral-500 mb-1">Pulse distance threshold (m)</label>
+              <DebouncedNumberInput
+                data-testid="scan-opt-pulse-threshold"
+                min={0}
+                step="any"
+                debounceMs={0}
+                value={opts.pulseDistanceThresholdM}
+                onCommit={setNum('pulseDistanceThresholdM')}
+                className={inputCls}
+              />
+            </div>
+          </div>
 
           {/* Total-pulse estimate for the selected scanners — the run's headline
               cost. Moving-platform scans can be millions of pulses (≈ PRF ×

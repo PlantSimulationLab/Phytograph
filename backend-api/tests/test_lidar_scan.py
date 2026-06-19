@@ -710,3 +710,187 @@ class TestMovingMultibeamChannels:
         # the elevation angles.
         assert body["success"] is True, body.get("error")
         assert body["results"][0]["num_points"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Return type: single (one return, first|last|strongest) vs multi (all returns
+# up to a cap). Every scan fires `rays_per_pulse` sub-rays across the beam cone
+# (exit diameter + divergence) and reduces the resolved waveform per its return
+# mode. rays_per_pulse=1 collapses the cone to one exact ray (the idealized scan)
+# — that is a run option, not a return mode. The scene is two STACKED slabs — a
+# small near slab floating above a large far slab — so a wide beam cone aimed at
+# the near slab's edge straddles BOTH surfaces within one pulse. That is what
+# separates the modes: single reports one surface per pulse, multi reports both.
+#
+# Assertions are statistical (counts, depth spreads, target_count), not
+# pulse-by-pulse — robust to the engine's stochastic sub-ray sampling.
+
+# Near slab: a small 0.6 m square cap at z≈2, ~1 m below an overhead scanner.
+_NEAR_Z = 2.0
+# Far slab: a large 3 m square floor at z≈0, fully behind/below the near slab.
+_FAR_Z = 0.0
+
+
+def _slab(half, z, thick=0.05):
+    """A square slab of side 2*half centred on the origin in xy, top face at z.
+
+    A thin box (not a coplanar quad) so the engine's AABB is non-degenerate.
+    """
+    lo, hi = z - thick, z
+    verts = [[sx * half, sy * half, sz]
+             for sx in (-1, 1) for sy in (-1, 1) for sz in (lo, hi)]
+    # 12 triangles of the box (same winding scheme as _box_mesh).
+    tris = [[0, 2, 3], [0, 3, 1], [4, 5, 7], [4, 7, 6], [0, 4, 6], [0, 6, 2],
+            [1, 3, 7], [1, 7, 5], [0, 1, 5], [0, 5, 4], [2, 6, 7], [2, 7, 3]]
+    return verts, tris
+
+
+def _stacked_slabs():
+    """Near 0.6 m cap at z=2 over a far 3 m floor at z=0, merged into one mesh."""
+    nv, nt = _slab(0.3, _NEAR_Z)
+    fv, ft = _slab(1.5, _FAR_Z)
+    verts = nv + fv
+    tris = nt + [[a + len(nv), b + len(nv), c + len(nv)] for a, b, c in ft]
+    return verts, tris
+
+
+def _cone_scanner(scanner_id, return_mode, *, max_returns=5,
+                  return_selection="strongest", divergence_mrad=80.0,
+                  exit_diameter_m=0.0):
+    """Overhead scanner at z=3 with a WIDE beam cone (default 80 mrad ≈ 4.6°).
+
+    The wide cone makes pulses near the near-slab edge spill onto the far slab,
+    so a single pulse resolves two surfaces ~2 m apart (with rays_per_pulse > 1).
+    """
+    return {
+        "id": scanner_id,
+        "origin": [0.0, 0.0, 3.0],
+        "n_theta": 140,
+        "n_phi": 140,
+        # Zenith 0°=straight up, 180°=straight down. The slabs are below the
+        # scanner, so sweep the downward cone (the last 35° before nadir).
+        "theta_min_deg": 145.0,
+        "theta_max_deg": 180.0,
+        "phi_min_deg": 0.0,
+        "phi_max_deg": 360.0,
+        "return_mode": return_mode,
+        "max_returns": max_returns,
+        "return_selection": return_selection,
+        "exit_diameter_m": exit_diameter_m,
+        "beam_divergence_mrad": divergence_mrad,
+    }
+
+
+class TestPulseReturnMode:
+    """single vs multi reduce a two-surface pulse differently."""
+
+    def _scan(self, client, scanners, rays_per_pulse=200, threshold=0.1):
+        pytest.importorskip("pyhelios")
+        verts, tris = _stacked_slabs()
+        resp = client.post("/api/lidar/scan", json={
+            "meshes": [{"vertices": verts, "triangles": tris}],
+            "scanners": scanners,
+            "rays_per_pulse": rays_per_pulse,
+            "pulse_distance_threshold": threshold,
+        })
+        assert resp.status_code == 200, resp.text
+        body = decode_lidar_scan(resp.content)
+        assert body["success"] is True, body.get("error")
+        return body
+
+    def _points(self, res):
+        n = res["num_points"]
+        return (np.array(res["points"], dtype=np.float64).reshape(-1, 3)
+                if n else np.zeros((0, 3)))
+
+    def test_rays_per_pulse_one_is_an_exact_scan(self, client):
+        # rays_per_pulse=1 collapses the beam cone to one exact ray per pulse — the
+        # idealized scan. Even with the wide-cone optics and multi mode, each pulse
+        # then hits exactly the first surface along its direction: every z sits on
+        # the near cap (≈2) or far floor (≈0), nothing spread between, and no pulse
+        # resolves more than one return.
+        body = self._scan(client, [_cone_scanner("exact", "multi")],
+                          rays_per_pulse=1)
+        res = body["results"][0]
+        pts = self._points(res)
+        assert len(pts) > 200, "overhead exact scan should densely sample both slabs"
+        z = pts[:, 2]
+        near = np.abs(z - _NEAR_Z) < 0.1
+        far = np.abs(z - _FAR_Z) < 0.1
+        assert (near | far).mean() > 0.97, "exact hits must sit on a slab surface"
+        assert near.any() and far.any(), "exact scan should see both slabs"
+        tc = np.array(res["scalars"]["target_count"], dtype=np.float64)
+        assert tc.max() <= 1.0 + 1e-6, "rays_per_pulse=1 must not report multiple returns"
+
+    def test_multi_reports_more_returns_than_single(self, client):
+        # Same wide-cone optics, single vs multi. Where a pulse straddles both
+        # slabs, multi keeps both returns while single keeps one — so multi yields
+        # strictly more points, and records pulses with target_count > 1.
+        body = self._scan(client, [
+            _cone_scanner("single", "single"),
+            _cone_scanner("multi", "multi"),
+        ])
+        by_id = {r["scanner_id"]: r for r in body["results"]}
+        n_single = by_id["single"]["num_points"]
+        n_multi = by_id["multi"]["num_points"]
+        assert n_single > 0 and n_multi > 0
+        assert n_multi > n_single, (
+            f"multi-return should keep more points than single ({n_multi} vs {n_single})"
+        )
+        # Multi must actually resolve multi-target pulses (the edge pulses).
+        tc_multi = np.array(by_id["multi"]["scalars"]["target_count"], dtype=np.float64)
+        assert tc_multi.max() >= 2.0, "multi must report at least one 2-target pulse"
+        # Single collapses every pulse to one return.
+        tc_single = np.array(by_id["single"]["scalars"]["target_count"], dtype=np.float64)
+        assert tc_single.max() <= 1.0 + 1e-6, "single must keep one return per pulse"
+
+    def test_single_first_vs_last_selects_near_vs_far_surface(self, client):
+        # For edge pulses that straddle both slabs, FIRST keeps the nearer surface
+        # (near cap, z≈2) and LAST keeps the farther (floor, z≈0). Compare the
+        # fraction of hits landing on the FAR floor: LAST must produce many more.
+        body = self._scan(client, [
+            _cone_scanner("first", "single", return_selection="first"),
+            _cone_scanner("last", "single", return_selection="last"),
+        ])
+        by_id = {r["scanner_id"]: r for r in body["results"]}
+        z_first = self._points(by_id["first"])[:, 2]
+        z_last = self._points(by_id["last"])[:, 2]
+        assert len(z_first) > 0 and len(z_last) > 0
+        far_first = (np.abs(z_first - _FAR_Z) < 0.3).mean()
+        far_last = (np.abs(z_last - _FAR_Z) < 0.3).mean()
+        # LAST pulls a clearly larger share of returns down onto the far floor.
+        assert far_last > far_first + 0.05, (
+            f"last-return should favor the far surface more than first "
+            f"(far fraction last={far_last:.2f} vs first={far_first:.2f})"
+        )
+
+    def test_single_and_multi_coexist_in_one_request(self, client):
+        # A mixed request (single + multi in one scan) must keep each scan's hits
+        # correctly partitioned and honor each scan's own stored return mode in the
+        # shared single-pass ray trace: single ≤1 return/pulse, multi resolves
+        # 2-target pulses.
+        body = self._scan(client, [
+            _cone_scanner("single", "single"),
+            _cone_scanner("multi", "multi"),
+        ])
+        by_id = {r["scanner_id"]: r for r in body["results"]}
+        assert set(by_id) == {"single", "multi"}
+        tc_single = np.array(by_id["single"]["scalars"]["target_count"], dtype=np.float64)
+        tc_multi = np.array(by_id["multi"]["scalars"]["target_count"], dtype=np.float64)
+        assert tc_single.max() <= 1.0 + 1e-6, "single scan's stored mode was not honored"
+        assert tc_multi.max() >= 2.0, "multi scan lost its multi-target pulses"
+        # Independent hit sets (not one cloud copied twice).
+        assert not np.array_equal(
+            self._points(by_id["single"]), self._points(by_id["multi"]))
+
+    def test_legacy_return_type_field_still_accepted(self, client):
+        # An old client that sends return_type (not return_mode) must still scan;
+        # 'multi' maps to the new multi mode.
+        legacy = _cone_scanner("legacy", "multi")
+        del legacy["return_mode"]
+        legacy["return_type"] = "multi"
+        body = self._scan(client, [legacy])
+        res = body["results"][0]
+        assert res["num_points"] > 0
+        tc = np.array(res["scalars"]["target_count"], dtype=np.float64)
+        assert tc.max() >= 2.0, "legacy return_type='multi' should still be multi-return"

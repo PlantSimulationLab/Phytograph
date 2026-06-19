@@ -93,9 +93,24 @@ them silently.
   sweep bounds (degrees) and number of rays. A spinning multibeam has no
   azimuth *range* (it rotates a full 360° per revolution); its azimuth
   control is just the **points per revolution** (angular resolution)
-- **Return type** — single (one return per ray) or multi (partial
-  returns through foliage)
-- **Beam properties** (multi-return only) — exit diameter, divergence
+- **Return type** — how many returns each pulse reports (a property of the
+  real instrument):
+    - **Single** — at most **one** return per pulse, chosen by the
+      **selection** policy below. Models single-return instruments (Leica,
+      FARO, single-return-configured spinning sensors).
+    - **Multi** — **all** detected returns up to a **max returns** cap.
+      Models full-waveform / multi-echo instruments (RIEGL VZ-400i, miniVUX)
+      that penetrate foliage.
+
+    For an idealized, *exact* scan (one ray per pulse, no beam footprint),
+    set **rays per pulse** to 1 when you run the scan — that is a simulation
+    option, not a return type. See [Simulate a scan](../workflows/simulate-scan.md).
+- **Return selection** (single only) — which return to keep when the beam
+  cone resolves several: **strongest**, **first** (nearest), or **last** (farthest)
+- **Max returns** (multi only) — the cap on returns reported per pulse
+- **Beam properties** — exit diameter and divergence, which define the cone
+  the pulse's sub-rays sample (at rays-per-pulse = 1 the cone collapses to
+  one exact ray)
 - **Scanner tilt** — residual roll/pitch lean away from level (degrees)
 - **Scanner heading** — initial azimuth the scanner faces in the
   horizontal plane (degrees; 0 is the default heading). Orients the

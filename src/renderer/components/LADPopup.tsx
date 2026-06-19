@@ -180,9 +180,9 @@ export function LADPopup({
   );
 
   // Return-type summary derived from the selected scans (read-only — set it per
-  // scan in the Scans panel).
+  // scan in the Scans panel). LAD only cares about multi-return vs. single.
   const returnTypes = useMemo(
-    () => new Set(selectedScans.map(s => s.params!.returnType)),
+    () => new Set(selectedScans.map(s => s.params!.returnMode)),
     [selectedScans],
   );
 

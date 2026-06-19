@@ -731,9 +731,11 @@ export function buildLADRequest(
       theta_max: p.zenithMaxDeg,
       phi_min: p.azimuthMinDeg,
       phi_max: p.azimuthMaxDeg,
-      return_type: p.returnType,
+      // LAD's wire field is the single/multi binary the inversion keys on (multi
+      // needs the per-pulse target_count weighting); it mirrors returnMode directly.
+      return_type: p.returnMode,
     };
-    if (p.returnType === 'multi') {
+    if (p.returnMode === 'multi') {
       entry.beam_exit_diameter = p.beamExitDiameterM;
       entry.beam_divergence = p.beamDivergenceMrad;
     }

@@ -126,7 +126,7 @@ describe('buildLADRequest', () => {
       params: {
         ...DEFAULT_SCAN_PARAMETERS,
         origin: { x: 0, y: 0, z: 0 },
-        returnType: 'multi',
+        returnMode: 'multi',
         beamExitDiameterM: 0.02,
         beamDivergenceMrad: 0.7,
       },

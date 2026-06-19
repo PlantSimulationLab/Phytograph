@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_SCAN_PARAMETERS,
+  migrateScanReturnFields,
   scanParametersFromFile,
   type ScanParamsFromFile,
 } from './scanParameters';
@@ -43,8 +44,8 @@ describe('scanParametersFromFile', () => {
     expect(p.zenithMaxDeg).toBe(DEFAULT_SCAN_PARAMETERS.zenithMaxDeg);
     expect(p.azimuthMinDeg).toBe(DEFAULT_SCAN_PARAMETERS.azimuthMinDeg);
     expect(p.azimuthMaxDeg).toBe(DEFAULT_SCAN_PARAMETERS.azimuthMaxDeg);
-    // Multi-return-only fields are never recovered from a file header.
-    expect(p.returnType).toBe('single');
+    // Return mode + beam fields are never recovered from a file header.
+    expect(p.returnMode).toBe('single');
     expect(p.beamExitDiameterM).toBe(DEFAULT_SCAN_PARAMETERS.beamExitDiameterM);
   });
 
@@ -105,5 +106,51 @@ describe('scanParametersFromFile', () => {
 
     const headed = scanParametersFromFile({ origin: [0, 0, 0], azimuth_offset_deg: 45 });
     expect(headed.azimuthOffsetDeg).toBe(45);
+  });
+});
+
+// migrateScanReturnFields maps a persisted (possibly older-shape) scan-params blob
+// onto the current { returnMode, maxReturns, returnSelection } fields. Older scans
+// carried `returnType: 'single' | 'multi'` and none of the new fields.
+describe('migrateScanReturnFields', () => {
+  it('maps legacy returnType "multi" to the multi mode', () => {
+    const m = migrateScanReturnFields({ returnType: 'multi' });
+    expect(m.returnMode).toBe('multi');
+  });
+
+  it('maps legacy returnType "single" to the single mode', () => {
+    const m = migrateScanReturnFields({ returnType: 'single' });
+    expect(m.returnMode).toBe('single');
+  });
+
+  it('honors a present returnMode over a legacy returnType', () => {
+    const m = migrateScanReturnFields({ returnMode: 'single', returnType: 'multi' });
+    expect(m.returnMode).toBe('single');
+  });
+
+  it('passes through each current mode', () => {
+    expect(migrateScanReturnFields({ returnMode: 'single' }).returnMode).toBe('single');
+    expect(migrateScanReturnFields({ returnMode: 'multi' }).returnMode).toBe('multi');
+  });
+
+  it('falls back to the default mode when neither field is present or valid', () => {
+    expect(migrateScanReturnFields({}).returnMode).toBe(DEFAULT_SCAN_PARAMETERS.returnMode);
+    expect(migrateScanReturnFields({ returnMode: 'bogus' }).returnMode)
+      .toBe(DEFAULT_SCAN_PARAMETERS.returnMode);
+  });
+
+  it('clamps maxReturns to an integer >= 1 and defaults otherwise', () => {
+    expect(migrateScanReturnFields({ maxReturns: 7 }).maxReturns).toBe(7);
+    expect(migrateScanReturnFields({ maxReturns: 3.9 }).maxReturns).toBe(4);
+    expect(migrateScanReturnFields({ maxReturns: 0 }).maxReturns)
+      .toBe(DEFAULT_SCAN_PARAMETERS.maxReturns);
+    expect(migrateScanReturnFields({}).maxReturns)
+      .toBe(DEFAULT_SCAN_PARAMETERS.maxReturns);
+  });
+
+  it('accepts a valid returnSelection and defaults an invalid one', () => {
+    expect(migrateScanReturnFields({ returnSelection: 'last' }).returnSelection).toBe('last');
+    expect(migrateScanReturnFields({ returnSelection: 'bogus' }).returnSelection)
+      .toBe(DEFAULT_SCAN_PARAMETERS.returnSelection);
   });
 });

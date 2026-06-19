@@ -9,7 +9,7 @@ referring to the same physical plant.
 
 <div class="grid cards" markdown>
 
-- :material-radar: **[Scans](scans.md)** — the central unit. May carry point data, scan parameters (origin, sweep, return type), or both. See also [Point clouds](point-clouds.md) for the point-data side.
+- :material-radar: **[Scans](scans.md)** — the central unit. May carry point data, scan parameters (origin, sweep, return mode), or both. See also [Point clouds](point-clouds.md) for the point-data side.
 
 - :material-vector-triangle: **[Meshes](meshes.md)** — surfaces built from triangles. The product of triangulation, or imported from an `.obj` / `.ply` / `.stl` file.
 

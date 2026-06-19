@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 import pandas as pd
 import numpy as np
 import io
@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.33.0"
+BACKEND_VERSION = "0.34.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -5120,9 +5120,28 @@ class LidarScanScanner(BaseModel):
     theta_max_deg: float
     phi_min_deg: float           # azimuth angle range (degrees, 0-360)
     phi_max_deg: float
-    return_type: str = "single"  # "single" (discrete) or "multi" (full-waveform)
+    # How many returns the pulse reports (an instrument property):
+    #   "single" — at most one return per pulse (RETURN_MODE_SINGLE, maxReturns=1)
+    #              chosen by return_selection (strongest/first/last).
+    #   "multi"  — all detected returns up to max_returns (RETURN_MODE_MULTI).
+    # For an idealized exact scan, send rays_per_pulse=1 (a run option), which the
+    # engine reduces to one exact return per pulse for either mode.
+    return_mode: str = "single"
+    max_returns: int = 5                 # "multi" only — cap on returns per pulse
+    return_selection: str = "strongest"  # "single" only — strongest | first | last
     exit_diameter_m: float = 0.0
     beam_divergence_mrad: float = 0.0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_return_type(cls, data):
+        # Back-compat: an older client (or persisted request) sends `return_type`
+        # ("single"/"multi") and no `return_mode`. Map it so the request still
+        # validates. A present `return_mode` wins.
+        if isinstance(data, dict) and "return_mode" not in data and "return_type" in data:
+            legacy = data.get("return_type")
+            data = {**data, "return_mode": "multi" if legacy == "multi" else "single"}
+        return data
     # Measurement-error model (applies to both return types). Defaults of 0
     # disable each effect, preserving an ideal noise-free, perfectly-level scan.
     range_noise_m: float = 0.0       # Gaussian along-beam range noise stddev (meters)
@@ -5333,6 +5352,30 @@ def _load_scan_mesh(ctx, mesh: "LidarScanMesh", tmpdir: str) -> None:
         ctx.addTrianglesFromArrays(verts, rest_tris, colors=colors)
 
 
+def _apply_return_mode(lidar, scan_id: int, s: "LidarScanScanner",
+                       ReturnMode, selection_map: dict) -> None:
+    """Set a freshly-added scan's stored return mode from the request.
+
+    The stored mode is honored by syntheticScan() when called with rays_per_pulse
+    and no explicit return_mode override:
+      - "single": RETURN_MODE_SINGLE, maxReturns=1, selection per request.
+      - "multi" : RETURN_MODE_MULTI, maxReturns = request max_returns.
+
+    For an idealized exact scan the caller sends rays_per_pulse=1, which the engine
+    reduces to one exact return per pulse regardless of the stored mode — so there
+    is no separate "clean" mode to handle here.
+    """
+    if s.return_mode == "multi":
+        lidar.setScanReturnMode(scan_id, ReturnMode.MULTI)
+        lidar.setScanMaxReturns(scan_id, max(1, int(s.max_returns)))
+    else:  # "single"
+        lidar.setScanReturnMode(scan_id, ReturnMode.SINGLE)
+        lidar.setScanMaxReturns(scan_id, 1)
+        sel = selection_map.get(s.return_selection)
+        if sel is not None:
+            lidar.setScanSingleReturnSelection(scan_id, sel)
+
+
 def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
     """
     Perform a true ray-traced synthetic LiDAR scan of the supplied geometry.
@@ -5367,10 +5410,18 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
             return {"success": False, "error": "Geometry has no triangles"}
 
         from pyhelios import LiDARCloud, Context
+        from pyhelios.LiDARCloud import ReturnMode, SingleReturnSelection
 
         _report(0.05, "Loading geometry")
 
-        want_waveform = any(s.return_type == "multi" for s in request.scanners)
+        # Every scan samples the beam cone (fires rays_per_pulse sub-rays per pulse).
+        # rays_per_pulse=1 collapses the cone to one exact ray (an idealized scan);
+        # the return mode then decides how the resolved waveform is reduced to points.
+        _SELECTION_MAP = {
+            "strongest": SingleReturnSelection.STRONGEST,
+            "first": SingleReturnSelection.FIRST,
+            "last": SingleReturnSelection.LAST,
+        }
         extra_fields = [f for f in request.extra_fields if f]
         # column_format drives which custom primitive data the scan samples onto
         # hits; only the extra fields need it (the standard keys are always recorded).
@@ -5464,7 +5515,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                                   f"{grid['duration_s']:.1f}s) — large scan, may be slow",
                                   flush=True)
                         phi_min = math.radians(s.phi_min_deg)
-                        lidar.addScanMoving(
+                        sid = lidar.addScanMoving(
                             Ntheta=n_theta,
                             theta_range=theta_range,
                             Nphi=grid["n_phi_total"],
@@ -5482,11 +5533,12 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                             range_noise_stddev=float(s.range_noise_m),
                             angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
                         )
+                        _apply_return_mode(lidar, sid, s, ReturnMode, _SELECTION_MAP)
                     else:
                         # Static raster scan (a multibeam scanner without a
                         # trajectory was already rejected above; spinning multibeam
                         # is a moving-only pattern).
-                        lidar.addScan(
+                        sid = lidar.addScan(
                             origin=[float(s.origin[0]), float(s.origin[1]), float(s.origin[2])],
                             Ntheta=int(s.n_theta),
                             theta_range=(math.radians(s.theta_min_deg), math.radians(s.theta_max_deg)),
@@ -5501,6 +5553,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                             scan_tilt_pitch=math.radians(s.tilt_pitch_deg),
                             scan_azimuth_offset=math.radians(s.scan_azimuth_offset_deg),
                         )
+                        _apply_return_mode(lidar, sid, s, ReturnMode, _SELECTION_MAP)
 
                 # Crop-to-grid: scan_grid_only restricts ray-tracing to the cells
                 # of a grid, which must be defined on the cloud first via addGrid.
@@ -5518,28 +5571,26 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 # record_misses is user-controlled now: when on, rays that hit
                 # nothing are kept (far-field placeholder points flagged via
                 # isHitMiss below) so the miss overlay + LAD can use them.
+                #
+                # rays_per_pulse is a single global arg: every scan fires that many
+                # sub-rays across its beam cone, and each scan's stored return mode
+                # (set above) reduces its waveform to single- or multi-return points.
+                # rays_per_pulse=1 collapses the cone to one exact ray per pulse — the
+                # idealized scan — for either mode.
                 record_misses = bool(request.record_misses)
                 _prof["add_scans"] = time.perf_counter()
                 # The ray trace is one uninterruptible C++ pass — report it as
                 # indeterminate (null fraction) so the bar pulses rather than
                 # sitting frozen at a stale percentage during the long step.
                 _report(None, "Ray-tracing scene")
-                if want_waveform:
-                    lidar.syntheticScan(
-                        ctx,
-                        rays_per_pulse=int(request.rays_per_pulse),
-                        pulse_distance_threshold=float(request.pulse_distance_threshold),
-                        scan_grid_only=scan_grid_only,
-                        record_misses=record_misses,
-                        append=False,
-                    )
-                else:
-                    lidar.syntheticScan(
-                        ctx,
-                        scan_grid_only=scan_grid_only,
-                        record_misses=record_misses,
-                        append=False,
-                    )
+                lidar.syntheticScan(
+                    ctx,
+                    rays_per_pulse=int(request.rays_per_pulse),
+                    pulse_distance_threshold=float(request.pulse_distance_threshold),
+                    scan_grid_only=scan_grid_only,
+                    record_misses=record_misses,
+                    append=False,
+                )
 
                 _prof["raytrace"] = time.perf_counter()
                 _report(0.85, "Extracting hits")

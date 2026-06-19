@@ -53,6 +53,9 @@ describe('scannerModels catalog', () => {
     const riegl = getScannerModel('riegl_vz400i').preset;
     expect(riegl.beamDivergenceMrad).toBeCloseTo(0.35);
     expect(riegl.pattern).toBe('raster');
+    // Full-waveform multi-return, up to ~15 targets/pulse (datasheet).
+    expect(riegl.returnMode).toBe('multi');
+    expect(riegl.maxReturns).toBe(15);
     expect(riegl.zenithMinDeg).toBe(30);
     expect(riegl.zenithMaxDeg).toBe(130);
     expect(riegl.beamExitDiameterM).toBeUndefined();
@@ -62,7 +65,7 @@ describe('scannerModels catalog', () => {
     const leica = getScannerModel('leica_p40').preset;
     expect(leica.beamDivergenceMrad).toBeCloseTo(0.23);
     expect(leica.beamExitDiameterM).toBeCloseTo(0.0035);
-    expect(leica.returnType).toBe('single');
+    expect(leica.returnMode).toBe('single');
     expect(leica.zenithMinDeg).toBe(0);
     expect(leica.zenithMaxDeg).toBe(145);
 
@@ -71,7 +74,7 @@ describe('scannerModels catalog', () => {
     const blk = getScannerModel('leica_blk360').preset;
     expect(blk.beamDivergenceMrad).toBeCloseTo(0.4);
     expect(blk.beamExitDiameterM).toBeCloseTo(0.00225);
-    expect(blk.returnType).toBe('single');
+    expect(blk.returnMode).toBe('single');
     expect(blk.zenithMinDeg).toBe(0);
     expect(blk.zenithMaxDeg).toBe(150);
     expect(blk.pulseRateHz).toBe(360000);
@@ -83,7 +86,7 @@ describe('scannerModels catalog', () => {
     const blk2 = getScannerModel('leica_blk360_g2').preset;
     expect(blk2.beamDivergenceMrad).toBeCloseTo(0.4);
     expect(blk2.beamExitDiameterM).toBeCloseTo(0.00225);
-    expect(blk2.returnType).toBe('single');
+    expect(blk2.returnMode).toBe('single');
     expect(blk2.zenithMinDeg).toBe(0);
     expect(blk2.zenithMaxDeg).toBe(135);
     expect(blk2.pulseRateHz).toBe(680000);
@@ -101,7 +104,7 @@ describe('scannerModels catalog', () => {
     expect(v.pattern).toBe('spinning_multibeam');
     // Datasheet offers single OR strongest+last dual return — no full-waveform
     // multi-return — and Helios has no dual mode, so single is the faithful default.
-    expect(v.returnType).toBe('single');
+    expect(v.returnMode).toBe('single');
     expect(v.beamElevationAnglesDeg).toHaveLength(32);
     // Rectangular emitter ~1/2″ wide at the source → 12.7 mm on the wide axis.
     expect(v.beamExitDiameterM).toBeCloseTo(0.0127);
@@ -123,7 +126,8 @@ describe('scannerModels catalog', () => {
     expect(m.pattern).toBe('spinning_multibeam');
     expect(m.beamElevationAnglesDeg).toEqual([0]);
     // Waveform LiDAR, up to 5 echoes/pulse → full-waveform multi-return.
-    expect(m.returnType).toBe('multi');
+    expect(m.returnMode).toBe('multi');
+    expect(m.maxReturns).toBe(5);
     // 1.6 × 0.5 mrad divergence → scalar field takes the wide axis, as the
     // HDL-32E does. Datasheet quotes a footprint, not an exit aperture, so —
     // like the VZ-400i — no beam diameter is preset.

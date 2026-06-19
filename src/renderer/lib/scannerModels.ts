@@ -7,9 +7,11 @@
 //      Leica P40 is a knee-high tripod head — see `heightMeters`).
 //   2. Auto-fills the acquisition parameters that are a fixed property of the
 //      instrument's optics and deflection unit — beam diameter/divergence, scan
-//      pattern, return capability, per-channel elevations, and the maximum
-//      angular sweep. Resolution (point counts) is a user choice, so it is left
-//      alone. Every auto-filled value remains editable afterward.
+//      pattern, return type (single/multi + maxReturns/selection), per-channel
+//      elevations, and the maximum angular sweep. Resolution (point counts) is a
+//      user choice, so it is left alone. Every auto-filled value remains editable
+//      afterward. (Whether to simulate an idealized exact scan is a per-run choice
+//      — set rays per pulse to 1 — not an instrument property.)
 //
 // The "generic" model is the default: an unknown or user-customised scanner. It
 // carries no preset (the form keeps DEFAULT_SCAN_PARAMETERS) and renders the
@@ -108,7 +110,9 @@ export type ScannerModelPreset = Partial<
   Pick<
     ScanParameters,
     | 'pattern'
-    | 'returnType'
+    | 'returnMode'
+    | 'maxReturns'
+    | 'returnSelection'
     | 'beamExitDiameterM'
     | 'beamDivergenceMrad'
     | 'beamElevationAnglesDeg'
@@ -167,7 +171,10 @@ export const SCANNER_MODELS: ScannerModel[] = [
     heightMeters: 0.308,
     preset: {
       pattern: 'raster',
-      returnType: 'multi', // full-waveform, up to 15 targets/pulse
+      // Full-waveform pulsed TLS: up to ~15 targets/pulse (datasheet). Reports
+      // every detected return up to maxReturns.
+      returnMode: 'multi',
+      maxReturns: 15,
       beamDivergenceMrad: 0.35, // 0.35 mrad @ 1/e² (datasheet)
       // Datasheet quotes only divergence, not an exit aperture, so leave the
       // beam diameter at the form default rather than invent a figure.
@@ -189,7 +196,9 @@ export const SCANNER_MODELS: ScannerModel[] = [
     heightMeters: 0.395,
     preset: {
       pattern: 'raster',
-      returnType: 'single', // single-pulse TLS
+      // Single-pulse WFD time-of-flight TLS: one return per direction (strongest).
+      returnMode: 'single',
+      returnSelection: 'strongest',
       beamDivergenceMrad: 0.23, // < 0.23 mrad FWHM (datasheet)
       beamExitDiameterM: 0.0035, // ≤ 3.5 mm at front window (datasheet)
       // Vertical FOV 290°, horizontal 360°. The single vertical mirror sweeps
@@ -213,7 +222,9 @@ export const SCANNER_MODELS: ScannerModel[] = [
     heightMeters: 0.165,
     preset: {
       pattern: 'raster',
-      returnType: 'single', // single-return WFD time-of-flight
+      // Single-return WFD time-of-flight: one return per direction (strongest).
+      returnMode: 'single',
+      returnSelection: 'strongest',
       beamDivergenceMrad: 0.4, // 0.4 mrad FWHM, full angle (user manual)
       beamExitDiameterM: 0.00225, // 2.25 mm at front window, FWHM (user manual)
       // Vertical FOV 300°, horizontal 360°. The single vertical mirror sweeps
@@ -242,7 +253,8 @@ export const SCANNER_MODELS: ScannerModel[] = [
       // and single-return. The G2 redesign is the detector/electronics, which
       // ~doubles the point rate.
       pattern: 'raster',
-      returnType: 'single',
+      returnMode: 'single',
+      returnSelection: 'strongest',
       beamDivergenceMrad: 0.4, // 0.4 mrad FWHM, full angle (same optics as G1)
       beamExitDiameterM: 0.00225, // 2.25 mm at front window, FWHM (same as G1)
       // Vertical FOV 270° (NOT the G1's 300°) → mirror reaches zenith 0–135°,
@@ -263,7 +275,9 @@ export const SCANNER_MODELS: ScannerModel[] = [
     heightMeters: 0.191,
     preset: {
       pattern: 'raster',
-      returnType: 'single',
+      // Phase-shift scanner → inherently one return per direction (strongest).
+      returnMode: 'single',
+      returnSelection: 'strongest',
       beamDivergenceMrad: 0.3, // 0.3 mrad @ 1/e (datasheet)
       beamExitDiameterM: 0.00212, // 2.12 mm at exit @ 1/e (datasheet)
       // Vertical FOV 300°, given on the datasheet as 2×150°: the mirror sweeps
@@ -290,8 +304,11 @@ export const SCANNER_MODELS: ScannerModel[] = [
       // strongest+last dual, never arbitrary multi-return. Helios has no
       // dual-return mode; its 'multi' is full-waveform (many returns/pulse),
       // which doesn't model the HDL-32E. Single return is the faithful default
-      // and matches the single-return pulse rate below (~695 kHz).
-      returnType: 'single',
+      // and matches the single-return pulse rate below (~695 kHz). The datasheet
+      // dual mode keeps strongest+last; the single mode (modelled here) keeps the
+      // strongest.
+      returnMode: 'single',
+      returnSelection: 'strongest',
       beamDivergenceMrad: 2.79,
       // The HDL-32E emits a rectangular spot ~1/2″ × 1/4″ at the source (12.7 ×
       // 6.35 mm), which is what yields the 2.79 mrad divergence. This field is a
@@ -327,7 +344,8 @@ export const SCANNER_MODELS: ScannerModel[] = [
       pattern: 'spinning_multibeam',
       beamElevationAnglesDeg: [0],
       // Waveform LiDAR with up to 5 target echoes per pulse (datasheet).
-      returnType: 'multi',
+      returnMode: 'multi',
+      maxReturns: 5,
       beamDivergenceMrad: 1.6, // 1.6 × 0.5 mrad → wide axis (footprint 160 × 50 mm @ 100 m)
       // Datasheet gives a footprint at range, not an exit aperture, so leave the
       // beam diameter at the form default rather than invent a figure.

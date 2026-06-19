@@ -7,7 +7,26 @@
 // clouds have no single defined origin. Analyses that need pulse directions
 // (e.g. Helios triangulation) are gated on presence of params.
 
-export type ReturnType = 'single' | 'multi';
+// How many returns a pulse reports — a property of the real instrument, not of
+// the simulation. The helios-core lidar engine fires `raysPerPulse` sub-rays
+// across the beam cone (exit diameter + divergence) and resolves the analytic
+// waveform into returns:
+//   - 'single': at most one return per pulse (RETURN_MODE_SINGLE, maxReturns=1),
+//               chosen by `returnSelection` (strongest/first/last). Models
+//               single-return TLS (Leica, FARO) and single-return-configured
+//               spinning sensors (Velodyne).
+//   - 'multi' : all detected returns reported up to `maxReturns`
+//               (RETURN_MODE_MULTI). Models full-waveform / multi-echo
+//               instruments (RIEGL VZ-400i, miniVUX) that penetrate foliage.
+//
+// For an idealized, exact-intersection scan (no beam-footprint spread), set
+// `raysPerPulse` to 1 in the Synthetic Scan Options — that is a simulation knob,
+// not a scan property, so it is NOT a return mode here.
+export type PulseReturnMode = 'single' | 'multi';
+
+// Which return a single-return pulse keeps when its beam cone resolves several.
+// Maps to helios-core SingleReturnSelection (STRONGEST/FIRST/LAST).
+export type SingleReturnSelection = 'strongest' | 'first' | 'last';
 
 // Acquisition geometry of the scan.
 //   - 'raster'            : uniform Ntheta x Nphi angular grid (the classic
@@ -43,9 +62,18 @@ export interface ScanParameters {
   zenithMaxDeg: number;
   azimuthMinDeg: number;
   azimuthMaxDeg: number;
-  returnType: ReturnType;
-  // Multi-return only. Beam exit diameter in meters and divergence in
-  // milliradians (the units pyhelios uses).
+  // How many returns the pulse reports (single / multi).
+  returnMode: PulseReturnMode;
+  // Multi-return only: the maximum number of returns reported per pulse (the
+  // engine's maxReturns). Ignored by 'single' (capped at 1).
+  maxReturns: number;
+  // Single-return only: which return to keep when the beam cone resolves several
+  // (strongest / first / last). Ignored by 'multi'.
+  returnSelection: SingleReturnSelection;
+  // Beam exit diameter in meters and divergence in milliradians (the units
+  // pyhelios uses). Define the beam cone sampled by both single- and multi-return
+  // scans (a wider cone footprint hits more surfaces near edges). At rays-per-pulse
+  // = 1 the cone collapses to one exact ray and these are effectively ignored.
   beamExitDiameterM: number;
   beamDivergenceMrad: number;
   // Residual scanner tilt away from plumb, in degrees — a real property of the
@@ -100,7 +128,9 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   zenithMaxDeg: 180,
   azimuthMinDeg: 0,
   azimuthMaxDeg: 360,
-  returnType: 'single',
+  returnMode: 'single',
+  maxReturns: 5,
+  returnSelection: 'strongest',
   beamExitDiameterM: 0.01,
   beamDivergenceMrad: 0.5,
   tiltRollDeg: 0,
@@ -112,6 +142,39 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   // used by a synthetic moving scan.
   pulseRateHz: 300000,
 };
+
+// Migrate a persisted scan-params blob to the current shape. Older scans (and
+// electron-store entries) carried `returnType: 'single' | 'multi'` and no
+// maxReturns / returnSelection. Map the old field onto `returnMode` and fill the
+// new fields from defaults so a stale persisted scan never loads with an invalid
+// or missing return mode.
+export function migrateScanReturnFields(
+  raw: Record<string, unknown>,
+): Pick<ScanParameters, 'returnMode' | 'maxReturns' | 'returnSelection'> {
+  const legacy = raw.returnType;
+  const current = raw.returnMode;
+  let returnMode: PulseReturnMode;
+  if (current === 'single' || current === 'multi') {
+    returnMode = current;
+  } else if (legacy === 'multi') {
+    returnMode = 'multi';
+  } else if (legacy === 'single') {
+    returnMode = 'single';
+  } else {
+    returnMode = DEFAULT_SCAN_PARAMETERS.returnMode;
+  }
+  const rawMax = raw.maxReturns;
+  const maxReturns =
+    typeof rawMax === 'number' && Number.isFinite(rawMax) && rawMax >= 1
+      ? Math.round(rawMax)
+      : DEFAULT_SCAN_PARAMETERS.maxReturns;
+  const rawSel = raw.returnSelection;
+  const returnSelection: SingleReturnSelection =
+    rawSel === 'strongest' || rawSel === 'first' || rawSel === 'last'
+      ? rawSel
+      : DEFAULT_SCAN_PARAMETERS.returnSelection;
+  return { returnMode, maxReturns, returnSelection };
+}
 
 export function makeDefaultScanParameters(
   originGuess?: { x: number; y: number; z: number },
