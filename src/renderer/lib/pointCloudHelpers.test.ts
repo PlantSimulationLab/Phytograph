@@ -385,6 +385,24 @@ describe('voxelMeshToHeliosGrid', () => {
     expect(grid!.ny).toBe(3); // rounded from 2.6
     expect(grid!.nz).toBe(1); // clamped up from -5
   });
+
+  it('captures a non-zero z-rotation (degrees) as the grid rotation', () => {
+    const grid = voxelMeshToHeliosGrid(
+      { x: 0, y: 0, z: 0.5 },
+      { x: 0.5, y: 0.5, z: 0.5 },
+      { x: 2, y: 2, z: 2 },
+      45,
+    );
+    expect(grid!.rotation).toBe(45); // round-trips sphere.xml's <rotation> 45
+  });
+
+  it('omits rotation when zero or negligible (axis-aligned grid)', () => {
+    expect('rotation' in voxelMeshToHeliosGrid(
+      { x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 }, { x: 1, y: 1, z: 1 }, 0)!).toBe(false);
+    // No rotation argument behaves like zero.
+    expect('rotation' in voxelMeshToHeliosGrid(
+      { x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 }, { x: 1, y: 1, z: 1 })!).toBe(false);
+  });
 });
 
 describe('formatColorbarTick', () => {

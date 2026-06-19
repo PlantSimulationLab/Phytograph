@@ -94,6 +94,73 @@ test('exports a multi-scan XML bundle for the sphere fixture', async () => {
   }
 });
 
+// Grid round-trip: import a Helios XML that carries a <grid> block (so a voxel
+// box lands in the scene), then re-export with "Export grid" ticked and the grid
+// added. The written XML must regain a <grid> block matching the imported grid's
+// center/size/Nx-Ny-Nz/rotation — closing the round-trip that was previously
+// impossible (exportScans() writes only <scan> blocks).
+test('round-trips a <grid> block when Export grid is ticked', async () => {
+  const { app, page, close } = await launchApp();
+  const outDir = mkdtempSync(join(tmpdir(), 'phytograph-gridexport-'));
+  const xmlPath = join(outDir, 'sphere.xml');
+
+  try {
+    // sphere-with-grid.xml: one scan + a grid at center (0.25,-0.5,0.75),
+    // size (1.5,2,2.5), Nx/Ny/Nz = 2/3/4, rotated 30° about z.
+    const xmlFixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere-with-grid.xml');
+    await stubOpenDialog(app, xmlFixture);
+    await stubSaveDialog(app, xmlPath);
+
+    await page.getByTestId('tool-add-scan').click();
+    const popup = page.getByTestId('scan-parameters-popup');
+    await expect(popup).toBeVisible();
+    await page.getByTestId('scan-import-xml').click();
+    await expect(popup).not.toBeVisible({ timeout: 20_000 });
+    await completeImportWizard(page);
+
+    await expect(page.getByTestId('scans-panel').locator('[data-testid="scan-row"]'))
+      .toHaveCount(1, { timeout: 20_000 });
+    // The grid imported as a voxel-box mesh ("Grid 1").
+    await expect(page.getByTestId('mesh-row')).toHaveCount(1);
+
+    await page.evaluate(() => (window as unknown as { __openExportPanel: () => void }).__openExportPanel());
+    await expect(page.getByTestId('export-modal')).toBeVisible();
+    await expect(page.getByTestId('export-scan-section')).toBeVisible();
+
+    // XML mode (default) reveals the "Export grid" toggle. Tick it and add the
+    // one scene grid.
+    await expect(page.getByTestId('export-scan-mode-xml')).toHaveAttribute('data-active', 'true');
+    const gridToggle = page.getByTestId('export-grid-toggle');
+    await expect(gridToggle).toBeVisible();
+    await gridToggle.check();
+    const gridRows = page.getByTestId('export-grid-row');
+    await expect(gridRows).toHaveCount(1);
+    await gridRows.first().getByRole('checkbox').check();
+    await expect(gridRows.first()).toHaveAttribute('data-checked', 'true');
+
+    await page.getByTestId('export-scan-xml').click();
+    await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    await expect.poll(() => existsSync(xmlPath), { timeout: 30_000, intervals: [200, 500, 1000] }).toBe(true);
+
+    // The exported XML regained a <grid> block carrying the imported geometry.
+    const xml = readFileSync(xmlPath, 'utf-8');
+    const grid = xml.match(/<grid>([\s\S]*?)<\/grid>/);
+    expect(grid, xml).not.toBeNull();
+    const body = grid![1];
+    const nums = (tag: string) =>
+      body.match(new RegExp(`<${tag}>([^<]*)</${tag}>`))![1].trim().split(/\s+/).map(Number);
+    expect(nums('center')).toEqual([0.25, -0.5, 0.75]);
+    expect(nums('size')).toEqual([1.5, 2, 2.5]);
+    expect(nums('Nx')).toEqual([2]);
+    expect(nums('Ny')).toEqual([3]);
+    expect(nums('Nz')).toEqual([4]);
+    expect(nums('rotation')).toEqual([30]);
+  } finally {
+    await close();
+  }
+});
+
 // Data-only mode: same workflow, but "Data only" writes just the per-scan .xyz
 // files (no XML). Verifies the mode toggle and that no .xml lands on disk.
 test('exports scan data only (no XML) when the Data only mode is chosen', async () => {

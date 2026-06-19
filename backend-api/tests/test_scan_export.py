@@ -293,6 +293,79 @@ class TestMultibeamExport:
         assert "elevation" in res["error"].lower()
 
 
+class TestScanExportGrids:
+    """`grids` (XML mode) injects <grid> blocks so a bundle round-trips its grid.
+
+    PyHelios exportScans() writes only <scan> blocks, so the export post-processes
+    the XML to add the requested grids — mirroring sphere.xml's <grid> element.
+    """
+
+    def _grid(self, rotation=0.0):
+        # The 2x2x2, 45deg grid from example-datasets/sphere.xml.
+        return main.ScanExportGrid(
+            center=[0.0, 0.0, 0.5], size=[0.5, 0.5, 0.5],
+            nx=2, ny=2, nz=2, rotation=rotation)
+
+    def test_grid_block_written_with_rotation(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="g",
+            include_misses=True, grids=[self._grid(rotation=45.0)]))
+        assert res["success"] is True, res.get("error")
+        xml = _decode(res["files"], ".xml")
+        # One well-formed <grid> block carrying sphere.xml's center/size/N/rotation.
+        grid = re.search(r"<grid>(.*?)</grid>", xml, re.S)
+        assert grid is not None, xml
+        body = grid.group(1)
+        assert re.search(r"<center>\s*0\.0?\s+0\.0?\s+0\.5\s*</center>", body), body
+        assert re.search(r"<size>\s*0\.5\s+0\.5\s+0\.5\s*</size>", body), body
+        assert re.search(r"<Nx>\s*2\s*</Nx>", body)
+        assert re.search(r"<Ny>\s*2\s*</Ny>", body)
+        assert re.search(r"<Nz>\s*2\s*</Nz>", body)
+        assert re.search(r"<rotation>\s*45(\.0)?\s*</rotation>", body), body
+        # Injected inside the helios document, before the closing tag.
+        assert xml.rstrip().endswith("</helios>")
+        assert xml.index("<grid>") < xml.index("</helios>")
+
+    def test_no_grids_writes_no_grid_block(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="ng",
+            include_misses=True))  # grids defaults to None
+        assert res["success"] is True, res.get("error")
+        assert "<grid>" not in _decode(res["files"], ".xml")
+
+    def test_zero_rotation_omits_rotation_tag(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="z",
+            include_misses=True, grids=[self._grid(rotation=0.0)]))
+        xml = _decode(res["files"], ".xml")
+        assert "<grid>" in xml and "<rotation>" not in xml
+
+    def test_bundle_with_grid_reloads_through_pyhelios(self, tmp_path):
+        # The injected XML must stay parseable by Helios: reload and confirm the
+        # 2x2x2 grid materializes as 8 cells. This is the real round-trip.
+        pytest.importorskip("pyhelios")
+        from pyhelios import LiDARCloud
+
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="grt",
+            include_misses=True, grids=[self._grid(rotation=45.0)]))
+        assert res["success"] is True, res.get("error")
+        for f in res["files"]:
+            (tmp_path / f["name"]).write_bytes(base64.b64decode(f["data"]))
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            cloud = LiDARCloud()
+            cloud.disableMessages()
+            cloud.loadXML("grt.xml")
+            assert cloud.getGridCellCount() == 8
+        finally:
+            os.chdir(cwd)
+
+
 class TestScanExportErrors:
     def test_no_scans_fails(self):
         res = main._do_scan_export(main.ScanExportRequest(scans=[], include_misses=True))

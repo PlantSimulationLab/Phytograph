@@ -303,6 +303,17 @@ picker is hidden for them.
 returns-only export. Available only when at least one checked scan carries
 misses.
 
+**Export grid** — shown only in **XML + data** mode when the scene holds one or
+more [voxel grids](../concepts/scans.md). Tick it to reveal a checklist of the
+scene's grids; each grid you check is written into the bundle's `.xml` as a
+top-level `<grid>` block (its center, size, `Nx`/`Ny`/`Nz` subdivisions, and
+z-rotation). This closes the round-trip for a file like Helios' `sphere.xml` —
+import it (the `<grid>` becomes a voxel box), then re-export with the grid
+ticked and the saved XML carries the grid back out, ready to drive
+[leaf-area-density](estimate-leaf-area-density.md) or Helios triangulation
+again. Leaving the box unticked (or checking it but adding no grids) writes no
+`<grid>` blocks.
+
 The per-scan file split is always kept (the XML metadata references each data
 file by scan). Edits (crop, translation, filtering) are baked into the exported
 coordinates — what you see is what gets written. If the scene holds no scans

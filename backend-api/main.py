@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.34.0"
+BACKEND_VERSION = "0.35.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2711,6 +2711,49 @@ def _file_xyz_bounds(file_path: str, ascii_format: Optional[str] = None):
     return n, lo, hi
 
 
+def _grid_xml_block(center: list, size: list, nx: int = 1, ny: int = 1,
+                    nz: int = 1, rotation_deg: float = 0.0) -> list:
+    """Build the lines of a Helios ``<grid>`` block. ``rotation_deg`` (azimuth
+    about +z) is emitted as a ``<rotation>`` tag only when meaningfully non-zero
+    — the Helios parser treats it as optional, defaulting to 0. Shared by the
+    triangulation config writer and the scan-export grid round-trip so both stay
+    consistent."""
+    lines = ['<grid>']
+    lines.append(f'    <center>{center[0]} {center[1]} {center[2]}</center>')
+    lines.append(f'    <size>{size[0]} {size[1]} {size[2]}</size>')
+    lines.append(f'    <Nx>{nx}</Nx>')
+    lines.append(f'    <Ny>{ny}</Ny>')
+    lines.append(f'    <Nz>{nz}</Nz>')
+    if abs(float(rotation_deg)) > 1e-9:
+        lines.append(f'    <rotation>{rotation_deg}</rotation>')
+    lines.append('</grid>')
+    return lines
+
+
+def _inject_grids_into_helios_xml(xml_path: str, grids: list) -> None:
+    """Insert <grid> blocks (one per ScanExportGrid) into an existing Helios XML,
+    immediately before the closing </helios>. Used to round-trip scene grids on
+    scan export, since PyHelios exportScans() emits only <scan> blocks. No-op when
+    ``grids`` is empty. Falls back to appending if no </helios> tag is found."""
+    if not grids:
+        return
+    blocks = []
+    for g in grids:
+        blocks.append('')
+        blocks.extend(_grid_xml_block(g.center, g.size, g.nx, g.ny, g.nz, g.rotation))
+    addition = '\n'.join(blocks) + '\n'
+
+    with open(xml_path, "r") as fh:
+        text = fh.read()
+    idx = text.rfind('</helios>')
+    if idx == -1:
+        text = text.rstrip() + '\n' + addition
+    else:
+        text = text[:idx] + addition + text[idx:]
+    with open(xml_path, "w") as fh:
+        fh.write(text)
+
+
 def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
                          grid_size: list, grid_nx: int = 1, grid_ny: int = 1,
                          grid_nz: int = 1, xml_name: str = "helios_config.xml") -> str:
@@ -2741,13 +2784,7 @@ def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
         xml_lines.append('')
 
     # Grid section is required for triangulation to work
-    xml_lines.append('<grid>')
-    xml_lines.append(f'    <center>{grid_center[0]} {grid_center[1]} {grid_center[2]}</center>')
-    xml_lines.append(f'    <size>{grid_size[0]} {grid_size[1]} {grid_size[2]}</size>')
-    xml_lines.append(f'    <Nx>{grid_nx}</Nx>')
-    xml_lines.append(f'    <Ny>{grid_ny}</Ny>')
-    xml_lines.append(f'    <Nz>{grid_nz}</Nz>')
-    xml_lines.append('</grid>')
+    xml_lines.extend(_grid_xml_block(grid_center, grid_size, grid_nx, grid_ny, grid_nz))
     xml_lines.append('')
     xml_lines.append('</helios>')
 
@@ -4462,6 +4499,18 @@ async def lad_compute(request: LADComputeRequest):
 # machinery the LAD path uses (a session-backed cloud yields its surviving,
 # translation-applied points; deletions already applied, never re-reading disk).
 
+class ScanExportGrid(BaseModel):
+    """A voxel-box grid to write as a Helios <grid> block on scan XML export, so a
+    bundle like sphere.xml round-trips its grid. center/size are world extents;
+    nx/ny/nz the per-axis cell counts; rotation the azimuth about +z in degrees."""
+    center: List[float]      # [x, y, z]
+    size: List[float]        # [x, y, z] full extents
+    nx: int = 1
+    ny: int = 1
+    nz: int = 1
+    rotation: float = 0.0    # degrees about +z
+
+
 class ScanExportEntry(BaseModel):
     """One scan to export. Point source is one of session_id / points / file_path
     (resolved in that precedence, mirroring the LAD path). Scanner geometry is
@@ -4509,6 +4558,9 @@ class ScanExportRequest(BaseModel):
     # Data-only output format (write_xml=False). One of las/laz/ply/xyz/csv/txt/
     # obj/e57. Ignored when write_xml=True (the Helios bundle is always .xyz).
     data_format: str = "xyz"
+    # Voxel-box grids to inject as <grid> blocks (write_xml=True only). None/empty
+    # → no grid blocks written. Lets a scan bundle round-trip its grid(s).
+    grids: Optional[List["ScanExportGrid"]] = None
 
 
 # Standard scalar columns we try to preserve on export, in a stable order. Any of
@@ -5027,6 +5079,11 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
     with tempfile.TemporaryDirectory() as tmpdir:
         xml_path = os.path.join(tmpdir, f"{base}.xml")
         cloud.exportScans(xml_path)
+        # PyHelios exportScans() writes only <scan> blocks. To round-trip the
+        # scene's grids (e.g. sphere.xml's voxel box), inject the requested
+        # <grid> blocks just before the closing </helios>.
+        if request.grids:
+            _inject_grids_into_helios_xml(xml_path, request.grids)
         files = []
         for name in sorted(os.listdir(tmpdir)):
             with open(os.path.join(tmpdir, name), "rb") as fh:

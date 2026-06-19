@@ -401,6 +401,10 @@ export interface HeliosGrid {
   nx: number;
   ny: number;
   nz: number;
+  // Azimuthal rotation about +z, in degrees. Optional — omitted for
+  // axis-aligned grids. Carried so a rotated grid round-trips into the
+  // Helios XML's <rotation> tag on scan export.
+  rotation?: number;
 }
 
 export interface HeliosTriangulationRequest {
@@ -1600,6 +1604,9 @@ export interface ScanExportRequest {
   write_xml: boolean;
   // Data-only output format (write_xml=false): las/laz/ply/xyz/csv/txt/obj/e57.
   data_format?: string;
+  // Voxel-box grids to write as <grid> blocks (XML mode only). Omitted/empty →
+  // no grid blocks. Lets a bundle like sphere.xml round-trip its grid.
+  grids?: HeliosGrid[];
 }
 
 export interface ScanExportFile {

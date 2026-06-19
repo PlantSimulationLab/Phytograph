@@ -40,6 +40,9 @@ export interface ExportModalProps {
   // scalars/labels), in default order. Used by the ASCII column picker.
   cloudColumns: ExportColumn[];
   scanExportList: ScanExportListItem[];
+  // Voxel-box grids in the scene the user can add to a scan XML export so the
+  // bundle round-trips (id + human label only; the parent resolves the geometry).
+  gridOptions: { id: string; label: string }[];
   meshSelected: boolean;
   meshName: string;
   meshTriangleCount: number;
@@ -57,10 +60,11 @@ export interface ExportModalProps {
   ) => void;
   // Scan export. `scanIds` checked scans, `includeMisses`, `writeXml` (bundle vs
   // data-only), `columns` the ordered ASCII column slugs (always includes xyz),
-  // and `dataFormat` the per-scan file format when writeXml is false.
+  // `dataFormat` the per-scan file format when writeXml is false, and `gridIds`
+  // the voxel-box grids to write as <grid> blocks (XML mode only; empty otherwise).
   onExportScanXml: (
     scanIds: string[], includeMisses: boolean, writeXml: boolean,
-    columns: string[], dataFormat: string,
+    columns: string[], dataFormat: string, gridIds: string[],
   ) => void;
   onExportMesh: (format: 'obj' | 'ply' | 'stl') => void;
   onExportSkeleton: (format: 'obj' | 'ply' | 'json') => void;
@@ -88,6 +92,7 @@ export function ExportModal({
   cloudName,
   cloudColumns,
   scanExportList,
+  gridOptions,
   meshSelected,
   meshName,
   meshTriangleCount,
@@ -112,6 +117,15 @@ export function ExportModal({
   // Data-only output format (revealed when writeXml is false).
   const [scanDataFormat, setScanDataFormat] = useState<'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj' | 'e57'>('xyz');
   const [checkedScanIds, setCheckedScanIds] = useState<Set<string>>(new Set());
+  // Grid export (XML mode only): off by default; when on, reveals a checklist of
+  // the scene's voxel-box grids. An empty selection writes no <grid> blocks.
+  const [exportGrid, setExportGrid] = useState(false);
+  const [checkedGridIds, setCheckedGridIds] = useState<Set<string>>(new Set());
+  const toggleGrid = (id: string) => setCheckedGridIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const scanListKey = useMemo(
     () => scanExportList.map(s => `${s.id}:${s.selected}`).join(','),
     [scanExportList]);
@@ -358,12 +372,56 @@ export function ExportModal({
                 />
                 Include miss points
               </label>
+
+              {/* Export grid — XML mode only. Lets the user add scene voxel-box
+                  grids as <grid> blocks so a bundle like sphere.xml round-trips.
+                  Hidden in Data-only mode and when the scene has no grids. */}
+              {writeXml && gridOptions.length > 0 && (
+                <>
+                  <label className="flex items-center gap-2 text-[11px] my-2 text-neutral-200 cursor-pointer">
+                    <input
+                      type="checkbox" data-testid="export-grid-toggle"
+                      checked={exportGrid}
+                      onChange={(e) => setExportGrid(e.target.checked)}
+                      className="accent-green-600"
+                    />
+                    Export grid
+                  </label>
+                  {exportGrid && (
+                    <div
+                      data-testid="export-grid-list"
+                      className="max-h-32 overflow-y-auto mb-2 rounded border border-neutral-700/60 divide-y divide-neutral-700/40"
+                    >
+                      {gridOptions.map(g => (
+                        <label
+                          key={g.id}
+                          data-testid="export-grid-row"
+                          data-grid-label={g.label}
+                          data-checked={checkedGridIds.has(g.id) ? 'true' : 'false'}
+                          className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-neutral-200 cursor-pointer hover:bg-neutral-700/40"
+                        >
+                          <input
+                            type="checkbox"
+                            data-testid={`export-grid-check-${g.id}`}
+                            checked={checkedGridIds.has(g.id)}
+                            onChange={() => toggleGrid(g.id)}
+                            className="accent-green-600"
+                          />
+                          <span className="truncate flex-1" title={g.label}>{g.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
               <button
                 data-testid="export-scan-xml"
                 onClick={() => onExportScanXml(
                   [...checkedScanIds], includeMisses && anyCheckedHasMisses, writeXml,
                   scanFormatIsAscii ? selectedSlugs(scanColumns) : ['x', 'y', 'z'],
                   writeXml ? 'xyz' : scanDataFormat,
+                  exportGrid && writeXml ? [...checkedGridIds] : [],
                 )}
                 disabled={checkedScans.length === 0}
                 className={`w-full px-2 py-2 rounded text-xs flex items-center justify-center gap-1.5 ${

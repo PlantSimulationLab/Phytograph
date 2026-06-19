@@ -213,23 +213,29 @@ export function fitGridToBounds(
 // backend expects. A voxel shape's base geometry is a unit cube spanning
 // ±0.5, so its world center is the mesh position and its world size equals the
 // mesh scale directly. `subdivisions` becomes the grid's per-axis cell count
-// (defaulting to a single cell when unset). Returns null when the mesh carries
-// no grid subdivisions (i.e. it isn't a voxel box).
+// (defaulting to a single cell when unset). `rotationDeg` is the box's z-Euler
+// angle (degrees); a meaningful non-zero value becomes the grid's azimuthal
+// rotation (only z is representable in a Helios grid — x/y tilt is ignored).
+// Returns null when the mesh carries no grid subdivisions (i.e. it isn't a
+// voxel box).
 export function voxelMeshToHeliosGrid(
   position: { x: number; y: number; z: number } | undefined,
   scale: { x: number; y: number; z: number } | undefined,
   subdivisions: { x: number; y: number; z: number } | undefined,
+  rotationDeg?: number,
 ): HeliosGrid | null {
   if (!subdivisions) return null;
   const p = position ?? { x: 0, y: 0, z: 0 };
   const s = scale ?? { x: 1, y: 1, z: 1 };
-  return {
+  const grid: HeliosGrid = {
     center: [p.x, p.y, p.z],
     size: [s.x, s.y, s.z],
     nx: Math.max(1, Math.round(subdivisions.x)),
     ny: Math.max(1, Math.round(subdivisions.y)),
     nz: Math.max(1, Math.round(subdivisions.z)),
   };
+  if (rotationDeg && Math.abs(rotationDeg) > 1e-6) grid.rotation = rotationDeg;
+  return grid;
 }
 
 // Per-triangle geometry derived from the face normal, in the leaf-angle

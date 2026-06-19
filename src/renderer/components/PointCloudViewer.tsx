@@ -1330,6 +1330,9 @@ export default function PointCloudViewer({
   const meshPositionsRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
   const meshRotationsRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
   const meshScalesRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
+  // Latest scene grid options, mirrored for callbacks defined before the memo
+  // (e.g. exportScanXmlBundle) so they can resolve grid ids without a stale dep.
+  const heliosGridOptionsRef = useRef<GridOption[]>([]);
   const skeletonPositionsRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
 
   // Blender-style modal transform state: T (translate), S (scale) with X/Y/Z axis lock
@@ -4633,7 +4636,7 @@ export default function PointCloudViewer({
   // Export one or more selected scans, either as a Helios XML + per-scan ASCII
   // bundle (writeXml=true) or as the per-scan ASCII data files only
   // (writeXml=false). `scanIds` are the user-chosen scans (from the panel's list).
-  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz') => {
+  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz', gridIds: string[] = []) => {
     const entries: ScanExportEntry[] = [];
     for (const id of scanIds) {
       const e = buildScanExportEntry(id);
@@ -4647,6 +4650,16 @@ export default function PointCloudViewer({
         message: 'No exportable scans selected (a scan needs scanner parameters and point data).' });
       return;
     }
+
+    // Voxel-box grids the user added (XML mode only). Each grid's center/size are
+    // already its viewer world transform (heliosGridOptions reads meshPositions/
+    // meshScales/meshRotations), mirroring how import maps <grid> center → position
+    // — so no scan-translation shift applies here; the grid is its own object.
+    // Read via a ref since heliosGridOptions is declared later in the component.
+    const gridOpts = heliosGridOptionsRef.current;
+    const grids: HeliosGrid[] = gridIds
+      .map(id => gridOpts.find(g => g.id === id)?.grid)
+      .filter((g): g is HeliosGrid => !!g);
 
     // Effective per-scan file extension: XML mode always writes Helios .xyz data;
     // data-only writes the chosen format. The save picker fixes the folder + base
@@ -4681,6 +4694,7 @@ export default function PointCloudViewer({
       const resp = await exportScanXml({
         scans: entries, base_name: chosenBase, include_misses: includeMisses,
         write_xml: writeXml, data_format: dataFormat,
+        ...(grids.length ? { grids } : {}),
       });
       if (!resp.success || !resp.files) {
         showToast({ title: 'Export Failed', type: 'error', message: resp.error || 'Unknown error' });
@@ -8319,6 +8333,7 @@ export default function PointCloudViewer({
         meshPositions.get(m.id),
         meshScales.get(m.id),
         m.gridSubdivisions,
+        meshRotations.get(m.id)?.z,
       );
       if (!grid) continue;
       const sx = grid.size[0], sy = grid.size[1], sz = grid.size[2];
@@ -8331,7 +8346,8 @@ export default function PointCloudViewer({
       });
     }
     return options;
-  }, [meshes, meshPositions, meshScales, displayNameOfMesh]);
+  }, [meshes, meshPositions, meshScales, meshRotations, displayNameOfMesh]);
+  useEffect(() => { heliosGridOptionsRef.current = heliosGridOptions; }, [heliosGridOptions]);
 
   // Existing Helios triangulations the LAD tool can REUSE. The backend always
   // re-triangulates internally, so "reuse" means locking the inversion to the
@@ -12762,6 +12778,9 @@ export default function PointCloudViewer({
                 selected: selectedIds.has(c.id),
               };
             })}
+          // Scene voxel-box grids the user can add to a scan XML export (id +
+          // label; geometry is resolved in exportScanXmlBundle via the same list).
+          gridOptions={heliosGridOptions.map(g => ({ id: g.id, label: g.label }))}
           onExportScanXml={exportScanXmlBundle}
           meshSelected={!!selectedMesh}
           meshName={selectedMesh ? displayNameOfMesh(selectedMesh) : ''}
