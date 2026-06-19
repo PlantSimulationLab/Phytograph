@@ -190,70 +190,62 @@ export function CameraController({
     return () => clearTimeout(timer);
   }, [hasContent, bounds, snapToView]);
 
-  // Adapt the perspective near/far planes for depth precision. The Canvas seeds a
-  // fixed near=0.01 / far=10000, which is the wrong scale at both extremes: a
-  // large scene clips at the far plane, and (worse) a tiny near against a far that
-  // dwarfs the content wastes depth-buffer precision near the origin, so coplanar
-  // geometry — the ground grid, or two synthetic scans sampling the same z=0
-  // plane — z-fights and flickers when orbiting.
+  // Adapt the perspective near/far planes for depth precision AND to keep the
+  // infinite ground grid from clipping. The Canvas seeds a fixed near=0.01 /
+  // far=10000, wrong at both extremes: a large scene clips at the far plane, and
+  // (worse) a tiny near against a far that dwarfs the content wastes depth-buffer
+  // precision near the origin, so coplanar geometry — the ground grid, or two
+  // synthetic scans sampling the same z=0 plane — z-fights and flickers.
   //
-  // Two levers, both aimed at shrinking the far/near *ratio* (depth precision is
-  // governed by that ratio, not the absolute planes):
+  // Both planes track the LIVE camera→target distance on every move (depth
+  // precision is governed by the far/near *ratio*, not the absolute planes, and
+  // tracking dist holds that ratio ≈ constant ~4000 at any zoom):
   //
-  // 1. FAR tracks the scene. The camera orbits at ~2x maxDim out and diag >= maxDim,
-  //    so diag*4 clears any orbit distance with margin — far less wasteful than the
-  //    old diag*10 floored at 1000.
-  // 2. NEAR tracks the camera's distance to its orbit target (see the change-driven
-  //    effect below), pushed as far out as it can go without clipping. A near pinned
-  //    at 0.01 is 100x closer than needed when orbiting a metre-scale scene at
-  //    several metres out, and that tiny near is what crushes precision near z=0.
+  // - NEAR = clamp(dist/1000, 1e-4, 0.1): pushed as far out as it can go without
+  //   clipping (well inside minDistance 0.1, so the orbit target is never clipped),
+  //   pulled in as you dolly toward a surface. A near pinned at 0.01 is 100x closer
+  //   than needed when orbiting a metre-scale scene metres out, and that tiny near
+  //   is what crushes precision near z=0.
+  // - FAR = max(diag*4, dist*4): the infinite grid fades out by ~fadeDistance =
+  //   dist*1.5 (see GroundGrid), so the farthest visible grid fragment sits ~dist*2.5
+  //   from the camera; dist*4 clears that with margin so the grid always *fades* and
+  //   never hits a hard far-plane cut. Floored at diag*4 (diag = scene diagonal) so a
+  //   camera parked close to a large scene still renders the whole scene. The old FAR
+  //   was bounds-only (max(100, diag*4)) and never tracked the camera, so on a small
+  //   scene the camera could orbit past far=100 (maxDistance is 10000) and the grid
+  //   culled abruptly.
   //
-  // This is a pure projection-matrix change — no per-fragment cost. (We deliberately
-  // do NOT use a logarithmic depth buffer: it fixes precision globally but forces
-  // every fragment to write gl_FragDepth, disabling early-Z and collapsing heavy
-  // point clouds to single-digit fps.)
-  useEffect(() => {
-    const persp = camera as THREE.PerspectiveCamera;
-    if (!persp.isPerspectiveCamera) return;
-    const diag = bounds.size.length() || 1;
-    // Floor at 100 so tiny scenes keep a sane far plane and don't clip when zoomed out.
-    const far = Math.max(100, diag * 4);
-    if (persp.far !== far) {
-      persp.far = far;
-      persp.updateProjectionMatrix();
-    }
-  }, [bounds, camera]);
-
-  // Drive NEAR from the live camera→target distance on every camera move. Pushing
-  // near out as the camera pulls back tightens the far/near ratio (more precision
-  // near z=0); pulling it in as you dolly toward a surface keeps that surface
-  // unclipped. near = dist/1000 is well inside minDistance (0.1) so the orbit
-  // target is never clipped, clamped to [1e-4, 0.1] so it stays sane at the extremes.
-  // Event-driven (OrbitControls 'change'), so it costs nothing while idle.
+  // Event-driven (OrbitControls 'change'), so it costs nothing while idle; both
+  // planes share one updateProjectionMatrix() per move. Pure projection-matrix
+  // change — no per-fragment cost. (We deliberately do NOT use a logarithmic depth
+  // buffer: it fixes precision globally but forces every fragment to write
+  // gl_FragDepth, disabling early-Z and collapsing heavy point clouds to single-digit fps.)
   useEffect(() => {
     const persp = camera as THREE.PerspectiveCamera;
     if (!persp.isPerspectiveCamera) return;
     let controls: any = null;
-    const updateNear = () => {
+    const updatePlanes = () => {
       if (!controls) return;
+      const diag = boundsRef.current.size.length() || 1;
       const dist = persp.position.distanceTo(controls.target);
       const near = Math.min(0.1, Math.max(1e-4, dist / 1000));
-      if (persp.near !== near) {
-        persp.near = near;
-        persp.updateProjectionMatrix();
-      }
+      const far = Math.max(diag * 4, dist * 4);
+      let dirty = false;
+      if (persp.near !== near) { persp.near = near; dirty = true; }
+      if (persp.far !== far) { persp.far = far; dirty = true; }
+      if (dirty) persp.updateProjectionMatrix();
     };
     // Defer one tick so OrbitControls is mounted (mirrors the framing effect above,
     // which has no hard ordering guarantee against the controls' own setTimeout(0)).
     const timer = setTimeout(() => {
       controls = controlsRef.current;
       if (!controls) return;
-      updateNear();
-      controls.addEventListener('change', updateNear);
+      updatePlanes();
+      controls.addEventListener('change', updatePlanes);
     }, 0);
     return () => {
       clearTimeout(timer);
-      if (controls) controls.removeEventListener('change', updateNear);
+      if (controls) controls.removeEventListener('change', updatePlanes);
     };
   }, [bounds, camera, hasContent]);
 

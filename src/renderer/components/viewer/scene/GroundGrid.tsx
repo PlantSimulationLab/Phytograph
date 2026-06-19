@@ -10,9 +10,6 @@ interface GroundGridProps {
   rotation: [number, number, number];
   cellSize: number;
   sectionSize: number;
-  // Lower bound for the faded radius — the real scene extent, so the grid is
-  // always at least scene-sized even when the camera is close.
-  baseFadeDistance: number;
 }
 
 // How much of the camera→target distance the faded radius spans. ~1.5 keeps the
@@ -40,10 +37,15 @@ function snap125(x: number): number {
 }
 
 // drei's <Grid> fades each cell by its in-plane distance from the point under
-// the camera, clamped at a *constant* fadeDistance — so a static value yields a
-// fixed-radius disk that shrinks to nothing as you orbit/zoom out. We instead
-// rescale fadeDistance every frame from the camera's distance to its orbit
-// target, so the visible patch grows with viewing distance.
+// the camera, clamped at a *constant* fadeDistance. We rescale fadeDistance every
+// frame to track the camera's distance to its orbit target (× FADE_DISTANCE_FACTOR)
+// — and ONLY that, no scene-sized floor. The floor used to be the bug: it pinned
+// the lit disk at scene scale even when zoomed in, so far cells — sized by the LOD
+// for the *near* target — projected sub-pixel out at the fade edge (moiré, then a
+// solid white wash). Tying the fade radius purely to dist keeps it scaling in
+// lockstep with the LOD cell size (which also tracks dist), so the cell count from
+// camera to fade edge is a fixed constant (~30 cells, outer ring ~TARGET_CELL_PX)
+// at every zoom: the far edge always fades before it can alias.
 //
 // The cell/section *world* sizes are likewise driven per frame: drei's Grid bakes
 // them as material uniforms, so a fixed size means the cells shrink on screen as
@@ -58,7 +60,6 @@ export function GroundGrid({
   rotation,
   cellSize,
   sectionSize,
-  baseFadeDistance,
 }: GroundGridProps) {
   // drei's Grid forwards its ref to the underlying mesh, so ref.current.material
   // is the GridMaterial whose fadeDistance uniform we drive each frame.
@@ -72,7 +73,9 @@ export function GroundGrid({
     const dist = target
       ? state.camera.position.distanceTo(target)
       : state.camera.position.length();
-    const fade = Math.max(baseFadeDistance, dist * FADE_DISTANCE_FACTOR);
+    // Fade radius tracks the camera→target distance only; small absolute floor
+    // guards the degenerate camera-on-target (dist→0) case.
+    const fade = Math.max(1e-3, dist * FADE_DISTANCE_FACTOR);
     const mat = grid.material as THREE.ShaderMaterial;
     const uniform = mat?.uniforms?.fadeDistance;
     if (uniform) uniform.value = fade;
@@ -141,7 +144,9 @@ export function GroundGrid({
       sectionColor="#525252"
       position={position}
       rotation={rotation}
-      fadeDistance={baseFadeDistance}
+      // Cosmetic initial uniform — useFrame overwrites it from the live camera
+      // distance before the first paint.
+      fadeDistance={10}
       infiniteGrid
       side={THREE.DoubleSide}
       // Draw before coplanar (renderOrder 0) transparent geometry like a z=0

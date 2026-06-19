@@ -10739,7 +10739,6 @@ export default function PointCloudViewer({
                   ]
             }
             rotation={gridPlane === 'z-up' ? [-Math.PI / 2, 0, 0] : [0, 0, 0]}
-            baseFadeDistance={staticBounds.size.length() * 5}
           />
         )}
 
