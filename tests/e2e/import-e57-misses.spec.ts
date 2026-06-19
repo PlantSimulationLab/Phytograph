@@ -45,6 +45,18 @@ test('imports an E57, excludes misses from the octree, and toggles the miss over
     await expect(missToggle).toHaveAttribute('title', 'Show sky/miss points');
     await missToggle.click();
     await expect(missToggle).toHaveAttribute('title', 'Hide sky/miss points');
+
+    // The miss points are sky returns — they project ABOVE the hits (the import
+    // frames the camera on the hit cloud, so the misses start outside the view
+    // frustum and potree, correctly, streams no tiles for an off-screen octree).
+    // A user reveals them the same way they would any out-of-frame geometry:
+    // reframe. Snap to the top view (the viewport gizmo's Top button) so the
+    // camera looks straight down +Z — hits and misses share an x/y footprint, so
+    // both fall inside the frustum and the overlay streams. We assert against the
+    // octree hook (set only once tiles are actually VISIBLE), so this still proves
+    // the shell RENDERED, not merely that the metadata loaded.
+    await page.getByRole('button', { name: 'Top View' }).click();
+
     // The octree loads + streams asynchronously; poll until the hook appears.
     await expect
       .poll(() => page.evaluate(() => {

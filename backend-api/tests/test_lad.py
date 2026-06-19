@@ -540,6 +540,14 @@ class TestEightVoxelIsotropicPatches:
                 beam_divergence=(0.0003 if multi_return else 0.0))
             cloud.addGrid(center=self.GRID_CENTER, size=self.GRID_SIZE, ndiv=[2, 2, 2])
             with Context() as ctx:
+                # Seed the Context RNG so the multi-return scan is reproducible.
+                # syntheticScan's beam-divergence / finite-aperture sub-ray sampling
+                # draws from the Context RNG (LiDAR.cpp context->randu/randn), which
+                # the Context otherwise seeds from wall-clock — making per-cell LAD
+                # scatter run-to-run and the RMSE bound below an intermittent flake.
+                # A fixed seed makes the scan deterministic; syntheticScan does not
+                # reseed the Context, so this holds for the whole call.
+                ctx.seedRandomGenerator(20240607)
                 uuids = ctx.loadXML(_GEOM_XML, True)
                 exact = self._exact_per_cell_lad(ctx, uuids, cloud)
                 # Both paths record misses: calculateLeafArea() fail-fasts on a
