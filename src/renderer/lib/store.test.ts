@@ -60,6 +60,7 @@ describe('store settings', () => {
       defaultPointSize: 1,
       scanMarkerScale: 1,
       missDistanceThreshold: 1001,
+      syntheticScanMemoryBudgetMb: null,
     });
   });
 
@@ -98,6 +99,19 @@ describe('store settings', () => {
     const settings = await getSettings();
     expect(settings.missDistanceThreshold).toBe(2500);
     expect(settings.theme).toBe('light'); // untouched
+  });
+
+  it('syntheticScanMemoryBudgetMb defaults to null (use Helios default)', async () => {
+    const settings = await getSettings();
+    expect(settings.syntheticScanMemoryBudgetMb).toBeNull();
+  });
+
+  it('updateSettings round-trips a memory budget and can clear it back to null', async () => {
+    await updateSettings({ syntheticScanMemoryBudgetMb: 512 });
+    expect((await getSettings()).syntheticScanMemoryBudgetMb).toBe(512);
+    // Clearing the field commits null — the backend then leaves Helios's default.
+    await updateSettings({ syntheticScanMemoryBudgetMb: null });
+    expect((await getSettings()).syntheticScanMemoryBudgetMb).toBeNull();
   });
 });
 
@@ -141,6 +155,7 @@ describe('store export/import', () => {
       defaultPointSize: 1,
       scanMarkerScale: 1,
       missDistanceThreshold: 1001,
+      syntheticScanMemoryBudgetMb: null,
     });
   });
 });

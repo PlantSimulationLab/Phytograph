@@ -894,3 +894,59 @@ class TestPulseReturnMode:
         assert res["num_points"] > 0
         tc = np.array(res["scalars"]["target_count"], dtype=np.float64)
         assert tc.max() >= 2.0, "legacy return_type='multi' should still be multi-return"
+
+
+class TestMemoryBudget:
+    """The synthetic-scan memory budget (`synthetic_scan_memory_budget_mb`) caps the
+    transient ray-tracing buffers so a large fan-out is processed in chunks instead
+    of one OOM-prone batch. Chunking must be RESULT-INVARIANT: a deliberately tiny
+    budget that forces many chunks must yield the same hits as an unset (default)
+    budget. We exercise waveform mode (rays_per_pulse >> 1) because that is where the
+    per-pulse fan-out is large enough for the budget to actually bite.
+    """
+
+    # A solid pyramid is enough geometry; reuse the module's fixture verts.
+    def _waveform_scan(self, client, budget_mb):
+        pytest.importorskip("pyhelios")
+        body = {
+            "meshes": [{"vertices": _PYRAMID_VERTS, "triangles": _PYRAMID_TRIS}],
+            "scanners": [_scanner("top", return_type="single")],
+            # Waveform mode: many sub-rays per pulse so the live trace buffers are
+            # large and a tiny budget forces chunking.
+            "rays_per_pulse": 200,
+            "pulse_distance_threshold": 0.02,
+        }
+        if budget_mb is not None:
+            body["synthetic_scan_memory_budget_mb"] = budget_mb
+        resp = client.post("/api/lidar/scan", json=body)
+        assert resp.status_code == 200, resp.text
+        out = decode_lidar_scan(resp.content)
+        assert out["success"] is True, out.get("error")
+        return out["results"][0]
+
+    def test_tiny_budget_matches_default_budget(self, client):
+        # 1 MB forces the per-pulse fan-out into many small chunks; the default
+        # (unset) traces in far fewer. Hits must be identical either way.
+        default = self._waveform_scan(client, budget_mb=None)
+        chunked = self._waveform_scan(client, budget_mb=1)
+
+        assert default["num_points"] > 0, "fixture must produce hits to be meaningful"
+        assert chunked["num_points"] == default["num_points"], (
+            "chunking changed the hit count — the budget must be result-invariant")
+
+        p_default = np.array(default["points"], dtype=np.float64)
+        p_chunked = np.array(chunked["points"], dtype=np.float64)
+        # Same points (order-stable across chunks), to tight tolerance.
+        np.testing.assert_allclose(p_chunked, p_default, rtol=0, atol=1e-6)
+        # And the per-hit distance scalar matches too.
+        np.testing.assert_allclose(
+            np.array(chunked["scalars"]["distance"], dtype=np.float64),
+            np.array(default["scalars"]["distance"], dtype=np.float64),
+            rtol=0, atol=1e-6)
+
+    def test_zero_budget_is_ignored_uses_default(self, client):
+        # 0 (or negative) means "no explicit cap" on the wire — the backend must NOT
+        # call the C++ setter (which rejects 0), so the scan succeeds with defaults.
+        zero = self._waveform_scan(client, budget_mb=0)
+        default = self._waveform_scan(client, budget_mb=None)
+        assert zero["num_points"] == default["num_points"]

@@ -1045,11 +1045,14 @@ export default function PointCloudViewer({
   // default background color and point size that seed the per-session viewer
   // controls below. The SettingsDialog owns editing; here we only consume.
   const [triangulateMaxPoints, setTriangulateMaxPoints] = useState(5_000_000);
+  // Soft cap (MB) on the synthetic-scan ray-tracing buffers; null = Helios default.
+  const [syntheticScanMemoryBudgetMb, setSyntheticScanMemoryBudgetMb] = useState<number | null>(null);
   const settingsSeededRef = useRef(false);
   useEffect(() => {
     getSettings()
       .then(s => {
         setTriangulateMaxPoints(s.triangulateMaxPoints);
+        setSyntheticScanMemoryBudgetMb(s.syntheticScanMemoryBudgetMb);
         setScanMarkerScale(s.scanMarkerScale);
         // Background and point size are launch seeds (the Display panel owns the
         // live values), so only adopt them on the very first load — not on every
@@ -5203,6 +5206,7 @@ export default function PointCloudViewer({
         record_misses: options.includeMisses,
         scan_grid_only: grid !== undefined,
         grid,
+        synthetic_scan_memory_budget_mb: syntheticScanMemoryBudgetMb ?? undefined,
       }, controller.signal, report, (runId) => { scanRunIdRef.current = runId; });
       stopSynth();  // request resolved — no more synthetic creep
       if (!response.success) {
@@ -5272,7 +5276,7 @@ export default function PointCloudViewer({
       setIsScanning(false);
       setScanProgress(null);
     }
-  }, [extractMeshWorldGeometry, buildScanCloudData, onUpdateScanData, onAddScan, meshes, meshPositions, meshScales]);
+  }, [extractMeshWorldGeometry, buildScanCloudData, onUpdateScanData, onAddScan, meshes, meshPositions, meshScales, syntheticScanMemoryBudgetMb]);
 
   // Entry point: validate the targets, then open the Synthetic Scan Options popup
   // (the actual run happens from handleScanOptionsRun once the user confirms).

@@ -1458,6 +1458,8 @@ export interface LidarScanRequest {
   record_misses?: boolean;  // include sky/miss points (default backend = false)
   scan_grid_only?: boolean; // restrict ray-tracing to the supplied grid's cells
   grid?: HeliosGrid;        // voxel grid to crop to when scan_grid_only is set
+  // Soft cap (MB) on the ray-tracing scratch buffers; omitted = Helios default.
+  synthetic_scan_memory_budget_mb?: number;
 }
 
 // Per-scanner scan result, decoded from the binary frame as zero-copy typed

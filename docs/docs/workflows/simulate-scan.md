@@ -330,6 +330,18 @@ remembered and pre-filled next time:
 
 Click **Run scan** to proceed.
 
+!!! tip "Memory budget for very large scans"
+    A high-resolution scan with many rays per pulse can fan a single pulse
+    into a huge batch of sub-rays — enough to exhaust RAM if traced all at
+    once. **Settings → Performance → Synthetic scan memory budget (MB)**
+    caps the transient ray-tracing buffers: when set, Phytograph processes
+    each scan's beam fan-out in chunks sized to stay near that budget, so a
+    large scan completes instead of running out of memory. It bounds only
+    the trace-time scratch buffers, not the output cloud, and chunking is
+    result-invariant — the points are identical to an uncapped run. Leave
+    the field **blank** to use the engine's automatic default
+    (≈4 GiB); lower it only if a large scan is straining your machine.
+
 Phytograph loads all visible scannable geometry into one Helios scene,
 ray-traces it once from each scan position you selected, then writes each
 scanner's hit points back **onto that scanner's own scan** — the row's

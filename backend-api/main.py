@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.36.0"
+BACKEND_VERSION = "0.37.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -5476,6 +5476,11 @@ class LidarScanRequest(BaseModel):
     record_misses: bool = False
     scan_grid_only: bool = False
     grid: Optional[HeliosGrid] = None
+    # Soft cap (MB) on the transient ray-tracing scratch buffers, set via
+    # LiDARCloud.setSyntheticScanMemoryBudget. Bounds peak RAM by chunking the
+    # beam fan-out (not the output cloud) on large scans. None => leave Helios's
+    # automatic path-dependent default (4 GiB CPU / 8 GiB GPU) untouched.
+    synthetic_scan_memory_budget_mb: Optional[int] = None
 
 
 class LidarScanResult(BaseModel):
@@ -5880,6 +5885,13 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 # rays_per_pulse=1 collapses the cone to one exact ray per pulse — the
                 # idealized scan — for either mode.
                 record_misses = bool(request.record_misses)
+                # Optional user-set cap on the ray trace's transient buffers. Only
+                # override when a positive value is supplied; otherwise leave Helios's
+                # automatic path-dependent default in place.
+                if request.synthetic_scan_memory_budget_mb is not None \
+                        and request.synthetic_scan_memory_budget_mb > 0:
+                    lidar.setSyntheticScanMemoryBudget(
+                        int(request.synthetic_scan_memory_budget_mb) * 1024 * 1024)
                 _prof["add_scans"] = time.perf_counter()
                 _ckpt()
                 # The ray trace's per-scan loop and inner ray loop honor a cancel

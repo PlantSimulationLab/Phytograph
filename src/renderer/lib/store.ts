@@ -57,6 +57,11 @@ export interface AppSettings {
   // LIDAR_RAYTRACE_MISS_T = 1001 m. The primary signal (target_index == 99) needs
   // neither this nor a scanner origin, so most Helios scans ignore this value.
   missDistanceThreshold: number;
+  // Soft cap (MB) on the transient ray-tracing scratch buffers used during a
+  // synthetic scan. Lower it to reduce peak RAM on very large scans (the beam
+  // fan-out is chunked to stay near this budget; results are unchanged). null =
+  // leave Helios's automatic default (≈4 GiB on this CPU build) untouched.
+  syntheticScanMemoryBudgetMb: number | null;
 }
 
 export interface StoreData {
@@ -71,6 +76,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   defaultPointSize: 1,
   scanMarkerScale: 1,
   missDistanceThreshold: 1001,
+  syntheticScanMemoryBudgetMb: null,
 };
 
 const hasElectron = (): boolean => typeof window !== 'undefined' && !!window.electronAPI;

@@ -60,6 +60,28 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     updateSettings(updates).catch(() => {});
   }, []);
 
+  // The memory-budget field is optional (blank = use Helios's default), so it's a
+  // raw text draft rather than a DebouncedNumberInput. Seed the draft from the
+  // loaded value; commit on blur/Enter, mapping blank or non-positive -> null.
+  const [budgetDraft, setBudgetDraft] = useState('');
+  useEffect(() => {
+    setBudgetDraft(
+      settings?.syntheticScanMemoryBudgetMb != null
+        ? String(settings.syntheticScanMemoryBudgetMb)
+        : '',
+    );
+  }, [settings?.syntheticScanMemoryBudgetMb]);
+  const commitBudget = useCallback(() => {
+    const trimmed = budgetDraft.trim();
+    if (trimmed === '') {
+      patch({ syntheticScanMemoryBudgetMb: null });
+      return;
+    }
+    const n = parseInt(trimmed, 10);
+    // Reject non-finite / non-positive: snap back to the persisted value.
+    patch({ syntheticScanMemoryBudgetMb: Number.isFinite(n) && n > 0 ? n : null });
+  }, [budgetDraft, patch]);
+
   if (!isOpen) return null;
 
   return (
@@ -184,6 +206,33 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                 step={10}
                 value={settings?.missDistanceThreshold ?? 1001}
                 onCommit={(v) => patch({ missDistanceThreshold: v })}
+                className="w-32 bg-neutral-700 text-neutral-200 text-sm rounded px-2 py-1.5 border border-neutral-600"
+              />
+            </div>
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="flex-1">
+                <label className="block text-sm text-neutral-200">Synthetic scan memory budget (MB)</label>
+                <p className="text-[11px] text-neutral-500 leading-snug">
+                  Soft cap on the ray-tracing scratch buffers during a synthetic scan. Lower it to reduce peak
+                  RAM on very large scans &mdash; the beam fan-out is chunked to stay near this budget, with
+                  identical results. Leave blank to use Helios's automatic default (&asymp;4&nbsp;GiB on this build).
+                </p>
+              </div>
+              {/* Optional field: blank => null => Helios default. DebouncedNumberInput
+                  can't represent "cleared" (it only commits finite parses), so per
+                  the CLAUDE.md guidance this is a raw text input over a string draft
+                  parsed at commit, mapping empty -> null. */}
+              <input
+                type="text"
+                inputMode="numeric"
+                data-testid="settings-synthetic-scan-memory-budget"
+                placeholder="default"
+                value={budgetDraft}
+                onChange={(e) => setBudgetDraft(e.target.value)}
+                onBlur={commitBudget}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                }}
                 className="w-32 bg-neutral-700 text-neutral-200 text-sm rounded px-2 py-1.5 border border-neutral-600"
               />
             </div>
