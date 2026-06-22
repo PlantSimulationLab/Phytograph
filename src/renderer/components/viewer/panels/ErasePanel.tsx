@@ -1,4 +1,4 @@
-import { Eraser } from 'lucide-react';
+import { Eraser, X } from 'lucide-react';
 
 // Presentational erase-brush panel for flat and octree clouds. The brush math,
 // preview frame, and all apply/restore/bake logic live in PointCloudViewer; this
@@ -30,6 +30,7 @@ interface ErasePanelProps {
   onRestore: () => void;
   onBake: () => void;
   onUndoPending: () => void;
+  onClose: () => void;
 }
 
 export function ErasePanel({
@@ -52,6 +53,7 @@ export function ErasePanel({
   onRestore,
   onBake,
   onUndoPending,
+  onClose,
 }: ErasePanelProps) {
   return (
     <div
@@ -62,9 +64,19 @@ export function ErasePanel({
       data-erase-projection-kind={eraseProjectionKind}
       className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
     >
-      <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center gap-2">
-        <Eraser className="w-3 h-3" />
-        Erase Brush
+      <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
+        <span className="flex items-center gap-2">
+          <Eraser className="w-3 h-3" />
+          Erase Brush
+        </span>
+        <button
+          onClick={onClose}
+          aria-label="Close"
+          title="Close"
+          className="p-1 hover:bg-neutral-700 rounded"
+        >
+          <X className="w-3 h-3 text-neutral-400" />
+        </button>
       </div>
       {isOctree && (
         // Erase-mode toggle: ON freezes the view and makes clicks stamp; OFF lets

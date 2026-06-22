@@ -12249,6 +12249,7 @@ export default function PointCloudViewer({
                 showToast({ title: `Undo failed: ${err instanceof Error ? err.message : String(err)}`, type: 'error' });
               }
             }}
+            onClose={() => setEditMode('none')}
           />
         );
       })()}
@@ -12786,6 +12787,7 @@ export default function PointCloudViewer({
                 });
               }
             }}
+            onClose={() => setEditMode('none')}
           />
         );
       })()}

@@ -1,4 +1,4 @@
-import { Move } from 'lucide-react';
+import { Move, X } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 
 type Axis = 'x' | 'y' | 'z';
@@ -14,11 +14,12 @@ interface TranslatePanelProps {
   objectName: string;
   onCoordChange: (axis: Axis, value: number) => void;
   onReset: () => void;
+  onClose: () => void;
 }
 
 const AXES: Axis[] = ['x', 'y', 'z'];
 
-export function TranslatePanel({ position, objectName, onCoordChange, onReset }: TranslatePanelProps) {
+export function TranslatePanel({ position, objectName, onCoordChange, onReset, onClose }: TranslatePanelProps) {
   return (
     <div className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56">
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
@@ -26,8 +27,18 @@ export function TranslatePanel({ position, objectName, onCoordChange, onReset }:
           <Move className="w-3 h-3" />
           Position
         </span>
-        <span className="text-[9px] text-neutral-500 truncate max-w-[100px]" title={objectName}>
-          {objectName}
+        <span className="flex items-center gap-1">
+          <span className="text-[9px] text-neutral-500 truncate max-w-[100px]" title={objectName}>
+            {objectName}
+          </span>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            title="Close"
+            className="p-1 hover:bg-neutral-700 rounded"
+          >
+            <X className="w-3 h-3 text-neutral-400" />
+          </button>
         </span>
       </div>
 
