@@ -206,5 +206,20 @@ genuinely tiny next to a large cloud. Two viewer controls help:
   to every marker (1 = real-world size). Raise it to make markers easier
   to spot; the change applies as soon as you close Settings.
 
+### Scan pattern wireframes
+
+**View → Show Scan Pattern Wireframes** (off by default) overlays a faint
+wireframe shell on each scanner that depicts its *angular coverage* — not
+its body. A **raster** scan draws a partial lat/long sphere with the
+unswept zenith/azimuth slices removed (so a dome scan reads as a banded
+sphere missing its top and bottom caps). A **spinning multibeam** draws one
+ring per beam elevation, each with a few spokes back to the scanner to
+suggest the cone the channel sweeps; a 0° beam flattens to a horizontal
+disk. The shell rotates and leans with the scanner's heading and tilt, is
+coloured to match the scan, and its radius is five times the scanner's
+real-world height scaled by the **Scan marker size** setting — a halo
+around the instrument, not the full scan range. Toggle it back off from the
+same menu item.
+
 See [Simulate a LiDAR scan](../workflows/simulate-scan.md) for the full
 walkthrough of placing virtual scanners.

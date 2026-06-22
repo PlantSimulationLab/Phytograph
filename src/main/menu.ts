@@ -156,6 +156,17 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
           ],
         },
         { type: 'separator' },
+        {
+          // Overlay showing each scanner's angular coverage (a partial sphere
+          // for raster scans, beam cones/disks for spinning multibeam). Hidden
+          // by default; Electron flips `checked` on click so the menu item is
+          // the single source of truth — send its post-click state.
+          label: 'Show Scan Pattern Wireframes',
+          type: 'checkbox',
+          checked: false,
+          click: (item) => send({ kind: 'toggle-scan-wireframes', show: item.checked }),
+        },
+        { type: 'separator' },
         { role: 'togglefullscreen' },
         ...(isDev
           ? ([

@@ -2,7 +2,7 @@ import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, X} from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -35,6 +35,7 @@ import { SyntheticScanOptionsPopup } from './SyntheticScanOptionsPopup';
 import { type SyntheticScanOptions } from '../lib/syntheticScanOptions';
 import { SCAN_HIT_FIELDS, STANDARD_HIT_FIELD_SLUGS } from '../lib/scanHitFields';
 import { ScanMarkerEntry } from './ScannerMarker';
+import { ScanWireframeEntry } from './ScanPatternWireframe';
 import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
@@ -611,6 +612,10 @@ export default function PointCloudViewer({
   // Show/hide the scan-position model markers (the scanner-shaped meshes). On by
   // default. Session-only, like the Grid/Axes toggles next to it.
   const [showScanMarkers, setShowScanMarkers] = useState(true);
+  // Scan-pattern wireframe overlay (each scanner's angular coverage). OFF by
+  // default; toggled from the native View menu (the menu checkbox is the source
+  // of truth). Session-only like showScanMarkers.
+  const [showScanWireframes, setShowScanWireframes] = useState(false);
   // Global size multiplier for scan markers, seeded from persisted settings.
   const [scanMarkerScale, setScanMarkerScale] = useState(1);
   const [displayPanelCollapsed, setDisplayPanelCollapsed] = useState(true);
@@ -1068,6 +1073,20 @@ export default function PointCloudViewer({
       .catch(() => {});
     // Re-read when the settings dialog closes (settingsEpoch bumps).
   }, [settingsEpoch]);
+
+  // Subscribe to native-menu commands. Currently only the View > Show Scan Pattern
+  // Wireframes checkbox is handled here (the menu item is the source of truth, so we
+  // just mirror its post-click state); other MenuCommandPayload kinds are dispatched
+  // elsewhere or not yet wired, so they're ignored.
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.onMenuCommand) return;
+    return api.onMenuCommand((payload) => {
+      if (payload.kind === 'toggle-scan-wireframes') {
+        setShowScanWireframes(payload.show);
+      }
+    });
+  }, []);
 
   // Alignment comparison state
   const [showAlignmentPanel, setShowAlignmentPanel] = useState(false);
@@ -10462,6 +10481,22 @@ export default function PointCloudViewer({
           );
         })}
 
+        {/* Scan-pattern wireframe shells (View-menu toggle, off by default). Same
+            display-offset wrapper as the markers; ScanWireframeEntry memoizes its
+            geometry on the stable params reference to avoid a per-frame GPU rebuild. */}
+        {showScanWireframes && scansWithParams.map(scan => {
+          if (!scan.visible) return null;
+          return (
+            <group key={`wf-${scan.id}`} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+              <ScanWireframeEntry
+                params={scan.params}
+                color={scan.color}
+                markerScale={scanMarkerScale}
+              />
+            </group>
+          );
+        })}
+
         <CameraController
           bounds={combinedBounds}
           hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0 || qsms.length > 0 || scansWithParams.some(s => s.visible)}
@@ -11377,16 +11412,28 @@ export default function PointCloudViewer({
           {scansWithParams.length > 0 && (
             <div className="px-2 pt-2">
               {isScanning ? (
-                // While a scan is running the panel button just shows a simple
-                // "Scanning…" spinner — the per-stage label, progress bar, and
-                // Cancel all live in the central StatusPill (the same one every
-                // other long op uses), so the panel doesn't duplicate them.
-                <div
-                  data-testid="synthetic-scan-running"
-                  className="w-full px-2 py-1.5 bg-neutral-600 rounded text-xs text-white flex items-center justify-center gap-1.5 cursor-default"
-                >
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  Scanning…
+                // While a scan is running the panel shows a "Scanning…" spinner
+                // alongside an explicit Cancel button. The per-stage label and
+                // progress bar still live in the central StatusPill, but a bare
+                // "x" on the pill reads as "dismiss" rather than "kill the run",
+                // so the discoverable Cancel lives here next to the indicator.
+                <div className="flex items-center gap-1.5">
+                  <div
+                    data-testid="synthetic-scan-running"
+                    className="flex-1 px-2 py-1.5 bg-neutral-600 rounded text-xs text-white flex items-center justify-center gap-1.5 cursor-default"
+                  >
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Scanning…
+                  </div>
+                  <button
+                    data-testid="cancel-synthetic-scan"
+                    onClick={cancelScan}
+                    className="px-2 py-1.5 bg-red-600 hover:bg-red-500 rounded text-xs text-white flex items-center justify-center gap-1.5"
+                    title="Cancel the running scan"
+                  >
+                    <X className="w-3 h-3" />
+                    Cancel
+                  </button>
                 </div>
               ) : (
                 <button

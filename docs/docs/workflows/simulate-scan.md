@@ -183,7 +183,10 @@ You need geometry in the scene to scan: typically a generated
 
 10. Click **Add Scan** to place the scanner. A marker — the selected
    instrument's shape, or a sphere for a generic scanner — appears in the
-   3D view at the origin.
+   3D view at the origin. To preview the scanner's angular coverage, enable
+   **View → Show Scan Pattern Wireframes** — a faint shell (a partial sphere
+   for a raster scan, beam cones for a spinning multibeam) shows what the
+   sweep ranges cover. See [Scan pattern wireframes](../concepts/scans.md#scan-pattern-wireframes).
 
 ## Import scan positions from a real campaign
 
@@ -380,8 +383,10 @@ it can stop, so cancellation is near-immediate for typical multi-scanner or
 multi-stage runs and may take a beat on one enormous single scan.) The
 ray-tracing pass doesn't report fine-grained progress, so the bar advances at
 an estimated pace during it (scaled to the scan's pulse count) and then snaps
-onto the next real stage when it completes. The **Run Synthetic LiDAR Scan**
-button in the Scans panel simply shows a "Scanning…" spinner meanwhile.
+onto the next real stage when it completes. Meanwhile the **Run Synthetic
+LiDAR Scan** button in the Scans panel shows a "Scanning…" spinner with a
+**Cancel** button beside it — the same cancellation as the status indicator,
+placed where you started the scan.
 
 If a scanner already holds point data (e.g. an imported scan), Phytograph
 asks whether to **overwrite** it, **keep the original and add a duplicate**

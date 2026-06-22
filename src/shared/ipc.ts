@@ -147,4 +147,7 @@ export type MenuCommandPayload =
   // Run a tool from the native Tools menu by its registry id. One payload kind
   // carries every tool; the renderer dispatches via __runToolCommand (the tool
   // actions live inside PointCloudViewer's command registry).
-  | { kind: 'tool'; toolId: string };
+  | { kind: 'tool'; toolId: string }
+  // Toggle the scan-pattern wireframe overlay. The View-menu checkbox is the
+  // single source of truth; `show` is its post-click checked state.
+  | { kind: 'toggle-scan-wireframes'; show: boolean };
