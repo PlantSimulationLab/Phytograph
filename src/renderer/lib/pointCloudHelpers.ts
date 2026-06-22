@@ -1,11 +1,12 @@
 // Pure, stateless helpers extracted from PointCloudViewer.tsx. No React, no
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
-import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData } from './pointCloudTypes';
+import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
 import type { HeliosGrid, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { poseStreamToWire } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
+import { applyTriangleFilter } from './triangleFilter';
 
 // Format a numeric range tick so the colorbar labels stay readable across
 // many orders of magnitude.
@@ -612,6 +613,45 @@ export function octreeScalarFieldOptions(
     .sort((a, b) => a.label.localeCompare(b.label));
 }
 
+// Turn a synthetic scan's returned per-hit scalar arrays into the cloud's
+// color-by `scalarFields` map, honoring the user's retained-fields selection.
+//
+//   - `intensity` is never a scalar field — it owns a dedicated color mode and
+//     the cloud's `intensities` array — so it's skipped here (the caller pulls
+//     it out separately) and returned via `intensities`.
+//   - A STANDARD field (per `standardSlugs`) the user did NOT retain is pruned,
+//     so it never reaches the picker.
+//   - A RETAINED field is kept even when constant (bypassing the variance check)
+//     so e.g. a single-sweep `timestamp` still shows in Color by. Anything else
+//     keeps the legacy varies-only rule (constant fields are useless to color by
+//     and would clutter the picker).
+//   - All-NaN fields are always dropped (the backend already prunes them, but
+//     guard here too).
+export function assembleScanScalarFields(
+  scalars: Record<string, Float32Array>,
+  n: number,
+  retainedSlugs: Iterable<string>,
+  standardSlugs: Iterable<string>,
+): { scalarFields: Record<string, ScalarField>; intensities?: Float32Array } {
+  const retainedSet = new Set(retainedSlugs);
+  const standardSet = new Set(standardSlugs);
+  const scalarFields: Record<string, ScalarField> = {};
+  let intensities: Float32Array | undefined;
+  for (const [name, arr] of Object.entries(scalars)) {
+    if (!arr || arr.length !== n) continue;
+    if (name === 'intensity') { intensities = arr; continue; }
+    // Prune any standard field the user didn't retain.
+    if (standardSet.has(name) && !retainedSet.has(name)) continue;
+    let mn = Infinity, mx = -Infinity;
+    for (const v of arr) { if (Number.isFinite(v)) { if (v < mn) mn = v; if (v > mx) mx = v; } }
+    if (!Number.isFinite(mn) || !Number.isFinite(mx)) continue; // all-NaN
+    if (retainedSet.has(name) || mn !== mx) {
+      scalarFields[name] = { values: arr, min: mn, max: mx };
+    }
+  }
+  return { scalarFields, intensities };
+}
+
 // Generate mesh data from shape type with default unit size
 export function generateShapeMesh(shapeType: ShapeType): MeshData {
   let geometry: THREE.BufferGeometry;
@@ -829,6 +869,70 @@ export function buildLADRequest(
     theta_max: 130,
     phi_min: 0,
     phi_max: 360,
+  };
+}
+
+// The indexed triangle mesh + per-triangle scan ids to inject into a reused LAD
+// run. `vertices`/`indices` are the filtered mesh's buffers (vertices shared,
+// unexpanded); `scanIds` is remapped to the LAD request's scan order (see
+// extractReuseMeshPayload). The backend expands indices->soup before injection.
+export interface ReuseMeshPayload {
+  vertices: Float32Array;  // (V*3) interleaved xyz
+  indices: Uint32Array;    // (T*3) triangle vertex indices
+  scanIds: Int32Array;     // (T) source scan index in request-scan order
+  triangleCount: number;
+}
+
+// Build the mesh payload for reusing a Helios triangulation in LAD. Reusing a
+// mesh must reproduce EXACTLY the triangulation the user sees, so:
+//   1. Apply the current interactive filter (lmax/maxAspectRatio) — the inversion
+//      keys on the filtered triangle set, not the unfiltered candidate set.
+//   2. Remap each triangle's scan id. A mesh's triangleScanIds are indices into
+//      the ORIGINAL triangulation's scan list (sourceScanIds order). At LAD time
+//      the cloud's scans are added in the request's scan order, so each id must be
+//      translated: originalIdx -> sourceScanIds[originalIdx] (scan-id string) ->
+//      its position in requestScanIdOrder. Throws if any source scan is missing
+//      from the request order — a partial mesh would silently change G(theta).
+// `meshData` should be the UNFILTERED mesh (it must carry triEdgeMax/triAspect so
+// applyTriangleFilter can run); pass requestScanIdOrder = the exact scan-id list,
+// in order, that buildLADRequest will emit (i.e. selectedScans.map(s => s.id)).
+export function extractReuseMeshPayload(
+  meshData: MeshData,
+  lmax: number,
+  maxAspectRatio: number,
+  sourceScanIds: string[],
+  requestScanIdOrder: string[],
+): ReuseMeshPayload {
+  const filtered = applyTriangleFilter(meshData, lmax, maxAspectRatio);
+  const triScan = filtered.triangleScanIds;
+  if (!triScan || triScan.length !== filtered.triangleCount) {
+    throw new Error(
+      'Cannot reuse this triangulation: it has no per-triangle scan ids '
+      + '(re-run the Helios triangulation to record them).');
+  }
+
+  const requestIndexOf = new Map<string, number>();
+  requestScanIdOrder.forEach((id, i) => requestIndexOf.set(id, i));
+
+  const T = filtered.triangleCount;
+  const scanIds = new Int32Array(T);
+  for (let t = 0; t < T; t++) {
+    const originalIdx = triScan[t];
+    const scanIdStr = sourceScanIds[originalIdx];
+    const reqIdx = scanIdStr !== undefined ? requestIndexOf.get(scanIdStr) : undefined;
+    if (reqIdx === undefined) {
+      throw new Error(
+        'Cannot reuse this triangulation: one of its source scans is no longer '
+        + 'available, so the result would not match the original mesh.');
+    }
+    scanIds[t] = reqIdx;
+  }
+
+  return {
+    vertices: filtered.vertices,
+    indices: filtered.indices,
+    scanIds,
+    triangleCount: T,
   };
 }
 

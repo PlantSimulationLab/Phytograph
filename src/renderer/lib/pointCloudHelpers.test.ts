@@ -5,6 +5,7 @@ import {
   fuzzyMatch,
   generateShapeMesh,
   octreeScalarFieldOptions,
+  assembleScanScalarFields,
   fitGridToBounds,
   voxelMeshToHeliosGrid,
   computeMeshTriangleScalars,
@@ -1053,5 +1054,64 @@ describe('buildLADRequest — moving-platform scans', () => {
     });
     expect(req.scans[0].trajectory).toBeUndefined();
     expect(req.gtheta).toBeUndefined();
+  });
+});
+
+describe('assembleScanScalarFields', () => {
+  const STANDARD = ['intensity', 'distance', 'timestamp', 'target_index', 'target_count'];
+
+  it('keeps a retained CONSTANT standard field (bypasses the variance filter)', () => {
+    // timestamp constant across a single static sweep — must still surface.
+    const { scalarFields } = assembleScanScalarFields(
+      { timestamp: new Float32Array([5, 5, 5]) }, 3, ['timestamp'], STANDARD);
+    expect(scalarFields.timestamp).toBeDefined();
+    expect(scalarFields.timestamp.min).toBe(5);
+    expect(scalarFields.timestamp.max).toBe(5);
+  });
+
+  it('prunes an unchecked standard field even when it varies', () => {
+    const { scalarFields } = assembleScanScalarFields(
+      { target_count: new Float32Array([1, 2, 3]) }, 3, [], STANDARD);
+    expect(scalarFields.target_count).toBeUndefined();
+  });
+
+  it('pulls intensity out separately and never as a scalar field', () => {
+    const intensity = new Float32Array([0.1, 0.9, 0.5]);
+    const { scalarFields, intensities } = assembleScanScalarFields(
+      { intensity }, 3, ['intensity'], STANDARD);
+    expect(intensities).toBe(intensity);
+    expect(scalarFields.intensity).toBeUndefined();
+  });
+
+  it('drops all-NaN fields', () => {
+    const { scalarFields } = assembleScanScalarFields(
+      { deviation: new Float32Array([NaN, NaN]) }, 2, ['deviation'], STANDARD);
+    expect(scalarFields.deviation).toBeUndefined();
+  });
+
+  it('keeps a non-standard (extra) field that resolved, even if constant', () => {
+    const { scalarFields } = assembleScanScalarFields(
+      { deviation: new Float32Array([0.02, 0.02]) }, 2, ['deviation'], STANDARD);
+    expect(scalarFields.deviation).toBeDefined();
+  });
+
+  it('falls back to varies-only for a returned field not in the retained set', () => {
+    // A varying non-retained field is still shown (legacy rule); a constant one isn't.
+    const varying = assembleScanScalarFields(
+      { distance: new Float32Array([1, 2, 3]) }, 3, [], STANDARD);
+    expect(varying.scalarFields.distance).toBeUndefined(); // standard + unchecked → pruned
+
+    const extraVarying = assembleScanScalarFields(
+      { reflectance: new Float32Array([1, 2, 3]) }, 3, [], STANDARD);
+    expect(extraVarying.scalarFields.reflectance).toBeDefined(); // non-standard, varies → kept
+    const extraConstant = assembleScanScalarFields(
+      { reflectance: new Float32Array([2, 2, 2]) }, 3, [], STANDARD);
+    expect(extraConstant.scalarFields.reflectance).toBeUndefined(); // non-standard, constant, unretained → dropped
+  });
+
+  it('ignores length-mismatched arrays', () => {
+    const { scalarFields } = assembleScanScalarFields(
+      { timestamp: new Float32Array([1, 2]) }, 3, ['timestamp'], STANDARD);
+    expect(scalarFields.timestamp).toBeUndefined();
   });
 });

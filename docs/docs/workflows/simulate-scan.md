@@ -327,6 +327,18 @@ remembered and pre-filled next time:
   pulse's beam cone) and **pulse distance threshold** (m, how close sub-ray
   hits must be to merge into one return). Set **rays per pulse** to 1 for an
   idealized exact scan (one ray per pulse, no beam footprint).
+- **Retained per-hit fields** — which auto-generated per-hit scalars are
+  kept on the resulting cloud and offered in the viewer's **Color by**
+  list. Check **distance**, **timestamp**, **return index/count**, **pulse
+  deviation**, **sub-rays hit**, or **reflectance**. A checked field appears
+  in **Color by** *even when it's constant* across the cloud — e.g.
+  **timestamp** is a single value for one static sweep, and **return
+  index/count** are `0`/`1` for a single-return scan. (An unchecked field is
+  dropped, and a constant field that you didn't retain is hidden, to keep the
+  picker uncluttered.) **Pulse deviation** and **sub-rays hit** are only
+  recorded for multi-return scans (**rays per pulse** > 1); **reflectance** is
+  sampled from primitive data when present. *Intensity* isn't listed here — it
+  always has its own color mode.
 
 Click **Run scan** to proceed.
 
@@ -347,10 +359,12 @@ ray-traces it once from each scan position you selected, then writes each
 scanner's hit points back **onto that scanner's own scan** — the row's
 subtitle changes from `params · origin (…)` to include the point count,
 and the scan now carries both its parameters and the point data. Each
-point also gets scalar fields you can color by or filter on: **intensity**
-(beam–surface angle × reflectivity), **distance**, **timestamp**, and —
-for multi-return — **target index** and **target count**. Switch the
-viewer's color mode to *Intensity* or any scalar to inspect them.
+point also carries the per-hit scalar fields you chose under **Retained
+per-hit fields** above — **intensity** (beam–surface angle × reflectivity),
+**distance**, **timestamp**, **return index/count**, and the multi-return
+extras — which you can color by or filter on. Switch the viewer's color mode
+to *Intensity* or any retained scalar to inspect them. (A field you didn't
+retain won't appear in **Color by**; re-run with it checked to keep it.)
 
 While the scan runs, a status indicator appears at the top-center of the
 viewer (the same one used for triangulation, leaf-area density, and other

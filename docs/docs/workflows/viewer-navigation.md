@@ -37,20 +37,22 @@ fit and whether they change your viewing angle:
 
 ## Snap to a canonical view
 
-The **Snap View** panel in the top-left snaps the camera to standard
+The **Snap View** panel in the top-left rotates the camera to standard
 orthographic and isometric views:
 
 - **Front**, **Back**, **Left**, **Right** — looking along the X or Y axis
 - **Top**, **Bottom** — looking along Z
-- **Isometric** — 30° elevation, 45° azimuth
+- **Isometric** — the default 3/4 angle
 
-After snapping you can still orbit; the snap doesn't lock the camera.
+These buttons **only reorient** — they rotate the camera to look down the
+requested axis while keeping your current orbit target and zoom level, so
+the scene doesn't jump closer or farther. To reframe, use **Reset View**
+(fit everything) or **Zoom to Selection**. After snapping you can still
+orbit; the snap doesn't lock the camera.
 
-You can also click an axis head on the **orientation gizmo** in the
-bottom-left corner (the red/green/blue X-Y-Z widget) to look straight
-down that world axis. Clicking only rotates the view to that axis with Z
-up — it keeps your current orbit target and zoom, so the scene doesn't
-jump closer or farther.
+The **orientation gizmo** in the bottom-left corner (the red/green/blue
+X-Y-Z widget) does the same thing: click an axis head to look straight
+down that world axis, preserving your current target and zoom.
 
 ## Show or hide the grid and axes
 

@@ -121,6 +121,76 @@ test('generates a plant, scans it, and a point cloud appears', async () => {
   }
 });
 
+// Retained per-hit fields end-to-end: a single static scan's `timestamp` is a
+// constant value (one sweep, one emission time), so the old variance filter hid
+// it from Color by. With it retained (the default) it must now appear in the
+// scalar-field picker even though it's constant, while an unchecked standard
+// (`target_count`, off by default) must NOT — proving the retention selection
+// drives the picker. Drives the live backend + real Display panel, no mocking.
+test('retained per-hit fields appear in Color by even when constant', async () => {
+  const { page, close } = await launchApp();
+
+  try {
+    // ── Generate a plant and place an overhead scanner ───────────────────
+    await page.getByTestId('tool-plant-generate').click();
+    await expect(page.getByTestId('plant-generation-popup')).toBeVisible();
+    await page.getByTestId('plant-species-select').selectOption('bean');
+    await page.getByTestId('plant-age-input').fill('20');
+    await page.getByTestId('plant-generate-button').click();
+    await expect(page.getByTestId('mesh-row').first()).toBeVisible({ timeout: 120_000 });
+
+    await page.getByTestId('tool-add-scan').click();
+    await expect(page.getByTestId('scan-parameters-popup')).toBeVisible();
+    await page.getByTestId('scan-label-input').fill('overhead');
+    await page.getByTestId('scan-origin-x').fill('0');
+    await page.getByTestId('scan-origin-y').fill('0');
+    await page.getByTestId('scan-origin-z').fill('3');
+    await page.getByTestId('scan-zenith-points').fill('150');
+    await page.getByTestId('scan-azimuth-points').fill('150');
+    await page.getByTestId('scan-zenith-min').fill('0');
+    await page.getByTestId('scan-zenith-max').fill('180');
+    await page.getByTestId('scan-submit').click();
+    await expect(page.getByTestId('scan-parameters-popup')).not.toBeVisible();
+
+    // ── Open the scan options; verify the retained-fields section ────────
+    await page.getByTestId('run-synthetic-scan').click();
+    const scanOptions = page.getByTestId('synthetic-scan-options-popup');
+    await expect(scanOptions).toBeVisible();
+    const fieldsCard = scanOptions.getByTestId('scan-opt-retained-fields');
+    await expect(fieldsCard).toBeVisible();
+    // timestamp is retained by default; target_count is not — assert the boxes.
+    const tsBox = scanOptions.getByTestId('scan-opt-field-timestamp').locator('input');
+    const tcBox = scanOptions.getByTestId('scan-opt-field-target_count').locator('input');
+    await expect(tsBox).toBeChecked();
+    await expect(tcBox).not.toBeChecked();
+
+    await page.getByTestId('scan-opt-run').click();
+    await expect(scanOptions).not.toBeVisible();
+
+    const scannerRow = page.locator('[data-testid="scan-row"][data-scan-name="overhead"]');
+    await expect(scannerRow).toHaveAttribute('data-has-data', 'true', { timeout: 120_000 });
+
+    // ── Read the Color by picker on the resulting cloud ──────────────────
+    await page.getByRole('button', { name: 'Display' }).click();
+    const colorMode = page.getByTestId('display-color-mode');
+    await expect(colorMode).toBeVisible();
+    const optionValues = await colorMode
+      .locator('optgroup[label="Scalar fields"] option')
+      .evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).value));
+
+    // The retained (constant) timestamp must now be selectable…
+    expect(optionValues).toContain('scalar:timestamp');
+    // …and the unchecked target_count must NOT be.
+    expect(optionValues).not.toContain('scalar:target_count');
+
+    // It's actually usable as a color mode (no crash on a constant range).
+    await colorMode.selectOption('scalar:timestamp');
+    await expect(colorMode).toHaveValue('scalar:timestamp');
+  } finally {
+    await close();
+  }
+});
+
 // Return type end-to-end: a 'multi' (full-waveform) scan of the same plant from
 // the same position penetrates foliage and reports more returns than an exact
 // single-ray scan (rays per pulse = 1). Drives the live backend through the real

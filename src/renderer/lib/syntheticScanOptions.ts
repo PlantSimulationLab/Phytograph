@@ -5,6 +5,11 @@
 // They're chosen per-run in the Synthetic Scan Options popup and remembered
 // (last-used) in the electron store.
 
+import {
+  SCAN_HIT_FIELD_SLUGS,
+  DEFAULT_RETAINED_FIELDS,
+} from './scanHitFields';
+
 export interface SyntheticScanOptions {
   // Gaussian along-beam range measurement noise, in millimeters (0 = perfect
   // ranging). Converted to meters for pyhelios. Applies to single + multi.
@@ -23,6 +28,12 @@ export interface SyntheticScanOptions {
   pulseDistanceThresholdM: number;
   // Restrict ray-tracing to the cells of the single visible voxel grid.
   cropToGrid: boolean;
+  // Per-hit scalar fields (slugs from ./scanHitFields) to retain on the
+  // resulting cloud's color-by list. Checked fields appear in "Color by" even
+  // when constant-valued (they bypass the variance filter in the cloud builder).
+  // Optional fields (deviation/nRaysHit/reflectance) are additionally read by
+  // the backend by sending them through the scan request's extra_fields.
+  retainedFields: string[];
 }
 
 export const DEFAULT_SYNTHETIC_SCAN_OPTIONS: SyntheticScanOptions = {
@@ -32,6 +43,7 @@ export const DEFAULT_SYNTHETIC_SCAN_OPTIONS: SyntheticScanOptions = {
   raysPerPulse: 100,
   pulseDistanceThresholdM: 0.02,
   cropToGrid: false,
+  retainedFields: [...DEFAULT_RETAINED_FIELDS],
 };
 
 // Electron-store key for the remembered last-used options.
@@ -55,5 +67,13 @@ export function coerceSyntheticScanOptions(stored: unknown): SyntheticScanOption
     ) || DEFAULT_SYNTHETIC_SCAN_OPTIONS.pulseDistanceThresholdM,
     cropToGrid: typeof s.cropToGrid === 'boolean'
       ? s.cropToGrid : DEFAULT_SYNTHETIC_SCAN_OPTIONS.cropToGrid,
+    // Drop unknown slugs (catalog may have changed) but HONOR an explicit empty
+    // array — the user may have unchecked everything. Only a missing/non-array
+    // value falls back to the defaults.
+    retainedFields: Array.isArray(s.retainedFields)
+      ? s.retainedFields.filter(
+          (v): v is string => typeof v === 'string' && SCAN_HIT_FIELD_SLUGS.includes(v),
+        )
+      : [...DEFAULT_RETAINED_FIELDS],
   };
 }

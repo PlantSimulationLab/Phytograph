@@ -29,8 +29,27 @@ describe('coerceSyntheticScanOptions', () => {
       raysPerPulse: 50,
       pulseDistanceThresholdM: 0.05,
       cropToGrid: true,
+      retainedFields: ['timestamp', 'distance'],
     };
     expect(coerceSyntheticScanOptions(stored)).toEqual(stored);
+  });
+
+  it('fills retainedFields with the defaults when absent or not an array', () => {
+    expect(coerceSyntheticScanOptions({}).retainedFields)
+      .toEqual(DEFAULT_SYNTHETIC_SCAN_OPTIONS.retainedFields);
+    expect(coerceSyntheticScanOptions({ retainedFields: 'oops' }).retainedFields)
+      .toEqual(DEFAULT_SYNTHETIC_SCAN_OPTIONS.retainedFields);
+  });
+
+  it('honors an explicit empty retainedFields array', () => {
+    expect(coerceSyntheticScanOptions({ retainedFields: [] }).retainedFields).toEqual([]);
+  });
+
+  it('drops unknown retainedFields slugs but keeps valid ones', () => {
+    const out = coerceSyntheticScanOptions({
+      retainedFields: ['timestamp', 'bogus', 42, 'deviation'],
+    });
+    expect(out.retainedFields).toEqual(['timestamp', 'deviation']);
   });
 
   it('clamps negatives, fixes non-finite, and rounds rays per pulse', () => {

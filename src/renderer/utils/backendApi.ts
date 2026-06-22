@@ -653,10 +653,27 @@ export async function computeLAD(
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
   onRunId?: (runId: string) => void,
+  // When reusing a previously-run triangulation, the indexed mesh + per-triangle
+  // scan ids to inject. The request is then sent as a PHB1 binary frame (request
+  // fields in the header, mesh as raw buffers) so a 1M+ triangle mesh rides back
+  // compactly and the backend injects it instead of re-triangulating.
+  reuseMesh?: { vertices: Float32Array; indices: Uint32Array; scanIds: Int32Array } | null,
 ): Promise<LADResponse> {
   console.log('LAD compute - scans:', request.scans.length,
-    'grid:', `${request.grid.nx}×${request.grid.ny}×${request.grid.nz}`);
+    'grid:', `${request.grid.nx}×${request.grid.ny}×${request.grid.nz}`,
+    reuseMesh ? `(reuse ${reuseMesh.indices.length / 3} tris)` : '');
   try {
+    if (reuseMesh) {
+      // The PHB1 frame format carries f32/u32 buffers; scan ids are non-negative
+      // small ints, so send them as u32 (the backend reads them back as int32).
+      const frame = encodeBinaryFrame(request as unknown as Record<string, unknown>, [
+        { name: 'mesh_vertices', data: reuseMesh.vertices },
+        { name: 'mesh_indices', data: reuseMesh.indices },
+        { name: 'mesh_scan_ids', data: new Uint32Array(reuseMesh.scanIds.buffer, reuseMesh.scanIds.byteOffset, reuseMesh.scanIds.length) },
+      ]);
+      return await fetchJsonWithProgress<LADResponse>(
+        '/api/lad/compute', request, signal, 600000, onProgress, onRunId, frame);
+    }
     return await fetchJsonWithProgress<LADResponse>(
       '/api/lad/compute', request, signal, 600000, onProgress, onRunId);
   } catch (error) {
@@ -1454,9 +1471,15 @@ export interface LidarScanScanner {
 export interface LidarScanRequest {
   meshes: LidarScanMesh[];
   scanners: LidarScanScanner[];
-  // Extra per-hit scalar fields to record beyond the standard set. Each is also a
-  // column-format label, so the scan samples that named primitive data onto hits.
+  // Extra per-hit scalar fields to record beyond the always-read standard set.
+  // Engine-produced optionals (deviation/nRaysHit) are just read; everything else
+  // is a column-format label, so the scan samples that named primitive data onto
+  // hits. The backend splits the two (see _ENGINE_OPTIONAL_FIELDS in main.py).
   extra_fields?: string[];
+  // Which of the standard fields to keep on the resulting cloud. Used on the
+  // misses-on (session) path so the color-by list matches the flat-cloud path.
+  // Omitted => keep all standards.
+  retained_standard_fields?: string[];
   // Beam-cone sampling: sub-rays fired per pulse across the cone, and the distance
   // (m) within which their hits merge into one return. rays_per_pulse=1 collapses
   // the cone to one exact ray per pulse (an idealized scan).
@@ -2080,6 +2103,45 @@ export function decodeBinaryFrame(buf: ArrayBuffer): BinaryFrame {
   return { meta: header.meta, buffers };
 }
 
+// Encode a PHB1 frame for sending in the REQUEST direction (the mirror of the
+// backend's _bin_frame_bytes and of decodeBinaryFrame above). `meta` holds the
+// scalar request fields; `buffers` are named typed arrays. Layout (little-endian):
+// 'PHB1' + uint32 headerLen + JSON {meta, buffers:[{name,dtype,length}]} (space-
+// padded to a 4-byte multiple so payloads stay aligned) + concatenated payloads.
+export function encodeBinaryFrame(
+  meta: Record<string, unknown>,
+  buffers: Array<{ name: string; data: Float32Array | Uint32Array }>,
+): Uint8Array {
+  const descs = buffers.map(b => ({
+    name: b.name,
+    dtype: b.data instanceof Float32Array ? 'f32' : 'u32',
+    length: b.data.length,
+  }));
+  let header = new TextEncoder().encode(JSON.stringify({ meta, buffers: descs }));
+  const pad = (4 - (header.length % 4)) % 4;  // pad with spaces to a 4-byte multiple
+  if (pad !== 0) header = concatBytes([header, new Uint8Array(pad).fill(0x20)]);
+
+  const head = new Uint8Array(8 + header.length);
+  head.set(new TextEncoder().encode(BIN_FRAME_MAGIC), 0);
+  new DataView(head.buffer).setUint32(4, header.length, true);
+  head.set(header, 8);
+
+  const parts: Uint8Array[] = [head];
+  for (const b of buffers) {
+    parts.push(new Uint8Array(b.data.buffer, b.data.byteOffset, b.data.byteLength));
+  }
+  return concatBytes(parts);
+}
+
+// Normalize a Uint8Array (possibly a view into a larger buffer) to a tight
+// ArrayBuffer suitable as a fetch body.
+function toRequestBody(b: ArrayBuffer | Uint8Array): ArrayBuffer {
+  if (b instanceof ArrayBuffer) return b;
+  return b.byteOffset === 0 && b.byteLength === b.buffer.byteLength
+    ? (b.buffer as ArrayBuffer)
+    : b.slice().buffer;
+}
+
 // Reporter for per-stage progress streamed ahead of the PHB1 frame as PHP1
 // markers (see _bin_frame_streaming_response in backend-api/main.py).
 export type BinaryFrameProgress = (progress: number | null, message: string) => void;
@@ -2198,6 +2260,11 @@ export async function fetchJsonWithProgress<T>(
   timeoutMs = 600000,
   onProgress?: BinaryFrameProgress,
   onRunId?: (runId: string) => void,
+  // When supplied, the request is sent as a raw binary body (octet-stream)
+  // instead of JSON — e.g. a PHB1 frame carrying a large mesh. `request` is then
+  // ignored for the body (still used by callers for logging). The response is
+  // drained identically (leading PHP1 markers + JSON tail).
+  binaryBody?: ArrayBuffer | Uint8Array,
 ): Promise<T> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
@@ -2210,8 +2277,8 @@ export async function fetchJsonWithProgress<T>(
   try {
     const response = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
+      headers: { 'Content-Type': binaryBody ? 'application/octet-stream' : 'application/json' },
+      body: binaryBody ? toRequestBody(binaryBody) : JSON.stringify(request),
       signal: controller.signal,
     });
     if (!response.ok) {

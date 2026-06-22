@@ -218,16 +218,6 @@ export function ScanParametersPopup({
     setParams(p => ({ ...p, trajectory: undefined }));
   };
 
-  const setNum = (key: keyof Omit<ScanParameters, 'origin' | 'returnMode' | 'returnSelection'>, min = 0) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = parseFloat(e.target.value);
-    setParams(p => ({ ...p, [key]: Number.isFinite(v) ? Math.max(min, v) : min }));
-  };
-
-  const setInt = (key: 'zenithPoints' | 'azimuthPoints', min = 1) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = parseInt(e.target.value, 10);
-    setParams(p => ({ ...p, [key]: Number.isFinite(v) ? Math.max(min, v) : min }));
-  };
-
   // The azimuth sweep (degrees) the point count is spread over: a full 360° for
   // a spinning multibeam (it always completes a revolution), else the raster's
   // azimuth min↔max span. Used to convert between a points-per-rev count and an
@@ -440,6 +430,9 @@ export function ScanParametersPopup({
               type="text"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
+              // Enter in a single-line text field would submit the form (close
+              // the modal). Swallow it — the user commits via the submit button.
+              onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault(); }}
               className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
             />
           </div>
@@ -624,13 +617,14 @@ export function ScanParametersPopup({
                     {rayInputMode === 'resolution' ? 'Zenith (°/ray)' : 'Zenith'}
                   </label>
                   {rayInputMode === 'points' ? (
-                    <input
+                    <DebouncedNumberInput
                       data-testid="scan-zenith-points"
-                      type="number"
                       min={1}
                       step={1}
+                      debounceMs={0}
+                      parse={(s) => parseInt(s, 10)}
                       value={params.zenithPoints}
-                      onChange={setInt('zenithPoints')}
+                      onCommit={(v) => setParams(p => ({ ...p, zenithPoints: Math.max(1, Math.round(v)) }))}
                       className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                     />
                   ) : (
@@ -679,13 +673,14 @@ export function ScanParametersPopup({
                   </button>
                 </div>
                 {rayInputMode === 'points' ? (
-                  <input
+                  <DebouncedNumberInput
                     data-testid="scan-azimuth-points"
-                    type="number"
                     min={1}
                     step={1}
+                    debounceMs={0}
+                    parse={(s) => parseInt(s, 10)}
                     value={params.azimuthPoints}
-                    onChange={setInt('azimuthPoints')}
+                    onCommit={(v) => setParams(p => ({ ...p, azimuthPoints: Math.max(1, Math.round(v)) }))}
                     className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
                   />
                 ) : (
@@ -781,6 +776,7 @@ export function ScanParametersPopup({
                 type="text"
                 value={elevationText}
                 onChange={setElevations}
+                onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault(); }}
                 placeholder="15, 10, 5, 0, -5, -10, -15, -20"
                 className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
               />
@@ -848,7 +844,8 @@ export function ScanParametersPopup({
                 />
                 <p className="mt-1 text-[11px] text-neutral-500">
                   Initial heading the scanner faces in the horizontal plane (azimuth offset).
-                  Orients the scanner marker; 0 points along +Y. Counter-clockwise positive.
+                  Rotates the swept beam fan about the vertical axis; 0 points along +Y.
+                  Counter-clockwise positive.
                 </p>
               </div>
             </>
@@ -918,25 +915,25 @@ export function ScanParametersPopup({
           <div data-testid="scan-beam-fields" className="border border-neutral-700 rounded-lg p-3 space-y-3 bg-neutral-800/50">
             <div>
               <label className="block text-xs text-neutral-500 mb-1">Beam exit diameter (m)</label>
-              <input
+              <DebouncedNumberInput
                 data-testid="scan-beam-diameter"
-                type="number"
                 min={0}
                 step="any"
+                debounceMs={0}
                 value={params.beamExitDiameterM}
-                onChange={setNum('beamExitDiameterM')}
+                onCommit={(v) => setParams(p => ({ ...p, beamExitDiameterM: Math.max(0, v) }))}
                 className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
               />
             </div>
             <div>
               <label className="block text-xs text-neutral-500 mb-1">Beam divergence (mrad)</label>
-              <input
+              <DebouncedNumberInput
                 data-testid="scan-beam-divergence"
-                type="number"
                 min={0}
                 step="any"
+                debounceMs={0}
                 value={params.beamDivergenceMrad}
-                onChange={setNum('beamDivergenceMrad')}
+                onCommit={(v) => setParams(p => ({ ...p, beamDivergenceMrad: Math.max(0, v) }))}
                 className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
               />
             </div>

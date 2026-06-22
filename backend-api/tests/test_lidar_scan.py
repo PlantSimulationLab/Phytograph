@@ -421,9 +421,9 @@ class TestScanOptions:
         seen = {}
         orig = main._create_lidar_scan_session
 
-        def _spy(r):
+        def _spy(r, retained_standard_fields=None):
             seen["is_miss_dtype"] = np.asarray(r["is_miss"]).dtype
-            return orig(r)
+            return orig(r, retained_standard_fields)
 
         monkeypatch.setattr(main, "_create_lidar_scan_session", _spy)
         req = main.LidarScanRequest(
@@ -950,3 +950,106 @@ class TestMemoryBudget:
         zero = self._waveform_scan(client, budget_mb=0)
         default = self._waveform_scan(client, budget_mb=None)
         assert zero["num_points"] == default["num_points"]
+
+
+class TestRetainedFields:
+    """`extra_fields` requests optional per-hit scalars; engine-produced optionals
+    (deviation/nRaysHit) are READ but never sampled as primitive data, while
+    primitive labels (an unknown name) resolve to absent and are dropped. On the
+    misses-on path, `retained_standard_fields` controls which STANDARD scalars
+    become octree extra-dims so the color-by list matches the flat-cloud path."""
+
+    def _scan(self, client, **req_opts):
+        pytest.importorskip("pyhelios")
+        resp = client.post("/api/lidar/scan", json={
+            "meshes": [{"vertices": _PYRAMID_VERTS, "triangles": _PYRAMID_TRIS}],
+            "scanners": [_scanner("top", return_type="multi")],
+            **req_opts,
+        })
+        assert resp.status_code == 200, resp.text
+        body = decode_lidar_scan(resp.content)
+        assert body["success"] is True, body.get("error")
+        return body["results"][0]
+
+    def test_deviation_surfaces_for_multi_return_when_requested(self, client):
+        # deviation is engine-produced for multi-return scans; requesting it via
+        # extra_fields (NOT as a primitive column) must surface a finite column.
+        res = self._scan(client, extra_fields=["deviation"], rays_per_pulse=200)
+        assert res["num_points"] > 0
+        assert "deviation" in res["scalars"], "requested engine optional must surface"
+        dev = np.asarray(res["scalars"]["deviation"], dtype=np.float64)
+        assert len(dev) == res["num_points"]
+        assert np.isfinite(dev).any()
+
+    def test_deviation_is_zero_for_single_ray_pulse(self, client):
+        # With one ray per pulse there is no within-pulse spread, so the engine
+        # reports deviation = 0 for every hit (a resolved, constant column — not
+        # NaN). The backend keeps it; the renderer's variance filter is what hides
+        # a constant column unless the user explicitly retains it.
+        res = self._scan(client, extra_fields=["deviation"], rays_per_pulse=1)
+        assert res["num_points"] > 0
+        assert "deviation" in res["scalars"]
+        dev = np.asarray(res["scalars"]["deviation"], dtype=np.float64)
+        assert np.allclose(dev, 0.0), "single-ray pulses have no within-pulse spread"
+
+    def test_unknown_primitive_extra_is_dropped_not_crashed(self, client):
+        # A primitive label with no matching primitive data resolves to all-NaN and
+        # is dropped — the scan must still succeed (the standard fields survive).
+        res = self._scan(client, extra_fields=["no_such_primitive"], rays_per_pulse=50)
+        assert res["num_points"] > 0
+        assert "no_such_primitive" not in res["scalars"]
+        assert "distance" in res["scalars"]
+
+    def test_session_extra_dims_honor_retained_standard_fields(self, client):
+        # Build a session directly from a synthetic hit dict, retaining only a
+        # subset of the standard fields. The session's extra-dim slugs must exclude
+        # the dropped standard, keep the retained one, keep a non-standard extra,
+        # and always carry the is_miss flag.
+        pytest.importorskip("pyhelios")
+        n = 4
+        r = {
+            "scanner_id": "s0",
+            "origin": [0.0, 0.0, 3.0],
+            "points": [[0.0, 0.0, float(i) * 0.1] for i in range(n)],
+            "colors": None,
+            "scalars": {
+                "intensity": np.full(n, 0.5, np.float32),
+                "distance": np.linspace(2.0, 2.3, n, dtype=np.float32),
+                "timestamp": np.zeros(n, np.float32),       # retained
+                "target_count": np.ones(n, np.float32),     # NOT retained → pruned
+                "deviation": np.full(n, 0.01, np.float32),  # non-standard → always kept
+            },
+            "is_miss": np.zeros(n, np.uint8),
+        }
+        out = main._create_lidar_scan_session(
+            r, retained_standard_fields=["intensity", "distance", "timestamp"])
+        sess = main._cloud_sessions[out["session_id"]]
+        slugs = {ed["slug"] for ed in sess.extra_dims_meta}
+        # intensity maps onto the LAS intensity field, never an extra dim.
+        assert "intensity" not in slugs
+        assert "timestamp" in slugs          # retained standard
+        assert "distance" in slugs           # retained standard
+        assert "target_count" not in slugs   # unchecked standard → pruned
+        assert "deviation" in slugs          # non-standard extra → always kept
+        assert main._MISS_SLUG in slugs      # the canonical miss flag
+
+    def test_retained_none_keeps_all_standards(self, client):
+        # Backward compatibility: retained_standard_fields=None keeps every standard
+        # field as an extra dim (older callers / standalone launches).
+        pytest.importorskip("pyhelios")
+        n = 3
+        r = {
+            "scanner_id": "s0",
+            "origin": [0.0, 0.0, 3.0],
+            "points": [[0.0, 0.0, float(i)] for i in range(n)],
+            "colors": None,
+            "scalars": {
+                "timestamp": np.zeros(n, np.float32),
+                "target_count": np.ones(n, np.float32),
+            },
+            "is_miss": np.zeros(n, np.uint8),
+        }
+        out = main._create_lidar_scan_session(r, retained_standard_fields=None)
+        sess = main._cloud_sessions[out["session_id"]]
+        slugs = {ed["slug"] for ed in sess.extra_dims_meta}
+        assert "timestamp" in slugs and "target_count" in slugs

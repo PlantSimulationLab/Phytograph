@@ -103,6 +103,7 @@ function TriangleFilterControls({
           <input
             data-testid="mesh-tri-lmax"
             type="number"
+            onWheel={(e) => e.currentTarget.blur()}
             step="0.01"
             min="0.001"
             max={cap.lmax}
@@ -119,6 +120,7 @@ function TriangleFilterControls({
           <input
             data-testid="mesh-tri-aspect"
             type="number"
+            onWheel={(e) => e.currentTarget.blur()}
             step="0.5"
             min="1"
             value={aspectStr}
@@ -535,11 +537,30 @@ export function MeshesListPanel({
                     {displayName}
                   </div>
                 )}
-                <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
-                  {mesh.data.triangleCount.toLocaleString()} triangles
-                  {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
-                  {mesh.isPlant && ' · Helios Plant'}
-                </div>
+                {mesh.gridSubdivisions ? (
+                  // A grid voxel is a box, so its triangle count (always 12) is
+                  // meaningless. Show the grid's geometry instead: center (from
+                  // the mesh position), size (from the mesh scale, since the base
+                  // box is a unit cube), and resolution (the per-axis cell count).
+                  (() => {
+                    const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
+                    const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
+                    const g = mesh.gridSubdivisions;
+                    return (
+                      <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
+                        Center {p.x.toFixed(2)}, {p.y.toFixed(2)}, {p.z.toFixed(2)}
+                        {' · '}Size {s.x.toFixed(2)} × {s.y.toFixed(2)} × {s.z.toFixed(2)} m
+                        {' · '}Resolution {g.x} × {g.y} × {g.z}
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
+                    {mesh.data.triangleCount.toLocaleString()} triangles
+                    {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
+                    {mesh.isPlant && ' · Helios Plant'}
+                  </div>
+                )}
               </div>
               <button
                 onClick={(e) => { e.stopPropagation(); onToggleVisibility(mesh.id); }}

@@ -64,10 +64,11 @@ Area Density dialog then reuses automatically.
 
 A small XYZ orientation gizmo and a row of view-snapping buttons:
 **Left**, **Right**, **Front**, **Back**, **Top**, **Bottom**, plus
-**Isometric**. Click any button to snap the camera. The gizmo tracks the
-current orientation; clicking one of its axis heads looks straight down
-that world axis (Z stays up) without changing your zoom. After snapping
-you can still orbit freely.
+**Isometric**. Click any button to rotate the camera to that view — it
+only reorients (Z stays up), keeping your current target and zoom rather
+than reframing. The gizmo tracks the current orientation; clicking one of
+its axis heads does the same thing. After snapping you can still orbit
+freely. To reframe, use **Reset View** (fit all) or **Zoom to Selection**.
 
 ## 3D canvas
 

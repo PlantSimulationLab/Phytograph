@@ -4,20 +4,25 @@ import { LADRequest } from '../utils/backendApi';
 import type { GridOption } from '../lib/gridOption';
 import type { HeliosGrid } from '../utils/backendApi';
 import type { Scan } from '../lib/scan';
+import type { MeshData } from '../lib/pointCloudTypes';
 import { hasData, hasParams, isBackfillEligible } from '../lib/scan';
 import { isMovingScan } from '../lib/scanParameters';
-import { buildLADRequest } from '../lib/pointCloudHelpers';
+import { buildLADRequest, extractReuseMeshPayload, type ReuseMeshPayload } from '../lib/pointCloudHelpers';
 
 // An existing Helios triangulation the user can REUSE. Selecting it locks the
-// inversion to the same scans + grid + lmax/aspect that produced the mesh, so
-// the (re-run) triangulation reproduces that mesh's G-function exactly.
+// inversion to the same scans + grid + lmax/aspect that produced the mesh, and
+// injects that exact mesh into the inversion (no re-triangulation).
 export interface LADTriangulationOption {
   id: string;        // mesh id
   label: string;     // mesh display name
   grid: HeliosGrid;  // the grid this mesh was triangulated in
-  scanIds: string[]; // the scans fused into it
+  scanIds: string[]; // the scans fused into it, in the mesh's scan-index order
   lmax: number;
   maxAspectRatio: number;
+  // The UNFILTERED mesh geometry (carries triEdgeMax/triAspect so the current
+  // lmax/aspect filter can be re-applied here). extractReuseMeshPayload turns it
+  // into the vertices/indices/scan-id buffers sent to the backend for injection.
+  meshData: MeshData;
   // The voxel-box mesh (if still in the scene) whose volume matches this grid.
   // Reusing this triangulation hides that box so its faces don't z-fight the LAD
   // voxel result. Undefined when the box was deleted/resized away.
@@ -33,7 +38,12 @@ interface LADPopupProps {
   // — which occupies the same space — is shown, avoiding z-fighting. When the
   // user reuses an existing triangulation, the grid lives on that mesh (not a
   // voxel box), so there's nothing to auto-hide → pass ''.
-  onStartLAD: (request: LADRequest, scanColors: string[], gridMeshId: string) => void;
+  // `reuseMesh` is the injected triangulation payload when the user reused an
+  // existing Helios mesh (null for a fresh run). When present the request is sent
+  // as a binary frame carrying the mesh, and the backend injects it instead of
+  // re-triangulating.
+  onStartLAD: (request: LADRequest, scanColors: string[], gridMeshId: string,
+               reuseMesh: ReuseMeshPayload | null) => void;
   scans: Scan[];
   initialSelectedIds?: Set<string>;
   // Voxel boxes available as the LAD grid. LAD REQUIRES one — when empty (and no
@@ -203,6 +213,14 @@ export function LADPopup({
       return;
     }
 
+    // Reusing a triangulation must reproduce the mesh the user saw. If any of its
+    // source scans is gone, the injected G(theta) would silently differ — block
+    // rather than compute a partial result.
+    if (reuseTri && reuseScansMissing > 0) {
+      setError('The reused triangulation’s source scans are no longer all available');
+      return;
+    }
+
     // Grid + lmax/aspect come from the reused mesh, else from the dialog.
     const grid = reuseTri ? reuseTri.grid : selectedGrid?.grid;
     if (!grid) {
@@ -227,13 +245,29 @@ export function LADPopup({
       gtheta,
     });
 
+    // Reuse: extract the filtered mesh (vertices/indices) with per-triangle scan
+    // ids remapped to the request's scan order, so the backend injects it instead
+    // of re-triangulating. Build the payload and the request from the SAME
+    // selectedScans so the scan ordering is one source of truth.
+    let reuseMesh: ReuseMeshPayload | null = null;
+    if (reuseTri) {
+      try {
+        reuseMesh = extractReuseMeshPayload(
+          reuseTri.meshData, lmax, maxAspectRatio,
+          reuseTri.scanIds, selectedScans.map(s => s.id));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Cannot reuse this triangulation');
+        return;
+      }
+    }
+
     // The grid mesh to auto-hide so it doesn't z-fight the LAD voxel result. In
     // new-triangulation mode that's the selected voxel box; in reuse mode it's
     // the box the reused triangulation's grid matches (if it's still around).
     const gridMeshId = reuseTri ? (reuseTri.gridMeshId ?? '') : (selectedGrid?.id ?? '');
-    onStartLAD(request, selectedScans.map(s => s.color), gridMeshId);
+    onStartLAD(request, selectedScans.map(s => s.color), gridMeshId, reuseMesh);
     onClose();
-  }, [reuseTri, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, gthetaStr, onStartLAD, onClose]);
+  }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, gthetaStr, onStartLAD, onClose]);
 
   if (!isOpen) return null;
 
@@ -432,6 +466,7 @@ export function LADPopup({
                 <input
                   data-testid="lad-input-lmax"
                   type="number"
+                  onWheel={(e) => e.currentTarget.blur()}
                   value={lmaxStr}
                   onChange={(e) => setLmaxStr(e.target.value)}
                   step="0.01"
@@ -450,6 +485,7 @@ export function LADPopup({
                 <input
                   data-testid="lad-input-aspect"
                   type="number"
+                  onWheel={(e) => e.currentTarget.blur()}
                   value={maxAspectRatioStr}
                   onChange={(e) => setMaxAspectRatioStr(e.target.value)}
                   step="0.5"
@@ -467,6 +503,7 @@ export function LADPopup({
                 <input
                   data-testid="lad-input-min-hits"
                   type="number"
+                  onWheel={(e) => e.currentTarget.blur()}
                   value={minVoxelHitsStr}
                   onChange={(e) => setMinVoxelHitsStr(e.target.value)}
                   step="1"
@@ -488,6 +525,7 @@ export function LADPopup({
                 <input
                   data-testid="lad-input-element-width"
                   type="number"
+                  onWheel={(e) => e.currentTarget.blur()}
                   value={elementWidthStr}
                   onChange={(e) => setElementWidthStr(e.target.value)}
                   step="0.01"
@@ -529,6 +567,7 @@ export function LADPopup({
                   <input
                     data-testid="lad-input-gtheta"
                     type="number"
+                    onWheel={(e) => e.currentTarget.blur()}
                     value={gthetaStr}
                     onChange={(e) => setGthetaStr(e.target.value)}
                     step="0.05"

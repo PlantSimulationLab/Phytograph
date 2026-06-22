@@ -58,19 +58,24 @@ surface.
 4. **In the dialog:**
     - **Triangulation.** If you've already run a
       [Helios triangulation](triangulate.md) over a voxel grid, choose
-      **Reuse: \<that mesh\>** here. The inversion then reuses *exactly* the
-      scans, grid, and Lmax / aspect that produced that mesh — reproducing its
-      G-function — and the scan picker, grid selector, and filter fields below
-      are hidden (they're locked to the mesh). Choose **Run a new triangulation**
-      to set everything yourself instead. (This selector only appears when a
-      reusable Helios triangulation exists — one built with a voxel grid.)
+      **Reuse: \<that mesh\>** here. The inversion then uses that mesh
+      *directly* — the exact triangles you see (with the current Lmax / aspect
+      filter applied) are sent to the inversion and used as-is, **skipping the
+      re-triangulation entirely**. This reproduces the mesh's G-function and, on
+      a heavy scan, saves the minutes a fresh triangulation would take. The scan
+      picker, grid selector, and filter fields below are hidden (locked to the
+      mesh). Choose **Run a new triangulation** to set everything yourself
+      instead. (This selector only appears when a reusable Helios triangulation
+      exists — one built with a voxel grid.)
 
         !!! note "You don't need a Helios mesh first"
-            The inversion always re-triangulates the scans server-side, so it
-            never depends on how (or whether) you triangulated in the viewer. A
             **Run a new triangulation** with your scans + grid is the full
-            workflow on its own — reuse is just a shortcut that locks the
-            settings to an existing Helios mesh so you don't re-enter them.
+            workflow on its own — it triangulates the scans server-side as part
+            of the inversion. Reusing a mesh is an optimization: it injects the
+            already-computed triangles instead of recomputing them, so it's
+            worth doing when you've already triangulated (especially on large
+            scans). If a reused mesh's source scans are no longer all present,
+            the tool blocks the run rather than silently changing the result.
     - Pick the **voxel grid** to use (required — no auto-grid). *(New
       triangulation only.)*
     - **Max Edge Length (Lmax)** and **Max Aspect Ratio** control the

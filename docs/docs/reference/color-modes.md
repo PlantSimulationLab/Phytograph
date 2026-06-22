@@ -55,6 +55,19 @@ the colorbar, and the **Min/Max** inputs let you window it.
     until re-imported — cached octrees built earlier don't carry the
     extra attributes.
 
+### Scalar fields on synthetic-scan clouds
+
+A [synthetic scan](../workflows/simulate-scan.md) generates per-hit scalars
+(distance, timestamp, return index/count, pulse deviation, sub-rays hit,
+reflectance) the same way an imported cloud carries its columns. Which of
+these end up in the **Color by** list is governed by **Retained per-hit
+fields** in the **Synthetic Scan Options** dialog — only the fields you check
+are kept. Unlike imported clouds (where a constant column is hidden), a
+retained field is listed **even when it's constant** across the cloud, so a
+single-static-sweep **timestamp** or a single-return scan's **return
+index/count** still appears. Intensity always has its own dedicated *Intensity*
+mode and isn't part of this selection.
+
 #### Categorical (classification) attributes
 
 Some scalar attributes are **categorical** — integer class labels rather

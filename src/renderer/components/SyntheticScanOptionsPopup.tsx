@@ -7,6 +7,7 @@ import {
   type SyntheticScanOptions,
 } from '../lib/syntheticScanOptions';
 import { scanDisplayName, type Scan } from '../lib/scan';
+import { SCAN_HIT_FIELDS, availabilityNote } from '../lib/scanHitFields';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { deriveMovingScanGrid, trajectoryDurationS } from '../lib/poseStream';
 
@@ -166,6 +167,22 @@ export function SyntheticScanOptionsPopup({
     });
   const selectAllScanners = () => setSelectedScannerIds(new Set(scanners.map(s => s.id)));
   const deselectAllScanners = () => setSelectedScannerIds(new Set());
+
+  // Retained per-hit fields. `intensity` is excluded from the checklist (it owns
+  // its own color mode + the intensities array). Multi-return fields are only
+  // meaningful when more than one sub-ray is fired per pulse.
+  const fieldChoices = SCAN_HIT_FIELDS.filter(f => f.slug !== 'intensity');
+  const isMultiReturn = opts.raysPerPulse > 1;
+  const toggleField = (slug: string) =>
+    setOpts(o => ({
+      ...o,
+      retainedFields: o.retainedFields.includes(slug)
+        ? o.retainedFields.filter(s => s !== slug)
+        : [...o.retainedFields, slug],
+    }));
+  const selectAllFields = () =>
+    setOpts(o => ({ ...o, retainedFields: fieldChoices.map(f => f.slug) }));
+  const deselectAllFields = () => setOpts(o => ({ ...o, retainedFields: [] }));
 
   const handleRun = (e: React.FormEvent) => {
     e.preventDefault();
@@ -401,6 +418,66 @@ export function SyntheticScanOptionsPopup({
                 className={inputCls}
               />
             </div>
+          </div>
+
+          {/* Retained per-hit fields — which auto-generated per-hit scalars are
+              kept on the resulting cloud and offered in the Display panel's
+              "Color by" list. Checked fields show even when constant-valued
+              (e.g. timestamp for a single static sweep). */}
+          <div
+            data-testid="scan-opt-retained-fields"
+            className="border border-neutral-700 rounded-lg p-3 space-y-2 bg-neutral-800/50"
+          >
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-neutral-400">Retained per-hit fields</p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={selectAllFields}
+                  className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
+                >
+                  All
+                </button>
+                <span className="text-neutral-600 text-[10px]">|</span>
+                <button
+                  type="button"
+                  onClick={deselectAllFields}
+                  className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
+                >
+                  None
+                </button>
+              </div>
+            </div>
+            <p className="text-[11px] text-neutral-500">
+              Checked fields are kept on the cloud and appear in Color by, even
+              when constant-valued.
+            </p>
+            {fieldChoices.map((f) => {
+              const note = f.availability === 'multiReturn' && !isMultiReturn
+                ? availabilityNote(f.availability)
+                : f.availability === 'extra'
+                  ? availabilityNote(f.availability)
+                  : null;
+              return (
+                <label
+                  key={f.slug}
+                  data-testid={`scan-opt-field-${f.slug}`}
+                  className="flex items-start gap-2 cursor-pointer select-none"
+                >
+                  <input
+                    type="checkbox"
+                    checked={opts.retainedFields.includes(f.slug)}
+                    onChange={() => toggleField(f.slug)}
+                    className="w-4 h-4 mt-0.5 accent-blue-600"
+                  />
+                  <span className="flex flex-col">
+                    <span className="text-sm text-neutral-300">{f.label}</span>
+                    <span className="text-[11px] text-neutral-500">{f.description}</span>
+                    {note && <span className="text-[11px] text-amber-400/80">{note}</span>}
+                  </span>
+                </label>
+              );
+            })}
           </div>
 
           {/* Total-pulse estimate for the selected scanners — the run's headline

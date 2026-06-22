@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import io
 import json
-from typing import Optional, List, Dict, Any, Literal, Sequence, Union, Iterable
+from typing import Optional, List, Dict, Any, Literal, Sequence, Union, Iterable, Tuple
 from scipy.optimize import curve_fit, minimize
 import re
 import math
@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.38.0"
+BACKEND_VERSION = "0.39.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -4060,8 +4060,18 @@ def _run_gapfill_extract(cloud):
     return synth_xyz, int(mask.sum())
 
 
-def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
+def _do_lad_computation(request: "LADComputeRequest", progress=None,
+                        reuse_mesh: "Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]" = None) -> dict:
     """Compute per-voxel leaf area density via PyHelios. Returns a result dict.
+
+    `reuse_mesh`, when supplied, is a (vertices, indices, scan_ids) triple from a
+    previously-run Helios triangulation that the caller wants to REUSE instead of
+    re-triangulating: vertices is (V, 3) float32 world coords, indices is (T, 3)
+    uint32 triangle vertex indices, scan_ids is (T,) per-triangle source-scan
+    index already remapped to this request's scan order. On the static path it is
+    injected via cloud.setExternalTriangulation, skipping the (potentially
+    minutes-long) Delaunay recompute. It is invalid for moving-platform scans
+    (which can't be triangulated) and is rejected there.
 
     LAD is NOT a sum of triangle areas. The triangulation supplies the per-cell
     G-function (the leaf-projection coefficient for Beer's law); Helios then
@@ -4387,6 +4397,14 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
         # for the whole cloud. Static-only requests triangulate exactly as before.
         any_moving = any(s["moving"] for s in scans_arrays)
         if any_moving:
+            # A reused triangulation cannot apply to a moving-platform scan: moving
+            # scans have no fixed theta-phi grid to triangulate, so any mesh the
+            # caller attached is a client bug. Reject loudly rather than silently
+            # ignore it.
+            if reuse_mesh is not None:
+                raise ValueError(
+                    "A reused triangulation cannot be combined with a moving-platform "
+                    "scan (moving scans are inverted from a supplied G(theta), not a mesh).")
             supplied_gtheta = request.gtheta if request.gtheta is not None else 0.5
             if request.gtheta is None:
                 warnings.append(
@@ -4395,6 +4413,30 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
                     "Set it to match the canopy if known.")
             if not (0.0 < supplied_gtheta <= 1.0):
                 raise ValueError("gtheta must be in (0, 1] (0.5 = spherical).")
+        elif reuse_mesh is not None:
+            # Reuse a previously-run triangulation: inject it instead of re-running
+            # the Delaunay pass. The mesh's vertices are world coordinates; the
+            # static path never applies lad_shift (only moving scans do), so they
+            # already match the cloud's points — assert that invariant rather than
+            # shifting. Expand the indexed mesh to the flat 9-floats-per-triangle
+            # soup setExternalTriangulation expects (one vectorized gather).
+            assert lad_shift is None, \
+                "triangulation reuse is static-only; lad_shift must be None"
+            _ckpt()
+            _report(0.55, "Reusing triangulation")
+            verts, tri_idx, scan_ids = reuse_mesh
+            soup = verts[tri_idx].reshape(-1).astype(np.float32, copy=False)
+            cloud.setExternalTriangulation(soup, scan_ids)
+            if cloud.getTriangleCount() == 0:
+                return {
+                    "success": False,
+                    "cells": [],
+                    "method_used": "helios",
+                    "error": "The reused triangulation produced no triangles inside the "
+                             "grid — cannot compute the G-function. Check that the mesh "
+                             "and grid overlap.",
+                    "warnings": warnings,
+                }
         else:
             _ckpt()
             _report(0.55, "Triangulating hit points")
@@ -4653,20 +4695,99 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
     return counts
 
 
+def _decode_lad_request_frame(body: bytes) -> "Tuple[LADComputeRequest, Tuple[np.ndarray, np.ndarray, np.ndarray]]":
+    """Decode a PHB1 LAD-reuse request frame into (request, (vertices, indices, scan_ids)).
+
+    The renderer sends a reuse LAD request as a PHB1 binary frame (the same format
+    _bin_frame_bytes produces for responses): the scalar LADComputeRequest fields
+    live in the header `meta`, and the reused mesh rides as three buffers —
+    `mesh_vertices` (f32, V*3), `mesh_indices` (u32, T*3), `mesh_scan_ids` (u32, T;
+    non-negative scan indices already remapped to this request's scan order).
+    Sending the mesh as raw bytes (not JSON numbers or base64) keeps a 1M+ triangle
+    payload ~18 MB instead of 150+ MB of text that would trip V8's string ceiling.
+    """
+    import struct
+    if body[:4] != _BIN_FRAME_MAGIC:
+        raise ValueError("LAD binary request must start with a PHB1 frame magic")
+    (header_len,) = struct.unpack_from("<I", body, 4)
+    header = json.loads(body[8:8 + header_len].decode("utf-8"))
+    meta = header.get("meta", {})
+    descs = header.get("buffers", [])
+
+    buffers: "dict[str, np.ndarray]" = {}
+    off = 8 + header_len
+    for d in descs:
+        n = int(d["length"])
+        np_dtype = np.float32 if d["dtype"] == "f32" else np.uint32
+        nbytes = n * 4
+        buffers[d["name"]] = np.frombuffer(body, dtype=np_dtype, count=n, offset=off).copy()
+        off += nbytes
+
+    request = LADComputeRequest(**meta)
+
+    for key in ("mesh_vertices", "mesh_indices", "mesh_scan_ids"):
+        if key not in buffers:
+            raise ValueError(f"LAD reuse frame missing required buffer '{key}'")
+
+    verts = buffers["mesh_vertices"].astype(np.float32, copy=False)
+    if verts.size % 3 != 0:
+        raise ValueError("mesh_vertices length must be a multiple of 3 (xyz per vertex)")
+    verts = verts.reshape(-1, 3)
+    V = verts.shape[0]
+
+    tri_idx = buffers["mesh_indices"].astype(np.uint32, copy=False)
+    if tri_idx.size % 3 != 0:
+        raise ValueError("mesh_indices length must be a multiple of 3 (three per triangle)")
+    tri_idx = tri_idx.reshape(-1, 3)
+    T = tri_idx.shape[0]
+
+    # scan_ids: non-negative indices into request.scans order; keep as int32 for
+    # setExternalTriangulation (its C-ABI takes int*).
+    scan_ids = buffers["mesh_scan_ids"].astype(np.int32, copy=False)
+
+    if T == 0:
+        raise ValueError("mesh_indices is empty — a reused triangulation needs at least one triangle")
+    if scan_ids.shape[0] != T:
+        raise ValueError(f"mesh_scan_ids has {scan_ids.shape[0]} entries, expected {T} (one per triangle)")
+    if V > 0 and int(tri_idx.max()) >= V:
+        raise ValueError("mesh_indices references a vertex beyond mesh_vertices")
+    n_scans = len(request.scans)
+    if int(scan_ids.min()) < 0 or int(scan_ids.max()) >= n_scans:
+        raise ValueError(
+            f"mesh_scan_ids must be in [0, {n_scans}) (the request's scan count); "
+            f"got range [{int(scan_ids.min())}, {int(scan_ids.max())}]")
+
+    return request, (verts, tri_idx, scan_ids)
+
+
 @app.post("/api/lad/compute")
-async def lad_compute(request: LADComputeRequest, http_request: Request):
+async def lad_compute(http_request: Request):
     """Compute per-voxel leaf area density via PyHelios.
 
-    Streams PHP1 progress markers (see _bin_frame_streaming_response) ahead of
-    the JSON result so the renderer shows a real per-stage progress bar, and the
-    keepalive cadence still survives WebKit's ~60s stall timeout on long runs.
-    The body is leading markers + the trailing JSON payload (no PHB1 frame); the
-    renderer drains the markers and parses the JSON tail.
+    Accepts either a JSON LADComputeRequest body (the default / fresh-triangulation
+    path) or — when reusing a previously-run Helios triangulation — a PHB1 binary
+    frame carrying the request fields in its header plus the mesh as raw buffers
+    (see _decode_lad_request_frame). The binary path lets a 1M+ triangle mesh ride
+    back to the backend compactly so it can be injected via setExternalTriangulation
+    instead of being re-triangulated from scratch.
+
+    Either way the response streams PHP1 progress markers (see
+    _bin_frame_streaming_response) ahead of the JSON result so the renderer shows a
+    real per-stage progress bar and the keepalive survives WebKit's ~60s stall
+    timeout. The renderer drains the markers and parses the JSON tail.
     """
+    content_type = (http_request.headers.get("content-type") or "").lower()
+    reuse_mesh = None
+    if "application/json" in content_type or content_type == "":
+        request = LADComputeRequest(**(await http_request.json()))
+    else:
+        body = await http_request.body()
+        request, reuse_mesh = _decode_lad_request_frame(body)
+
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(
-            _do_lad_computation(request, progress=progress)
+            _do_lad_computation(request, progress=progress, reuse_mesh=reuse_mesh)
         ).encode("utf-8"),
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
@@ -5459,11 +5580,22 @@ class LidarScanRequest(BaseModel):
     """Request model for a synthetic LiDAR scan."""
     meshes: List[LidarScanMesh]
     scanners: List[LidarScanScanner]
-    # Extra per-hit scalar fields to record. The standard set (intensity, distance,
-    # timestamp, target_index, target_count) is always attempted; anything here is
-    # additionally treated as a column-format label, so syntheticScan samples that
-    # named primitive data from the struck primitive onto each hit.
+    # Extra per-hit scalar fields to record, beyond the always-read standard set
+    # (intensity, distance, timestamp, target_index, target_count). Two kinds:
+    #   - engine-produced optionals ("deviation", "nRaysHit") — recorded by
+    #     syntheticScan for multi-return scans; only need to be READ (added to
+    #     fields_to_read). They must NOT go in column_format (there is no such
+    #     primitive data to sample).
+    #   - primitive extras (e.g. "reflectance" or any custom primitive label) —
+    #     treated as a column-format label so syntheticScan samples that named
+    #     primitive data from the struck primitive onto each hit.
+    # See _ENGINE_OPTIONAL_FIELDS for the split.
     extra_fields: List[str] = []
+    # Which of the standard fields to keep on the resulting cloud. Used only on
+    # the misses-on (session) path to decide which standard scalars become octree
+    # extra-dims, so the color-by list matches the flat-cloud path. None => keep
+    # all standards (backward compatible for older callers / standalone launches).
+    retained_standard_fields: Optional[List[str]] = None
     # Full-waveform tuning (used only when a scanner has return_type == "multi").
     rays_per_pulse: int = 100
     pulse_distance_threshold: float = 0.02
@@ -5506,6 +5638,13 @@ class LidarScanResponse(BaseModel):
 # LiDAR.cpp). "intensity" is the beam/normal dot product (can be negative) scaled
 # by reflectivity; we abs() it when surfacing so it reads as a 0..1-ish magnitude.
 _LIDAR_STANDARD_HIT_FIELDS = ["intensity", "distance", "timestamp", "target_index", "target_count"]
+
+# Optional per-hit fields syntheticScan computes itself (for multi-return scans)
+# but does NOT record unless asked. They are READ (added to fields_to_read) when
+# requested via extra_fields, but must never be passed in column_format — there
+# is no primitive data by these names to sample. Anything in extra_fields that
+# is NOT one of these is treated as a primitive-data label (e.g. "reflectance").
+_ENGINE_OPTIONAL_FIELDS = frozenset({"deviation", "nRaysHit"})
 
 # Soft ceiling on a moving scan's total pulse count. A real PRF over a long flight
 # is genuinely millions of pulses (we fire them — physically faithful), but past
@@ -5728,9 +5867,13 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
             "last": SingleReturnSelection.LAST,
         }
         extra_fields = [f for f in request.extra_fields if f]
-        # column_format drives which custom primitive data the scan samples onto
-        # hits; only the extra fields need it (the standard keys are always recorded).
-        column_format = extra_fields if extra_fields else None
+        # Split the requested extras: engine-produced optionals (deviation/nRaysHit)
+        # only need to be READ, while primitive extras must be sampled via
+        # column_format. column_format drives which custom primitive data the scan
+        # samples onto hits; the standard keys are always recorded.
+        engine_optionals = [f for f in extra_fields if f in _ENGINE_OPTIONAL_FIELDS]
+        primitive_extras = [f for f in extra_fields if f not in _ENGINE_OPTIONAL_FIELDS]
+        column_format = primitive_extras if primitive_extras else None
 
         # Phase timing — set PHYTOGRAPH_SCAN_PROFILE=1 to print where scan time
         # goes (mesh load / ray trace / hit extraction / post-processing). The
@@ -5920,7 +6063,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 # doesHitDataExist/getHitData per field), which dominated scan time
                 # on million-hit clouds. Pull every quantity for ALL hits in a
                 # handful of FFI calls, then partition per scanner with numpy masks.
-                fields_to_read = _LIDAR_STANDARD_HIT_FIELDS + extra_fields
+                fields_to_read = _LIDAR_STANDARD_HIT_FIELDS + engine_optionals + primitive_extras
                 # A moving-platform scan records each beam's own emission origin and
                 # firing index; pull them too so the result cloud carries the
                 # per-beam geometry the leaf-area inversion needs (origin_x/y/z) —
@@ -6007,7 +6150,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
             session = None
             if has_misses:
                 try:
-                    session = _create_lidar_scan_session(r)
+                    session = _create_lidar_scan_session(r, request.retained_standard_fields)
                 except Exception:
                     import traceback
                     traceback.print_exc()
@@ -6085,7 +6228,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
         return {"success": False, "error": f"Synthetic LiDAR scan failed: {str(e)}"}
 
 
-def _create_lidar_scan_session(r: dict) -> dict:
+def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[str]] = None) -> dict:
     """Build a CloudSession from one synthetic scanner's in-memory hits and return
     the create_cloud_session-style metadata (session_id + octree cache + miss
     summary). Routing a miss-recording scan through a session lets the existing
@@ -6095,6 +6238,11 @@ def _create_lidar_scan_session(r: dict) -> dict:
     `scalars` dict, an `is_miss` list (1==sky), and the scanner `origin`. The
     octree is built hits-only (far-field misses would poison its bbox); misses
     live in the session's is_miss extra dim for the overlay + LAD.
+
+    `retained_standard_fields`, when not None, restricts which STANDARD scalars
+    (see _LIDAR_STANDARD_HIT_FIELDS) become octree extra-dims, so the misses-on
+    color-by list matches the flat-cloud path. Non-standard scalars (requested
+    extras) and the is_miss flag are always kept. None => keep all standards.
     """
     import time
     import tempfile
@@ -6120,6 +6268,11 @@ def _create_lidar_scan_session(r: dict) -> dict:
     intensity = None
     extras: Dict[str, np.ndarray] = {}
     extra_dims_meta: List[dict] = []
+    # When a retained-standards set is given, a standard scalar not in it is
+    # pruned (so it doesn't reappear in color-by). Non-standard scalars (requested
+    # extras like deviation/reflectance) are always kept — requesting one IS the
+    # retention choice.
+    retained_set = set(retained_standard_fields) if retained_standard_fields is not None else None
     for name, vals in r.get("scalars", {}).items():
         arr = np.asarray(vals, dtype=np.float32)
         if arr.shape[0] != n:
@@ -6128,6 +6281,9 @@ def _create_lidar_scan_session(r: dict) -> dict:
             # Session intensity is uint16 (0..65535 LAS scale); the scan surfaces
             # intensity as a 0..1 magnitude. Scale and clamp.
             intensity = np.clip(arr * 65535.0, 0, 65535).astype(np.uint16)
+            continue
+        if (retained_set is not None and name in _LIDAR_STANDARD_HIT_FIELDS
+                and name not in retained_set):
             continue
         extras[name] = arr
         extra_dims_meta.append({"slug": name, "label": name})
