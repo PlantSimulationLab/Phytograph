@@ -1102,6 +1102,9 @@ export default function PointCloudViewer({
   const [plantProgressMsg, setPlantProgressMsg] = useState('');
   // Abort controller for an in-flight streaming build (Cancel button).
   const plantAbortRef = useRef<AbortController | null>(null);
+  // Backend cancellation token for the in-flight build (its first SSE event).
+  // Cancel POSTs /api/cancel/{runId} so the C++ build loops bail and free memory.
+  const plantRunIdRef = useRef<string | null>(null);
   // Helios triangulation background task state (the setup UI is now the unified
   // TriangulationPopup; isHeliosRunning gates the in-flight Helios run).
   const [isHeliosRunning, setIsHeliosRunning] = useState(false);
@@ -9124,6 +9127,7 @@ export default function PointCloudViewer({
         payload,
         (p, msg) => { setPlantProgress(p); setPlantProgressMsg(msg); },
         abort.signal,
+        (runId) => { plantRunIdRef.current = runId; },
       );
 
       // Single plants come back with a retained session for age scrubbing.
@@ -9221,8 +9225,9 @@ export default function PointCloudViewer({
       }
 
     } catch (error) {
-      // A user-initiated cancel aborts the fetch; that's not an error.
-      if (abort.signal.aborted) {
+      // A user-initiated cancel — fetch abort OR the backend's cancelled event —
+      // is not an error.
+      if (abort.signal.aborted || error instanceof ScanCancelledError) {
         console.log('[Plant] Generation cancelled by user');
       } else {
         console.error('Plant generation failed:', error);
@@ -9230,14 +9235,17 @@ export default function PointCloudViewer({
       }
     } finally {
       if (plantAbortRef.current === abort) plantAbortRef.current = null;
+      plantRunIdRef.current = null;
       setIsGeneratingPlant(false);
       setPlantProgress(null);
       setPlantProgressMsg('');
     }
   }, [isGeneratingPlant, shapeCounter, onDeselectAll]);
 
-  // Cancel an in-flight plant/canopy build (aborts the SSE stream).
+  // Cancel an in-flight plant/canopy build: tell the backend to stop (frees the
+  // C++ build's memory by bailing the canopy/growth loops), then abort the SSE.
   const handleCancelPlantGenerate = useCallback(() => {
+    if (plantRunIdRef.current) void cancelRun(plantRunIdRef.current);
     plantAbortRef.current?.abort();
   }, []);
 

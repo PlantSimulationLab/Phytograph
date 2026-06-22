@@ -39,8 +39,12 @@ Generation takes anywhere from a couple of seconds (young vegetable) to
 a minute (mature tree). While it runs, the popup stays open and shows a
 **progress bar** with the current phase ("Growing plants…", "Packing
 geometry…") and a **Cancel** button if you want to abort a long build.
-When it finishes, the mesh appears in the **Meshes** list and the
-**Plant** panel opens at the right for further control.
+Cancelling genuinely stops the work: it signals the backend to break out
+of the build, so a long canopy or growth simulation halts between plants
+(or growth steps) and its memory is released within a moment rather than
+running to completion in the background. When it finishes, the mesh
+appears in the **Meshes** list and the **Plant** panel opens at the
+right for further control.
 
 ## Live age scrubbing
 

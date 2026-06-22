@@ -198,3 +198,113 @@ def test_stream_emits_run_id_then_cancelled_marker(client):
     assert any(m.get("cancelled") for m in markers), "expected a terminal cancelled marker"
     # The registry entry is cleared by the wrapper's finally.
     assert main._cancel_run(run_id) is False
+
+
+# ---- Plant build cancellation (SSE path) -----------------------------------
+# Plant generation uses an SSE event stream, not _bin_frame_streaming_response.
+# The cancel mechanism is the same registry + a ctypes flag the C++ canopy /
+# advanceTime loops poll. The C++ short-circuit itself is covered by the pyhelios
+# plantarchitecture selfTest; here we assert the endpoint emits the run_id and
+# that a cancel mid-build yields a `cancelled` event (not a result).
+
+_pyhelios_available = False
+try:  # native plant build needed for these
+    import importlib
+    importlib.import_module("pyhelios")
+    _pyhelios_available = True
+except Exception:
+    _pyhelios_available = False
+
+requires_pyhelios = pytest.mark.skipif(
+    not _pyhelios_available, reason="pyhelios not built")
+
+
+def _parse_sse(line_iter):
+    """Yield (event, data_dict) tuples from an SSE line iterator."""
+    import json as _json
+    event = None
+    for line in line_iter:
+        if not line:
+            continue
+        if line.startswith("event:"):
+            event = line.split(":", 1)[1].strip()
+        elif line.startswith("data:"):
+            raw = line.split(":", 1)[1].strip()
+            try:
+                yield event, _json.loads(raw)
+            except Exception:
+                yield event, {}
+
+
+@requires_pyhelios
+def test_plant_stream_emits_run_id_first(client):
+    """The first SSE event carries the run_id so the client can cancel."""
+    with client.stream(
+        "POST", "/api/plant/generate/stream",
+        json={"mode": "single", "plant_type": "bean", "age": 5},
+    ) as resp:
+        assert resp.status_code == 200, resp.text
+        first_event = None
+        first_data = None
+        for event, data in _parse_sse(resp.iter_lines()):
+            first_event, first_data = event, data
+            break
+    assert first_event == "run_id"
+    assert isinstance(first_data.get("run_id"), str) and first_data["run_id"]
+
+
+@requires_pyhelios
+def test_plant_canopy_cancel_mid_build_yields_cancelled():
+    """A heavy canopy build cancelled mid-stream emits a `cancelled` event and
+    never a `result` — the C++ build loop bails and the worker tears down.
+
+    Driven by invoking the endpoint's SSE generator directly: TestClient's
+    sync `stream()` buffers the SSE body for a generator still running in a
+    portal thread, so it can't cancel mid-build. Calling the async generator
+    lets us flip the cancel the instant the run_id arrives, deterministically.
+    """
+    import asyncio
+
+    class _FakeRequest:
+        async def is_disconnected(self):
+            return False
+
+    req = main.PlantStreamRequest(
+        mode="canopy", plant_type="bean", age=30,
+        count_x=8, count_y=8, germination_rate=1.0,
+    )
+
+    async def drive():
+        resp = await main.generate_plant_stream(req, _FakeRequest())
+        events = []
+        cancelled_run = False
+        async for chunk in resp.body_iterator:
+            text = chunk if isinstance(chunk, str) else chunk.decode("utf-8")
+            for raw in text.split("\n"):
+                if raw.startswith("event:"):
+                    ev = raw.split(":", 1)[1].strip()
+                    events.append(ev)
+                if raw.startswith("data:") and not cancelled_run:
+                    import json as _json
+                    try:
+                        data = _json.loads(raw.split(":", 1)[1].strip())
+                    except Exception:
+                        data = {}
+                    rid = data.get("run_id")
+                    if rid:
+                        # run_id just arrived → cancel the in-flight build.
+                        main._cancel_run(rid)
+                        cancelled_run = True
+            if events and events[-1] in ("result", "cancelled", "error"):
+                break
+        return events
+
+    loop = asyncio.new_event_loop()
+    try:
+        events = loop.run_until_complete(asyncio.wait_for(drive(), timeout=120))
+    finally:
+        loop.close()
+
+    assert events[0] == "run_id"
+    assert "cancelled" in events, f"expected a cancelled event, got {events}"
+    assert "result" not in events, "a cancelled build must not emit a result"

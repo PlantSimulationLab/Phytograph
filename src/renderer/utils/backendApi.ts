@@ -1022,6 +1022,7 @@ export async function generatePlantStreaming(
   payload: PlantStreamPayload,
   onProgress: (progress: number, message: string) => void,
   signal?: AbortSignal,
+  onRunId?: (runId: string) => void,
 ): Promise<PlantGenerationResponse> {
   const baseUrl = getBackendUrl();
   // The stream request flattens mode + the relevant fields; the backend reads
@@ -1064,11 +1065,18 @@ export async function generatePlantStreaming(
         }
         if (!data) continue;
 
-        if (eventType === 'progress') {
+        if (eventType === 'run_id') {
+          const parsed = JSON.parse(data);
+          if (parsed.run_id && onRunId) onRunId(parsed.run_id);
+        } else if (eventType === 'progress') {
           const parsed = JSON.parse(data);
           onProgress(parsed.progress, parsed.message);
         } else if (eventType === 'result') {
           return JSON.parse(data) as PlantGenerationResponse;
+        } else if (eventType === 'cancelled') {
+          // The backend aborted the build and freed its memory — surface a typed
+          // cancel so the caller treats it as a no-op, not a failure.
+          throw new ScanCancelledError();
         } else if (eventType === 'error') {
           const parsed = JSON.parse(data);
           throw new Error(parsed.detail || 'Plant generation failed');

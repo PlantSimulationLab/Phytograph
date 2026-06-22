@@ -10762,26 +10762,39 @@ async def generate_plant_canopy(request: PlantCanopyRequest):
 
 
 @app.post("/api/plant/generate/stream")
-async def generate_plant_stream(request: PlantStreamRequest):
+async def generate_plant_stream(request: PlantStreamRequest, http_request: Request):
     """
     Generate a single plant or a canopy with Server-Sent Events progress.
 
     Emits:
+      event: run_id    data: {"run_id": "..."}   (first, so the client can cancel)
       event: progress  data: {"progress": 0.0-1.0, "message": "..."}
       event: result    data: <PlantGenerationResponse-shaped JSON>
+      event: cancelled data: {}                  (build aborted; memory freed)
       event: error     data: {"detail": "..."}
 
     Progress maps the C++ growth phase to 0–0.6 (via setProgressCallback),
     geometry extraction to 0.6–0.95, and JSON serialization to the final 1.0.
     Single-plant builds create a retained session (echoed as session_id) so the
     age slider keeps working; canopies are stateless.
+
+    Cancellation: the run_id ride the first event; a client POSTing
+    /api/cancel/{run_id} (or disconnecting) flips a shared ctypes flag that the
+    C++ canopy/advanceTime loops poll, so a long build stops between
+    plants/timesteps and its Context/PlantArchitecture are torn down promptly.
     """
     import asyncio
+    import ctypes as _ctypes
     import queue as _queue
     import time
 
     progress_queue: "_queue.Queue" = _queue.Queue()
     is_canopy = request.mode == "canopy"
+    run_id, cancel_event = _new_cancel_token()
+    # Shared cancel flag the C++ build loops poll. The SSE generator flips it the
+    # moment this run is cancelled (disconnect or /api/cancel); the worker also
+    # checks cancel_event at stage boundaries to bail before geometry extraction.
+    cancel_flag = _ctypes.c_int(0)
 
     def _do():
         from pyhelios import Context, PlantArchitecture
@@ -10827,6 +10840,8 @@ async def generate_plant_stream(request: PlantStreamRequest):
                 progress_queue.put(("progress", max(0.0, min(progress, 1.0)) * 0.6, "Growing plants..."))
 
             plantarch.setProgressCallback(on_progress)
+            # Register the cancel flag so the C++ build loops bail mid-build.
+            plantarch.setCancelFlag(cancel_flag)
             progress_queue.put(("progress", 0.0, "Growing plants..."))
 
             if is_canopy:
@@ -10838,6 +10853,11 @@ async def generate_plant_stream(request: PlantStreamRequest):
                     germination_rate=request.germination_rate,
                     build_parameters=build_params if build_params else None,
                 )
+                # A cancelled canopy can return early with few/no plants — report
+                # that as cancellation, not a germination failure.
+                if cancel_event.is_set():
+                    progress_queue.put(("cancelled", None))
+                    return
                 if not plant_ids:
                     progress_queue.put(("error", "No plants germinated. Try a higher germination rate."))
                     return
@@ -10851,6 +10871,14 @@ async def generate_plant_stream(request: PlantStreamRequest):
                 plant_ids = [primary_id]
 
             plantarch.setProgressCallback(None)
+
+            # The build loops honor the cancel flag, so a cancelled run returns a
+            # partial/empty plant. Bail here — before the expensive geometry
+            # extraction + serialization — and let the finally tear everything
+            # down so the C++/numpy memory is freed promptly.
+            if cancel_event.is_set():
+                progress_queue.put(("cancelled", None))
+                return
 
             try:
                 height = plantarch.getPlantHeight(primary_id)
@@ -10943,6 +10971,12 @@ async def generate_plant_stream(request: PlantStreamRequest):
         finally:
             try:
                 plantarch.setProgressCallback(None)
+                # Clear the cancel flag: it's a local c_int that dies with this
+                # request, but a retained single-plant session keeps `plantarch`
+                # alive — leaving the pointer set would dangle on later age
+                # scrubbing (advanceTime). Drop it so the session re-registers a
+                # fresh flag if/when it next needs one.
+                plantarch.setCancelFlag(None)
             except Exception:
                 pass
             # Tear down pyhelios resources unless a session owns them now.
@@ -10955,30 +10989,45 @@ async def generate_plant_stream(request: PlantStreamRequest):
 
     async def event_generator():
         loop = asyncio.get_event_loop()
+        # Emit the run_id up front so the client can cancel before heavy work.
+        yield f"event: run_id\ndata: {json.dumps({'run_id': run_id})}\n\n"
         task = loop.run_in_executor(None, _do)
 
-        while True:
-            try:
-                item = await asyncio.to_thread(progress_queue.get, True, 0.25)
-            except _queue.Empty:
-                if task.done():
-                    exc = task.exception()
-                    if exc:
-                        yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
-                    break
-                continue
+        try:
+            while True:
+                try:
+                    item = await asyncio.to_thread(progress_queue.get, True, 0.25)
+                except _queue.Empty:
+                    # On each idle tick, propagate a cancel (from /api/cancel or a
+                    # client disconnect) into the C++ cancel flag so the in-flight
+                    # build bails at its next plant/timestep boundary.
+                    if await http_request.is_disconnected():
+                        cancel_event.set()
+                    if cancel_event.is_set():
+                        cancel_flag.value = 1
+                    if task.done():
+                        exc = task.exception()
+                        if exc:
+                            yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+                        break
+                    continue
 
-            kind = item[0]
-            if kind == "progress":
-                _, progress_val, message = item
-                yield f"event: progress\ndata: {json.dumps({'progress': progress_val, 'message': message})}\n\n"
-            elif kind == "done":
-                # item[1] is already-serialized JSON (built in the worker thread).
-                yield f"event: result\ndata: {item[1]}\n\n"
-                break
-            elif kind == "error":
-                yield f"event: error\ndata: {json.dumps({'detail': item[1]})}\n\n"
-                break
+                kind = item[0]
+                if kind == "progress":
+                    _, progress_val, message = item
+                    yield f"event: progress\ndata: {json.dumps({'progress': progress_val, 'message': message})}\n\n"
+                elif kind == "done":
+                    # item[1] is already-serialized JSON (built in the worker thread).
+                    yield f"event: result\ndata: {item[1]}\n\n"
+                    break
+                elif kind == "cancelled":
+                    yield f"event: cancelled\ndata: {json.dumps({})}\n\n"
+                    break
+                elif kind == "error":
+                    yield f"event: error\ndata: {json.dumps({'detail': item[1]})}\n\n"
+                    break
+        finally:
+            _clear_run(run_id)
 
     return StreamingResponse(
         event_generator(),
