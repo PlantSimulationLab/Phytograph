@@ -97,6 +97,37 @@ describe('scanParametersFromFile', () => {
     expect(tilted.tiltPitchDeg).toBe(-3);
   });
 
+  it('attaches a reconstructed trajectory and zeroes static tilt', () => {
+    // A LAS with per-pulse beam-origin ExtraBytes surfaces a reconstructed
+    // trajectory wire dict; the imported scan becomes moving with its tilt zeroed.
+    const p = scanParametersFromFile({
+      origin: [0, 0, 10],
+      tilt_roll_deg: 5,  // would normally carry through — but a moving scan zeroes it
+      trajectory: {
+        poses: [
+          { t: 0, x: 0, y: 0, z: 10, qx: 0, qy: 0, qz: 0, qw: 1 },
+          { t: 1, x: 2, y: 0, z: 10, qx: 0, qy: 0, qz: 0, qw: 1 },
+        ],
+        frame: { crs: null, up_axis: 'z', body_convention: 'FLU', time_ref: 'gps' },
+        lever_arm: [0, 0, 0],
+        boresight_rpy: [0, 0, 0],
+        source_format: 'las_extrabytes',
+      },
+    });
+    expect(p.trajectory).toBeDefined();
+    expect(p.trajectory!.poses).toHaveLength(2);
+    expect(p.trajectory!.sourceFormat).toBe('las_extrabytes');
+    expect(p.tiltRollDeg).toBe(0);  // zeroed for a moving scan
+    expect(p.tiltPitchDeg).toBe(0);
+    expect(p.azimuthOffsetDeg).toBe(0);
+  });
+
+  it('stays static if the reconstructed trajectory is malformed', () => {
+    const p = scanParametersFromFile({ origin: [1, 2, 3], trajectory: { poses: [] } });
+    expect(p.trajectory).toBeUndefined();
+    expect(p.origin).toEqual({ x: 1, y: 2, z: 3 });
+  });
+
   it('defaults heading (azimuth offset) to 0 and honors a file-carried value', () => {
     // Initial scanner heading is a scan property: absent → 0; present → carried.
     expect(DEFAULT_SCAN_PARAMETERS.azimuthOffsetDeg).toBe(0);

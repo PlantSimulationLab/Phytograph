@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { scannerOrientation } from './ScannerMarker';
+import { scannerOrientation, decimatePosesForDisplay, MAX_DISPLAY_POSES } from './ScannerMarker';
 
 // The scanner meshes are authored forward-along-+Y. scannerOrientation() returns
 // the quaternion the marker group is rotated by, so applying it to the mesh's
@@ -72,5 +72,34 @@ describe('scannerOrientation', () => {
     const f = forwardAfter(20, 0, 0);
     expect(f.z).toBeGreaterThan(0);
     expect(f.length()).toBeCloseTo(1, 6);
+  });
+});
+
+describe('decimatePosesForDisplay', () => {
+  const make = (n: number) =>
+    Array.from({ length: n }, (_, i) => [i, 0, 0, 0, 0, 0, 1] as
+      [number, number, number, number, number, number, number]);
+
+  it('returns the same array reference when under the cap', () => {
+    const poses = make(10);
+    expect(decimatePosesForDisplay(poses, 24)).toBe(poses);
+  });
+
+  it('caps a dense path at the max and keeps first + last', () => {
+    const poses = make(400);
+    const out = decimatePosesForDisplay(poses, 24);
+    expect(out).toHaveLength(24);
+    expect(out[0][0]).toBe(0);            // first pose kept
+    expect(out[out.length - 1][0]).toBe(399); // last pose kept
+    // Evenly spaced (monotonic, no duplicates beyond rounding).
+    for (let i = 1; i < out.length; i++) expect(out[i][0]).toBeGreaterThan(out[i - 1][0]);
+  });
+
+  it('defaults to MAX_DISPLAY_POSES', () => {
+    expect(decimatePosesForDisplay(make(1000)).length).toBe(MAX_DISPLAY_POSES);
+  });
+
+  it('handles an empty path', () => {
+    expect(decimatePosesForDisplay([])).toEqual([]);
   });
 });

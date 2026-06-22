@@ -45,7 +45,8 @@ def test_ply_explicit_is_miss_flag_carried(tmp_path):
     assert n == 4
     assert main._MISS_SLUG in {ed["slug"] for ed in extra_dims}
 
-    _, _, _, extras, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    extras = _r.extras
     is_miss = extras[main._MISS_SLUG]
     assert int((is_miss == 1).sum()) == 1
     assert int((is_miss == 0).sum()) == 3
@@ -62,7 +63,8 @@ def test_ply_miss_alias_property(tmp_path):
     out = tmp_path / "out.las"
 
     main._ply_to_las(src, out)
-    _, _, _, extras, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    extras = _r.extras
     # 'sky' folds into is_miss, not a generic 'sky' extra dim.
     assert main._MISS_SLUG in extras
     assert "sky" not in extras
@@ -88,7 +90,8 @@ def test_ply_nan_coords_dropped_as_undirected_misses(tmp_path):
     n, extra_dims = main._ply_to_las(src, out)
     assert n == 2  # the NaN row was dropped
     assert main._MISS_SLUG in {ed["slug"] for ed in extra_dims}
-    _, _, _, extras, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    extras = _r.extras
     assert np.all(np.isfinite(extras[main._MISS_SLUG]))
 
 

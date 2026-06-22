@@ -2,9 +2,9 @@ import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, X, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -38,8 +38,8 @@ import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import StatusPill from './StatusPill';
-import { type ScanParameters } from '../lib/scanParameters';
-import { poseStreamToWire } from '../lib/poseStream';
+import { type ScanParameters, scanParametersFromFile } from '../lib/scanParameters';
+import { poseStreamToWire, trajectoryDurationS, deriveMovingScanGrid } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, isBackfillEligible } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
@@ -655,8 +655,13 @@ export default function PointCloudViewer({
   // which pill renders is gated by triangulationInProgress / isHeliosRunning.
   const [triProgress, setTriProgress] = useState<{ label: string; value: number | null } | null>(null);
   const triAbortRef = useRef<AbortController | null>(null);
+  // Backend cancellation token for the in-flight triangulation (its first PHP1
+  // marker). Cancel POSTs /api/cancel/{runId} so the server stops and frees memory.
+  const triRunIdRef = useRef<string | null>(null);
   // Per-stage progress for the leaf-area-density inversion (mirrors triProgress).
   const [ladProgress, setLadProgress] = useState<{ label: string; value: number | null } | null>(null);
+  // Backend cancellation token for the in-flight LAD inversion.
+  const ladRunIdRef = useRef<string | null>(null);
 
   // Ground segmentation state (Cloth Simulation Filter)
   const [showGroundSegmentPanel, setShowGroundSegmentPanel] = useState(false);
@@ -977,6 +982,12 @@ export default function PointCloudViewer({
               scan.data = data;
               scan.sourcePath = p.resolved;
               scan.asciiFormat = r.asciiFormat;
+              // Reconstructed scan params from the file (e.g. a LAS with per-pulse
+              // beam-origin ExtraBytes → a moving-platform trajectory) populate the
+              // scan's parameters when the import didn't already carry them.
+              if (!scan.params && data.octree?.scanParams) {
+                scan.params = scanParametersFromFile(data.octree.scanParams);
+              }
               attachedCount += 1;
             } catch (err) {
               failures.push({ label: p.label, reason: err instanceof Error ? err.message : String(err) });
@@ -1117,15 +1128,29 @@ export default function PointCloudViewer({
   // Synthetic LiDAR scan state
   const [isScanning, setIsScanning] = useState(false);
   // Per-stage progress for the synthetic scan (mirrors triProgress/ladProgress).
-  // value === null renders an indeterminate (pulsing) bar — used for the
-  // uninterruptible C++ ray-trace pass that can't report a fraction.
+  // The uninterruptible C++ ray-trace can't self-report, so executeScan drives a
+  // synthetic creep across that stage (see scanSynthStopRef) and `value` stays a
+  // finite fraction throughout — a null only briefly precedes the first marker.
   const [scanProgress, setScanProgress] = useState<{ label: string; value: number | null } | null>(null);
   // AbortController for the in-flight scan request, so the user can cancel a
   // hung/long scan. Aborting tears down the HTTP request and frees the UI; the
-  // backend discards the result (the C++ ray trace itself can't be interrupted
-  // mid-pass, but the user is no longer blocked waiting on it).
+  // backend ALSO cancels the run (see scanRunIdRef) so the C++ ray trace bails
+  // mid-pass and the multi-GB Helios/numpy memory is freed promptly rather than
+  // held until a huge scan finishes on its own.
   const scanAbortRef = useRef<AbortController | null>(null);
+  // The backend's cancellation token for the in-flight scan (its first PHP1
+  // marker). Cancel POSTs /api/cancel/{runId} so the server stops computing.
+  const scanRunIdRef = useRef<string | null>(null);
+  // Stops the synthetic-progress ticker for the ray-trace stage (reported as
+  // null). Set while a scan runs so Cancel clears the interval, not just aborts
+  // the fetch (mirrors backfillSynthStopRef).
+  const scanSynthStopRef = useRef<(() => void) | null>(null);
   const cancelScan = useCallback(() => {
+    scanSynthStopRef.current?.();
+    // Tell the backend to stop and free memory, THEN tear down the fetch. Order
+    // matters: aborting first can drop the request before the cancel lands, but
+    // the backend's own disconnect detection is a backstop either way.
+    if (scanRunIdRef.current) void cancelRun(scanRunIdRef.current);
     scanAbortRef.current?.abort();
   }, []);
   // Pending scan awaiting the user's choice when ≥1 target scanner already holds
@@ -5109,6 +5134,67 @@ export default function PointCloudViewer({
 
       const controller = new AbortController();
       scanAbortRef.current = controller;
+
+      // Total pulses across the participating scanners — the ray-trace cost
+      // scales with this, so it paces the synthetic creep below (mirrors how the
+      // backfill creep is paced by point count). Same derivation the options
+      // popup uses for its estimate: a static scanner fires Ntheta×Nphi; a moving
+      // one fires ≈PRF×flight-duration. rays_per_pulse multiplies the C++ work,
+      // so fold it in too.
+      let totalPulses = 0;
+      for (const s of activeScanners) {
+        const p = s.params;
+        if (!p) continue;
+        const nTheta = p.pattern === 'spinning_multibeam'
+          ? Math.max(p.beamElevationAnglesDeg.length, 1)
+          : p.zenithPoints;
+        totalPulses += p.trajectory
+          ? deriveMovingScanGrid(
+              nTheta, p.azimuthPoints, p.pulseRateHz ?? 300000,
+              trajectoryDurationS(p.trajectory),
+            ).totalPulses
+          : nTheta * p.azimuthPoints;
+      }
+      const rayWork = Math.max(totalPulses, 1) * Math.max(options.raysPerPulse, 1);
+      // Pace the creep to roughly track real ray-trace wall-clock so the bar sits
+      // near the band end as the scan finishes (minimising the snap when the real
+      // "Extracting hits" marker arrives). Floored so a tiny scan still animates.
+      const estimatedMs = Math.max(1500, rayWork / 400);
+
+      // The ray-trace is one opaque C++ call reported as a null fraction; ease the
+      // bar across its band with an asymptotic creep, snapping onto truth whenever
+      // a real marker arrives. Mirrors the Backfill Misses gapfill reporter.
+      let lastValue = 0;
+      let synthTimer: ReturnType<typeof setInterval> | null = null;
+      const stopSynth = () => { if (synthTimer) { clearInterval(synthTimer); synthTimer = null; } };
+      scanSynthStopRef.current = stopSynth;
+      const report = (p: number | null, msg: string) => {
+        if (p != null) {
+          // Real marker: snap the bar onto the streamed fraction and end any creep.
+          stopSynth();
+          lastValue = p;
+          setScanProgress({ label: msg, value: p });
+          return;
+        }
+        // Indeterminate stage (the ray-trace): ease from where we are toward a cap
+        // just shy of the next real marker (0.85 "Extracting hits"), never quite
+        // reaching it — real completion snaps the bar forward.
+        const bandStart = Math.max(lastValue, 0.15);
+        const bandEnd = 0.82;
+        const span = Math.max(bandEnd - bandStart, 0);
+        const t0 = performance.now();
+        setScanProgress({ label: msg, value: bandStart });
+        stopSynth();
+        synthTimer = setInterval(() => {
+          const elapsed = performance.now() - t0;
+          // 1 - e^(-t/τ) approaches 1 asymptotically; τ = estimatedMs/3 reaches
+          // ~95% of the band at the estimate, so the bar sits near the band end
+          // before the real marker arrives.
+          const eased = 1 - Math.exp(-elapsed / (estimatedMs / 3));
+          setScanProgress({ label: msg, value: bandStart + span * eased });
+        }, 100);
+      };
+
       const response = await runLidarScan({
         meshes: requestMeshes,
         scanners: requestScanners,
@@ -5117,7 +5203,8 @@ export default function PointCloudViewer({
         record_misses: options.includeMisses,
         scan_grid_only: grid !== undefined,
         grid,
-      }, controller.signal, (p, msg) => setScanProgress({ label: msg, value: p }));
+      }, controller.signal, report, (runId) => { scanRunIdRef.current = runId; });
+      stopSynth();  // request resolved — no more synthetic creep
       if (!response.success) {
         showToast({ title: response.error || 'Scan failed', type: 'error' });
         return;
@@ -5165,16 +5252,23 @@ export default function PointCloudViewer({
         type: 'success',
       });
     } catch (error) {
-      // User-initiated cancel (AbortController) isn't a failure — fetch rejects
-      // with an AbortError. Surface it as a neutral notice and bail.
-      if (error instanceof DOMException && error.name === 'AbortError') {
+      // User-initiated cancel isn't a failure. Either the fetch aborted
+      // (AbortError) or the backend acknowledged the cancel with a terminal
+      // marker (ScanCancelledError) — both surface as a neutral notice.
+      if (
+        (error instanceof DOMException && error.name === 'AbortError') ||
+        error instanceof ScanCancelledError
+      ) {
         showToast({ title: 'Scan cancelled', type: 'info' });
         return;
       }
       console.error('Synthetic LiDAR scan failed:', error);
       showToast({ title: `Scan failed: ${error instanceof Error ? error.message : 'Unknown error'}`, type: 'error' });
     } finally {
+      scanSynthStopRef.current?.();
+      scanSynthStopRef.current = null;
       scanAbortRef.current = null;
+      scanRunIdRef.current = null;
       setIsScanning(false);
       setScanProgress(null);
     }
@@ -5479,7 +5573,7 @@ export default function PointCloudViewer({
         applyMethodParams(request);
 
         const response = await triangulatePointCloud(request, abort.signal, (p, msg) =>
-          setTriProgress({ label: msg, value: p }));
+          setTriProgress({ label: msg, value: p }), (runId) => { triRunIdRef.current = runId; });
         if (!response.success) throw new Error(response.error || 'Triangulation failed');
 
         const meshData: MeshData = {
@@ -5562,7 +5656,7 @@ export default function PointCloudViewer({
           const frac = p == null ? null : (cloudIdx + p) / targets.length;
           const label = targets.length > 1 ? `[${cloudIdx + 1}/${targets.length}] ${msg}` : msg;
           setTriProgress({ label, value: frac });
-        });
+        }, (runId) => { triRunIdRef.current = runId; });
         if (!response.success) throw new Error(response.error || 'Triangulation failed');
 
         const meshData: MeshData = {
@@ -5620,8 +5714,10 @@ export default function PointCloudViewer({
           : `Created ${newMeshes.length} meshes with ${totalTriangles.toLocaleString()} triangles total`,
       });
     } catch (error) {
-      // User-initiated cancel (pill X) aborts the fetch — not an error to surface.
-      if (error instanceof DOMException && error.name === 'AbortError') {
+      // User-initiated cancel (pill X) — fetch abort OR a backend cancelled
+      // marker — is not an error to surface.
+      if ((error instanceof DOMException && error.name === 'AbortError')
+          || error instanceof ScanCancelledError) {
         setTriangulationError(null);
       } else {
         console.error('Triangulation error:', error);
@@ -5637,6 +5733,7 @@ export default function PointCloudViewer({
       setTriangulationInProgress(false);
       setTriProgress(null);
       triAbortRef.current = null;
+      triRunIdRef.current = null;
     }
   }, [clouds, buildPointSource, triangulateMaxPoints, onHideScan, addMesh, addMeshes]);
 
@@ -8573,7 +8670,7 @@ export default function PointCloudViewer({
 
     try {
       const response = await heliosTriangulate(request, abort.signal, (p, msg) =>
-        setTriProgress({ label: msg, value: p }));
+        setTriProgress({ label: msg, value: p }), (runId) => { triRunIdRef.current = runId; });
 
       if (abort.signal.aborted) return;
 
@@ -8775,7 +8872,7 @@ export default function PointCloudViewer({
         });
       }
     } catch (err) {
-      if (abort.signal.aborted) return;
+      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
       showToast({
         type: 'error',
         title: 'Helios Triangulation Failed',
@@ -8784,6 +8881,7 @@ export default function PointCloudViewer({
     } finally {
       setIsHeliosRunning(false);
       heliosAbortRef.current = null;
+      triRunIdRef.current = null;
       setTriProgress(null);
     }
   }, [isHeliosRunning, onHideScan]);
@@ -8808,9 +8906,11 @@ export default function PointCloudViewer({
   }, [handleHeliosTriangulate, handleTriangulateOpen3D]);
 
   const cancelHeliosTriangulation = useCallback(() => {
+    if (triRunIdRef.current) void cancelRun(triRunIdRef.current);
     heliosAbortRef.current?.abort();
     setIsHeliosRunning(false);
     heliosAbortRef.current = null;
+    triRunIdRef.current = null;
     setTriProgress(null);
   }, []);
 
@@ -8866,7 +8966,7 @@ export default function PointCloudViewer({
 
     try {
       const response = await computeLAD(request, abort.signal, (p, msg) =>
-        setLadProgress({ label: msg, value: p }));
+        setLadProgress({ label: msg, value: p }), (runId) => { ladRunIdRef.current = runId; });
       if (abort.signal.aborted) return;
 
       if (!response.success) {
@@ -8949,7 +9049,7 @@ export default function PointCloudViewer({
         message: `Computed LAD for ${voxels.length.toLocaleString()} voxels (max ${max.toFixed(2)} m²/m³)`,
       });
     } catch (err) {
-      if (abort.signal.aborted) return;
+      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
       showToast({
         type: 'error',
         title: 'Leaf Area Density Failed',
@@ -8959,14 +9059,18 @@ export default function PointCloudViewer({
       setIsLadRunning(false);
       setLadProgress(null);
       ladAbortRef.current = null;
+      ladRunIdRef.current = null;
     }
   }, [isLadRunning]);
 
   const cancelLAD = useCallback(() => {
+    // Stop the backend (frees the inversion's C++/numpy memory), then abort.
+    if (ladRunIdRef.current) void cancelRun(ladRunIdRef.current);
     ladAbortRef.current?.abort();
     setIsLadRunning(false);
     setLadProgress(null);
     ladAbortRef.current = null;
+    ladRunIdRef.current = null;
   }, []);
 
   const removeLadResult = useCallback((id: string) => {
@@ -11061,7 +11165,11 @@ export default function PointCloudViewer({
           testId="triangulation-running"
           label={triProgress?.label ?? 'Triangulating…'}
           progress={triProgress?.value ?? null}
-          onCancel={() => triAbortRef.current?.abort()}
+          onCancel={() => {
+            if (triRunIdRef.current) void cancelRun(triRunIdRef.current);
+            triAbortRef.current?.abort();
+            triRunIdRef.current = null;
+          }}
         />
       )}
 
@@ -11099,6 +11207,18 @@ export default function PointCloudViewer({
           label={qsmProgress?.label ?? 'Building QSM…'}
           progress={qsmProgress?.value ?? null}
           onCancel={cancelQSM}
+        />
+      )}
+
+      {/* Synthetic LiDAR scan status indicator — the central pill every other
+          long op shows. The ray-trace stage streams a null fraction, which
+          StatusPill renders as a label-only pulse (no bar/percent). */}
+      {isScanning && (
+        <StatusPill
+          testId="synthetic-scan-status"
+          label={scanProgress?.label ?? 'Scanning…'}
+          progress={scanProgress?.value ?? null}
+          onCancel={cancelScan}
         />
       )}
 
@@ -11281,43 +11401,16 @@ export default function PointCloudViewer({
           {scansWithParams.length > 0 && (
             <div className="px-2 pt-2">
               {isScanning ? (
-                // While a scan is running, the run button is replaced by a
-                // per-stage progress indicator + a Cancel button so a long/hung
-                // scan can be abandoned without force-quitting the app. The
-                // backend streams PHP1 markers (load → configure → ray-trace →
-                // extract → build); the ray-trace stage reports a null fraction,
-                // which renders as an indeterminate (pulsing) bar.
-                <div className="flex flex-col gap-1.5" data-testid="synthetic-scan-running">
-                  <div className="flex items-center gap-1.5">
-                    <div className="flex-1 px-2 py-1.5 bg-neutral-600 rounded text-xs text-white flex items-center justify-center gap-1.5">
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                      <span data-testid="synthetic-scan-progress-label">
-                        {scanProgress?.label ?? 'Scanning…'}
-                        {scanProgress?.value != null && ` (${Math.round(scanProgress.value * 100)}%)`}
-                      </span>
-                    </div>
-                    <button
-                      data-testid="cancel-synthetic-scan"
-                      onClick={() => cancelScan()}
-                      className="px-2 py-1.5 bg-red-600 hover:bg-red-500 rounded text-xs text-white flex items-center justify-center gap-1.5"
-                      title="Cancel the running scan"
-                    >
-                      <X className="w-3 h-3" />
-                      Cancel
-                    </button>
-                  </div>
-                  {/* Thin progress bar: determinate fill when a fraction is
-                      known, full-width pulse while the ray trace runs. */}
-                  <div className="h-1 w-full bg-neutral-700 rounded overflow-hidden">
-                    {scanProgress?.value != null ? (
-                      <div
-                        className="h-full bg-blue-500 transition-all duration-200"
-                        style={{ width: `${Math.round(scanProgress.value * 100)}%` }}
-                      />
-                    ) : (
-                      <div className="h-full w-full bg-blue-500 animate-pulse" />
-                    )}
-                  </div>
+                // While a scan is running the panel button just shows a simple
+                // "Scanning…" spinner — the per-stage label, progress bar, and
+                // Cancel all live in the central StatusPill (the same one every
+                // other long op uses), so the panel doesn't duplicate them.
+                <div
+                  data-testid="synthetic-scan-running"
+                  className="w-full px-2 py-1.5 bg-neutral-600 rounded text-xs text-white flex items-center justify-center gap-1.5 cursor-default"
+                >
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Scanning…
                 </div>
               ) : (
                 <button
@@ -11525,6 +11618,15 @@ export default function PointCloudViewer({
                           try {
                             const data = await parsePointCloudFromPath(path);
                             onUpdateScanData(scan.id, data);
+                            // A file carrying reconstructed scan params (e.g. a LAS
+                            // with per-pulse beam-origin ExtraBytes → a moving-platform
+                            // trajectory) auto-populates the scan's parameters, so it
+                            // becomes a moving scan with its path drawn rather than a
+                            // plain static cloud.
+                            const sp = data.octree?.scanParams;
+                            if (sp && !scan.params) {
+                              onUpdateScanParams(scan.id, scanParametersFromFile(sp));
+                            }
                             showToast({ title: `Attached ${data.pointCount.toLocaleString()} points to ${scan.label}`, type: 'success' });
                           } catch (err) {
                             const msg = err instanceof Error ? err.message : 'Failed to read file';
@@ -11589,11 +11691,22 @@ export default function PointCloudViewer({
                           model: <span className="text-neutral-300">{getScannerModel(scan.params.scannerModel).label}</span>
                         </div>
                       )}
-                      <div className="grid grid-cols-3 gap-x-2">
-                        <div>x: <span className="font-mono text-neutral-300">{scan.params.origin.x.toFixed(3)}</span></div>
-                        <div>y: <span className="font-mono text-neutral-300">{scan.params.origin.y.toFixed(3)}</span></div>
-                        <div>z: <span className="font-mono text-neutral-300">{scan.params.origin.z.toFixed(3)}</span></div>
-                      </div>
+                      {isMovingScanRow ? (
+                        // A moving scan has no single position — each return's beam
+                        // origin comes from the trajectory. Show the path summary
+                        // instead of the (misleading) first-pose anchor coordinate.
+                        <div>
+                          trajectory: <span className="font-mono text-neutral-300">{scan.params.trajectory!.poses.length} poses</span>
+                          <span className="mx-1">·</span>
+                          <span className="font-mono text-neutral-300">{trajectoryDurationS(scan.params.trajectory!).toFixed(1)} s</span>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-3 gap-x-2">
+                          <div>x: <span className="font-mono text-neutral-300">{scan.params.origin.x.toFixed(3)}</span></div>
+                          <div>y: <span className="font-mono text-neutral-300">{scan.params.origin.y.toFixed(3)}</span></div>
+                          <div>z: <span className="font-mono text-neutral-300">{scan.params.origin.z.toFixed(3)}</span></div>
+                        </div>
+                      )}
                       {scan.params.pattern === 'spinning_multibeam' ? (
                         <>
                           <div>
@@ -13533,6 +13646,7 @@ export default function PointCloudViewer({
         onClose={() => setPendingScan(null)}
         onRun={(options, scannerIds) => { void handleScanOptionsRun(options, scannerIds); }}
         scanners={pendingScan?.activeScanners ?? []}
+        initialSelectedIds={selectedScanIds}
         hasGeometry={(pendingScan?.targetMeshes.length ?? 0) > 0}
         gridAvailable={pendingGridAvailable}
       />

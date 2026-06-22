@@ -162,7 +162,12 @@ def test_bpp_legend_round_trips_grid_extras(tmp_path):
     f = tmp_path / "scan.xyz"
     _write_headerless(f, _BPP_ROWS)
     las_path, _, _ = main._source_to_las(f, _BPP_FORMAT, tmp_path, None)
-    positions, colors, intensity, extras, extra_dims_meta = main._read_las_into_arrays(las_path)
+    _r = main._read_las_into_arrays(las_path)
+    positions = _r.positions
+    colors = _r.colors
+    intensity = _r.intensity
+    extras = _r.extras
+    extra_dims_meta = _r.extra_dims_meta
 
     assert len(positions) == len(_BPP_ROWS)
     for slug in main._GRID_INDEX_SLUGS:

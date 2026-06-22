@@ -26,12 +26,41 @@ interface SyntheticScanOptionsPopupProps {
   // visibility/selection). Each can be toggled off so the run only ray-traces
   // the chosen subset.
   scanners: Scan[];
+  // The current Scans-panel selection. Used to seed which positions are checked
+  // when the popup opens — the checked subset defaults to this, intersected with
+  // the candidate set, so opening the modal with one scan selected ray-traces
+  // only that scan (mirrors Backfill Misses). Empty → default to all candidates.
+  initialSelectedIds?: Set<string>;
   // Whether the scene has at least one visible scannable mesh to ray-trace.
   // When false the modal still opens (so you can review positions/options) but
   // explains the missing geometry and keeps Run disabled.
   hasGeometry: boolean;
   // Whether exactly one voxel grid is visible — gates the crop-to-grid toggle.
   gridAvailable: boolean;
+}
+
+// Decide which candidate scanner ids to check when the popup opens.
+// `candidateIds` are the scan positions that can be ray-traced; `incoming` is the
+// current Scans-panel selection. Rules (mirrors seedBackfillSelection):
+//   - no incoming    → opened with nothing selected, so default to all candidates.
+//   - incoming given → honor it, intersected with the candidate set. May be EMPTY
+//     when the selected scans have no scanner parameters — intentional, so we
+//     never silently check a different, unselected scanner.
+// Computed FRESH from `incoming` on every open, so reopening with a different
+// panel selection picks it up.
+export function seedScannerSelection(
+  candidateIds: string[],
+  incoming: Set<string>,
+): Set<string> {
+  if (incoming.size === 0) {
+    return new Set(candidateIds);
+  }
+  const candidateSet = new Set(candidateIds);
+  const intersection = new Set([...incoming].filter(id => candidateSet.has(id)));
+  // If the panel selection touches none of the candidates, fall back to all —
+  // the user opened the scan tool with unrelated objects selected, so checking
+  // every position is the least-surprising default (and never an empty run).
+  return intersection.size === 0 ? new Set(candidateIds) : intersection;
 }
 
 // Pre-run dialog for the run-time options of a synthetic LiDAR scan (noise,
@@ -43,6 +72,7 @@ export function SyntheticScanOptionsPopup({
   onClose,
   onRun,
   scanners,
+  initialSelectedIds,
   hasGeometry,
   gridAvailable,
 }: SyntheticScanOptionsPopupProps) {
@@ -66,13 +96,17 @@ export function SyntheticScanOptionsPopup({
     return () => { cancelled = true; };
   }, [isOpen]);
 
-  // Seed the scan-position selection (all on) each time the popup opens.
+  // Seed the scan-position selection each time the popup opens — from the live
+  // Scans-panel selection, intersected with the candidate set (falls back to all
+  // when nothing relevant is selected). Mirrors BackfillMissesPopup, so opening
+  // the modal with one scan selected ray-traces only that scan rather than all.
   useEffect(() => {
     if (!isOpen) return;
-    setSelectedScannerIds(new Set(scanners.map(s => s.id)));
+    setSelectedScannerIds(seedScannerSelection(
+      scanners.map(s => s.id), initialSelectedIds ?? new Set<string>()));
     // Keyed on isOpen only: re-seeding on every `scanners` identity change would
-    // clobber the user's toggles mid-session. The candidate set is fixed for the
-    // lifetime of one open popup.
+    // clobber the user's toggles mid-session. The candidate set (and the seeding
+    // selection) is fixed for the lifetime of one open popup.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 

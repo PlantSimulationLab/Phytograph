@@ -85,7 +85,11 @@ def test_e57_converter_tags_and_places_misses(tmp_path):
     assert n == 6
     assert {ed["slug"] for ed in extra_dims} == {main._MISS_SLUG}
 
-    pos, colors, intensity, extras, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    pos = _r.positions
+    colors = _r.colors
+    intensity = _r.intensity
+    extras = _r.extras
     is_miss = extras[main._MISS_SLUG]
     assert int((is_miss == 1).sum()) == expected_misses == 2
     assert int((is_miss == 0).sum()) == 4
@@ -113,7 +117,8 @@ def test_e57_without_misses_has_no_miss_points(tmp_path):
     out = tmp_path / "out.las"
 
     n, _ = main._e57_to_las(src, out)
-    _, _, _, extras, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    extras = _r.extras
     assert n == 6
     # is_miss extra dim is present but all zero.
     assert int((extras[main._MISS_SLUG] != 0).sum()) == 0
@@ -136,7 +141,9 @@ def test_e57_zeroed_misses_kept_flagged_not_dropped(tmp_path):
     assert main._MISS_SLUG in slugs
     assert {"row_index", "column_index"} <= slugs
 
-    pos, _, _, extras, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    pos = _r.positions
+    extras = _r.extras
     is_miss = extras[main._MISS_SLUG]
     assert int((is_miss == 1).sum()) == expected_misses == 2
 
@@ -162,7 +169,9 @@ def test_e57_intensity_normalised_from_valid_range(tmp_path):
     out = tmp_path / "out.las"
 
     main._e57_to_las(src, out)
-    _, _, intensity, extras, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    intensity = _r.intensity
+    extras = _r.extras
     is_miss = extras[main._MISS_SLUG]
 
     assert intensity is not None
@@ -192,7 +201,8 @@ def test_e57_multiscan_uses_per_scan_pose(tmp_path):
     out = tmp_path / "out.las"
 
     n, _ = main._e57_to_las(src, out)
-    pos, _, _, _, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    pos = _r.positions
     assert n == 4
     # Scan 0's points are near o0; scan 1's are shifted by ~100 m (its own pose).
     near_o0 = pos[np.linalg.norm(pos - o0, axis=1) < 10]
@@ -387,7 +397,9 @@ def test_e57_carries_rgb_into_las_misses_black(tmp_path):
     out = tmp_path / "out.las"
     main._e57_to_las(src, out)
 
-    _, colors, _, extras, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    colors = _r.colors
+    extras = _r.extras
     assert colors is not None
     is_miss = extras[main._MISS_SLUG]
 
@@ -406,7 +418,8 @@ def test_e57_without_color_has_no_rgb(tmp_path):
     _write_e57(src, with_misses=False)  # cartesian + intensity, no colour
     out = tmp_path / "out.las"
     main._e57_to_las(src, out)
-    _, colors, _, _, _ = main._read_las_into_arrays(out)
+    _r = main._read_las_into_arrays(out)
+    colors = _r.colors
     # RGB channels exist (point format 3) but are all zero — no colour carried.
     assert colors is None or np.all(colors == 0)
 

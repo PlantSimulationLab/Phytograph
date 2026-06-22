@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.35.0"
+BACKEND_VERSION = "0.36.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -1604,9 +1604,13 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
         if progress is not None:
             progress(fraction, message)
 
+    def _ckpt():
+        _cancel_checkpoint(progress)
+
     try:
         import open3d as o3d
 
+        _ckpt()
         _report(0.05, "Reading points")
         if request.sources:
             # Merged multi-scan: read and fuse every contributing source. Inline
@@ -1668,6 +1672,9 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
 
         mesh = None
         method_used = request.method
+        # Last cheap exit before the monolithic Open3D/scipy meshing call (which
+        # itself can't be interrupted mid-pass); a cancel here frees the cloud.
+        _ckpt()
         _report(0.45, f"Meshing ({request.method.replace('_', ' ')})")
 
         if request.method == "ball_pivoting":
@@ -1780,6 +1787,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
                     "points_used": points_used,
                     "error": "Triangulation produced no triangles. Try adjusting parameters or using a different method."}
 
+        _ckpt()
         # Clean up mesh
         _report(0.85, "Cleaning up mesh")
         mesh.remove_degenerate_triangles()
@@ -1817,6 +1825,8 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
         return {"success": False, "method_used": request.method,
                 "num_triangles": 0, "num_vertices": 0,
                 "error": "Open3D not installed. Run: pip install open3d"}
+    except ScanCancelled:
+        raise  # cancellation propagates to the streaming wrapper (memory freed)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1845,10 +1855,12 @@ def _pack_mesh_frame(result: dict, *, index_key: str = "triangles") -> bytes:
 
 
 @app.post("/api/triangulate")
-async def triangulate_point_cloud(request: TriangulationRequest):
+async def triangulate_point_cloud(request: TriangulationRequest, http_request: Request):
     """Triangulate a point cloud (Open3D). Returns a PHB1 binary frame."""
+    run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
-        lambda progress: _pack_mesh_frame(_do_open3d_triangulation(request, progress=progress)))
+        lambda progress: _pack_mesh_frame(_do_open3d_triangulation(request, progress=progress)),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 # ==================== GROUND SEGMENTATION ====================
@@ -2963,6 +2975,9 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         if progress is not None:
             progress(fraction, message)
 
+    def _ckpt():
+        _cancel_checkpoint(progress)
+
     tmpdir = None
     try:
         from pyhelios import LiDARCloud
@@ -3120,6 +3135,9 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
 
         n_scans = len(scans_info)
         for scan_idx, scan_info in enumerate(scans_info):
+            # Fresh LiDARCloud per scan ⇒ a cancel here unwinds cleanly before the
+            # next (monolithic) triangulateHitPoints call.
+            _ckpt()
             _report(0.1 + 0.7 * scan_idx / max(n_scans, 1),
                     f"Triangulating scan {scan_idx + 1} of {n_scans}"
                     if n_scans > 1 else "Triangulating")
@@ -3307,6 +3325,8 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
             "method_used": "helios",
             "error": f"PyHelios not installed: {str(e)}"
         }
+    except ScanCancelled:
+        raise  # cancellation propagates to the streaming wrapper (memory freed)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -3362,15 +3382,17 @@ def _pack_helios_triangulation(result: dict) -> bytes:
 
 
 @app.post("/api/triangulate/helios")
-async def helios_triangulate(request: HeliosTriangulationRequest):
+async def helios_triangulate(request: HeliosTriangulationRequest, http_request: Request):
     """Triangulate point cloud data using PyHelios spherical Delaunay triangulation.
 
     Returns a PHB1 binary frame (see _bin_frame_bytes) so multi-million-triangle
     meshes transfer compactly and parse as zero-copy typed arrays. Keepalive
     chunks during the (long) computation keep WebKit's stall timeout at bay.
     """
+    run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
-        lambda progress: _pack_helios_triangulation(_do_helios_computation(request, progress=progress)))
+        lambda progress: _pack_helios_triangulation(_do_helios_computation(request, progress=progress)),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 # Lmax / median-spacing ratio at or above which we call the triangulation "likely
@@ -3716,9 +3738,24 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
     dirs = _directions_from_origin(xyz, origin)
 
     def _get(slug):
+        # The per-point timestamp lives on the dedicated float64 `sess.timestamps`
+        # field (not float32 `extras`) to preserve GPS-time precision for the
+        # trajectory join — prefer it. Fall back to `extras` for the ASCII import
+        # path, which still routes timestamp through the column plan.
+        if slug == 'timestamp' and sess.timestamps is not None:
+            return np.asarray(sess.timestamps, dtype=np.float64)[keep]
         return sess.extras[slug][keep] if slug in sess.extras else None
 
     labels, vals, flags = _lad_labels_vals(_get, xyz.shape[0])
+
+    # Per-pulse beam origins from LAS ExtraBytes (ground truth) — surfaced to the
+    # LAD caller so it can use them directly and bypass the timestamp join. Subset
+    # by `keep` to stay aligned with `xyz`. Carried on `flags` (which already flows
+    # out) rather than widening the return tuple. None unless the LAS carried them.
+    flags["beam_origins"] = (
+        np.ascontiguousarray(sess.beam_origins[keep], dtype=np.float64)
+        if getattr(sess, "beam_origins", None) is not None else None
+    )
 
     backfilled = sess.backfilled_misses if include_backfilled else None
     if (backfilled is not None and backfilled.get("positions") is not None
@@ -3849,7 +3886,80 @@ def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
     return xyz, dirs, labels, vals, flags
 
 
-def _apply_trajectory_origins(xyz, dirs, labels, vals, trajectory, shift=None):
+_GPS_WEEK_SECONDS = 604800.0
+_GPS_STANDARD_OFFSET = 1e9  # Standard − Adjusted-Standard GPS seconds
+
+
+def _validate_join_coverage(ts, traj_t, warnings=None):
+    """Fail loudly when point timestamps don't line up with the trajectory's clock.
+
+    `ts` (N,) and `traj_t` (M,) are float64 seconds in whatever clock each carries.
+    The trajectory join (`origins_for_returns` → `resolve_pose_at`) CLAMPS query
+    times to [t0, t1], which is correct for small legitimate edge overruns but
+    catastrophic for a clock mismatch: every return clamps to one endpoint pose and
+    silently collapses to a single static origin. This validates the join BEFORE
+    that happens:
+      - zero overlap                 → raise (almost always an epoch/unit mismatch)
+      - systematic ~1e9 / N-week gap → raise explicitly (never auto-correct)
+      - 0 < coverage < ~98%          → append a warning (partial; clamped tail)
+      - NaN timestamps               → raise
+    A single-pose trajectory (M == 1) is a degenerate "static" pose applied to all
+    returns by design — skip the overlap check for it.
+    """
+    import numpy as np
+
+    if ts.size == 0 or traj_t.size == 0:
+        return
+    if not np.all(np.isfinite(ts)):
+        raise ValueError(
+            "Moving-platform LAD: the per-point timestamp column contains NaN/inf "
+            "values, so returns cannot be joined to the trajectory. Re-import the "
+            "scan with a clean GPS-time column.")
+
+    t0, t1 = float(traj_t[0]), float(traj_t[-1])
+    if traj_t.size == 1 or t1 == t0:
+        return  # single pose: applies to every return; no span to overlap
+
+    ts_lo, ts_hi = float(np.min(ts)), float(np.max(ts))
+    coverage = float(((ts >= t0) & (ts <= t1)).mean())
+
+    # When the clocks don't line up, first try to NAME the specific GPS confusion
+    # (a systematic ~1e9 s or integer-GPS-week offset between the medians) — a far
+    # more actionable message than the generic "no overlap". Never auto-correct: a
+    # wrong guess would silently shift every origin.
+    offset = float(np.median(ts) - (t0 + t1) / 2.0)
+    if abs(abs(offset) - _GPS_STANDARD_OFFSET) < 1.0:
+        raise ValueError(
+            f"Moving-platform LAD: the point timestamps lead the trajectory by "
+            f"~{offset:.0f} s, the exact Standard − Adjusted-Standard GPS offset "
+            f"(1e9 s). One side is Standard GPS time and the other Adjusted-Standard. "
+            f"Re-export both on the same GPS-time encoding; the offset is not "
+            f"auto-corrected.")
+    if abs(offset) > _GPS_WEEK_SECONDS and (abs(offset) % _GPS_WEEK_SECONDS) < 1.0:
+        weeks = round(abs(offset) / _GPS_WEEK_SECONDS)
+        raise ValueError(
+            f"Moving-platform LAD: the point timestamps and trajectory differ by "
+            f"~{weeks} GPS week(s) ({offset:.0f} s). One side is likely GPS Week Time "
+            f"and the other an absolute clock. Re-align them to a common epoch; the "
+            f"offset is not auto-corrected.")
+
+    if coverage == 0.0:
+        raise ValueError(
+            f"Moving-platform LAD: the point timestamps and the trajectory do not "
+            f"overlap in time (points span [{ts_lo:.3f}, {ts_hi:.3f}] s, trajectory "
+            f"spans [{t0:.3f}, {t1:.3f}] s). This usually means the two use different "
+            f"clocks (e.g. GPS Week Time vs Adjusted-Standard, or a ~1e9 s epoch "
+            f"offset). Re-export them on a common clock; the join is not auto-corrected.")
+
+    if coverage < 0.98 and warnings is not None:
+        warnings.append(
+            f"Moving-platform LAD: only {coverage * 100:.1f}% of returns fall within "
+            f"the trajectory's time span [{t0:.3f}, {t1:.3f}] s; the remaining returns "
+            f"are clamped to the nearest trajectory endpoint and their per-beam "
+            f"origins may be wrong. Check that the trajectory covers the whole scan.")
+
+
+def _apply_trajectory_origins(xyz, dirs, labels, vals, trajectory, shift=None, warnings=None):
     """Convert a static LAD scan into a per-beam (moving-platform) one.
 
     Given a scan's resolved arrays plus a `trajectory` (Pydantic PoseStream) and an
@@ -3865,6 +3975,14 @@ def _apply_trajectory_origins(xyz, dirs, labels, vals, trajectory, shift=None):
     BOTH into a local frame for float32 precision (the inversion is frame-invariant).
     Returns (dirs, labels, vals, origins). Raises if no `timestamp` column exists —
     a moving scan cannot be reconstructed without the per-return join key.
+
+    Before joining, the per-point timestamps are checked for OVERLAP with the
+    trajectory's time span. With no overlap (e.g. a GPS epoch/unit mismatch) every
+    return would clamp to a single endpoint pose and silently collapse to one static
+    origin — so this RAISES instead. Partial coverage appends a warning to `warnings`
+    (a list, when provided) rather than blocking. A systematic ~1e9 (Standard vs
+    Adjusted-Standard) or integer-GPS-week offset is refused explicitly rather than
+    auto-corrected (a wrong auto-correct silently corrupts every origin).
     """
     import numpy as np
     from trajectory import PoseStream as _TrajPoseStream, origins_for_returns
@@ -3888,14 +4006,30 @@ def _apply_trajectory_origins(xyz, dirs, labels, vals, trajectory, shift=None):
     if shift is not None:
         stream = stream.recentered(np.asarray(shift, dtype=np.float64))
 
-    origins = origins_for_returns(stream, ts)              # (N,3) float64, local frame
-    dirs = _directions_from_origin(xyz, origins)           # per-beam directions
+    _validate_join_coverage(ts, np.asarray(stream.t, dtype=np.float64), warnings)
 
+    origins = origins_for_returns(stream, ts)              # (N,3) float64, local frame
+    dirs, labels, vals = _attach_origins(xyz, labels, vals, origins)
+    return dirs, labels, vals, origins
+
+
+def _attach_origins(xyz, labels, vals, origins):
+    """Recompute per-beam ray directions from explicit emission `origins` and append
+    origin_x/origin_y/origin_z to (labels, vals).
+
+    Shared by the trajectory-join path (`_apply_trajectory_origins`) and the LAS
+    ExtraBytes path (`_do_lad_computation`) so both produce the IDENTICAL wire shape
+    the C++ getHitOrigin() / beam-based (Gtheta) inversion reads. `xyz` and `origins`
+    must already be in the same frame. Returns (dirs, labels, vals).
+    """
+    import numpy as np
+
+    dirs = _directions_from_origin(xyz, origins)           # per-beam directions
     labels = list(labels) + ['origin_x', 'origin_y', 'origin_z']
-    origin_cols = origins.astype(np.float64)
+    origin_cols = np.asarray(origins, dtype=np.float64)
     vals = (np.column_stack([vals, origin_cols]) if vals is not None
             else origin_cols)
-    return dirs, labels, vals, origins
+    return dirs, labels, vals
 
 
 def _run_gapfill_extract(cloud):
@@ -3951,6 +4085,9 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
         if progress is not None:
             progress(fraction, message)
 
+    def _ckpt():
+        _cancel_checkpoint(progress)
+
     warnings: List[str] = []
     try:
         from pyhelios import LiDARCloud, Context
@@ -3988,10 +4125,28 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
         # the min corner over the trajectory samples and the grid box, so all
         # coordinates reaching Helios are small. Static-only requests skip this
         # entirely (lad_shift is None) and are byte-for-byte unchanged.
-        any_moving = any(s.trajectory is not None for s in request.scans)
+        # A scan is "moving" if it carries a trajectory OR its session holds
+        # per-pulse beam origins (LAS ExtraBytes). Both reconstruct per-beam origins
+        # in the float32 geometry path and so need the local-frame recenter when the
+        # coordinates are large (UTM). Peek at sessions here (read-only) so an
+        # ExtraBytes-only scan with NO trajectory still contributes to the shift floor.
+        def _scan_beam_origins(s):
+            if not s.session_id:
+                return None
+            with _cloud_session_lock:
+                _s = _cloud_sessions.get(s.session_id)
+            return getattr(_s, "beam_origins", None) if _s is not None else None
+
+        scan_origin_mins = []
+        for s in request.scans:
+            bo = _scan_beam_origins(s)
+            if bo is not None and len(bo):
+                scan_origin_mins.append(np.min(np.asarray(bo, dtype=np.float64), axis=0).tolist())
+        any_moving = (any(s.trajectory is not None for s in request.scans)
+                      or bool(scan_origin_mins))
         lad_shift = None
         if any_moving:
-            mins = []
+            mins = list(scan_origin_mins)
             for s in request.scans:
                 if s.trajectory is not None:
                     for p in s.trajectory.poses:
@@ -4023,6 +4178,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
         _report(0.05, "Reading scans")
         for scan_idx, scan_entry in enumerate(request.scans):
             # Step 0.05 → 0.35 across scans so multi-scan ingest visibly advances.
+            _ckpt()
             _report(0.05 + 0.30 * (scan_idx / n_scans),
                     f"Reading scan {scan_idx + 1} of {n_scans}")
             origin = scan_entry.origin
@@ -4070,22 +4226,44 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
                 raise ValueError("Scan entry has no points, file_path, or session_id")
             scan_multi = scan_flags["multi"]
 
-            # Moving-platform scan: reconstruct a PER-BEAM emission origin for every
-            # return by joining its timestamp to the trajectory, recompute the ray
-            # directions from those per-beam origins, and carry origin_x/y/z so the
-            # beam-based (Gtheta) inversion can read each beam's own origin. Both the
-            # points and the trajectory are recentered by `lad_shift` into a small
-            # local frame for float32 precision (the inversion is frame-invariant;
-            # the grid + output cells are shifted to match below). `cull_origin` is
-            # the per-beam origins so the frustum cull also accounts for motion.
-            scan_moving = scan_entry.trajectory is not None
-            if scan_moving:
+            # Resolve a per-beam emission origin so the beam-based (Gtheta) inversion
+            # can read each beam's own origin (carried as origin_x/y/z, frustum-culled
+            # via `cull_origin`). Precedence:
+            #   1. LAS ExtraBytes per-pulse origins — GROUND TRUTH, no join needed.
+            #   2. trajectory join — reconstruct origins by joining each return's
+            #      timestamp to the 6-DOF trajectory.
+            #   3. static origin — a single fixed scanner position.
+            # Moving paths recenter points + origins by `lad_shift` into a small local
+            # frame for float32 precision (the inversion is frame-invariant; the grid
+            # + output cells are shifted to match below).
+            beam_origins = scan_flags.get("beam_origins")
+            if beam_origins is not None and beam_origins.shape[0] == xyz.shape[0]:
+                if scan_entry.trajectory is not None:
+                    warnings.append(
+                        "Scan carries per-pulse beam-origin columns (LAS ExtraBytes) "
+                        "AND a trajectory; the explicit origins were used and the "
+                        "trajectory was ignored.")
+                if lad_shift is not None:
+                    xyz = xyz - lad_shift
+                    beam_origins = beam_origins - lad_shift
+                dirs, labels, vals = _attach_origins(xyz, labels, vals, beam_origins)
+                cull_origin = beam_origins
+                scan_moving = True
+            elif scan_entry.trajectory is not None:
+                # Moving-platform scan: reconstruct a PER-BEAM emission origin for
+                # every return by joining its timestamp to the trajectory, recompute
+                # the ray directions, and carry origin_x/y/z so the beam-based
+                # (Gtheta) inversion reads each beam's own origin. Points and
+                # trajectory are recentered by `lad_shift` for float32 precision.
                 if lad_shift is not None:
                     xyz = xyz - lad_shift
                 dirs, labels, vals, cull_origin = _apply_trajectory_origins(
-                    xyz, dirs, labels, vals, scan_entry.trajectory, shift=lad_shift)
+                    xyz, dirs, labels, vals, scan_entry.trajectory, shift=lad_shift,
+                    warnings=warnings)
+                scan_moving = True
             else:
                 cull_origin = origin
+                scan_moving = False
 
             # Cull to the grid's beam frustum: keep only beams (origin -> point)
             # whose segment can pass through the grid AABB. This preserves
@@ -4218,6 +4396,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
             if not (0.0 < supplied_gtheta <= 1.0):
                 raise ValueError("gtheta must be in (0, 1] (0.5 = spherical).")
         else:
+            _ckpt()
             _report(0.55, "Triangulating hit points")
             cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
             if cloud.getTriangleCount() == 0:
@@ -4265,6 +4444,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
                 "threshold; defaulted to 5. Set 'Min Voxel Hits' to control which "
                 "voxels are solved."
             )
+        _ckpt()
         _report(0.80, "Inverting Beer's law")
         with Context() as ctx:
             if any_moving:
@@ -4291,6 +4471,8 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
         total_leaf_area = 0.0
         solved_indices = []  # voxels with a real LAD solution + defined variance
         for i in range(n_cells):
+            if (i & 0xFFF) == 0:  # every 4096 voxels — negligible overhead
+                _ckpt()
             c = cell_centers[i]
             s = cell_sizes[i]
             la = float(cloud.getCellLeafArea(i))
@@ -4395,6 +4577,8 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None) -> dict:
             "error": f"PyHelios not installed: {str(e)}",
             "warnings": warnings,
         }
+    except ScanCancelled:
+        raise  # cancellation propagates to the streaming wrapper (memory freed)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -4470,7 +4654,7 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
 
 
 @app.post("/api/lad/compute")
-async def lad_compute(request: LADComputeRequest):
+async def lad_compute(request: LADComputeRequest, http_request: Request):
     """Compute per-voxel leaf area density via PyHelios.
 
     Streams PHP1 progress markers (see _bin_frame_streaming_response) ahead of
@@ -4479,10 +4663,57 @@ async def lad_compute(request: LADComputeRequest):
     The body is leading markers + the trailing JSON payload (no PHB1 frame); the
     renderer drains the markers and parses the JSON tail.
     """
+    run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(
             _do_lad_computation(request, progress=progress)
-        ).encode("utf-8"))
+        ).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+class TrajectoryParseRequest(BaseModel):
+    """Parse a binary trajectory file into the canonical PoseStream wire shape.
+
+    `path` is a server-readable file path (the renderer sends the picked path, same
+    as the cloud-import endpoints). `format` is auto-detected from the extension when
+    omitted. `smrmsg_path` optionally points at the SBET accuracy companion for a QC
+    warning. `target_poses` caps the decimated pose count."""
+    path: str
+    format: Optional[str] = None
+    smrmsg_path: Optional[str] = None
+    target_poses: int = 3000
+
+
+@app.post("/api/trajectory/parse")
+async def trajectory_parse(request: TrajectoryParseRequest):
+    """Parse a binary trajectory (currently SBET .sbet/.out) into the canonical
+    PoseStream wire dict the renderer's poseStreamFromWire consumes. Text trajectories
+    (.csv/.txt/.tsv/.traj) are parsed client-side and never hit this endpoint.
+
+    Binary parsing belongs server-side: it needs pyproj (Python-only) for the
+    geographic->UTM projection, and the renderer only does IPC text reads.
+    """
+    import sbet
+
+    src = _Path(request.path).expanduser()
+    if not src.is_file():
+        raise HTTPException(status_code=404, detail=f"Trajectory file not found: {request.path}")
+
+    fmt = (request.format or src.suffix.lstrip(".")).lower()
+    if fmt in ("sbet", "out"):
+        try:
+            return sbet.parse_sbet(
+                str(src), target_poses=request.target_poses,
+                smrmsg_path=request.smrmsg_path)
+        except sbet.SbetParseError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:  # pyproj / unexpected — surface a clean 400, not a 500
+            raise HTTPException(status_code=400,
+                                detail=f"Failed to parse SBET trajectory: {e}")
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unsupported binary trajectory format '.{fmt}'. Supported: .sbet/.out "
+               f"(SBET). Text trajectories (.csv/.txt/.tsv/.traj) are imported directly.")
 
 
 # ==================== SCAN EXPORT (Helios XML + per-scan ASCII) ====================
@@ -5455,6 +5686,9 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
         if progress is not None:
             progress(fraction, message)
 
+    def _ckpt():
+        _cancel_checkpoint(progress)
+
     try:
         if not request.meshes:
             return {"success": False, "error": "No geometry to scan"}
@@ -5468,6 +5702,15 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
 
         from pyhelios import LiDARCloud, Context
         from pyhelios.LiDARCloud import ReturnMode, SingleReturnSelection
+
+        # Shared cancel flag the C++ ray loop polls. The stream loop flips it to
+        # 1 the moment this run is cancelled (disconnect or /api/cancel), so the
+        # in-flight syntheticScan bails its per-scan + inner ray loops. Bind it to
+        # the reporter so propagate_cancel() can mirror the Event into it.
+        import ctypes as _ctypes
+        _scan_cancel_flag = _ctypes.c_int(0)
+        if progress is not None and getattr(progress, "bind_cancel_int", None):
+            progress.bind_cancel_int(_scan_cancel_flag)
 
         _report(0.05, "Loading geometry")
 
@@ -5496,10 +5739,12 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
         # Decoded leaf/bark textures must live as real files on disk for the
         # whole Context lifetime (Helios reads them lazily during ray tracing),
         # so the temp dir wraps the Context and is cleaned up after it closes.
+        _ckpt()
         with tempfile.TemporaryDirectory(prefix="phyto_scan_tex_") as _tex_dir, \
                 Context() as ctx:
             # Load every mesh into the scannable scene (textured-aware).
             for mesh in request.meshes:
+                _ckpt()
                 _load_scan_mesh(ctx, mesh, _tex_dir)
 
             _prof["mesh_load"] = time.perf_counter()
@@ -5636,9 +5881,11 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 # idealized scan — for either mode.
                 record_misses = bool(request.record_misses)
                 _prof["add_scans"] = time.perf_counter()
-                # The ray trace is one uninterruptible C++ pass — report it as
-                # indeterminate (null fraction) so the bar pulses rather than
-                # sitting frozen at a stale percentage during the long step.
+                _ckpt()
+                # The ray trace's per-scan loop and inner ray loop honor a cancel
+                # flag (see _scan_cancel_flag below), so a cancel mid-trace bails
+                # the C++ pass; report it as indeterminate (null fraction) so the
+                # bar pulses rather than sitting frozen during the long step.
                 _report(None, "Ray-tracing scene")
                 lidar.syntheticScan(
                     ctx,
@@ -5647,9 +5894,13 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                     scan_grid_only=scan_grid_only,
                     record_misses=record_misses,
                     append=False,
+                    cancel_flag=_scan_cancel_flag,
                 )
 
                 _prof["raytrace"] = time.perf_counter()
+                # The C++ trace may have stopped early on a cancel — surface it as
+                # ScanCancelled before we spend time/RAM extracting a partial cloud.
+                _ckpt()
                 _report(0.85, "Extracting hits")
 
                 # ---- Bulk extraction. This was a per-hit Python loop doing ~13×N
@@ -5704,6 +5955,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 results = []
                 single_scanner = len(request.scanners) == 1
                 for sid, s in enumerate(request.scanners):
+                    _ckpt()
                     if single_scanner:
                         sel = slice(None)  # the whole cloud belongs to this scanner
                     else:
@@ -5732,6 +5984,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
         # every scanner's full staging dict stays live alongside the sessions and
         # laspy records, re-stacking the peak we just trimmed above.
         while results:
+            _ckpt()
             r = results.pop(0)
             # When this scan recorded any miss, build a cloud session for it so the
             # existing session-based miss overlay + LAD work. The session is built
@@ -5809,6 +6062,11 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
 
         return {"success": True, "results": out}
 
+    except ScanCancelled:
+        # Cancellation is not a failure — let it propagate so the streaming
+        # wrapper emits the cancelled marker (the `with` blocks already unwound,
+        # freeing C++/numpy memory).
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -5975,11 +6233,25 @@ def _pack_lidar_scan(result: dict) -> bytes:
 
 
 @app.post("/api/lidar/scan")
-async def lidar_scan(request: LidarScanRequest):
+async def lidar_scan(request: LidarScanRequest, http_request: Request):
     """Ray-traced synthetic LiDAR scan. Returns a PHB1 binary frame (points +
     scalars per scanner can be millions of values)."""
+    run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
-        lambda progress: _pack_lidar_scan(_do_lidar_scan(request, progress=progress)))
+        lambda progress: _pack_lidar_scan(_do_lidar_scan(request, progress=progress)),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+@app.post("/api/cancel/{run_id}")
+async def cancel_run(run_id: str):
+    """Cancel an in-flight streaming op (synthetic scan / triangulation / LAD).
+
+    The streaming endpoints emit their run_id as the first PHP1 marker; the
+    renderer POSTs it here to stop the work and free the C++/numpy memory without
+    waiting on the (possibly huge) computation to finish. Idempotent: an unknown
+    or already-finished run_id returns found=False rather than an error."""
+    found = _cancel_run(run_id)
+    return {"cancelled": found, "run_id": run_id}
 
 
 # ==================== TREE SKELETON EXTRACTION (BFS Graph-Based Algorithm) ====================
@@ -12242,15 +12514,122 @@ def _bin_frame_bytes(meta: dict, buffers: "list[tuple]") -> bytes:
 _PROGRESS_MARKER_MAGIC = b"PHP1"
 
 
-def _pack_progress_marker(progress, message: str) -> bytes:
-    """Pack one PHP1 progress marker. `progress` is a 0..1 fraction or None."""
+def _pack_progress_marker(progress, message: str, *, run_id=None, cancelled=False) -> bytes:
+    """Pack one PHP1 progress marker. `progress` is a 0..1 fraction or None.
+
+    `run_id` (when set) rides the first marker so the renderer learns the
+    cancellation token before any heavy work starts; `cancelled` rides the
+    terminal marker emitted in place of a frame when a run is cancelled."""
     import struct
-    payload = json.dumps({"progress": progress, "message": message}).encode("utf-8")
+    obj = {"progress": progress, "message": message}
+    if run_id is not None:
+        obj["run_id"] = run_id
+    if cancelled:
+        obj["cancelled"] = True
+    payload = json.dumps(obj).encode("utf-8")
     payload += b" " * ((-len(payload)) % 4)  # keep total marker a 4-byte multiple
     return _PROGRESS_MARKER_MAGIC + struct.pack("<I", len(payload)) + payload
 
 
-def _bin_frame_streaming_response(build_frame) -> StreamingResponse:
+# ---- Cancellation registry -------------------------------------------------
+# Long-running streaming ops (synthetic scan, triangulation, LAD inversion) run
+# off-thread in an executor; the heavy C++/Open3D primitives are monolithic, so
+# cancellation is cooperative — the worker polls a per-run threading.Event at
+# every stage boundary and raises ScanCancelled, which unwinds its `with
+# Context()/LiDARCloud()` blocks and frees the multi-GB C++/numpy memory
+# promptly. A run is cancelled either by the client POSTing /api/cancel/{run_id}
+# or by the client disconnecting (detected in _bin_frame_streaming_response).
+class ScanCancelled(Exception):
+    """Raised inside a streaming worker when its run has been cancelled."""
+
+
+_CANCEL_REGISTRY: "dict[str, threading.Event]" = {}
+_CANCEL_REGISTRY_LOCK = threading.Lock()
+
+
+def _cancel_checkpoint(progress) -> None:
+    """Raise ScanCancelled if `progress` is a reporter whose run was cancelled.
+
+    Workers call this at stage boundaries; raising unwinds their `with Context()/
+    LiDARCloud()` blocks so the C++/numpy memory is freed promptly. A no-op when
+    progress is None (e.g. unit tests calling a worker directly)."""
+    if progress is not None and getattr(progress, "should_cancel", None) and progress.should_cancel():
+        raise ScanCancelled()
+
+
+def _new_cancel_token() -> "tuple[str, threading.Event]":
+    """Mint a run_id + its cancel Event and register them."""
+    run_id = uuid.uuid4().hex
+    event = threading.Event()
+    with _CANCEL_REGISTRY_LOCK:
+        _CANCEL_REGISTRY[run_id] = event
+    return run_id, event
+
+
+def _cancel_run(run_id: str) -> bool:
+    """Signal cancellation for run_id. Returns True if the run was known."""
+    with _CANCEL_REGISTRY_LOCK:
+        event = _CANCEL_REGISTRY.get(run_id)
+    if event is not None:
+        event.set()
+        return True
+    return False
+
+
+def _clear_run(run_id: str) -> None:
+    """Drop a run from the registry once its stream has finished."""
+    with _CANCEL_REGISTRY_LOCK:
+        _CANCEL_REGISTRY.pop(run_id, None)
+
+
+class _ProgressReporter:
+    """Callable progress reporter handed to streaming workers.
+
+    Calling it (`progress(fraction, message)`) queues a PHP1 marker for the
+    stream. `should_cancel()` / `cancelled` let the worker poll its run's cancel
+    Event at stage boundaries and raise ScanCancelled to unwind promptly.
+
+    `cancel_int` is an optional ctypes c_int shared with the C++ ray loop: a
+    worker registers one via `bind_cancel_int()` and the stream loop flips it to
+    1 the instant the cancel Event fires, so the in-flight C++ trace (which holds
+    no GIL and can't poll the Python Event) sees the cancel and bails its loop."""
+
+    def __init__(self, progress_queue, cancel_event):
+        self._queue = progress_queue
+        self._cancel_event = cancel_event
+        self._cancel_int = None  # ctypes.c_int, set by bind_cancel_int()
+
+    def __call__(self, fraction, message: str) -> None:
+        self._queue.put((fraction, message))
+
+    def should_cancel(self) -> bool:
+        return self._cancel_event is not None and self._cancel_event.is_set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self.should_cancel()
+
+    def raise_if_cancelled(self) -> None:
+        if self.should_cancel():
+            raise ScanCancelled()
+
+    def bind_cancel_int(self, cancel_int) -> None:
+        """Register the ctypes c_int the C++ ray loop polls for this run."""
+        self._cancel_int = cancel_int
+
+    def propagate_cancel(self) -> None:
+        """Mirror a set Event into the shared c_int (called from stream loop)."""
+        if self._cancel_int is not None and self.should_cancel():
+            self._cancel_int.value = 1
+
+
+def _bin_frame_streaming_response(
+    build_frame,
+    *,
+    request: "Optional[Request]" = None,
+    cancel_event: "Optional[threading.Event]" = None,
+    run_id: "Optional[str]" = None,
+) -> StreamingResponse:
     """Run build_frame() off-thread, emitting keepalives until it's done (so
     WebKit's ~60s stall timeout doesn't fire on long computations), then the PHB1
     frame. Keepalives are 4-byte whitespace chunks so the leading padding stays a
@@ -12258,22 +12637,25 @@ def _bin_frame_streaming_response(build_frame) -> StreamingResponse:
     aligned for zero-copy decode.
 
     `build_frame` may be either a zero-arg callable (returns PHB1 bytes) or a
-    one-arg callable taking a `progress(fraction, message)` reporter. When it
+    one-arg callable taking a `progress` reporter (a _ProgressReporter). When it
     takes the reporter, queued progress updates are flushed as PHB1-compatible
     PHP1 markers in place of blank keepalives, so the renderer can surface real
-    per-stage progress."""
+    per-stage progress.
+
+    Cancellation: when `cancel_event`/`run_id` are supplied, the run_id rides the
+    first PHP1 marker (so the client can target /api/cancel/{run_id}), the stream
+    loop also sets the event if the client disconnects, and a worker that raises
+    ScanCancelled yields a terminal `cancelled` marker instead of a frame."""
     import asyncio
     import inspect
     import queue as _queue
 
     wants_progress = len(inspect.signature(build_frame).parameters) >= 1
     progress_queue: "_queue.Queue" = _queue.Queue()
-
-    def _report(fraction, message: str) -> None:
-        progress_queue.put((fraction, message))
+    reporter = _ProgressReporter(progress_queue, cancel_event)
 
     def _run():
-        return build_frame(_report) if wants_progress else build_frame()
+        return build_frame(reporter) if wants_progress else build_frame()
 
     # Poll the executor future frequently in BOTH modes so the finished frame is
     # flushed as soon as the off-thread build returns — `poll` is the re-check
@@ -12289,33 +12671,60 @@ def _bin_frame_streaming_response(build_frame) -> StreamingResponse:
 
     async def stream():
         loop = asyncio.get_event_loop()
+        # Emit the run_id up front so the client can cancel before heavy work.
+        if run_id is not None:
+            yield _pack_progress_marker(None, "", run_id=run_id)
         fut = loop.run_in_executor(None, _run)
         silent_for = 0.0
-        while not fut.done():
-            emitted = False
+        disconnect_checked = 0.0
+        try:
+            while not fut.done():
+                emitted = False
+                try:
+                    while True:
+                        fraction, message = progress_queue.get_nowait()
+                        yield _pack_progress_marker(fraction, message)
+                        emitted = True
+                except _queue.Empty:
+                    pass
+                # Detect client disconnect (~every 0.25s) and flip the cancel
+                # event so the worker unwinds and frees C++/numpy memory.
+                if request is not None and cancel_event is not None:
+                    disconnect_checked += poll
+                    if disconnect_checked >= 0.25:
+                        disconnect_checked = 0.0
+                        if await request.is_disconnected():
+                            cancel_event.set()
+                # When the cancel Event is set (here, or via /api/cancel on
+                # another request), mirror it into the C++ shared cancel int so
+                # the in-flight ray loop — which can't poll the Python Event —
+                # bails. Cheap and idempotent; runs every poll tick.
+                if cancel_event is not None and cancel_event.is_set():
+                    reporter.propagate_cancel()
+                if emitted:
+                    silent_for = 0.0
+                else:
+                    silent_for += poll
+                    if silent_for >= silence_keepalive_after:
+                        yield b"    "
+                        silent_for = 0.0
+                await asyncio.sleep(poll)
+            # Drain any progress queued in the final tick before the frame.
             try:
                 while True:
                     fraction, message = progress_queue.get_nowait()
                     yield _pack_progress_marker(fraction, message)
-                    emitted = True
             except _queue.Empty:
                 pass
-            if emitted:
-                silent_for = 0.0
-            else:
-                silent_for += poll
-                if silent_for >= silence_keepalive_after:
-                    yield b"    "
-                    silent_for = 0.0
-            await asyncio.sleep(poll)
-        # Drain any progress queued in the final tick before the frame.
-        try:
-            while True:
-                fraction, message = progress_queue.get_nowait()
-                yield _pack_progress_marker(fraction, message)
-        except _queue.Empty:
-            pass
-        yield await fut
+            try:
+                yield await fut
+            except ScanCancelled:
+                # Cooperative cancel landed: the worker unwound its Context/
+                # LiDARCloud (memory freed). Tell the client instead of a frame.
+                yield _pack_progress_marker(None, "Cancelled", cancelled=True)
+        finally:
+            if run_id is not None:
+                _clear_run(run_id)
 
     return StreamingResponse(stream(), media_type="application/octet-stream")
 
@@ -15015,6 +15424,34 @@ class CloudSession:
     # time (toast) and at LAD time (warning). Only the backfilled buffer can go
     # stale — interleaved is_miss points live in `extras` and are subset by bake.
     backfilled_misses_stale: bool = False
+    # Per-point GPS/relative time, the moving-platform LAD join key. Kept as a
+    # dedicated float64 column (NOT in the float32 `extras` dict) because GPS
+    # Adjusted-Standard time is a huge double (~3.5e8 s) and a float32 cast has
+    # only ~7 significant digits → ~32 s of resolution, which collapses every
+    # return within tens of seconds onto a single trajectory pose. The LAD path
+    # reads this via `_session_to_lad_arrays`'s `_get('timestamp')` chokepoint,
+    # which prefers this field over any `extras['timestamp']`. None for clouds
+    # with no usable time column (plain XYZ, point-format 0/2 LAS). Defaulted so
+    # existing direct CloudSession(...) constructions need no change.
+    timestamps: Optional[np.ndarray] = None  # (N,) float64 | None
+    # How the LAS `gps_time` column is encoded, from global_encoding bit 0:
+    #   'adjusted_standard' — Adjusted-Standard GPS seconds (Standard − 1e9), an
+    #                         ABSOLUTE clock reconcilable with a survey trajectory.
+    #   'gps_week'          — GPS Week Time (seconds-into-week, 0–604800): no
+    #                         absolute epoch, so it CANNOT align to an absolute
+    #                         trajectory clock without an external week reference.
+    #                         The moving join refuses it loudly rather than treating
+    #                         week-seconds as adjusted-standard.
+    #   None                — no usable gps_time (plain XYZ, point-format 0/2 LAS,
+    #                         or an ASCII-derived timestamp that carries no encoding).
+    gps_time_encoding: Optional[str] = None
+    # Per-pulse emission points read from LAS ExtraBytes (ox/oy/oz aliases), in the
+    # SAME frame as `positions` (world_shift already subtracted at create). When
+    # present these are GROUND TRUTH origins and the LAD path uses them directly,
+    # bypassing the timestamp -> trajectory join (see `_do_lad_computation`). None
+    # when the LAS carried no origin triple. Defaulted so existing direct
+    # CloudSession(...) constructions need no change.
+    beam_origins: Optional[np.ndarray] = None  # (N,3) float64 | None
 
 
 def _get_cloud_session(session_id: str) -> "CloudSession":
@@ -15027,17 +15464,56 @@ def _get_cloud_session(session_id: str) -> "CloudSession":
     return sess
 
 
-def _read_las_into_arrays(
-    las_path: _Path,
-) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, np.ndarray], List[dict]]:
+# Case-insensitive ExtraBytes name aliases for a per-pulse beam-origin triple.
+# When a LAS carries all three of any one set, those are ground-truth emission
+# origins (one per return) and LAD uses them directly, bypassing the timestamp ->
+# trajectory join entirely (see `_do_lad_computation`). Matched lower-cased.
+_BEAM_ORIGIN_ALIAS_SETS = (
+    ("ox", "oy", "oz"),
+    ("xorigin", "yorigin", "zorigin"),
+    ("beamoriginx", "beamoriginy", "beamoriginz"),
+)
+
+
+@dataclass
+class LasReadResult:
+    """Everything `_read_las_into_arrays` materialises from a normalised LAS.
+
+    A dataclass (not a tuple) because the set has grown past readable positional
+    unpacking and carries several Optionals with subtle precision contracts.
+      positions        (N,3) float64 — full-resolution coordinates.
+      colors           (N,3) uint16 | None — kept in LAS scale for byte round-trip.
+      intensity        (N,)  uint16 | None.
+      extras           {slug: (N,) float32} — scalar extra-dim columns.
+      extra_dims_meta  ordered [{slug, label}] for the octree sidecar.
+      timestamps       (N,) float64 | None — gps_time, kept OUT of float32 extras
+                       (the LAD trajectory-join key; see CloudSession.timestamps).
+      gps_time_encoding 'adjusted_standard' | 'gps_week' | None.
+      beam_origins     (N,3) float64 | None — per-pulse emission points read from
+                       ExtraBytes (ox/oy/oz aliases); when present LAD uses them
+                       directly and skips the trajectory join.
+    """
+    positions: np.ndarray
+    colors: Optional[np.ndarray]
+    intensity: Optional[np.ndarray]
+    extras: Dict[str, np.ndarray]
+    extra_dims_meta: List[dict]
+    timestamps: Optional[np.ndarray] = None
+    gps_time_encoding: Optional[str] = None
+    beam_origins: Optional[np.ndarray] = None
+
+
+def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
     """Read a LAS file fully into RAM as the session's source-of-truth arrays.
 
-    Returns (positions[N,3] float64, colors[N,3] uint16 | None,
-    intensity[N] uint16 | None, extras{slug: (N,) float32}, extra_dims_meta).
-    RGB/intensity are kept in LAS uint16 scale so the bake writer can round-trip
-    them byte-for-byte; extras are the float32 extra-dimension columns. This is
-    the ONE point where a normalised LAS is materialised into the session — used
-    by create after `_source_to_las` converts whatever the source format was.
+    Returns a `LasReadResult`. RGB/intensity are kept in LAS uint16 scale so the
+    bake writer can round-trip them byte-for-byte; extras are the float32 extra-
+    dimension columns. `gps_time` is returned SEPARATELY as float64 `timestamps`
+    (not in `extras`) — it is the moving-platform LAD join key and a float32 cast
+    would destroy its precision (see CloudSession.timestamps). Per-pulse beam-origin
+    ExtraBytes are read as float64 `beam_origins` and likewise kept out of `extras`.
+    This is the ONE point where a normalised LAS is materialised into the session —
+    used by create after `_source_to_las` converts whatever the source format was.
     """
     import laspy
     with laspy.open(str(las_path)) as reader:
@@ -15054,10 +15530,30 @@ def _read_las_into_arrays(
     intensity = None
     if "intensity" in dim_names and np.any(np.asarray(las.intensity)):
         intensity = np.asarray(las.intensity, dtype=np.uint16)
+
+    # Detect per-pulse beam-origin ExtraBytes FIRST so their three columns are
+    # skipped by the generic extra-dim loop below (they must not also become lossy
+    # float32 display scalars). Read as float64 — these are world/UTM coordinates.
+    extra_by_lower = {d.name.lower(): d.name for d in las.point_format.extra_dimensions}
+    beam_origins: Optional[np.ndarray] = None
+    _origin_skip: set = set()
+    for ax, ay, az in _BEAM_ORIGIN_ALIAS_SETS:
+        if ax in extra_by_lower and ay in extra_by_lower and az in extra_by_lower:
+            nx, ny, nz = extra_by_lower[ax], extra_by_lower[ay], extra_by_lower[az]
+            beam_origins = np.stack([
+                np.asarray(las[nx], dtype=np.float64),
+                np.asarray(las[ny], dtype=np.float64),
+                np.asarray(las[nz], dtype=np.float64),
+            ], axis=1)
+            _origin_skip = {nx, ny, nz}
+            break
+
     extras: Dict[str, np.ndarray] = {}
     extra_dims_meta: List[dict] = []
     for d in las.point_format.extra_dimensions:
         name = d.name
+        if name in _origin_skip:
+            continue  # carried as float64 beam_origins, not a float32 scalar
         extras[name] = np.asarray(las[name], dtype=np.float32)
         extra_dims_meta.append({"slug": name, "label": name})
 
@@ -15078,7 +15574,6 @@ def _read_las_into_arrays(
     _las_multireturn = (
         ("return_number", "target_index"),
         ("number_of_returns", "target_count"),
-        ("gps_time", "timestamp"),
     )
     for src_dim, slug in _las_multireturn:
         if src_dim in dim_names and slug not in extras:
@@ -15086,6 +15581,38 @@ def _read_las_into_arrays(
             if vals.size and np.any(vals != vals.flat[0]):  # not constant/all-zero
                 extras[slug] = vals.astype(np.float32)
                 extra_dims_meta.append({"slug": slug, "label": _MULTI_RETURN_LABELS[slug]})
+
+    # gps_time is the LAD trajectory-join key — route it to a dedicated float64
+    # array, NOT the float32 `extras` dict (a float32 cast at adjusted-standard
+    # magnitude has ~32 s resolution and collapses every return onto one pose).
+    # Same non-degenerate guard as the multi-return dims: gps_time is a STANDARD
+    # dimension present (all-zero) on plain XYZ/E57 imports, so only carry it when
+    # it actually varies. The non-constant check runs on the original float64
+    # values, before any cast.
+    timestamps: Optional[np.ndarray] = None
+    gps_time_encoding: Optional[str] = None
+    if "gps_time" in dim_names:
+        _gps = np.asarray(las["gps_time"], dtype=np.float64)
+        if _gps.size and np.any(_gps != _gps.flat[0]):  # not constant/all-zero
+            timestamps = _gps
+            # global_encoding bit 0 (laspy GpsTimeType): 1 = Adjusted-Standard GPS
+            # seconds (absolute clock), 0 = GPS Week Time (seconds-into-week, no
+            # epoch). Recorded so the moving-platform join can compare like-for-like
+            # and refuse a week clock it cannot align. Keep the RAW values either
+            # way — week-time is a different clock, not a subtractable offset.
+            try:
+                gps_time_encoding = (
+                    'adjusted_standard'
+                    if bool(las.header.global_encoding.gps_time_type)
+                    else 'gps_week'
+                )
+            except Exception:
+                # Older/odd headers: fall back to the raw bit.
+                gps_time_encoding = (
+                    'adjusted_standard'
+                    if (int(las.header.global_encoding.value) & 1)
+                    else 'gps_week'
+                )
 
     # Carry the remaining STANDARD LAS dimensions (classification, scan_angle,
     # point_source_id, user_data, scanner_channel, …) as user-selectable scalar
@@ -15113,7 +15640,78 @@ def _read_las_into_arrays(
         if vals.size and np.any(vals != vals.flat[0]):  # not constant
             extras[slug] = vals.astype(np.float32)
             extra_dims_meta.append({"slug": slug, "label": name})
-    return positions, colors, intensity, extras, extra_dims_meta
+    return LasReadResult(
+        positions=positions,
+        colors=colors,
+        intensity=intensity,
+        extras=extras,
+        extra_dims_meta=extra_dims_meta,
+        timestamps=timestamps,
+        gps_time_encoding=gps_time_encoding,
+        beam_origins=beam_origins,
+    )
+
+
+def _trajectory_wire_from_beam_origins(beam_origins, timestamps, max_poses=3000):
+    """Reconstruct a decimated platform-trajectory wire dict from per-pulse beam
+    origins + their timestamps (e.g. a LAS carrying ox/oy/oz ExtraBytes).
+
+    The origins ARE the platform path sampled once per pulse — far too dense to use
+    as poses directly (millions of near-duplicates). Sort by time, even-stride down
+    to <= `max_poses` (always keeping first + last so the span is preserved), and
+    emit one identity-attitude pose per kept sample. Attitude is unknown from
+    positions alone, so it is identity — the EXACT per-pulse origins are still used
+    for the LAD inversion (this trajectory is for display + as the moving-scan flag,
+    not for re-deriving origins). Returns the canonical PoseStream wire dict, or None
+    when there is no usable origin/time data. Drops non-finite and non-monotonic
+    samples so the resulting pose times strictly increase.
+    """
+    import numpy as np
+
+    if beam_origins is None or timestamps is None:
+        return None
+    bo = np.asarray(beam_origins, dtype=np.float64)
+    ts = np.asarray(timestamps, dtype=np.float64)
+    if bo.ndim != 2 or bo.shape[0] != ts.shape[0] or bo.shape[0] == 0:
+        return None
+
+    finite = np.isfinite(ts) & np.all(np.isfinite(bo), axis=1)
+    bo, ts = bo[finite], ts[finite]
+    if ts.shape[0] == 0:
+        return None
+
+    order = np.argsort(ts, kind="stable")
+    ts, bo = ts[order], bo[order]
+    # Keep strictly-increasing times (collapse exact-duplicate timestamps, keeping
+    # the first), so SLERP/interp on the renderer + backend never sees a flat step.
+    keep_t = np.concatenate(([True], np.diff(ts) > 0))
+    ts, bo = ts[keep_t], bo[keep_t]
+    n = ts.shape[0]
+    if n == 0:
+        return None
+
+    if n > max_poses:
+        idx = np.arange(0, n, int(np.ceil(n / max_poses)))
+        if idx[-1] != n - 1:
+            idx = np.append(idx, n - 1)
+    else:
+        idx = np.arange(n)
+
+    poses = [
+        {"t": float(ts[i]),
+         "x": float(bo[i, 0]), "y": float(bo[i, 1]), "z": float(bo[i, 2]),
+         "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
+        for i in idx
+    ]
+    if len(poses) < 2:
+        return None  # a single pose is a static scan, not a trajectory
+    return {
+        "poses": poses,
+        "frame": {"crs": None, "up_axis": "z", "body_convention": "FLU", "time_ref": "gps"},
+        "lever_arm": [0.0, 0.0, 0.0],
+        "boresight_rpy": [0.0, 0.0, 0.0],
+        "source_format": "las_extrabytes",
+    }
 
 
 # Row block size for the in-RAM → LAS writers. Caps the transient laspy record to
@@ -15206,10 +15804,10 @@ def _gather_miss_positions(sess: "CloudSession",
       radius 0. The miss octree is built at true coordinates; its own bbox keeps
       the ~20 km extent from ever touching the hits octree's framing.
     - `origin` supplied → project each placeable miss onto a sphere centred on
-      the origin at `radius = max(far + depth, far*1.4, far + 1.0)` (far/near are
-      the max/min HIT distance from the origin, depth = far − near), exactly the
-      projection the overlay used. Misses sitting AT the origin (no beam
-      direction yet) are dropped.
+      the origin at `radius = far + max(0.05*depth, 0.05*far, 0.05)` (far/near are
+      the max/min HIT distance from the origin, depth = far − near), a THIN halo
+      hugging the cloud. Misses sitting AT the origin (no beam direction yet) are
+      dropped.
 
     This is the projection math factored out of the former `get_cloud_misses`
     endpoint, MINUS the _MISS_OVERLAY_CAP stride — the octree streams via LOD, so
@@ -15243,14 +15841,15 @@ def _gather_miss_positions(sess: "CloudSession",
         hit_dists = np.linalg.norm(hit_pos - origin_arr, axis=1)
         far = float(np.max(hit_dists))
         near = float(np.min(hit_dists))
-        # The radius must clear the FARTHEST hit by a generous margin so the miss
-        # shell reads as a distinct halo well outside the cloud — not a band
-        # hugging its far surface. The margin scales with the cloud's own radial
-        # depth (far − near) so it adapts to scene size, with a multiplicative
-        # floor (far*1.4 ≈ a 40% buffer) and a small absolute floor for near-zero-
-        # depth clouds.
+        # The radius clears the FARTHEST hit by only a SMALL, bounded margin so the
+        # miss shell reads as a thin halo HUGGING the cloud — not a band parked far
+        # outside it. The far*1.4 shell was the bug: the miss octree is LOD-streamed
+        # and frustum-culled like any cloud, so a shell beyond the camera's framing
+        # of the hits renders nothing. The margin scales with the cloud's own radial
+        # depth (far − near) so it adapts to scene size, with a small multiplicative
+        # floor (5% of far) and a small absolute floor for near-zero-depth clouds.
         depth = max(far - near, 0.0)
-        radius = max(far + 1.0 * depth, far * 1.4, far + 1.0)
+        radius = far + max(0.05 * depth, 0.05 * far, 0.05)
     else:
         radius = 1.0
     if radius <= 0:
@@ -15433,7 +16032,15 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         las_path, las_is_temp, source_extra_dims = _source_to_las(
             source_path, request.ascii_format, tmp_dir, request.column_plan,
         )
-        positions, colors, intensity, extras, extra_dims_meta = _read_las_into_arrays(las_path)
+        _las = _read_las_into_arrays(las_path)
+        positions = _las.positions
+        colors = _las.colors
+        intensity = _las.intensity
+        extras = _las.extras
+        extra_dims_meta = _las.extra_dims_meta
+        timestamps = _las.timestamps
+        gps_time_encoding = _las.gps_time_encoding
+        beam_origins = _las.beam_origins
         # CloudCompare-style global shift: subtract the requested offset so the
         # in-RAM array (the source of truth) — and the octree built from it below —
         # hold small, precision-friendly coordinates. The shift is stored on the
@@ -15450,6 +16057,10 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
                 )
             if np.any(ws != 0.0):
                 positions = positions - ws  # new array; positions is float64 here
+                # beam_origins are in the SAME world frame as positions — shift them
+                # in lockstep so per-beam origins stay consistent with the points.
+                if beam_origins is not None:
+                    beam_origins = beam_origins - ws
                 world_shift_arr = ws
         # `_read_las_into_arrays` sets label==slug from the LAS header, which
         # loses the wizard's custom labels. `_source_to_las` returns the proper
@@ -15495,6 +16106,9 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             extras=extras,
             extra_dims_meta=extra_dims_meta,
             world_shift=world_shift_arr,
+            timestamps=timestamps,  # float64 GPS/relative time, not in float32 extras
+            gps_time_encoding=gps_time_encoding,
+            beam_origins=beam_origins,  # float64 ExtraBytes origins; bypass the join
             deleted=np.zeros(n, dtype=bool),
             deleted_history=[],
             octree_cache_id=None,
@@ -15554,6 +16168,24 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     # the Helios-XML import path. Only the recoverable fields are present.
     if scan_meta and scan_meta.get("scan_params"):
         miss_info["scan_params"] = scan_meta["scan_params"]
+    # A LAS carrying per-pulse beam-origin ExtraBytes is a MOVING-platform scan:
+    # reconstruct a decimated platform trajectory from the origins + timestamps so
+    # the renderer auto-creates a moving scan (path drawn, LAD takes the per-beam
+    # path) instead of a plain static cloud. The origins were recentered by
+    # world_shift at read, so the trajectory is in the SAME frame as the points.
+    if beam_origins is not None:
+        _traj_wire = _trajectory_wire_from_beam_origins(beam_origins, timestamps)
+        if _traj_wire is not None:
+            _first = _traj_wire["poses"][0]
+            sp = miss_info.get("scan_params") or {}
+            sp.setdefault("origin", [_first["x"], _first["y"], _first["z"]])
+            sp["trajectory"] = _traj_wire
+            miss_info["scan_params"] = sp
+        else:
+            miss_info.setdefault("warnings", []).append(
+                "This cloud carries per-pulse beam-origin columns but no usable "
+                "timestamp to order them into a trajectory; the origins are still "
+                "used directly for moving-platform LAD.")
     # Unplaceable misses: flagged miss cells whose beam direction couldn't be
     # recovered at import (zeroed cartesian, no spherical) and so sit at the
     # scanner origin until Helios recovers them from the row/column grid. Surface
@@ -15569,6 +16201,21 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             "carries no scan angles). They are kept and tagged; their beam "
             "directions are recovered from the scan grid during LAD."
         )
+
+    # Surface the LAS GPS-time encoding so the renderer can record it on the cloud
+    # and the user knows which clock the per-point time uses. A GPS Week Time clock
+    # carries no absolute epoch, so a moving-platform trajectory join (attached
+    # later) needs a matching relative/week clock — flag that now rather than
+    # letting the join silently fail to overlap.
+    if gps_time_encoding is not None:
+        miss_info["gps_time_encoding"] = gps_time_encoding
+        if gps_time_encoding == "gps_week":
+            miss_info.setdefault("warnings", []).append(
+                "This cloud's per-point GPS time uses GPS Week Time (seconds-into-"
+                "week, no absolute epoch). A moving-platform trajectory join needs a "
+                "matching clock — attach a trajectory on the same week/relative time, "
+                "or re-export the cloud with Adjusted-Standard GPS time."
+            )
 
     # Echo the applied global shift so the renderer persists it on the cloud's
     # OctreeRef (provenance + world-coord readouts). null when no shift was applied.

@@ -125,6 +125,17 @@ carry a per-return `timestamp` column (for the trajectory join) and miss
 points — run [Backfill Misses](backfill-misses.md) first if the scan has a
 timestamp but no recorded misses, as for any LAD.
 
+**Clock alignment matters.** The return timestamps and the trajectory must use the
+**same clock**. If they don't overlap in time (a common cause: a LAS recorded in *GPS
+Week Time* combined with an absolute trajectory, or a ~1e9 s Standard vs Adjusted-Standard
+GPS offset), the join would otherwise clamp every return to a single pose — so LAD
+**fails with an explicit error** naming both time ranges rather than producing wrong
+origins. If only part of the scan falls inside the trajectory's time span, you get a
+partial-coverage **warning** and the out-of-range returns are clamped to the nearest
+endpoint. A scan whose LAS carries explicit per-beam origin
+[ExtraBytes](../reference/file-formats.md#las-extrabytes-per-beam-origins) skips the join
+entirely and uses those origins directly.
+
 ## Tips
 
 - If no triangles are produced (G-function can't be estimated), increase

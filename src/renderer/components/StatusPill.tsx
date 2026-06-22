@@ -46,6 +46,7 @@ export default function StatusPill({ label, progress, onCancel, testId }: Status
       {onCancel && (
         <button
           onClick={onCancel}
+          data-testid={testId ? `${testId}-cancel` : undefined}
           className="ml-1 p-0.5 rounded hover:bg-neutral-600/60 transition-colors"
           title="Cancel"
         >

@@ -277,6 +277,60 @@ file *doesn't* record is left at its default (blank), exactly as before.
   tool if you need them for [Helios triangulation](../workflows/triangulate.md)
   or [LAD](../workflows/estimate-leaf-area-density.md).
 
+## Platform trajectory files
+
+A **moving-platform** scan (drone / UAV / mobile mapping) reconstructs a separate
+emission origin for every return by joining each return's timestamp to a dense 6-DOF
+platform trajectory. Attach one in the **Add Scan** tool via **Import trajectory
+file…**. Supported formats:
+
+| Format | Parsed | Layout |
+|---|---|---|
+| `.csv` / `.txt` / `.tsv` / `.traj` | In the app | One pose per row: `t x y z qx qy qz qw` (quaternion) **or** `t x y z roll pitch yaw` (Euler). Comma, tab, or whitespace separated; an optional header row is skipped. |
+| `.sbet` / `.out` | On the backend | Binary Applanix SBET: 17 little-endian float64 per record (136 bytes), no header — `time, lat, lon, alt, …, roll, pitch, heading, …` (angles in radians). |
+
+- **Time is the join key.** Each pose carries a time `t`; the importer requires it to
+  share a clock with the point cloud's per-point time (see *GPS time* below). Times
+  must be strictly increasing.
+- **SBET conversions.** Latitude/longitude (radians) are projected to **UTM** (zone
+  auto-picked from the mean longitude; the EPSG is recorded on the trajectory),
+  altitude becomes Z, and the NED roll/pitch/heading attitude is converted to
+  Phytograph's ENU/Z-up body→world quaternion. A `*-smrmsg` accuracy companion, if
+  present, contributes a position-RMS quality note. High-rate SBETs are decimated to a
+  few thousand poses (the join interpolates between them; the last record is always
+  kept so the time span is preserved).
+- **SYSSIFOSS / HELIOS++ trajectories.** HELIOS++ trajectory output is the 7-column
+  `t x y z roll pitch yaw` layout with angles in **degrees** — import it as a text
+  trajectory.
+- On import the scan's static tilt/heading are zeroed: a moving scan's attitude comes
+  entirely from the trajectory (plus any fixed boresight), and the origin is anchored
+  to the first pose as a fallback.
+
+### GPS time in LAS/LAZ
+
+When a LAS/LAZ carries a per-point `gps_time` (point formats 1, 3, 4, 5, and 6+), it is
+read as the per-return timestamp and kept at full **double precision** (a 32-bit float
+would collapse adjacent returns at GPS-epoch magnitude). The LAS header's *GPS time
+type* (global encoding bit 0) is honoured:
+
+- **Adjusted Standard GPS time** — an absolute clock that can be joined to a survey
+  trajectory directly.
+- **GPS Week Time** — seconds-into-week with no absolute epoch; it cannot be aligned to
+  an absolute trajectory clock, so a moving-platform join with mismatched clocks **fails
+  loudly** (rather than silently clamping every return to one pose) and you're told to
+  re-export on a common clock.
+
+### LAS ExtraBytes per-beam origins
+
+If a LAS/LAZ carries the per-pulse emission point as three ExtraBytes columns — any of
+`ox`/`oy`/`oz`, `XOrigin`/`YOrigin`/`ZOrigin`, or `BeamOriginX`/`Y`/`Z` (matched
+case-insensitively) — those are read as the ground-truth per-beam origins (float64).
+Importing such a cloud **auto-creates a moving-platform scan**: a decimated platform
+trajectory is reconstructed from the origins (ordered by `gps_time`) so the scan is
+flagged moving with its path drawn. Moving-platform LAD then uses the exact per-pulse
+origins **directly** and skips the trajectory join entirely (if a separate trajectory is
+also attached, the explicit origins win and it is ignored, with a warning).
+
 ## Plant parameter presets
 
 The Morph popup exports / imports JSON describing a complete parameter

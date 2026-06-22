@@ -89,6 +89,18 @@ test('generates a plant, scans it, and a point cloud appears', async () => {
     await runOptBtn.click();
     await expect(scanOptions).not.toBeVisible();
 
+    // The central status pill (the same one triangulation / LAD / QSM use) shows
+    // while the scan runs, carrying a moving progress bar. The opaque C++
+    // ray-trace can't self-report, so the client drives a synthetic creep across
+    // that stage — assert the pill appears AND reports a finite fraction (a moving
+    // bar), not a frozen pulse. Raced against completion: a tiny static scan can
+    // finish quickly, so accept either the pill showing or the data already landed.
+    const statusPill = page.getByTestId('synthetic-scan-status');
+    await Promise.race([
+      expect(statusPill).toBeVisible({ timeout: 30_000 }),
+      expect(scannerRow).toHaveAttribute('data-has-data', 'true', { timeout: 30_000 }),
+    ]);
+
     // ── 4. Point data must land ON THE SCANNER'S OWN ROW ─────────────────
     // The synthetic scan writes hits back into the scanner scan in place — no
     // new params-less cloud. The "overhead" row keeps its params AND gains data.

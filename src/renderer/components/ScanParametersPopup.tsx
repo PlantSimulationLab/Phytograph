@@ -21,10 +21,12 @@ import {
 } from '../lib/heliosScanXml';
 import {
   parsePoseStreamCsv,
+  poseStreamFromWire,
   PoseStreamParseError,
   deriveMovingScanGrid,
   trajectoryDurationS,
 } from '../lib/poseStream';
+import { parseTrajectory } from '../utils/backendApi';
 
 // What the popup is doing in this open. Drives the title and submit-button
 // labels — submission semantics are otherwise identical (the caller decides
@@ -171,13 +173,26 @@ export function ScanParametersPopup({
     setImportError(null);
     const picked = await window.electronAPI.dialog.open({
       title: 'Import platform trajectory',
-      filters: [{ name: 'Trajectory (CSV / text)', extensions: ['csv', 'txt', 'tsv', 'traj'] }],
+      filters: [
+        { name: 'Trajectory (CSV / text)', extensions: ['csv', 'txt', 'tsv', 'traj'] },
+        { name: 'Binary trajectory (SBET)', extensions: ['sbet', 'out'] },
+      ],
     });
     if (!picked) return;
     const path = Array.isArray(picked) ? picked[0] : picked;
+    const label = path.split(/[\\/]/).pop();
+    const ext = (path.split('.').pop() || '').toLowerCase();
     try {
-      const text = await window.electronAPI.fs.readText(path);
-      const stream = parsePoseStreamCsv(text, { label: path.split(/[\\/]/).pop() });
+      // Binary SBET is parsed server-side (it needs pyproj for the UTM projection);
+      // text trajectories are parsed in the renderer. Both yield the same PoseStream.
+      let stream;
+      if (ext === 'sbet' || ext === 'out') {
+        const wire = await parseTrajectory(path);
+        stream = poseStreamFromWire(wire, label);
+      } else {
+        const text = await window.electronAPI.fs.readText(path);
+        stream = parsePoseStreamCsv(text, { label });
+      }
       const first = stream.poses[0];
       setParams(p => ({
         ...p,

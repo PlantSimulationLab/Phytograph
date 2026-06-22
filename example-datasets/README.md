@@ -27,6 +27,35 @@ curl -L -o example-datasets/pumpARowColumnIndex.e57 \
   "https://sourceforge.net/projects/e57-3d-imgfmt/files/E57Example-data/pumpARowColumnIndex.e57/download"
 ```
 
+## Moving-platform trajectory files
+
+Example platform trajectories for testing moving-platform scans (drone / UAV / mobile
+mapping). Attach one in the **Add Scan** popup → **Import trajectory file…**. All
+describe the same illustrative UAV pass; they exercise the different import paths:
+
+| File | Format | Path | Notes |
+|---|---|---|---|
+| `drone_pass_trajectory.csv` | text, quaternion | in-app | `t x y z qx qy qz qw` |
+| `drone_pass_trajectory_euler.csv` | text, Euler (radians) | in-app | `t x y z roll pitch yaw` |
+| `drone_pass_trajectory_syssifoss.txt` | text, Euler (**degrees**), tab-sep | in-app | HELIOS++ / SYSSIFOSS export form; degrees are auto-detected |
+| `drone_pass_trajectory.sbet` | binary Applanix SBET | backend | 500 poses near Heidelberg → projected to UTM zone 32N |
+| `drone_pass_trajectory.smrmsg` | SBET accuracy companion | backend | place beside the `.sbet`; surfaces a position-RMS QC note |
+| `drone_pass_beam_origins.las` | LAS with per-beam-origin ExtraBytes | — | `ox`/`oy`/`oz` per-pulse origins; LAD uses them directly and skips the trajectory join |
+
+Notes:
+
+- **SBET** (`.sbet`/`.out`) is parsed on the backend (it needs `pyproj` for the
+  geographic→UTM projection). Its latitude/longitude are projected to UTM and the NED
+  attitude converted to Phytograph's ENU frame. The `.smrmsg` companion is optional.
+- **`drone_pass_beam_origins.las`** demonstrates the ExtraBytes-origin path: import it as
+  a point cloud and it auto-creates a **moving-platform scan** — the backend reconstructs a
+  decimated platform trajectory from the per-pulse `ox/oy/oz` origins (ordered by
+  `gps_time`), so the scan is flagged moving with its path drawn. Moving-platform LAD then
+  uses the exact per-pulse origins as ground truth.
+- These are illustrative format samples (the trajectories are not tied to a committed
+  point cloud here). For an end-to-end moving-LAD numerics check, see the committed E2E
+  fixture `tests/e2e/fixtures/lad-leafcube-moving/`.
+
 ## Datasets
 
 | Dataset | Sensor | Trees | License | Download |

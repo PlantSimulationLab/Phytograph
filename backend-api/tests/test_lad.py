@@ -780,8 +780,9 @@ class TestMultiReturnImportColumnMapping:
         # Build the session arrays the same way create_cloud_session does.
         las_path, _, source_extra_dims = main._source_to_las(
             main._Path(_MULTI_XYZ), _MULTI_FORMAT, tmp_path, plan)
-        positions, colors, intensity, extras, extra_dims_meta = \
-            main._read_las_into_arrays(las_path)
+        _r = main._read_las_into_arrays(las_path)
+        positions, colors, intensity = _r.positions, _r.colors, _r.intensity
+        extras, extra_dims_meta = _r.extras, _r.extra_dims_meta
         # The per-pulse columns survived the round-trip under canonical slugs.
         assert {"timestamp", "target_index", "target_count"} <= set(extras), \
             sorted(extras)
@@ -913,8 +914,9 @@ class TestSingleReturnMissImportColumnMapping:
 
         las_path, _, _ = main._source_to_las(
             main._Path(_FIXTURE_XYZ), self._FORMAT, tmp_path, plan)
-        positions, colors, intensity, extras, extra_dims_meta = \
-            main._read_las_into_arrays(las_path)
+        _r = main._read_las_into_arrays(las_path)
+        positions, colors, intensity = _r.positions, _r.colors, _r.intensity
+        extras, extra_dims_meta = _r.extras, _r.extra_dims_meta
         # The miss flag survived the round-trip under its canonical slug, and the
         # fixture genuinely carries sky misses (is_miss == 1 for some rows).
         assert "is_miss" in extras, sorted(extras)

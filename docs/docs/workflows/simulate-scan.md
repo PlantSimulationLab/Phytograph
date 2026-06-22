@@ -218,9 +218,12 @@ you can attach it later from the row's paperclip button.
 
 A static scanner fires from one fixed position. To simulate a **moving
 platform**, attach a *trajectory* to the scan: in the Add Scan popup,
-click **Import trajectory file…** and pick a CSV/text file of poses (see
+click **Import trajectory file…** and pick a CSV/text file of poses, or a
+binary Applanix **SBET** (`.sbet` / `.out`) — see
 [Scans → Moving-platform scans](../concepts/scans.md#moving-platform-scans)
-for the format — `t x y z` plus a quaternion or roll/pitch/yaw per row).
+and [File formats → Platform trajectory files](../reference/file-formats.md#platform-trajectory-files)
+for the formats (`t x y z` plus a quaternion or roll/pitch/yaw per row, or a
+binary SBET projected to UTM).
 
 Once a trajectory is attached:
 
@@ -337,13 +340,22 @@ point also gets scalar fields you can color by or filter on: **intensity**
 for multi-return — **target index** and **target count**. Switch the
 viewer's color mode to *Intensity* or any scalar to inspect them.
 
-While the scan runs, the **Run** button is replaced by a progress
-indicator showing the current stage (loading geometry → configuring
+While the scan runs, a status indicator appears at the top-center of the
+viewer (the same one used for triangulation, leaf-area density, and other
+long operations). It shows the current stage (loading geometry → configuring
 scanners → ray-tracing → extracting hits → building point clouds) with a
-bar that fills as the scan advances. The ray-tracing pass is a single
-uninterruptible step, so the bar pulses (rather than ticking a
-percentage) during it. A **Cancel** button next to the indicator
-abandons a long or hung scan without force-quitting the app.
+progress bar and percentage that advance as the scan proceeds, plus a
+**Cancel** button to abandon a long or hung scan without force-quitting the
+app. Cancelling genuinely stops the work: it signals the backend to break out
+of the ray trace, so the computation halts and its memory is released within a
+moment rather than running to completion in the background. (A scan with a
+single, very high-resolution scanner finishes the current tracing pass before
+it can stop, so cancellation is near-immediate for typical multi-scanner or
+multi-stage runs and may take a beat on one enormous single scan.) The
+ray-tracing pass doesn't report fine-grained progress, so the bar advances at
+an estimated pace during it (scaled to the scan's pulse count) and then snaps
+onto the next real stage when it completes. The **Run Synthetic LiDAR Scan**
+button in the Scans panel simply shows a "Scanning…" spinner meanwhile.
 
 If a scanner already holds point data (e.g. an imported scan), Phytograph
 asks whether to **overwrite** it, **keep the original and add a duplicate**

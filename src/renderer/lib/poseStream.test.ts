@@ -3,6 +3,7 @@ import {
   parsePoseStreamCsv,
   quatFromRpy,
   poseStreamToWire,
+  poseStreamFromWire,
   PoseStreamParseError,
   trajectoryDurationS,
   deriveMovingScanGrid,
@@ -123,6 +124,75 @@ describe('poseStreamToWire', () => {
     const frame = wire.frame as Record<string, unknown>;
     expect(frame).toHaveProperty('up_axis', 'z');
     expect(frame).toHaveProperty('body_convention', 'FLU');
+  });
+});
+
+describe('poseStreamFromWire', () => {
+  it('round-trips through poseStreamToWire', () => {
+    const s = parsePoseStreamCsv(['0 1 2 3 0 0 0 1', '1 4 5 6 0 0 0 1'].join('\n'));
+    const back = poseStreamFromWire(poseStreamToWire(s));
+    expect(back.poses).toEqual(s.poses);
+    expect(back.leverArm).toEqual(s.leverArm);
+    expect(back.boresightRpy).toEqual(s.boresightRpy);
+    expect(back.sourceFormat).toBe(s.sourceFormat);
+    expect(back.frame.upAxis).toBe('z');
+  });
+
+  it('maps an SBET wire payload (snake_case, FRD, EPSG crs)', () => {
+    const wire = {
+      poses: [{ t: 0, x: 100, y: 200, z: 50, qx: 0, qy: 0, qz: 0, qw: 1 }],
+      frame: { crs: 'EPSG:32632', up_axis: 'z', body_convention: 'FRD', time_ref: 'gps' },
+      lever_arm: [0.1, 0, -0.2],
+      boresight_rpy: [0, 0, 0],
+      source_format: 'sbet',
+    };
+    const s = poseStreamFromWire(wire, 'flight.sbet');
+    expect(s.sourceFormat).toBe('sbet');
+    expect(s.frame.crs).toBe('EPSG:32632');
+    expect(s.frame.bodyConvention).toBe('FRD');
+    expect(s.leverArm).toEqual([0.1, 0, -0.2]);
+    expect(s.label).toBe('flight.sbet');
+  });
+
+  it('throws on an empty/malformed payload', () => {
+    expect(() => poseStreamFromWire({ poses: [] })).toThrow(PoseStreamParseError);
+    expect(() => poseStreamFromWire({})).toThrow(PoseStreamParseError);
+    expect(() => poseStreamFromWire(
+      { poses: [{ t: 0, x: NaN, y: 0, z: 0, qx: 0, qy: 0, qz: 0, qw: 1 }] }
+    )).toThrow(PoseStreamParseError);
+  });
+});
+
+describe('SYSSIFOSS / HELIOS++ trajectory (tab/space, degrees Euler)', () => {
+  it('parses a tab-separated 7-column degrees-Euler trajectory', () => {
+    // HELIOS++ trajectory output: t x y z roll pitch yaw, angles in DEGREES, with a
+    // header row. Tabs are handled by the existing /[,\s]+/ split.
+    const text = [
+      'gpsTime\tx\ty\tz\troll\tpitch\tyaw',
+      '0.0\t10\t20\t30\t0\t0\t0',
+      '1.0\t11\t20\t30\t0\t0\t90',
+    ].join('\n');
+    const s = parsePoseStreamCsv(text, { eulerInDegrees: true });
+    expect(s.poses).toHaveLength(2);
+    expect(s.poses[0].x).toBe(10);
+    // yaw 90° about +Z → qz = sin(45°), qw = cos(45°).
+    expect(s.poses[1].qz).toBeCloseTo(Math.SQRT1_2, 6);
+    expect(s.poses[1].qw).toBeCloseTo(Math.SQRT1_2, 6);
+  });
+
+  it('auto-detects degrees when an angle exceeds 2π (no option needed)', () => {
+    // A HELIOS++/SYSSIFOSS file imported through the picker passes no eulerInDegrees
+    // flag; yaw=90 (> 2π) must be read as degrees, not radians.
+    const text = ['0 0 0 5 0 0 0', '1 1 0 5 0 0 90'].join('\n');
+    const s = parsePoseStreamCsv(text);
+    expect(s.poses[1].qz).toBeCloseTo(Math.SQRT1_2, 6); // 90° → not 90 rad
+  });
+
+  it('keeps small angles as radians when auto-detecting', () => {
+    // All angles ≤ 2π → genuine radians; a 1.0 rad yaw stays 1.0 rad.
+    const text = ['0 0 0 5 0 0 0', '1 1 0 5 0 0 1.0'].join('\n');
+    const s = parsePoseStreamCsv(text);
+    expect(s.poses[1].qz).toBeCloseTo(Math.sin(0.5), 6); // yaw 1.0 rad
   });
 });
 

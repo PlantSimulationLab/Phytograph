@@ -140,7 +140,19 @@ export function parsePoseStreamCsv(
     throw new PoseStreamParseError('Trajectory file has no data rows.');
   }
 
-  const toDeg = options.eulerInDegrees ? Math.PI / 180 : 1;
+  // Euler angle units: honor an explicit `eulerInDegrees`, else auto-detect. No sane
+  // attitude in radians exceeds 2π (~6.28), so a roll/pitch/yaw magnitude above that
+  // means the file is in DEGREES — which is what HELIOS++/SYSSIFOSS trajectories use.
+  // This lets those files import correctly through the picker with no UI toggle.
+  let useDegrees = options.eulerInDegrees ?? false;
+  if (options.eulerInDegrees === undefined && detectedCols === EULER_COLS) {
+    const maxAngle = rows.reduce(
+      (mx, r) => Math.max(mx, Math.abs(r[4]), Math.abs(r[5]), Math.abs(r[6])),
+      0,
+    );
+    if (maxAngle > 2 * Math.PI) useDegrees = true;
+  }
+  const toDeg = useDegrees ? Math.PI / 180 : 1;
   const poses: PoseSample[] = rows.map((r) => {
     const [t, x, y, z] = r;
     let qx: number, qy: number, qz: number, qw: number;
@@ -188,6 +200,54 @@ export function poseStreamToWire(stream: PoseStream): unknown {
     lever_arm: stream.leverArm,
     boresight_rpy: stream.boresightRpy,
     source_format: stream.sourceFormat,
+  };
+}
+
+// Inverse of poseStreamToWire: build a renderer PoseStream from the backend wire
+// shape (snake_case), e.g. the JSON returned by POST /api/trajectory/parse for a
+// binary SBET. Validates the poses array so a malformed payload surfaces as a
+// PoseStreamParseError (caught by the import handler) rather than a silent bad join.
+export function poseStreamFromWire(wire: unknown, label?: string): PoseStream {
+  const w = wire as Record<string, unknown> | null;
+  const rawPoses = w && Array.isArray(w.poses) ? (w.poses as unknown[]) : null;
+  if (!rawPoses || rawPoses.length === 0) {
+    throw new PoseStreamParseError('Trajectory response carried no poses.');
+  }
+  const poses: PoseSample[] = rawPoses.map((p, i) => {
+    const o = p as Record<string, unknown>;
+    const num = (k: string) => {
+      const v = Number(o[k]);
+      if (!Number.isFinite(v)) {
+        throw new PoseStreamParseError(
+          `Trajectory pose ${i} has a non-finite "${k}".`);
+      }
+      return v;
+    };
+    return {
+      t: num('t'), x: num('x'), y: num('y'), z: num('z'),
+      qx: num('qx'), qy: num('qy'), qz: num('qz'), qw: num('qw'),
+    };
+  });
+  const frame = (w?.frame ?? {}) as Record<string, unknown>;
+  const bodyConv = frame.body_convention === 'FRD' ? 'FRD' : 'FLU';
+  const lever = Array.isArray(w?.lever_arm) ? (w!.lever_arm as number[]) : [0, 0, 0];
+  const bore = Array.isArray(w?.boresight_rpy) ? (w!.boresight_rpy as number[]) : [0, 0, 0];
+  const fmt = w?.source_format;
+  const sourceFormat: PoseStream['sourceFormat'] =
+    fmt === 'sbet' || fmt === 'las_extrabytes' || fmt === 'reconstructed' ||
+    fmt === 'simulated' || fmt === 'pose_csv' ? fmt : 'sbet';
+  return {
+    poses,
+    frame: {
+      crs: typeof frame.crs === 'string' ? frame.crs : null,
+      upAxis: 'z',
+      bodyConvention: bodyConv,
+      timeRef: typeof frame.time_ref === 'string' ? frame.time_ref : null,
+    },
+    leverArm: [lever[0] ?? 0, lever[1] ?? 0, lever[2] ?? 0],
+    boresightRpy: [bore[0] ?? 0, bore[1] ?? 0, bore[2] ?? 0],
+    sourceFormat,
+    label: label ?? (typeof w?.label === 'string' ? (w.label as string) : undefined),
   };
 }
 

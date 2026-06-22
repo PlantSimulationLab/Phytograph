@@ -590,6 +590,29 @@ export function ScannerMarker({
 }
 
 // Wrapper that derives the ScannerMarker props from a scan's ScanParameters and
+// How many scanner glyphs/OBJ instances to draw along a trajectory at most. The
+// PATH LINE always uses every pose (it's cheap and defines the true route), but the
+// posed instruments are decimated to this many evenly-spaced samples (first + last
+// always kept). Hundreds of overlapping OBJ instruments otherwise read as one blob
+// and multiply the primitive count by N. An origin-derived trajectory (one pose per
+// pulse → thousands) and a dense interpolated trajectory file both hit this, so the
+// decimation lives here on the shared display path rather than at import.
+export const MAX_DISPLAY_POSES = 24;
+
+// Evenly subsample `poses` to at most `max` entries, always keeping the first and
+// last so the drawn instruments still span the whole path. Returns the same array
+// reference when no decimation is needed (so the downstream memo key is stable).
+export function decimatePosesForDisplay<T>(poses: T[], max = MAX_DISPLAY_POSES): T[] {
+  const n = poses.length;
+  if (n <= max) return poses;
+  const out: T[] = [];
+  // Stride across [0, n-1] in `max` steps so the last index lands on n-1.
+  for (let i = 0; i < max; i++) {
+    out.push(poses[Math.round((i * (n - 1)) / (max - 1))]);
+  }
+  return out;
+}
+
 // MEMOIZES the trajectory-derived arrays on the stable `params.trajectory`
 // reference. Without this, the parent's inline `.map()` produced a fresh
 // positions array every render, rebuilding the trajectory marker's GPU geometry
@@ -610,10 +633,14 @@ export function ScanMarkerEntry({
     () => traj?.poses.map(p => [p.x, p.y, p.z] as [number, number, number]),
     [traj],
   );
+  // The PATH LINE (`trajectory`) uses every pose; the posed instruments/glyphs are
+  // decimated to MAX_DISPLAY_POSES so a dense path (e.g. an origin-derived trajectory
+  // with one pose per pulse) doesn't draw hundreds of overlapping models.
   const poses = useMemo(
-    () => traj?.poses.map(p =>
-      [p.x, p.y, p.z, p.qx, p.qy, p.qz, p.qw] as
-        [number, number, number, number, number, number, number]),
+    () => decimatePosesForDisplay(
+      (traj?.poses ?? []).map(p =>
+        [p.x, p.y, p.z, p.qx, p.qy, p.qz, p.qw] as
+          [number, number, number, number, number, number, number])),
     [traj],
   );
   const bodyQuaternion = useMemo<[number, number, number, number] | undefined>(

@@ -139,8 +139,9 @@ export async function triangulatePointCloud(
   request: TriangulationRequest,
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<TriangulationResult> {
-  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate', request, signal, 600000, onProgress);
+  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate', request, signal, 600000, onProgress, onRunId);
   if (!meta.success) {
     return {
       success: false,
@@ -217,6 +218,43 @@ export async function segmentGround(
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Ground segmentation failed:', error);
+    throw error;
+  }
+}
+
+// ==================== TRAJECTORY PARSE API ====================
+// Parse a binary trajectory file (SBET .sbet/.out) server-side into the canonical
+// PoseStream wire shape. Binary parsing lives on the backend (it needs pyproj for
+// the geographic->UTM projection); text trajectories are parsed in the renderer.
+// `path` is a server-readable file path (same as the cloud-import endpoints).
+export async function parseTrajectory(
+  path: string,
+  options?: { smrmsgPath?: string; targetPoses?: number }
+): Promise<unknown> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
+
+  try {
+    const response = await fetch(`${baseUrl}/api/trajectory/parse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path,
+        smrmsg_path: options?.smrmsgPath,
+        target_poses: options?.targetPoses,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('Trajectory parse failed:', error);
     throw error;
   }
 }
@@ -470,8 +508,9 @@ export async function heliosTriangulate(
   request: HeliosTriangulationRequest,
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<HeliosTriangulationResult> {
-  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate/helios', request, signal, 600000, onProgress);
+  const { meta, buffers } = await fetchBinaryFrame('/api/triangulate/helios', request, signal, 600000, onProgress, onRunId);
   if (!meta.success) {
     return {
       success: false,
@@ -613,12 +652,13 @@ export async function computeLAD(
   request: LADRequest,
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<LADResponse> {
   console.log('LAD compute - scans:', request.scans.length,
     'grid:', `${request.grid.nx}×${request.grid.ny}×${request.grid.nz}`);
   try {
     return await fetchJsonWithProgress<LADResponse>(
-      '/api/lad/compute', request, signal, 600000, onProgress);
+      '/api/lad/compute', request, signal, 600000, onProgress, onRunId);
   } catch (error) {
     console.error('LAD computation failed:', error);
     throw error;
@@ -1462,12 +1502,14 @@ export async function runLidarScan(
   request: LidarScanRequest,
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<LidarScanResponse> {
   // A high-resolution scan ray-traces Ntheta×Nphi rays per scanner; the points +
   // scalars come back as a PHB1 binary frame (5-min allowance for big scans).
   // When onProgress is supplied the backend streams PHP1 markers ahead of the
   // frame so the run button can show per-stage progress (mirrors triangulation/LAD).
-  const { meta, buffers } = await fetchBinaryFrame('/api/lidar/scan', request, signal, 300000, onProgress);
+  // onRunId captures the cancellation token so the user can stop a long scan.
+  const { meta, buffers } = await fetchBinaryFrame('/api/lidar/scan', request, signal, 300000, onProgress, onRunId);
   if (!meta.success) {
     return { success: false, error: (meta.error as string) ?? 'LiDAR scan failed', results: [] };
   }
@@ -1491,6 +1533,19 @@ export async function runLidarScan(
     };
   });
   return { success: true, results };
+}
+
+// Cancel an in-flight streaming op (synthetic scan / triangulation / LAD) by the
+// run_id the backend emitted as its first PHP1 marker. Fire-and-forget: the
+// backend flips the run's cancel flag, the C++ ray loop / stage checkpoints bail,
+// and the memory is freed. Errors are swallowed — a failed cancel POST must not
+// mask the abort the caller also performs on the fetch.
+export async function cancelRun(runId: string): Promise<void> {
+  try {
+    await fetch(`${getBackendUrl()}/api/cancel/${encodeURIComponent(runId)}`, { method: 'POST' });
+  } catch {
+    // best-effort; the fetch abort still tears down the request
+  }
 }
 
 // ==================== POINT CLOUD LAS/LAZ IMPORT/EXPORT API ====================
@@ -1920,6 +1975,11 @@ const PROGRESS_MARKER_MAGIC = 'PHP1';
 export interface ProgressMarker {
   progress: number | null;
   message: string;
+  // The first marker of a cancellable streaming op carries its run_id (so the
+  // renderer can POST /api/cancel/{run_id}); the terminal marker of a cancelled
+  // run carries cancelled:true in place of a frame. Both optional on other markers.
+  runId?: string;
+  cancelled?: boolean;
 }
 
 function isWhitespaceByte(b: number): boolean {
@@ -1957,8 +2017,13 @@ export function parseProgressMarkers(
     if (o + 8 + jsonLen > bytes.length) break; // payload not fully arrived
     const json = new TextDecoder().decode(bytes.subarray(o + 8, o + 8 + jsonLen));
     try {
-      const parsed = JSON.parse(json) as ProgressMarker;
-      markers.push({ progress: parsed.progress ?? null, message: parsed.message ?? '' });
+      const parsed = JSON.parse(json) as ProgressMarker & { run_id?: string };
+      markers.push({
+        progress: parsed.progress ?? null,
+        message: parsed.message ?? '',
+        runId: parsed.run_id,
+        cancelled: parsed.cancelled,
+      });
     } catch {
       // Ignore a malformed marker rather than wedging the stream.
     }
@@ -2009,6 +2074,16 @@ export function decodeBinaryFrame(buf: ArrayBuffer): BinaryFrame {
 // markers (see _bin_frame_streaming_response in backend-api/main.py).
 export type BinaryFrameProgress = (progress: number | null, message: string) => void;
 
+// Thrown when the backend reports a cancelled run (a terminal PHP1 `cancelled`
+// marker) instead of a frame. Callers catch this to treat the cancel as a
+// no-op-success (UI returns to idle) rather than surfacing an error toast.
+export class ScanCancelledError extends Error {
+  constructor() {
+    super('Operation cancelled');
+    this.name = 'ScanCancelledError';
+  }
+}
+
 // POST a JSON request and decode a PHB1 binary-frame response. Mirrors the JSON
 // fetch helpers (10-min timeout, forwards an external abort signal).
 //
@@ -2023,6 +2098,7 @@ export async function fetchBinaryFrame(
   signal?: AbortSignal,
   timeoutMs = 600000,
   onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<BinaryFrame> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
@@ -2063,7 +2139,14 @@ export async function fetchBinaryFrame(
         // Parse any complete markers visible at the head of the stream so far.
         const merged = concatBytes([pending, value]);
         const { markers, consumed } = parseProgressMarkers(merged, 0);
-        for (const m of markers) onProgress(m.progress, m.message);
+        for (const m of markers) {
+          if (m.runId && onRunId) onRunId(m.runId);
+          // A `cancelled` marker means the backend aborted and freed its memory;
+          // there is no frame to decode. Surface it as a typed abort so callers
+          // can distinguish a user cancel from a real failure.
+          if (m.cancelled) throw new ScanCancelledError();
+          onProgress(m.progress, m.message);
+        }
         pending = merged.subarray(consumed);
       }
     } finally {
@@ -2104,6 +2187,7 @@ export async function fetchJsonWithProgress<T>(
   signal?: AbortSignal,
   timeoutMs = 600000,
   onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<T> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
@@ -2145,7 +2229,11 @@ export async function fetchJsonWithProgress<T>(
         refreshTimeout();
         const merged = concatBytes([pending, value]);
         const { markers, consumed } = parseProgressMarkers(merged, 0);
-        if (onProgress) for (const m of markers) onProgress(m.progress, m.message);
+        for (const m of markers) {
+          if (m.runId && onRunId) onRunId(m.runId);
+          if (m.cancelled) throw new ScanCancelledError();
+          if (onProgress) onProgress(m.progress, m.message);
+        }
         pending = merged.subarray(consumed);
       }
     } finally {

@@ -21,6 +21,11 @@ pytexit>=0.3.4
 pyyaml>=5.0.0
 open3d>=0.18.0
 laspy[lazrs]>=2.5.0
+# Geographic -> projected (UTM) conversion for binary SBET trajectory import
+# (lat/lon radians -> easting/northing; see backend-api/sbet.py). Bundles the PROJ
+# C library + proj.db data dir — must be in `collectAll` in build-backend.mjs, NOT
+# just hiddenimports, or the packaged app crashes on the first transform.
+pyproj>=3.6
 # Direct PLY parsing (ASCII + binary, all endianness) that preserves arbitrary
 # scalar vertex properties — open3d drops everything but position + RGB on read.
 # Used by _ply_to_las to carry intensity/reflectance/custom scalars into the

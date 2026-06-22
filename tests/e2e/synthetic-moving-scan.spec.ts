@@ -81,6 +81,31 @@ test('runs a synthetic moving-platform scan driven by a trajectory', async () =>
     await page.getByTestId('scan-opt-run').click();
     await expect(scanOptions).not.toBeVisible();
 
+    // The central status pill shows while the scan runs, carrying a DETERMINATE
+    // progress bar with a percentage. The opaque C++ ray-trace can't self-report,
+    // so the client drives a synthetic creep across that stage — the key property
+    // is that the bar shows a finite percentage (a real, moving bar) rather than
+    // the old null-fraction pulse with no number. Sample the pill while the scan
+    // runs and assert that whenever it's visible it carries a finite percentage in
+    // [0, 100]. Best-effort + guarded by the data-landing wait below: the pill
+    // vanishes on completion, so the data assertion gates correctness regardless.
+    const statusPill = page.getByTestId('synthetic-scan-status');
+    let sawPercent = false;
+    for (let i = 0; i < 60; i++) {
+      const txt = await statusPill.locator('text=/%$/').first().textContent().catch(() => null);
+      if (txt) {
+        const pct = parseInt(txt.replace('%', ''), 10);
+        expect(pct).toBeGreaterThanOrEqual(0);
+        expect(pct).toBeLessThanOrEqual(100);
+        sawPercent = true;
+      }
+      if ((await scannerRow.getAttribute('data-has-data')) === 'true') break;
+      await page.waitForTimeout(100);
+    }
+    // (sawPercent is informational — the determinate-bar property is asserted
+    // above each time the pill is caught; a too-fast scan simply yields no sample.)
+    void sawPercent;
+
     // ── 4. Data lands on the scanner row, and it's a genuine moving scan ──
     await expect(scannerRow).toHaveAttribute('data-has-data', 'true', { timeout: 120_000 });
     await expect(scannerRow).toHaveAttribute('data-moving', 'true');

@@ -1075,10 +1075,15 @@ function buildPhb1Frame(meta: Record<string, unknown>, name: string, data: numbe
   return buf;
 }
 
-// Build one PHP1 marker (mirrors _pack_progress_marker in main.py).
-function buildPhp1Marker(progress: number | null, message: string): Uint8Array {
+// Build one PHP1 marker (mirrors _pack_progress_marker in main.py). `extra`
+// carries the optional run_id / cancelled fields the cancellation protocol adds.
+function buildPhp1Marker(
+  progress: number | null,
+  message: string,
+  extra: Record<string, unknown> = {},
+): Uint8Array {
   const enc = new TextEncoder();
-  let payloadStr = JSON.stringify({ progress, message });
+  let payloadStr = JSON.stringify({ progress, message, ...extra });
   const pad = (4 - (enc.encode(payloadStr).length % 4)) % 4;
   payloadStr += ' '.repeat(pad);
   const payload = enc.encode(payloadStr);
@@ -1125,6 +1130,24 @@ describe('parseProgressMarkers', () => {
     const r2 = parseProgressMarkers(full, 0);
     expect(r2.markers).toEqual([{ progress: 0.75, message: 'Cleaning up mesh' }]);
     expect(r2.consumed).toBe(full.byteLength);
+  });
+
+  it('surfaces the run_id on the leading cancellation-token marker', () => {
+    // The backend emits the run_id as the first marker (progress null, no msg).
+    const idMarker = buildPhp1Marker(null, '', { run_id: 'abc123' });
+    const progress = buildPhp1Marker(0.4, 'Ray-tracing scene');
+    const { markers } = parseProgressMarkers(concat(idMarker, progress), 0);
+    expect(markers[0].runId).toBe('abc123');
+    expect(markers[0].progress).toBeNull();
+    expect(markers[1].runId).toBeUndefined();
+    expect(markers[1].message).toBe('Ray-tracing scene');
+  });
+
+  it('flags the terminal cancelled marker', () => {
+    const cancelled = buildPhp1Marker(null, 'Cancelled', { cancelled: true });
+    const { markers } = parseProgressMarkers(cancelled, 0);
+    expect(markers[0].cancelled).toBe(true);
+    expect(markers[0].message).toBe('Cancelled');
   });
 });
 

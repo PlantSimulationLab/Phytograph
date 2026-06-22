@@ -7,6 +7,8 @@
 // clouds have no single defined origin. Analyses that need pulse directions
 // (e.g. Helios triangulation) are gated on presence of params.
 
+import { poseStreamFromWire } from './poseStream';
+
 // How many returns a pulse reports — a property of the real instrument, not of
 // the simulation. The helios-core lidar engine fires `raysPerPulse` sub-rays
 // across the beam cone (exit diameter + divergence) and resolves the analytic
@@ -202,6 +204,11 @@ export interface ScanParamsFromFile {
   tilt_roll_deg?: number;
   tilt_pitch_deg?: number;
   azimuth_offset_deg?: number;
+  // A reconstructed platform trajectory (canonical PoseStream wire shape) when the
+  // file describes a MOVING-platform scan — e.g. a LAS carrying per-pulse beam-origin
+  // ExtraBytes, from which the backend rebuilds a decimated path. Mapped through
+  // poseStreamFromWire so the imported scan is auto-flagged moving with its path drawn.
+  trajectory?: unknown;
 }
 
 // Build ScanParameters from the partial set a file header carried, filling any
@@ -226,5 +233,20 @@ export function scanParametersFromFile(src: ScanParamsFromFile): ScanParameters 
   if (typeof src.tilt_roll_deg === 'number') p.tiltRollDeg = src.tilt_roll_deg;
   if (typeof src.tilt_pitch_deg === 'number') p.tiltPitchDeg = src.tilt_pitch_deg;
   if (typeof src.azimuth_offset_deg === 'number') p.azimuthOffsetDeg = src.azimuth_offset_deg;
+  // A moving-platform file (reconstructed trajectory) → attach the PoseStream and
+  // zero the static tilt/heading, exactly as the trajectory-file importer does (a
+  // moving scan's attitude comes from the trajectory; the backend rejects a static
+  // tilt on a moving scan). poseStreamFromWire throws on a malformed payload, so a
+  // bad trajectory simply leaves the scan static rather than failing the import.
+  if (src.trajectory != null) {
+    try {
+      p.trajectory = poseStreamFromWire(src.trajectory);
+      p.tiltRollDeg = 0;
+      p.tiltPitchDeg = 0;
+      p.azimuthOffsetDeg = 0;
+    } catch {
+      // Leave the scan static if the reconstructed trajectory can't be mapped.
+    }
+  }
   return p;
 }

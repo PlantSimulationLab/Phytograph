@@ -130,13 +130,19 @@ platform pose at the moment that pulse was fired — rather than a single
 scanner position. This is what leaf-area inversion needs to trace beam
 paths correctly for a sensor that was moving through the scene.
 
-Attach one with **Import trajectory file…** in the Add Scan popup. The
-file is a CSV / whitespace-delimited table, one pose per row:
+Attach one with **Import trajectory file…** in the Add Scan popup. A
+CSV / whitespace-delimited table, one pose per row:
 
 - `t x y z qx qy qz qw` — time (seconds), position (metres), and a
   Hamilton orientation quaternion, or
 - `t x y z roll pitch yaw` — orientation as Tait-Bryan angles (radians;
   the importer also accepts degrees) in intrinsic Z-Y-X order.
+
+A **binary Applanix SBET** (`.sbet` / `.out`) is also accepted: it is parsed
+on the backend, with latitude/longitude projected to UTM and the NED attitude
+converted to Phytograph's ENU frame. See
+[File formats → Platform trajectory files](../reference/file-formats.md#platform-trajectory-files)
+for the full list, GPS-time clock handling, and LAS per-beam-origin ExtraBytes.
 
 Times must strictly increase. A header row and `#` / `//` comment lines
 are ignored. Once attached, the scan's origin is anchored to the first

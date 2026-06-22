@@ -68,7 +68,12 @@ def _session_from_xyz(xyz_path: Path, tmp_path: Path):
     las_path, is_temp, source_extra_dims = main._source_to_las(
         xyz_path, _MULTI_FORMAT, tmp_path, None,
     )
-    positions, colors, intensity, extras, extra_dims_meta = main._read_las_into_arrays(las_path)
+    _r = main._read_las_into_arrays(las_path)
+    positions = _r.positions
+    colors = _r.colors
+    intensity = _r.intensity
+    extras = _r.extras
+    extra_dims_meta = _r.extra_dims_meta
     return _session_from_arrays(positions, colors, intensity, extras, extra_dims_meta)
 
 
@@ -211,16 +216,26 @@ def test_las_native_multireturn_dims_auto_mapped(tmp_path):
     las.number_of_returns = np.array([1, 3, 3, 3, 1], dtype=np.uint8)
     las.write(str(las_path))
 
-    positions, colors, intensity, extras, extra_dims_meta = main._read_las_into_arrays(las_path)
+    _r = main._read_las_into_arrays(las_path)
+    positions = _r.positions
+    colors = _r.colors
+    intensity = _r.intensity
+    extras = _r.extras
+    extra_dims_meta = _r.extra_dims_meta
+    timestamps = _r.timestamps
 
-    for slug in main._MULTI_RETURN_SLUGS:
-        assert slug in extras, f"missing {slug}"
+    # target_index/target_count are carried as float32 extras; gps_time is routed
+    # OUT of extras to the dedicated float64 `timestamps` return (precision).
+    assert "target_index" in extras and "target_count" in extras
+    assert "timestamp" not in extras, "gps_time must not land in float32 extras"
     # return_number carried verbatim as target_index (1-based here).
     np.testing.assert_allclose(extras["target_index"], [1, 1, 2, 3, 1])
     np.testing.assert_allclose(extras["target_count"], [1, 3, 3, 3, 1])
-    np.testing.assert_allclose(extras["timestamp"], [1.0, 2.0, 2.0, 2.0, 3.0])
+    assert timestamps is not None and timestamps.dtype == np.float64
+    np.testing.assert_allclose(timestamps, [1.0, 2.0, 2.0, 2.0, 3.0])
     slugs = {ed["slug"] for ed in extra_dims_meta}
-    assert {"timestamp", "target_index", "target_count"} <= slugs
+    assert {"target_index", "target_count"} <= slugs
+    assert "timestamp" not in slugs, "timestamp is no longer an extra-dim"
 
 
 def test_las_degenerate_standard_dims_not_mapped(tmp_path):
@@ -239,7 +254,8 @@ def test_las_degenerate_standard_dims_not_mapped(tmp_path):
     # Leave return_number/number_of_returns/gps_time at their default zeros.
     las.write(str(las_path))
 
-    _, _, _, extras, _ = main._read_las_into_arrays(las_path)
+    _r = main._read_las_into_arrays(las_path)
+    extras = _r.extras
     for slug in main._MULTI_RETURN_SLUGS:
         assert slug not in extras, f"phantom {slug} mapped from all-zero standard dim"
 
@@ -262,7 +278,9 @@ def test_las_nonconstant_standard_dims_carried_as_scalars(tmp_path):
     las.user_data = np.array([0, 0, 0, 0], dtype=np.uint8)           # constant → skip
     las.write(str(las_path))
 
-    _, _, _, extras, extra_dims_meta = main._read_las_into_arrays(las_path)
+    _r = main._read_las_into_arrays(las_path)
+    extras = _r.extras
+    extra_dims_meta = _r.extra_dims_meta
 
     # Carried under a 'las_'-prefixed slug (the bare name would collide with the
     # reserved LAS standard schema when _session_to_las rebuilds the octree LAS).
@@ -299,7 +317,12 @@ def test_carried_standard_dims_survive_session_to_las(tmp_path):
     las.point_source_id = np.array([10, 10, 11, 12], dtype=np.uint16)
     las.write(str(src))
 
-    positions, colors, intensity, extras, extra_dims_meta = main._read_las_into_arrays(src)
+    _r = main._read_las_into_arrays(src)
+    positions = _r.positions
+    colors = _r.colors
+    intensity = _r.intensity
+    extras = _r.extras
+    extra_dims_meta = _r.extra_dims_meta
     sess = _session_from_arrays(positions, colors, intensity, extras, extra_dims_meta)
 
     out = tmp_path / "rebuilt.las"
