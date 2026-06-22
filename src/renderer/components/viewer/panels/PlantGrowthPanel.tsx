@@ -165,6 +165,7 @@ export function PlantGrowthPanel({
           <div className="flex gap-1">
             <input
               type="number"
+              onWheel={(e) => e.currentTarget.blur()}
               value={targetAge}
               onChange={(e) => onTargetAgeChange(e.target.value)}
               placeholder={currentAge.toFixed(0)}
@@ -191,6 +192,7 @@ export function PlantGrowthPanel({
               <label className="text-[8px] text-neutral-500 block mb-0.5">Start</label>
               <input
                 type="number"
+                onWheel={(e) => e.currentTarget.blur()}
                 value={animationStartAge}
                 onChange={(e) => onAnimationStartAgeChange(e.target.value)}
                 min={0}
@@ -202,6 +204,7 @@ export function PlantGrowthPanel({
               <label className="text-[8px] text-neutral-500 block mb-0.5">End</label>
               <input
                 type="number"
+                onWheel={(e) => e.currentTarget.blur()}
                 value={animationEndAge}
                 onChange={(e) => onAnimationEndAgeChange(e.target.value)}
                 min={0}

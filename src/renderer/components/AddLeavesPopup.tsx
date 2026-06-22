@@ -217,23 +217,23 @@ export function AddLeavesPopup({ isOpen, onClose, qsm, onAddLeaves }: AddLeavesP
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-[10px] text-neutral-400 block mb-1">Leaf spacing (m)</label>
-              <input data-testid="add-leaves-spacing" type="number" value={spacingStr}
+              <input data-testid="add-leaves-spacing" type="number" onWheel={(e) => e.currentTarget.blur()} value={spacingStr}
                 onChange={(e) => setSpacingStr(e.target.value)} step="0.01" min="0.005" className={numCls} />
             </div>
             <div>
               <label className="text-[10px] text-neutral-400 block mb-1">Leaf size (m)</label>
-              <input data-testid="add-leaves-size" type="number" value={sizeStr}
+              <input data-testid="add-leaves-size" type="number" onWheel={(e) => e.currentTarget.blur()} value={sizeStr}
                 onChange={(e) => setSizeStr(e.target.value)} step="0.01" min="0.005" className={numCls} />
             </div>
             <div>
               <label className="text-[10px] text-neutral-400 block mb-1">Leaf pitch (°)</label>
-              <input data-testid="add-leaves-pitch" type="number" value={pitchStr}
+              <input data-testid="add-leaves-pitch" type="number" onWheel={(e) => e.currentTarget.blur()} value={pitchStr}
                 onChange={(e) => setPitchStr(e.target.value)} step="5" min="0" max="90" className={numCls} />
               <p className="text-[9px] text-neutral-500 mt-0.5">From the shoot axis (90° = straight out)</p>
             </div>
             <div>
               <label className="text-[10px] text-neutral-400 block mb-1">Leaves per node</label>
-              <input data-testid="add-leaves-pernode" type="number" value={leavesPerNodeStr}
+              <input data-testid="add-leaves-pernode" type="number" onWheel={(e) => e.currentTarget.blur()} value={leavesPerNodeStr}
                 onChange={(e) => setLeavesPerNodeStr(e.target.value)} step="1" min="1" max="6" className={numCls} />
             </div>
           </div>
@@ -241,7 +241,7 @@ export function AddLeavesPopup({ isOpen, onClose, qsm, onAddLeaves }: AddLeavesP
           {/* Phyllotaxis (auto-detected, editable) */}
           <div className="border-t border-neutral-700 pt-3">
             <label className="text-[10px] text-neutral-400 block mb-1">Phyllotactic angle (°)</label>
-            <input data-testid="add-leaves-phyllotaxis" type="number" value={phyllotaxisStr}
+            <input data-testid="add-leaves-phyllotaxis" type="number" onWheel={(e) => e.currentTarget.blur()} value={phyllotaxisStr}
               onChange={(e) => setPhyllotaxisStr(e.target.value)} step="0.5" min="0" max="180" className={numCls} />
             <p className="text-[9px] text-neutral-500 mt-0.5" data-testid="add-leaves-phyllo-hint">
               {detecting

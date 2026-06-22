@@ -490,6 +490,7 @@ export function TriangulationPopup({
                     <input
                       data-testid="triangulation-radius"
                       type="number"
+                      onWheel={(e) => e.currentTarget.blur()}
                       value={radiusStr}
                       onChange={(e) => setRadiusStr(e.target.value)}
                       step="0.01"
@@ -586,6 +587,7 @@ export function TriangulationPopup({
                     <input
                       data-testid="triangulation-alpha"
                       type="number"
+                      onWheel={(e) => e.currentTarget.blur()}
                       value={alphaStr}
                       onChange={(e) => setAlphaStr(e.target.value)}
                       step="0.01"

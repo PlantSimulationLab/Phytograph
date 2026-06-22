@@ -174,6 +174,7 @@ export function FilterPanel({
               <input
                 data-testid="filter-min-input"
                 type="number"
+                onWheel={(e) => e.currentTarget.blur()}
                 value={pendingFilterMin}
                 onChange={(e) => onPendingMinChange(e.target.value)}
                 step="any"
@@ -185,6 +186,7 @@ export function FilterPanel({
               <input
                 data-testid="filter-max-input"
                 type="number"
+                onWheel={(e) => e.currentTarget.blur()}
                 value={pendingFilterMax}
                 onChange={(e) => onPendingMaxChange(e.target.value)}
                 step="any"

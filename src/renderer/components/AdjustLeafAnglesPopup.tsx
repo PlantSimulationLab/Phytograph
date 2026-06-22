@@ -125,6 +125,7 @@ export function AdjustLeafAnglesPopup({
                 <input
                   data-testid="adjust-leaves-seed"
                   type="number"
+                  onWheel={(e) => e.currentTarget.blur()}
                   value={seedStr}
                   onChange={(e) => setSeedStr(e.target.value)}
                   step="1"
