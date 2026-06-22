@@ -40,7 +40,9 @@ test('duplicating a scan creates an independent "(copy)" with the same point cou
     const original = await importTree(app, page);
     const originalId = await original.getAttribute('data-scan-id');
     const originalCount = await original.getAttribute('data-point-count');
+    const originalColor = await original.getAttribute('data-scan-color');
     expect(parseInt(originalCount ?? '0', 10)).toBeGreaterThan(0);
+    expect(originalColor).toBeTruthy();
 
     // Click the per-row Duplicate button.
     await page.getByTestId(`scan-duplicate-${originalId}`).click();
@@ -56,6 +58,11 @@ test('duplicating a scan creates an independent "(copy)" with the same point cou
     const copyId = await copy.getAttribute('data-scan-id');
     expect(copyId).not.toBe(originalId);
     await expect(copy).toHaveAttribute('data-selected', 'true');
+
+    // The copy gets a fresh unused color, not the source's color.
+    const copyColor = await copy.getAttribute('data-scan-color');
+    expect(copyColor).toBeTruthy();
+    expect(copyColor).not.toBe(originalColor);
   } finally {
     await close();
   }

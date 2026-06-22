@@ -134,4 +134,16 @@ export function duplicateScanName(sourceLabel: string, existing: Iterable<string
   }
 }
 
+// The fixed per-scan color palette. New scans (imports, params-only scans, and
+// duplicates) pick the first entry not already in use so each scan's swatch is
+// visually distinct. Order: blue, green, amber, red, violet, pink, teal, orange.
+const SCAN_PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+
+// Pick the first palette color not already in `usedColors`; if all are taken,
+// fall back to cycling by the count of used colors so successive allocations
+// still vary.
+export function allocateScanColor(usedColors: Set<string>): string {
+  return SCAN_PALETTE.find(c => !usedColors.has(c)) ?? SCAN_PALETTE[usedColors.size % SCAN_PALETTE.length];
+}
+
 export type { ScanParameters } from './scanParameters';

@@ -42,7 +42,7 @@ import StatusPill from './StatusPill';
 import { type ScanParameters, scanParametersFromFile } from '../lib/scanParameters';
 import { poseStreamToWire, trajectoryDurationS, deriveMovingScanGrid } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
-import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, isBackfillEligible } from '../lib/scan';
+import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -877,10 +877,8 @@ export default function PointCloudViewer({
     }
     const xmlDir = xmlPath ? dirname(xmlPath) : '';
     const used = new Set(scans.map(s => s.color));
-    const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
     const allocateColor = () => {
-      const free = PALETTE.find(c => !used.has(c));
-      const chosen = free ?? PALETTE[(scans.length + used.size) % PALETTE.length];
+      const chosen = allocateScanColor(used);
       used.add(chosen);
       return chosen;
     };
@@ -1854,6 +1852,9 @@ export default function PointCloudViewer({
 
     const newId = crypto.randomUUID();
     const label = duplicateScanName(scanDisplayName(src), scans.map(scanDisplayName));
+    // Give the copy a fresh unused color rather than inheriting the source's,
+    // so the two scans are visually distinct in the viewer/list.
+    const color = allocateScanColor(new Set(scans.map(s => s.color)));
     const params = src.params
       ? { ...src.params, origin: { ...src.params.origin } }
       : undefined;
@@ -1867,7 +1868,7 @@ export default function PointCloudViewer({
         const res = await duplicateCloudSession(octreeInfo.sessionId!);
         if (!res.duplicate) throw new Error('Duplicate returned no points.');
         const data = buildSessionOctreeData(res.duplicate, octreeInfo, baseName, res.duplicate.session_id);
-        onAddScan({ id: newId, label, visible: true, color: src.color, data, params });
+        onAddScan({ id: newId, label, visible: true, color, data, params });
         showToast({ title: `Duplicated ${data.pointCount.toLocaleString()} points to ${label}`, type: 'success' });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Failed to duplicate scan';
@@ -1880,7 +1881,7 @@ export default function PointCloudViewer({
 
     // Flat data and/or params-only: clone in RAM (no backend round-trip).
     const data = hasData(src) ? cloneFlatPointCloudData(src.data) : undefined;
-    onAddScan({ id: newId, label, visible: true, color: src.color, data, params });
+    onAddScan({ id: newId, label, visible: true, color, data, params });
   }, [onAddScan, scans, buildSessionOctreeData]);
 
   const handleApplyCrop = useCallback(() => {
@@ -11463,6 +11464,7 @@ export default function PointCloudViewer({
                     data-testid="scan-row"
                     data-scan-id={scan.id}
                     data-scan-name={displayName}
+                    data-scan-color={scan.color}
                     data-point-count={scanHasData ? effectivePointCount : 0}
                     data-has-data={scanHasData ? 'true' : 'false'}
                     data-has-params={scanHasParams ? 'true' : 'false'}
@@ -13601,9 +13603,7 @@ export default function PointCloudViewer({
           } else {
             // Create a params-only scan. Allocate a color from the same
             // palette as data-bearing scans so the dot is consistent.
-            const used = new Set(scans.map(s => s.color));
-            const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
-            const nextColor = PALETTE.find(c => !used.has(c)) ?? PALETTE[scans.length % PALETTE.length];
+            const nextColor = allocateScanColor(new Set(scans.map(s => s.color)));
             const id = crypto.randomUUID();
             onAddScan?.({
               id,
