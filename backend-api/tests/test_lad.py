@@ -778,7 +778,7 @@ class TestMultiReturnImportColumnMapping:
         plan = main.ColumnPlan(columns=entries, rgb_is_255=False)
 
         # Build the session arrays the same way create_cloud_session does.
-        las_path, _, source_extra_dims = main._source_to_las(
+        las_path, _, source_extra_dims, _ = main._source_to_las(
             main._Path(_MULTI_XYZ), _MULTI_FORMAT, tmp_path, plan)
         _r = main._read_las_into_arrays(las_path)
         positions, colors, intensity = _r.positions, _r.colors, _r.intensity
@@ -912,7 +912,7 @@ class TestSingleReturnMissImportColumnMapping:
         ]
         plan = main.ColumnPlan(columns=entries, rgb_is_255=False)
 
-        las_path, _, _ = main._source_to_las(
+        las_path, _, _, _ = main._source_to_las(
             main._Path(_FIXTURE_XYZ), self._FORMAT, tmp_path, plan)
         _r = main._read_las_into_arrays(las_path)
         positions, colors, intensity = _r.positions, _r.colors, _r.intensity

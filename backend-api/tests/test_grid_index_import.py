@@ -170,7 +170,7 @@ def test_preview_reports_grid_roles_for_wizard(client, tmp_path):
 def test_ascii_import_preserves_grid_extras(tmp_path):
     f = tmp_path / "scan.xyz"
     _write_grid_xyz(f)
-    las_path, _, _ = main._source_to_las(f, _GRID_FORMAT, tmp_path, None)
+    las_path, _, _, _ = main._source_to_las(f, _GRID_FORMAT, tmp_path, None)
     _r = main._read_las_into_arrays(las_path)
     positions = _r.positions
     colors = _r.colors

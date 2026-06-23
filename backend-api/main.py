@@ -13680,7 +13680,9 @@ def _intensity_to_las_uint16(values: "np.ndarray",
 
 
 def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
-                column_plan: "Optional[ColumnPlan]" = None) -> tuple[int, List[dict]]:
+                column_plan: "Optional[ColumnPlan]" = None,
+                capture_full_xyz: bool = False,
+                ) -> "tuple[int, List[dict], Optional[np.ndarray]]":
     """Stream an XYZ-family ASCII file into a LAS file via laspy in chunks.
 
     PotreeConverter 2.x accepts only LAS/LAZ; XYZ goes through here first.
@@ -13693,9 +13695,12 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     Any remaining numeric columns are carried into the octree as LAS extra
     dimensions (float32) so the renderer can colour by them later.
 
-    Returns (total_points, extra_dims), where extra_dims is the
+    Returns (total_points, extra_dims, full_xyz), where extra_dims is the
     [{slug, label}, ...] list of carried scalar attributes (for the cache's
-    slug→label sidecar).
+    slug→label sidecar). `full_xyz` is the (N,3) float64 source-precision
+    coordinate array when `capture_full_xyz` is set, else None — the LAS itself
+    is 1 mm-quantized and must not be the session's source of truth, so the
+    session reads positions from this instead (see _xyz_to_las_stream).
     """
     import laspy  # local: only when this code path runs
 
@@ -13797,10 +13802,11 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                 xyz_min = np.minimum(xyz_min, arr.min(axis=0))
         header.offsets = np.floor(np.where(np.isfinite(xyz_min), xyz_min, 0.0))
 
+        full_xyz_chunks: "Optional[list]" = [] if capture_full_xyz else None
         total_points = _xyz_to_las_stream(
             source_path, out_las, header, names, skiprows, sep, chunk_rows,
             rgb_cols, rgb_is_255, intensity_role, intensity_lo, intensity_hi,
-            extra_dims,
+            extra_dims, full_xyz_out=full_xyz_chunks,
         )
     except (ValueError, KeyError) as e:
         # A non-numeric value reaching the x/y/z/RGB float cast almost always
@@ -13818,15 +13824,33 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                 f"format."
             ),
         ) from e
-    return total_points, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
+    full_xyz = None
+    if full_xyz_chunks is not None:
+        full_xyz = (np.concatenate(full_xyz_chunks, axis=0)
+                    if full_xyz_chunks else np.empty((0, 3), dtype=np.float64))
+    return (total_points,
+            [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims],
+            full_xyz)
 
 
 def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                        chunk_rows, rgb_cols, rgb_is_255, intensity_role,
-                       intensity_lo, intensity_hi, extra_dims) -> int:
+                       intensity_lo, intensity_hi, extra_dims,
+                       full_xyz_out: "Optional[list]" = None) -> int:
     """Inner streaming loop for `_xyz_to_las`, split out so the caller can wrap
     column-mismatch errors (raised here from the float casts) into a clean 400.
-    Returns the total points written."""
+    Returns the total points written.
+
+    The LAS this writes is quantized to the header's 1 mm scale — fine as the
+    octree's input (the octree is a display cache) but NOT precise enough to be
+    the session's source-of-truth array (1 mm shatters precision-sensitive ops
+    like triangulation; see CloudSession.positions). When `full_xyz_out` is a
+    list, the FULL-PRECISION float64 xyz of each written chunk (already
+    NaN-filtered, in LAS point order) is appended to it, so the caller can
+    populate the session positions directly from the source instead of reading
+    them back from the quantized LAS. The chunks are filtered identically to the
+    LAS write here, so the concatenation aligns point-for-point with the LAS-
+    derived colors/intensity/extras."""
     import laspy
     total_points = 0
     with laspy.open(str(out_las), mode="w", header=header) as writer:
@@ -13852,9 +13876,15 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
             if n == 0:
                 continue
             record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
-            record.x = chunk["x"].to_numpy(dtype=np.float64)
-            record.y = chunk["y"].to_numpy(dtype=np.float64)
-            record.z = chunk["z"].to_numpy(dtype=np.float64)
+            cx = chunk["x"].to_numpy(dtype=np.float64)
+            cy = chunk["y"].to_numpy(dtype=np.float64)
+            cz = chunk["z"].to_numpy(dtype=np.float64)
+            record.x = cx
+            record.y = cy
+            record.z = cz
+            if full_xyz_out is not None:
+                # Stash the unquantized xyz of this chunk for the session array.
+                full_xyz_out.append(np.column_stack([cx, cy, cz]))
             if rgb_cols is not None:
                 # LAS RGB is uint16 (16-bit per channel). 0-255 source scales by
                 # 256 (preserves perceptual brightness; renderer right-shifts to
@@ -14488,37 +14518,47 @@ def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
 
 
 def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path,
-                   column_plan: "Optional[ColumnPlan]" = None) -> tuple[_Path, bool, List[dict]]:
+                   column_plan: "Optional[ColumnPlan]" = None,
+                   ) -> "tuple[_Path, bool, List[dict], Optional[np.ndarray]]":
     """Get a LAS file path for `source_path`, converting from another format
     if needed.
 
-    Returns (las_path, is_temp, extra_dims) — caller deletes the file if
-    is_temp. `extra_dims` is the [{slug, label}, ...] list of carried scalar
+    Returns (las_path, is_temp, extra_dims, full_xyz) — caller deletes the file
+    if is_temp. `extra_dims` is the [{slug, label}, ...] list of carried scalar
     attributes (read from the header for LAS/LAZ; derived during conversion for
     XYZ/PLY; empty for PCD, which carries position + RGB only).
+
+    `full_xyz` is the (N,3) float64 SOURCE-PRECISION coordinate array for the
+    XYZ-family branch, where the LAS we synthesise is 1 mm-quantized and so must
+    not be the session's source of truth (1 mm shatters triangulation). It is
+    None for every other branch: LAS/LAZ keep their own header scale (the user's
+    original precision), and PLY/PCD/E57 already read positions losslessly into
+    their LAS. Callers that need the session array use `full_xyz` when present
+    and otherwise fall back to reading the LAS.
 
     `column_plan` (import wizard) applies only to the XYZ-family branch; PLY/PCD/
     LAS define their own layout and ignore it.
     """
     ext = source_path.suffix.lower().lstrip(".")
     if ext in ("las", "laz"):
-        return source_path, False, _las_extra_dim_labels(source_path)
+        return source_path, False, _las_extra_dim_labels(source_path), None
     if ext in _PANDAS_EXTENSIONS:
         out = work_dir / (source_path.stem + ".las")
-        _, extra_dims = _xyz_to_las(source_path, ascii_format, out, column_plan)
-        return out, True, extra_dims
+        _, extra_dims, full_xyz = _xyz_to_las(
+            source_path, ascii_format, out, column_plan, capture_full_xyz=True)
+        return out, True, extra_dims, full_xyz
     if ext == "ply":
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims = _ply_to_las(source_path, out)
-        return out, True, extra_dims
+        return out, True, extra_dims, None
     if ext == "pcd":
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims = _pcd_to_las(source_path, out)
-        return out, True, extra_dims
+        return out, True, extra_dims, None
     if ext == "e57":
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims = _e57_to_las(source_path, out)
-        return out, True, extra_dims
+        return out, True, extra_dims, None
     raise HTTPException(
         status_code=400,
         detail=f"Unsupported source extension for octree conversion: .{ext}",
@@ -15802,7 +15842,13 @@ class CloudSession:
     source_path: str                 # provenance only — never re-read after create
     ascii_format: Optional[str]
     column_plan: Optional[Any]       # ColumnPlan | None (wizard layout, honored once)
-    positions: np.ndarray            # (N,3) float64 — full resolution
+    positions: np.ndarray            # (N,3) float64 — FULL source resolution.
+    # For ASCII/XYZ imports this comes straight from the source via
+    # `_xyz_to_las(capture_full_xyz=True)`, NOT from reading back the 1 mm-scale
+    # octree LAS — that quantization shatters precision-sensitive ops like Helios
+    # triangulation (it projects to spherical angles from the scan origin, where
+    # 1 mm jitter blows up edge lengths). LAS/LAZ inputs keep their own header
+    # precision; PLY/PCD/E57 read losslessly into the LAS already.
     colors: Optional[np.ndarray]     # (N,3) uint16 (0-65535 LAS scale) | None
     intensity: Optional[np.ndarray]  # (N,) uint16 | None
     extras: Dict[str, np.ndarray]    # slug -> (N,) float32 scalar extra-dim columns
@@ -16458,11 +16504,31 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     import tempfile
     with tempfile.TemporaryDirectory() as _tmp:
         tmp_dir = _Path(_tmp)
-        las_path, las_is_temp, source_extra_dims = _source_to_las(
+        las_path, las_is_temp, source_extra_dims, full_xyz = _source_to_las(
             source_path, request.ascii_format, tmp_dir, request.column_plan,
         )
         _las = _read_las_into_arrays(las_path)
-        positions = _las.positions
+        # The session array is the source of truth and must hold FULL precision
+        # (it is never re-read from the file). For ASCII/XYZ imports the LAS we
+        # synthesised is 1 mm-quantized — coarse enough to shatter precision-
+        # sensitive ops like triangulation — so prefer the source-precision xyz
+        # `_source_to_las` captured during conversion. Colors/intensity/extras
+        # still come from the LAS read (it filters NaN-xyz rows identically, so
+        # the arrays stay point-for-point aligned). LAS/LAZ inputs keep their own
+        # header precision (full_xyz is None) and need no override.
+        if full_xyz is not None:
+            if full_xyz.shape[0] != _las.positions.shape[0]:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Internal error importing cloud: source-precision point "
+                        f"count ({full_xyz.shape[0]}) disagrees with the converted "
+                        f"LAS ({_las.positions.shape[0]}). Please report this file."
+                    ),
+                )
+            positions = full_xyz
+        else:
+            positions = _las.positions
         colors = _las.colors
         intensity = _las.intensity
         extras = _las.extras
