@@ -344,35 +344,16 @@ function buildHeliosTriParams(
   };
 }
 
-// Attach the interactive triangle-filter state to an Open3D mesh so the Meshes
-// panel shows the Lmax / aspect controls (the same panel the Helios path drives).
-// Open3D meshes carry no backend Otsu estimate, so we compute the per-triangle
-// metrics client-side, derive the cap from the longest edge, store the 'n/a'
-// estimate sentinel (which makes the panel hide the Auto button / separation /
-// spacing-check), and seed the filter wide open (Lmax = cap) so the mesh starts
-// unfiltered. Returns the fields to spread onto the MeshEntry; `data` itself is
-// unchanged (the seed filter is a no-op at the cap).
-function buildOpen3DTriangleFilter(data: MeshData): Pick<MeshEntry, 'unfilteredMesh' | 'triangleFilter'> {
-  const { triEdgeMax, triAspect } = computeTriangleMetrics(data);
-  const withMetrics: MeshData = { ...data, triEdgeMax, triAspect };
-  let capLmax = 0;
-  for (let i = 0; i < triEdgeMax.length; i++) if (triEdgeMax[i] > capLmax) capLmax = triEdgeMax[i];
-  if (!Number.isFinite(capLmax) || capLmax <= 0) capLmax = 1.0;
-  const capAspect = 1.0e9;
-  const estimate: TriangleFilterEstimate = {
-    lmax: null,
-    eta: 0,
-    label: 'n/a',
-    sepRatio: null,
-    sepLabel: 'n/a',
-    merged: false,
-    mergedMessage: null,
-  };
-  return {
-    unfilteredMesh: { data: withMetrics, estimate, cap: { lmax: capLmax, maxAspectRatio: capAspect } },
-    triangleFilter: { lmax: capLmax, maxAspectRatio: capAspect },
-  };
-}
+// Open3D triangulation methods (ball pivoting, poisson, alpha shape, delaunay)
+// do NOT get a post-triangulation Lmax / aspect filter. Each method already
+// applies its own length scale during reconstruction — ball pivoting's ball
+// radius, alpha shape's alpha, poisson's octree depth — so the long bridge
+// triangles the Helios path trims with Otsu-derived Lmax don't survive into the
+// returned mesh. Re-filtering by edge length would be a no-op (filtering 0.02 vs
+// 10 leaves the same triangle count) while implying to the user that there's a
+// meaningful knob to turn. The Lmax / aspect controls are therefore Helios-only;
+// Open3D meshes carry no `triangleFilter` / `unfilteredMesh`, so the Meshes panel
+// hides those controls for them.
 
 export default function PointCloudViewer({
   scans,
@@ -5638,7 +5619,6 @@ export default function PointCloudViewer({
           color: targets[0].color,
           method,
           triangulationParams,
-          ...buildOpen3DTriangleFilter(meshData),
         };
         addMesh(meshEntry, undefined, 'Triangulate');
         setShowTriangulationPopup(false);
@@ -5716,7 +5696,6 @@ export default function PointCloudViewer({
           color: cloud.color,
           method,
           triangulationParams,
-          ...buildOpen3DTriangleFilter(meshData),
         });
         totalTriangles += meshData.triangleCount;
 

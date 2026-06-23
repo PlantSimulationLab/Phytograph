@@ -71,6 +71,17 @@ Method-specific parameters:
     - No parameters — the points are projected to a plane and triangulated.
       Best for a single roughly-flat surface.
 
+!!! note "No post-triangulation filter on cloud methods"
+
+    The **Lmax / aspect filter** is **Helios-only**. Each cloud method already
+    applies its own length scale while reconstructing — the ball-pivot radius,
+    alpha-shape alpha, Poisson octree depth — so the long bridge triangles the
+    Helios filter trims never survive into the returned mesh. Re-filtering by
+    edge length afterwards would do nothing (and the "auto Lmax" you'd see on a
+    cloud method is just the auto-computed radius, not an independent estimate).
+    Set the length scale through the method's parameter (e.g. the ball radius)
+    instead.
+
 !!! note "Sky/miss returns are skipped"
 
     If the cloud is a multi-return / full-waveform scan, its sky/miss
@@ -105,9 +116,8 @@ Each mesh row supports a few quick edits:
   settings and the number of points used (which reflects any downsampling
   of a large streamed cloud). For a **Helios mesh** it's L<sub>max</sub>,
   the max aspect ratio, and how many scans were fused. Once you apply the
-  [triangle filter](#filter-triangles-and-plot-leaf-angles-any-method) to any
-  mesh, the readout also shows the filter breakdown (candidates / kept /
-  dropped).
+  [triangle filter](#helios-method) to a Helios mesh, the readout also shows
+  the filter breakdown (candidates / kept / dropped).
 - **Recolor** — click the color swatch to the left of the name to open a
   color picker. Pick a color or type a hex value. The color applies to the
   mesh surface; **texture-mapped meshes ignore it** and keep drawing their
@@ -131,22 +141,13 @@ Each mesh row supports a few quick edits:
     **Performance → Triangulate max points** for more surface detail at the cost
     of more memory.
 
-## Filter triangles and plot leaf angles (any method)
+## Plot leaf angles (any method)
 
-Two mesh tools work on **every** triangulated mesh — the cloud methods
-(ball-pivoting, Poisson, alpha-shape, Delaunay) as well as Helios. Expand a
-mesh's row to reach them:
+The **Leaf angles…** tool works on **every** triangulated mesh — the cloud
+methods (ball-pivoting, Poisson, alpha-shape, Delaunay) as well as Helios. The
+**Filter** controls (Lmax / aspect) are **Helios-only** — see [Helios
+method](#helios-method) below. Expand a mesh's row to reach the tool:
 
-- **Filter** — an **Lmax** (maximum edge length, meters) and **Max aspect**
-  (max edge ÷ min edge) filter. Triangles with a longer edge or a more
-  mis-shapen ratio are hidden, and the mesh re-filters instantly as you type —
-  no re-triangulation. This is the quickest way to trim the long "bridge"
-  triangles a Delaunay or alpha-shape mesh throws across gaps. Cloud meshes
-  start **unfiltered** (Lmax wide open, aspect blank for "no limit"); type a
-  value to tighten. The **Auto** button, the **Separation (η)/Modes**
-  diagnostics, and the **Check point spacing** button are **Helios-only** (they
-  rely on the scanner-geometry estimate) and don't appear for cloud meshes — see
-  [Helios method](#helios-method) below for what they mean.
 - **Leaf angles…** — opens the leaf-angle distribution plot (inclination PDF,
   azimuth rose, and a de Wit archetype + Beta fit). It reads the mesh's triangle
   normals directly, area-weighted, so it works on any triangulated surface. A

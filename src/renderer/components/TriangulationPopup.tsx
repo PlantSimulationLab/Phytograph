@@ -170,11 +170,17 @@ export function TriangulationPopup({
   );
 
   // Keep the crop-grid selection valid as boxes come and go; reset the toggle
-  // when the popup reopens so it doesn't silently persist a stale crop.
+  // when the popup reopens so it doesn't silently persist a stale crop. Default
+  // to the first real grid in the scene when one exists (matching the Helios
+  // grid selector) — a present voxel box is almost always the region the user
+  // means to crop to — and fall back to the point-bounding "Auto" option only
+  // when there are no grids.
   useEffect(() => {
     if (!isOpen) return;
     setCropToGrid(false);
-    setCropGridId(prev => (gridOptions.some(g => g.id === prev) ? prev : ''));
+    setCropGridId(prev =>
+      gridOptions.some(g => g.id === prev) ? prev : (gridOptions[0]?.id ?? ''),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, gridOptions]);
 
