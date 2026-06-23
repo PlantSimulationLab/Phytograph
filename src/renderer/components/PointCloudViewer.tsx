@@ -5540,13 +5540,20 @@ export default function PointCloudViewer({
     depth?: number;
     alpha?: number | null;
     radii?: number[];
-    cropBox?: { min: [number, number, number]; max: [number, number, number] };
+    cropBox?: {
+      min: [number, number, number];
+      max: [number, number, number];
+      rotationDeg?: number;
+    };
   }) => {
     const { method, scanIds, merge, depth, alpha, radii, cropBox } = args;
-    // Flatten the optional crop AABB to the backend's [minx,miny,minz,maxx,maxy,maxz].
+    // Flatten the optional crop box to the backend's [minx,miny,minz,maxx,maxy,maxz].
     const cropBoxArr = cropBox
       ? [cropBox.min[0], cropBox.min[1], cropBox.min[2], cropBox.max[0], cropBox.max[1], cropBox.max[2]]
       : undefined;
+    // Rotated crop box: the box's azimuthal rotation (deg about +z), sent so the
+    // backend crops the rotated box rather than its axis-aligned extent.
+    const cropBoxRotationDeg = cropBox?.rotationDeg;
     const targets = scanIds
       .map(id => clouds.find(c => c.id === id))
       .filter((c): c is PointCloudEntry => c != null);
@@ -5599,6 +5606,7 @@ export default function PointCloudViewer({
           ...(sources.length > 0 ? { sources } : {}),
           ...(points.length > 0 ? { points } : {}),
           ...(cropBoxArr ? { crop_box: cropBoxArr } : {}),
+          ...(cropBoxRotationDeg ? { crop_box_rotation_deg: cropBoxRotationDeg } : {}),
         };
         applyMethodParams(request);
 
@@ -5637,7 +5645,7 @@ export default function PointCloudViewer({
         for (const c of targets) onHideScan(c.id);
 
         const totalPoints = targets.reduce((sum, c) => sum + c.data.pointCount, 0);
-        if (typeof response.pointsUsed === 'number' && response.pointsUsed < totalPoints) {
+        if (response.downsampled && typeof response.pointsUsed === 'number') {
           showToast({
             type: 'warning',
             title: 'Merged cloud downsampled for triangulation',
@@ -5666,6 +5674,7 @@ export default function PointCloudViewer({
           normal_radius: 0.1,
           normal_max_nn: 30,
           ...(cropBoxArr ? { crop_box: cropBoxArr } : {}),
+          ...(cropBoxRotationDeg ? { crop_box_rotation_deg: cropBoxRotationDeg } : {}),
         };
         if (ps.kind === 'source') {
           request.source = { ...ps.source, max_points: triangulateMaxPoints };
@@ -5713,8 +5722,8 @@ export default function PointCloudViewer({
 
         if (
           ps.kind === 'source' &&
-          typeof response.pointsUsed === 'number' &&
-          response.pointsUsed < cloud.data.pointCount
+          response.downsampled &&
+          typeof response.pointsUsed === 'number'
         ) {
           downsampledNote = `${response.pointsUsed.toLocaleString()} of ${cloud.data.pointCount.toLocaleString()} points (Settings → Triangulate max points)`;
         }

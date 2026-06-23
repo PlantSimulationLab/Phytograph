@@ -23,10 +23,17 @@ export type TriangulationStartArgs =
       depth?: number;            // poisson
       alpha?: number | null;     // alpha_shape (null → auto)
       radii?: number[];          // ball_pivoting (omitted → auto)
-      // Crop-to-grid AABB (world coords). Set only by the Ball Pivot "Crop to
+      // Crop-to-grid box (world coords). Set only by the Ball Pivot "Crop to
       // grid" toggle when a real voxel box is chosen; points outside it are
       // dropped before meshing. Omitted for "Auto — fit to all points" (no crop).
-      cropBox?: { min: [number, number, number]; max: [number, number, number] };
+      // `rotationDeg` is the box's azimuthal rotation about +z (degrees); when
+      // non-zero the backend crops the ROTATED box, not its AABB — so a rotated
+      // grid doesn't leak points past its rotated walls (matches Helios).
+      cropBox?: {
+        min: [number, number, number];
+        max: [number, number, number];
+        rotationDeg?: number;
+      };
     }
   | {
       kind: 'helios';
@@ -186,6 +193,9 @@ export function TriangulationPopup({
     return {
       min: [cx - sx / 2, cy - sy / 2, cz - sz / 2] as [number, number, number],
       max: [cx + sx / 2, cy + sy / 2, cz + sz / 2] as [number, number, number],
+      // Carry the grid's azimuthal rotation so the backend crops the rotated box
+      // (the min/max above are the box's AXIS-ALIGNED extent before rotation).
+      ...(cropGrid.grid.rotation ? { rotationDeg: cropGrid.grid.rotation } : {}),
     };
   }, [cropToGrid, cropGrid]);
 

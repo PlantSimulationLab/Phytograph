@@ -34,10 +34,14 @@ export interface TriangulationRequest {
   sources?: BackendPointSource[];
   method: TriangulationMethod;
   // Crop-to-grid box [min_x, min_y, min_z, max_x, max_y, max_z] (world coords).
-  // When set, points outside this AABB are dropped before meshing (a numpy mask
+  // When set, points outside this box are dropped before meshing (a numpy mask
   // applied backend-side to the resolved points, regardless of source kind).
   // Omit for no crop.
   crop_box?: number[];
+  // Azimuthal rotation of the crop box about +z (degrees, about the box center).
+  // Non-zero → the backend crops the ROTATED box, not its AABB (crop_box gives
+  // the box's axis-aligned extent before rotation). Omit/0 = axis-aligned.
+  crop_box_rotation_deg?: number;
   // Ball pivoting parameters
   radii?: number[];
   // Poisson parameters
@@ -62,7 +66,11 @@ export interface TriangulationResult {
   numTriangles: number;
   numVertices: number;
   methodUsed: string;
-  pointsUsed?: number;      // input points actually triangulated (octree cap may downsample)
+  pointsUsed?: number;      // input points actually triangulated (post-crop, post-cap)
+  // True iff the max_points cap actually downsampled. Distinct from
+  // pointsUsed < cloud size, which a crop alone also makes true — gate the
+  // "downsampled" warning on THIS, not on the count comparison.
+  downsampled?: boolean;
 }
 
 import { BACKEND_PORT_PROD } from '../../shared/constants';
@@ -193,6 +201,7 @@ export async function triangulatePointCloud(
     numVertices: meta.num_vertices as number,
     methodUsed: meta.method_used as string,
     pointsUsed: meta.points_used as number | undefined,
+    downsampled: meta.downsampled as boolean | undefined,
   };
 }
 

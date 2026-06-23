@@ -1618,12 +1618,21 @@ class TriangulationRequest(BaseModel):
     sources: Optional[List[PointSource]] = None
     method: str = "ball_pivoting"  # "ball_pivoting", "poisson", "alpha_shape", "delaunay"
     # Optional crop-to-grid box, as [min_x, min_y, min_z, max_x, max_y, max_z] in
-    # world coordinates. When set, points outside the (inclusive) AABB are dropped
-    # before meshing — a pure numpy mask applied to the resolved point array,
+    # world coordinates. When set, points outside the (inclusive) box are dropped
+    # before meshing — a numpy mask applied to the resolved point array,
     # regardless of source kind (inline / session / merged). Used by the
     # "Crop to grid" toggle on the Ball Pivot path so only points inside a voxel
     # box get triangulated. None = no crop (mesh every resolved point).
     crop_box: Optional[List[float]] = None
+    # Azimuthal rotation of the crop box about +z, in DEGREES, about the box
+    # center (= the AABB midpoint of crop_box). The voxel grid the user crops to
+    # can be rotated (e.g. a Helios <grid> with <rotation>), and the renderer
+    # renders it rotated; cropping by the axis-aligned crop_box alone keeps the
+    # box's AABB corners, so a rotated grid leaks branches past its rotated walls.
+    # Matches Helios's own grid-cell test (inverse-rotate the point into the box
+    # frame, then AABB), so Ball Pivot and Helios crop the identical region.
+    # None / ~0 = axis-aligned (the prior behavior).
+    crop_box_rotation_deg: Optional[float] = None
     # Ball pivoting parameters
     radii: Optional[List[float]] = None  # Ball radii for ball pivoting (auto if None)
     # Poisson parameters
@@ -1647,10 +1656,14 @@ class TriangulationResponse(BaseModel):
     num_vertices: int
     method_used: str
     error: Optional[str] = None
-    # Number of input points actually triangulated. For octree clouds this can
-    # be less than the cloud's full count when the `source.max_points` cap
-    # downsampled — the renderer compares it to warn the user.
+    # Number of input points actually triangulated. With crop-to-grid this is the
+    # in-grid count, which is naturally less than the whole cloud even when no
+    # downsampling happened — so don't infer "downsampled" from it; use the flag.
     points_used: Optional[int] = None
+    # True iff the max_points cap actually stride-downsampled the (post-crop)
+    # points. The renderer keys its "downsampled" warning toast off THIS, not off
+    # points_used < cloud size (which a crop alone also makes true).
+    downsampled: Optional[bool] = None
 
 
 def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> dict:
@@ -1677,35 +1690,76 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
 
         _ckpt()
         _report(0.05, "Reading points")
+        if len(request.crop_box or []) not in (0, 6):
+            return {"success": False, "method_used": request.method,
+                    "num_triangles": 0, "num_vertices": 0, "points_used": 0,
+                    "error": "crop_box must be [min_x, min_y, min_z, max_x, max_y, max_z]"}
+        cropping = request.crop_box is not None
+
+        # Resolve order with crop-to-grid: the per-source `max_points` cap (the
+        # "Triangulate max points" setting) stride-downsamples inside
+        # `_read_points_from_source`. Applied THERE (before the crop) it thins the
+        # WHOLE cloud first, throwing away in-grid density for nothing — a grid
+        # holding a few million points would still be served a 5M-strided cloud.
+        # So we strip the cap from the resolve, CROP first, then cap the (usually
+        # far smaller) cropped set. The cap is the max of the contributing
+        # sources' caps; inline-only requests carry none.
+        def _resolve(src: "PointSource") -> np.ndarray:
+            return _read_points_from_source(src.model_copy(update={"max_points": None}))[0]
+
+        cap: Optional[int] = None
         if request.sources:
-            # Merged multi-scan: read and fuse every contributing source. Inline
-            # `points` (flat clouds that had no on-disk source) are folded in too,
-            # so a mix of octree- and inline-backed scans merges correctly.
-            parts = [_read_points_from_source(s)[0] for s in request.sources]
+            parts = [_resolve(s) for s in request.sources]
             if request.points:
                 parts.append(np.array(request.points, dtype=np.float64))
             parts = [p for p in parts if len(p) > 0]
             points = np.vstack(parts) if parts else np.empty((0, 3), dtype=np.float64)
+            caps = [s.max_points for s in request.sources if s.max_points]
+            cap = max(caps) if caps else None
         elif request.source is not None:
-            points, _, _ = _read_points_from_source(request.source)
+            points = _resolve(request.source)
+            cap = request.source.max_points
         else:
             points = np.array(request.points or [], dtype=np.float64)
 
-        # Crop to grid: drop points outside the requested AABB before meshing.
+        # Crop to grid: drop points outside the requested box before meshing.
         # A pure numpy mask on the already-resolved array — works the same for
-        # octree/session, merged, and inline sources (the points are in hand
-        # here regardless of how they were fetched). Applied before the
+        # octree/session, merged, and inline sources. Applied before the
         # min-3-points check so an over-tight box reports the right error.
-        if request.crop_box is not None and len(points) > 0:
+        if cropping and len(points) > 0:
             cb = request.crop_box
-            if len(cb) != 6:
-                return {"success": False, "method_used": request.method,
-                        "num_triangles": 0, "num_vertices": 0, "points_used": 0,
-                        "error": "crop_box must be [min_x, min_y, min_z, max_x, max_y, max_z]"}
             lo = np.array(cb[:3], dtype=np.float64)
             hi = np.array(cb[3:], dtype=np.float64)
-            mask = np.all((points >= lo) & (points <= hi), axis=1)
+            rot_deg = request.crop_box_rotation_deg or 0.0
+            if abs(float(rot_deg)) > 1e-9:
+                # Inverse-rotate each point about the box center into the box's
+                # local axis-aligned frame, then AABB-test — identical to Helios's
+                # calculateHitGridCell (rotatePointAboutLine by -rotation about z).
+                # +rotation is CCW about +z (right-handed), matching the renderer's
+                # three.js mesh rotation.z and the Helios <grid> convention.
+                center = (lo + hi) / 2.0
+                theta = -np.radians(float(rot_deg))  # inverse rotation
+                cos_t, sin_t = np.cos(theta), np.sin(theta)
+                dx = points[:, 0] - center[0]
+                dy = points[:, 1] - center[1]
+                local = np.empty_like(points)
+                local[:, 0] = cos_t * dx - sin_t * dy + center[0]
+                local[:, 1] = sin_t * dx + cos_t * dy + center[1]
+                local[:, 2] = points[:, 2]
+                mask = np.all((local >= lo) & (local <= hi), axis=1)
+            else:
+                mask = np.all((points >= lo) & (points <= hi), axis=1)
             points = points[mask]
+
+        # Apply the cap AFTER the crop. `was_downsampled` is true only when the
+        # cap actually fired — NOT merely when fewer points than the whole cloud
+        # remain (cropping is not downsampling). The renderer keys its warning
+        # toast off this, so a crop that stays under the cap won't falsely warn.
+        was_downsampled = False
+        if cap and cap > 0 and len(points) > cap:
+            stride = int(math.ceil(len(points) / cap))
+            points = points[::stride]
+            was_downsampled = True
 
         points_used = int(len(points))
 
@@ -1889,6 +1943,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
             "num_vertices": int(vertices.shape[0]),
             "method_used": method_used,
             "points_used": points_used,
+            "downsampled": was_downsampled,
         }
 
     except ImportError:
@@ -2524,6 +2579,11 @@ class HeliosGrid(BaseModel):
     nx: int = 1
     ny: int = 1
     nz: int = 1
+    # Azimuthal rotation of the box about +z, in degrees (the voxel box's
+    # z-Euler angle). Helios's <grid> honors this and crops the ROTATED box;
+    # without it a rotated UI grid would crop only its axis-aligned extent,
+    # leaking points past the rotated walls. 0 / absent = axis-aligned.
+    rotation: float = 0.0
 
 class HeliosTriangulationRequest(BaseModel):
     """Request model for Helios triangulation"""
@@ -2838,15 +2898,18 @@ def _inject_grids_into_helios_xml(xml_path: str, grids: list) -> None:
 
 def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
                          grid_size: list, grid_nx: int = 1, grid_ny: int = 1,
-                         grid_nz: int = 1, xml_name: str = "helios_config.xml") -> str:
+                         grid_nz: int = 1, xml_name: str = "helios_config.xml",
+                         grid_rotation_deg: float = 0.0) -> str:
     """Generate a pyhelios XML config file for scan triangulation.
 
     Each entry in ``scans_info`` carries its own per-scan acquisition geometry
     (``n_theta``/``n_phi`` and ``theta_min``/``theta_max``/``phi_min``/
     ``phi_max``), since Helios triangulates each scan in its own scanner-angular
     grid. ``grid_nx``/``grid_ny``/``grid_nz`` set the grid cell subdivisions
-    (1×1×1 single cell by default). ``xml_name`` lets callers write one config
-    per scan into the same temp dir without clobbering.
+    (1×1×1 single cell by default). ``grid_rotation_deg`` is the grid box's
+    azimuth about +z (degrees) — Helios crops the rotated box when non-zero.
+    ``xml_name`` lets callers write one config per scan into the same temp dir
+    without clobbering.
     """
     import os
 
@@ -2866,7 +2929,8 @@ def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
         xml_lines.append('')
 
     # Grid section is required for triangulation to work
-    xml_lines.extend(_grid_xml_block(grid_center, grid_size, grid_nx, grid_ny, grid_nz))
+    xml_lines.extend(_grid_xml_block(grid_center, grid_size, grid_nx, grid_ny,
+                                     grid_nz, grid_rotation_deg))
     xml_lines.append('')
     xml_lines.append('</helios>')
 
@@ -3150,7 +3214,12 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 bb_lo = np.minimum(bb_lo, xyz.min(axis=0))
                 bb_hi = np.maximum(bb_hi, xyz.max(axis=0))
                 pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
-                np.savetxt(pts_path, xyz, fmt="%.6g", delimiter=" ")
+                # %.8g, not %.6g: world coords can sit near z~100 m, where 6
+                # sig-figs rounds to ~1 mm and quantizes the angular structure the
+                # spherical-projection Delaunay depends on — coarse enough to
+                # shatter leaf surfaces (most candidates then exceed Lmax). 8
+                # sig-figs keeps ~µm precision at 100 m.
+                np.savetxt(pts_path, xyz, fmt="%.8g", delimiter=" ")
                 n_theta, n_phi = _resolution(
                     scan_entry, xyz.shape[0], theta_max - theta_min, phi_max - phi_min)
                 fmt = "x y z"
@@ -3182,7 +3251,8 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 bb_lo = np.minimum(bb_lo, pts_arr_scan[:, :3].min(axis=0))
                 bb_hi = np.maximum(bb_hi, pts_arr_scan[:, :3].max(axis=0))
                 pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
-                np.savetxt(pts_path, pts_arr_scan[:, :3], fmt="%.6g", delimiter=" ")
+                # %.8g for the same precision reason as the session branch above.
+                np.savetxt(pts_path, pts_arr_scan[:, :3], fmt="%.8g", delimiter=" ")
                 n_theta, n_phi = _resolution(
                     scan_entry, len(points), theta_max - theta_min, phi_max - phi_min)
                 fmt = "x y z"
@@ -3211,12 +3281,14 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
             grid_center = list(request.grid.center)
             grid_size = list(request.grid.size)
             grid_nx, grid_ny, grid_nz = request.grid.nx, request.grid.ny, request.grid.nz
+            grid_rotation_deg = float(request.grid.rotation)
         else:
             if not np.all(np.isfinite(bb_lo)) or not np.all(np.isfinite(bb_hi)):
                 raise ValueError("Could not determine point bounds for auto-grid")
             grid_center = ((bb_lo + bb_hi) / 2).tolist()
             grid_size = (np.maximum(bb_hi - bb_lo, 0.01) * 1.1).tolist()
             grid_nx = grid_ny = grid_nz = 1
+            grid_rotation_deg = 0.0
             grid_warning = True
             grid_message = (
                 "No grid box was specified — triangulating all points within "
@@ -3255,6 +3327,7 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 tmpdir, [scan_info], grid_center, grid_size,
                 grid_nx, grid_ny, grid_nz,
                 xml_name=f"helios_config_{scan_idx}.xml",
+                grid_rotation_deg=grid_rotation_deg,
             )
 
             cloud = LiDARCloud()
@@ -3549,8 +3622,9 @@ def _resolve_scan_positions(scan_entry, warnings: list) -> "np.ndarray":
     raise ValueError("Scan entry has no points, file_path, or session_id")
 
 
-def _points_inside_grid(xyz: "np.ndarray", grid_center, grid_size) -> "np.ndarray":
-    """Boolean mask for points STRICTLY inside the grid's overall AABB.
+def _points_inside_grid(xyz: "np.ndarray", grid_center, grid_size,
+                        grid_rotation_deg: float = 0.0) -> "np.ndarray":
+    """Boolean mask for points STRICTLY inside the grid's overall box.
 
     Distinct from `_cull_to_grid` (beam-intersects-AABB, which deliberately keeps
     far miss rays for Beer's law): for the spacing check we want only the points
@@ -3558,13 +3632,26 @@ def _points_inside_grid(xyz: "np.ndarray", grid_center, grid_size) -> "np.ndarra
     max range — whose beam crosses the grid but whose position is nowhere near it
     — is excluded. Otherwise its nearest neighbor would be another distant miss,
     poisoning the spacing estimate. Uses the grid's full extent (all cells), which
-    matches the region the triangulation tags with a gridCell."""
+    matches the region the triangulation tags with a gridCell — including the
+    grid's azimuthal rotation, so the spacing is measured over the SAME rotated
+    box the triangulation crops to (inverse-rotate into the box frame, then AABB,
+    exactly as Helios's calculateHitGridCell does)."""
     import numpy as np
 
     c = np.asarray(grid_center, dtype=np.float64)
     half = np.asarray(grid_size, dtype=np.float64) / 2.0
     lo = c - half
     hi = c + half
+    if abs(float(grid_rotation_deg)) > 1e-9:
+        theta = -np.radians(float(grid_rotation_deg))  # inverse rotation about +z
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        dx = xyz[:, 0] - c[0]
+        dy = xyz[:, 1] - c[1]
+        local = np.empty_like(xyz)
+        local[:, 0] = cos_t * dx - sin_t * dy + c[0]
+        local[:, 1] = sin_t * dx + cos_t * dy + c[1]
+        local[:, 2] = xyz[:, 2]
+        return np.all((local >= lo) & (local <= hi), axis=1)
     return np.all((xyz >= lo) & (xyz <= hi), axis=1)
 
 
@@ -3583,10 +3670,12 @@ def _do_spacing_check(request: HeliosTriangulationRequest) -> dict:
     if request.grid is not None:
         grid_center = list(request.grid.center)
         grid_size = list(request.grid.size)
+        grid_rotation_deg = float(request.grid.rotation)
     else:
         # No explicit grid: the triangulation auto-boxed all points, so the
         # spacing check measures the whole cloud (every point is "in-cell").
         grid_center = grid_size = None
+        grid_rotation_deg = 0.0
 
     pooled = []
     for scan_entry in request.scans:
@@ -3594,7 +3683,7 @@ def _do_spacing_check(request: HeliosTriangulationRequest) -> dict:
         if xyz.size == 0:
             continue
         if grid_center is not None:
-            xyz = xyz[_points_inside_grid(xyz, grid_center, grid_size)]
+            xyz = xyz[_points_inside_grid(xyz, grid_center, grid_size, grid_rotation_deg)]
         if xyz.size:
             pooled.append(xyz)
 

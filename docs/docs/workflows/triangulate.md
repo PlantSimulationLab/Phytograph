@@ -198,7 +198,9 @@ selected scans):
       the Meshes list), position and size it over the region you care
       about, and set its grid subdivisions in the mesh panel. It then
       appears in the **Grid** dropdown; selecting it uses the box's
-      position, size and Nx×Ny×Nz cell counts as the grid.
+      position, size, Nx×Ny×Nz cell counts, and **azimuthal rotation** as
+      the grid — a box rotated about its vertical axis crops to that rotated
+      footprint, not its axis-aligned bounding box.
 5. Click **Triangulate**.
 
 The mesh lands in the **Meshes** list named *"Helios triangulation"* (the

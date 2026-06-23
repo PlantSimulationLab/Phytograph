@@ -232,13 +232,16 @@ def captured_xml(monkeypatch):
     captured.setdefault("scans_info", [])
 
     def spy(tmpdir, scans_info, grid_center, grid_size,
-            grid_nx=1, grid_ny=1, grid_nz=1, xml_name="helios_config.xml"):
+            grid_nx=1, grid_ny=1, grid_nz=1, xml_name="helios_config.xml",
+            grid_rotation_deg=0.0):
         captured["scans_info"].extend(scans_info)
         captured["grid_center"] = grid_center
         captured["grid_size"] = grid_size
         captured["grid_nxyz"] = (grid_nx, grid_ny, grid_nz)
+        captured["grid_rotation_deg"] = grid_rotation_deg
         return real(tmpdir, scans_info, grid_center, grid_size,
-                    grid_nx, grid_ny, grid_nz, xml_name)
+                    grid_nx, grid_ny, grid_nz, xml_name,
+                    grid_rotation_deg=grid_rotation_deg)
 
     monkeypatch.setattr(main, "_generate_helios_xml", spy)
 
@@ -313,6 +316,19 @@ class TestDoHeliosComputationShaping:
         assert captured_xml["grid_center"] == [10, 20, 30]
         assert captured_xml["grid_size"] == [2, 3, 4]
         assert captured_xml["grid_nxyz"] == (2, 2, 3)
+        assert captured_xml["grid_rotation_deg"] == 0.0  # default when absent
+
+    def test_grid_rotation_is_passed_through(self, captured_xml):
+        # Regression: HeliosGrid.rotation was dropped by the model, so a rotated
+        # UI grid cropped its axis-aligned extent and leaked points past the
+        # rotated walls. The rotation must reach _generate_helios_xml.
+        pts = [[0, 0, 0], [1, 1, 1]]
+        req = main.HeliosTriangulationRequest(
+            scans=[_points_scan(pts, origin=[0, 0, 5])],
+            grid=main.HeliosGrid(center=[0, 0, 0], size=[4, 4, 3], rotation=61.0),
+        )
+        main._do_helios_computation(req)
+        assert captured_xml["grid_rotation_deg"] == 61.0
 
 
 # ---------------------------------------------------------------------------
