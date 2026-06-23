@@ -440,7 +440,9 @@ export function MeshesListPanel({
           const canSetOpacity = supportsOpacity(mesh);
           // Provenance is worth surfacing even when the source cloud is gone
           // (which flips isTriangulated off), so expandability includes it.
-          const canExpand = canColorByTriangle || canSetOpacity || !!mesh.triangulationParams;
+          // Grids and planes expand to show their geometry (center/size/…).
+          const canExpand = canColorByTriangle || canSetOpacity || !!mesh.triangulationParams
+            || !!mesh.gridSubdivisions || !!mesh.isPlane;
           const isExpanded = expandedMeshIds.has(mesh.id);
           const colorMode = meshColorModes.get(mesh.id) ?? 'solid';
           const meshOpacity = meshOpacities.get(mesh.id) ?? defaultOpacityFor(mesh);
@@ -539,21 +541,23 @@ export function MeshesListPanel({
                 )}
                 {mesh.gridSubdivisions ? (
                   // A grid voxel is a box, so its triangle count (always 12) is
-                  // meaningless. Show the grid's geometry instead: center (from
-                  // the mesh position), size (from the mesh scale, since the base
-                  // box is a unit cube), and resolution (the per-axis cell count).
+                  // meaningless. Show a compact subtitle; full geometry
+                  // (center/size) lives in the expanded options.
                   (() => {
-                    const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
-                    const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
                     const g = mesh.gridSubdivisions;
                     return (
                       <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
-                        Center {p.x.toFixed(2)}, {p.y.toFixed(2)}, {p.z.toFixed(2)}
-                        {' · '}Size {s.x.toFixed(2)} × {s.y.toFixed(2)} × {s.z.toFixed(2)} m
-                        {' · '}Resolution {g.x} × {g.y} × {g.z}
+                        Voxel grid · {g.x} × {g.y} × {g.z}
                       </div>
                     );
                   })()
+                ) : mesh.isPlane ? (
+                  // A plane is always two triangles, so the count is meaningless.
+                  // Full geometry (center/size/rotation) lives in the expanded
+                  // options; the name already reads "Plane".
+                  <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
+                    Plane
+                  </div>
                 ) : (
                   <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
                     {mesh.data.triangleCount.toLocaleString()} triangles
@@ -597,6 +601,35 @@ export function MeshesListPanel({
             {/* Inline per-mesh options, expanded from the chevron. */}
             {isExpanded && (
               <div className="ml-7 mr-2 mb-1 p-2 bg-neutral-900/50 rounded space-y-1.5">
+                {/* Voxel-grid geometry: center (mesh position), size (mesh
+                    scale, since the base box is a unit cube), and resolution. */}
+                {mesh.gridSubdivisions && (() => {
+                  const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
+                  const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
+                  const g = mesh.gridSubdivisions;
+                  return (
+                    <div className="text-[10px] text-neutral-400 space-y-0.5" data-testid="mesh-grid-info">
+                      <div>Center: {p.x.toFixed(2)}, {p.y.toFixed(2)}, {p.z.toFixed(2)}</div>
+                      <div>Size: {s.x.toFixed(2)} × {s.y.toFixed(2)} × {s.z.toFixed(2)} m</div>
+                      <div>Resolution: {g.x} × {g.y} × {g.z}</div>
+                    </div>
+                  );
+                })()}
+                {/* Plane geometry: center (mesh position), size (width × length
+                    from the scale x/y; the base quad is a unit square and z is
+                    unused), and rotation (Euler degrees). */}
+                {mesh.isPlane && (() => {
+                  const p = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
+                  const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
+                  const r = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 };
+                  return (
+                    <div className="text-[10px] text-neutral-400 space-y-0.5" data-testid="mesh-plane-info">
+                      <div>Center: {p.x.toFixed(2)}, {p.y.toFixed(2)}, {p.z.toFixed(2)}</div>
+                      <div>Size: {s.x.toFixed(2)} × {s.y.toFixed(2)} m</div>
+                      <div>Rotation: {r.x.toFixed(0)}°, {r.y.toFixed(0)}°, {r.z.toFixed(0)}°</div>
+                    </div>
+                  );
+                })()}
                 {/* Triangulation provenance: how this mesh was reconstructed and
                     with which parameters. Only present on triangulated meshes. */}
                 {mesh.triangulationParams && (

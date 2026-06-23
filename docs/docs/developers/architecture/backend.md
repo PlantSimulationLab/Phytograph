@@ -24,7 +24,10 @@ with `PYTHON=/path/to/python` if needed.
     `pyhelios/` (with its own nested `helios-core` C++ submodule) so it can
     be co-developed alongside Phytograph. `scripts/build-pyhelios.mjs`
     compiles the native `libhelios` from source (the `plantarchitecture` and
-    `lidar` plugins; `--nogpu` drops the radiation/OptiX CUDA toolchain) into
+    `lidar` plugins; `--nogpu` drops only the radiation/OptiX plugin, not the
+    `lidar` CUDA ray-tracing path, which compiles when a CUDA toolkit is
+    present — the release workflow installs one on Windows + Linux, so those
+    builds are GPU-accelerated while macOS stays CPU-only) into
     `pyhelios/pyhelios_build/build/lib/` and installs the package editable.
     The `lidar` plugin pulls in the `visualizer` plugin at the C++ level, so
     OpenGL (glfw/glew/freetype) compiles too — no extra packages on macOS

@@ -3,11 +3,11 @@ import { X, Triangle } from 'lucide-react';
 import {
   TriangulationMethod,
   HeliosTriangulationRequest,
-  HeliosScanEntry,
 } from '../utils/backendApi';
 import type { GridOption } from '../lib/gridOption';
 import type { Scan } from '../lib/scan';
 import { hasData, hasParams } from '../lib/scan';
+import { buildHeliosTriangulationRequest } from '../lib/pointCloudHelpers';
 
 // What the modal hands back when the user clicks Triangulate. The Open3D path
 // (ball_pivoting / poisson / alpha_shape / delaunay) is a thin descriptor the
@@ -211,44 +211,11 @@ export function TriangulationPopup({
   );
 
   // Assemble the HeliosTriangulationRequest from the current selection + grid.
-  // Prefer the source file path (backend reads bytes from disk); fall back to
-  // serialising every point. The triangulation runs UNFILTERED (lmax / aspect
-  // huge) — the backend returns every candidate triangle and the filter is
-  // applied interactively in the Meshes panel afterwards.
+  // Delegates to the shared, unit-tested builder so the point-source resolution
+  // (session → file → inline points, misses excluded server-side) can't drift
+  // from the LAD path. Throws if a scan has no resolvable source.
   const buildHeliosRequest = useCallback((): HeliosTriangulationRequest => {
-    const requestScans: HeliosScanEntry[] = selectedScans.map(scan => {
-      const p = scan.params!;
-      const angular = {
-        origin: [p.origin.x, p.origin.y, p.origin.z],
-        n_theta: p.zenithPoints,
-        n_phi: p.azimuthPoints,
-        theta_min: p.zenithMinDeg,
-        theta_max: p.zenithMaxDeg,
-        phi_min: p.azimuthMinDeg,
-        phi_max: p.azimuthMaxDeg,
-      };
-      if (scan.sourcePath) {
-        return { file_path: scan.sourcePath, ascii_format: scan.asciiFormat ?? null, ...angular };
-      }
-      const points: number[][] = [];
-      const data = scan.data!;
-      for (let i = 0; i < data.pointCount; i++) {
-        const idx = i * 3;
-        points.push([data.positions[idx], data.positions[idx + 1], data.positions[idx + 2]]);
-      }
-      return { points, ...angular };
-    });
-
-    return {
-      scans: requestScans,
-      lmax: 1.0e9,
-      max_aspect_ratio: 1.0e9,
-      theta_min: 30,
-      theta_max: 130,
-      phi_min: 0,
-      phi_max: 360,
-      ...(selectedGrid ? { grid: selectedGrid.grid } : {}),
-    };
+    return buildHeliosTriangulationRequest(selectedScans, selectedGrid?.grid ?? null);
   }, [selectedScans, selectedGrid]);
 
   const handleTriangulate = useCallback(() => {
@@ -259,7 +226,13 @@ export function TriangulationPopup({
     }
 
     if (method === 'helios') {
-      const request = buildHeliosRequest();
+      let request: HeliosTriangulationRequest;
+      try {
+        request = buildHeliosRequest();
+      } catch (err) {
+        setLocalError(err instanceof Error ? err.message : String(err));
+        return;
+      }
       const scanColors = selectedScans.map(s => s.color);
       const sourceScanIds = selectedScans.map(s => s.id);
       onStartTriangulate({

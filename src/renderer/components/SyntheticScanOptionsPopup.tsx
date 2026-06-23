@@ -9,6 +9,7 @@ import {
 import { scanDisplayName, type Scan } from '../lib/scan';
 import { SCAN_HIT_FIELDS, availabilityNote } from '../lib/scanHitFields';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
+import { ComputePathBadge } from './ComputePathBadge';
 import { deriveMovingScanGrid, trajectoryDurationS } from '../lib/poseStream';
 
 // Above this many total pulses a scan starts taking a long time and produces a
@@ -214,6 +215,9 @@ export function SyntheticScanOptionsPopup({
           <div className="flex items-center gap-2">
             <Radio className="w-5 h-5 text-neutral-400" />
             <h2 className="text-lg font-semibold text-white">Synthetic Scan Options</h2>
+            {/* Tells the user up-front whether this scan will ray-trace on the
+                GPU or fall back to CPU on their machine. */}
+            <ComputePathBadge />
           </div>
           <button
             onClick={onClose}

@@ -21,10 +21,22 @@ describe('scanHitFields catalog', () => {
   });
 
   it('only primitive-data extras are flagged isPrimitiveExtra', () => {
-    // reflectance is the one sampled-from-primitive field; deviation/nRaysHit are
-    // engine-produced and must NOT be sent as column_format.
+    // reflectance + organ are sampled-from-primitive fields; deviation/nRaysHit
+    // are engine-produced and must NOT be sent as column_format.
     const primitives = SCAN_HIT_FIELDS.filter(f => f.isPrimitiveExtra).map(f => f.slug);
-    expect(primitives).toEqual(['reflectance']);
+    expect(primitives).toEqual(['reflectance', 'organ']);
+  });
+
+  it('organ is an opt-in primitive extra (non-standard, not default-retained)', () => {
+    // Carrying organ type into a scan must be explicit: the field is a
+    // primitive-sampled extra so checking it routes 'organ' into extra_fields
+    // (column_format) and, in the viewer, gates sending the per-triangle codes.
+    const organ = SCAN_HIT_FIELDS.find(f => f.slug === 'organ')!;
+    expect(organ).toBeDefined();
+    expect(organ.isStandard).toBe(false);
+    expect(organ.isPrimitiveExtra).toBe(true);
+    expect(organ.defaultRetained).toBe(false);
+    expect(DEFAULT_RETAINED_FIELDS).not.toContain('organ');
   });
 
   it('engine optionals (deviation/nRaysHit) are non-standard, non-primitive', () => {

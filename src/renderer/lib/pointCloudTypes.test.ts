@@ -59,6 +59,10 @@ describe('meshDisplayName', () => {
     expect(meshDisplayName(makeMesh({}))).toBe('Mesh');
   });
 
+  it('names a shape plane "Plane" rather than the generic "Mesh"', () => {
+    expect(meshDisplayName(makeMesh({ isPlane: true }))).toBe('Plane');
+  });
+
   it('names plants by type/age, ignoring triangulation params', () => {
     const single = makeMesh({ isPlant: true, plantType: 'bean', plantAge: 30, method: 'helios' });
     expect(meshDisplayName(single)).toBe('bean (30d)');

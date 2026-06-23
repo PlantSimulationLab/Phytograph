@@ -14,6 +14,8 @@ export interface PlantMeshResponseLike {
   materials?: { name: string; color?: number[]; texture_name?: string; has_alpha: boolean }[] | null;
   material_groups?: { material_name: string; triangle_indices: number[] }[] | null;
   textures?: Record<string, string> | null;
+  // Per-triangle Helios organ-type code (parallel to `indices`); see ORGAN_SCHEME.
+  organ_codes?: number[] | null;
   vertex_count: number;
   triangle_count: number;
 }
@@ -85,6 +87,13 @@ export function plantResponseToMeshData(resp: PlantMeshResponseLike): {
     });
   }
 
+  // Organ-type code per triangle, when the backend extracted it. Carried onto the
+  // mesh so a later synthetic scan can label each hit by organ (see ORGAN_SCHEME).
+  let triangleOrganCodes: Uint8Array | undefined;
+  if (resp.organ_codes && resp.organ_codes.length === resp.triangle_count) {
+    triangleOrganCodes = Uint8Array.from(resp.organ_codes);
+  }
+
   const data: MeshData = {
     vertices,
     indices,
@@ -93,6 +102,7 @@ export function plantResponseToMeshData(resp: PlantMeshResponseLike): {
     uvCoordinates,
     vertexCount: resp.vertex_count,
     triangleCount: resp.triangle_count,
+    triangleOrganCodes,
   };
   return { data, plantMaterials };
 }

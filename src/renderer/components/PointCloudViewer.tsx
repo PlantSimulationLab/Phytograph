@@ -4206,14 +4206,27 @@ export default function PointCloudViewer({
   // read from the same edit state the crop-apply path uses.
   const buildPointSource = useCallback((cloud: PointCloudEntry): PointSourcePayload => {
     const octree = cloud.data.octree;
-    if (octree && octree.sourceXyzPath) {
+    // Route through the backend `source` branch whenever the cloud is
+    // session-backed (sessionId) OR file-backed (sourceXyzPath). Gating on
+    // sessionId — not on sourceXyzPath — is load-bearing: a synthetic-scan cloud
+    // is session-backed but its `sourceXyzPath` is `session.cache_dir ?? ''`,
+    // which is EMPTY when the octree build failed (best-effort, swallowed) or
+    // carried no cache_dir. The old `if (octree.sourceXyzPath)` gate dropped
+    // those clouds to the inline branch, which (a) serialized the WHOLE cloud as
+    // an uncapped `number[][]` JSON body (the triangulateMaxPoints cap only
+    // applies to `source` payloads — a multi-million-point synthetic scan would
+    // OOM the backend's JSON parse, the same failure mode as the Helios fix) and
+    // (b) bypassed the session, ignoring unbaked deletions. The backend reads the
+    // in-RAM session array when session_id is present and ignores source_path, so
+    // an empty source_path is fine for a session-backed cloud.
+    if (octree && (octree.sessionId || octree.sourceXyzPath)) {
       const t = getEditState(cloud.id).translation;
       const translation: [number, number, number] | null =
         (t.x !== 0 || t.y !== 0 || t.z !== 0) ? [t.x, t.y, t.z] : null;
       return {
         kind: 'source',
         source: {
-          source_path: octree.sourceXyzPath,
+          source_path: octree.sourceXyzPath || '',
           ascii_format: octree.asciiFormat ?? null,
           translation,
           // When the cloud is session-backed, downstream ops read the in-RAM
@@ -4886,7 +4899,7 @@ export default function PointCloudViewer({
   // Extract a mesh's geometry in WORLD space (scale -> rotate(Euler XYZ) ->
   // translate), matching how it's rendered. Returns the arrays the scan/scene
   // API expects. Shared so every scan target is transformed identically.
-  const extractMeshWorldGeometry = useCallback((mesh: MeshEntry) => {
+  const extractMeshWorldGeometry = useCallback((mesh: MeshEntry, carryOrgan = false) => {
     const meshPos = meshPositions.get(mesh.id) || { x: 0, y: 0, z: 0 };
     const meshScale = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
     const meshRot = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 };
@@ -4969,7 +4982,17 @@ export default function PointCloudViewer({
       }
     }
 
-    return { vertices, triangles, colors, uv_coordinates, materials };
+    // Organ-type code per triangle, forwarded only when the user opted in (the
+    // 'organ' retained field is checked). `triangles` above is built in mesh
+    // index order, so these line up 1:1 on the backend. Imported meshes have no
+    // organ codes and simply forward nothing here.
+    let organ_codes: number[] | undefined;
+    if (carryOrgan && mesh.data.triangleOrganCodes &&
+        mesh.data.triangleOrganCodes.length === mesh.data.triangleCount) {
+      organ_codes = Array.from(mesh.data.triangleOrganCodes);
+    }
+
+    return { vertices, triangles, colors, uv_coordinates, materials, organ_codes };
   }, [meshPositions, meshScales, meshRotations, isTexturedMesh]);
 
   // Build PointCloudData from one scanner's scan result: positions, RGB colors,
@@ -5051,7 +5074,10 @@ export default function PointCloudViewer({
     setIsScanning(true);
     setScanProgress(null);
     try {
-      const requestMeshes = targetMeshes.map(extractMeshWorldGeometry);
+      // Carry organ-type codes into the scan only when the user checked the
+      // 'organ' retained field, so each hit can be labeled/colored by organ.
+      const carryOrgan = options.retainedFields.includes('organ');
+      const requestMeshes = targetMeshes.map((m) => extractMeshWorldGeometry(m, carryOrgan));
       const requestScanners = activeScanners.map(s => {
         const p = s.params!;
         return {
@@ -5483,6 +5509,26 @@ export default function PointCloudViewer({
   }, [skeletons, clouds, downloadFile, skeletonShowAsCylinders, skeletonTubeRadius]);
 
 
+  // Serialize a FLAT cloud's display positions into the backend's `points`
+  // (`number[][]`), STRIDE-DOWNSAMPLED to the triangulate cap. Only reached for
+  // clouds with neither a session nor a source file (genuinely flat, in-RAM) —
+  // session/file clouds go through buildPointSource's `source` branch (capped
+  // server-side). The cap matters because this branch JSON-serializes the points:
+  // an uncapped multi-million-point flat cloud (e.g. a large no-path import) would
+  // build a huge `number[][]` + JSON body, the same OOM shape as the Helios fix.
+  // Stride (not reservoir) preserves spatial uniformity, matching the backend's
+  // _read_points_from_source downsample. Returns {points, used, total}.
+  const flatPointsCapped = useCallback((data: PointCloudData): { points: number[][]; used: number; total: number } => {
+    const total = data.pointCount;
+    const stride = total > triangulateMaxPoints ? Math.ceil(total / triangulateMaxPoints) : 1;
+    const points: number[][] = [];
+    for (let i = 0; i < total; i += stride) {
+      const idx = i * 3;
+      points.push([data.positions[idx], data.positions[idx + 1], data.positions[idx + 2]]);
+    }
+    return { points, used: points.length, total };
+  }, [triangulateMaxPoints]);
+
   // Open3D triangulation (ball_pivoting / poisson / alpha_shape / delaunay),
   // driven by the unified TriangulationPopup. Supports multiple selected scans,
   // either per-scan (one mesh each) or merged (selected scans' points fused into
@@ -5540,11 +5586,8 @@ export default function PointCloudViewer({
           if (ps.kind === 'source') {
             sources.push({ ...ps.source, max_points: triangulateMaxPoints });
           } else {
-            const d = ps.data;
-            for (let i = 0; i < d.pointCount; i++) {
-              const idx = i * 3;
-              points.push([d.positions[idx], d.positions[idx + 1], d.positions[idx + 2]]);
-            }
+            // Flat cloud (no session/file): fold in its points, capped.
+            points.push(...flatPointsCapped(ps.data).points);
           }
         }
 
@@ -5627,13 +5670,8 @@ export default function PointCloudViewer({
         if (ps.kind === 'source') {
           request.source = { ...ps.source, max_points: triangulateMaxPoints };
         } else {
-          const displayData = ps.data;
-          const points: number[][] = [];
-          for (let i = 0; i < displayData.pointCount; i++) {
-            const idx = i * 3;
-            points.push([displayData.positions[idx], displayData.positions[idx + 1], displayData.positions[idx + 2]]);
-          }
-          request.points = points;
+          // Flat cloud (no session/file): serialize its points, capped.
+          request.points = flatPointsCapped(ps.data).points;
         }
         applyMethodParams(request);
 
@@ -5722,7 +5760,7 @@ export default function PointCloudViewer({
       triAbortRef.current = null;
       triRunIdRef.current = null;
     }
-  }, [clouds, buildPointSource, triangulateMaxPoints, onHideScan, addMesh, addMeshes]);
+  }, [clouds, buildPointSource, triangulateMaxPoints, flatPointsCapped, onHideScan, addMesh, addMeshes]);
 
   // Segment ground vs plant points (Cloth Simulation Filter). Writes a
   // `ground_class` scalar attribute (1=ground, 2=plant) and colors by it.

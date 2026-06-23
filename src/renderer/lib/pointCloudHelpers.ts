@@ -2,7 +2,7 @@
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
 import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
-import type { HeliosGrid, LADRequest, LADScanEntry } from '../utils/backendApi';
+import type { HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { poseStreamToWire } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
@@ -745,12 +745,96 @@ export function ladRange(
   return { min, max };
 }
 
+// Resolve a scan's point-data SOURCE for a Helios request (triangulation or LAD)
+// by the priority the backend feed expects, and write it onto `entry`:
+//   1. session_id — a session-backed (octree) cloud: the backend triangulates its
+//      surviving in-RAM HIT points (deletions honored, sky/miss points excluded).
+//      This is the source of truth after ANY edit (crop/erase/backfill/segment),
+//      so the original file is never re-read. Sent with file_path as a restart
+//      fallback when the cloud has both.
+//   2. file_path — a file-backed cloud with no session (Helios reads it from disk;
+//      tiny request body, original columns preserved).
+//   3. inline points — a FLAT in-RAM cloud with populated positions and neither a
+//      session nor a source file (e.g. a synthetic scan).
+// The `positions.length > 0` guard on (3) is load-bearing: an octree cloud has
+// EMPTY positions but a full pointCount, so an unguarded points loop would
+// serialise millions of `[undefined, undefined, undefined]` (including any
+// backfilled misses) into a multi-hundred-MB JSON body that OOM'd the backend's
+// pydantic parse. Returns true if a source was found, false if the scan has none.
+export function resolveHeliosScanSource(scan: Scan, entry: HeliosScanEntry): boolean {
+  const sessionId = scan.data?.octree?.sessionId;
+  if (sessionId && scan.sourcePath) {
+    entry.session_id = sessionId;
+    entry.file_path = scan.sourcePath;
+    entry.ascii_format = scan.asciiFormat ?? null;
+    return true;
+  }
+  if (sessionId) {
+    entry.session_id = sessionId;
+    return true;
+  }
+  if (scan.sourcePath) {
+    entry.file_path = scan.sourcePath;
+    entry.ascii_format = scan.asciiFormat ?? null;
+    return true;
+  }
+  if (scan.data && scan.data.positions.length > 0) {
+    const points: number[][] = [];
+    for (let i = 0; i < scan.data.pointCount; i++) {
+      const idx = i * 3;
+      points.push([scan.data.positions[idx], scan.data.positions[idx + 1], scan.data.positions[idx + 2]]);
+    }
+    entry.points = points;
+    return true;
+  }
+  return false;
+}
+
+// Assemble a Helios triangulation request from the selected scans + optional
+// voxel grid. Pure so it can be unit-tested. Runs UNFILTERED (lmax/aspect huge):
+// the backend returns every candidate triangle and the interactive Lmax/aspect
+// filter is applied client-side afterwards. Throws if a scan has no resolvable
+// point source (see resolveHeliosScanSource).
+export function buildHeliosTriangulationRequest(
+  scans: Scan[],
+  grid: HeliosGrid | null,
+): HeliosTriangulationRequest {
+  const requestScans: HeliosScanEntry[] = scans.map(scan => {
+    const p = scan.params!;
+    const entry: HeliosScanEntry = {
+      origin: [p.origin.x, p.origin.y, p.origin.z],
+      n_theta: p.zenithPoints,
+      n_phi: p.azimuthPoints,
+      theta_min: p.zenithMinDeg,
+      theta_max: p.zenithMaxDeg,
+      phi_min: p.azimuthMinDeg,
+      phi_max: p.azimuthMaxDeg,
+    };
+    if (!resolveHeliosScanSource(scan, entry)) {
+      throw new Error(
+        `Scan "${scan.label}" has no triangulation source: no session, no source file, and no in-RAM points. Re-import the scan and try again.`,
+      );
+    }
+    return entry;
+  });
+
+  return {
+    scans: requestScans,
+    lmax: 1.0e9,
+    max_aspect_ratio: 1.0e9,
+    theta_min: 30,
+    theta_max: 130,
+    phi_min: 0,
+    phi_max: 360,
+    ...(grid ? { grid } : {}),
+  };
+}
+
 // Assemble a LADRequest from the selected scans, the chosen voxel grid, and the
-// algorithm parameters. Pure so it can be unit-tested. Mirrors how the Helios
-// triangulation popup builds its request: prefer the on-disk file path, fall
-// back to serialising the points; carry each scan's own angular geometry and
-// return type. Each scan's multi-return beam fields are attached only when that
-// scan is actually multi-return.
+// algorithm parameters. Pure so it can be unit-tested. Uses the same source
+// priority as buildHeliosTriangulationRequest / the backend feed (session →
+// file → inline points), plus each scan's angular geometry, return type, and —
+// for multi-return scans — the per-pulse beam fields.
 // The per-pulse multi-return columns Helios needs to run the full-waveform LAD
 // algorithm. On a synthetic-scan cloud they live in `scalarFields` under exactly
 // these names (the backend records them under the same keys).

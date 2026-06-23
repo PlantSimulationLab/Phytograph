@@ -311,6 +311,14 @@ If there's nothing to scan, the dialog still opens so you can review your
 scan positions and settings, but it shows a notice to add a plant or
 mesh and keeps **Run** disabled until scannable geometry is visible.
 
+A small **GPU** or **CPU** pill next to the dialog title tells you which
+compute path the ray tracing will use on your machine — GPU when this
+build was compiled with CUDA support *and* a compatible NVIDIA GPU and
+driver are present, otherwise CPU. macOS builds are always CPU; on
+Windows and Linux, GPU acceleration kicks in automatically when a
+supported GPU is detected (no setup needed — and a missing or
+unsupported GPU simply falls back to CPU). Hover the pill for details.
+
 Unlike a scan's properties (origin, sweep, tilt — set per scan), these
 are simulation settings chosen per run; your last-used values are
 remembered and pre-filled next time:
@@ -333,8 +341,8 @@ remembered and pre-filled next time:
 - **Retained per-hit fields** — which auto-generated per-hit scalars are
   kept on the resulting cloud and offered in the viewer's **Color by**
   list. Check **distance**, **timestamp**, **return index/count**, **pulse
-  deviation**, **sub-rays hit**, or **reflectance**. A checked field appears
-  in **Color by** *even when it's constant* across the cloud — e.g.
+  deviation**, **sub-rays hit**, **reflectance**, or **organ type**. A checked
+  field appears in **Color by** *even when it's constant* across the cloud — e.g.
   **timestamp** is a single value for one static sweep, and **return
   index/count** are `0`/`1` for a single-return scan. (An unchecked field is
   dropped, and a constant field that you didn't retain is hidden, to keep the
@@ -342,6 +350,15 @@ remembered and pre-filled next time:
   recorded for multi-return scans (**rays per pulse** > 1); **reflectance** is
   sampled from primitive data when present. *Intensity* isn't listed here — it
   always has its own color mode.
+
+    **Organ type** is opt-in and plant-specific: when checked, each hit is
+    tagged with the organ it struck — **leaf**, **petiole**, **shoot**
+    (stem/internode), **peduncle**, or **fruit** — carried from the source
+    plant's Helios plant-architecture model. Coloring by **organ type** draws
+    each class in a distinct color with a legend (it's categorical, not a
+    gradient). Hits on imported (non-plant) meshes have no organ data and read
+    as *Unknown*. Leave it unchecked to send nothing extra — the organ labels
+    are only computed, transmitted, and sampled when the box is ticked.
 
 Click **Run scan** to proceed.
 

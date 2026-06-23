@@ -41,6 +41,26 @@ describe('isCategoricalAttribute', () => {
   });
 });
 
+describe('organ scheme', () => {
+  // Mirror of _ORGAN_LABEL_TO_CODE in backend-api/main.py; a static scheme so
+  // the 'organ' scalar from a synthetic scan colors discretely with a legend on
+  // both the flat and octree render paths, with no per-cloud registration.
+  it('registers organ codes 0..6 with semantic labels', () => {
+    const scheme = categoricalSchemeFor('organ');
+    expect(scheme).not.toBeNull();
+    expect(scheme!.classes.map((c) => c.value)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(scheme!.classes.map((c) => c.label)).toEqual([
+      'Unknown', 'Leaf', 'Petiole', 'Shoot', 'Peduncle', 'Fruit', 'Petiolule',
+    ]);
+  });
+
+  it('resolves via categoricalSchemeForRange and is a registered categorical attribute', () => {
+    expect(categoricalSchemeForRange('organ', [0, 5])).not.toBeNull();
+    expect(isCategoricalAttribute('organ')).toBe(true);
+    expect(hasRegisteredScheme('Organ')).toBe(true); // case-insensitive
+  });
+});
+
 describe('is_miss scheme', () => {
   it('registers a two-class Hit/Miss scheme', () => {
     const scheme = categoricalSchemeFor(MISS_ATTRIBUTE);

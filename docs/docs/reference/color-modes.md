@@ -59,10 +59,10 @@ the colorbar, and the **Min/Max** inputs let you window it.
 
 A [synthetic scan](../workflows/simulate-scan.md) generates per-hit scalars
 (distance, timestamp, return index/count, pulse deviation, sub-rays hit,
-reflectance) the same way an imported cloud carries its columns. Which of
-these end up in the **Color by** list is governed by **Retained per-hit
-fields** in the **Synthetic Scan Options** dialog — only the fields you check
-are kept. Unlike imported clouds (where a constant column is hidden), a
+reflectance, organ type) the same way an imported cloud carries its columns.
+Which of these end up in the **Color by** list is governed by **Retained
+per-hit fields** in the **Synthetic Scan Options** dialog — only the fields you
+check are kept. Unlike imported clouds (where a constant column is hidden), a
 retained field is listed **even when it's constant** across the cloud, so a
 single-static-sweep **timestamp** or a single-return scan's **return
 index/count** still appears. Intensity always has its own dedicated *Intensity*
@@ -88,6 +88,14 @@ The **`tree_instance`** attribute produced by
 `1..N` = individual trees) is also categorical, but its class count isn't fixed:
 each tree's colour is generated on the fly (a perceptually-spaced hue rotation)
 and the legend lists Tree 1, Tree 2, …, with unassigned points in grey.
+
+The **Organ Type** attribute carried by a
+[synthetic scan](../workflows/simulate-scan.md) of a generated plant (when
+**organ type** is checked under **Retained per-hit fields**) is categorical too:
+each hit is labelled with the organ it struck — **Leaf**, **Petiole**,
+**Shoot**, **Peduncle**, or **Fruit** — and renders with a distinct colour per
+organ and a legend. Hits on imported (non-plant) geometry carry no organ data
+and read as **Unknown** (grey).
 
 You can also **mark a column as categorical yourself** in the
 [import wizard](../workflows/import-export.md#the-import-wizard) — set its role

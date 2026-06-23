@@ -208,6 +208,10 @@ export interface MeshData {
   // 'scan' pseudocolor mode. Absent for cloud-only / plant / shape meshes.
   triangleScanIds?: Uint32Array;
   scanColors?: string[];
+  // Plant-only provenance: Helios organ-type code per triangle (aligned 1:1 with
+  // `indices`/3); see ORGAN_SCHEME in lib/classification.ts. Present on generated
+  // plant meshes; carried into a synthetic scan so hits can be labeled by organ.
+  triangleOrganCodes?: Uint8Array;
   // Helios-only: each source scan's sensor origin [x,y,z], flat-packed and keyed
   // by scan index (so scan s is scanOrigins[s*3 .. s*3+2]). Used to orient each
   // facet's normal toward the scanner that saw it before deriving azimuth, so a
@@ -390,6 +394,7 @@ export function meshDisplayName(mesh: MeshEntry, sourceFileName?: string): strin
     const base = `${label} triangulation`;
     return sourceFileName ? `${base} (${sourceFileName})` : base;
   }
+  if (mesh.isPlane) return 'Plane';
   return sourceFileName || 'Mesh';
 }
 

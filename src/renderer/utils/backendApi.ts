@@ -133,6 +133,35 @@ export function describeBackendError(error: unknown, action: string): Error {
 }
 
 /**
+ * Whether synthetic-scan ray tracing will run on the GPU or the CPU, and why.
+ * The packaged Windows/Linux builds always contain the CUDA path (the release
+ * CI fails otherwise) and macOS is always CPU-only, so the path is decided by a
+ * runtime probe for a usable NVIDIA GPU (`gpuPresent`). See /api/device-info.
+ */
+export interface DeviceInfo {
+  gpuPresent: boolean;
+  gpuCount: number;
+  gpuName: string | null;
+  driverVersion: string | null;
+  effectivePath: 'gpu' | 'cpu';
+  reason: string;
+}
+
+export async function getDeviceInfo(signal?: AbortSignal): Promise<DeviceInfo> {
+  const res = await fetch(`${getBackendUrl()}/api/device-info`, { signal });
+  if (!res.ok) throw new Error(`device-info failed: ${res.status}`);
+  const j = (await res.json()) as Record<string, unknown>;
+  return {
+    gpuPresent: j.gpu_present === true,
+    gpuCount: typeof j.gpu_count === 'number' ? j.gpu_count : 0,
+    gpuName: typeof j.gpu_name === 'string' ? j.gpu_name : null,
+    driverVersion: typeof j.driver_version === 'string' ? j.driver_version : null,
+    effectivePath: j.effective_path === 'gpu' ? 'gpu' : 'cpu',
+    reason: typeof j.reason === 'string' ? j.reason : '',
+  };
+}
+
+/**
  * Send triangulation request to backend API
  */
 export async function triangulatePointCloud(
@@ -414,9 +443,15 @@ export async function segmentTrees(
 // ==================== HELIOS TRIANGULATION API ====================
 
 export interface HeliosScanEntry {
-  file_path?: string;       // Path to scan file on disk (preferred for large scans)
+  // Point-data source priority (backend resolves session → file → points):
+  //   session_id — a session-backed (octree) cloud; the backend triangulates its
+  //     in-RAM surviving HIT points (deletions honored, misses excluded). This is
+  //     the source of truth after any edit (crop/erase/backfill/segment), so the
+  //     file is never re-read. Sent alongside file_path as a restart fallback.
+  session_id?: string | null;
+  file_path?: string;       // Path to scan file on disk (file-backed cloud, no session)
   ascii_format?: string | null;  // Column format e.g. "x y z timestamp" (auto-detected if omitted/null)
-  points?: number[][];      // [[x, y, z], ...] fallback when no file_path
+  points?: number[][];      // [[x, y, z], ...] flat in-RAM cloud (no session, no file)
   colors?: number[][];      // [[r, g, b], ...] point colors (0-1 range)
   origin: number[];         // [x, y, z] scanner position
   // Per-scan acquisition geometry from the scan's own ScanParameters. Helios
@@ -1418,6 +1453,9 @@ export interface LidarScanMesh {
   colors?: number[][];  // [[r, g, b], ...] - per-vertex colors (0-1 range)
   uv_coordinates?: number[][];  // [[u, v], ...] per-vertex (required when materials set)
   materials?: LidarScanMaterial[];  // textured material groups (alpha-masked leaves)
+  // Per-triangle Helios organ-type code (parallel to `triangles`). Populated only
+  // when the user opts into organ carry; lets the scan label each hit by organ.
+  organ_codes?: number[];
 }
 
 // One scanner position + acquisition geometry (mirrors ScanParameters; angles

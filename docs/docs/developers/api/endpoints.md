@@ -12,6 +12,7 @@ is defined.
 | GET | `/` | `main.py:49` | Root ping |
 | GET | `/health` | `main.py:54` | Liveness probe |
 | GET | `/version` | `main.py:60` | Returns `BACKEND_VERSION` (used by the supervisor) |
+| GET | `/api/device-info` | `main.py` | Reports whether synthetic-scan ray tracing runs on **GPU** or **CPU**. Shipped Windows/Linux builds always contain the CUDA path (the release CI fails otherwise) and macOS never does, so the path is decided by a runtime probe for a usable NVIDIA GPU (`gpu_present`/`gpu_count`/`gpu_name`/`driver_version`, via `pyhelios.runtime.get_gpu_runtime_info` — mainly `nvidia-smi`). `effective_path` is `"gpu"` when a GPU is present on a non-macOS host, else `"cpu"` (Helios falls back to CPU/OpenMP; cudart is statically linked so a GPU build still runs driverless). `reason` is a human-readable explanation. The renderer surfaces this as the GPU/CPU pill in the Synthetic Scan Options dialog |
 
 ## Curve / surface fitting
 

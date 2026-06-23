@@ -17,11 +17,25 @@ PyHelios is vendored as a git **submodule** (built from source — there is no
 pip wheel), so clone recursively and compile its native `libhelios`. This
 needs **cmake** and a **C++ compiler** (Xcode Command Line Tools on macOS,
 MSVC on Windows). The compile covers the `plantarchitecture` and `lidar`
-plugins (`--nogpu` skips the radiation/CUDA toolchain). The `lidar` plugin
+plugins (`--nogpu` skips only the radiation/OptiX plugin; the `lidar`
+CUDA ray-tracing path still compiles if a CUDA toolkit is present — see the
+GPU note below). The `lidar` plugin
 transitively builds the `visualizer` (OpenGL) plugin — fine on macOS and
 Windows with no extra packages; on Linux you'd also need `libgl1-mesa-dev`,
 `xorg-dev`, and `libtbb-dev` (the last for PotreeConverter):
 `sudo apt-get install -y libgl1-mesa-dev xorg-dev libtbb-dev`.
+
+!!! note "GPU acceleration is decided at build time"
+    The `lidar`/`collisiondetection` plugin compiles a CUDA ray-tracing path
+    **whenever a CUDA toolkit is found on the build machine** (CMake's
+    `find_package(CUDAToolkit)` → `HELIOS_CUDA_AVAILABLE`); otherwise the build
+    is CPU/OpenMP-only. `--nogpu` doesn't change this — it only drops the
+    separate radiation/OptiX plugin. The release workflow installs the CUDA
+    toolkit on the Windows + Linux runners, so the shipped installers for those
+    platforms are GPU-capable; **macOS is always CPU-only** (no CUDA on Apple
+    hardware). cudart is linked statically, so GPU-enabled builds still run on
+    machines with no CUDA/driver and fall back to CPU automatically. A local
+    dev build is GPU-enabled only if you have a CUDA toolkit installed.
 
 ```bash
 # 1. Clone the repo (recursively, to pull the PyHelios + helios-core submodules)

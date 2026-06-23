@@ -84,6 +84,27 @@ describe('plantResponseToMeshData', () => {
     expect(plantMaterials![0].textureData).toBeUndefined();
   });
 
+  it('carries per-triangle organ codes onto the mesh when present', () => {
+    // Organ codes (parallel to indices) ride through to triangleOrganCodes as a
+    // Uint8Array, so a later synthetic scan can label hits by organ.
+    const { data } = plantResponseToMeshData({
+      vertices: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1]],
+      indices: [[0, 1, 2], [3, 4, 5]],
+      organ_codes: [1, 3], // leaf, shoot
+      vertex_count: 6,
+      triangle_count: 2,
+    });
+    expect(data.triangleOrganCodes).toBeInstanceOf(Uint8Array);
+    expect(Array.from(data.triangleOrganCodes!)).toEqual([1, 3]);
+  });
+
+  it('omits organ codes when absent or length-mismatched', () => {
+    expect(plantResponseToMeshData(base).data.triangleOrganCodes).toBeUndefined();
+    // A mismatched length is dropped rather than silently misaligned.
+    const mismatched = plantResponseToMeshData({ ...base, organ_codes: [1, 2] });
+    expect(mismatched.data.triangleOrganCodes).toBeUndefined();
+  });
+
   it('consumes a QSMLeavesResponse-shaped object (extra success/leaf_count fields)', () => {
     // The /api/qsm/leaves response carries success/leaf_count/error on top of the
     // plant-mesh fields. Those extras must not interfere with the flatten step —

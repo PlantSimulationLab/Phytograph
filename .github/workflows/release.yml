@@ -111,7 +111,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: resources/${{ matrix.backend_name }}
-          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}
+          # `-cuda` marks the GPU-enabled backend: bumping it (or any change
+          # that should force a fresh backend) invalidates pre-GPU CPU-only
+          # caches so the next build actually recompiles with CUDA.
+          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}-cuda
 
       - name: Install Python dependencies
         if: steps.backend-cache.outputs.cache-hit != 'true'
@@ -121,16 +124,68 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # GPU acceleration (Windows + Linux): install the CUDA toolkit so Helios's
+      # collisiondetection plugin compiles its CUDA ray-tracing path. CMake's
+      # `find_package(CUDAToolkit)` then defines HELIOS_CUDA_AVAILABLE and builds
+      # CollisionDetection.cu. Key facts that make this safe on GPU-less runners
+      # and GPU-less end users alike:
+      #   - The runner has no physical GPU, but architecture selection uses
+      #     `nvcc --list-gpu-code` (detect_GPU_compute.cmake) — the compiler's
+      #     capability list, not the hardware — so the build needs no GPU.
+      #   - cudart is linked STATICALLY (collisiondetection CMakeLists:
+      #     CUDA::cudart_static), so the shipped libhelios bundles no CUDA
+      #     DLLs/.so and requires no CUDA install on the user's machine. With no
+      #     NVIDIA driver/GPU, cudaGetDeviceCount() returns an error and Helios
+      #     falls back to CPU/OpenMP automatically.
+      # macOS has no CUDA and stays CPU-only (the step is skipped there). Only
+      # runs on a cache miss, i.e. when we actually rebuild the backend.
+
+      # CUDA's full network install needs several GB and the Linux runner's root
+      # disk is already tight (see the swap step below), so reclaim preinstalled
+      # bloat the build never uses before installing.
+      - name: Free disk space for CUDA (Linux)
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false   # keep Python/Node toolchains the build needs
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false # the swap step below manages swap itself
+
+      - name: Install CUDA Toolkit (Windows + Linux)
+        if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true'
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: '12.6.2'
+          method: 'network'
+          use-github-cache: true
+          use-local-cache: true
+
+      - name: Verify CUDA (Windows + Linux)
+        if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true'
+        run: nvcc -V
+
       # Compile the PyHelios native library (libhelios) and editable-install the
       # package so PyInstaller's collect-all picks it up. plantarchitecture +
-      # lidar plugins; --nogpu drops the radiation/OptiX CUDA toolchain. (lidar
-      # pulls in the visualizer + OpenGL at the C++ level, which builds with no
-      # extra packages on macOS/Windows; on Linux the GL/X11 dev headers come
-      # from the "Install Linux build dependencies" step above.) Runners provide
-      # cmake + a C++ toolchain (Xcode CLT on macOS, MSVC on Windows, gcc on Linux).
+      # lidar plugins; --nogpu drops only the gpu_required plugins (radiation/
+      # OptiX), which we don't use — it does NOT disable the collisiondetection
+      # CUDA path, which auto-enables whenever the CUDA toolkit installed above
+      # is present (so Windows/Linux builds are GPU-accelerated; macOS is
+      # CPU-only). (lidar pulls in the visualizer + OpenGL at the C++ level,
+      # which builds with no extra packages on macOS/Windows; on Linux the
+      # GL/X11 dev headers come from the "Install Linux build dependencies" step
+      # above.) Runners provide cmake + a C++ toolchain (Xcode CLT on macOS,
+      # MSVC on Windows, gcc on Linux). On Windows/Linux we pass --require-gpu so
+      # the build FAILS LOUDLY if the CUDA path didn't compile (e.g. the toolkit
+      # install above silently failed) rather than shipping a CPU-only installer
+      # that masquerades as GPU-capable. macOS has no CUDA, so it never gets the
+      # flag.
       - name: Build PyHelios from source
         if: steps.backend-cache.outputs.cache-hit != 'true'
-        run: node scripts/build-pyhelios.mjs
+        run: node scripts/build-pyhelios.mjs ${{ runner.os != 'macOS' && '--require-gpu' || '' }}
 
       # Free disk + enlarge swap on Linux before the PyInstaller backend build.
       # The Linux job kept dying during "Build Python backend" — the signature

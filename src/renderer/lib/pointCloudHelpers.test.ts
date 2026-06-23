@@ -26,6 +26,8 @@ import {
   worldToDisplay,
   displayToWorld,
   buildLADRequest,
+  buildHeliosTriangulationRequest,
+  resolveHeliosScanSource,
 } from './pointCloudHelpers';
 import { projectWorldToCanvasPixel } from './cropGeometry';
 import type { MeshData, PointCloudData } from './pointCloudTypes';
@@ -1113,5 +1115,131 @@ describe('assembleScanScalarFields', () => {
     const { scalarFields } = assembleScanScalarFields(
       { timestamp: new Float32Array([1, 2]) }, 3, ['timestamp'], STANDARD);
     expect(scalarFields.timestamp).toBeUndefined();
+  });
+});
+
+describe('buildHeliosTriangulationRequest / resolveHeliosScanSource', () => {
+  const GRID: HeliosGrid = {
+    center: [0, 0, 0], size: [4, 4, 4], nx: 2, ny: 2, nz: 3,
+  };
+
+  // An octree/session-backed cloud: positions are EMPTY (geometry lives in the
+  // backend session), pointCount is the full count. This is the shape that, with
+  // a cleared sourcePath, drove the 40 GB pydantic OOM before the fix.
+  function octreeCloud(sessionId: string, pointCount = 13_000_000): PointCloudData {
+    return {
+      positions: new Float32Array(0),
+      pointCount,
+      bounds: {
+        min: new THREE.Vector3(-1, -1, -1),
+        max: new THREE.Vector3(1, 1, 1),
+        center: new THREE.Vector3(0, 0, 0),
+        size: new THREE.Vector3(2, 2, 2),
+      },
+      fileName: 'scan.xyz',
+      octree: { cacheId: 'abc', sourceXyzPath: '/data/scan.xyz', sessionId },
+    };
+  }
+
+  // A flat in-RAM cloud (e.g. synthetic scan): positions populated, no octree.
+  function flatCloud(positions: number[]): PointCloudData {
+    return {
+      positions: new Float32Array(positions),
+      pointCount: positions.length / 3,
+      bounds: {
+        min: new THREE.Vector3(0, 0, 0),
+        max: new THREE.Vector3(1, 1, 1),
+        center: new THREE.Vector3(0.5, 0.5, 0.5),
+        size: new THREE.Vector3(1, 1, 1),
+      },
+      fileName: 'synthetic',
+    };
+  }
+
+  function scanOf(data: PointCloudData | undefined, extra: Partial<Scan> = {}): Scan {
+    return {
+      id: 's1', label: 'Scan 1', visible: true, color: '#fff',
+      params: { ...DEFAULT_SCAN_PARAMETERS },
+      ...(data ? { data } : {}),
+      ...extra,
+    };
+  }
+
+  it('sends session_id (NOT serialized points) for a session-backed cloud with a cleared sourcePath', () => {
+    // The exact post-Backfill-Misses state: octree cloud, sourcePath dropped by
+    // handleUpdateScanData. Must NOT iterate the empty positions × full pointCount.
+    const scan = scanOf(octreeCloud('sess-1', 28_000_000), { sourcePath: undefined });
+    const req = buildHeliosTriangulationRequest([scan], GRID);
+    expect(req.scans[0].session_id).toBe('sess-1');
+    expect(req.scans[0].points).toBeUndefined();
+    expect(req.scans[0].file_path).toBeUndefined();
+    // Sanity: the serialized request is tiny, not hundreds of MB.
+    expect(JSON.stringify(req).length).toBeLessThan(2_000);
+  });
+
+  it('sends both session_id and file_path when the cloud still has its source path (restart fallback)', () => {
+    const scan = scanOf(octreeCloud('sess-2'), { sourcePath: '/data/scan.xyz', asciiFormat: 'x y z' });
+    const req = buildHeliosTriangulationRequest([scan], GRID);
+    expect(req.scans[0].session_id).toBe('sess-2');
+    expect(req.scans[0].file_path).toBe('/data/scan.xyz');
+    expect(req.scans[0].points).toBeUndefined();
+  });
+
+  it('sends file_path for a file-backed cloud with no session', () => {
+    const scan = scanOf(flatCloud([0, 0, 0]), { sourcePath: '/data/scan.xyz', asciiFormat: 'x y z' });
+    // flat cloud here only to satisfy hasData; sourcePath wins over inline points.
+    const req = buildHeliosTriangulationRequest([scan], GRID);
+    expect(req.scans[0].file_path).toBe('/data/scan.xyz');
+    expect(req.scans[0].session_id).toBeUndefined();
+    expect(req.scans[0].points).toBeUndefined();
+  });
+
+  it('serializes inline points only for a flat in-RAM cloud (no session, no file)', () => {
+    const scan = scanOf(flatCloud([0, 0, 0, 1, 1, 1]), { sourcePath: undefined });
+    const req = buildHeliosTriangulationRequest([scan], GRID);
+    expect(req.scans[0].points).toEqual([[0, 0, 0], [1, 1, 1]]);
+    expect(req.scans[0].session_id).toBeUndefined();
+    expect(req.scans[0].file_path).toBeUndefined();
+  });
+
+  it('throws (rather than serializing empty positions) when a cloud has no resolvable source', () => {
+    // Octree cloud with NO session and NO sourcePath: positions are empty, so the
+    // old code would have looped pointCount times pushing [undefined,…]. Now it errors.
+    const data = octreeCloud('x');
+    delete data.octree!.sessionId;
+    const scan = scanOf(data, { sourcePath: undefined });
+    expect(() => buildHeliosTriangulationRequest([scan], GRID)).toThrow(/no triangulation source/);
+  });
+
+  it('runs unfiltered (huge lmax/aspect) and attaches the grid', () => {
+    const scan = scanOf(octreeCloud('sess-3'), { sourcePath: undefined });
+    const req = buildHeliosTriangulationRequest([scan], GRID);
+    expect(req.lmax).toBeGreaterThan(1e8);
+    expect(req.max_aspect_ratio).toBeGreaterThan(1e8);
+    expect(req.grid).toEqual(GRID);
+  });
+
+  it('omits the grid when none is supplied (backend auto-fits a bounding box)', () => {
+    const scan = scanOf(octreeCloud('sess-4'), { sourcePath: undefined });
+    const req = buildHeliosTriangulationRequest([scan], null);
+    expect(req.grid).toBeUndefined();
+  });
+
+  it('carries each scan its own angular geometry from its params', () => {
+    const scan = scanOf(octreeCloud('sess-5'), { sourcePath: undefined });
+    scan.params = { ...DEFAULT_SCAN_PARAMETERS, zenithPoints: 3415, azimuthPoints: 8122 };
+    const req = buildHeliosTriangulationRequest([scan], GRID);
+    expect(req.scans[0].n_theta).toBe(3415);
+    expect(req.scans[0].n_phi).toBe(8122);
+  });
+
+  it('resolveHeliosScanSource returns false (no mutation of points/file) for an unsourced scan', () => {
+    const data = octreeCloud('x');
+    delete data.octree!.sessionId;
+    const scan = scanOf(data, { sourcePath: undefined });
+    const entry = { origin: [0, 0, 0] } as Parameters<typeof resolveHeliosScanSource>[1];
+    expect(resolveHeliosScanSource(scan, entry)).toBe(false);
+    expect(entry.points).toBeUndefined();
+    expect(entry.session_id).toBeUndefined();
   });
 });

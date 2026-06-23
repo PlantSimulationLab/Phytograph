@@ -119,6 +119,19 @@ export const SCAN_HIT_FIELDS: ScanHitField[] = [
     isPrimitiveExtra: true,
     defaultRetained: false,
   },
+  {
+    // Organ type carried from a generated plant (leaf/petiole/shoot/peduncle/
+    // fruit). Sampled from the "organ" primitive data the scan mesh loader stamps
+    // when this field is checked; colors categorically via ORGAN_SCHEME. Imported
+    // (non-plant) meshes have no organ data, so those hits read as unknown.
+    slug: 'organ',
+    label: 'Organ type',
+    description: 'Plant organ each hit struck (leaf, petiole, shoot, peduncle, fruit). Plant meshes only.',
+    availability: 'extra',
+    isStandard: false,
+    isPrimitiveExtra: true,
+    defaultRetained: false,
+  },
 ];
 
 // The five standard slugs the backend always reads (mirrors

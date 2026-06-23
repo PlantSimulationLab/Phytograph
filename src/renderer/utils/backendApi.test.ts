@@ -14,6 +14,7 @@ import {
   generatePlantStreaming,
   getAvailablePlantModels,
   getBackendUrl,
+  getDeviceInfo,
   getPlantSessionStatus,
   heliosTriangulate,
   icpRegisterCloudToCloud,
@@ -1215,5 +1216,48 @@ describe('backfillMisses', () => {
   it('omits raster fields when no raster is supplied (backend falls back to its estimate)', async () => {
     const body = await sentBody('sess1', [0, 0, 5]);
     expect(body).toEqual({ origin: [0, 0, 5] });
+  });
+});
+
+describe('getDeviceInfo', () => {
+  it('maps backend snake_case fields to a camelCase DeviceInfo', async () => {
+    mockFetchOk({
+      gpu_present: true,
+      gpu_count: 1,
+      gpu_name: 'NVIDIA RTX 4090',
+      driver_version: '550.0',
+      effective_path: 'gpu',
+      reason: 'GPU acceleration active.',
+    });
+    const d = await getDeviceInfo();
+    expect(d).toEqual({
+      gpuPresent: true,
+      gpuCount: 1,
+      gpuName: 'NVIDIA RTX 4090',
+      driverVersion: '550.0',
+      effectivePath: 'gpu',
+      reason: 'GPU acceleration active.',
+    });
+  });
+
+  it('defaults missing fields to safe values', async () => {
+    mockFetchOk({ gpu_present: false, effective_path: 'cpu', reason: 'No GPU.' });
+    const d = await getDeviceInfo();
+    expect(d.gpuPresent).toBe(false);
+    expect(d.gpuCount).toBe(0);
+    expect(d.gpuName).toBeNull();
+    expect(d.driverVersion).toBeNull();
+    expect(d.effectivePath).toBe('cpu');
+  });
+
+  it('coerces any non-"gpu" effective_path to cpu', async () => {
+    mockFetchOk({ effective_path: 'weird', reason: 'x' });
+    const d = await getDeviceInfo();
+    expect(d.effectivePath).toBe('cpu');
+  });
+
+  it('throws on a non-ok response', async () => {
+    mockFetchError(500, { detail: 'boom' });
+    await expect(getDeviceInfo()).rejects.toThrow(/device-info failed: 500/);
   });
 });

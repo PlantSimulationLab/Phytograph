@@ -225,6 +225,7 @@ BACKEND_VERSION = "0.39.0"
 import logging
 logger = logging.getLogger("phytograph")
 
+
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
 # Configure CORS. The renderer's dev-server origin is now a *dynamic* port
@@ -295,6 +296,65 @@ def health_check():
 def get_version():
     """Version endpoint for Tauri app to check backend compatibility"""
     return {"version": BACKEND_VERSION}
+
+
+def _gpu_name() -> "str | None":
+    """Best-effort human-readable GPU name via nvidia-smi (None if unavailable)."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            first = r.stdout.strip().split("\n")[0].strip()
+            return first or None
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/api/device-info")
+def device_info():
+    """Report whether synthetic-scan ray tracing runs on GPU or CPU.
+
+    The packaged Windows/Linux builds always compile the CUDA ray-tracing path
+    (the release CI fails the build otherwise), and cudart is linked statically
+    so a GPU build still runs on a machine with no driver — Helios's
+    cudaGetDeviceCount() returns 0 and it falls back to CPU/OpenMP. macOS builds
+    are always CPU-only (no CUDA on Apple hardware). So the effective path is
+    decided entirely by a runtime probe for a usable NVIDIA GPU
+    (pyhelios.runtime.get_gpu_runtime_info, primarily via nvidia-smi): GPU when
+    one is present on a non-macOS build, CPU otherwise.
+    """
+    import platform as _platform
+    is_macos = _platform.system().lower() == "darwin"
+
+    try:
+        from pyhelios.runtime import get_gpu_runtime_info
+        info = get_gpu_runtime_info()
+    except Exception:
+        info = {}
+
+    gpu_present = bool(info.get("cuda_runtime_available"))
+    gpu_count = int(info.get("cuda_device_count") or 0)
+    driver_version = info.get("cuda_version")
+
+    if is_macos:
+        path, reason = "cpu", "macOS builds are CPU-only (no CUDA on Apple hardware)."
+    elif gpu_present:
+        path, reason = "gpu", "GPU acceleration active."
+    else:
+        path, reason = "cpu", "No compatible NVIDIA GPU detected; scans run on CPU/OpenMP."
+
+    return {
+        "gpu_present": gpu_present,
+        "gpu_count": gpu_count,
+        "gpu_name": _gpu_name() if gpu_present else None,
+        "driver_version": driver_version,
+        "effective_path": path,
+        "reason": reason,
+    }
 
 
 # Model mapping
@@ -1494,19 +1554,24 @@ async def fit_prospect_model(request: ProspectFitRequest):
 # ==================== POINT CLOUD TRIANGULATION ====================
 
 class PointSource(BaseModel):
-    """Tell a downstream endpoint to read points from a file on disk instead
+    """Tell a downstream endpoint to read points from a live cloud SESSION
+    (in-RAM, source of truth) or — only as a fallback — a file on disk, instead
     of an inline `points` array.
 
     Octree-backed clouds keep no positions in the renderer (the geometry lives
     only in the on-disk Potree octree, streamed to the GPU), so skeleton /
-    triangulate / c2m / icp / export read from the original source file here
-    — exactly as the M3 crop path does. The backend has no octree reader; the
-    source file is always the point of truth.
+    triangulate / c2m / icp / export resolve their points here. When `session_id`
+    is set the in-RAM session array is the point of truth (deletions honored, no
+    file re-read); `source_path` is then provenance only and may be empty (e.g. a
+    synthetic-scan session that never had a source file). When there is no session,
+    `source_path` is read from disk.
 
     Resolved by `_read_points_from_source` (defined later, alongside the other
     point-cloud loaders it reuses).
     """
-    source_path: str
+    # Empty/None is valid when `session_id` is set (the session is the source of
+    # truth and source_path is provenance only). Required only for a file source.
+    source_path: Optional[str] = None
     ascii_format: Optional[str] = None
     # Stride-downsample cap. None = full resolution. Stride (not reservoir)
     # preserves spatial uniformity, which skeleton/triangulation depend on.
@@ -1667,8 +1732,13 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
                     max_nn=request.normal_max_nn
                 )
             )
-            # Orient normals consistently
+            # Orient normals consistently. The MST-based orientation can be slow
+            # on a large cloud and is itself uninterruptible, so checkpoint a
+            # cancel on either side of it — otherwise a cancel issued during this
+            # pass isn't honored until the meshing checkpoint below.
+            _ckpt()
             pcd.orient_normals_consistent_tangent_plane(k=15)
+            _ckpt()
 
         mesh = None
         method_used = request.method
@@ -2862,6 +2932,36 @@ _HELIOS_MAX_RETURN_TRIANGLES = 12_000_000
 # A scan looks like a merged multi-scan cloud when its median candidate edge is
 # this many times its 5th-percentile edge (the finest true spacing).
 _HELIOS_MERGED_RATIO = 10.0
+
+
+def _session_hit_positions_for_triangulation(session_id: str) -> "np.ndarray":
+    """Surviving HIT positions (N,3 float64, world coords) of a cloud session,
+    for Helios triangulation. Honors unbaked deletions and ALWAYS excludes sky/
+    miss points — a miss is a ray that hit nothing, projected ~1 km out, never a
+    surface, so it must never be triangulated (it would mesh a phantom shell and,
+    with the post-backfill miss count often exceeding the hits, balloon the run).
+
+    Mirrors the miss exclusion + world-shift add-back of the open3d session feed
+    (see the `src.session_id` branch of the point-source resolver). The session's
+    backfilled-miss buffer lives OUTSIDE `positions`, so it is excluded for free;
+    interleaved `is_miss` points (when present) are dropped via the extra.
+    """
+    import numpy as np
+    sess = _cloud_sessions.get(session_id)
+    if sess is None:
+        raise ValueError(
+            f"Cloud session not found: {session_id}. The backend may have "
+            "restarted since import. Re-import the scan and try again.")
+    with _cloud_session_lock:
+        keep = ~sess.deleted
+        if _MISS_SLUG in sess.extras:
+            keep = keep & (sess.extras[_MISS_SLUG] == 0)
+        positions = sess.positions[keep].copy()
+        world_shift = sess.world_shift
+    positions = positions.astype(np.float64, copy=False)
+    if world_shift is not None:
+        positions = positions + np.asarray(world_shift, dtype=np.float64)
+    return np.ascontiguousarray(positions)
 _HELIOS_MERGED_MESSAGE = (
     "These points look like a merged multi-scan cloud — candidate edges are far "
     "larger than the point spacing, which happens when a single scan actually "
@@ -2986,7 +3086,6 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         tmpdir = tempfile.mkdtemp(prefix="phytograph_helios_")
 
         scans_info = []
-        use_file_paths = any(s.file_path for s in request.scans)
 
         # Per-scan angular geometry comes from the scan's own ScanParameters when
         # present; the request-level values are only a fallback for scans that
@@ -3016,79 +3115,90 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         bb_lo = np.array([np.inf, np.inf, np.inf])
         bb_hi = np.array([-np.inf, -np.inf, -np.inf])
 
-        if use_file_paths:
-            # File-path mode: pyhelios reads scan files directly from disk
-            for idx, scan_entry in enumerate(request.scans):
-                origin = scan_entry.origin
-                if len(origin) != 3:
-                    raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
+        # Resolve each scan's point SOURCE by the same priority the renderer +
+        # LAD use, so the in-RAM arrays stay the source of truth and the file is
+        # never re-read once a session exists:
+        #   1. session_id — a session-backed (octree) cloud: triangulate its
+        #      surviving in-RAM HIT positions (deletions honored, MISSES EXCLUDED).
+        #      Written to a temp x-y-z file so Helios reconstructs theta/phi from
+        #      (pos - origin) exactly as for any scan file.
+        #   2. file_path — a file-backed cloud with no session: Helios reads it
+        #      directly from disk (no huge JSON, original columns preserved).
+        #   3. inline points — a flat in-RAM cloud (e.g. synthetic scan).
+        # A session_id whose session is gone (backend restarted) falls back to
+        # file_path when the entry carries one, else errors.
+        for idx, scan_entry in enumerate(request.scans):
+            origin = scan_entry.origin
+            if len(origin) != 3:
+                raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
 
+            theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
+
+            session_id = scan_entry.session_id
+            session_present = False
+            if session_id is not None:
+                with _cloud_session_lock:
+                    session_present = session_id in _cloud_sessions
+
+            if session_id is not None and session_present:
+                # Session source of truth: hits only, misses excluded.
+                xyz = _session_hit_positions_for_triangulation(session_id)
+                if xyz.shape[0] == 0:
+                    raise ValueError(
+                        "The edited point cloud has no surviving hit points to "
+                        "triangulate (all points deleted or only misses remain).")
+                bb_lo = np.minimum(bb_lo, xyz.min(axis=0))
+                bb_hi = np.maximum(bb_hi, xyz.max(axis=0))
+                pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
+                np.savetxt(pts_path, xyz, fmt="%.6g", delimiter=" ")
+                n_theta, n_phi = _resolution(
+                    scan_entry, xyz.shape[0], theta_max - theta_min, phi_max - phi_min)
+                fmt = "x y z"
+                fp = pts_path
+            elif scan_entry.file_path:
+                # File-path mode: pyhelios reads the scan file directly from disk.
                 fp = scan_entry.file_path
                 if not fp or not os.path.isfile(fp):
                     raise ValueError(f"Scan file not found: {fp}")
-
-                # Auto-detect ASCII format if not specified
                 fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
-
-                theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
-
-                # One pass per file gives both the point count (resolution
-                # fallback) and the bounds (auto-grid). Cheap relative to the
-                # triangulation itself.
                 n_points, lo, hi = _file_xyz_bounds(fp, fmt)
                 if lo is not None:
                     bb_lo = np.minimum(bb_lo, lo)
                     bb_hi = np.maximum(bb_hi, hi)
                 n_theta, n_phi = _resolution(
                     scan_entry, n_points, theta_max - theta_min, phi_max - phi_min)
-
-                scans_info.append({
-                    "filepath": fp,
-                    "ascii_format": fmt,
-                    "origin": origin,
-                    "n_theta": n_theta,
-                    "n_phi": n_phi,
-                    "theta_min": theta_min,
-                    "theta_max": theta_max,
-                    "phi_min": phi_min,
-                    "phi_max": phi_max,
-                })
-        else:
-            # Points mode (fallback): write points to temp files
-            for idx, scan_entry in enumerate(request.scans):
-                origin = scan_entry.origin
-                if len(origin) != 3:
-                    raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
-
+            elif scan_entry.session_id is not None:
+                # session_id given but the session is gone and no file fallback.
+                raise ValueError(
+                    f"Cloud session not found: {scan_entry.session_id}. The "
+                    "backend may have restarted since import. Re-import the scan "
+                    "and try again.")
+            else:
+                # Points mode (fallback): write inline points to a temp file.
                 points = scan_entry.points
                 if not points:
-                    raise ValueError("Scan entry has no points and no file_path")
-
+                    raise ValueError("Scan entry has no points, file_path, or session_id")
                 pts_arr_scan = np.asarray(points, dtype=float)
                 bb_lo = np.minimum(bb_lo, pts_arr_scan[:, :3].min(axis=0))
                 bb_hi = np.maximum(bb_hi, pts_arr_scan[:, :3].max(axis=0))
-
                 pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
-                # Bulk-serialize x y z (np.savetxt) rather than a per-point
-                # Python write loop. Points-mode is the small-cloud fallback;
-                # large scans use file_path, which pyhelios reads directly.
                 np.savetxt(pts_path, pts_arr_scan[:, :3], fmt="%.6g", delimiter=" ")
-
-                theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
                 n_theta, n_phi = _resolution(
                     scan_entry, len(points), theta_max - theta_min, phi_max - phi_min)
+                fmt = "x y z"
+                fp = pts_path
 
-                scans_info.append({
-                    "filepath": pts_path,
-                    "ascii_format": "x y z",
-                    "origin": origin,
-                    "n_theta": n_theta,
-                    "n_phi": n_phi,
-                    "theta_min": theta_min,
-                    "theta_max": theta_max,
-                    "phi_min": phi_min,
-                    "phi_max": phi_max,
-                })
+            scans_info.append({
+                "filepath": fp,
+                "ascii_format": fmt,
+                "origin": origin,
+                "n_theta": n_theta,
+                "n_phi": n_phi,
+                "theta_min": theta_min,
+                "theta_max": theta_max,
+                "phi_min": phi_min,
+                "phi_max": phi_max,
+            })
 
         # Resolve the grid. An explicit grid (from a voxel box in the UI) is used
         # verbatim. Otherwise auto-create a single cell tightly enclosing all
@@ -5510,6 +5620,10 @@ class LidarScanMesh(BaseModel):
     colors: Optional[List[List[float]]] = None  # per-vertex [[r, g, b], ...] (0-1)
     uv_coordinates: Optional[List[List[float]]] = None  # per-vertex [[u, v], ...]
     materials: Optional[List[LidarScanMaterial]] = None  # textured material groups
+    # Optional per-triangle organ-type code (parallel to `triangles`). Sent only
+    # when the user opts into organ carry; stamped onto primitives so the scan can
+    # sample it per hit (see _load_scan_mesh / _ORGAN_LABEL_TO_CODE).
+    organ_codes: Optional[List[int]] = None
 
 
 class LidarScanScanner(BaseModel):
@@ -5724,6 +5838,13 @@ def _load_scan_mesh(ctx, mesh: "LidarScanMesh", tmpdir: str) -> None:
     if mesh.colors and len(mesh.colors) == len(verts):
         colors = np.asarray(mesh.colors, dtype=np.float32)
 
+    # Optional per-triangle organ codes (sent only when the user opts in). When
+    # present they're stamped onto the loaded primitives as "organ" int data so
+    # the synthetic scan samples organ type per hit (LiDAR.cpp column_format).
+    organ_arr = None
+    if mesh.organ_codes is not None and len(mesh.organ_codes) == len(tris):
+        organ_arr = np.asarray(mesh.organ_codes, dtype=np.int32)
+
     # Decide which triangles are textured. We need per-vertex UVs (one [u,v] per
     # vertex) and at least one material that carries a usable texture image. If
     # any precondition fails we fall back to the plain color path for the whole
@@ -5759,7 +5880,10 @@ def _load_scan_mesh(ctx, mesh: "LidarScanMesh", tmpdir: str) -> None:
 
     if not textured_assignment:
         # No usable textures — original color-only path for the whole mesh.
-        ctx.addTrianglesFromArrays(verts, tris, colors=colors)
+        uuids = ctx.addTrianglesFromArrays(verts, tris, colors=colors)
+        if organ_arr is not None and uuids:
+            # addTrianglesFromArrays returns UUIDs in input-triangle order.
+            ctx.setPrimitiveDataInt(list(uuids), "organ", organ_arr.tolist())
         return
 
     textured_tri_idx = np.array(sorted(textured_assignment.keys()), dtype=np.int64)
@@ -5773,15 +5897,38 @@ def _load_scan_mesh(ctx, mesh: "LidarScanMesh", tmpdir: str) -> None:
     material_ids = np.array(
         [textured_assignment[int(ti)] for ti in textured_tri_idx], dtype=np.uint32
     )
-    ctx.addTrianglesFromArraysTextured(
-        verts, tex_tris, uvs, texture_files, material_ids=material_ids
-    )
+    if organ_arr is None:
+        # Default path: one bulk multi-textured call (unchanged behavior).
+        ctx.addTrianglesFromArraysTextured(
+            verts, tex_tris, uvs, texture_files, material_ids=material_ids
+        )
+    else:
+        # Organ carry on: load one material slot at a time. A single-texture call
+        # returns UUIDs in input-triangle order on both the C++ and fallback
+        # backends, whereas the bulk multi-textured C++ path regroups triangles by
+        # material id — which would scramble a per-triangle organ array. Slotting
+        # keeps the mapping correct regardless of which backend is compiled in.
+        for slot in range(len(texture_files)):
+            local = np.nonzero(material_ids == slot)[0]
+            if len(local) == 0:
+                continue
+            slot_uuids = ctx.addTrianglesFromArraysTextured(
+                verts, tex_tris[local], uvs, texture_files[slot], material_ids=None
+            )
+            if slot_uuids:
+                slot_codes = [int(organ_arr[textured_tri_idx[p]]) for p in local]
+                ctx.setPrimitiveDataInt(list(slot_uuids), "organ", slot_codes)
 
     # Everything else keeps the flat-color path (stems, flowers, untextured
     # organs that share the mesh).
     rest_tris = tris[~textured_mask]
     if len(rest_tris) > 0:
-        ctx.addTrianglesFromArrays(verts, rest_tris, colors=colors)
+        rest_uuids = ctx.addTrianglesFromArrays(verts, rest_tris, colors=colors)
+        if organ_arr is not None and rest_uuids:
+            # rest_tris is tris[~textured_mask]; organ_arr[~textured_mask] is the
+            # same ascending-index order addTrianglesFromArrays returns.
+            ctx.setPrimitiveDataInt(list(rest_uuids), "organ",
+                                    organ_arr[~textured_mask].tolist())
 
 
 def _apply_return_mode(lidar, scan_id: int, s: "LidarScanScanner",
@@ -8883,6 +9030,9 @@ class PlantGenerationResponse(BaseModel):
     materials: Optional[List[PlantMaterial]] = None  # Material definitions
     material_groups: Optional[List[PlantMaterialGroup]] = None  # Triangle-to-material mapping
     textures: Optional[Dict[str, str]] = None  # {texture_name: base64_png_data}
+    # Per-triangle organ-type code (see _ORGAN_LABEL_TO_CODE / ORGAN_SCHEME),
+    # parallel to `indices`. Lets a synthetic scan label hits by organ.
+    organ_codes: Optional[List[int]] = None
     vertex_count: int
     triangle_count: int
     plant_type: str
@@ -8972,6 +9122,7 @@ class PlantSessionAdvanceResponse(BaseModel):
     materials: Optional[List[PlantMaterial]] = None
     material_groups: Optional[List[PlantMaterialGroup]] = None
     textures: Optional[Dict[str, str]] = None
+    organ_codes: Optional[List[int]] = None  # per-triangle organ code, parallel to indices
     vertex_count: int
     triangle_count: int
     error: Optional[str] = None
@@ -9559,6 +9710,36 @@ async def get_available_plant_models():
 
 # ==================== PLANT SESSION ENDPOINTS ====================
 
+# Organ-type labels Helios writes as the "object_label" primitive-data string on
+# plant-architecture geometry, mapped to small int codes that survive the synthetic
+# scan's numeric per-hit sampling (getHitDataArray is float32; a string label can't
+# ride it). MIRROR of ORGAN_SCHEME in src/renderer/lib/classification.ts — keep the
+# codes in sync. Unknown/absent labels collapse to 0.
+_ORGAN_LABEL_TO_CODE = {
+    "unknown": 0,
+    "leaf": 1,
+    "petiole": 2,
+    "shoot": 3,       # internode tube primitives
+    "peduncle": 4,
+    "fruit": 5,
+    "petiolule": 6,
+}
+
+
+def _organ_code_for_primitive(context, uuid) -> int:
+    """Read a primitive's Helios ``object_label`` organ tag and map it to a small
+    int code (see ``_ORGAN_LABEL_TO_CODE``). Returns 0 (unknown) when the tag is
+    absent — e.g. imported meshes or organs the model didn't label."""
+    try:
+        if context.doesPrimitiveDataExist(uuid, "object_label"):
+            return _ORGAN_LABEL_TO_CODE.get(
+                context.getPrimitiveData(uuid, "object_label", str), 0
+            )
+    except Exception:
+        pass
+    return 0
+
+
 def _extract_session_geometry(session: PlantSession) -> tuple:
     """
     Extract geometry from an active plant session.
@@ -9593,6 +9774,7 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
     normals = []
     uvs = []
     faces = []
+    organ_codes = []  # per-triangle organ-type code, parallel to faces
     vertex_index = 0
     triangle_index = 0
 
@@ -9617,6 +9799,10 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
         except:
             mat_label = None
             texture_path = None
+
+        # Organ type is constant within an object (a leaf object's primitives are
+        # all leaves); read it once and broadcast to this object's triangles.
+        organ_code = _organ_code_for_primitive(context, first_prim.uuid)
 
         is_textured = texture_path and len(texture_path) > 0
         texture_name_lower = texture_path.lower() if texture_path else ""
@@ -9682,6 +9868,7 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
                     vertex_index += 1
 
                 faces.append(face_indices)
+                organ_codes.append(organ_code)
 
                 if tri_is_textured and mat_label in material_groups_dict:
                     material_groups_dict[mat_label].append(triangle_index)
@@ -9712,6 +9899,7 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
         "materials": materials_list,
         "material_groups": material_groups_list,
         "textures": textures_data if textures_data else None,
+        "organ_codes": organ_codes if organ_codes else None,
     }
 
     return vertices, faces, colors, len(vertices), len(faces), texture_payload
@@ -9869,6 +10057,7 @@ async def advance_plant_session(session_id: str, request: PlantSessionAdvanceReq
             materials=tex["materials"],
             material_groups=tex["material_groups"],
             textures=tex["textures"],
+            organ_codes=tex.get("organ_codes"),
             vertex_count=vertex_count,
             triangle_count=triangle_count
         )
@@ -10179,6 +10368,7 @@ class PlantMorphResponse(BaseModel):
     materials: Optional[List[PlantMaterial]] = None
     material_groups: Optional[List[PlantMaterialGroup]] = None
     textures: Optional[Dict[str, str]] = None
+    organ_codes: Optional[List[int]] = None  # per-triangle organ code, parallel to indices
     vertex_count: int = 0
     triangle_count: int = 0
     current_age: float = 0
@@ -10316,6 +10506,7 @@ async def morph_plant(request: PlantMorphRequest):
             materials=tex["materials"],
             material_groups=tex["material_groups"],
             textures=tex["textures"],
+            organ_codes=tex.get("organ_codes"),
             vertex_count=vertex_count,
             triangle_count=triangle_count,
             current_age=current_age,
@@ -10414,6 +10605,7 @@ async def generate_plant_model(request: PlantGenerationRequest):
                 normals = []   # Per-vertex normals
                 uvs = []       # Per-vertex UV coordinates (for textured objects)
                 faces = []     # Triangle indices (for compatibility)
+                organ_codes = []  # Per-triangle organ-type code, parallel to faces
 
                 # Track materials and their triangles
                 materials_dict = {}  # material_name -> PlantMaterial
@@ -10441,6 +10633,9 @@ async def generate_plant_model(request: PlantGenerationRequest):
                     except:
                         mat_label = None
                         texture_path = None
+
+                    # Organ type is constant within an object; read once, broadcast per triangle.
+                    organ_code = _organ_code_for_primitive(context, first_prim.uuid)
 
                     # Determine if this object is textured
                     is_textured = texture_path and len(texture_path) > 0
@@ -10557,6 +10752,7 @@ async def generate_plant_model(request: PlantGenerationRequest):
                             vertex_index += 1
 
                         faces.append(tri_indices)
+                        organ_codes.append(organ_code)
 
                         # Track which material this triangle uses (only when it
                         # actually has texture coordinates to sample with)
@@ -10611,6 +10807,7 @@ async def generate_plant_model(request: PlantGenerationRequest):
                     materials=materials_list,
                     material_groups=material_groups_list,
                     textures=textures_data if textures_data else None,
+                    organ_codes=organ_codes if organ_codes else None,
                     vertex_count=len(vertices),
                     triangle_count=len(faces),
                     plant_type=request.plant_type,
@@ -10649,7 +10846,8 @@ def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -
     are processed, so a streaming caller can report extraction progress.
 
     Returns (vertices, faces, colors, normals, uvs, materials_list,
-             material_groups_list, textures_data).
+             material_groups_list, textures_data, organ_codes) where organ_codes
+             is a per-triangle organ-type code (see _ORGAN_LABEL_TO_CODE).
     """
     import os
     import base64
@@ -10662,6 +10860,7 @@ def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -
     normals = []
     uvs = []
     faces = []
+    organ_codes = []  # per-triangle organ-type code, parallel to faces
     vertex_index = 0
     triangle_index = 0
 
@@ -10687,6 +10886,9 @@ def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -
         except Exception:
             mat_label = None
             texture_path = None
+
+        # Organ type is constant within an object; read once, broadcast per triangle.
+        organ_code = _organ_code_for_primitive(context, first_prim.uuid)
 
         is_textured = texture_path and len(texture_path) > 0
         texture_name_lower = texture_path.lower() if texture_path else ""
@@ -10750,6 +10952,7 @@ def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -
                     vertex_index += 1
 
                 faces.append(face_indices)
+                organ_codes.append(organ_code)
 
                 if tri_is_textured and mat_label in material_groups_dict:
                     material_groups_dict[mat_label].append(triangle_index)
@@ -10778,7 +10981,7 @@ def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -
 
     return (
         vertices, faces, colors, normals, uvs,
-        materials_list, material_groups_list, textures_data,
+        materials_list, material_groups_list, textures_data, organ_codes,
     )
 
 
@@ -10866,7 +11069,7 @@ async def generate_plant_canopy(request: PlantCanopyRequest):
                 print(f"[Plant Canopy] Built {len(plant_ids)} plants; extracting geometry...")
 
                 (vertices, faces, colors, normals, uvs,
-                 materials_list, material_groups_list, textures_data) = \
+                 materials_list, material_groups_list, textures_data, organ_codes) = \
                     _extract_context_plant_geometry(context, is_woody)
 
                 # XML export: a canopy is not a morph target, so write the first
@@ -10897,6 +11100,7 @@ async def generate_plant_canopy(request: PlantCanopyRequest):
                     materials=materials_list,
                     material_groups=material_groups_list,
                     textures=textures_data if textures_data else None,
+                    organ_codes=organ_codes if organ_codes else None,
                     vertex_count=len(vertices),
                     triangle_count=len(faces),
                     plant_type=request.plant_type,
@@ -11046,7 +11250,7 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                 progress_queue.put(("progress", 0.6 + max(0.0, min(frac, 1.0)) * 0.35, "Packing geometry..."))
 
             (vertices, faces, colors, normals, uvs,
-             materials_list, material_groups_list, textures_data) = \
+             materials_list, material_groups_list, textures_data, organ_codes) = \
                 _extract_context_plant_geometry(context, is_woody, progress_cb=extract_progress)
 
             # Plant structure XML (first/only plant).
@@ -11073,6 +11277,7 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                 "materials": [m.model_dump() for m in materials_list] if materials_list else None,
                 "material_groups": [g.model_dump() for g in material_groups_list] if material_groups_list else None,
                 "textures": textures_data if textures_data else None,
+                "organ_codes": organ_codes if organ_codes else None,
                 "vertex_count": len(vertices),
                 "triangle_count": len(faces),
                 "plant_type": request.plant_type,
@@ -13202,6 +13407,13 @@ def _read_points_from_source(
         colors = None
         intensity = None
     else:
+        if not src.source_path:
+            raise HTTPException(
+                status_code=400,
+                detail=("Point source has neither a session_id nor a source_path. "
+                        "A session-backed cloud must send its session_id; a "
+                        "file-backed cloud must send source_path."),
+            )
         positions, colors, intensity = _load_pointcloud_arrays(
             src.source_path, src.ascii_format
         )

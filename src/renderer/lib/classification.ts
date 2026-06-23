@@ -153,13 +153,34 @@ const MISS_SCHEME: CategoricalScheme = {
   ],
 };
 
+// Organ type carried from a Helios plant-architecture model through a synthetic
+// scan: each hit is tagged with the organ it struck. Codes are a MIRROR of
+// _ORGAN_LABEL_TO_CODE in backend-api/main.py — keep them in sync. Semantic
+// colors: leaf/petiolule green, woody-brown shoot, tan petiole/peduncle, red
+// fruit, gray for unlabeled.
+export const ORGAN_ATTRIBUTE = 'organ';
+
+const ORGAN_SCHEME: CategoricalScheme = {
+  attribute: ORGAN_ATTRIBUTE,
+  classes: [
+    { value: 0, label: 'Unknown', color: [0.55, 0.55, 0.55] },
+    { value: 1, label: 'Leaf', color: [0.30, 0.69, 0.31] },
+    { value: 2, label: 'Petiole', color: [0.65, 0.72, 0.30] },
+    { value: 3, label: 'Shoot', color: [0.45, 0.30, 0.15] },
+    { value: 4, label: 'Peduncle', color: [0.78, 0.60, 0.32] },
+    { value: 5, label: 'Fruit', color: [0.82, 0.26, 0.24] },
+    { value: 6, label: 'Petiolule', color: [0.40, 0.60, 0.45] },
+  ],
+};
+
 // Registry of known categorical schemes, keyed by attribute slug. Future
-// classifications (organ type, semantic labels, …) register here and get
-// discrete coloring + a legend for free.
+// classifications (semantic labels, …) register here and get discrete coloring
+// + a legend for free.
 const SCHEMES: Record<string, CategoricalScheme> = {
   [GROUND_CLASS_ATTRIBUTE]: GROUND_SCHEME,
   [WOOD_CLASS_ATTRIBUTE]: WOOD_SCHEME,
   [MISS_ATTRIBUTE]: MISS_SCHEME,
+  [ORGAN_ATTRIBUTE]: ORGAN_SCHEME,
 };
 
 // True when `slug` has a STATIC registered scheme (is_miss, ground_class, …) —
