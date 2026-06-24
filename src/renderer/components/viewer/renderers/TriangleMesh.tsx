@@ -28,9 +28,15 @@ export interface TriangleMeshProps {
   // The offset is in depth-buffer units, not world space, so it doesn't visibly
   // move the surface. Default false = no offset.
   polygonOffset?: boolean;
+  // Write depth even when translucent. Normally a translucent surface skips the
+  // depth write (so you can see through it), but the ground plane must stay the
+  // stable z=0 occluder the GroundGrid fix assumes — without a depth write it and
+  // the coplanar grid/scan points flicker even while the camera is static.
+  // Default false = follow the opaque⇄translucent rule.
+  forceDepthWrite?: boolean;
 }
 
-export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null, renderOrder = 0, polygonOffset = false }: TriangleMeshProps) {
+export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe = false, useVertexColors = false, triangleColors = null, renderOrder = 0, polygonOffset = false, forceDepthWrite = false }: TriangleMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const hasLoggedRef = useRef(false);
 
@@ -138,7 +144,7 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
     return new THREE.MeshStandardMaterial({
       color: useColorAttr ? 0xffffff : new THREE.Color(color),  // White when using a color attribute
       transparent: isTranslucent,
-      depthWrite: !isTranslucent,
+      depthWrite: forceDepthWrite || !isTranslucent,
       opacity,
       wireframe,
       side: THREE.DoubleSide,
@@ -156,7 +162,7 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
       polygonOffsetFactor: polygonOffset ? 1 : 0,
       polygonOffsetUnits: polygonOffset ? 1 : 0,
     });
-  }, [color, isTranslucent, wireframe, useColorAttr, hasTriangleColors, polygonOffset]);
+  }, [color, isTranslucent, wireframe, useColorAttr, hasTriangleColors, polygonOffset, forceDepthWrite]);
 
   // Update material properties when they change. opacity flows in here (not the
   // memo) so dragging the slider doesn't rebuild the material; transparent /
@@ -170,13 +176,14 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
       mat.opacity = opacity;
       mat.wireframe = wireframe;
       const translucent = opacity < 1;
-      if (mat.transparent !== translucent || mat.depthWrite !== !translucent) {
+      const wantDepthWrite = forceDepthWrite || !translucent;
+      if (mat.transparent !== translucent || mat.depthWrite !== wantDepthWrite) {
         mat.transparent = translucent;
-        mat.depthWrite = !translucent;
+        mat.depthWrite = wantDepthWrite;
         mat.needsUpdate = true;
       }
     }
-  }, [color, opacity, wireframe, useColorAttr]);
+  }, [color, opacity, wireframe, useColorAttr, forceDepthWrite]);
 
   useEffect(() => () => { geometry.dispose(); }, [geometry]);
   useEffect(() => () => { material.dispose(); }, [material]);

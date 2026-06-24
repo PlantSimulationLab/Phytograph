@@ -3,6 +3,7 @@ import { X, Triangle } from 'lucide-react';
 import {
   TriangulationMethod,
   HeliosTriangulationRequest,
+  HeliosGrid,
 } from '../utils/backendApi';
 import type { GridOption } from '../lib/gridOption';
 import type { Scan } from '../lib/scan';
@@ -34,6 +35,14 @@ export type TriangulationStartArgs =
         max: [number, number, number];
         rotationDeg?: number;
       };
+      // The voxel grid this Ball Pivot mesh is PINNED to, so it can later be
+      // re-used as the external triangulation for the leaf-area (LAD) inversion.
+      // Set only for ball_pivoting + a chosen grid + per-scan (NOT merged) — a
+      // merged mesh has no single source scan, so it can't drive LAD. Carries the
+      // grid geometry (for backend per-triangle cell binning) and the source
+      // voxel-box mesh id (so LAD can auto-hide it). Omitted = not LAD-reusable.
+      grid?: HeliosGrid;
+      gridMeshId?: string;
     }
   | {
       kind: 'helios';
@@ -108,14 +117,13 @@ export function TriangulationPopup({
   // Open3D only: false = one mesh per scan, true = merge points into one mesh.
   const [mergeScans, setMergeScans] = useState(false);
 
-  // Which voxel box (if any) drives the Helios grid. Empty string = auto-grid.
+  // Which voxel box (if any) drives the grid. Empty string = "Auto" (no grid).
+  // Shared by BOTH the Helios path (bounds the triangulation region) and the Ball
+  // Pivot path (pins the mesh to the box so it can later be re-used for the LAD
+  // inversion; points outside the box are cropped before meshing). One selector,
+  // one source of truth — a ball-pivot mesh is LAD-reusable only when a real box
+  // is chosen here AND the mesh is built per-scan (not merged).
   const [selectedGridId, setSelectedGridId] = useState<string>('');
-
-  // Ball Pivot "Crop to grid": when on, points outside the chosen voxel box are
-  // dropped before meshing. `cropGridId` empty = "Auto — fit to all points",
-  // which is a no-op crop (mesh everything), kept for UX parity with Helios.
-  const [cropToGrid, setCropToGrid] = useState(false);
-  const [cropGridId, setCropGridId] = useState<string>('');
 
   const [localError, setLocalError] = useState<string | null>(null);
 
@@ -169,41 +177,23 @@ export function TriangulationPopup({
     [gridOptions, selectedGridId],
   );
 
-  // Keep the crop-grid selection valid as boxes come and go; reset the toggle
-  // when the popup reopens so it doesn't silently persist a stale crop. Default
-  // to the first real grid in the scene when one exists (matching the Helios
-  // grid selector) — a present voxel box is almost always the region the user
-  // means to crop to — and fall back to the point-bounding "Auto" option only
-  // when there are no grids.
-  useEffect(() => {
-    if (!isOpen) return;
-    setCropToGrid(false);
-    setCropGridId(prev =>
-      gridOptions.some(g => g.id === prev) ? prev : (gridOptions[0]?.id ?? ''),
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, gridOptions]);
-
-  const cropGrid = useMemo(
-    () => gridOptions.find(g => g.id === cropGridId) ?? null,
-    [gridOptions, cropGridId],
-  );
-
-  // The crop AABB sent to the backend: a real voxel box → its world min/max
-  // (center ± size/2); "Auto — fit to all points" (no box) → no crop. Null when
-  // the toggle is off or no real box is chosen.
+  // The crop AABB derived from the selected grid box (Ball Pivot path): its world
+  // min/max (center ± size/2). Used to drop points outside the box before meshing
+  // so the pinned mesh contains only in-grid geometry. Null when no real box is
+  // chosen ("Auto — fit to all points" = no crop). Method-gated by the caller, so
+  // it's safe to derive unconditionally here.
   const cropBox = useMemo(() => {
-    if (!cropToGrid || !cropGrid) return null;
-    const [cx, cy, cz] = cropGrid.grid.center;
-    const [sx, sy, sz] = cropGrid.grid.size;
+    if (!selectedGrid) return null;
+    const [cx, cy, cz] = selectedGrid.grid.center;
+    const [sx, sy, sz] = selectedGrid.grid.size;
     return {
       min: [cx - sx / 2, cy - sy / 2, cz - sz / 2] as [number, number, number],
       max: [cx + sx / 2, cy + sy / 2, cz + sz / 2] as [number, number, number],
       // Carry the grid's azimuthal rotation so the backend crops the rotated box
       // (the min/max above are the box's AXIS-ALIGNED extent before rotation).
-      ...(cropGrid.grid.rotation ? { rotationDeg: cropGrid.grid.rotation } : {}),
+      ...(selectedGrid.grid.rotation ? { rotationDeg: selectedGrid.grid.rotation } : {}),
     };
-  }, [cropToGrid, cropGrid]);
+  }, [selectedGrid]);
 
   const toggleScan = useCallback((scanId: string) => {
     setSelectedScanIds(prev => {
@@ -277,9 +267,17 @@ export function TriangulationPopup({
       const r = parseFloat(radiusStr);
       if (Number.isFinite(r) && r > 0) args.radii = [r];
     }
-    // Crop to grid (Ball Pivot only): attach the AABB when a real box is chosen.
+    // Grid pin (Ball Pivot only): crop points to the chosen box, and — when the
+    // mesh is built PER-SCAN (not merged) — pin it to the grid so it can later be
+    // re-used for the leaf-area (LAD) inversion. A merged mesh fuses multiple
+    // scans with no single source scan, so it's never LAD-reusable: crop it, but
+    // don't attach the LAD pin (grid/gridMeshId).
     if (method === 'ball_pivoting' && cropBox) {
       args.cropBox = cropBox;
+      if (!mergeScans && selectedGrid) {
+        args.grid = selectedGrid.grid;
+        args.gridMeshId = selectedGrid.id;
+      }
     }
     onStartTriangulate(args);
     onClose();
@@ -495,45 +493,55 @@ export function TriangulationPopup({
                   </p>
                 )}
 
-                {/* Crop to grid: drop points outside a voxel box before meshing. */}
+                {/* Grid: pin the mesh to a voxel box. Same selector pattern as the
+                    Helios path. Choosing a box crops points to it before meshing
+                    AND — when triangulating per-scan — pins the mesh so it can be
+                    re-used for the leaf-area (LAD) inversion. */}
                 <div className="border-t border-neutral-700/60 mt-4 pt-3">
-                  <label className="flex items-center gap-2 text-[11px] text-neutral-300 cursor-pointer">
-                    <input
-                      data-testid="triangulation-crop-toggle"
-                      type="checkbox"
-                      checked={cropToGrid}
-                      onChange={(e) => setCropToGrid(e.target.checked)}
-                      className="rounded bg-neutral-700 border-neutral-600 text-green-500 focus:ring-0 focus:ring-offset-0"
-                    />
-                    Crop to grid
-                  </label>
-                  <p className="text-[9px] text-neutral-500 mt-0.5">
-                    Triangulate only the points inside a voxel box.
+                  <label className="text-xs font-medium text-neutral-300 block mb-1">Grid</label>
+                  <p className="text-[9px] text-neutral-500 mb-2">
+                    Pin the mesh to a voxel box to crop points to it and make the mesh
+                    re-usable for the leaf-area (LAD) inversion.
                   </p>
-                  {cropToGrid && (
-                    <div className="mt-2">
-                      <select
-                        data-testid="triangulation-crop-grid-select"
-                        value={cropGridId}
-                        onChange={(e) => setCropGridId(e.target.value)}
-                        className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                  <select
+                    data-testid="triangulation-grid-select"
+                    value={selectedGridId}
+                    onChange={(e) => setSelectedGridId(e.target.value)}
+                    className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                  >
+                    <option value="">Auto — fit to all points (no pin)</option>
+                    {gridOptions.map(g => (
+                      <option key={g.id} value={g.id}>{g.label}</option>
+                    ))}
+                  </select>
+                  {selectedGrid ? (
+                    mergeScans ? (
+                      <p
+                        className="text-[9px] text-amber-300/80 mt-1"
+                        data-testid="triangulation-grid-merge-note"
                       >
-                        <option value="">Auto — fit to all points (no crop)</option>
-                        {gridOptions.map(g => (
-                          <option key={g.id} value={g.id}>{g.label}</option>
-                        ))}
-                      </select>
-                      {cropGrid ? (
-                        <p className="text-[9px] text-neutral-500 mt-1" data-testid="triangulation-crop-grid-summary">
-                          Cropping to: {cropGrid.label}
-                        </p>
-                      ) : (
-                        <p className="text-[9px] text-amber-300/80 mt-1" data-testid="triangulation-crop-allpoints-note">
-                          No grid box selected — all points are triangulated (create a
-                          voxel box in the viewer to crop to a region).
-                        </p>
-                      )}
-                    </div>
+                        Cropping to {selectedGrid.label}, but a merged mesh can’t be
+                        used for the leaf-area inversion (no single source scan).
+                        Triangulate each scan separately to make it LAD-reusable.
+                      </p>
+                    ) : (
+                      <p
+                        className="text-[9px] text-neutral-500 mt-1"
+                        data-testid="triangulation-grid-summary"
+                      >
+                        Pinned to {selectedGrid.label} — re-usable for the leaf-area
+                        inversion.
+                      </p>
+                    )
+                  ) : (
+                    <p
+                      className="text-[9px] text-amber-300/80 mt-1"
+                      data-testid="triangulation-grid-allpoints-note"
+                    >
+                      No grid box selected — all points are triangulated and the mesh
+                      can’t be used for the leaf-area inversion (create a voxel box in
+                      the viewer and select it here to pin the mesh to it).
+                    </p>
                   )}
                 </div>
               </div>

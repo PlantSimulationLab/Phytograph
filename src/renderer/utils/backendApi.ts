@@ -42,6 +42,13 @@ export interface TriangulationRequest {
   // Non-zero → the backend crops the ROTATED box, not its AABB (crop_box gives
   // the box's axis-aligned extent before rotation). Omit/0 = axis-aligned.
   crop_box_rotation_deg?: number;
+  // PIN this triangulation to a voxel grid so the mesh can later be re-used as the
+  // external triangulation for the leaf-area (LAD) inversion. The renderer also
+  // sets crop_box from the SAME grid (so points outside the box are dropped before
+  // meshing); `grid` drives the per-triangle cell binning the response echoes back
+  // (triangleCellIds), which the LAD reuse path uses to keep only in-grid
+  // triangles. Omit = not pinned (mesh isn't LAD-reusable).
+  grid?: HeliosGrid;
   // Ball pivoting parameters
   radii?: number[];
   // Poisson parameters
@@ -71,6 +78,9 @@ export interface TriangulationResult {
   // pointsUsed < cloud size, which a crop alone also makes true — gate the
   // "downsampled" warning on THIS, not on the count comparison.
   downsampled?: boolean;
+  // Per-triangle grid cell (0xffffffff = outside) when the request pinned the
+  // mesh to a `grid`. Aligned 1:1 with `triangles`. Undefined when not pinned.
+  triangleCellIds?: Uint32Array;
 }
 
 import { BACKEND_PORT_PROD } from '../../shared/constants';
@@ -202,6 +212,7 @@ export async function triangulatePointCloud(
     methodUsed: meta.method_used as string,
     pointsUsed: meta.points_used as number | undefined,
     downsampled: meta.downsampled as boolean | undefined,
+    triangleCellIds: buffers.triangle_cell_ids as Uint32Array | undefined,
   };
 }
 

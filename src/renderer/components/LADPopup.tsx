@@ -29,6 +29,17 @@ export interface LADTriangulationOption {
   gridMeshId?: string;
 }
 
+// A triangulation that CANNOT be reused for LAD, with a user-facing reason and a
+// hint at the fix. Rendered as a disabled option in the triangulation dropdown so
+// the user sees why their mesh is absent and what to do — rather than it silently
+// not appearing. Currently only ball-pivot meshes that fall short of the
+// per-scan + scan-position + pinned-to-grid eligibility rule.
+export interface IneligibleTriangulation {
+  id: string;
+  label: string;
+  reason: string;  // short phrase, e.g. "merged — re-triangulate per-scan"
+}
+
 interface LADPopupProps {
   isOpen: boolean;
   onClose: () => void;
@@ -50,9 +61,12 @@ interface LADPopupProps {
   // triangulation is reused) the compute button is disabled and the user is told
   // to create a voxel box.
   gridOptions?: GridOption[];
-  // Existing Helios triangulations the user can reuse instead of running a new
-  // one. Reusing one locks the scans, grid, and lmax/aspect to that mesh.
+  // Existing triangulations the user can reuse instead of running a new one.
+  // Reusing one locks the scans, grid, and lmax/aspect to that mesh.
   triangulationOptions?: LADTriangulationOption[];
+  // Triangulations that exist but can't be reused (e.g. a merged or unpinned
+  // ball-pivot mesh), shown as disabled dropdown entries explaining why.
+  ineligibleTriangulations?: IneligibleTriangulation[];
   // Pre-fill Lmax / max aspect ratio from the filter the user dialed in on a
   // Helios triangulation mesh, so the inversion bakes in that filtering. Still
   // editable here. Omitted → fall back to the standard defaults.
@@ -78,6 +92,7 @@ export function LADPopup({
   initialSelectedIds,
   gridOptions = [],
   triangulationOptions = [],
+  ineligibleTriangulations = [],
   defaultLmax,
   defaultMaxAspectRatio,
   onBackfill,
@@ -313,10 +328,12 @@ export function LADPopup({
         </div>
 
         <div className="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
-          {/* Triangulation source: run a new one, or reuse an existing Helios
-              mesh (which locks the scans, grid, and lmax/aspect to reproduce its
-              G-function). Only shown when reusable triangulations exist. */}
-          {triangulationOptions.length > 0 && (
+          {/* Triangulation source: run a new one, or reuse an existing mesh (which
+              locks the scans, grid, and lmax/aspect to reproduce its G-function).
+              Shown when any triangulation exists — reusable ones are selectable;
+              ineligible ones (e.g. a merged/unpinned ball-pivot mesh) appear
+              disabled with the reason so the user knows why and how to fix it. */}
+          {(triangulationOptions.length > 0 || ineligibleTriangulations.length > 0) && (
             <div>
               <label className="text-xs font-medium text-neutral-300 block mb-1">Triangulation</label>
               <select
@@ -328,6 +345,11 @@ export function LADPopup({
                 <option value="">Run a new triangulation</option>
                 {triangulationOptions.map(t => (
                   <option key={t.id} value={t.id}>Reuse: {t.label}</option>
+                ))}
+                {ineligibleTriangulations.map(t => (
+                  <option key={t.id} value="" disabled data-testid="lad-triangulation-ineligible">
+                    {`⛔ ${t.label} — ${t.reason}`}
+                  </option>
                 ))}
               </select>
               {reuseTri && (

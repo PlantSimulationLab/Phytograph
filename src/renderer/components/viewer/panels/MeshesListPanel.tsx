@@ -355,6 +355,11 @@ interface MeshesListPanelProps {
   // Run the opt-in point-spacing cross-check on a Helios mesh (offered when the
   // Otsu indicators aren't both High). Writes the verdict to mesh.heliosSpacingCheck.
   onCheckSpacing: (id: string) => void;
+  // Why this (ball-pivot) mesh can't be re-used for the leaf-area (LAD) inversion,
+  // or null if it can (or LAD doesn't apply). Surfaced as a one-line note on the
+  // mesh row so the reason is visible where the mesh lives, not only in the LAD
+  // dialog. Computed in the parent (it needs the scan list for the position check).
+  ladIneligibilityReason?: (mesh: MeshEntry) => string | null;
 }
 
 export function MeshesListPanel({
@@ -397,6 +402,7 @@ export function MeshesListPanel({
   onOpenLeafAngles,
   onHeliosFilterChange,
   onCheckSpacing,
+  ladIneligibilityReason,
 }: MeshesListPanelProps) {
   return (
     <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
@@ -672,6 +678,35 @@ export function MeshesListPanel({
                     )}
                   </div>
                 )}
+                {/* Leaf-area (LAD) reusability note for a ball-pivot mesh. Eligible
+                    meshes (pinned per-scan, scan has a position) say so; ineligible
+                    ones explain why and how to fix it — visible here on the mesh, not
+                    only buried in the LAD dialog. */}
+                {mesh.method === 'ball_pivoting' && (() => {
+                  const reason = ladIneligibilityReason?.(mesh) ?? null;
+                  if (reason) {
+                    return (
+                      <div
+                        className="flex items-start gap-1 text-[10px] text-amber-300/90"
+                        data-testid="mesh-lad-ineligible-note"
+                      >
+                        <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                        <span>Can’t be used for leaf-area inversion: {reason}.</span>
+                      </div>
+                    );
+                  }
+                  if (mesh.data.grid && mesh.data.triangleCellIds) {
+                    return (
+                      <div
+                        className="text-[10px] text-green-400/80"
+                        data-testid="mesh-lad-ready-note"
+                      >
+                        Pinned to a grid — re-usable for leaf-area inversion.
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
                 {/* Interactive Lmax / aspect filter — on any triangulated mesh
                     that carries the candidate metrics (Helios meshes from the
                     backend; Open3D meshes get them computed client-side at build

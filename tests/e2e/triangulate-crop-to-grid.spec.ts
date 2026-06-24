@@ -4,17 +4,17 @@ import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 
-// Drives the Ball Pivot "Crop to grid" option end-to-end against the LIVE
-// backend. ground_plants.xyz is a dense ground-cover surface of 2200 points
-// spanning x,y ∈ [-1, 1]; a default voxel box is a 1×1×1 m cube at the origin,
-// so cropping to it keeps the central 729 points (which ball-pivoting reliably
-// meshes). We assert the cropped mesh's provenance reports fewer points used
-// than the full cloud — proof the backend numpy mask subset the points before
-// meshing.
+// Drives the Ball Pivot "Grid" pin (which crops points to the chosen voxel box)
+// end-to-end against the LIVE backend. ground_plants.xyz is a dense ground-cover
+// surface of 2200 points spanning x,y ∈ [-1, 1]; a default voxel box is a 1×1×1 m
+// cube at the origin, so pinning to it keeps the central 729 points (which
+// ball-pivoting reliably meshes). We assert the cropped mesh's provenance reports
+// fewer points used than the full cloud — proof the backend numpy mask subset the
+// points before meshing.
 //
-// Per CLAUDE.md E2E rules: live backend, real UI (create the voxel box, toggle
-// the option, pick the grid, run), concrete output assertion (points-used count
-// strictly below the full cloud), not "didn't throw".
+// Per CLAUDE.md E2E rules: live backend, real UI (create the voxel box, pick the
+// grid, run), concrete output assertion (points-used count strictly below the
+// full cloud), not "didn't throw".
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants.xyz');
 const FULL_COUNT = 2200;
 
@@ -42,21 +42,19 @@ test('Ball Pivot crop-to-grid meshes only the points inside the voxel box', asyn
     await cloudRow.getByTestId('scan-row-name').click();
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
-    // --- Triangulate: Ball Pivot + Crop to grid ----------------------------
+    // --- Triangulate: Ball Pivot pinned to the voxel grid ------------------
     await page.getByTestId('tool-triangulate').click();
     const modal = page.getByTestId('triangulation-popup');
     await expect(modal).toBeVisible();
     await modal.getByTestId('triangulation-method').selectOption('ball_pivoting');
 
-    // The crop toggle is Ball-Pivot-only; turn it on and pick the voxel box.
-    const cropToggle = modal.getByTestId('triangulation-crop-toggle');
-    await expect(cropToggle).toBeVisible();
-    await cropToggle.check();
-    const cropSelect = modal.getByTestId('triangulation-crop-grid-select');
-    await expect(cropSelect).toBeVisible();
-    // The only option besides "Auto" is the voxel box we just created.
-    await cropSelect.selectOption({ index: 1 });
-    await expect(modal.getByTestId('triangulation-crop-grid-summary')).toBeVisible();
+    // The Grid selector (Ball-Pivot) crops points to the chosen voxel box and pins
+    // the mesh. Index 0 = "Auto" (no pin); index 1 = the voxel box we just created.
+    const gridSelect = modal.getByTestId('triangulation-grid-select');
+    await expect(gridSelect).toBeVisible();
+    await gridSelect.selectOption({ index: 1 });
+    // Per-scan (default) output → the summary confirms it's LAD-re-usable.
+    await expect(modal.getByTestId('triangulation-grid-summary')).toBeVisible();
 
     await modal.getByTestId('triangulation-run-button').click();
 

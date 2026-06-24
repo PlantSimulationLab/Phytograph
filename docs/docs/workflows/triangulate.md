@@ -53,6 +53,17 @@ Method-specific parameters:
       from the median nearest-neighbour spacing of the cloud.
     - Untick it to set the **radius** manually (in meters). A good value
       is ~1.5–2× the average point spacing.
+    - **Grid** — optionally pin the mesh to a voxel box (the same selector the
+      Helios method uses). Pick **Auto — fit to all points (no pin)** for an
+      ordinary mesh, or a voxel box to **crop the points to it** before meshing
+      *and* make the mesh re-usable for the
+      [leaf-area inversion](estimate-leaf-area-density.md). A pinned, per-scan
+      mesh records which grid and scan produced it, so the LAD tool can inject it
+      directly instead of re-triangulating. A **merged** mesh (see *Output*
+      below) can't be pinned for LAD — it has no single source scan — so the
+      selector warns you; triangulate each scan separately to keep it
+      LAD-re-usable. The Meshes panel shows whether a ball-pivot mesh is
+      *"re-usable for leaf-area inversion"* or why it isn't.
 
 === "Poisson"
 

@@ -24,13 +24,17 @@ const DEG = Math.PI / 180;
 // instrument rather than the full (tens-of-metres) scan reach.
 const RADIUS_FACTOR = 5;
 
-// A world-frame point at (zenith from +Z, azimuth from +X CCW about +Z), radius R.
-// World is Z-up; zenith 0 = straight up, 90 = horizon, 180 = straight down.
+// A scanner-local point at (zenith from +Z, azimuth = Helios phi), radius R.
+// Z-up; zenith 0 = straight up, 90 = horizon, 180 = straight down. The azimuth
+// convention MUST match the backend's ray generation: PyHelios `sphere2cart`
+// places phi from +Y, increasing toward +X (x = sin φ, y = cos φ) — NOT the
+// math-standard from-+X (x = cos φ). Using cos/sin here put the shell 90° off
+// (and mirrored) from the actual scan points. See LiDAR.cpp sphere2cart.
 function sph(R: number, zenithDeg: number, azimuthDeg: number): [number, number, number] {
   const t = zenithDeg * DEG;
   const p = azimuthDeg * DEG;
   const s = Math.sin(t);
-  return [R * s * Math.cos(p), R * s * Math.sin(p), R * Math.cos(t)];
+  return [R * s * Math.sin(p), R * s * Math.cos(p), R * Math.cos(t)];
 }
 
 // Push a polyline (consecutive world points) into `out` as disjoint segment pairs,
@@ -53,8 +57,8 @@ function finishGeometry(out: number[]): THREE.BufferGeometry {
 // Raster: a partial lat/long grid over zenith ∈ [zMin,zMax] and azimuth ∈ [aMin,aMax].
 // A full sphere is [0,180]×[0,360]; a banded zenith range drops the top/bottom caps,
 // and an azimuth window narrower than 360° leaves a wedge open. Built in the scanner's
-// own (untilted, zero-heading) frame from +X — the group quaternion applies the
-// heading/tilt (see the component), so azimuthOffset is NOT folded in here.
+// own (untilted, zero-heading) frame with phi from +Y (see sph) — the group quaternion
+// applies the heading/tilt (see the component), so azimuthOffset is NOT folded in here.
 export function buildRasterGeometry(
   R: number,
   p: { zMin: number; zMax: number; aMin: number; aMax: number },
@@ -95,7 +99,7 @@ export function buildRasterGeometry(
 // latitude arc over [aMin,aMax] plus a few radial spokes from the origin out to the
 // ring, suggesting the cone surface. A 0° beam → zenith 90 → every point lands in the
 // z=0 plane, so the ring+spokes degenerate to a flat disk sector automatically (no
-// special case needed). Same local +X frame as the raster builder.
+// special case needed). Same local frame (phi from +Y) as the raster builder.
 export function buildMultibeamGeometry(
   R: number,
   p: { elevations: number[]; aMin: number; aMax: number },

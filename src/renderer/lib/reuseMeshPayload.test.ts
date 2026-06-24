@@ -70,11 +70,45 @@ describe('extractReuseMeshPayload', () => {
       .toThrow(/no longer/i);
   });
 
-  it('throws when the mesh has no per-triangle scan ids', () => {
+  it('throws when a MULTI-scan mesh has no per-triangle scan ids', () => {
+    // With more than one source scan and no triangleScanIds there's no way to
+    // know which scan each triangle came from — must throw rather than guess.
     const mesh = makeMesh([{ edgeMax: 0.1, aspect: 2, scan: 0 }]);
     const noScan: MeshData = { ...mesh, triangleScanIds: undefined };
-    expect(() => extractReuseMeshPayload(noScan, 1, 100, ['A'], ['A']))
+    expect(() => extractReuseMeshPayload(noScan, 1, 100, ['A', 'B'], ['A', 'B']))
       .toThrow(/scan ids/i);
+  });
+
+  it('synthesizes all-zero scan ids for a SINGLE-scan mesh with no scan ids', () => {
+    // A per-scan ball-pivot mesh carries no triangleScanIds: its one source scan
+    // means every triangle is scan index 0. This is the ball-pivot LAD path.
+    const mesh = makeMesh([
+      { edgeMax: 0.1, aspect: 2, scan: 0 },
+      { edgeMax: 0.1, aspect: 2, scan: 0 },
+    ]);
+    const noScan: MeshData = { ...mesh, triangleScanIds: undefined };
+    const payload = extractReuseMeshPayload(noScan, 1, 100, ['A'], ['A']);
+    expect(payload.triangleCount).toBe(2);
+    expect(Array.from(payload.scanIds)).toEqual([0, 0]);
+  });
+
+  it('drops out-of-grid triangles (cell id = outside sentinel)', () => {
+    // The ball-pivot LAD path: only triangles whose centroid is inside the grid
+    // feed the inversion. A mesh has no edge/aspect metrics (filter is a no-op),
+    // a single source scan, and cell ids mixing an in-grid cell and the sentinel.
+    const OUTSIDE = 0xffffffff;
+    const mesh: MeshData = {
+      vertices: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0]),
+      indices: new Uint32Array([0, 1, 2, 1, 3, 2]),
+      vertexCount: 4,
+      triangleCount: 2,
+      triangleCellIds: new Uint32Array([0, OUTSIDE]),
+    };
+    const payload = extractReuseMeshPayload(mesh, 0.1, 4, ['A'], ['A']);
+    // Only the in-grid triangle (cell 0) survives; the sentinel one is dropped.
+    expect(payload.triangleCount).toBe(1);
+    expect(Array.from(payload.indices)).toEqual([0, 1, 2]);
+    expect(Array.from(payload.scanIds)).toEqual([0]);
   });
 });
 

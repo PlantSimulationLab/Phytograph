@@ -1599,6 +1599,31 @@ class PointSource(BaseModel):
     session_id: Optional[str] = None
 
 
+class TriangulationGrid(BaseModel):
+    """A voxel grid to PIN a (ball-pivot / Open3D) triangulation to, so the mesh
+    can later be re-used as the external triangulation for the leaf-area (LAD)
+    inversion. Same shape as ``HeliosGrid`` (defined later in the file), declared
+    separately so ``TriangulationRequest`` doesn't forward-reference it.
+
+    When set on a TriangulationRequest the backend (a) crops points to the grid's
+    world AABB before meshing — so only points inside the box are triangulated —
+    and (b) bins each output triangle's centroid into the grid, returning a
+    per-triangle cell id. The renderer needs both: the crop confines the mesh to
+    the box, and the cell ids let the LAD reuse path drop any triangle whose
+    centroid still falls outside the grid (belt-and-suspenders for "only
+    in-grid triangles feed the inversion")."""
+    center: List[float]  # [x, y, z] world coordinates
+    size: List[float]    # [x, y, z] full extents
+    nx: int = 1
+    ny: int = 1
+    nz: int = 1
+    # Azimuthal rotation about +z (degrees). The renderer crops the ROTATED box
+    # (via crop_box_rotation_deg), so points are confined correctly; the cell
+    # binning here is axis-aligned, but the C++ inversion re-bins each triangle
+    # with a rotation-aware containment test, so a rotated grid is still correct.
+    rotation: float = 0.0
+
+
 class TriangulationRequest(BaseModel):
     """Request model for point cloud triangulation"""
     # Inline points for flat clouds; octree clouds send `source` instead.
@@ -1633,6 +1658,15 @@ class TriangulationRequest(BaseModel):
     # frame, then AABB), so Ball Pivot and Helios crop the identical region.
     # None / ~0 = axis-aligned (the prior behavior).
     crop_box_rotation_deg: Optional[float] = None
+    # PIN this triangulation to a voxel grid so the resulting mesh can later be
+    # re-used as the external triangulation for the leaf-area (LAD) inversion.
+    # When set, each output triangle's centroid is binned into the grid and the
+    # per-triangle cell ids ride back in the response, so the LAD reuse path can
+    # keep only in-grid triangles. The renderer also sets crop_box (+
+    # crop_box_rotation_deg) from the SAME grid so points outside the box are
+    # dropped before meshing — `grid` here is purely the binning/echo channel,
+    # not a second crop. None = not pinned (mesh isn't LAD-reusable).
+    grid: Optional[TriangulationGrid] = None
     # Ball pivoting parameters
     radii: Optional[List[float]] = None  # Ball radii for ball pivoting (auto if None)
     # Poisson parameters
@@ -1664,6 +1698,11 @@ class TriangulationResponse(BaseModel):
     # points. The renderer keys its "downsampled" warning toast off THIS, not off
     # points_used < cloud size (which a crop alone also makes true).
     downsampled: Optional[bool] = None
+    # Per-triangle grid cell (row-major i + nx*(j + ny*k)) when the request pinned
+    # the mesh to a `grid`; -1 (packed as the uint32 sentinel 0xffffffff) means the
+    # centroid fell outside every cell. Aligned 1:1 with `triangles`. Empty when no
+    # grid was supplied. Lets the LAD reuse path keep only in-grid triangles.
+    triangle_cell_ids: List[int] = []
 
 
 def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> dict:
@@ -1962,6 +2001,26 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
         triangles = np.asarray(mesh.triangles)
         normals = np.asarray(mesh.vertex_normals) if mesh.has_vertex_normals() else None
 
+        # Pin to grid: bin each triangle's centroid into the request grid so the
+        # LAD reuse path can keep only in-grid triangles. The renderer already
+        # cropped points to the grid (honoring rotation via crop_box_rotation_deg),
+        # so almost every centroid lands inside; the few that straddle the boundary
+        # get -1 and are dropped downstream. Mirrors the Helios triangulation's
+        # per-triangle cell ids. Cell binning here is axis-aligned (rotation is
+        # ignored for the bin); the C++ setExternalTriangulation re-bins each
+        # centroid with getContainingGridCell, which DOES honor cell rotation, so
+        # a rotated grid is still assigned correctly at inversion time.
+        triangle_cell_ids: list = []
+        if request.grid is not None and triangles.shape[0] > 0:
+            _report(0.97, "Binning into grid")
+            g = request.grid
+            v = vertices[triangles]  # (T, 3, 3)
+            centroids = v.mean(axis=1)  # (T, 3)
+            cells = _bin_points_to_cells(
+                centroids, g.center, g.size, g.nx, g.ny, g.nz
+            )
+            triangle_cell_ids = cells
+
         _report(1.0, "Finalizing")
         return {
             "success": True,
@@ -1974,6 +2033,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
             "method_used": method_used,
             "points_used": points_used,
             "downsampled": was_downsampled,
+            "triangle_cell_ids": triangle_cell_ids,
         }
 
     except ImportError:
@@ -2000,12 +2060,20 @@ def _pack_mesh_frame(result: dict, *, index_key: str = "triangles") -> bytes:
         meta = {k: v for k, v in result.items()
                 if k not in ("vertices", "triangles", "indices", "normals", "colors", "uv_coordinates")}
         return _bin_frame_bytes(meta, [])
-    array_keys = {"vertices", "triangles", "indices", "normals", "colors", "uv_coordinates"}
+    array_keys = {"vertices", "triangles", "indices", "normals", "colors", "uv_coordinates",
+                  "triangle_cell_ids"}
     meta = {k: v for k, v in result.items() if k not in array_keys}
     buffers = [("vertices", result["vertices"], "f32"), ("indices", result[index_key], "u32")]
     for opt in ("normals", "colors", "uv_coordinates"):
         if result.get(opt) is not None:
             buffers.append((opt, result[opt], "f32"))
+    # Per-triangle grid cell ids (ball-pivot LAD pin). Pack like the Helios
+    # triangulation: cast -1 to the uint32 sentinel 0xffffffff the renderer
+    # treats as "outside". Only emitted when present and non-empty.
+    cell_ids = result.get("triangle_cell_ids")
+    if cell_ids is not None and len(cell_ids) > 0:
+        buffers.append(("triangle_cell_ids",
+                        np.asarray(cell_ids).astype(np.int64) & 0xFFFFFFFF, "u32"))
     return _bin_frame_bytes(meta, buffers)
 
 

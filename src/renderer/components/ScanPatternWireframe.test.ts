@@ -46,12 +46,30 @@ describe('buildRasterGeometry', () => {
   });
 
   it('a narrow azimuth window keeps points within that wedge', () => {
-    // Azimuth [0,90] in the local +X frame → cos,sin both ≥ 0, so x≥0 and y≥0.
+    // Azimuth [0,90] in the local phi-from-+Y frame → sin,cos both ≥ 0, so x≥0 and y≥0.
     const g = buildRasterGeometry(R, { zMin: 0, zMax: 180, aMin: 0, aMax: 90 });
     for (const [x, y] of verts(g)) {
       expect(x).toBeGreaterThanOrEqual(-1e-6);
       expect(y).toBeGreaterThanOrEqual(-1e-6);
     }
+  });
+
+  it('uses the Helios phi convention: phi from +Y toward +X (matches the scan rays)', () => {
+    // A degenerate horizon ring (zenith 90, single azimuth) must land where
+    // PyHelios sphere2cart puts it: x = R·sin(phi), y = R·cos(phi). This is the
+    // regression guard for the 90°-offset wireframe bug — the old from-+X
+    // convention (x = R·cos(phi)) would put phi=0 at +X instead of +Y.
+    const atPhi = (phiDeg: number): [number, number, number] => {
+      const g = buildMultibeamGeometry(R, { elevations: [0], aMin: phiDeg, aMax: phiDeg });
+      // Ring points all share the single azimuth; grab the first non-origin vertex.
+      return verts(g).find(([x, y, z]) => Math.hypot(x, y, z) > 1e-6)!;
+    };
+    expect(atPhi(0)).toEqual([
+      expect.closeTo(0, 5), expect.closeTo(R, 5), expect.closeTo(0, 5), // phi 0 → +Y
+    ]);
+    expect(atPhi(90)).toEqual([
+      expect.closeTo(R, 5), expect.closeTo(0, 5), expect.closeTo(0, 5), // phi 90 → +X
+    ]);
   });
 });
 

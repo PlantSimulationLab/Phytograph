@@ -967,19 +967,33 @@ export interface ReuseMeshPayload {
   triangleCount: number;
 }
 
-// Build the mesh payload for reusing a Helios triangulation in LAD. Reusing a
-// mesh must reproduce EXACTLY the triangulation the user sees, so:
+// The uint32 sentinel the backend packs for a triangle whose centroid fell
+// outside every grid cell (-1 & 0xffffffff). Such triangles must not feed the
+// LAD inversion — only in-grid geometry is valid for the per-cell G(theta).
+const CELL_OUTSIDE = 0xffffffff;
+
+// Build the mesh payload for reusing a triangulation in LAD. Reusing a mesh must
+// reproduce EXACTLY the triangulation the user sees, so:
 //   1. Apply the current interactive filter (lmax/maxAspectRatio) — the inversion
-//      keys on the filtered triangle set, not the unfiltered candidate set.
-//   2. Remap each triangle's scan id. A mesh's triangleScanIds are indices into
-//      the ORIGINAL triangulation's scan list (sourceScanIds order). At LAD time
-//      the cloud's scans are added in the request's scan order, so each id must be
-//      translated: originalIdx -> sourceScanIds[originalIdx] (scan-id string) ->
-//      its position in requestScanIdOrder. Throws if any source scan is missing
-//      from the request order — a partial mesh would silently change G(theta).
-// `meshData` should be the UNFILTERED mesh (it must carry triEdgeMax/triAspect so
-// applyTriangleFilter can run); pass requestScanIdOrder = the exact scan-id list,
-// in order, that buildLADRequest will emit (i.e. selectedScans.map(s => s.id)).
+//      keys on the filtered triangle set, not the unfiltered candidate set. (A
+//      ball-pivot mesh has no edge/aspect metrics, so the filter is a no-op and
+//      every triangle passes through.)
+//   2. Drop any triangle whose grid cell id is the "outside" sentinel, so only
+//      in-grid triangles reach the inversion. The backend crop already confines
+//      ball-pivot points to the grid, but a centroid can still straddle a cell
+//      boundary — this is the belt-and-suspenders for "only in-grid triangles".
+//   3. Remap each surviving triangle's scan id. A Helios mesh's triangleScanIds
+//      are indices into the ORIGINAL triangulation's scan list (sourceScanIds
+//      order). At LAD time the cloud's scans are added in the request's scan
+//      order, so each id is translated: originalIdx -> sourceScanIds[originalIdx]
+//      (scan-id string) -> its position in requestScanIdOrder. A per-scan
+//      ball-pivot mesh carries NO triangleScanIds (one source scan, so every
+//      triangle is scan index 0) — synthesized here. Throws if any source scan is
+//      missing from the request order — a partial mesh would silently change
+//      G(theta).
+// `meshData` is the mesh to reuse (the UNFILTERED Helios candidate set, or a
+// ball-pivot mesh's `data`); pass requestScanIdOrder = the exact scan-id list, in
+// order, that buildLADRequest will emit (i.e. selectedScans.map(s => s.id)).
 export function extractReuseMeshPayload(
   meshData: MeshData,
   lmax: number,
@@ -988,19 +1002,34 @@ export function extractReuseMeshPayload(
   requestScanIdOrder: string[],
 ): ReuseMeshPayload {
   const filtered = applyTriangleFilter(meshData, lmax, maxAspectRatio);
-  const triScan = filtered.triangleScanIds;
-  if (!triScan || triScan.length !== filtered.triangleCount) {
-    throw new Error(
-      'Cannot reuse this triangulation: it has no per-triangle scan ids '
-      + '(re-run the Helios triangulation to record them).');
+  const n = filtered.triangleCount;
+
+  // Per-triangle scan ids. Helios meshes carry them; a per-scan ball-pivot mesh
+  // (exactly one source scan) does not — every triangle is scan index 0.
+  let triScan = filtered.triangleScanIds;
+  if (!triScan || triScan.length !== n) {
+    if (sourceScanIds.length === 1) {
+      triScan = new Uint32Array(n); // all zeros: the single source scan
+    } else {
+      throw new Error(
+        'Cannot reuse this triangulation: it has no per-triangle scan ids '
+        + '(re-run the Helios triangulation to record them).');
+    }
   }
 
   const requestIndexOf = new Map<string, number>();
   requestScanIdOrder.forEach((id, i) => requestIndexOf.set(id, i));
 
-  const T = filtered.triangleCount;
-  const scanIds = new Int32Array(T);
-  for (let t = 0; t < T; t++) {
+  // Drop out-of-grid triangles (sentinel cell id) so only in-grid geometry feeds
+  // the inversion. With no cell ids (legacy Helios meshes) keep every triangle.
+  const cellIds = filtered.triangleCellIds;
+  const hasCellIds = !!cellIds && cellIds.length === n;
+
+  const srcIdx = filtered.indices;
+  const keptIndices: number[] = [];
+  const keptScanIds: number[] = [];
+  for (let t = 0; t < n; t++) {
+    if (hasCellIds && cellIds![t] === CELL_OUTSIDE) continue;
     const originalIdx = triScan[t];
     const scanIdStr = sourceScanIds[originalIdx];
     const reqIdx = scanIdStr !== undefined ? requestIndexOf.get(scanIdStr) : undefined;
@@ -1009,13 +1038,15 @@ export function extractReuseMeshPayload(
         'Cannot reuse this triangulation: one of its source scans is no longer '
         + 'available, so the result would not match the original mesh.');
     }
-    scanIds[t] = reqIdx;
+    keptIndices.push(srcIdx[t * 3], srcIdx[t * 3 + 1], srcIdx[t * 3 + 2]);
+    keptScanIds.push(reqIdx);
   }
 
+  const T = keptScanIds.length;
   return {
     vertices: filtered.vertices,
-    indices: filtered.indices,
-    scanIds,
+    indices: Uint32Array.from(keptIndices),
+    scanIds: Int32Array.from(keptScanIds),
     triangleCount: T,
   };
 }

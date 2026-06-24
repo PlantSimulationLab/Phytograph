@@ -56,17 +56,21 @@ surface.
    box exists — the tooltip tells you which is missing.
 
 4. **In the dialog:**
-    - **Triangulation.** If you've already run a
-      [Helios triangulation](triangulate.md) over a voxel grid, choose
-      **Reuse: \<that mesh\>** here. The inversion then uses that mesh
-      *directly* — the exact triangles you see (with the current Lmax / aspect
-      filter applied) are sent to the inversion and used as-is, **skipping the
-      re-triangulation entirely**. This reproduces the mesh's G-function and, on
-      a heavy scan, saves the minutes a fresh triangulation would take. The scan
-      picker, grid selector, and filter fields below are hidden (locked to the
-      mesh). Choose **Run a new triangulation** to set everything yourself
-      instead. (This selector only appears when a reusable Helios triangulation
-      exists — one built with a voxel grid.)
+    - **Triangulation.** If you've already triangulated over a voxel grid —
+      either a [Helios triangulation](triangulate.md), or a **per-scan Ball
+      Pivot mesh pinned to a grid** — choose **Reuse: \<that mesh\>** here. The
+      inversion then uses that mesh *directly* — the exact triangles you see
+      (with the current Lmax / aspect filter applied) are sent to the inversion
+      and used as-is, **skipping the re-triangulation entirely**. This reproduces
+      the mesh's G-function and, on a heavy scan, saves the minutes a fresh
+      triangulation would take. The scan picker, grid selector, and filter fields
+      below are hidden (locked to the mesh). Choose **Run a new triangulation** to
+      set everything yourself instead. (This selector only appears when a reusable
+      triangulation exists — one built with a voxel grid.) A ball-pivot mesh that
+      **can't** be reused — merged, not pinned to a grid, or from a scan with no
+      scanner position — appears greyed-out here with the reason, so you can fix
+      it (re-triangulate per-scan, pinned to a grid) rather than wonder why it's
+      missing.
 
         !!! note "You don't need a Helios mesh first"
             **Run a new triangulation** with your scans + grid is the full

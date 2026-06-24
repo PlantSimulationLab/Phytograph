@@ -5526,8 +5526,13 @@ export default function PointCloudViewer({
       max: [number, number, number];
       rotationDeg?: number;
     };
+    // Ball Pivot LAD pin: the grid the mesh is pinned to (drives backend
+    // per-triangle cell binning) and the source voxel-box mesh id. Set only for
+    // ball_pivoting + per-scan (the dispatcher omits them for merged meshes).
+    grid?: HeliosGrid;
+    gridMeshId?: string;
   }) => {
-    const { method, scanIds, merge, depth, alpha, radii, cropBox } = args;
+    const { method, scanIds, merge, depth, alpha, radii, cropBox, grid, gridMeshId } = args;
     // Flatten the optional crop box to the backend's [minx,miny,minz,maxx,maxy,maxz].
     const cropBoxArr = cropBox
       ? [cropBox.min[0], cropBox.min[1], cropBox.min[2], cropBox.max[0], cropBox.max[1], cropBox.max[2]]
@@ -5655,6 +5660,9 @@ export default function PointCloudViewer({
           normal_max_nn: 30,
           ...(cropBoxArr ? { crop_box: cropBoxArr } : {}),
           ...(cropBoxRotationDeg ? { crop_box_rotation_deg: cropBoxRotationDeg } : {}),
+          // Grid pin (per-scan ball-pivot): drives the backend's per-triangle cell
+          // binning so this mesh can later be re-used for the LAD inversion.
+          ...(grid ? { grid } : {}),
         };
         if (ps.kind === 'source') {
           request.source = { ...ps.source, max_points: triangulateMaxPoints };
@@ -5680,11 +5688,21 @@ export default function PointCloudViewer({
           vertexCount: response.numVertices,
           triangleCount: response.numTriangles,
           surfaceArea: response.surfaceArea,
+          // Grid pin provenance (per-scan ball-pivot): the grid the mesh is pinned
+          // to plus the per-triangle cell ids, so the LAD reuse path can keep only
+          // in-grid triangles. Mirrors the fields a Helios mesh carries.
+          ...(grid ? { grid } : {}),
+          ...(grid && response.triangleCellIds ? { triangleCellIds: response.triangleCellIds } : {}),
         };
         const triangulationParams: NonNullable<MeshEntry['triangulationParams']> = {
           normalRadius: request.normal_radius,
           normalMaxNn: request.normal_max_nn,
           pointsUsed: response.pointsUsed,
+          // Grid pin: record the source voxel-box mesh id (so LAD can auto-hide it)
+          // and the single owning scan id (this mesh is one scan), so the LAD option
+          // builder and reuse-payload remap can resolve the scan. Set only when
+          // pinned to a real grid — these two together mark the mesh LAD-reusable.
+          ...(grid ? { gridMeshId, sourceScanIds: [cloud.id] } : {}),
         };
         methodParamProvenance(triangulationParams);
 
@@ -8467,12 +8485,30 @@ export default function PointCloudViewer({
   const ladTriangulationOptions = useMemo<LADTriangulationOption[]>(() => {
     const options: LADTriangulationOption[] = [];
     for (const m of meshes) {
-      if (m.method !== 'helios') continue;
+      // Helios meshes carry per-triangle scan provenance directly. A per-scan
+      // ball-pivot mesh is LAD-reusable too when it was PINNED to a grid (the
+      // grid drop-down) — it has exactly one source scan, so every triangle maps
+      // to scan index 0 (synthesized in extractReuseMeshPayload). A MERGED
+      // ball-pivot mesh has no single source scan and never gets `grid`/
+      // `sourceScanIds`, so it's excluded here (and explained in the LAD popup).
+      const isHelios = m.method === 'helios';
+      const isPinnedBallPivot =
+        m.method === 'ball_pivoting' &&
+        !!m.data.grid &&
+        m.triangulationParams?.sourceScanIds?.length === 1 &&
+        !!m.data.triangleCellIds;
+      if (!isHelios && !isPinnedBallPivot) continue;
       const grid = m.data.grid;
       const scanIds = m.triangulationParams?.sourceScanIds;
       if (!grid || !scanIds || scanIds.length === 0) continue;
+      // The source scan must still have position info (params): LAD traces beams
+      // from the scanner origin, so a position-less scan can't be inverted even if
+      // its mesh is pinned. A missing scan also disqualifies (reuse needs it).
+      if (!scanIds.every(id => { const s = scans.find(x => x.id === id); return s && hasParams(s); })) continue;
       // The current filter is what feeds the inversion (triangleFilter), falling
-      // back to the build-time params if no live filter is recorded.
+      // back to the build-time params if no live filter is recorded. Ball-pivot
+      // meshes have no edge/aspect metrics, so the filter is a no-op for them and
+      // these defaults simply pass every (in-grid) triangle through.
       const lmax = m.triangleFilter?.lmax ?? m.triangulationParams?.lmax ?? 0.1;
       const maxAspectRatio = m.triangleFilter?.maxAspectRatio ?? m.triangulationParams?.maxAspectRatio ?? 4.0;
       // The voxel box this mesh was triangulated in (recorded at build time), but
@@ -8489,12 +8525,52 @@ export default function PointCloudViewer({
         maxAspectRatio,
         // The unfiltered mesh carries triEdgeMax/triAspect so the reuse path can
         // re-apply the current filter and inject the exact triangle set shown.
+        // Ball-pivot has no unfiltered set; its `data` already carries the grid +
+        // per-triangle cell ids the reuse path needs.
         meshData: m.unfilteredMesh?.data ?? m.data,
         gridMeshId: gridBoxPresent ? gridMeshId : undefined,
       });
     }
     return options;
-  }, [meshes, displayNameOfMesh]);
+  }, [meshes, scans, displayNameOfMesh]);
+
+  // Why a ball-pivot mesh can't be re-used for the leaf-area (LAD) inversion, or
+  // null if it can (or it isn't a ball-pivot mesh). The eligibility rule: built
+  // PER-SCAN (not merged) + PINNED to a grid + the source scan still has a scanner
+  // position. Used both for the disabled LAD-dropdown entries and the Meshes-panel
+  // note, so the reason text is one source of truth.
+  const ladIneligibilityReason = useCallback((m: MeshEntry): string | null => {
+    if (m.method !== 'ball_pivoting') return null;
+    // Merged: the merged path fuses multiple scans and records scanCount but no
+    // per-scan provenance, so there's no single source scan to drive G(theta).
+    if (!m.data.grid && (m.triangulationParams?.scanCount ?? 0) > 1) {
+      return 'merged — re-triangulate each scan separately';
+    }
+    // Per-scan but not pinned to a grid: no grid recorded.
+    if (!m.data.grid || !m.data.triangleCellIds) {
+      return 'not pinned to a grid — re-triangulate with a grid selected';
+    }
+    // Pinned per-scan, but the source scan lacks position info (or is gone).
+    const scanIds = m.triangulationParams?.sourceScanIds;
+    if (scanIds && scanIds.length >= 1 &&
+        !scanIds.every(id => { const s = scans.find(x => x.id === id); return s && hasParams(s); })) {
+      return 'source scan has no scanner position';
+    }
+    return null; // eligible (already in ladTriangulationOptions)
+  }, [scans]);
+
+  // Ball-pivot meshes that EXIST but can't be reused for LAD, each with the reason
+  // and the fix. Surfaced as disabled entries in the LAD triangulation dropdown so
+  // a user who triangulated with ball pivot sees why their mesh is missing rather
+  // than it silently not appearing.
+  const ineligibleLadTriangulations = useMemo(() => {
+    const out: { id: string; label: string; reason: string }[] = [];
+    for (const m of meshes) {
+      const reason = ladIneligibilityReason(m);
+      if (reason) out.push({ id: m.id, label: displayNameOfMesh(m), reason });
+    }
+    return out;
+  }, [meshes, ladIneligibilityReason, displayNameOfMesh]);
 
   // Opt-in cross-check of a Helios mesh's current Lmax against the real in-grid
   // point spacing — offered by the filter panel when the Otsu indicators aren't
@@ -8917,6 +8993,8 @@ export default function PointCloudViewer({
         alpha: r.alpha,
         radii: r.radii,
         cropBox: r.cropBox,
+        grid: r.grid,
+        gridMeshId: r.gridMeshId,
       });
     }
   }, [handleHeliosTriangulate, handleTriangulateOpen3D]);
@@ -10373,6 +10451,10 @@ export default function PointCloudViewer({
                   // A ground plane usually sits at z=0, coplanar with the ground
                   // grid; bias its depth so it doesn't z-fight the grid.
                   polygonOffset={mesh.isPlane}
+                  // ...and keep it writing depth even at its default 0.7 opacity,
+                  // so it stays the stable z=0 occluder the grid fix assumes and
+                  // doesn't flicker against the coplanar grid/scan points.
+                  forceDepthWrite={mesh.isPlane}
                 />
               )}
               {mesh.gridSubdivisions &&
@@ -11867,6 +11949,7 @@ export default function PointCloudViewer({
             onOpenLeafAngles={setShowLeafAngleMeshId}
             onHeliosFilterChange={handleHeliosFilterChange}
             onCheckSpacing={handleCheckSpacing}
+            ladIneligibilityReason={ladIneligibilityReason}
           />
         )}
 
@@ -13594,6 +13677,7 @@ export default function PointCloudViewer({
         scans={scans}
         gridOptions={heliosGridOptions}
         triangulationOptions={ladTriangulationOptions}
+        ineligibleTriangulations={ineligibleLadTriangulations}
         onStartLAD={handleComputeLAD}
         initialSelectedIds={selectedScanIds}
         defaultLmax={[...meshes].reverse().find(m => m.triangleFilter)?.triangleFilter?.lmax}
