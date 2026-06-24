@@ -151,6 +151,41 @@ def test_ground_warning_fires_when_ground_present(client):
     assert res.json()["ground_warning"] is True
 
 
+@requires_treeiso
+def test_ground_class_labels_exclude_ground(client):
+    """When `ground_class` labels accompany the points (ground segmented but
+    kept, not deleted), TreeIso runs only on the plant points: ground points
+    come back as tree id 0, `labels` stays aligned 1:1 with the input, and the
+    ground heuristic warning is suppressed."""
+    points, _ = _load_fixture()
+    rng = np.random.RandomState(0)
+    lo = points.min(axis=0)
+    span = np.ptp(points[:, :2], axis=0)
+    ground = np.c_[
+        lo[0] + rng.uniform(0, span[0], 6000),
+        lo[1] + rng.uniform(0, span[1], 6000),
+        lo[2] + rng.uniform(0, 0.05, 6000),
+    ]
+    withg = np.vstack([ground, points])
+    gc = np.concatenate([
+        np.full(len(ground), main.GROUND_CLASS_GROUND),
+        np.full(len(points), main.GROUND_CLASS_PLANT),
+    ]).tolist()
+    res = client.post(
+        "/api/segment/trees",
+        json={"points": withg.tolist(), "ground_class": gc},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is True
+    labels = np.asarray(body["labels"])
+    assert len(labels) == len(withg)              # aligned 1:1 with the input
+    assert np.all(labels[: len(ground)] == 0)     # ground excluded → unassigned
+    assert int((labels[len(ground):] > 0).sum()) > 0  # plant points segmented
+    assert body["num_trees"] >= 2
+    assert body["ground_warning"] is False        # heuristic suppressed
+
+
 def test_too_few_points(client):
     res = client.post("/api/segment/trees", json={"points": [[0, 0, 0], [1, 1, 1]]})
     assert res.status_code == 200, res.text

@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.40.0"
+BACKEND_VERSION = "0.40.1"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2391,6 +2391,12 @@ class TreeSegmentationRequest(BaseModel):
     points: Optional[List[List[float]]] = None
     source: Optional[PointSource] = None
     seed_points: Optional[List[List[float]]] = None
+    # Optional per-point ground/plant labels (aligned 1:1 with `points`), as
+    # produced by a prior ground segmentation that was kept but not deleted.
+    # When given, ground points (== GROUND_CLASS_GROUND) are excluded from
+    # TreeIso and returned as tree id 0. Ignored on the session endpoint, which
+    # reads the persisted `ground_class` column directly.
+    ground_class: Optional[List[float]] = None
     reg_strength1: float = 1.0
     min_nn1: int = 5
     decimate_res1: float = 0.05
@@ -2519,51 +2525,65 @@ async def segment_trees_points(request: TreeSegmentationRequest):
         points = _resolve_segmentation_points(
             GroundSegmentationRequest(points=request.points, source=request.source)
         )
+        n_full = len(points)
 
-        if len(points) < 10:
+        if n_full < 10:
             return TreeSegmentationResponse(
-                success=False, num_points=len(points),
+                success=False, num_points=n_full,
                 error="Need at least 10 points to segment trees",
             )
 
-        # Drop non-finite points before TreeIso (cKDTree chokes on NaN/inf).
-        finite = np.isfinite(points).all(axis=1)
-        if not finite.all():
-            points = points[finite]
-            if len(points) < 10:
-                return TreeSegmentationResponse(
-                    success=False, num_points=len(points),
-                    error="Fewer than 10 finite points after dropping NaN/inf coordinates.",
-                )
+        # The points TreeIso actually sees: finite coordinates (cKDTree chokes
+        # on NaN/inf) AND not labelled ground. Ground points (from a prior
+        # ground segmentation that was kept, not deleted) are excluded so they
+        # aren't clustered into a "tree". Labels are scattered back to the full
+        # input order with 0 (unassigned) for every excluded point, so `labels`
+        # aligns 1:1 with the points the caller sent.
+        eligible = np.isfinite(points).all(axis=1)
+        ground_excluded = False
+        if request.ground_class is not None and len(request.ground_class) == n_full:
+            eligible &= np.asarray(request.ground_class) != GROUND_CLASS_GROUND
+            ground_excluded = True
 
-        if len(points) > _TREEISO_MAX_POINTS:
+        pts = points[eligible]
+        if len(pts) < 10:
+            reason = "non-finite and ground-labelled" if ground_excluded else "non-finite"
             return TreeSegmentationResponse(
-                success=False, num_points=len(points),
-                error=(f"{len(points):,} points exceeds the {_TREEISO_MAX_POINTS:,}-point "
+                success=False, num_points=n_full,
+                error=f"Fewer than 10 points remain after dropping {reason} points.",
+            )
+
+        if len(pts) > _TREEISO_MAX_POINTS:
+            return TreeSegmentationResponse(
+                success=False, num_points=n_full,
+                error=(f"{len(pts):,} points exceeds the {_TREEISO_MAX_POINTS:,}-point "
                        "limit for tree segmentation. Downsample or crop first."),
             )
 
-        ground_warning = _looks_like_ground_present(points)
+        # Skip the advisory ground heuristic when the caller already handed us
+        # ground labels to exclude — the ground is gone from `pts`.
+        ground_warning = (not ground_excluded) and _looks_like_ground_present(pts)
         seeds = (
             np.asarray(request.seed_points, dtype=np.float64)
             if request.seed_points else None
         )
         try:
-            labels = segment_trees(points, _treeiso_params(request), seeds)
+            sub_labels = segment_trees(pts, _treeiso_params(request), seeds)
         except ImportError as e:
             return TreeSegmentationResponse(
-                success=False, num_points=len(points),
+                success=False, num_points=n_full,
                 error=f"TreeIso dependencies not installed ({e}). "
                       "Run: pip install -r backend-api/requirements.txt",
             )
 
-        labels = np.asarray(labels)
-        num_trees = int(len(np.unique(labels[labels > 0]))) if len(labels) else 0
+        labels = np.zeros(n_full, dtype=np.int64)
+        labels[eligible] = np.asarray(sub_labels)
+        num_trees = int(len(np.unique(labels[labels > 0])))
         return TreeSegmentationResponse(
             success=True,
             labels=[int(x) for x in labels],
             num_trees=num_trees,
-            num_points=len(points),
+            num_points=n_full,
             ground_warning=ground_warning,
         )
     except HTTPException:
@@ -17677,22 +17697,45 @@ class SessionTreeSegmentRequest(TreeSegmentationRequest):
 @app.post("/api/cloud/session/{session_id}/segment_trees")
 async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequest):
     """TreeIso on the in-RAM survivors → append `tree_instance` → rebuild octree
-    from the arrays. No source file read."""
+    from the arrays. No source file read.
+
+    If the cloud carries a `ground_class` column (from a prior ground
+    segmentation that was *labeled* but not removed), the ground points are
+    excluded from TreeIso and assigned tree id 0 (unassigned) — TreeIso only
+    sees the plant points, so ground never gets clustered into a "tree"."""
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
-        pts = sess.positions[~sess.deleted].copy()
-    if len(pts) > _TREEISO_MAX_POINTS:
+        keep = ~sess.deleted
+        pts = sess.positions[keep].copy()
+        # Survivor-aligned ground mask: True where a prior ground segmentation
+        # tagged the point as ground. Absent column ⇒ no exclusion.
+        ground_col = sess.extras.get(GROUND_CLASS_SLUG)
+        is_ground = (
+            ground_col[keep] == GROUND_CLASS_GROUND
+            if ground_col is not None else np.zeros(len(pts), dtype=bool)
+        )
+    plant_mask = ~is_ground
+    n_plant = int(plant_mask.sum())
+    if n_plant > _TREEISO_MAX_POINTS:
         raise HTTPException(
             status_code=400,
-            detail=f"Tree segmentation is capped at {_TREEISO_MAX_POINTS:,} points; this cloud has {len(pts):,}. Crop or downsample first.",
+            detail=f"Tree segmentation is capped at {_TREEISO_MAX_POINTS:,} points; this cloud has {n_plant:,} non-ground points. Crop or downsample first.",
+        )
+    if n_plant < 10:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least 10 non-ground points for tree segmentation; found {n_plant}.",
         )
     seeds = (
         np.asarray(request.seed_points, dtype=np.float64)
         if request.seed_points else None
     )
-    labels = segment_trees(pts, _treeiso_params(request), seeds=seeds)
+    plant_labels = segment_trees(pts[plant_mask], _treeiso_params(request), seeds=seeds)
+    # Scatter the plant tree ids back onto all survivors; ground stays 0.
+    labels = np.zeros(len(pts), dtype=np.int64)
+    labels[plant_mask] = np.asarray(plant_labels)
     with _cloud_session_lock:
-        _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, np.asarray(labels))
+        _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
     cache_key, cache_dir, meta = _session_rebuild(sess)
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
 

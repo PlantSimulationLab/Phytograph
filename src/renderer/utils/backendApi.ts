@@ -408,6 +408,8 @@ export interface TreeSegmentationRequest {
   points?: number[][];          // [[x, y, z], ...] — omit when `source` is set
   source?: BackendPointSource;  // octree-backed clouds read from disk
   seed_points?: number[][];     // [[x, y, z], ...] trunk seeds (HITL)
+  ground_class?: number[];      // per-point ground/plant labels (1=ground) to exclude
+
   // TreeIso parameters (defaults match the backend / Xi & Hopkinson 2022).
   reg_strength1?: number;
   min_nn1?: number;

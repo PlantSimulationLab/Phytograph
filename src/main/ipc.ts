@@ -2,9 +2,10 @@
 // Mirrors the Tauri plugins the frontend currently uses: dialog, fs, store, file-drop events.
 
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
-import { access, readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import Store from 'electron-store';
 import {
   IPC,
@@ -29,7 +30,22 @@ const isFirstRun = !existsSync(join(app.getPath('userData'), 'phytograph-store.j
 
 const store = new Store({ name: 'phytograph-store' });
 
+// Private per-instance scratch dir for materialized drag-drop imports (see
+// FsWriteTempBinary). Unique per process so concurrent app instances never
+// clobber each other; removed on quit by cleanupTempImports().
+const tempImportDir = join(app.getPath('temp'), `phytograph-imports-${process.pid}`);
+
+function cleanupTempImports(): void {
+  // Best-effort: a stale dir on a crash is harmless (OS temp gets reaped) and
+  // the pid-scoping means we never delete a sibling instance's in-use files.
+  rm(tempImportDir, { recursive: true, force: true }).catch(() => { /* ignore */ });
+}
+
 export function registerIpc(): void {
+  // Drop materialized-import scratch files when this instance exits.
+  app.on('will-quit', cleanupTempImports);
+
+
   ipcMain.handle(IPC.BackendGetInfo, (): BackendInfo => {
     const isDev = !app.isPackaged;
     return {
@@ -162,6 +178,27 @@ export function registerIpc(): void {
   ipcMain.handle(IPC.FsWriteBinary, async (_e, path: string, contents: ArrayBuffer) => {
     denyWrite(path);
     await writeFile(path, Buffer.from(contents));
+  });
+  // Materialize a dropped File's bytes into a private per-instance temp dir and
+  // return the absolute path, allowlisted for the fs handlers + the backend's
+  // path-backed import. This is what lets a dragged point cloud with no
+  // resolvable OS path (cloud-storage placeholder, drag from a non-file source)
+  // still take the octree import path instead of the flat fallback. The dir is
+  // unique per process (so concurrent instances never clobber each other) and
+  // removed on quit (see cleanupTempImports below). `fileName` is preserved so
+  // the backend's format detection sees the right extension.
+  ipcMain.handle(IPC.FsWriteTempBinary, async (_e, fileName: string, contents: ArrayBuffer): Promise<string> => {
+    // Each drop lands in its own uuid subdir so the file keeps its ORIGINAL
+    // basename — that basename becomes the cloud's fileName / scan label and the
+    // backend's format-detection extension, and per-drop subdirs avoid collisions
+    // when the same filename is dropped twice.
+    const safeName = String(fileName).replace(/[/\\]/g, '_') || 'dropped.xyz';
+    const dir = join(tempImportDir, randomUUID());
+    await mkdir(dir, { recursive: true });
+    const target = join(dir, safeName);
+    await writeFile(target, Buffer.from(contents));
+    allowPath(target, 'saveFile');  // readable + writable for downstream fs/import
+    return target;
   });
   ipcMain.handle(IPC.FsExists, async (_e, path: string): Promise<boolean> => {
     // The scan-file resolver probes candidate companion paths here. Report a

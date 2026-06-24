@@ -48,6 +48,12 @@ applies to every scan you have selected.
 When more than one scan is selected, the panel shows "Applies to N scans"
 and each scan gets its own cropped result — identities are preserved.
 
+!!! note "Preview detail while cropping"
+    For large (LOD-streamed) scans, the live crop preview renders at reduced
+    point density so it stays responsive while you position the box — you may
+    see the displayed density change as you move or zoom. This affects only the
+    preview; **Apply** re-crops the scan at full resolution.
+
 ### Box mode
 
 Two ways to shape the box:

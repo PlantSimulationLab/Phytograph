@@ -137,6 +137,51 @@ function applyScalarSwapToVisibleNodes(octree: any, field: string): void {
   }
 }
 
+// Octree LOD level cap applied WHILE a crop box is previewing. Limiting the
+// preview by point budget alone makes potree refine the highest-priority nodes
+// deeply and leave the rest coarse — visibly uneven density (a sparse "notch"
+// beside dense blobs). Capping the level instead makes potree render every
+// region at one consistent level, so the reduced preview is uniform. Tunable:
+// higher = denser/uniform but heavier; lower = sparser/lighter. Removed on exit.
+const CROP_PREVIEW_MAX_LEVEL = 4;
+
+// True when the crop clip box provably yields an EMPTY result for this cloud —
+// so the per-frame LOD update can be skipped and the cloud simply hidden.
+//
+// Why this matters: potree fills its point budget from UN-clipped nodes only
+// (a node whose bbox misses the clip box is `continue`d before its points are
+// counted). When the box excludes the whole cloud the budget never fills, which
+// defeats the LOD early-out — potree keeps descending and streaming the region
+// to try to reach the budget. On a large cloud that's the "ultra laggy the
+// moment the crop box leaves the points" bug. Skipping the update kills it.
+//
+// Conservative by construction: returns true only when emptiness is CERTAIN
+// from the AABBs (box disjoint from the cloud for keep-inside; box fully
+// containing the cloud for keep-outside), so it can never hide points that
+// should be visible. The clip box and the cloud's bounds share the
+// (data-bounds + translation) world frame — display/base offsets are render-only
+// and cancel in the shader, so they're irrelevant to this test.
+function cropClipsEverything(
+  clipBox: { min: THREE.Vector3; max: THREE.Vector3; invert?: boolean },
+  bounds: { min: THREE.Vector3; max: THREE.Vector3 },
+  translation: { x: number; y: number; z: number },
+): boolean {
+  const { x: tx, y: ty, z: tz } = translation;
+  const bminx = bounds.min.x + tx, bminy = bounds.min.y + ty, bminz = bounds.min.z + tz;
+  const bmaxx = bounds.max.x + tx, bmaxy = bounds.max.y + ty, bmaxz = bounds.max.z + tz;
+  const { min, max } = clipBox;
+  if (clipBox.invert) {
+    // keep-outside (CLIP_INSIDE): empty iff the box fully contains the cloud.
+    return min.x <= bminx && max.x >= bmaxx &&
+           min.y <= bminy && max.y >= bmaxy &&
+           min.z <= bminz && max.z >= bmaxz;
+  }
+  // keep-inside (CLIP_OUTSIDE): empty iff the box is disjoint from the cloud.
+  return max.x < bminx || min.x > bmaxx ||
+         max.y < bminy || min.y > bmaxy ||
+         max.z < bminz || min.z > bmaxz;
+}
+
 export function OctreePointCloud({
   data,
   pointSize = 2,
@@ -155,6 +200,9 @@ export function OctreePointCloud({
 }: OctreePointCloudProps) {
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
   const firstTilesFiredRef = useRef(false);
+  // Tracks the last crop-empty/hidden state so the E2E hook (__octreeCropHidden)
+  // is only written on transition, not every frame.
+  const cropHiddenRef = useRef<boolean | null>(null);
   // Ticks every time the material effect recreates the material. The
   // ClipBox effect depends on this so it re-applies the clip volume to
   // the fresh material instance — otherwise toggling color mode while a
@@ -283,12 +331,15 @@ export function OctreePointCloud({
     }
   }, [octree, translation?.x, translation?.y, translation?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z, data.octree?.cacheId]);
 
-  // Drop the E2E position hook for this cloud on unmount.
+  // Drop the E2E position + crop-hidden hooks for this cloud on unmount.
   useEffect(() => {
     const cacheId = data.octree?.cacheId;
     return () => {
       if (cacheId && (window as any).__octreePositions) {
         delete (window as any).__octreePositions[cacheId];
+      }
+      if (cacheId && (window as any).__octreeCropHidden) {
+        delete (window as any).__octreeCropHidden[cacheId];
       }
     };
   }, [data.octree?.cacheId]);
@@ -643,6 +694,20 @@ export function OctreePointCloud({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [octree, materialVersion, clipBoxesKey]);
 
+  // Cap the octree LOD level while a crop box is previewing so potree spreads
+  // the (reduced) budget across a shallower, cheaper, more even part of the tree
+  // instead of deeply refining a few high-priority nodes and leaving others
+  // coarse. Density still varies with the view (potree streams by camera
+  // distance) — the accepted tradeoff for a responsive preview; the applied crop
+  // re-renders at full resolution. `cropPreviewActive` is a stable boolean so
+  // this fires only on enter/exit, not on every box move. Restored to unlimited
+  // (Infinity) when the box clears.
+  const cropPreviewActive = !!clipBox;
+  useEffect(() => {
+    if (!octree) return;
+    (octree as any).maxLevel = cropPreviewActive ? CROP_PREVIEW_MAX_LEVEL : Infinity;
+  }, [octree, cropPreviewActive]);
+
   // Per-frame LOD update. Potree decides which nodes to fetch / drop
   // based on the camera's view of the octree's bounding boxes. Also
   // keeps per-tile sceneNode.material in sync with the cloud's current
@@ -650,6 +715,22 @@ export function OctreePointCloud({
   // ref synced here on the next frame.
   useFrame(() => {
     if (!octree) return;
+    // When the crop clip box makes this cloud empty (it left the points, or a
+    // keep-outside box swallowed them), skip potree's LOD update — an under-
+    // filled point budget otherwise makes it stream the whole region (ultra-lag
+    // on large clouds). Hide the cloud while empty; restore on the next frame
+    // the box overlaps again.
+    const cropEmpty = !!clipBox && cropClipsEverything(clipBox, data.bounds, translation ?? { x: 0, y: 0, z: 0 });
+    if (cropEmpty !== cropHiddenRef.current) {
+      cropHiddenRef.current = cropEmpty;
+      const cacheId = data.octree?.cacheId;
+      if (cacheId) ((window as any).__octreeCropHidden ??= {})[cacheId] = cropEmpty;
+    }
+    if (cropEmpty) {
+      if (octree.visible) octree.visible = false;
+      return;
+    }
+    if (!octree.visible) octree.visible = true;
     manager.updatePointClouds([octree], camera, gl);
     const cur = octree.material;
     const visible = (octree as any).visibleNodes;

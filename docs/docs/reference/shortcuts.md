@@ -22,6 +22,9 @@ start typing, press <kbd>Enter</kbd> to run, <kbd>Esc</kbd> to close.
 | Pan camera | Right-click drag, or <kbd>Ctrl</kbd> + left-click drag |
 | Zoom | Scroll wheel |
 | Frame an object | Double-click an object |
+| Select a mesh | Left-click the mesh (draws a highlight outline) |
+| Add/remove a mesh from the selection | <kbd>⌘/Ctrl</kbd> + left-click the mesh |
+| Clear the mesh selection | Left-click empty space |
 
 ## Tool modes
 

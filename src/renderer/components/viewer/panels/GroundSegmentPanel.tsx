@@ -1,5 +1,6 @@
 import { Layers, Loader2, X } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
+import { InfoHint } from '../../InfoHint';
 
 // Presentational tool panel for ground (cloth-simulation) segmentation. The
 // `onSegment` handler and all state live in PointCloudViewer; the parent gates
@@ -50,12 +51,21 @@ export function GroundSegmentPanel({
 
       <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
         Cloth Simulation Filter separates ground from plant points. Lower
-        tolerance keeps low plant material; higher merges it into ground.
+        tolerance keeps low plant material separate; raise it to merge weeds
+        and ground cover into the ground class. Tolerance is a height above the
+        draped cloth, so larger / field-scale scans need larger values.
       </div>
 
       {/* Cloth resolution */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">Cloth resolution (m)</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Cloth resolution (m)
+          <InfoHint
+            data-testid="ground-cloth-resolution-help"
+            label="Cloth resolution"
+            text="Grid spacing of the simulated cloth, in metres. Smaller follows finer ground relief but runs slower; larger is coarser and faster. Seeded from the cloud's size — a few centimetres for close-range scans, larger for field-scale tiles."
+          />
+        </label>
         <DebouncedNumberInput
           data-testid="ground-cloth-resolution"
           value={clothResolution}
@@ -70,13 +80,20 @@ export function GroundSegmentPanel({
 
       {/* Ground tolerance (class threshold) */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">Ground tolerance (m)</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Ground tolerance (m)
+          <InfoHint
+            data-testid="ground-class-threshold-help"
+            label="Ground tolerance"
+            text="Maximum height a point can sit above the draped cloth and still count as ground. Raise it to merge weeds and low ground cover into the ground class; lower it to keep the plant base separate. It's an absolute height, so field-scale scans need larger values (e.g. ~2 m on a 50 m orchard tile)."
+          />
+        </label>
         <DebouncedNumberInput
           data-testid="ground-class-threshold"
           value={classThreshold}
           onCommit={(n) => onClassThresholdChange(n)}
           min={0.001}
-          max={1}
+          max={5}
           step={0.01}
           disabled={inProgress}
           className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
@@ -85,7 +102,14 @@ export function GroundSegmentPanel({
 
       {/* Rigidness */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">Rigidness (1–3)</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Rigidness (1–3)
+          <InfoHint
+            data-testid="ground-rigidness-help"
+            label="Rigidness"
+            text="Stiffness of the cloth (1–3). Use 3 for flat ground; lower it for undulating terrain so the cloth can bend to follow slopes instead of bridging over them."
+          />
+        </label>
         <DebouncedNumberInput
           data-testid="ground-rigidness"
           value={rigidness}
@@ -99,17 +123,25 @@ export function GroundSegmentPanel({
       </div>
 
       {/* Split checkbox */}
-      <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-3">
-        <input
-          data-testid="ground-split-clouds"
-          type="checkbox"
-          checked={splitClouds}
-          onChange={(e) => onSplitCloudsChange(e.target.checked)}
-          className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-          disabled={inProgress}
+      <div className="flex items-center gap-1 mb-3">
+        <label className="flex items-center gap-2 text-[10px] text-neutral-400">
+          <input
+            data-testid="ground-split-clouds"
+            type="checkbox"
+            checked={splitClouds}
+            onChange={(e) => onSplitCloudsChange(e.target.checked)}
+            className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
+            disabled={inProgress}
+          />
+          Split into ground + plant clouds
+        </label>
+        <InfoHint
+          data-testid="ground-split-clouds-help"
+          label="Split into ground + plant clouds"
+          align="right"
+          text="Also output two new clouds — ground and non-ground — alongside the classified original, so you can hide, export, or process them separately. The original is always kept and recoloured by class."
         />
-        Split into ground + plant clouds
-      </label>
+      </div>
 
       {error && (
         <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">

@@ -33,6 +33,12 @@ const api = {
       ipcRenderer.invoke(IPC.FsWriteText, path, contents),
     writeBinary: (path: string, contents: ArrayBuffer): Promise<void> =>
       ipcRenderer.invoke(IPC.FsWriteBinary, path, contents),
+    // Persist a dropped File's bytes to a private temp file (main owns the dir
+    // and allowlists the path), returning the absolute path. Lets a dragged
+    // point cloud with no resolvable OS path still take the path-backed octree
+    // import. `fileName` is kept so the extension drives format detection.
+    writeTempBinary: (fileName: string, contents: ArrayBuffer): Promise<string> =>
+      ipcRenderer.invoke(IPC.FsWriteTempBinary, fileName, contents),
     exists: (path: string): Promise<boolean> => ipcRenderer.invoke(IPC.FsExists, path),
   },
   app: {

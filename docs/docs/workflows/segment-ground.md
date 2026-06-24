@@ -12,14 +12,27 @@ labels the points the cloth settles onto as ground.
 1. Select a single point cloud.
 2. Click **Segment Ground** (the layers icon in the tool column), or open
    the command palette and choose **Segment Ground**.
-3. Adjust the parameters if needed (defaults suit close-range plant scans
-   on roughly flat ground):
+3. Adjust the parameters if needed (hover the **?** beside any parameter for
+   a quick explanation). The cloth resolution and ground tolerance are seeded
+   automatically from the cloud's horizontal size each time you open the
+   panel — a few centimetres for a pot/plot-scale scan, scaling up to tens of
+   centimetres for a field- or orchard-scale scan.
+   (CSF's parameters are absolute distances, so a fixed default that suits a
+   1 m plant scan would label nearly everything as non-ground on a 50 m
+   field. The seeded values are a starting point — override them freely.)
     - **Cloth resolution (m)** — the cloth grid cell size. Smaller follows
       finer ground relief but is slower; for pot/plot-scale scans a few
       centimetres works well.
-    - **Ground tolerance (m)** — how far a point can sit from the cloth and
-      still count as ground. Raise it to pull low plant material into the
-      ground; lower it to keep more of the plant base.
+    - **Ground tolerance (m)** — how far a point can sit *above* the draped
+      cloth and still count as ground. Raise it to pull low plant material —
+      weeds, ground cover, inter-row vegetation — into the ground class;
+      lower it to keep more of the plant base separate. Because it's an
+      absolute height above the cloth, field- or orchard-scale scans need
+      larger values than pot-scale ones: e.g. on a 50 m orchard tile a
+      tolerance around **2 m** absorbs the inter-row weeds while leaving the
+      tree canopy as non-ground, whereas the seeded ~0.5 m keeps them
+      separate. Nudge it up until the weeds flip to ground without the trees
+      following.
     - **Rigidness (1–3)** — cloth stiffness. Use **3** for flat ground,
       lower for undulating terrain.
 4. (Optional) Tick **Split into ground + plant clouds** to also produce two

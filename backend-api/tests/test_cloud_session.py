@@ -307,6 +307,50 @@ def test_session_segment_trees_appends_instance_column(client, cache_root, tmp_p
     assert len(sess.extras["tree_instance"]) == len(sess.positions)
 
 
+def test_session_segment_trees_excludes_labeled_ground(client, cache_root, tmp_path):
+    """When a `ground_class` column is present (ground segmented but kept, not
+    deleted), TreeIso must run only on the plant points: every ground point
+    keeps tree id 0, and the plant points still get real instance ids."""
+    # A flat ground slab plus two well-separated plant clusters above it.
+    f = tmp_path / "trees_on_ground.xyz"
+    rows = []
+    for gi in range(20):
+        for gj in range(20):
+            rows.append(f"{gi * 0.3:.4f} {gj * 0.3:.4f} 0.0000")
+    for cx in (0.0, 5.0):
+        for i in range(15):
+            for k in range(8):
+                rows.append(f"{cx + (i % 4) * 0.05:.4f} {(i // 4) * 0.05:.4f} {0.5 + k * 0.1:.4f}")
+    f.write_text("\n".join(rows) + "\n")
+    sid = client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(f), "ascii_format": "x y z"},
+    ).json()["session_id"]
+
+    sess = main._cloud_sessions[sid]
+    n = len(sess.positions)
+    # Label the flat slab (z≈0) as ground, the rest as plant — exactly the state
+    # left by a ground segmentation that was kept (labelled) but not deleted.
+    gclass = np.where(
+        sess.positions[:, 2] < 0.25, main.GROUND_CLASS_GROUND, main.GROUND_CLASS_PLANT
+    ).astype(np.float32)
+    with main._cloud_session_lock:
+        main._session_add_extra_column(
+            sess, main.GROUND_CLASS_SLUG, main.GROUND_CLASS_LABEL, gclass
+        )
+    assert int((gclass == main.GROUND_CLASS_GROUND).sum()) > 0  # slab really is labelled
+
+    res = client.post(f"/api/cloud/session/{sid}/segment_trees", json={})
+    assert res.status_code == 200, res.text
+    tree = main._cloud_sessions[sid].extras["tree_instance"]
+    assert len(tree) == n
+    is_ground = gclass == main.GROUND_CLASS_GROUND
+    # Ground was excluded from TreeIso → all ground points stay unassigned (0).
+    assert np.all(tree[is_ground] == 0), int((tree[is_ground] > 0).sum())
+    # Plant points were segmented → at least one real tree id.
+    assert int((tree[~is_ground] > 0).sum()) > 0
+
+
 def test_downstream_source_reads_masked_array(client, cache_root, grid_xyz, grid_points):
     """_read_points_from_source(session_id=...) returns survivors only — the
     contract that lets triangulate/skeleton/etc honor deletions with no bake."""

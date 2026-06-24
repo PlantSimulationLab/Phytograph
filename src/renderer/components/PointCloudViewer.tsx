@@ -41,6 +41,7 @@ import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import StatusPill from './StatusPill';
 import { type ScanParameters, scanParametersFromFile } from '../lib/scanParameters';
+import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { poseStreamToWire, trajectoryDurationS, deriveMovingScanGrid } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible } from '../lib/scan';
@@ -90,6 +91,8 @@ import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { MissOctree } from './viewer/renderers/MissOctree';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
+import { JFAOutline, OutlineSelect } from './viewer/outline/JFAOutline';
+import { setPointBudget, DEFAULT_POINT_BUDGET, CROP_PREVIEW_POINT_BUDGET } from './viewer/potreeManager';
 import { VoxelGridOverlay } from './viewer/renderers/VoxelGridOverlay';
 import { LADVoxelGrid } from './viewer/renderers/LADVoxelGrid';
 import { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
@@ -660,6 +663,27 @@ export default function PointCloudViewer({
   const [groundClassThreshold, setGroundClassThreshold] = useState(0.02);
   const [groundRigidness, setGroundRigidness] = useState(3);
   const [groundSplitClouds, setGroundSplitClouds] = useState(false);
+  // Seed CSF cloth-resolution / class-threshold from the selected cloud's
+  // horizontal extent each time the ground panel OPENS. CSF's params are
+  // absolute distances, so a fixed default that suits a ~1 m plant scan badly
+  // under-segments a 50 m field (nearly everything labelled non-ground); scaling
+  // by extent makes the out-of-the-box run sensible at any scale, and the user
+  // can still override in the panel. Guarded by a ref so it only fires on the
+  // open transition — re-running on a later `clouds`/`selectedIds` change would
+  // clobber any manual tweaks the user made while the panel is open.
+  const groundPanelWasOpen = useRef(false);
+  useEffect(() => {
+    if (showGroundSegmentPanel && !groundPanelWasOpen.current) {
+      const sel = clouds.find((c) => selectedIds.has(c.id));
+      const size = sel?.data.bounds?.size;
+      if (size) {
+        const defaults = groundSegmentDefaultsForExtent(Math.max(size.x, size.y));
+        setGroundClothResolution(defaults.clothResolution);
+        setGroundClassThreshold(defaults.classThreshold);
+      }
+    }
+    groundPanelWasOpen.current = showGroundSegmentPanel;
+  }, [showGroundSegmentPanel, clouds, selectedIds]);
   // Wood/leaf segmentation state (geometric, non-ML).
   const [showWoodSegmentPanel, setShowWoodSegmentPanel] = useState(false);
   const [woodSegmentInProgress, setWoodSegmentInProgress] = useState(false);
@@ -719,6 +743,10 @@ export default function PointCloudViewer({
   // panel, mirroring the Scans panel's lastSelectedScanIdRef in App.
   const lastSelectedMeshIdRef = useRef<string | null>(null);
   const lastSelectedSkeletonIdRef = useRef<string | null>(null);
+  // Pointer-down position (client px) over the viewport, so the empty-space
+  // deselect (onPointerMissed, whose native event carries no R3F drag `delta`)
+  // can tell a click from a camera-orbit drag that happened to end on nothing.
+  const viewportPointerDownRef = useRef<{ x: number; y: number } | null>(null);
   const lastSelectedQSMIdRef = useRef<string | null>(null);
 
   // Copy confirmation flash state
@@ -1241,6 +1269,26 @@ export default function PointCloudViewer({
 
   // Edit mode and per-cloud edit states
   const [editMode, setEditMode] = useState<EditMode>('none');
+
+  // Lower the octree point budget while a crop box is being previewed, restore
+  // when it ends. potree clips with a fragment `discard` (no early-Z), so the
+  // GPU can't cull occluded points during preview and overdraw goes quadratic
+  // with on-screen point density — concentrating the crop box pins the frame
+  // rate to single digits on a large cloud. Fewer points ⇒ proportionally fewer
+  // fragment invocations. The budget is global (shared potree manager), which is
+  // fine: crop is a modal, single-cloud-focused mode. Apply re-converts at full
+  // resolution, so the reduced preview detail never reaches the saved cloud.
+  const cropPreviewActive = editMode === 'crop' || isApplyingCrop;
+  useEffect(() => {
+    const budget = cropPreviewActive ? CROP_PREVIEW_POINT_BUDGET : DEFAULT_POINT_BUDGET;
+    setPointBudget(budget);
+    // E2E hook: lets a test confirm the preview budget engages/restores.
+    (window as { __pointBudget?: number }).__pointBudget = budget;
+    return () => {
+      setPointBudget(DEFAULT_POINT_BUDGET);
+      (window as { __pointBudget?: number }).__pointBudget = DEFAULT_POINT_BUDGET;
+    };
+  }, [cropPreviewActive]);
   // Cloud edit states (translation + erased indices + pending deletes) now live
   // in the scene store. Reads keep `.get(id)`; writes keep `setEditStates(prev => ...)`.
   const editStates = scene.state.editStates;
@@ -6346,7 +6394,15 @@ export default function PointCloudViewer({
         ];
       }
 
-      const response = await segmentTrees({ points, seed_points: seeds, ...tiParams });
+      // If a prior ground segmentation labelled (but didn't delete) the ground,
+      // pass those labels so TreeIso excludes ground instead of clustering it.
+      const groundField = displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE];
+      const groundClass =
+        groundField && groundField.values.length === count
+          ? Array.from(groundField.values)
+          : undefined;
+
+      const response = await segmentTrees({ points, seed_points: seeds, ground_class: groundClass, ...tiParams });
       if (!response.success) {
         throw new Error(response.error || 'Tree segmentation failed');
       }
@@ -10073,6 +10129,12 @@ export default function PointCloudViewer({
     setEraseActive(false);
   }, [editMode, firstSelectedCloud]);
 
+  // Viewport mesh click-to-select is live only in the default viewport state —
+  // when an edit tool owns the click (crop/erase/translate gizmo), tree-seed
+  // placement is active, or a gizmo drag is in flight, those clicks belong to
+  // the tool, not selection.
+  const meshSelectionEnabled = editMode === 'none' && !treeSeedMode && !gizmoDragging;
+
   // Color modes that benefit from a colormap + colorbar (continuous scalars).
   const isScalarColorMode = (
     colorMode === 'x' ||
@@ -10172,12 +10234,26 @@ export default function PointCloudViewer({
       // default ±5 origin box (size ≈ 17.3), which would blank the viewport.
       data-scene-bounds-size={combinedBounds.size.length().toFixed(2)}
       data-scene-center={`${combinedBounds.center.x.toFixed(1)},${combinedBounds.center.y.toFixed(1)},${combinedBounds.center.z.toFixed(1)}`}
+      // Record the press location so onPointerMissed can reject orbit-drags
+      // (native event has no R3F `delta`). Bubbles up from the canvas.
+      onPointerDown={(e) => { viewportPointerDownRef.current = { x: e.clientX, y: e.clientY }; }}
     >
       {/* 3D Canvas */}
       <Canvas
         camera={{ fov: 60, near: 0.01, far: 10000, position: [0, 0, 10] }}
         gl={{ antialias: true, alpha: false }}
         onCreated={({ gl }) => { gl.setClearColor('#171717'); }}
+        // Left-click on empty space clears the mesh selection (single-focus,
+        // matching a plain panel click). Gated so it never fires mid-tool, and
+        // a drag guard (vs. the press position) keeps a camera orbit that ends
+        // on nothing from deselecting.
+        onPointerMissed={(e) => {
+          if (!meshSelectionEnabled) return;
+          if (e.button !== 0) return;
+          const down = viewportPointerDownRef.current;
+          if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+          setSelectedMeshIds(new Set());
+        }}
       >
         <ambientLight intensity={lightIntensity * LIGHT_INTENSITY_SCALE} />
         <directionalLight position={[10, 10, 10]} intensity={lightIntensity * LIGHT_INTENSITY_SCALE} />
@@ -10425,7 +10501,25 @@ export default function PointCloudViewer({
               ]}
               rotation={[meshRot.x * Math.PI / 180, meshRot.y * Math.PI / 180, meshRot.z * Math.PI / 180]}
               scale={[meshScale.x, meshScale.y, meshScale.z]}
+              // Viewport mesh picking via R3F's built-in raycaster (clicks bubble
+              // up from the child mesh). e.delta is the pointer's pixel travel
+              // since pointerdown — filtering on it lets an orbit-drag that
+              // started over a mesh rotate the camera without selecting it.
+              // stopPropagation keeps the click from reaching onPointerMissed.
+              onClick={(e) => {
+                if (!meshSelectionEnabled) return;
+                if (e.delta > 4) return;
+                e.stopPropagation();
+                handleSelectMesh(mesh.id, e.ctrlKey || e.metaKey, e.shiftKey);
+              }}
             >
+              {/* Wrap the rendered mesh in <OutlineSelect> so the JFA outline
+                  pass (below) draws a screen-space silhouette outline when this
+                  mesh is selected. Screen-space distance-field edge detection
+                  works for ANY topology — including multi-surface plant meshes —
+                  with uniform width, unlike a per-mesh inverted hull. The voxel
+                  overlay below stays outside so it isn't outlined. */}
+              <OutlineSelect enabled={selectedMeshIds.has(mesh.id)}>
               {/* Render textured (plant / imported OBJ+MTL) meshes through the
                   material-group renderer when UVs and a textured material are
                   present; otherwise fall back to the vertex-colored mesh.
@@ -10474,6 +10568,7 @@ export default function PointCloudViewer({
                   forceDepthWrite={mesh.isPlane}
                 />
               )}
+              </OutlineSelect>
               {mesh.gridSubdivisions &&
                 (mesh.gridSubdivisions.x > 1 || mesh.gridSubdivisions.y > 1 || mesh.gridSubdivisions.z > 1) && (
                   <VoxelGridOverlay subdivisions={mesh.gridSubdivisions} />
@@ -10983,6 +11078,12 @@ export default function PointCloudViewer({
         )}
 
         {showAxes && <ViewportAxesGizmo />}
+
+        {/* Screen-space (jump-flood) selection outline. Owns the render loop at
+            priority 1 (like the EffectComposer did) to render the scene then
+            composite a uniform-width silhouette outline of the selected meshes.
+            When nothing is selected it just renders the scene and returns. */}
+        <JFAOutline active={selectedMeshIds.size > 0} color="#a3e635" width={4} />
       </Canvas>
 
       {/* Polygon lasso overlay — covers the canvas in screen space.

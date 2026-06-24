@@ -15,14 +15,23 @@ classical cut-pursuit graph method that runs on the CPU (no GPU required).
 
 ## Before you start
 
-TreeIso isolates **above-ground tree structure**, so remove the ground first
-with [Segment ground points](segment-ground.md). If ground appears to still be
-present when you run the tool, Phytograph warns you (but still runs).
+TreeIso isolates **above-ground tree structure**, so deal with the ground first
+with [Segment ground points](segment-ground.md). You have two options:
+
+- **Remove** the ground points, or
+- **Label** them (run ground segmentation and keep the labelled cloud without
+  deleting the ground). When the cloud carries a `ground_class` label,
+  Segment Trees automatically excludes the ground points — TreeIso only sees the
+  plant points, and the ground keeps tree ID `0` ("Unassigned").
+
+If ground appears to still be present *and unlabelled* when you run the tool,
+Phytograph warns you (but still runs).
 
 ## Steps
 
 1. **Import** your scan (see [Import & export](import-export.md)) and, if needed,
-   run [Segment ground points](segment-ground.md) and keep the non-ground cloud.
+   run [Segment ground points](segment-ground.md) — either keep the non-ground
+   cloud or keep the labelled cloud (the ground is excluded automatically).
 2. **Select** the cloud in the scan list.
 3. Open the **Segment Trees** tool from the toolbar (the trees/forest icon in
    the **Tools** › Segmentation group) or the command palette

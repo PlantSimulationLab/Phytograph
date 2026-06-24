@@ -114,6 +114,17 @@ act on the current selection, so being deliberate about what's selected
 matters; multi-input tools (Stitch, Align, Leaf Area Density) seed their
 dialog from the selection but let you change it there.
 
+### Selecting meshes in the viewport
+
+Meshes are also selectable directly in the 3D view. Click a mesh to
+select it; <kbd>⌘/Ctrl</kbd>+click adds or removes meshes from a
+multi-selection. Selecting a mesh — whether in the viewport or in the
+**Meshes** panel — draws a bright highlight outline around it in the 3D
+view and highlights its row in the panel, so the two stay in sync. Click
+an empty area to clear the selection. (Viewport mesh selection pauses
+while an edit tool such as Crop, Erase, or Translate is active, since
+those clicks belong to the tool.)
+
 ### Bulk show/hide and delete
 
 Each list's header has an **eye** and a **trash** button that act on

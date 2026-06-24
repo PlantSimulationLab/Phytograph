@@ -12,6 +12,12 @@ export const IPC = {
   FsReadBinary: 'fs:readBinary',
   FsWriteText: 'fs:writeText',
   FsWriteBinary: 'fs:writeBinary',
+  // Persist a dropped File's bytes to a private temp file and return its path.
+  // Used when a dragged point cloud has no resolvable on-disk path (e.g. a
+  // cloud-storage placeholder) so it can still take the path-backed octree
+  // import instead of the in-renderer flat parser. Main owns the temp dir and
+  // allowlists the returned path; the files are removed on quit.
+  FsWriteTempBinary: 'fs:writeTempBinary',
   FsExists: 'fs:exists',
   // renderer -> main (one-way): allowlist a drag-drop / file-input path so the
   // fs handlers will read it (it's a genuine user selection).

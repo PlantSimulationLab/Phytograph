@@ -1,5 +1,6 @@
 import { Trees, Loader2, X } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
+import { InfoHint } from '../../InfoHint';
 
 // Output mode for wood/leaf segmentation:
 //  - 'label': keep all points, write the wood_class column, colour by it.
@@ -92,7 +93,14 @@ export function WoodSegmentPanel({
       {/* Method: connectivity (skeleton backbone, recovers thin twigs) vs the
           original geometric (local shape). */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">Method</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Method
+          <InfoHint
+            data-testid="wood-method-help"
+            label="Method"
+            text="Which classifier separates wood from leaf. Branch-segment fits cylinders to whole branch segments (best on real trees, needs the ground removed); Connectivity traces branches back to the trunk to recover thin twigs (also needs ground removed); Geometric judges each point from its local shape alone — use it when the cloud can't be cleanly ground-removed or is partial/disconnected."
+          />
+        </label>
         <select
           data-testid="wood-method"
           value={method}
@@ -161,7 +169,14 @@ export function WoodSegmentPanel({
       {/* Wood sensitivity (wood_bias, inverted for intuition: higher slider →
           more wood → lower wood_bias). */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">Wood sensitivity (0–1)</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Wood sensitivity (0–1)
+          <InfoHint
+            data-testid="wood-bias-help"
+            label="Wood sensitivity"
+            text="The wood/leaf decision threshold. Raise it to classify more points as wood — catches thin twigs at the cost of some leaf bleed; lower it to be stricter about what counts as wood. The default works across broadleaf and conifer scans."
+          />
+        </label>
         <DebouncedNumberInput
           data-testid="wood-bias"
           value={woodBias}
@@ -176,7 +191,14 @@ export function WoodSegmentPanel({
 
       {/* Neighbourhood scale (k_max) — larger = smoother / slower. */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">Neighbourhood size</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Neighbourhood size
+          <InfoHint
+            data-testid="wood-kmax-help"
+            label="Neighbourhood size"
+            text="How many neighbouring points define each point's local geometry. Larger is smoother but slower; the default suits typical terrestrial-LiDAR densities. Increase it for noisy or sparse clouds, decrease it to preserve fine detail."
+          />
+        </label>
         <DebouncedNumberInput
           data-testid="wood-kmax"
           value={kMax}
@@ -191,7 +213,14 @@ export function WoodSegmentPanel({
 
       {/* Smoothing (reg_iters). */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">Smoothing (0–8)</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Smoothing (0–8)
+          <InfoHint
+            data-testid="wood-reg-iters-help"
+            label="Smoothing"
+            text="How aggressively isolated misclassifications are cleaned up by a majority vote over each point's neighbours. Higher values remove more speckle but can erode thin structures; 0 disables it entirely."
+          />
+        </label>
         <DebouncedNumberInput
           data-testid="wood-reg-iters"
           value={regIters}
@@ -236,7 +265,14 @@ export function WoodSegmentPanel({
         </div>
       ) : (
         <div className="mb-3">
-          <label className="text-[10px] text-neutral-400 block mb-1">Output</label>
+          <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+            Output
+            <InfoHint
+              data-testid="wood-mode-help"
+              label="Output"
+              text="What to produce. Label in place keeps every point and adds a Wood Class attribute, recoloured by it. Split additionally emits separate … (wood) and … (leaf) clouds. Remove wood drops the wood points, leaving a leaf-only cloud (classic wood removal). Label and Split never delete the original."
+            />
+          </label>
           <select
             data-testid="wood-mode"
             value={mode}

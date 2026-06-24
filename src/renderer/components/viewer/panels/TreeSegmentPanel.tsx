@@ -1,5 +1,6 @@
 import { Sprout, Loader2, X } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
+import { InfoHint } from '../../InfoHint';
 
 // Presentational tool panel for TreeIso tree-instance segmentation. State,
 // handlers (`onSegment`/`onMerge`/`onSplit`), and the seed-mode pointer plumbing
@@ -85,7 +86,14 @@ export function TreeSegmentPanel({
 
       {/* Regularization strength 1 (3D) */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">3D reg. strength (λ₁)</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          3D reg. strength (λ₁)
+          <InfoHint
+            data-testid="tree-reg-strength1-help"
+            label="3D reg. strength"
+            text="Regularization for the initial 3D over-segmentation that breaks the cloud into small clusters. Higher values merge points into larger, smoother clusters; lower keeps them finer. The default rarely needs changing — tune λ₂ first."
+          />
+        </label>
         <DebouncedNumberInput
           data-testid="tree-reg-strength1"
           value={regStrength1}
@@ -98,7 +106,14 @@ export function TreeSegmentPanel({
 
       {/* Regularization strength 2 (2D) */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">2D reg. strength (λ₂)</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          2D reg. strength (λ₂)
+          <InfoHint
+            data-testid="tree-reg-strength2-help"
+            label="2D reg. strength"
+            text="Regularization for the intermediate 2D grouping that assembles clusters into trees — the most influential knob. Raise it if one tree is split into several pieces; lower it if separate trees are merged together."
+          />
+        </label>
         <DebouncedNumberInput
           data-testid="tree-reg-strength2"
           value={regStrength2}
@@ -111,7 +126,14 @@ export function TreeSegmentPanel({
 
       {/* Max gap */}
       <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 block mb-1">Max intra-tree gap (m)</label>
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Max intra-tree gap (m)
+          <InfoHint
+            data-testid="tree-max-gap-help"
+            label="Max intra-tree gap"
+            text="The largest gap (in metres, usually from occlusion) still treated as belonging to a single tree. Lower it when trees stand close together so neighbours aren't merged into one; raise it if a single sparsely-scanned tree is broken apart."
+          />
+        </label>
         <DebouncedNumberInput
           data-testid="tree-max-gap"
           value={maxGap}
@@ -134,6 +156,11 @@ export function TreeSegmentPanel({
             disabled={inProgress}
           />
           Seed trunks (left-click to add)
+          <InfoHint
+            data-testid="tree-seed-mode-help"
+            label="Seed trunks"
+            text="Guide the result by marking trunks yourself. Turn this on, then left-click each trunk in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and ambiguous segments are assigned to their nearest seed — use it when neighbouring trees merge or split automatically."
+          />
         </label>
         {seedMode && (
           <div className="text-[10px] text-neutral-500 mb-1">
@@ -165,6 +192,12 @@ export function TreeSegmentPanel({
           disabled={inProgress}
         />
         Split into one cloud per tree
+        <InfoHint
+          data-testid="tree-split-clouds-help"
+          label="Split into one cloud per tree"
+          align="right"
+          text="Also add a separate cloud for each detected tree (… (tree N)) to the scan list, so you can hide, export, or process each individually. The original cloud is always kept and recoloured by tree."
+        />
       </label>
 
       {error && (
@@ -199,7 +232,14 @@ export function TreeSegmentPanel({
       {/* Refine: merge / split the current tree_instance field (flat clouds). */}
       {hasTrees && (
         <div data-testid="tree-refine" className="mt-3 pt-3 border-t border-neutral-700">
-          <div className="text-[10px] font-medium text-neutral-300 mb-2">Refine</div>
+          <div className="text-[10px] font-medium text-neutral-300 mb-2 flex items-center gap-1">
+            Refine
+            <InfoHint
+              data-testid="tree-refine-help"
+              label="Refine"
+              text="Hand-correct the segmentation by tree ID (read the IDs off the legend). Merge combines two trees that should be one; Split separates a single ID that actually holds two trees by breaking it at spatial gaps. Changes apply to the existing tree_instance field in place."
+            />
+          </div>
           {/* Merge */}
           <div className="flex items-end gap-1 mb-2">
             <div className="flex-1">
