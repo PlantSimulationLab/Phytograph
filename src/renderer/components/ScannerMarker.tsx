@@ -377,6 +377,20 @@ function headingYawQuaternion(azimuthOffsetDeg: number): THREE.Quaternion {
   return new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), yaw);
 }
 
+// Compose a heading yaw with a roll/pitch tilt — q = tilt ∘ yaw, so the yaw is
+// applied first and the tilt leans about world axes. `tiltForwardAzimuthDeg` is
+// the world azimuth (CCW from +X) of the forward axis roll/pitch lean about.
+function composeOrientation(
+  rollDeg: number,
+  pitchDeg: number,
+  yawDeg: number,
+  tiltForwardAzimuthDeg: number,
+): THREE.Quaternion {
+  const yaw = headingYawQuaternion(yawDeg);
+  const tilt = tiltQuaternion(rollDeg, pitchDeg, tiltForwardAzimuthDeg);
+  return tilt.multiply(yaw);
+}
+
 // Full marker orientation: yaw the authored +Y-forward body to the heading first,
 // then apply tilt about the (now correctly-oriented) world axes — q = tilt ∘ yaw.
 // The body forward after the yaw sits at world azimuth (heading + 90°), so tilt is
@@ -388,9 +402,28 @@ export function scannerOrientation(
   pitchDeg: number,
   azimuthOffsetDeg: number,
 ): THREE.Quaternion {
-  const yaw = headingYawQuaternion(azimuthOffsetDeg);
-  const tilt = tiltQuaternion(rollDeg, pitchDeg, azimuthOffsetDeg + 90);
-  return tilt.multiply(yaw);
+  return composeOrientation(rollDeg, pitchDeg, azimuthOffsetDeg, azimuthOffsetDeg + 90);
+}
+
+// Orientation for the coverage SHELL (ScanPatternWireframe), whose vertices already
+// sit at their true phi (phi from +Y; see ScanPatternWireframe.sph). The shell is
+// yawed by the heading offset ONLY — phiMin is baked into the geometry, not the
+// yaw — and the roll/pitch tilt leans about the phiMin scan direction AFTER that
+// yaw: world azimuth (azimuthOffset + 90 − phiMin). That is the same body-forward
+// axis the backend tilts its rays about (LiDAR.cpp), so the shell leans with the
+// real scan. For phiMin = 0 this is identical to scannerOrientation().
+export function scanShellOrientation(
+  rollDeg: number,
+  pitchDeg: number,
+  azimuthOffsetDeg: number,
+  phiMinDeg: number,
+): THREE.Quaternion {
+  return composeOrientation(
+    rollDeg,
+    pitchDeg,
+    azimuthOffsetDeg,
+    azimuthOffsetDeg + 90 - phiMinDeg,
+  );
 }
 
 // Per-marker MeshStandardMaterial built from the scan's swatch colour. Darken in

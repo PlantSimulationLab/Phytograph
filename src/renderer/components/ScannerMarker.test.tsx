@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { scannerOrientation, decimatePosesForDisplay, MAX_DISPLAY_POSES } from './ScannerMarker';
+import {
+  scannerOrientation,
+  scanShellOrientation,
+  decimatePosesForDisplay,
+  MAX_DISPLAY_POSES,
+} from './ScannerMarker';
 
 // The scanner meshes are authored forward-along-+Y. scannerOrientation() returns
 // the quaternion the marker group is rotated by, so applying it to the mesh's
@@ -72,6 +77,49 @@ describe('scannerOrientation', () => {
     const f = forwardAfter(20, 0, 0);
     expect(f.z).toBeGreaterThan(0);
     expect(f.length()).toBeCloseTo(1, 6);
+  });
+});
+
+describe('scanShellOrientation', () => {
+  // The shell's local phiMin horizon direction (zenith 90) is (sin φ, cos φ, 0) —
+  // matches ScanPatternWireframe.sph, which places phi from +Y.
+  const phiMinDir = (phiMinDeg: number) => {
+    const p = (phiMinDeg * Math.PI) / 180;
+    return new THREE.Vector3(Math.sin(p), Math.cos(p), 0);
+  };
+
+  it('equals scannerOrientation when phiMin is 0', () => {
+    const a = scanShellOrientation(15, 10, 40, 0);
+    const b = scannerOrientation(15, 10, 40);
+    expect(a.angleTo(b)).toBeCloseTo(0, 6);
+  });
+
+  it('leans pitch about the phiMin scan direction (phiMin ray stays put under pitch)', () => {
+    // Pitch rotates about the body forward axis; for the shell that axis is the
+    // phiMin direction. So the phiMin horizon ray must be invariant under pitch:
+    // it stays in the XY plane and keeps its azimuth (here phiMin=180, az=0 → -Y).
+    const d = phiMinDir(180).applyQuaternion(scanShellOrientation(0, 30, 0, 180));
+    expect(d.x).toBeCloseTo(0, 5);
+    expect(d.y).toBeCloseTo(-1, 5);
+    expect(d.z).toBeCloseTo(0, 5); // forward axis = phiMin dir → pitch leaves it level
+  });
+
+  it('regression: the old phiMin-agnostic tilt tipped the phiMin ray out of plane', () => {
+    // scannerOrientation ignores phiMin: at az=0 its forward axis is az+90 = +Y,
+    // NOT the phiMin=90 direction (+X). Pitching about +Y then drives the +X phiMin
+    // ray out of the horizontal plane (sin 30° ≈ 0.5) — the bug scanShellOrientation
+    // fixes by leaning about +X instead, where the test above keeps it level.
+    const d = phiMinDir(90).applyQuaternion(scannerOrientation(0, 30, 0));
+    expect(Math.abs(d.z)).toBeGreaterThan(0.4);
+  });
+
+  it('carries the heading yaw on top of the phiMin tilt axis', () => {
+    // With a heading offset the phiMin ray yaws with it but stays pitch-invariant:
+    // phiMin=90 (local +X) at az=90 yaws to +Y, and pitch keeps it level.
+    const d = phiMinDir(90).applyQuaternion(scanShellOrientation(0, 25, 90, 90));
+    expect(d.x).toBeCloseTo(0, 5);
+    expect(d.y).toBeCloseTo(1, 5);
+    expect(d.z).toBeCloseTo(0, 5);
   });
 });
 

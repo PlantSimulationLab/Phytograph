@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.39.0"
+BACKEND_VERSION = "0.40.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -4037,9 +4037,12 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
     def _get(slug):
         # The per-point timestamp lives on the dedicated float64 `sess.timestamps`
         # field (not float32 `extras`) to preserve GPS-time precision for the
-        # trajectory join — prefer it. Fall back to `extras` for the ASCII import
-        # path, which still routes timestamp through the column plan.
-        if slug == 'timestamp' and sess.timestamps is not None:
+        # trajectory join — prefer it. The length guard tolerates any mutation site
+        # that fails to re-slice it (degrade to the float32 extra rather than
+        # misalign). Fall back to `extras` for the ASCII import path, which still
+        # routes timestamp through the column plan.
+        if (slug == 'timestamp' and sess.timestamps is not None
+                and sess.timestamps.shape[0] == sess.positions.shape[0]):
             return np.asarray(sess.timestamps, dtype=np.float64)[keep]
         return sess.extras[slug][keep] if slug in sess.extras else None
 
@@ -5250,7 +5253,16 @@ def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
             keep = ~sess.deleted
             xyz = np.ascontiguousarray(sess.positions[keep], dtype=np.float64)
             extras = {k: v[keep] for k, v in sess.extras.items()}
+            # Prefer the dedicated float64 timestamps field over the float32 extra
+            # so GPS-magnitude times export at full precision. Subset by the same
+            # `keep`; guard on length so a stale/misaligned field falls back.
+            ts64 = (np.asarray(sess.timestamps, dtype=np.float64)[keep]
+                    if sess.timestamps is not None
+                    and sess.timestamps.shape[0] == sess.positions.shape[0]
+                    else None)
         def _get(slug):
+            if slug == 'timestamp' and ts64 is not None:
+                return ts64
             return np.asarray(extras[slug]) if slug in extras else None
     elif scan_entry.points:
         xyz = np.ascontiguousarray(
@@ -5352,7 +5364,14 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool):
             extras = {k: np.asarray(v[keep]) for k, v in sess.extras.items()}
             if getattr(sess, 'colors', None) is not None:
                 colors = np.ascontiguousarray(sess.colors[keep], dtype=np.float64)
+            # Prefer the float64 timestamps field (see _resolve_scan_export_arrays).
+            ts64 = (np.asarray(sess.timestamps, dtype=np.float64)[keep]
+                    if sess.timestamps is not None
+                    and sess.timestamps.shape[0] == sess.positions.shape[0]
+                    else None)
         def _get(slug):
+            if slug == 'timestamp' and ts64 is not None:
+                return ts64
             return extras.get(slug)
     elif scan_entry.points:
         xyz = np.ascontiguousarray(np.asarray(scan_entry.points, dtype=np.float64)[:, :3])
@@ -5947,6 +5966,14 @@ _LIDAR_STANDARD_HIT_FIELDS = ["intensity", "distance", "timestamp", "target_inde
 # is NOT one of these is treated as a primitive-data label (e.g. "reflectance").
 _ENGINE_OPTIONAL_FIELDS = frozenset({"deviation", "nRaysHit"})
 
+# Per-hit fields whose magnitude (GPS Adjusted-Standard time ~3.5e8 s) needs
+# float64; the float32 getHitDataArray() path quantizes them to ~10 s, which
+# corrupts the moving-platform LAD trajectory join (timestamp is the join key).
+# These are read additionally via the columnar getHitDataColumnArray() float64
+# path and routed to the dedicated CloudSession.timestamps field — the float32
+# copy stays in extras for octree color-by / backfill-UI display.
+_LIDAR_FLOAT64_HIT_FIELDS = frozenset({"timestamp"})
+
 # Soft ceiling on a moving scan's total pulse count. A real PRF over a long flight
 # is genuinely millions of pulses (we fire them — physically faithful), but past
 # this we surface a warning so a 60 s flight at 1 MHz (60M pulses) doesn't lock up
@@ -6416,12 +6443,21 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                                 else np.zeros(n, dtype=np.int32))    # (n,) int32, 1==miss
                     # Each field is (n,) f32, NaN where the label is absent for a hit.
                     all_fields = {f: lidar.getHitDataArray(f) for f in fields_to_read}
+                    # Precision-sensitive fields (timestamp) read additionally at
+                    # float64 via the columnar path; absent_value=np.nan matches the
+                    # float32 path's NaN-where-absent semantics so the all-NaN drop
+                    # and LAD NaN-guards stay consistent (a -9999 sentinel would
+                    # survive those filters and poison the trajectory join).
+                    fields_f64 = {f: lidar.getHitDataColumnArray(f, absent_value=np.nan)
+                                  for f in fields_to_read if f in _LIDAR_FLOAT64_HIT_FIELDS}
                 else:
                     all_xyz = np.empty((0, 3), np.float32)
                     all_rgb = np.empty((0, 3), np.float32)
                     all_scan_ids = np.empty((0,), np.int32)
                     all_miss = np.empty((0,), np.int32)
                     all_fields = {f: np.empty((0,), np.float32) for f in fields_to_read}
+                    fields_f64 = {f: np.empty((0,), np.float64)
+                                  for f in fields_to_read if f in _LIDAR_FLOAT64_HIT_FIELDS}
 
                 # intensity is a signed beam·normal dot product; surface its
                 # magnitude so it reads as a 0..1-ish value (matches the old loop).
@@ -6455,6 +6491,10 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                         "points": all_xyz[sel],                       # (m,3) f32
                         "colors": all_rgb[sel],                       # (m,3) f32
                         "scalars": {f: arr[sel] for f, arr in all_fields.items()},
+                        # Float64 copies of the precision-sensitive fields, sliced
+                        # with the SAME sel as scalars so they stay aligned. Routed
+                        # to CloudSession.timestamps (not the float32 frame).
+                        "timestamps_f64": {f: arr[sel] for f, arr in fields_f64.items()},
                         # is_miss stays compact (uint8); the session re-casts as it
                         # needs. A float32 flag is 4× the bytes for a 0/1 value.
                         "is_miss": all_miss[sel].astype(np.uint8),    # (m,) u8, 1==miss
@@ -6463,7 +6503,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 # its slice. Without this they stay referenced until the function
                 # returns, so they coexist with the f64 session positions + the
                 # laspy records built below — the peak that drove RAM to tens of GB.
-                del all_xyz, all_rgb, all_scan_ids, all_miss, all_fields
+                del all_xyz, all_rgb, all_scan_ids, all_miss, all_fields, fields_f64
 
         _prof["extract"] = time.perf_counter()
         _report(0.95, "Building point clouds")
@@ -6625,6 +6665,18 @@ def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[
     extras[_MISS_SLUG] = miss
     extra_dims_meta.append({"slug": _MISS_SLUG, "label": _MISS_LABEL})
 
+    # Per-point timestamp at float64 — the moving-platform LAD trajectory join key.
+    # Routed to the dedicated CloudSession.timestamps field (NOT the float32 extras
+    # above) so GPS-magnitude timestamps keep sub-second precision. The float32
+    # copy stays in extras for color-by/backfill display. None when timestamp was
+    # not recorded or is all-NaN (e.g. a static scan with no per-pulse time).
+    ts_f64 = r.get("timestamps_f64", {}).get("timestamp")
+    timestamps = None
+    if ts_f64 is not None:
+        arr64 = np.asarray(ts_f64, dtype=np.float64)
+        if arr64.shape[0] == n and not np.all(np.isnan(arr64)):
+            timestamps = arr64
+
     session_id = uuid.uuid4().hex[:8]
     sess = CloudSession(
         session_id=session_id,
@@ -6636,6 +6688,7 @@ def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[
         intensity=intensity,
         extras=extras,
         extra_dims_meta=extra_dims_meta,
+        timestamps=timestamps,
         world_shift=None,  # synthetic scans are authored near the origin
         deleted=np.zeros(n, dtype=bool),
         deleted_history=[],
@@ -17268,6 +17321,8 @@ async def bake_cloud_session(session_id: str):
             sess.intensity = sess.intensity[keep]
         for slug in list(sess.extras.keys()):
             sess.extras[slug] = sess.extras[slug][keep]
+        if sess.timestamps is not None:
+            sess.timestamps = sess.timestamps[keep]
         sess.deleted = np.zeros(len(sess.positions), dtype=bool)
         sess.deleted_history = []
         sess.octree_cache_id = cache_key
@@ -17354,6 +17409,10 @@ def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSess
         intensity=sess.intensity[surv][keep].copy() if sess.intensity is not None else None,
         extras={k: v[surv][keep].copy() for k, v in sess.extras.items()},
         extra_dims_meta=list(sess.extra_dims_meta),
+        # Carry the float64 timestamps onto the subset so the moving-platform LAD
+        # join key survives a split/crop with full precision (and stays aligned).
+        timestamps=(np.asarray(sess.timestamps)[surv][keep].copy()
+                    if sess.timestamps is not None else None),
         # Inherit the parent's import shift so the subset's stored positions stay
         # in the same (shifted) space and still restore to world coords on read.
         world_shift=(sess.world_shift.copy() if sess.world_shift is not None else None),

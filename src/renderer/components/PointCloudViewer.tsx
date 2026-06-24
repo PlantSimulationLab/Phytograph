@@ -1434,7 +1434,13 @@ export default function PointCloudViewer({
   // Track previous mesh IDs to detect new additions
   const prevMeshIdsRef = useRef<Set<string>>(new Set());
 
-  // Snap to isometric view when a new mesh is added
+  // Frame a newly added mesh WITHOUT changing the viewing angle. We deliberately
+  // use __frameSelection (preserves the current camera→target direction and up
+  // vector, only re-centers + re-zooms) rather than __snapToView('iso', …),
+  // which would slam the camera to a fixed isometric angle and reset camera.up —
+  // rotating the view ~180° just because e.g. a voxel grid was added to a scene
+  // the user had already orbited. First-content framing is handled separately by
+  // the empty→loaded iso snap in CameraController.
   useEffect(() => {
     const currentIds = new Set(meshes.map(m => m.id));
     const prevIds = prevMeshIdsRef.current;
@@ -1445,12 +1451,12 @@ export default function PointCloudViewer({
       const newMesh = meshes.find(m => m.id === newMeshIds[0]);
       if (newMesh && newMesh.data.vertices && newMesh.data.vertexCount > 0) {
         setTimeout(() => {
-          const snapToView = (window as any).__snapToView;
-          if (snapToView) {
+          const frameSelection = (window as any).__frameSelection;
+          if (frameSelection) {
             // Frame the mesh in WORLD space. computeBoundsFromPositions on the raw
             // local vertices ignores the mesh transform, which for a Helios <grid>
             // voxel (a unit cube placed at [center] with [size] scale) collapses to
-            // a ±0.5 box at the origin and makes snapToView zoom to near-zero
+            // a ±0.5 box at the origin and makes the framing zoom to near-zero
             // distance, culling everything. Transform first (scale -> rotate Euler
             // XYZ -> translate, matching extractMeshWorldGeometry).
             const pos = meshPositionsRef.current.get(newMesh.id) || { x: 0, y: 0, z: 0 };
@@ -1474,7 +1480,7 @@ export default function PointCloudViewer({
             }
             const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
             const size = new THREE.Vector3().subVectors(max, min);
-            snapToView('iso', { center, size });
+            frameSelection({ center, size });
           }
         }, 50);
       }
@@ -10442,12 +10448,23 @@ export default function PointCloudViewer({
                   wireframe={meshWireframe}
                   useVertexColors={mesh.data.vertexColors !== undefined && mesh.data.vertexColors.length > 0}
                   triangleColors={meshTriangleColors.get(mesh.id) ?? null}
-                  // The translucent voxel box must always blend over the
-                  // surface mesh it encloses, not be camera-distance-sorted
-                  // against it. A positive renderOrder forces it last in the
-                  // transparent pass so its volume tint survives every view
-                  // angle (fixes the +X-view "full green" bug).
-                  renderOrder={mesh.gridSubdivisions ? 1 : 0}
+                  // Transparent-pass draw order (three.js sorts by renderOrder,
+                  // then camera distance):
+                  //  • voxel box (+1): always blend LAST over the surface mesh it
+                  //    encloses, not camera-distance-sorted against it, so its
+                  //    volume tint survives every view angle (the +X-view "full
+                  //    green" fix).
+                  //  • ground plane (-0.5): draw FIRST, just after the ground grid
+                  //    (-1) and before all real geometry (0). The plane is coplanar
+                  //    at z=0 with any triangulated surface / second scan sitting on
+                  //    it; at equal camera distance the sort ties and the tie-break
+                  //    falls to scene-graph order, which the octree LOD streamer
+                  //    reshuffles every frame as it adds/drops tiles — so the plane
+                  //    and that coplanar surface race and flicker even with a frozen
+                  //    camera. A fixed lower renderOrder makes the plane
+                  //    deterministically composite UNDER them instead of racing.
+                  //  • everything else (0): normal distance sorting.
+                  renderOrder={mesh.gridSubdivisions ? 1 : mesh.isPlane ? -0.5 : 0}
                   // A ground plane usually sits at z=0, coplanar with the ground
                   // grid; bias its depth so it doesn't z-fight the grid.
                   polygonOffset={mesh.isPlane}

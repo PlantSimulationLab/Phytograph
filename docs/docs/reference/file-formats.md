@@ -320,6 +320,11 @@ type* (global encoding bit 0) is honoured:
   loudly** (rather than silently clamping every return to one pose) and you're told to
   re-export on a common clock.
 
+Synthetic scans keep the same guarantee: a generated scan's per-return timestamp is also
+stored at full double precision (read from the engine via the float64 columnar path), so a
+synthetic moving-platform scan's trajectory join and its exported timestamps are not
+quantized — matching imported clouds.
+
 ### LAS ExtraBytes per-beam origins
 
 If a LAS/LAZ carries the per-pulse emission point as three ExtraBytes columns — any of

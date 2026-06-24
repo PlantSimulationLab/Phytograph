@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import { getScannerModel, type ScannerModelId } from '../lib/scannerModels';
-import { scannerOrientation } from './ScannerMarker';
+import { scanShellOrientation } from './ScannerMarker';
 import type { ScanParameters } from '../lib/scanParameters';
 
 // A faint wireframe shell depicting a scanner's angular COVERAGE (not its body —
@@ -195,9 +195,10 @@ export function ScanPatternWireframe({
   );
   useEffect(() => () => geometry.dispose(), [geometry]);
 
-  // Orientation matches the body marker: a moving scan uses its first-pose attitude;
-  // a static scan uses the heading+tilt quaternion (which folds in azimuthOffset, so
-  // the arcs above must stay azimuthOffset-free to avoid double-counting it).
+  // Orientation: a moving scan uses its first-pose attitude; a static scan uses the
+  // heading+tilt quaternion. The yaw folds in azimuthOffset (so the arcs above stay
+  // azimuthOffset-free to avoid double-counting it), and the tilt leans about the
+  // phiMin (azimuthMin) scan direction so the shell tips with the real rays.
   const quaternion = useMemo(
     () =>
       bodyQuaternion
@@ -207,8 +208,13 @@ export function ScanPatternWireframe({
             bodyQuaternion[2],
             bodyQuaternion[3],
           ).normalize()
-        : scannerOrientation(tiltRollDeg, tiltPitchDeg, azimuthOffsetDeg),
-    [bodyQuaternion, tiltRollDeg, tiltPitchDeg, azimuthOffsetDeg],
+        : scanShellOrientation(
+            tiltRollDeg,
+            tiltPitchDeg,
+            azimuthOffsetDeg,
+            azimuthMinDeg,
+          ),
+    [bodyQuaternion, tiltRollDeg, tiltPitchDeg, azimuthOffsetDeg, azimuthMinDeg],
   );
 
   return (

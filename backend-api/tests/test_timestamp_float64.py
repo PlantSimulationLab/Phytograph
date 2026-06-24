@@ -203,3 +203,143 @@ def test_encoding_none_when_no_gps_time(tmp_path):
     encoding = _r.gps_time_encoding
     assert timestamps is None
     assert encoding is None
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-scan path: the same precision guarantee for the synthetic-scan
+# session builder (the import path is covered above; this covers _do_lidar_scan
+# → _create_lidar_scan_session, which must route the float64 columnar timestamp
+# to CloudSession.timestamps just as the LAS reader does for imported clouds).
+# ---------------------------------------------------------------------------
+
+def _synthetic_scan_r(n=_N, with_misses=False):
+    """A `_create_lidar_scan_session` input dict mirroring what `_do_lidar_scan`
+    builds for one scanner: float32 `scalars` (the renderer/display copy) plus the
+    float64 `timestamps_f64` columnar copy that must reach CloudSession.timestamps."""
+    pts = np.column_stack([
+        np.linspace(0.1, 0.8, n),
+        np.linspace(0.2, 0.9, n),
+        np.linspace(1.0, 0.5, n),
+    ]).astype(np.float32)
+    is_miss = np.zeros(n, dtype=np.uint8)
+    if with_misses:
+        is_miss[-1] = 1  # one sky return
+    return {
+        "scanner_id": "syn",
+        "origin": [0.0, 0.0, 5.0],
+        "points": pts,
+        "colors": None,
+        # Display copy is float32 (exactly what getHitDataArray returns).
+        "scalars": {"timestamp": _GPS_TIMES.astype(np.float32)},
+        # Precision copy is float64 (what getHitDataColumnArray returns).
+        "timestamps_f64": {"timestamp": _GPS_TIMES.copy()},
+        "is_miss": is_miss,
+    }
+
+
+class TestSyntheticScanTimestampFloat64:
+    """A synthetic scan must route its per-hit timestamp to the float64
+    CloudSession.timestamps field, so GPS-magnitude times keep sub-second
+    precision the float32 getHitDataArray() display copy would quantize away."""
+
+    def _make_session(self, r):
+        out = main._create_lidar_scan_session(r)
+        sid = out["session_id"]
+        with main._cloud_session_lock:
+            sess = main._cloud_sessions[sid]
+        return sid, sess
+
+    def test_session_stores_float64_timestamps_with_float32_display_copy(self):
+        sid, sess = self._make_session(_synthetic_scan_r())
+        try:
+            # The dedicated float64 field carries the join-key precision.
+            assert sess.timestamps is not None
+            assert sess.timestamps.dtype == np.float64
+            assert len(np.unique(sess.timestamps)) == _N
+            np.testing.assert_allclose(sess.timestamps, _GPS_TIMES, rtol=0, atol=0)
+
+            # The two-copy contract: timestamp ALSO stays in float32 extras for
+            # octree color-by / backfill display.
+            assert "timestamp" in sess.extras
+            assert sess.extras["timestamp"].dtype == np.float32
+
+            # CONTROL: a float32 cast (the display copy / the old bug) collapses the
+            # 1 ms spacing at this epoch. If this fails, the float32 path returned.
+            assert len(np.unique(sess.timestamps.astype(np.float32))) < _N
+        finally:
+            with main._cloud_session_lock:
+                main._cloud_sessions.pop(sid, None)
+
+    def test_export_emits_float64_timestamp_column(self):
+        sid, sess = self._make_session(_synthetic_scan_r())
+        try:
+            entry = main.HeliosScanEntry(origin=[0.0, 0.0, 5.0], session_id=sid)
+            xyz, labels, vals = main._resolve_scan_export_arrays(entry, include_misses=True)
+            assert "timestamp" in labels, "export must carry the timestamp column"
+            ts_col = vals[:, labels.index("timestamp")]
+            assert ts_col.dtype == np.float64
+            # Full precision survived to the exported column.
+            assert len(np.unique(ts_col)) == _N
+            np.testing.assert_allclose(np.sort(ts_col), _GPS_TIMES, rtol=0, atol=0)
+        finally:
+            with main._cloud_session_lock:
+                main._cloud_sessions.pop(sid, None)
+
+    def test_subset_keeps_timestamps_aligned_and_precise(self):
+        """`_session_subset_locked` (split/crop) must carry the float64 timestamps
+        onto the new session, aligned with the surviving points."""
+        sid, sess = self._make_session(_synthetic_scan_r())
+        new_id = None
+        try:
+            keep = np.ones(_N, dtype=bool)
+            keep[[1, 4]] = False  # drop 2 of N survivors
+            with main._cloud_session_lock:
+                new_sess = main._session_subset_locked(sess, keep)
+            new_id = new_sess.session_id
+            assert new_sess.timestamps is not None
+            assert new_sess.timestamps.dtype == np.float64
+            assert new_sess.timestamps.shape[0] == new_sess.positions.shape[0]
+            np.testing.assert_allclose(
+                new_sess.timestamps, _GPS_TIMES[keep], rtol=0, atol=0)
+        finally:
+            with main._cloud_session_lock:
+                main._cloud_sessions.pop(sid, None)
+                if new_id:
+                    main._cloud_sessions.pop(new_id, None)
+
+
+class TestSyntheticScanTimestampFloat64RealPyhelios:
+    """End-to-end through the real synthetic-scan FFI: a scan with misses must
+    populate CloudSession.timestamps as a float64 column read via
+    getHitDataColumnArray (NOT the float32 getHitDataArray display copy). Skipped
+    when the native pyhelios build is unavailable."""
+
+    def test_scan_session_has_float64_timestamps(self):
+        pytest.importorskip("pyhelios")
+        # Reuse the pyramid geometry + static scanner from the lidar-scan suite. A
+        # 0..180 theta sweep from above sends most beams past the pyramid → misses,
+        # so record_misses builds a session (the path that stores timestamps).
+        from tests.test_lidar_scan import _PYRAMID_VERTS, _PYRAMID_TRIS, _scanner
+
+        req = main.LidarScanRequest(
+            meshes=[main.LidarScanMesh(vertices=_PYRAMID_VERTS, triangles=_PYRAMID_TRIS)],
+            scanners=[main.LidarScanScanner(**_scanner("top"))],
+            record_misses=True)
+        res = main._do_lidar_scan(req)
+        assert res["results"], res.get("error")
+        sess_meta = res["results"][0].get("session")
+        assert sess_meta is not None, "record_misses over the pyramid should create a session"
+        sid = sess_meta["session_id"]
+        try:
+            with main._cloud_session_lock:
+                sess = main._cloud_sessions[sid]
+            # The columnar float64 read reached the dedicated field, aligned 1:1
+            # with positions (hits + misses) at full double precision.
+            assert sess.timestamps is not None, \
+                "synthetic scan must populate float64 timestamps"
+            assert sess.timestamps.dtype == np.float64
+            assert sess.timestamps.shape[0] == sess.positions.shape[0]
+            assert np.isfinite(sess.timestamps).any(), "some return must carry a time"
+        finally:
+            with main._cloud_session_lock:
+                main._cloud_sessions.pop(sid, None)
