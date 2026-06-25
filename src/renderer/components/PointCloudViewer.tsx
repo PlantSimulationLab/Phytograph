@@ -40,7 +40,7 @@ import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import StatusPill from './StatusPill';
-import { type ScanParameters, scanParametersFromFile } from '../lib/scanParameters';
+import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams } from '../lib/scanParameters';
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { poseStreamToWire, trajectoryDurationS, deriveMovingScanGrid } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
@@ -664,14 +664,18 @@ export default function PointCloudViewer({
   const [groundClothResolution, setGroundClothResolution] = useState(0.05);
   const [groundClassThreshold, setGroundClassThreshold] = useState(0.02);
   const [groundRigidness, setGroundRigidness] = useState(3);
+  const [groundSlopeSmooth, setGroundSlopeSmooth] = useState(false);
   const [groundSplitClouds, setGroundSplitClouds] = useState(false);
-  // Seed CSF cloth-resolution / class-threshold from the selected cloud's
-  // horizontal extent each time the ground panel OPENS. CSF's params are
-  // absolute distances, so a fixed default that suits a ~1 m plant scan badly
-  // under-segments a 50 m field (nearly everything labelled non-ground); scaling
-  // by extent makes the out-of-the-box run sensible at any scale, and the user
-  // can still override in the panel. Guarded by a ref so it only fires on the
-  // open transition — re-running on a later `clouds`/`selectedIds` change would
+  // Seed CSF cloth-resolution / class-threshold / rigidness / slope-smooth from
+  // the selected cloud's horizontal extent AND vertical relief each time the
+  // ground panel OPENS. CSF's params are absolute distances, so a fixed default
+  // that suits a ~1 m plant scan badly under-segments a 50 m field (nearly
+  // everything labelled non-ground); and a coarse, stiff cloth tuned for a large
+  // FLAT field bridges over a large SLOPED tile and only finds the valley floor.
+  // groundSegmentDefaultsForExtent picks the right recipe from the X/Y extent
+  // (Z is up, so size.z is the vertical relief), and the user can still override
+  // every field in the panel. Guarded by a ref so it only fires on the open
+  // transition — re-running on a later `clouds`/`selectedIds` change would
   // clobber any manual tweaks the user made while the panel is open.
   const groundPanelWasOpen = useRef(false);
   useEffect(() => {
@@ -679,9 +683,11 @@ export default function PointCloudViewer({
       const sel = clouds.find((c) => selectedIds.has(c.id));
       const size = sel?.data.bounds?.size;
       if (size) {
-        const defaults = groundSegmentDefaultsForExtent(Math.max(size.x, size.y));
+        const defaults = groundSegmentDefaultsForExtent(Math.max(size.x, size.y), size.z);
         setGroundClothResolution(defaults.clothResolution);
         setGroundClassThreshold(defaults.classThreshold);
+        setGroundRigidness(defaults.rigidness);
+        setGroundSlopeSmooth(defaults.slopeSmooth);
       }
     }
     groundPanelWasOpen.current = showGroundSegmentPanel;
@@ -971,7 +977,7 @@ export default function PointCloudViewer({
         results = onRequestImportWizard
           ? await onRequestImportWizard(inputs)
           : // No wizard host (defensive): import with auto-detect.
-            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], worldShift: null }));
+            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], worldShift: null, trajectory: null }));
         if (!results) return; // user cancelled the wizard
       }
 
@@ -1004,6 +1010,12 @@ export default function PointCloudViewer({
               // scan's parameters when the import didn't already carry them.
               if (!scan.params && data.octree?.scanParams) {
                 scan.params = scanParametersFromFile(data.octree.scanParams);
+              }
+              // A trajectory chosen in the wizard makes this a moving-platform
+              // scan: attach it (creating defaults if the scan had no params),
+              // anchoring origin to the first pose and zeroing static tilt/heading.
+              if (r.trajectory) {
+                scan.params = applyTrajectoryToParams(scan.params, r.trajectory);
               }
               attachedCount += 1;
             } catch (err) {
@@ -5862,6 +5874,7 @@ export default function PointCloudViewer({
       cloth_resolution: groundClothResolution,
       rigidness: groundRigidness,
       class_threshold: groundClassThreshold,
+      slope_smooth: groundSlopeSmooth,
     };
 
     try {
@@ -6002,7 +6015,7 @@ export default function PointCloudViewer({
     } finally {
       setGroundSegmentInProgress(false);
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSplitClouds]);
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds]);
 
   // Pull a per-point reflectance/intensity scalar from a flat cloud's display
   // data for the inline reflectance-assist path, as a plain number[] aligned to
@@ -12992,6 +13005,7 @@ export default function PointCloudViewer({
           clothResolution={groundClothResolution}
           classThreshold={groundClassThreshold}
           rigidness={groundRigidness}
+          slopeSmooth={groundSlopeSmooth}
           splitClouds={groundSplitClouds}
           inProgress={groundSegmentInProgress}
           error={groundSegmentError}
@@ -12999,6 +13013,7 @@ export default function PointCloudViewer({
           onClothResolutionChange={setGroundClothResolution}
           onClassThresholdChange={setGroundClassThreshold}
           onRigidnessChange={setGroundRigidness}
+          onSlopeSmoothChange={setGroundSlopeSmooth}
           onSplitCloudsChange={setGroundSplitClouds}
           onSegment={handleGroundSegment}
         />

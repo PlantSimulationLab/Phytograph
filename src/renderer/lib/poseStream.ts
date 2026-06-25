@@ -90,6 +90,53 @@ export interface ParsePoseStreamOptions {
 const QUAT_COLS = 8;
 const EULER_COLS = 7;
 
+// Map a header column name to a canonical pose field. Strips units/punctuation
+// ('Time [s]' -> 'time', 'Easting [m]' -> 'easting') and accepts the spellings
+// real exporters use — notably SYSSIFOSS/HELIOS++, whose trajectory header is
+// `Easting Northing Height Time Roll Pitch Yaw` (POSITION-first, not time-first).
+// Without this, that file's columns are read positionally and Easting is mistaken
+// for time (which isn't monotonic → "times must be strictly increasing").
+type PoseField = 't' | 'x' | 'y' | 'z'
+  | 'roll' | 'pitch' | 'yaw' | 'qx' | 'qy' | 'qz' | 'qw';
+
+function poseFieldFromHeader(name: string): PoseField | null {
+  const base = name.replace(/\[.*?\]/g, '').replace(/[^a-z0-9]+/gi, '').toLowerCase();
+  switch (base) {
+    case 't': case 'time': case 'gpstime': case 'timestamp': case 'times': return 't';
+    case 'x': case 'easting': case 'east': case 'posx': return 'x';
+    case 'y': case 'northing': case 'north': case 'posy': return 'y';
+    case 'z': case 'height': case 'altitude': case 'alt': case 'elevation':
+    case 'posz': return 'z';
+    case 'roll': return 'roll';
+    case 'pitch': return 'pitch';
+    case 'yaw': case 'heading': return 'yaw';
+    case 'qx': return 'qx';
+    case 'qy': return 'qy';
+    case 'qz': return 'qz';
+    case 'qw': return 'qw';
+    default: return null;
+  }
+}
+
+// Given a header line's tokens, return a column-reorder map that pulls each raw
+// row into canonical order — [t,x,y,z,roll,pitch,yaw] (Euler) or
+// [t,x,y,z,qx,qy,qz,qw] (quaternion) — or null when the header doesn't resolve to
+// a complete known layout (so the caller falls back to positional parsing).
+function columnOrderFromHeader(tokens: string[]): number[] | null {
+  const fieldAt = tokens.map(poseFieldFromHeader);
+  const idxOf = (f: PoseField) => fieldAt.indexOf(f);
+  const base: PoseField[] = ['t', 'x', 'y', 'z'];
+  const quat: PoseField[] = [...base, 'qx', 'qy', 'qz', 'qw'];
+  const euler: PoseField[] = [...base, 'roll', 'pitch', 'yaw'];
+  if (tokens.length === QUAT_COLS && quat.every((f) => idxOf(f) >= 0)) {
+    return quat.map(idxOf);
+  }
+  if (tokens.length === EULER_COLS && euler.every((f) => idxOf(f) >= 0)) {
+    return euler.map(idxOf);
+  }
+  return null;
+}
+
 // Parse a CSV / whitespace-delimited trajectory file into a PoseStream.
 //
 // Accepts comma OR whitespace separators, '#'/'//' comment lines, and an optional
@@ -103,20 +150,39 @@ export function parsePoseStreamCsv(
   const rawLines = text.split(/\r?\n/);
   const rows: number[][] = [];
   let detectedCols: number | null = null;
+  // When a recognized header names the columns, this reorders each raw row into
+  // canonical [t,x,y,z,...] order — letting position-first exports (SYSSIFOSS/
+  // HELIOS++) import without the user pre-reordering. null = parse positionally.
+  let columnOrder: number[] | null = null;
 
   for (const raw of rawLines) {
     const line = raw.trim();
     if (!line || line.startsWith('#') || line.startsWith('//')) continue;
     const tokens = line.split(/[,\s]+/).filter((t) => t.length > 0);
-    // A header row (non-numeric first token) is skipped once.
+    // A header row (non-numeric first token) is skipped once — but first try to
+    // read a column-order map from it, so named columns in any order resolve.
     if (rows.length === 0 && detectedCols === null && Number.isNaN(Number(tokens[0]))) {
+      // Strip bracketed unit groups BEFORE tokenizing the header, so a label like
+      // 'Time [s]' (which the row split would break into 'Time' + '[s]', inflating
+      // the column count) stays a single 'Time' token. Data rows never have these.
+      const headerTokens = line
+        .replace(/\[[^\]]*\]/g, '')
+        .split(/[,\t]|\s{2,}|\s+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+      columnOrder = columnOrderFromHeader(headerTokens);
       continue;
     }
-    const nums = tokens.map(Number);
+    let nums = tokens.map(Number);
     if (nums.some((n) => Number.isNaN(n))) {
       throw new PoseStreamParseError(
         `Trajectory row has a non-numeric value: "${line}"`,
       );
+    }
+    // Reorder named columns into canonical order. Only when the row width matches
+    // the header's (a malformed short row falls through to the width check below).
+    if (columnOrder && nums.length === columnOrder.length) {
+      nums = columnOrder.map((i) => nums[i]);
     }
     if (detectedCols === null) {
       if (nums.length !== QUAT_COLS && nums.length !== EULER_COLS) {
@@ -200,6 +266,26 @@ export function poseStreamToWire(stream: PoseStream): unknown {
     lever_arm: stream.leverArm,
     boresight_rpy: stream.boresightRpy,
     source_format: stream.sourceFormat,
+  };
+}
+
+// Translate every pose position by SUBTRACTING `shift` ([x, y, z]), returning a
+// new PoseStream (attitude, lever-arm, frame metadata unchanged). Used to move an
+// imported trajectory into a cloud's stored frame: the import wizard's global
+// shift is subtracted from the point cloud (stored = world − worldShift), so a
+// trajectory attached at import — whose poses are in raw world/UTM coordinates —
+// must have the SAME offset subtracted, or it would render millions of metres away
+// from the shifted cloud and the LAD timestamp→origin join would be in the wrong
+// frame. A null/zero shift returns the stream unchanged (no allocation churn).
+export function shiftPoseStream(
+  stream: PoseStream,
+  shift: [number, number, number] | null | undefined,
+): PoseStream {
+  if (!shift || (shift[0] === 0 && shift[1] === 0 && shift[2] === 0)) return stream;
+  const [sx, sy, sz] = shift;
+  return {
+    ...stream,
+    poses: stream.poses.map((p) => ({ ...p, x: p.x - sx, y: p.y - sy, z: p.z - sz })),
   };
 }
 

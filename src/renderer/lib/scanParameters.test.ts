@@ -1,10 +1,29 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_SCAN_PARAMETERS,
+  applyTrajectoryToParams,
+  makeDefaultScanParameters,
   migrateScanReturnFields,
   scanParametersFromFile,
   type ScanParamsFromFile,
 } from './scanParameters';
+import type { PoseStream } from './poseStream';
+
+// A minimal two-pose PoseStream for the trajectory-attach tests: the platform
+// moves from x=-1 to x=1 at z=5, identity attitude.
+function makeTrajectory(): PoseStream {
+  return {
+    poses: [
+      { t: 0, x: -1, y: 0, z: 5, qx: 0, qy: 0, qz: 0, qw: 1 },
+      { t: 2, x: 1, y: 0, z: 5, qx: 0, qy: 0, qz: 0, qw: 1 },
+    ],
+    frame: { crs: null, upAxis: 'z', bodyConvention: 'FLU', timeRef: 'gps' },
+    leverArm: [0, 0, 0],
+    boresightRpy: [0, 0, 0],
+    sourceFormat: 'pose_csv',
+    label: 'pass.csv',
+  };
+}
 
 // scanParametersFromFile turns the partial scan-pattern metadata a point-cloud
 // FILE carried (E57 pose + angular sweep + grid; PCD VIEWPOINT origin) into a
@@ -137,6 +156,49 @@ describe('scanParametersFromFile', () => {
 
     const headed = scanParametersFromFile({ origin: [0, 0, 0], azimuth_offset_deg: 45 });
     expect(headed.azimuthOffsetDeg).toBe(45);
+  });
+});
+
+// applyTrajectoryToParams attaches an imported platform trajectory to a scan,
+// marking it a moving-platform acquisition. Used by the Scan Parameters popup and
+// the import wizard's trajectory upload.
+describe('applyTrajectoryToParams', () => {
+  it('attaches the trajectory, anchors origin to the first pose, and zeros tilt/heading', () => {
+    const base = makeDefaultScanParameters();
+    base.tiltRollDeg = 5;
+    base.tiltPitchDeg = -3;
+    base.azimuthOffsetDeg = 45;
+    const p = applyTrajectoryToParams(base, makeTrajectory());
+    expect(p.trajectory?.poses).toHaveLength(2);
+    expect(p.origin).toEqual({ x: -1, y: 0, z: 5 }); // first pose
+    expect(p.tiltRollDeg).toBe(0);
+    expect(p.tiltPitchDeg).toBe(0);
+    expect(p.azimuthOffsetDeg).toBe(0);
+  });
+
+  it('synthesizes default params when the scan had none (plain XYZ/LAS import)', () => {
+    const p = applyTrajectoryToParams(undefined, makeTrajectory());
+    expect(p.trajectory).toBeDefined();
+    expect(p.origin).toEqual({ x: -1, y: 0, z: 5 });
+    // Untouched fields come from the defaults.
+    expect(p.zenithPoints).toBe(DEFAULT_SCAN_PARAMETERS.zenithPoints);
+    expect(p.returnMode).toBe(DEFAULT_SCAN_PARAMETERS.returnMode);
+  });
+
+  it('preserves the rest of the existing params', () => {
+    const base = makeDefaultScanParameters();
+    base.pattern = 'spinning_multibeam';
+    base.azimuthPoints = 720;
+    const p = applyTrajectoryToParams(base, makeTrajectory());
+    expect(p.pattern).toBe('spinning_multibeam');
+    expect(p.azimuthPoints).toBe(720);
+  });
+
+  it('does not mutate the input params', () => {
+    const base = makeDefaultScanParameters();
+    const before = JSON.stringify(base);
+    applyTrajectoryToParams(base, makeTrajectory());
+    expect(JSON.stringify(base)).toBe(before);
   });
 });
 

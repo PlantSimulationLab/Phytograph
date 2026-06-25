@@ -3,6 +3,7 @@ import { X, Radio, FileUp } from 'lucide-react';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import {
   DEFAULT_SCAN_PARAMETERS,
+  applyTrajectoryToParams,
   type PulseReturnMode,
   type SingleReturnSelection,
   type ScanParameters,
@@ -20,13 +21,11 @@ import {
   type HeliosXmlGrid,
 } from '../lib/heliosScanXml';
 import {
-  parsePoseStreamCsv,
-  poseStreamFromWire,
   PoseStreamParseError,
   deriveMovingScanGrid,
   trajectoryDurationS,
 } from '../lib/poseStream';
-import { parseTrajectory } from '../utils/backendApi';
+import { pickAndParseTrajectory } from '../lib/trajectoryImport';
 
 // What the popup is doing in this open. Drives the title and submit-button
 // labels — submission semantics are otherwise identical (the caller decides
@@ -171,41 +170,15 @@ export function ScanParametersPopup({
   // surfaced inside the popup, like XML import.
   const handleImportTrajectory = async () => {
     setImportError(null);
-    const picked = await window.electronAPI.dialog.open({
-      title: 'Import platform trajectory',
-      filters: [
-        { name: 'Trajectory (CSV / text)', extensions: ['csv', 'txt', 'tsv', 'traj'] },
-        { name: 'Binary trajectory (SBET)', extensions: ['sbet', 'out'] },
-      ],
-    });
-    if (!picked) return;
-    const path = Array.isArray(picked) ? picked[0] : picked;
-    const label = path.split(/[\\/]/).pop();
-    const ext = (path.split('.').pop() || '').toLowerCase();
     try {
       // Binary SBET is parsed server-side (it needs pyproj for the UTM projection);
       // text trajectories are parsed in the renderer. Both yield the same PoseStream.
-      let stream;
-      if (ext === 'sbet' || ext === 'out') {
-        const wire = await parseTrajectory(path);
-        stream = poseStreamFromWire(wire, label);
-      } else {
-        const text = await window.electronAPI.fs.readText(path);
-        stream = parsePoseStreamCsv(text, { label });
-      }
-      const first = stream.poses[0];
-      setParams(p => ({
-        ...p,
-        trajectory: stream,
-        origin: { x: first.x, y: first.y, z: first.z },
-        // A moving scan's attitude comes entirely from the trajectory
-        // quaternions (+ boresight); the static tilt/heading no longer apply and
-        // the backend (addScanMoving) REJECTS a non-zero static tilt. Zero them
-        // so importing a trajectory onto a previously-tilted scan can't error.
-        tiltRollDeg: 0,
-        tiltPitchDeg: 0,
-        azimuthOffsetDeg: 0,
-      }));
+      const stream = await pickAndParseTrajectory();
+      if (!stream) return; // user cancelled the file picker
+      // applyTrajectoryToParams anchors origin to the first pose and zeros the
+      // static tilt/heading (a moving scan's attitude comes from the trajectory;
+      // the backend's addScanMoving REJECTS a non-zero static tilt).
+      setParams(p => applyTrajectoryToParams(p, stream));
     } catch (err) {
       const msg = err instanceof PoseStreamParseError || err instanceof Error
         ? err.message

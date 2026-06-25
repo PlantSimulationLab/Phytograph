@@ -108,6 +108,7 @@ nav:
       - workflows/index.md
       - Getting around:
           - Import & export: workflows/import-export.md
+          - Export from RiPROCESS: workflows/export-from-riprocess.md
           - Viewer navigation: workflows/viewer-navigation.md
       - 1. Pre-processing:
           - Clean a point cloud: workflows/clean-point-cloud.md

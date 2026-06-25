@@ -127,7 +127,7 @@ def test_xyz_to_las_db_intensity_not_clamped_to_zero(tmp_path):
     src = tmp_path / "db.xyz"
     _write_db_scan(src)
     out = tmp_path / "db.las"
-    n, eds, _ = main._xyz_to_las(main._Path(src), None, main._Path(out))
+    n, eds, _, _ = main._xyz_to_las(main._Path(src), None, main._Path(out))
     assert n == 4
     las = laspy.read(str(out))
     inten = np.asarray(las.intensity)
@@ -150,7 +150,7 @@ def test_xyz_to_las_large_utm_coordinates_survive(tmp_path):
     ]
     src.write_text("".join(f"{x:.4f} {y:.4f} {z:.4f}\n" for x, y, z in pts))
     out = tmp_path / "utm.las"
-    n, _, _ = main._xyz_to_las(main._Path(src), "x y z", main._Path(out))
+    n, _, _, _ = main._xyz_to_las(main._Path(src), "x y z", main._Path(out))
     assert n == len(pts)
     las = laspy.read(str(out))
     # Coordinates come back at full magnitude, within the 1 mm scale tolerance.
@@ -166,7 +166,7 @@ def test_xyz_to_las_keeps_reflectance_when_intensity_present(tmp_path):
     src = tmp_path / "db.xyz"
     _write_db_scan(src)
     out = tmp_path / "db.las"
-    _, eds, _ = main._xyz_to_las(main._Path(src), None, main._Path(out))
+    _, eds, _, _ = main._xyz_to_las(main._Path(src), None, main._Path(out))
     las = laspy.read(str(out))
     assert "reflectance" in las.point_format.extra_dimension_names
     refl = np.asarray(las["reflectance"])
@@ -254,7 +254,7 @@ def test_xyz_to_las_double_slash_header_imports(tmp_path):
     src = tmp_path / "cc.xyz"
     src.write_text("//X //Y //Z\n0 0 0\n1 2 3\n4 5 6\n")
     out = tmp_path / "cc.las"
-    n, _, _ = main._xyz_to_las(main._Path(str(src)), None, main._Path(str(out)))
+    n, _, _, _ = main._xyz_to_las(main._Path(str(src)), None, main._Path(str(out)))
     assert n == 3
     las = laspy.read(str(out))
     # Coordinates round-trip (0.001 LAS scale → mm precision is ample here).
@@ -301,7 +301,7 @@ def test_xyz_to_las_comma_delimited_cloudcompare_export(tmp_path):
         main.ColumnPlanEntry(index=6, role='extra:Scalar field'),
         main.ColumnPlanEntry(index=7, role='extra:Illuminance (PCV)'),
     ], rgb_is_255=True)
-    n, eds, _ = main._xyz_to_las(main._Path(str(src)), None, main._Path(str(out)), cp)
+    n, eds, _, _ = main._xyz_to_las(main._Path(str(src)), None, main._Path(str(out)), cp)
     assert n == 3
     assert len(eds) == 2  # the two extra scalar columns are carried
     las = laspy.read(str(out))

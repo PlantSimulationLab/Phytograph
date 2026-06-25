@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.40.2"
+BACKEND_VERSION = "0.41.2"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -12285,6 +12285,49 @@ def _normalise_miss_alias(name: str) -> Optional[str]:
     / sky, case- and punctuation-insensitive), else None."""
     base = re.sub(r'[^a-z0-9]+', '', name.strip().lower())
     return _MISS_SLUG if base in _MISS_ALIASES_NORMALISED else None
+
+
+# Per-pulse beam-origin triple. When all three are present these are GROUND-TRUTH
+# laser emission points (one per return), in the SAME world frame as positions;
+# the LAD path uses them directly and bypasses the timestamp->trajectory join
+# (see `CloudSession.beam_origins` / `_do_lad_computation`). Defined HERE (rather
+# than next to the LAS reader where it's also used) so the ASCII import path —
+# header auto-detect and column-plan canonicalisation below — can share the exact
+# same alias spellings. Origins are world/UTM coordinates needing full float64
+# precision, so they are NEVER carried as float32 extra dims; the ASCII path
+# captures them into a side-channel (see `_xyz_to_las` `capture_origins`) exactly
+# as positions are, and the LAS path reads them as float64 in `_read_las_into_arrays`.
+_ORIGIN_SLUGS = ('origin_x', 'origin_y', 'origin_z')
+_ORIGIN_LABELS = {
+    'origin_x': 'Beam Origin X',
+    'origin_y': 'Beam Origin Y',
+    'origin_z': 'Beam Origin Z',
+}
+# Case-insensitive ExtraBytes / header name aliases for the beam-origin triple.
+# When a source carries all three of any one set, those are the emission origins.
+# Matched lower-cased; the ASCII path also matches with punctuation stripped.
+_BEAM_ORIGIN_ALIAS_SETS = (
+    ("ox", "oy", "oz"),
+    ("xorigin", "yorigin", "zorigin"),
+    ("beamoriginx", "beamoriginy", "beamoriginz"),
+)
+# Map each alias spelling (punctuation/case stripped) to its canonical origin
+# slug, preserving the x/y/z axis. Built once so `_normalise_origin_alias` is a
+# dict lookup mirroring `_normalise_miss_alias`.
+_ORIGIN_ALIAS_TO_SLUG = {
+    re.sub(r'[^a-z0-9]+', '', alias): _ORIGIN_SLUGS[axis]
+    for triple in _BEAM_ORIGIN_ALIAS_SETS
+    for axis, alias in enumerate(triple)
+}
+
+
+def _normalise_origin_alias(name: str) -> Optional[str]:
+    """Return the canonical origin slug ('origin_x'/'origin_y'/'origin_z') when
+    `name` is any beam-origin spelling (ox/oy/oz, xorigin/yorigin/zorigin,
+    beamoriginx/y/z — case- and punctuation-insensitive), else None. Mirrors
+    `_normalise_miss_alias`, but maps to one of three axis-specific slugs."""
+    base = re.sub(r'[^a-z0-9]+', '', name.strip().lower())
+    return _ORIGIN_ALIAS_TO_SLUG.get(base)
 # Distance (metres) at which a miss point is placed from the scanner origin along
 # its pulse direction. Matches Helios's gap_distance (LiDAR.cpp gapfillMisses).
 _MISS_GAP_DISTANCE = 20000.0
@@ -12589,6 +12632,15 @@ def _role_from_header_name(name: str) -> Optional[str]:
     # reads, matching the E57/structured-PLY recovery convention.
     if base in _MISS_ALIASES_NORMALISED:
         return _MISS_SLUG
+    # Per-pulse beam-origin triple (ox/oy/oz and aliases, see
+    # `_BEAM_ORIGIN_ALIAS_SETS`). A headered ASCII file with `ox oy oz` columns
+    # auto-maps to the canonical origin_x/y/z roles so LAD uses them directly,
+    # bypassing the trajectory join — exactly like the LAS ExtraBytes path. These
+    # are world/UTM coordinates, captured at full float64 precision (NOT as float32
+    # extras); the column-plan/streaming path keys off the canonical slug.
+    origin_slug = _normalise_origin_alias(name)
+    if origin_slug is not None:
+        return origin_slug
     return None
 
 
@@ -12946,6 +12998,20 @@ def _is_skip_name(name: str) -> bool:
     return name == 'skip' or name.startswith('skip:')
 
 
+# A beam-origin column rides in the pandas `names` list as `origin:<canonical>`
+# (origin:origin_x/_y/_z). It is NOT a skip name (so usecols reads it) and NOT an
+# `extra:` dim (origins are float64, never float32 extras) — the streaming reader
+# captures these three columns into the float64 origin side-channel by name.
+def _is_origin_name(name: str) -> bool:
+    return name.startswith('origin:')
+
+
+def _origin_slug_of(name: str) -> str:
+    """Canonical origin slug ('origin_x'/'origin_y'/'origin_z') for an
+    `origin:<canonical>` column token."""
+    return name.split(':', 1)[1]
+
+
 def _dedupe_slug(base: str, used_slugs: "set[str]") -> str:
     """Return `base` (or a numbered variant) not yet in `used_slugs`, capped at
     the 32-char LAS limit. Mutates `used_slugs` to reserve the result."""
@@ -13012,6 +13078,15 @@ def _plan_columns(roles: List[str], header_names: Optional[List[str]]):
             names.append(col_id)
             extra_dims.append({"col": col_id, "slug": slug,
                                "label": _MISS_LABEL, "categorical": False})
+            continue
+        if role in _ORIGIN_SLUGS:
+            # Per-pulse beam-origin column (auto-detected from an ox/oy/oz header,
+            # see `_role_from_header_name`). World/UTM coordinates needing full
+            # float64 precision, so they are NOT carried as a float32 extra dim;
+            # the `origin:<canonical>` sentinel token tells the streaming reader to
+            # capture this column into the float64 origin side-channel instead (see
+            # `_xyz_to_las_stream`). Deliberately NOT appended to `extra_dims`.
+            names.append(f"origin:{role}")
             continue
         if header_names is not None and i < len(header_names) and header_names[i]:
             label = _humanize_extra_dim_label(header_names[i])
@@ -13099,6 +13174,19 @@ def _plan_columns_from_column_plan(column_plan: "ColumnPlan"):
             extra_dims.append({"col": col_id, "slug": slug,
                                "label": (entry.label or '').strip() or _MISS_LABEL,
                                "categorical": False})
+            continue
+        # Per-pulse beam-origin column (the wizard's Beam Origin X/Y/Z role, or an
+        # 'extra' whose slug normalises to an ox/oy/oz alias). These are world/UTM
+        # emission coordinates needing FULL float64 precision, so — unlike every
+        # other branch above — they must NOT become a float32 extra dim (the LAS is
+        # 1 mm-quantized and extras are float32; both would shatter them). Instead
+        # emit an `origin:<canonical>` sentinel token so the streaming reader keeps
+        # the column (it's not a skip name, so pandas/usecols read it) and captures
+        # it into the float64 origin side-channel, exactly like `capture_full_xyz`
+        # does for positions. Deliberately NOT appended to `extra_dims`.
+        ori = role if role in _ORIGIN_SLUGS else (_normalise_origin_alias(entry.slug or '') or '')
+        if ori in _ORIGIN_SLUGS:
+            names.append(f"origin:{ori}")
             continue
         if role == 'skip' or (role == 'extra' and not (entry.slug or entry.label)):
             # A skipped column, or an 'extra' with no usable name, carries
@@ -13997,7 +14085,8 @@ def _intensity_to_las_uint16(values: "np.ndarray",
 def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                 column_plan: "Optional[ColumnPlan]" = None,
                 capture_full_xyz: bool = False,
-                ) -> "tuple[int, List[dict], Optional[np.ndarray]]":
+                capture_origins: bool = False,
+                ) -> "tuple[int, List[dict], Optional[np.ndarray], Optional[np.ndarray]]":
     """Stream an XYZ-family ASCII file into a LAS file via laspy in chunks.
 
     PotreeConverter 2.x accepts only LAS/LAZ; XYZ goes through here first.
@@ -14010,12 +14099,19 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     Any remaining numeric columns are carried into the octree as LAS extra
     dimensions (float32) so the renderer can colour by them later.
 
-    Returns (total_points, extra_dims, full_xyz), where extra_dims is the
-    [{slug, label}, ...] list of carried scalar attributes (for the cache's
+    Returns (total_points, extra_dims, full_xyz, origins), where extra_dims is
+    the [{slug, label}, ...] list of carried scalar attributes (for the cache's
     slug→label sidecar). `full_xyz` is the (N,3) float64 source-precision
     coordinate array when `capture_full_xyz` is set, else None — the LAS itself
     is 1 mm-quantized and must not be the session's source of truth, so the
     session reads positions from this instead (see _xyz_to_las_stream).
+
+    `origins` is the (N,3) float64 per-pulse beam-origin array when
+    `capture_origins` is set AND the column plan carried an ox/oy/oz triple (the
+    `origin:*` tokens), else None. Like `full_xyz` it is captured directly from
+    the source columns — origins are world/UTM coordinates and must keep full
+    precision, so they bypass the 1 mm LAS / float32 extras entirely and feed the
+    LAD path's ground-truth-origin shortcut (see CloudSession.beam_origins).
     """
     import laspy  # local: only when this code path runs
 
@@ -14068,6 +14164,20 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
+    # Per-pulse beam origins ride in `names` as `origin:origin_x/_y/_z` tokens
+    # (see `_plan_columns*`). They are deliberately NOT extra dims — origins are
+    # world/UTM coordinates and a float32 LAS extra would shatter their precision —
+    # so we capture them straight from the source into a float64 side-channel,
+    # exactly like `capture_full_xyz` does for positions. Map each canonical slug
+    # to its `names` token so the streaming loop can stack the three columns in
+    # x,y,z order regardless of source column order; capture only when all three
+    # are present (a partial triple is not a usable origin).
+    origin_cols: Optional[Dict[str, str]] = None
+    if capture_origins:
+        present = {_origin_slug_of(c): c for c in names if _is_origin_name(c)}
+        if all(s in present for s in _ORIGIN_SLUGS):
+            origin_cols = present
+
     skiprows = _ascii_skiprows(str(source_path))
     sep = _ascii_pandas_sep(str(source_path))
 
@@ -14118,10 +14228,12 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
         header.offsets = np.floor(np.where(np.isfinite(xyz_min), xyz_min, 0.0))
 
         full_xyz_chunks: "Optional[list]" = [] if capture_full_xyz else None
+        origin_chunks: "Optional[list]" = [] if origin_cols is not None else None
         total_points = _xyz_to_las_stream(
             source_path, out_las, header, names, skiprows, sep, chunk_rows,
             rgb_cols, rgb_is_255, intensity_role, intensity_lo, intensity_hi,
             extra_dims, full_xyz_out=full_xyz_chunks,
+            origin_cols=origin_cols, origins_out=origin_chunks,
         )
     except (ValueError, KeyError) as e:
         # A non-numeric value reaching the x/y/z/RGB float cast almost always
@@ -14143,15 +14255,21 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     if full_xyz_chunks is not None:
         full_xyz = (np.concatenate(full_xyz_chunks, axis=0)
                     if full_xyz_chunks else np.empty((0, 3), dtype=np.float64))
+    origins = None
+    if origin_chunks is not None:
+        origins = (np.concatenate(origin_chunks, axis=0)
+                   if origin_chunks else np.empty((0, 3), dtype=np.float64))
     return (total_points,
             [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims],
-            full_xyz)
+            full_xyz, origins)
 
 
 def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                        chunk_rows, rgb_cols, rgb_is_255, intensity_role,
                        intensity_lo, intensity_hi, extra_dims,
-                       full_xyz_out: "Optional[list]" = None) -> int:
+                       full_xyz_out: "Optional[list]" = None,
+                       origin_cols: "Optional[Dict[str, str]]" = None,
+                       origins_out: "Optional[list]" = None) -> int:
     """Inner streaming loop for `_xyz_to_las`, split out so the caller can wrap
     column-mismatch errors (raised here from the float casts) into a clean 400.
     Returns the total points written.
@@ -14165,7 +14283,14 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
     populate the session positions directly from the source instead of reading
     them back from the quantized LAS. The chunks are filtered identically to the
     LAS write here, so the concatenation aligns point-for-point with the LAS-
-    derived colors/intensity/extras."""
+    derived colors/intensity/extras.
+
+    When `origins_out` is a list, the per-pulse beam origins are captured the same
+    way: `origin_cols` maps each canonical slug ('origin_x'/'_y'/'_z') to its
+    column name in `names`, and the three columns are stacked in x,y,z order as
+    float64 into `origins_out`, aligned point-for-point with the same NaN-filtered
+    rows. Origins are world/UTM coordinates kept OUT of the quantized LAS and the
+    float32 extras so LAD's ground-truth-origin shortcut sees full precision."""
     import laspy
     total_points = 0
     with laspy.open(str(out_las), mode="w", header=header) as writer:
@@ -14200,6 +14325,17 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
             if full_xyz_out is not None:
                 # Stash the unquantized xyz of this chunk for the session array.
                 full_xyz_out.append(np.column_stack([cx, cy, cz]))
+            if origins_out is not None and origin_cols is not None:
+                # Stash the full-precision beam origins of this chunk, stacked in
+                # x,y,z order (regardless of source column order) and filtered to
+                # the exact same rows as xyz above, so the concatenation aligns
+                # point-for-point with positions/colors/extras. Origins stay
+                # float64 — never routed through the 1 mm LAS or float32 extras.
+                origins_out.append(np.column_stack([
+                    chunk[origin_cols['origin_x']].to_numpy(dtype=np.float64),
+                    chunk[origin_cols['origin_y']].to_numpy(dtype=np.float64),
+                    chunk[origin_cols['origin_z']].to_numpy(dtype=np.float64),
+                ]))
             if rgb_cols is not None:
                 # LAS RGB is uint16 (16-bit per channel). 0-255 source scales by
                 # 256 (preserves perceptual brightness; renderer right-shifts to
@@ -14829,19 +14965,28 @@ def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
         # is handed to PotreeConverter regardless, and the renderer falls back
         # to raw slugs when the sidecar is absent.
         return []
-    return [{"slug": d, "label": d} for d in dims]
+    # Drop a complete beam-origin triple: `_read_las_into_arrays` consumes it into
+    # the float64 `beam_origins` array, so it's not a renderer scalar field and
+    # shouldn't get a slug→label sidecar entry (mirrors `_preview_las`).
+    dims_lower = {d.lower() for d in dims}
+    origin_cols: "set[str]" = set()
+    for triple in _BEAM_ORIGIN_ALIAS_SETS:
+        if all(ax in dims_lower for ax in triple):
+            origin_cols = set(triple)
+            break
+    return [{"slug": d, "label": d} for d in dims if d.lower() not in origin_cols]
 
 
 def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path,
                    column_plan: "Optional[ColumnPlan]" = None,
-                   ) -> "tuple[_Path, bool, List[dict], Optional[np.ndarray]]":
+                   ) -> "tuple[_Path, bool, List[dict], Optional[np.ndarray], Optional[np.ndarray]]":
     """Get a LAS file path for `source_path`, converting from another format
     if needed.
 
-    Returns (las_path, is_temp, extra_dims, full_xyz) — caller deletes the file
-    if is_temp. `extra_dims` is the [{slug, label}, ...] list of carried scalar
-    attributes (read from the header for LAS/LAZ; derived during conversion for
-    XYZ/PLY; empty for PCD, which carries position + RGB only).
+    Returns (las_path, is_temp, extra_dims, full_xyz, beam_origins) — caller
+    deletes the file if is_temp. `extra_dims` is the [{slug, label}, ...] list of
+    carried scalar attributes (read from the header for LAS/LAZ; derived during
+    conversion for XYZ/PLY; empty for PCD, which carries position + RGB only).
 
     `full_xyz` is the (N,3) float64 SOURCE-PRECISION coordinate array for the
     XYZ-family branch, where the LAS we synthesise is 1 mm-quantized and so must
@@ -14851,29 +14996,37 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
     their LAS. Callers that need the session array use `full_xyz` when present
     and otherwise fall back to reading the LAS.
 
+    `beam_origins` is the (N,3) float64 per-pulse origin array for the XYZ-family
+    branch when the column plan carried an ox/oy/oz triple, else None — captured
+    at full precision alongside `full_xyz` (origins are world/UTM coords that must
+    not pass through the 1 mm LAS / float32 extras). For LAS/LAZ it is None here:
+    those origins live in ExtraBytes and are read later by `_read_las_into_arrays`.
+    PLY/PCD/E57 do not carry an ASCII origin triple, so None.
+
     `column_plan` (import wizard) applies only to the XYZ-family branch; PLY/PCD/
     LAS define their own layout and ignore it.
     """
     ext = source_path.suffix.lower().lstrip(".")
     if ext in ("las", "laz"):
-        return source_path, False, _las_extra_dim_labels(source_path), None
+        return source_path, False, _las_extra_dim_labels(source_path), None, None
     if ext in _PANDAS_EXTENSIONS:
         out = work_dir / (source_path.stem + ".las")
-        _, extra_dims, full_xyz = _xyz_to_las(
-            source_path, ascii_format, out, column_plan, capture_full_xyz=True)
-        return out, True, extra_dims, full_xyz
+        _, extra_dims, full_xyz, beam_origins = _xyz_to_las(
+            source_path, ascii_format, out, column_plan,
+            capture_full_xyz=True, capture_origins=True)
+        return out, True, extra_dims, full_xyz, beam_origins
     if ext == "ply":
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims = _ply_to_las(source_path, out)
-        return out, True, extra_dims, None
+        return out, True, extra_dims, None, None
     if ext == "pcd":
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims = _pcd_to_las(source_path, out)
-        return out, True, extra_dims, None
+        return out, True, extra_dims, None, None
     if ext == "e57":
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims = _e57_to_las(source_path, out)
-        return out, True, extra_dims, None
+        return out, True, extra_dims, None, None
     raise HTTPException(
         status_code=400,
         detail=f"Unsupported source extension for octree conversion: .{ext}",
@@ -15284,6 +15437,17 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
             detected_role = _MISS_SLUG
             suggested_slug = _MISS_SLUG
             suggested_label = _MISS_LABEL
+        elif role in _ORIGIN_SLUGS:
+            # A per-pulse beam-origin column (auto-detected from an ox/oy/oz
+            # header): the wizard exposes dedicated 'Beam Origin X/Y/Z' roles, so
+            # report the canonical origin role token directly (not 'extra') to
+            # pre-select the matching option — mirroring the grid-index/miss roles
+            # above. These are captured as full-precision float64 origins (see
+            # `_plan_columns`), never as a float32 extra, so there's no extra-dim
+            # slug to suggest; the role token is what the column plan carries.
+            detected_role = role
+            suggested_slug = role
+            suggested_label = _ORIGIN_LABELS[role]
         else:
             detected_role = 'extra' if role != 'skip' else 'skip'
             if header_names is not None and i < len(header_names) and header_names[i]:
@@ -15455,11 +15619,27 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
                 return 'intensity'
             return 'extra'
         extra_names = {d.name for d in pf.extra_dimensions}
+        # Beam-origin ExtraBytes (ox/oy/oz or an alias set) are auto-consumed by
+        # `_read_las_into_arrays` into the float64 `beam_origins` array — exactly
+        # like x/y/z become positions — so they are NOT user-mappable scalars and
+        # must be hidden from the wizard. Only suppress them when a COMPLETE triple
+        # is present (matching the reader): a lone `ox` with no `oy`/`oz` isn't an
+        # origin set, so it stays a normal scalar column.
+        _extra_lower = {nm.lower() for nm in extra_names}
+        _origin_cols = set()
+        for _triple in _BEAM_ORIGIN_ALIAS_SETS:
+            if all(ax in _extra_lower for ax in _triple):
+                _origin_cols = set(_triple)
+                break
         for i, n in enumerate(names):
             # `is_miss` is a system-managed sky/miss flag, not a user-mappable
             # column — never present it in the wizard (and don't let it be
             # renamed off the canonical slug the renderer/LAD depend on).
             if n.lower() in _MISS_ALIASES:
+                continue
+            # Beam-origin triple: auto-consumed as float64 `beam_origins`, not a
+            # mappable scalar (see comment above) — hide like x/y/z.
+            if n.lower() in _origin_cols:
                 continue
             role = role_for(n)
             is_extra = n in extra_names or role == 'extra'
@@ -16254,15 +16434,9 @@ def _get_cloud_session(session_id: str) -> "CloudSession":
     return sess
 
 
-# Case-insensitive ExtraBytes name aliases for a per-pulse beam-origin triple.
-# When a LAS carries all three of any one set, those are ground-truth emission
-# origins (one per return) and LAD uses them directly, bypassing the timestamp ->
-# trajectory join entirely (see `_do_lad_computation`). Matched lower-cased.
-_BEAM_ORIGIN_ALIAS_SETS = (
-    ("ox", "oy", "oz"),
-    ("xorigin", "yorigin", "zorigin"),
-    ("beamoriginx", "beamoriginy", "beamoriginz"),
-)
+# `_BEAM_ORIGIN_ALIAS_SETS` (the ExtraBytes name aliases for a per-pulse
+# beam-origin triple, used by `_read_las_into_arrays` below) is defined earlier,
+# next to `_normalise_origin_alias`, so the ASCII import path can share it.
 
 
 @dataclass
@@ -16819,7 +16993,7 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     import tempfile
     with tempfile.TemporaryDirectory() as _tmp:
         tmp_dir = _Path(_tmp)
-        las_path, las_is_temp, source_extra_dims, full_xyz = _source_to_las(
+        las_path, las_is_temp, source_extra_dims, full_xyz, source_origins = _source_to_las(
             source_path, request.ascii_format, tmp_dir, request.column_plan,
         )
         _las = _read_las_into_arrays(las_path)
@@ -16850,7 +17024,25 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         extra_dims_meta = _las.extra_dims_meta
         timestamps = _las.timestamps
         gps_time_encoding = _las.gps_time_encoding
+        # Beam origins: for LAS/LAZ they're read from ExtraBytes by
+        # `_read_las_into_arrays`. For the ASCII/XYZ path the 1 mm LAS can't carry
+        # them (origins are world/UTM coords needing full precision), so prefer the
+        # float64 triple `_source_to_las` captured from the source columns. Like
+        # `full_xyz`, guard the row count so a malformed plan can't desync them
+        # from positions; the LAD path then uses these directly, bypassing the
+        # timestamp->trajectory join (see CloudSession.beam_origins).
         beam_origins = _las.beam_origins
+        if source_origins is not None:
+            if source_origins.shape[0] != _las.positions.shape[0]:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Internal error importing cloud: beam-origin point count "
+                        f"({source_origins.shape[0]}) disagrees with the converted "
+                        f"LAS ({_las.positions.shape[0]}). Please report this file."
+                    ),
+                )
+            beam_origins = source_origins
         # CloudCompare-style global shift: subtract the requested offset so the
         # in-RAM array (the source of truth) — and the octree built from it below —
         # hold small, precision-friendly coordinates. The shift is stored on the

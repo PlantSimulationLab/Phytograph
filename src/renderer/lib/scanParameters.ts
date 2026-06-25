@@ -7,7 +7,7 @@
 // clouds have no single defined origin. Analyses that need pulse directions
 // (e.g. Helios triangulation) are gated on presence of params.
 
-import { poseStreamFromWire } from './poseStream';
+import { poseStreamFromWire, type PoseStream } from './poseStream';
 
 // How many returns a pulse reports — a property of the real instrument, not of
 // the simulation. The helios-core lidar engine fires `raysPerPulse` sub-rays
@@ -186,6 +186,31 @@ export function makeDefaultScanParameters(
     origin: originGuess
       ? { x: originGuess.x, y: originGuess.y, z: originGuess.z }
       : { ...DEFAULT_SCAN_PARAMETERS.origin },
+  };
+}
+
+// Attach an imported platform trajectory to a scan's parameters, marking it a
+// moving-platform acquisition. Mirrors the Scan Parameters popup's trajectory
+// importer: the `origin` is anchored to the first pose (it's only a fallback
+// anchor for a moving scan) and the static tilt/heading are zeroed — a moving
+// scan's attitude comes entirely from the per-pose quaternions (+ boresight),
+// and the backend's addScanMoving / LAD beam-origin join reject a non-zero
+// static tilt. When the scan had no parameters yet (a plain XYZ/LAS/PLY import
+// that carried none), start from the sensible defaults so the trajectory has
+// somewhere to live.
+export function applyTrajectoryToParams(
+  params: ScanParameters | undefined,
+  trajectory: PoseStream,
+): ScanParameters {
+  const base = params ?? makeDefaultScanParameters();
+  const first = trajectory.poses[0];
+  return {
+    ...base,
+    trajectory,
+    origin: first ? { x: first.x, y: first.y, z: first.z } : base.origin,
+    tiltRollDeg: 0,
+    tiltPitchDeg: 0,
+    azimuthOffsetDeg: 0,
   };
 }
 

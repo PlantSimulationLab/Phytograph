@@ -59,7 +59,7 @@ def test_captured_xyz_is_full_precision_not_las_quantized(fine_scan, tmp_path):
     path, fmt, expected = fine_scan
     out = tmp_path / "o.las"
 
-    total, _extra_dims, full_xyz = main._xyz_to_las(
+    total, _extra_dims, full_xyz, _ = main._xyz_to_las(
         path, fmt, out, None, capture_full_xyz=True)
     las = main._read_las_into_arrays(out)
 
@@ -97,7 +97,7 @@ def test_capture_aligns_when_nan_xyz_rows_dropped(tmp_path):
         "1.5 2.5 3.5 15\n"
     )
     out = tmp_path / "o.las"
-    total, _ed, full_xyz = main._xyz_to_las(
+    total, _ed, full_xyz, _ = main._xyz_to_las(
         path, "x y z reflectance", out, None, capture_full_xyz=True)
     las = main._read_las_into_arrays(out)
 
@@ -114,7 +114,7 @@ def test_no_capture_returns_none(fine_scan, tmp_path):
     the non-ASCII branches of _source_to_las) rely on that."""
     path, fmt, _ = fine_scan
     out = tmp_path / "o.las"
-    total, extra_dims, full_xyz = main._xyz_to_las(path, fmt, out, None)
+    total, extra_dims, full_xyz, _ = main._xyz_to_las(path, fmt, out, None)
     assert total > 0
     assert isinstance(extra_dims, list)
     assert full_xyz is None

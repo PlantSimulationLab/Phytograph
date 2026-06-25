@@ -65,7 +65,7 @@ def _session_from_arrays(positions, colors, intensity, extras, extra_dims_meta):
 
 def _session_from_xyz(xyz_path: Path, tmp_path: Path):
     """Run the real session-create IO path: source -> LAS -> in-RAM arrays."""
-    las_path, is_temp, source_extra_dims, _ = main._source_to_las(
+    las_path, is_temp, source_extra_dims, _, _ = main._source_to_las(
         xyz_path, _MULTI_FORMAT, tmp_path, None,
     )
     _r = main._read_las_into_arrays(las_path)

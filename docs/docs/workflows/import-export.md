@@ -74,8 +74,9 @@ dropdowns in; you correct anything that's wrong before importing:
 - **Column roles** — for ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`,
   `.asc`), each column's dropdown sets its role: **X / Y / Z**,
   **Red / Green / Blue**, **Intensity**, **Reflectance**,
-  **Scan Row Index**, **Scan Column Index**, **Miss Flag**, **Scalar**,
-  **Label**, or **Skip**. X, Y, and Z must be assigned before you can import.
+  **Scan Row Index**, **Scan Column Index**, **Miss Flag**,
+  **Beam Origin X / Y / Z**, **Scalar**, **Label**, or **Skip**. X, Y, and Z
+  must be assigned before you can import.
 - **Scalar vs Label** — a **Scalar** column is a continuous measurement
   (intensity, height, timestamp) and colors as a smooth gradient; a
   **Label** column holds class ids (tree id, segment, classification) and
@@ -113,6 +114,16 @@ dropdowns in; you correct anything that's wrong before importing:
         the **Miss detection distance** setting (default 1001 m, the Helios
         placeholder distance) from the scanner. An explicit `is_miss` column
         always takes precedence over auto-detection.
+- **Beam Origin X / Y / Z** — the per-pulse laser emission point (the scanner's
+  position for each return), in the same coordinate frame as X/Y/Z. Mapping all
+  three makes the cloud carry **ground-truth origins** that leaf-area-density
+  inversion uses directly — measuring each ray's true path through the canopy
+  without needing a separate scanner trajectory. This is the ASCII equivalent of
+  the `ox`/`oy`/`oz` origin columns a LAS file can carry; they auto-detect from
+  headers like `ox` / `oy` / `oz`, `xorigin` / `yorigin` / `zorigin`, or
+  `beamoriginx` / `…y` / `…z`. Origins are kept at full coordinate precision (not
+  the millimeter display quantization), so projected/UTM-scale origins survive
+  exactly. Map all three for them to take effect; a partial pair is ignored.
 - **RGB range** — when an RGB role is present, choose whether the values are
   **0–255 integers** or **0–1 floats**, so colors import at the right
   brightness.
@@ -143,10 +154,30 @@ dropdowns in; you correct anything that's wrong before importing:
     automatic rendering offset are independent: the shift changes what's
     *stored*; the rendering offset changes only what's *drawn*.
 
+- **Platform trajectory** — for **mobile-platform** data (drone, robot,
+  backpack, or vehicle MLS), click **Import trajectory file…** to attach the
+  platform's trajectory to the scan. The imported cloud then becomes a
+  moving-platform acquisition: leaf-area density reconstructs a per-beam origin
+  for every return by joining the return's timestamp to the trajectory, instead
+  of assuming one fixed scanner position. All trajectory formats Phytograph reads
+  are accepted — text **CSV / TXT / TSV / .traj** (`t x y z` plus a quaternion or
+  Euler attitude) and binary **SBET** (`.sbet` / `.out`, parsed server-side). The
+  wizard shows the pose count and duration once it's attached; **Replace…** swaps
+  it and the **✕** removes it. Leave it empty for a static tripod scan. When you
+  import several files at once, attaching a trajectory to one scan **fills in the
+  others by default** (the common case is one platform pass split across files) —
+  but you can give any scan its own trajectory, and an explicit per-scan choice is
+  never overwritten by the default.
+
 For `.ply`, `.pcd`, `.las`, and `.laz`, the column layout is defined inside
 the file, so X/Y/Z and color roles can't be reassigned — but you can still
 preview the fields, rename scalars, and switch any scalar between **Scalar**
 and **Label**.
+
+(A LAS/LAZ or ASCII cloud that already carries per-pulse beam-origin columns —
+`ox`/`oy`/`oz` — needs no trajectory: those ground-truth origins are used
+directly. The trajectory button is for mobile data whose origins must be
+reconstructed from the platform path.)
 
 If a file can't be previewed, the wizard says so and still lets you import
 with auto-detection.

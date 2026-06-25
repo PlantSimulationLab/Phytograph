@@ -387,7 +387,7 @@ def test_xyz_to_las_with_reserved_extra_dim_slug_does_not_crash(tmp_path: Path):
         ColumnPlanEntry(index=3, role='extra', slug='intensity', label='Intensity'),
     ], rgb_is_255=True)
     out = tmp_path / "out.las"
-    n, extra, _ = main._xyz_to_las(main._Path(str(f)), None, main._Path(str(out)), cp)
+    n, extra, _, _ = main._xyz_to_las(main._Path(str(f)), None, main._Path(str(out)), cp)
     assert n == 3
     assert len(extra) == 1
     assert extra[0]["slug"].lower() not in main._LAS_RESERVED_DIM_NAMES

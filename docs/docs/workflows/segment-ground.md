@@ -13,13 +13,20 @@ labels the points the cloth settles onto as ground.
 2. Click **Segment Ground** (the layers icon in the tool column), or open
    the command palette and choose **Segment Ground**.
 3. Adjust the parameters if needed (hover the **?** beside any parameter for
-   a quick explanation). The cloth resolution and ground tolerance are seeded
-   automatically from the cloud's horizontal size each time you open the
-   panel — a few centimetres for a pot/plot-scale scan, scaling up to tens of
-   centimetres for a field- or orchard-scale scan.
+   a quick explanation). The parameters are seeded automatically from the
+   cloud's size **and shape** each time you open the panel — a few centimetres
+   of cloth resolution for a pot/plot-scale scan, scaling up to tens of
+   centimetres for a field- or orchard-scale scan. The seed also reads the
+   cloud's **vertical relief**: a large *flat* field gets a coarse, stiff
+   cloth, but a large *sloped* tile (e.g. an aerial scan of a hillside forest)
+   gets a **finer cloth, low rigidness, and slope smoothing on** so the cloth
+   can bend to follow the slope instead of draping flat and catching only the
+   valley floor.
    (CSF's parameters are absolute distances, so a fixed default that suits a
    1 m plant scan would label nearly everything as non-ground on a 50 m
-   field. The seeded values are a starting point — override them freely.)
+   field — and a coarse, stiff cloth tuned for a flat field bridges over a
+   steep tile, labelling the whole uphill slope non-ground. The seeded values
+   are a starting point — override them freely.)
     - **Cloth resolution (m)** — the cloth grid cell size. Smaller follows
       finer ground relief but is slower; for pot/plot-scale scans a few
       centimetres works well.
@@ -34,7 +41,12 @@ labels the points the cloth settles onto as ground.
       separate. Nudge it up until the weeds flip to ground without the trees
       following.
     - **Rigidness (1–3)** — cloth stiffness. Use **3** for flat ground,
-      lower for undulating terrain.
+      lower (down to **1**) for undulating or sloped terrain so the cloth can
+      bend to follow the slope instead of bridging over it.
+    - **Slope smoothing** — enables CSF's slope-handling pass. Leave it off for
+      flat ground; turn it on (together with a low rigidness) for undulating or
+      steep terrain. It's auto-enabled when the cloud's vertical relief is
+      large relative to its footprint.
 4. (Optional) Tick **Split into ground + plant clouds** to also produce two
    new clouds — ground and non-ground — alongside the classified original.
 5. Click **Segment Ground**.

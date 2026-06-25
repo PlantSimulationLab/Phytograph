@@ -52,9 +52,53 @@ Notes:
   decimated platform trajectory from the per-pulse `ox/oy/oz` origins (ordered by
   `gps_time`), so the scan is flagged moving with its path drawn. Moving-platform LAD then
   uses the exact per-pulse origins as ground truth.
-- These are illustrative format samples (the trajectories are not tied to a committed
-  point cloud here). For an end-to-end moving-LAD numerics check, see the committed E2E
-  fixture `tests/e2e/fixtures/lad-leafcube-moving/`.
+- These `drone_pass_*` files are **small synthetic format samples** (a clean straight
+  UAV pass; the trajectories are not tied to a committed point cloud). For an end-to-end
+  moving-LAD numerics check, see the committed E2E fixture
+  `tests/e2e/fixtures/lad-leafcube-moving/`. For a **real, processable** aerial dataset,
+  see the SYSSIFOSS BR04 section below.
+
+## Real aerial dataset — SYSSIFOSS BR04 (testing all three origin paths)
+
+A real airborne LiDAR plot from the SYSSIFOSS project (Weiser et al. 2022, central
+European forest near Bretten, Germany), used to exercise the three ways origin
+information can enter Phytograph on **genuine drone/aircraft data** (not toy fixtures).
+
+Source: PANGAEA [doi:10.1594/PANGAEA.942856](https://doi.pangaea.de/10.1594/PANGAEA.942856),
+plot **BR04** (`BR04.zip`, 5.58 GB), licence **CC-BY-SA-4.0**. Frame: ETRS89 / UTM
+zone 32N (EPSG:25832). The full zip is not kept here (gitignored anyway); re-download
+and extract the ALS cloud + trajectory with:
+
+```bash
+curl -L -o example-datasets/BR04.zip \
+  "https://download.pangaea.de/dataset/942856/files/BR04.zip"
+unzip -o -j example-datasets/BR04.zip \
+  "ALS/ALS-on_BR04_2019-07-05_140m.laz" \
+  "ALS/ALS-on_BR04_2019-07-05_trajectory.txt" -d example-datasets/
+rm example-datasets/BR04.zip   # optional: the two extracted files are all we need
+```
+
+| File | Path tested | Notes |
+|---|---|---|
+| `ALS-on_BR04_2019-07-05_140m.laz` | — (base cloud) | Real ALS: **2.64 M pts**, up to 7 returns, per-point `gps_time`, full-waveform `Amplitude`/`Reflectance`/`Deviation`. Ground/canopy Z ≈ 245–327 m |
+| `ALS-on_BR04_2019-07-05_trajectory.txt` | **3. sidecar trajectory** | Real flight path, 5 376 poses, native PANGAEA form: header `Easting Northing Height Time Roll Pitch Yaw` (deg, tab-sep), position-first. **Imports directly** — the importer maps columns by their header names. Import via Add Scan → Import trajectory file |
+| `ALS-on_BR04_2019-07-05_trajectory_phytograph.txt` | **3. sidecar trajectory** | Same poses pre-reordered to time-first `t x y z roll pitch yaw`. No longer required (the raw file imports natively); kept as a plain-`t`-first sample |
+| `BR04_ALS_origins.las` | **1. LAS `ox/oy/oz`** | 200 k-pt real subset; per-point sensor origin (interpolated from the real trajectory at each point's `gps_time`) written as **float64** `ox/oy/oz` ExtraBytes. Origins sit at the ~953–961 m sensor altitude |
+| `BR04_ALS_origins.xyz` | **2. ASCII `ox/oy/oz`** | Same 200 k subset as plain text, header `# x y z timestamp return_number number_of_returns ox oy oz`. Auto-detect maps `ox/oy/oz` → beam-origin roles; origins are kept float64 (not float32 extras) and feed LAD |
+
+Notes:
+
+- The SYSSIFOSS/HELIOS++ *export* form is position-first (`Easting Northing Height Time
+  …`). The importer now reads the labeled header and maps columns by name, so the raw file
+  imports as-is; a headerless file still falls back to positional time-first `t x y z …`.
+  The `_phytograph.txt` companion (a pre-permuted time-first copy) is kept only as a plain
+  sample and is no longer needed.
+- `BR04_ALS_origins.las` / `.xyz` are **derived** (their `ox/oy/oz` come from interpolating
+  the real trajectory at each point's `gps_time`, lever-arm ≈ 0). Regenerate them from the
+  base cloud + trajectory with `scripts/make_br04_origin_fixtures.py`.
+- All three paths are verified end-to-end against the live backend: the ASCII path captures
+  `ox/oy/oz` as float64 `beam_origins` to <1 mm (not the lossy float32 extras), matching the
+  LAS ExtraBytes path.
 
 ## Datasets
 

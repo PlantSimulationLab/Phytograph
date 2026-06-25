@@ -9,6 +9,7 @@ interface GroundSegmentPanelProps {
   clothResolution: number;
   classThreshold: number;
   rigidness: number;
+  slopeSmooth: boolean;
   splitClouds: boolean;
   inProgress: boolean;
   error: string | null;
@@ -16,6 +17,7 @@ interface GroundSegmentPanelProps {
   onClothResolutionChange: (n: number) => void;
   onClassThresholdChange: (n: number) => void;
   onRigidnessChange: (n: number) => void;
+  onSlopeSmoothChange: (v: boolean) => void;
   onSplitCloudsChange: (v: boolean) => void;
   onSegment: () => void;
 }
@@ -24,6 +26,7 @@ export function GroundSegmentPanel({
   clothResolution,
   classThreshold,
   rigidness,
+  slopeSmooth,
   splitClouds,
   inProgress,
   error,
@@ -31,6 +34,7 @@ export function GroundSegmentPanel({
   onClothResolutionChange,
   onClassThresholdChange,
   onRigidnessChange,
+  onSlopeSmoothChange,
   onSplitCloudsChange,
   onSegment,
 }: GroundSegmentPanelProps) {
@@ -119,6 +123,27 @@ export function GroundSegmentPanel({
           step={1}
           disabled={inProgress}
           className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+        />
+      </div>
+
+      {/* Slope smoothing */}
+      <div className="flex items-center gap-1 mb-3">
+        <label className="flex items-center gap-2 text-[10px] text-neutral-400">
+          <input
+            data-testid="ground-slope-smooth"
+            type="checkbox"
+            checked={slopeSmooth}
+            onChange={(e) => onSlopeSmoothChange(e.target.checked)}
+            className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
+            disabled={inProgress}
+          />
+          Slope smoothing
+        </label>
+        <InfoHint
+          data-testid="ground-slope-smooth-help"
+          label="Slope smoothing"
+          align="right"
+          text="Enable the cloth's slope-handling pass for undulating or steep terrain. Together with a low rigidness it lets the cloth conform to a slope instead of draping flat and bridging over it. Auto-enabled when the cloud's vertical relief is large relative to its footprint; leave off for flat ground."
         />
       </div>
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { X, ChevronLeft, ChevronRight, FileUp, AlertTriangle } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, FileUp, AlertTriangle, Route } from 'lucide-react';
 import {
   previewPointCloud,
   type PointCloudPreviewResponse,
@@ -8,6 +8,9 @@ import {
   type ColumnPlanEntry,
 } from '../utils/backendApi';
 import type { ScanParameters } from '../lib/scanParameters';
+import type { PoseStream } from '../lib/poseStream';
+import { pickAndParseTrajectory } from '../lib/trajectoryImport';
+import { PoseStreamParseError, trajectoryDurationS } from '../lib/poseStream';
 import { showToast } from './Toast';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { hasRegisteredScheme } from '../lib/classification';
@@ -41,6 +44,11 @@ export interface WizardResult {
   // import, or null to keep the original coordinates. Auto-suggested from the
   // preview for large (e.g. UTM) clouds; the user can edit or disable it.
   worldShift: [number, number, number] | null;
+  // Mobile-platform trajectory to attach to this scan, or null for a static
+  // (tripod) capture. When set, the imported Scan becomes a moving-platform
+  // acquisition: its scan parameters carry this PoseStream so leaf-area
+  // inversion reconstructs a per-beam origin per return (joined by timestamp).
+  trajectory: PoseStream | null;
 }
 
 interface PointCloudImportWizardProps {
@@ -68,6 +76,9 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'row_index', label: 'Scan Row Index' },
   { value: 'column_index', label: 'Scan Column Index' },
   { value: 'is_miss', label: 'Miss Flag' },
+  { value: 'origin_x', label: 'Beam Origin X' },
+  { value: 'origin_y', label: 'Beam Origin Y' },
+  { value: 'origin_z', label: 'Beam Origin Z' },
   { value: 'extra', label: 'Scalar' },
   { value: 'label', label: 'Label' },
   { value: 'skip', label: 'Skip' },
@@ -86,6 +97,16 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
 // renderer's fixed Hit/Miss colour scheme find it by name. It is NOT a scalar
 // (no rename box) and NOT categorical-toggleable — the renderer always colours
 // it with the dedicated Hit/Miss scheme, so it's excluded from SCALAR_ROLES.
+//
+// 'origin_x'/'origin_y'/'origin_z' are the per-pulse beam-emission origin (the
+// laser's position for each return), in the same world frame as x/y/z. Mapping
+// all three makes the cloud carry GROUND-TRUTH origins that the LAD inversion
+// uses directly, bypassing the timestamp->trajectory join — exactly like the LAS
+// ExtraBytes ox/oy/oz path. Like the grid/miss roles they pass straight through
+// buildColumnPlan as their own role token; the backend captures them at full
+// float64 precision into a side-channel (NOT as float32 extra dims, which would
+// corrupt world/UTM coordinates), so they need no rename box and aren't in
+// SCALAR_ROLES.
 
 // Roles that carry a named scalar field (and so get a rename box). 'label' is
 // the categorical variant of 'extra'.
@@ -118,6 +139,15 @@ interface ScanConfig {
   // 0/keep by default since elevation is rarely huge. The user can edit/toggle.
   shiftEnabled: boolean;
   shift: { x: number; y: number; z: number };
+  // Mobile-platform trajectory attached to this scan (null = static capture).
+  trajectory: PoseStream | null;
+  // True once the user explicitly imported a trajectory FOR THIS SCAN. A
+  // trajectory imported on one scan auto-populates the others (the common case:
+  // one platform pass split across files), but only those still at their
+  // inherited/empty default — an explicit per-scan choice is never overwritten.
+  trajectoryExplicit: boolean;
+  // Per-scan trajectory import error (bad file), shown inline next to the button.
+  trajectoryError: string | null;
 }
 
 // Normalise a backend-detected role to the wizard's RGB convention: the backend
@@ -159,6 +189,7 @@ function blankScanConfig(): ScanConfig {
     preview: null, loading: true, error: null, warning: null,
     columns: [], rgbIs255: true, autoOnly: false,
     shiftEnabled: false, shift: { x: 0, y: 0, z: 0 },
+    trajectory: null, trajectoryExplicit: false, trajectoryError: null,
   };
 }
 
@@ -309,6 +340,39 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
       ? { ...c, shift: { ...c.shift, [axis]: v } } : c));
   }, [stepIdx]);
 
+  // Import a mobile-platform trajectory file for the current scan. The picked
+  // PoseStream is set on this scan (marked an explicit choice) and, since most
+  // multi-file imports are one platform pass split across files, auto-populated
+  // onto every OTHER scan still at its inherited/empty default — never clobbering
+  // a scan the user gave its own trajectory. A bad file shows an inline error.
+  const importTrajectory = useCallback(async () => {
+    try {
+      const stream = await pickAndParseTrajectory();
+      if (!stream) return; // user cancelled the picker
+      setConfigs((prev) => prev.map((c, i) => {
+        if (i === stepIdx) {
+          return { ...c, trajectory: stream, trajectoryExplicit: true, trajectoryError: null };
+        }
+        // Default the other scans to this trajectory, but leave any scan the
+        // user explicitly set to its own choice.
+        if (!c.trajectoryExplicit) return { ...c, trajectory: stream, trajectoryError: null };
+        return c;
+      }));
+    } catch (err) {
+      const msg = err instanceof PoseStreamParseError || err instanceof Error
+        ? err.message : String(err);
+      setConfigs((prev) => prev.map((c, i) => i === stepIdx ? { ...c, trajectoryError: msg } : c));
+    }
+  }, [stepIdx]);
+
+  // Clear the current scan's trajectory and drop its explicit flag (so a later
+  // import on another scan can again populate it by default). Only this scan is
+  // affected — trajectories already inherited by other scans are left in place.
+  const clearTrajectory = useCallback(() => {
+    setConfigs((prev) => prev.map((c, i) => i === stepIdx
+      ? { ...c, trajectory: null, trajectoryExplicit: false, trajectoryError: null } : c));
+  }, [stepIdx]);
+
   // Copy the current scan's column config onto every other scan whose column
   // signature matches (same count + same header names). Mismatches are skipped
   // with a toast so a 6-col layout never lands on a 4-col file.
@@ -364,6 +428,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         categoricalSlugs: categoricalSlugs(c),
         continuousSlugs: continuousSlugs(c),
         worldShift: effectiveShift(c),
+        trajectory: c.trajectory,
       };
     });
     onComplete(results);
@@ -647,6 +712,79 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                   </label>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Platform trajectory (mobile-mapping / MLS). Optional: attach a
+              trajectory file so the imported scan is treated as a moving-platform
+              acquisition — leaf-area inversion then reconstructs a per-beam origin
+              per return by joining each return's timestamp to the path. Importing
+              one on any scan auto-populates the others (one pass, many files); each
+              scan can still get its own. Shown for every previewed scan. */}
+          {cfg && !cfg.loading && !cfg.error && (
+            <div
+              data-testid="import-wizard-trajectory"
+              className="border border-neutral-700 rounded-lg px-3 py-2.5 space-y-2"
+            >
+              <div className="flex items-center gap-2 text-[11px] text-neutral-200">
+                <Route className="w-3.5 h-3.5 text-neutral-400" />
+                <span className="font-medium">Platform trajectory</span>
+                <span className="text-[10px] text-neutral-500">— mobile / MLS data (optional)</span>
+              </div>
+              <p className="text-[10px] text-neutral-500 leading-snug">
+                For mobile-platform (drone, robot, vehicle) scans, attach the platform
+                trajectory so leaf-area density uses a per-beam origin reconstructed from
+                the path. {total > 1 && 'Importing one here fills in the other scans by default; you can give each scan its own.'} Leave empty for a static tripod scan or if there are beam origin columns in the scan data.
+              </p>
+              {cfg.trajectory ? (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs text-white truncate" data-testid="import-wizard-trajectory-label">
+                      {cfg.trajectory.label ?? 'trajectory'}
+                      {!cfg.trajectoryExplicit && (
+                        <span className="ml-1.5 text-[10px] text-neutral-400">(from another scan)</span>
+                      )}
+                    </p>
+                    <p className="text-[10px] text-neutral-400">
+                      {cfg.trajectory.poses.length} poses · {trajectoryDurationS(cfg.trajectory).toFixed(2)} s
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      type="button"
+                      onClick={importTrajectory}
+                      data-testid="import-wizard-trajectory-replace"
+                      className="px-2 py-1 text-[11px] bg-neutral-700 text-neutral-200 rounded hover:bg-neutral-600 transition-colors"
+                    >
+                      Replace…
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearTrajectory}
+                      data-testid="import-wizard-trajectory-clear"
+                      className="p-1 rounded text-neutral-400 hover:text-white hover:bg-neutral-700 transition-colors"
+                      title="Remove trajectory"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={importTrajectory}
+                  data-testid="import-wizard-trajectory-import"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] bg-neutral-700 text-neutral-200 rounded hover:bg-neutral-600 transition-colors"
+                >
+                  <FileUp className="w-3.5 h-3.5" /> Import trajectory file…
+                </button>
+              )}
+              {cfg.trajectoryError && (
+                <div className="flex items-start gap-1.5 text-[10px] text-red-300">
+                  <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                  <span data-testid="import-wizard-trajectory-error">{cfg.trajectoryError}</span>
+                </div>
+              )}
             </div>
           )}
         </div>

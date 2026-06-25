@@ -281,12 +281,15 @@ file *doesn't* record is left at its default (blank), exactly as before.
 
 A **moving-platform** scan (drone / UAV / mobile mapping) reconstructs a separate
 emission origin for every return by joining each return's timestamp to a dense 6-DOF
-platform trajectory. Attach one in the **Add Scan** tool via **Import trajectory
-file…**. Supported formats:
+platform trajectory. Attach one **while importing the point cloud** — the
+[import wizard](../workflows/import-export.md#the-import-wizard) has an **Import
+trajectory file…** button, and attaching a trajectory to one scan fills in the
+others by default — or later via the **Add Scan** tool's **Import trajectory
+file…** when editing the scan. Supported formats:
 
 | Format | Parsed | Layout |
 |---|---|---|
-| `.csv` / `.txt` / `.tsv` / `.traj` | In the app | One pose per row: `t x y z qx qy qz qw` (quaternion) **or** `t x y z roll pitch yaw` (Euler). Comma, tab, or whitespace separated; an optional header row is skipped. |
+| `.csv` / `.txt` / `.tsv` / `.traj` | In the app | One pose per row: 8 columns `t x y z qx qy qz qw` (quaternion) **or** 7 columns `t x y z roll pitch yaw` (Euler). Comma, tab, or whitespace separated. A header row, if present, is read: columns are mapped **by name** (so any order works — see below); without a header, columns are read positionally in the order shown. |
 | `.sbet` / `.out` | On the backend | Binary Applanix SBET: 17 little-endian float64 per record (136 bytes), no header — `time, lat, lon, alt, …, roll, pitch, heading, …` (angles in radians). |
 
 - **Time is the join key.** Each pose carries a time `t`; the importer requires it to
@@ -299,9 +302,16 @@ file…**. Supported formats:
   present, contributes a position-RMS quality note. High-rate SBETs are decimated to a
   few thousand poses (the join interpolates between them; the last record is always
   kept so the time span is preserved).
-- **SYSSIFOSS / HELIOS++ trajectories.** HELIOS++ trajectory output is the 7-column
-  `t x y z roll pitch yaw` layout with angles in **degrees** — import it as a text
-  trajectory.
+- **Header-based column mapping.** When the first line is a header, columns are matched
+  by name regardless of their order, with units in brackets ignored — `Time [s]`,
+  `Easting`/`Northing`/`Height` (or `x`/`y`/`z`), `Roll`/`Pitch`/`Yaw` (or `heading`),
+  and `qx`/`qy`/`qz`/`qw`. This is what lets the **SYSSIFOSS / HELIOS++** export — whose
+  header is the *position-first* `Easting Northing Height Time Roll Pitch Yaw` (angles in
+  **degrees**) — import directly, even though its column order isn't time-first. A header
+  that doesn't resolve to a complete layout falls back to positional parsing.
+- **Degree vs radian Euler.** Euler angles are read as radians unless any |angle| exceeds
+  2π, in which case the file is treated as **degrees** (HELIOS++/SYSSIFOSS convention) —
+  no toggle needed.
 - On import the scan's static tilt/heading are zeroed: a moving scan's attitude comes
   entirely from the trajectory (plus any fixed boresight), and the origin is anchored
   to the first pose as a fallback.
@@ -335,6 +345,13 @@ trajectory is reconstructed from the origins (ordered by `gps_time`) so the scan
 flagged moving with its path drawn. Moving-platform LAD then uses the exact per-pulse
 origins **directly** and skips the trajectory join entirely (if a separate trajectory is
 also attached, the explicit origins win and it is ignored, with a warning).
+
+ASCII/CSV/XYZ clouds can carry the same per-pulse origins as three columns (the same
+`ox`/`oy`/`oz` and alias spellings). Map them in the import wizard with the **Beam
+Origin X / Y / Z** roles (or let the header auto-detect them); they auto-create the same
+moving-platform scan and feed LAD identically. Origins are captured at full coordinate
+precision — bypassing the 1 mm display quantization — so projected/UTM-scale origins
+survive exactly.
 
 ## Plant parameter presets
 
