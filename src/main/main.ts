@@ -311,14 +311,6 @@ app.whenReady().then(async () => {
     mainWindow?.webContents.send(IPC.FileDropEvent, payload);
   });
 
-  // File → New: the renderer has freed its backend sessions and now wants a
-  // fresh start. Reload the window through reloadRenderer (webContents.reload),
-  // since the window blocks in-page navigation so window.location.reload() does
-  // nothing. Re-running the renderer gives an empty SceneProvider — a true reset.
-  ipcMain.on(IPC.AppReload, () => {
-    reloadRenderer();
-  });
-
   // OS "Open With": the renderer signals it has mounted and can receive imports.
   // Mark ready and flush any paths the OS handed us before the window was up.
   ipcMain.on(IPC.RendererReady, () => {

@@ -48,11 +48,6 @@ export const IPC = {
   RendererReady: 'app:rendererReady',
   // Backend supervisor status (main -> renderer): crash/restart lifecycle
   BackendStatus: 'backend:status',
-  // Renderer -> main (one-way): reload the renderer (File → New, after the
-  // renderer has freed its backend sessions). Goes through main's reloadRenderer
-  // because the window blocks in-page navigation (will-navigate preventDefault),
-  // so window.location.reload() is a no-op; webContents.reload() is not.
-  AppReload: 'app:reload',
 } as const;
 
 export type BackendStatusPayload =

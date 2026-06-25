@@ -8,9 +8,10 @@ const fixture = (name: string) => join(repoRoot, 'tests', 'e2e', 'fixtures', nam
 const TREE = fixture('tree.xyz');
 
 // File → New resets the app to a fresh, empty state — the same as relaunching
-// it. The renderer handles this by reloading itself (main.tsx re-runs with a
-// fresh empty SceneProvider); before the reload it frees every backend session
-// it was holding so the long-lived sidecar doesn't leak that RAM.
+// it. The renderer handles this in-place by remounting the App + SceneProvider
+// subtree (a key bump in Root), giving a fresh empty SceneProvider without a
+// window reload or backend re-probe; before remounting it frees every backend
+// session it was holding so the long-lived sidecar doesn't leak that RAM.
 //
 // Per CLAUDE.md: live backend, drive the real UI, assert concrete outcomes.
 // We import a real octree-backed cloud (so a real /api/cloud/session is created),
@@ -60,14 +61,14 @@ test('File → New clears all data and frees backend sessions', async () => {
     await expect(original).toHaveCount(1);
 
     // Re-open and actually clear. Clicking "Clear everything" frees sessions and
-    // reloads the renderer.
+    // remounts the renderer subtree to a fresh empty state.
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: 'new' });
     });
     await expect(dialog).toBeVisible();
     await page.getByTestId('new-confirm-clear').click();
 
-    // The renderer reloads to a fresh state: empty hint back, zero scan rows.
+    // The renderer remounts to a fresh state: empty hint back, zero scan rows.
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible({ timeout: 20_000 });
     await expect(page.locator('[data-testid="scan-row"]')).toHaveCount(0);
 
