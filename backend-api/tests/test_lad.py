@@ -59,7 +59,7 @@ class _FakeCloud:
         self.calls.append(("addHitPointsWithData", scanID, len(xyz), tuple(labels or [])))
 
     def addGrid(self, center, size, ndiv, rotation=0.0):
-        self.calls.append(("addGrid", tuple(center), tuple(size), tuple(ndiv)))
+        self.calls.append(("addGrid", tuple(center), tuple(size), tuple(ndiv), rotation))
 
     def triangulateHitPoints(self, lmax, aspect):
         self.calls.append(("triangulate", lmax, aspect))
@@ -573,7 +573,7 @@ class TestEightVoxelIsotropicPatches:
         xyz = np.array([[p.x, p.y, p.z] for p in positions], dtype=np.float64)
         return xyz, cols, exact
 
-    def _run(self, xyz, cols, return_type):
+    def _run(self, xyz, cols, return_type, rotation=0.0):
         scan = main.HeliosScanEntry(
             points=xyz.tolist(),
             scalar_columns=cols,
@@ -583,7 +583,7 @@ class TestEightVoxelIsotropicPatches:
         req = main.LADComputeRequest(
             scans=[scan],
             grid=main.HeliosGrid(center=self.GRID_CENTER, size=self.GRID_SIZE,
-                                 nx=2, ny=2, nz=2),
+                                 nx=2, ny=2, nz=2, rotation=rotation),
             lmax=0.04, max_aspect_ratio=10, min_voxel_hits=1)
         return main._do_lad_computation(req)
 
@@ -633,6 +633,38 @@ class TestEightVoxelIsotropicPatches:
             f"degenerate cell(s): {[round(c['lad'], 3) for c in cells]}"
         rmse = self._rmse(cells, exact)
         assert rmse < 0.5, f"per-cell LAD RMSE too high: {rmse} (exact {exact})"
+
+    def test_rotated_grid_returns_unrotated_centers_and_echoes_rotation(self):
+        """A rotated grid must (a) echo grid_rotation in the response, and (b) still
+        return AXIS-ALIGNED cell centers — Helios stores the azimuthal rotation
+        per-cell and does NOT bake it into getCellCenter. This is the invariant the
+        renderer relies on: it rotates the centers about the grid center itself
+        (Helios's own visualizer does the same). If Helios ever started returning
+        pre-rotated centers, the renderer would double-rotate — this guards that."""
+        xyz, cols, _ = self._generate_scan(multi_return=False)
+        ROT = 37.0
+        result = self._run(xyz, cols, "single", rotation=ROT)
+        assert result["success"] is True, result.get("error")
+        assert result["grid_rotation"] == pytest.approx(ROT)
+
+        cells = result["cells"]
+        assert len(cells) == 8
+        # Every cell center is on the AXIS-ALIGNED 2x2x2 lattice about the grid
+        # center: |x-gc| == |y-gc| == 0.25. A pre-rotated center would land off this
+        # lattice (e.g. x-offset != +/-0.25). z is never rotated.
+        gx, gy, _gz = self.GRID_CENTER
+        for c in cells:
+            cx, cy, _cz = c["center"]
+            assert abs(abs(cx - gx) - 0.25) < 1e-3, f"x not on axis-aligned lattice: {cx}"
+            assert abs(abs(cy - gy) - 0.25) < 1e-3, f"y not on axis-aligned lattice: {cy}"
+
+        # And the rotation genuinely changed the physics: the per-cell LAD with a
+        # 37deg grid differs from the unrotated grid (the beams cross different
+        # rotated voxels), so this isn't a silently-ignored parameter.
+        unrot = self._run(xyz, cols, "single", rotation=0.0)
+        rot_lads = sorted(round(c["lad"], 4) for c in cells)
+        unrot_lads = sorted(round(c["lad"], 4) for c in unrot["cells"])
+        assert rot_lads != unrot_lads, "rotation did not affect the inversion"
 
 
 # ---------------------------------------------------------------------------
@@ -952,3 +984,91 @@ class TestSingleReturnMissImportColumnMapping:
         assert result["success"] is True, result.get("error")
         assert result["return_mode"] == "single"
         assert result["cells"][0]["lad"] == pytest.approx(2.0, rel=0.25)
+
+
+class TestLADGridRotation:
+    """The LAD voxel grid must honor the grid box's azimuthal rotation, so the
+    result grid aligns with the (rotated) grid mesh the user laid out — the same
+    fix the triangulation crop already carries."""
+
+    def test_grid_rotation_is_forwarded_to_addGrid_in_degrees(self, tmp_path, stub_pyhelios):
+        # Helios's LiDARcloud::addGrid takes DEGREES (it converts *pi/180 internally),
+        # despite the PyHelios docstring saying radians. The backend must pass the
+        # request's grid.rotation through unchanged, not pre-converted to radians.
+        req = _single_return_request(tmp_path, rotation=30.0)
+        result = main._do_lad_computation(req)
+        assert result["success"] is True
+
+        cloud = stub_pyhelios.instances[-1]
+        add_grid = next(c for c in cloud.calls if c[0] == "addGrid")
+        # tuple: ("addGrid", center, size, ndiv, rotation)
+        assert add_grid[4] == pytest.approx(30.0)
+        # And the response carries it so the renderer can orient the voxel cubes.
+        assert result["grid_rotation"] == pytest.approx(30.0)
+
+    def test_zero_rotation_is_the_default(self, tmp_path, stub_pyhelios):
+        result = main._do_lad_computation(_single_return_request(tmp_path))
+        assert result["grid_rotation"] == pytest.approx(0.0)
+        cloud = stub_pyhelios.instances[-1]
+        add_grid = next(c for c in cloud.calls if c[0] == "addGrid")
+        assert add_grid[4] == pytest.approx(0.0)
+
+
+class TestCountPointsPerCellRotation:
+    """`_count_points_per_cell` populates the per-voxel hit_count for the UI. With
+    a rotated grid it must bin points in the ROTATED cell frame, matching Helios's
+    convention (inverse-rotate about the grid center by -rotation about +z)."""
+
+    @staticmethod
+    def _axis_aligned_cells(center, size, nx, ny, nz):
+        """Reproduce Helios's getCellCenter output: the UNROTATED (axis-aligned)
+        lattice centers. Helios stores the azimuthal rotation per-cell but does NOT
+        bake it into the center, so getCellCenter always returns these — which is
+        exactly why _count_points_per_cell must un-rotate the POINTS, not the cells."""
+        cx, cy, cz = center
+        sx, sy, sz = size
+        centers, sizes = [], []
+        for k in range(nz):
+            z = -0.5 * sz + (k + 0.5) * (sz / nz)
+            for j in range(ny):
+                y = -0.5 * sy + (j + 0.5) * (sy / ny)
+                for i in range(nx):
+                    x = -0.5 * sx + (i + 0.5) * (sx / nx)
+                    centers.append(_Vec(cx + x, cy + y, cz + z))
+                    sizes.append(_Vec(sx / nx, sy / ny, sz / nz))
+        return centers, sizes
+
+    def test_rotated_grid_bins_points_into_the_correct_cell(self):
+        # A 2x1x1 grid centered at origin, rotated 90deg about +z. Helios's cell
+        # centers stay UNROTATED at x=-0.5 (cell 0) and x=+0.5 (cell 1). A WORLD
+        # point on the +y axis falls in the cell that — after the grid's +90deg
+        # rotation — occupies +y, i.e. the cell whose unrotated center is at +x
+        # (cell 1). The function un-rotates the point by -90deg: (0,+0.4)->(+0.4,0)
+        # which lands in cell 1; (0,-0.4)->(-0.4,0) lands in cell 0.
+        center, size = [0.0, 0.0, 0.5], [2.0, 1.0, 1.0]
+        centers, sizes = self._axis_aligned_cells(center, size, 2, 1, 1)
+        assert centers[0].x == pytest.approx(-0.5, abs=1e-6)
+        assert centers[1].x == pytest.approx(0.5, abs=1e-6)
+
+        pts = np.array([[0.0, 0.4, 0.5], [0.0, -0.4, 0.5]], dtype=np.float64)
+        counts = main._count_points_per_cell([pts], centers, sizes,
+                                             grid_rotation_rad=math.radians(90.0))
+        assert counts[1] == 1   # world (0,+0.4) -> rotated cell 1
+        assert counts[0] == 1   # world (0,-0.4) -> rotated cell 0
+
+        # Control: with NO rotation, those same world points lie on the y-axis
+        # boundary between the two x-cells, not cleanly inside either x-half — so a
+        # rotated-aware result that differs from the unrotated one proves rotation
+        # actually changed the binning (guards against a no-op).
+        counts_norot = main._count_points_per_cell([pts], centers, sizes,
+                                                   grid_rotation_rad=0.0)
+        assert not np.array_equal(counts, counts_norot)
+
+    def test_unrotated_grid_unchanged(self):
+        # Rotation 0 must behave exactly as before (regression guard).
+        center, size = [0.0, 0.0, 0.5], [2.0, 1.0, 1.0]
+        centers, sizes = self._axis_aligned_cells(center, size, 2, 1, 1)
+        pts = np.array([[0.4, 0.0, 0.5], [-0.4, 0.0, 0.5]], dtype=np.float64)
+        counts = main._count_points_per_cell([pts], centers, sizes, grid_rotation_rad=0.0)
+        assert counts[1] == 1   # (+0.4, 0) -> cell 1 (x=+0.5)
+        assert counts[0] == 1   # (-0.4, 0) -> cell 0 (x=-0.5)

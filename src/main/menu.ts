@@ -63,6 +63,12 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
       label: 'File',
       submenu: [
         {
+          label: 'New',
+          accelerator: 'CmdOrCtrl+N',
+          click: () => send({ kind: 'new' }),
+        },
+        { type: 'separator' },
+        {
           label: 'Import',
           submenu: [
             { label: 'Auto-detect…', click: () => send({ kind: 'import-auto' }) },

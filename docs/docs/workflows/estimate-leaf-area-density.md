@@ -33,7 +33,10 @@ surface.
       so edge points aren't clipped). The button is enabled whenever one or
       more scans with points are selected, and you can re-fit at any time.
     - Adjust the box (Position / Scale) if you want a tighter or different
-      region. The box is its own object in the scene.
+      region. The box is its own object in the scene. **Rotating** the box
+      about the vertical axis is honored — the LAD voxels are computed in the
+      rotated frame and the result grid lines up with the box you laid out
+      (e.g. to follow a planted row that isn't axis-aligned).
     - Set **Grid Resolution** (Nx × Ny × Nz) to the number of voxels you
       want along each axis. Use 1×1×1 for a single canopy-wide value, or
       subdivide for a 3-D density field. A wireframe shows the cells when
@@ -48,6 +51,8 @@ surface.
    see [Backfill misses](backfill-misses.md). The LAD dialog also surfaces
    this: it disables **Compute LAD** and shows a banner with a one-click
    **Backfill Misses** button for any selected scan still missing them.
+   Clicking it runs the backfill and then reopens the LAD dialog with the
+   same scan selection once it finishes, so you're back where you were.
    Scans imported from a miss-retaining format (E57 / structured PLY) skip
    this step.
 
@@ -66,7 +71,9 @@ surface.
       triangulation would take. The scan picker, grid selector, and filter fields
       below are hidden (locked to the mesh). Choose **Run a new triangulation** to
       set everything yourself instead. (This selector only appears when a reusable
-      triangulation exists — one built with a voxel grid.) A ball-pivot mesh that
+      triangulation exists — one built with a voxel grid. When one does, it's
+      pre-selected by default, since reusing it skips the redundant
+      re-triangulation; pick **Run a new triangulation** if you'd rather not.) A ball-pivot mesh that
       **can't** be reused — merged, not pinned to a grid, or from a scan with no
       scanner position — appears greyed-out here with the reason, so you can fix
       it (re-triangulate per-scan, pinned to a grid) rather than wonder why it's
@@ -74,20 +81,28 @@ surface.
 
         !!! note "You don't need a Helios mesh first"
             **Run a new triangulation** with your scans + grid is the full
-            workflow on its own — it triangulates the scans server-side as part
-            of the inversion. Reusing a mesh is an optimization: it injects the
-            already-computed triangles instead of recomputing them, so it's
-            worth doing when you've already triangulated (especially on large
-            scans). If a reused mesh's source scans are no longer all present,
+            workflow on its own. It runs a real
+            [Helios triangulation](triangulate.md) first — the same one the
+            standalone Triangulate tool produces, with the max edge length
+            **auto-estimated from the data** — **adds that surface mesh to the
+            Meshes panel**, then inverts Beer's law on it. So the inversion's
+            G(θ) is computed on a surface you can actually see and check. If it
+            looks wrong (e.g. long triangles bridging gaps between separate
+            leaves, which flatten the normals and depress G(θ)), adjust its
+            **Lmax / aspect filter** in the Meshes panel, then reopen this dialog
+            and choose **Reuse: \<that mesh\>** to recompute on the corrected
+            surface. If a reused mesh's source scans are no longer all present,
             the tool blocks the run rather than silently changing the result.
     - Pick the **voxel grid** to use (required — no auto-grid). *(New
       triangulation only.)*
     - **Max Edge Length (Lmax)** and **Max Aspect Ratio** control the
-      triangulation that estimates the G-function (not the final mesh). If you
-      already dialed in a filter on a [Helios triangulation](triangulate.md)
-      mesh, these fields are **pre-filled** with that Lmax / aspect so the
-      inversion bakes in the same filtering — still editable here. *(New
-      triangulation only.)*
+      triangulation that estimates the G-function. Leave **Lmax** on
+      **Auto** (the placeholder) to size it from the data — an Otsu estimate
+      over the candidate edge lengths, the same default the standalone
+      Triangulate tool seeds — or type a value to force it. The resulting mesh
+      lands in the Meshes panel either way, where you can fine-tune the filter
+      and re-run via **Reuse** (see the note above). *(New triangulation
+      only.)*
     - **Min Voxel Hits** skips voxels with too few returns to solve
       reliably.
     - **Element width (m)** is the characteristic width of a leaf or
@@ -147,9 +162,15 @@ entirely and uses those origins directly.
 
 ## Tips
 
-- If no triangles are produced (G-function can't be estimated), increase
-  **Lmax** or loosen **Max Aspect Ratio**. (Moving-platform scans skip
-  triangulation; this doesn't apply to them.)
+- If no triangles are produced (G-function can't be estimated), set an
+  explicit **Lmax** (larger than Auto chose) or loosen **Max Aspect Ratio**,
+  or inspect the mesh that was created in the Meshes panel and loosen its
+  filter there. (Moving-platform scans skip triangulation; this doesn't apply
+  to them.)
+- The G(θ) you see when hovering a LAD voxel is now computed on the **same
+  filtered surface** shown in the Meshes panel. If it looks too low, the mesh
+  likely has long triangles bridging gaps between separate leaves — tighten
+  its Lmax filter and recompute via **Reuse**.
 - Segment out ground and trunk first if you only want foliage density —
   the inversion counts every return inside the grid.
 - If you **crop a scan after backfilling its misses**, the result warns that

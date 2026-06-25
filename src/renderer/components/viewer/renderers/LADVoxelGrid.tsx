@@ -1,4 +1,4 @@
-import { useMemo, useRef, useEffect } from 'react';
+import { useMemo, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import * as THREE from 'three';
 import type { ThreeEvent } from '@react-three/fiber';
 import type { LADVoxel } from '../../../lib/pointCloudTypes';
@@ -12,6 +12,14 @@ import { ladColorT } from '../../../lib/pointCloudHelpers';
 // value readout.
 export interface LADVoxelGridProps {
   voxels: LADVoxel[];
+  // Azimuthal rotation of the grid box about +z (degrees). Helios returns voxel
+  // centers UNROTATED, so we both rotate each center about `gridCenter` AND orient
+  // each cube by this angle, so a rotated LAD result aligns with the original grid
+  // mesh. 0 = axis-aligned.
+  rotationDeg?: number;
+  // World-space pivot the centers rotate about. Required for rotationDeg to have
+  // any visible effect; when omitted (or rotationDeg 0) the centers are unchanged.
+  gridCenter?: [number, number, number];
   colormap: ColormapName;
   min: number;            // colorbar domain low
   max: number;            // colorbar domain high
@@ -25,6 +33,8 @@ const EMPTY_COLOR = new THREE.Color('#3a3a3a');
 
 export function LADVoxelGrid({
   voxels,
+  rotationDeg = 0,
+  gridCenter,
   colormap,
   min,
   max,
@@ -45,17 +55,44 @@ export function LADVoxelGrid({
   const geometry = useMemo(() => new THREE.BoxGeometry(1, 1, 1), []);
   useEffect(() => () => geometry.dispose(), [geometry]);
 
-  // Write per-instance transforms + colors whenever inputs change.
-  useEffect(() => {
-    const mesh = meshRef.current;
+  // Write per-instance transforms + colors into a given mesh. Kept as a stable
+  // callback so it can be driven from BOTH the ref callback (on every R3F
+  // (re)assignment of the InstancedMesh) and a layout effect (on prop-only
+  // changes while the mesh identity is stable). Driving it only from a
+  // dep-array effect was the source of a "grid sometimes missing after
+  // inversion" bug: when R3F re-created the mesh (its key={drawn.length}, or a
+  // reconciliation re-create during the addLad batch), the new mesh was handed
+  // to meshRef.current but the fill effect didn't re-run — its deps were
+  // referentially unchanged — so the fresh mesh kept zero-matrix instances and
+  // nothing drew until a visibility toggle remounted the component.
+  const fillMesh = useCallback((mesh: THREE.InstancedMesh | null) => {
     if (!mesh) return;
     const m = new THREE.Matrix4();
     const color = new THREE.Color();
+    // The grid's azimuthal rotation about +z (CCW, matching three.js rotation.z
+    // and the Helios <grid>). Helios returns voxel CENTERS unrotated (the rotation
+    // lives per-cell and is honored only in its physics), so we replicate Helios's
+    // own visualizer: rotate each center about the grid center, AND orient the
+    // cube by the same angle. With no pivot (or 0deg) the centers are unchanged.
+    const theta = THREE.MathUtils.degToRad(rotationDeg);
+    const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), theta);
+    const cosT = Math.cos(theta), sinT = Math.sin(theta);
+    const rotate = gridCenter != null && Math.abs(rotationDeg) > 1e-9;
+    const pos = new THREE.Vector3();
     for (let i = 0; i < drawn.length; i++) {
       const v = drawn[i];
+      pos.set(v.center[0], v.center[1], v.center[2]);
+      if (rotate) {
+        // Rotate the center about gridCenter (about +z), CCW — identical to
+        // Helios's rotatePointAboutLine(center, anchor, +z, rotation).
+        const dx = pos.x - gridCenter![0];
+        const dy = pos.y - gridCenter![1];
+        pos.x = gridCenter![0] + dx * cosT - dy * sinT;
+        pos.y = gridCenter![1] + dx * sinT + dy * cosT;
+      }
       m.compose(
-        new THREE.Vector3(v.center[0], v.center[1], v.center[2]),
-        new THREE.Quaternion(),
+        pos,
+        quat,
         new THREE.Vector3(v.size[0], v.size[1], v.size[2]),
       );
       mesh.setMatrixAt(i, m);
@@ -70,7 +107,24 @@ export function LADVoxelGrid({
     mesh.count = drawn.length;
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  }, [drawn, colormap, min, max]);
+  }, [drawn, rotationDeg, gridCenter, colormap, min, max]);
+
+  // (1) Re-fill when render inputs change while the mesh identity is stable
+  //     (colorbar drag, colormap switch, rotation tweak, hide-empty toggle that
+  //     keeps the count). useLayoutEffect, not useEffect, so the buffers are
+  //     populated before paint — no one-frame flash of an unfilled mesh.
+  useLayoutEffect(() => {
+    fillMesh(meshRef.current);
+  }, [fillMesh]);
+
+  // (2) Re-fill the instant R3F (re)assigns a new InstancedMesh — covers the
+  //     initial mount AND every remount (key={drawn.length} change, or a
+  //     reconciliation re-create during the addLad batch). This is the case the
+  //     deps-driven effect alone missed.
+  const setMeshRef = useCallback((mesh: THREE.InstancedMesh | null) => {
+    meshRef.current = mesh;
+    fillMesh(mesh);
+  }, [fillMesh]);
 
   const handleMove = (e: ThreeEvent<PointerEvent>) => {
     if (!onHoverVoxel) return;
@@ -92,7 +146,7 @@ export function LADVoxelGrid({
 
   return (
     <instancedMesh
-      ref={meshRef}
+      ref={setMeshRef}
       // Re-key so the instance buffers resize when the cell count changes.
       key={drawn.length}
       args={[geometry, undefined, drawn.length]}

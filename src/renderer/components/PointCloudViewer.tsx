@@ -77,6 +77,8 @@ import {
   computeDisplayOffset,
   displayViewToWorldView,
   buildLADRequest,
+  buildHeliosTriangulationRequest,
+  extractReuseMeshPayload,
   type Vec3Like,
   type ReuseMeshPayload,
 } from '../lib/pointCloudHelpers';
@@ -1147,6 +1149,12 @@ export default function PointCloudViewer({
   const [showStitchDialog, setShowStitchDialog] = useState(false);
   // Leaf area density popup + results + background task state
   const [showLADPopup, setShowLADPopup] = useState(false);
+  // When the LAD modal launches a backfill (a selected scan lacked misses), it
+  // closes itself but hands us the scan selection it had. We stash it here so we
+  // can reopen LAD seeded with the same scans once the backfill completes,
+  // returning the user to where they were instead of stranding them in the tool
+  // bar. Null when no LAD reopen is pending.
+  const [ladReopenSelection, setLadReopenSelection] = useState<Set<string> | null>(null);
   // LAD results — store-owned so add/remove are undoable (Phase C).
   const ladResults = scene.state.ladResults;
   const setLadResults = useMemo(() => makeFieldSetter('ladResults'), [makeFieldSetter]);
@@ -2596,7 +2604,7 @@ export default function PointCloudViewer({
   // points for the given scans, streaming per-stage progress into a StatusPill
   // like Triangulation / LAD. `showAfter` reveals the overlay on completion (only
   // for scans with a known scanner origin — the modal already gates it).
-  const handleBackfillMisses = useCallback(async (scanIds: string[], showAfter: boolean) => {
+  const handleBackfillMisses = useCallback(async (scanIds: string[], showAfter: boolean, reopenLADWith: Set<string> | null = null) => {
     if (isBackfillRunning) return;
     const eligible = scanIds
       .map(id => clouds.find(c => c.id === id))
@@ -2753,6 +2761,17 @@ export default function PointCloudViewer({
           : undefined,
         type: 'success',
       });
+    }
+
+    // Backfill launched from the LAD modal → reopen it now that the misses are
+    // recovered, seeded with the same scan selection the user had. We reached
+    // here without an abort return, so the run actually ran. Stashing the
+    // selection here (not in the onBackfill handler) avoids racing the popup's
+    // onClose; `initialSelectedIds` prefers it so the reopened popup restores
+    // exactly what was selected. The next manual open (toolbar) clears it.
+    if (reopenLADWith) {
+      setLadReopenSelection(reopenLADWith);
+      setShowLADPopup(true);
     }
   }, [clouds, isBackfillRunning, onUpdateCloud, onToggleMisses]);
 
@@ -3614,7 +3633,7 @@ export default function PointCloudViewer({
       { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPopup(true); }, category: 'Point Cloud', toolGroup: 'reconstruct', icon: Triangle, testId: 'tool-triangulate', multiInput: true, isActive: () => showTriangulationPopup },
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Dna, testId: 'tool-skeleton', isActive: () => showSkeletonPanel },
       { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: QsmIcon, testId: 'tool-qsm', multiInput: true, isActive: () => showQSMPopup },
-      { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
+      { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setLadReopenSelection(null); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
 
       // ── Create (geometry + scanner placement — scene-building, not analysis) ──
       { id: 'create-plant', name: 'Generate Plant', keywords: ['helios', 'leaf', 'vegetation', 'build', 'geometry'], action: () => setShowPlantPopup(true), category: 'Create', requires: null, toolGroup: 'create', icon: Sprout, testId: 'tool-plant-generate' },
@@ -5162,6 +5181,7 @@ export default function PointCloudViewer({
             meshPositions.get(gridMesh.id),
             meshScales.get(gridMesh.id),
             gridMesh.gridSubdivisions,
+            meshRotations.get(gridMesh.id)?.z,
           ) ?? undefined;
         }
       }
@@ -8814,23 +8834,40 @@ export default function PointCloudViewer({
   // Handle Helios triangulation as a background task with cancel support.
   // `scanColors` is aligned 1:1 with request.scans so we can stash per-triangle
   // scan provenance (and the matching colors) on the resulting mesh.
-  const handleHeliosTriangulate = useCallback(async (request: HeliosTriangulationRequest, scanColors: string[] = [], sourceScanIds: string[] = [], gridMeshId?: string) => {
-    if (isHeliosRunning) return;
+  // Resolves to the created MeshEntry on success (so callers can chain off the
+  // mesh — e.g. the LAD tool triangulates then immediately reuses the result),
+  // or null if it bailed (already running, cancelled, or backend error). When
+  // `opts.ownProgress` is false the caller drives the running/progress/abort UI
+  // itself (the LAD chain shows ONE combined progress bar across triangulate +
+  // invert and owns the AbortController), so we don't touch isHeliosRunning /
+  // triProgress / heliosAbortRef here and use the caller's signal instead.
+  const handleHeliosTriangulate = useCallback(async (request: HeliosTriangulationRequest, scanColors: string[] = [], sourceScanIds: string[] = [], gridMeshId?: string, opts?: { ownProgress?: boolean; signal?: AbortSignal; onProgress?: (p: number | null, msg: string) => void; onRunId?: (runId: string) => void }): Promise<MeshEntry | null> => {
+    const ownProgress = opts?.ownProgress !== false;
+    if (ownProgress && isHeliosRunning) return null;
 
-    const abort = new AbortController();
-    heliosAbortRef.current = abort;
-    setIsHeliosRunning(true);
-    setTriProgress({ label: 'Helios triangulating…', value: null });
+    const abort = ownProgress ? new AbortController() : null;
+    const signal = opts?.signal ?? abort!.signal;
+    if (ownProgress) {
+      heliosAbortRef.current = abort;
+      setIsHeliosRunning(true);
+      setTriProgress({ label: 'Helios triangulating…', value: null });
+    }
 
+    let createdMesh: MeshEntry | null = null;
     try {
-      const response = await heliosTriangulate(request, abort.signal, (p, msg) =>
-        setTriProgress({ label: msg, value: p }), (runId) => { triRunIdRef.current = runId; });
+      const response = await heliosTriangulate(request, signal, (p, msg) => {
+        if (ownProgress) setTriProgress({ label: msg, value: p });
+        else opts?.onProgress?.(p, msg);
+      }, (runId) => {
+        if (opts?.onRunId) opts.onRunId(runId);
+        else triRunIdRef.current = runId;
+      });
 
-      if (abort.signal.aborted) return;
+      if (signal.aborted) return null;
 
       if (!response.success) {
         showToast({ type: 'error', title: 'Helios Triangulation Failed', message: response.error || 'Unknown error' });
-        return;
+        return null;
       }
 
       // The big arrays arrive as zero-copy typed-array views over the binary
@@ -8893,6 +8930,10 @@ export default function PointCloudViewer({
             nx: request.grid.nx,
             ny: request.grid.ny,
             nz: request.grid.nz,
+            // Preserve the box's azimuthal rotation so a LAD run that REUSES this
+            // triangulation gets the rotated grid (else the result voxels come back
+            // axis-aligned and skewed off the rotated grid mesh).
+            ...(request.grid.rotation ? { rotation: request.grid.rotation } : {}),
           }
         : undefined;
 
@@ -8977,6 +9018,9 @@ export default function PointCloudViewer({
       // a real origin).
       addMesh(meshEntry, undefined, 'Triangulate');
       setShowTriangulationPopup(false);
+      // Capture the mesh so chained callers (the LAD new-triangulation path) can
+      // reuse it for the inversion without re-triangulating.
+      createdMesh = meshEntry;
       // Hide the contributing scans so their points don't obscure the new mesh
       // (mirrors the QSM build). The scans stay in the list and can be re-shown.
       for (const id of sourceScanIds) onHideScan(id);
@@ -9026,18 +9070,28 @@ export default function PointCloudViewer({
         });
       }
     } catch (err) {
-      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
-      showToast({
-        type: 'error',
-        title: 'Helios Triangulation Failed',
-        message: err instanceof Error ? err.message : 'Unknown error',
-      });
+      if (signal.aborted || err instanceof ScanCancelledError) return null;
+      // When chained (no own progress), let the caller surface the failure with
+      // its own context (a re-throw would be swallowed by its try/catch anyway);
+      // the standalone path shows the toast here.
+      if (ownProgress) {
+        showToast({
+          type: 'error',
+          title: 'Helios Triangulation Failed',
+          message: err instanceof Error ? err.message : 'Unknown error',
+        });
+      } else {
+        throw err;
+      }
     } finally {
-      setIsHeliosRunning(false);
-      heliosAbortRef.current = null;
-      triRunIdRef.current = null;
-      setTriProgress(null);
+      if (ownProgress) {
+        setIsHeliosRunning(false);
+        heliosAbortRef.current = null;
+        triRunIdRef.current = null;
+        setTriProgress(null);
+      }
     }
+    return createdMesh;
   }, [isHeliosRunning, onHideScan]);
 
   // Dispatcher wired to the unified TriangulationPopup. Branches on the result
@@ -9112,7 +9166,22 @@ export default function PointCloudViewer({
   // Compute per-voxel leaf area density. Mirrors handleHeliosTriangulate: run
   // against the live backend, then add the result as an LADResultEntry the
   // viewer renders as colored voxel cells.
-  const handleComputeLAD = useCallback(async (request: LADRequest, _scanColors: string[] = [], gridMeshId?: string, reuseMesh: ReuseMeshPayload | null = null) => {
+  //
+  // `newTri` (static "run new triangulation" mode only) makes this a two-step
+  // chain: first run the Helios triangulation — which applies the Otsu-estimated
+  // Lmax and adds the mesh to the Meshes pane, exactly as the standalone tool
+  // does — then run the inversion REUSING that mesh. So the inversion's G(theta)
+  // is computed on the same filtered surface the user can now see and refine
+  // (adjust the filter in the Meshes panel, reopen LAD, reuse it, recompute),
+  // instead of a backend re-triangulation at a fixed Lmax with no feedback. The
+  // moving-platform / explicit-reuse paths skip this and pass reuseMesh directly.
+  const handleComputeLAD = useCallback(async (
+    request: LADRequest,
+    _scanColors: string[] = [],
+    gridMeshId?: string,
+    reuseMesh: ReuseMeshPayload | null = null,
+    newTri?: { scans: Scan[]; grid: HeliosGrid; gridMeshId: string; lmax?: number; maxAspectRatio: number } | null,
+  ) => {
     if (isLadRunning) return;
 
     const abort = new AbortController();
@@ -9121,6 +9190,73 @@ export default function PointCloudViewer({
     setLadProgress(null);
 
     try {
+      // Two-step path: triangulate (mesh added to the pane), then reuse that mesh
+      // for the inversion. On triangulation failure/cancel, handleHeliosTriangulate
+      // already toasted (chained mode re-throws), and a null mesh means we can't
+      // proceed — bail before the inversion.
+      if (newTri && !reuseMesh) {
+        setLadProgress({ label: 'Triangulating hit points…', value: null });
+        // ALWAYS triangulate wide-open (1e9 from buildHeliosTriangulationRequest)
+        // so the backend computes the Otsu estimate over the FULL candidate
+        // distribution — identical to the standalone tool. The mesh is seeded at
+        // the Otsu estimate. An explicit dialog Lmax is applied AFTER, as the
+        // displayed filter on the full candidate set (exactly as the user would
+        // dial it in the Meshes panel), NOT by pre-trimming the triangulation —
+        // pre-trimming would change which triangles the post-hoc Otsu/seed sees
+        // and shift G(theta).
+        const triRequest = buildHeliosTriangulationRequest(newTri.scans, newTri.grid);
+        const mesh = await handleHeliosTriangulate(
+          triRequest,
+          newTri.scans.map(s => s.color),
+          newTri.scans.map(s => s.id),
+          newTri.gridMeshId || undefined,
+          {
+            ownProgress: false,
+            signal: abort.signal,
+            onProgress: (p, msg) => setLadProgress({ label: msg, value: p }),
+            // Route the triangulation phase's run id to the LAD cancel handler so
+            // cancelling during triangulation cancels the backend run too.
+            onRunId: (runId) => { ladRunIdRef.current = runId; },
+          },
+        );
+        if (abort.signal.aborted) return;
+        if (!mesh || !mesh.unfilteredMesh) {
+          // Triangulation produced nothing usable — the toast from the
+          // triangulation handler explains why; stop here.
+          return;
+        }
+        // The filter to invert at: an explicit dialog Lmax (clamped to the
+        // returned set's cap so we never ask for triangles that weren't returned),
+        // else the mesh's seeded Otsu filter. Aspect: explicit value when the user
+        // set an Lmax, else the seeded aspect.
+        const filterLmax = newTri.lmax !== undefined
+          ? Math.min(newTri.lmax, mesh.unfilteredMesh.cap.lmax)
+          : mesh.triangleFilter!.lmax;
+        const filterAspect = newTri.lmax !== undefined
+          ? Math.min(newTri.maxAspectRatio, mesh.unfilteredMesh.cap.maxAspectRatio)
+          : mesh.triangleFilter!.maxAspectRatio;
+        // When the user forced a filter, push it onto the mesh row too, so the
+        // Meshes panel shows exactly the surface the inversion ran on (one source
+        // of truth — a later "Reuse" run then reproduces this result).
+        if (newTri.lmax !== undefined) {
+          handleHeliosFilterChange(mesh.id, { lmax: filterLmax, maxAspectRatio: filterAspect });
+        }
+        // Invert EXACTLY that surface: filter the full candidate set at the chosen
+        // lmax/aspect, drop out-of-grid triangles, remap scan ids to the LAD
+        // request's scan order. The LAD request's scan order is exactly
+        // newTri.scans (buildLADRequest maps selectedScans in order, and
+        // newTri.scans IS selectedScans).
+        reuseMesh = extractReuseMeshPayload(
+          mesh.unfilteredMesh.data,
+          filterLmax,
+          filterAspect,
+          mesh.triangulationParams!.sourceScanIds ?? [],
+          newTri.scans.map(s => s.id),
+        );
+        gridMeshId = newTri.gridMeshId || undefined;
+        setLadProgress({ label: 'Inverting Beer’s law…', value: null });
+      }
+
       const response = await computeLAD(request, abort.signal, (p, msg) =>
         setLadProgress({ label: msg, value: p }), (runId) => { ladRunIdRef.current = runId; }, reuseMesh);
       if (abort.signal.aborted) return;
@@ -9161,6 +9297,10 @@ export default function PointCloudViewer({
           min: (response.bounds?.[0] ?? [0, 0, 0]) as [number, number, number],
           max: (response.bounds?.[1] ?? [0, 0, 0]) as [number, number, number],
         },
+        gridRotationDeg: response.grid_rotation ?? 0,
+        gridCenter: (response.grid_center && response.grid_center.length === 3
+          ? (response.grid_center as [number, number, number])
+          : undefined),
         returnMode: response.return_mode === 'multi' ? 'multi' : 'single',
         visible: true,
         color: '#22c55e',
@@ -9217,7 +9357,7 @@ export default function PointCloudViewer({
       ladAbortRef.current = null;
       ladRunIdRef.current = null;
     }
-  }, [isLadRunning]);
+  }, [isLadRunning, handleHeliosTriangulate, handleHeliosFilterChange]);
 
   const cancelLAD = useCallback(() => {
     // Stop the backend (frees the inversion's C++/numpy memory), then abort.
@@ -10662,6 +10802,8 @@ export default function PointCloudViewer({
             <group key={result.id} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
               <LADVoxelGrid
                 voxels={result.voxels}
+                rotationDeg={result.gridRotationDeg ?? 0}
+                gridCenter={result.gridCenter}
                 colormap={colormap}
                 min={min}
                 max={max}
@@ -11590,11 +11732,28 @@ export default function PointCloudViewer({
 
       {/* Right Side Panels Container. z-30 keeps the whole panel stack above the
           viewport SVG overlays (crop/seed boxes at z-10) so panel controls and
-          their popovers aren't obstructed by the wireframe crop box. */}
-      <div className="absolute top-4 right-4 z-30 flex flex-col gap-2 max-h-[calc(100vh-100px)]">
+          their popovers aren't obstructed by the wireframe crop box.
+
+          Space budget: the stack is top-anchored and the Display panel is
+          bottom-anchored (bottom-4) on the same right edge, so when many panels
+          are present (scans + meshes + skeletons + QSM + LAD, each up to
+          40–50vh) the stack would otherwise run to the bottom of the viewer and
+          collide with Display. We bound the stack with BOTH top-4 and a bottom
+          anchor (bottom-[4.5rem]) so its height is derived from this absolute
+          container's offset parent — the `flex-1` viewer pane. A `100vh`-based
+          maxHeight is WRONG here: the pane sits *below* the app toolbar, so
+          100vh overshoots the pane and never reserves a bottom gap (the panels
+          just run to the window bottom). The bottom anchor clears the
+          *collapsed* Display bubble (bottom-4 + its ~2.5rem header), so the
+          closed bubble is never collided with; it's fine for the *expanded*
+          Display panel to overlap the stack (z-55, above it, transient).
+          overflow-y-auto scrolls the column as one unit; `pr-1` keeps the
+          scrollbar off panel content; `overflow-x-visible` keeps leftward-
+          opening color/transform popovers from clipping. */}
+      <div className="absolute top-4 bottom-[4.5rem] right-4 z-30 flex flex-col gap-2 overflow-y-auto overflow-x-visible pr-1">
         {/* Unified Scans Panel — shows every scan whether it has data, params,
             or both. Per-row actions adapt to which fields are present. */}
-        <div data-testid="scans-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
+        <div data-testid="scans-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col shrink-0">
           <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
             <Layers className="w-4 h-4 text-neutral-400" />
             <span className="text-xs font-medium text-neutral-300 flex-1">Scans</span>
@@ -12095,7 +12254,7 @@ export default function PointCloudViewer({
 
         {/* QSM Results Panel */}
         {qsms.length > 0 && (
-          <div data-testid="qsm-results-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[50vh] flex flex-col">
+          <div data-testid="qsm-results-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[50vh] flex flex-col shrink-0">
             <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
               <QsmIcon className="w-4 h-4 text-neutral-400" />
               <span className="text-xs font-medium text-neutral-300 flex-1">QSM</span>
@@ -13797,10 +13956,16 @@ export default function PointCloudViewer({
         triangulationOptions={ladTriangulationOptions}
         ineligibleTriangulations={ineligibleLadTriangulations}
         onStartLAD={handleComputeLAD}
-        initialSelectedIds={selectedScanIds}
+        initialSelectedIds={ladReopenSelection ?? selectedScanIds}
         defaultLmax={[...meshes].reverse().find(m => m.triangleFilter)?.triangleFilter?.lmax}
         defaultMaxAspectRatio={[...meshes].reverse().find(m => m.triangleFilter)?.triangleFilter?.maxAspectRatio}
-        onBackfill={(ids) => { void handleBackfillMisses(ids, /* showAfter */ false); }}
+        onBackfill={(ids, selectedIds) => {
+          // Run the backfill, then reopen LAD on completion seeded with the
+          // modal's selection. handleBackfillMisses stashes the selection itself
+          // (after the popup's onClose has run) so the onClose clear can't race
+          // it away.
+          void handleBackfillMisses(ids, /* showAfter */ false, selectedIds);
+        }}
       />
       <BackfillMissesPopup
         isOpen={showBackfillPopup}

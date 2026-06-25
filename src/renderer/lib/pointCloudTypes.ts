@@ -231,6 +231,9 @@ export interface MeshData {
     nx: number;
     ny: number;
     nz: number;
+    // Azimuthal rotation of the grid box about +z, in degrees. Carried so a LAD
+    // run that reuses this triangulation gets the rotated grid. Absent/0 = axis-aligned.
+    rotation?: number;
   };
   // Helios-only: per-triangle filter metrics (aligned 1:1 with `indices`/3),
   // computed by the backend at full precision so the front-end can apply the
@@ -513,6 +516,16 @@ export interface LADResultEntry {
   ny: number;
   nz: number;
   bounds: { min: [number, number, number]; max: [number, number, number] };
+  // Azimuthal rotation of the grid box about +z (degrees). Non-zero when the LAD
+  // was run in a rotated voxel grid. Helios returns voxel centers UNROTATED (the
+  // azimuthal rotation is stored per-cell and honored only in its physics, not in
+  // getCellCenter), so the renderer must rotate each center about `gridCenter` by
+  // this angle AND orient each cube by it — exactly as Helios's own visualizer
+  // does (rotatePointAboutLine about the anchor). Absent/0 = axis-aligned.
+  gridRotationDeg?: number;
+  // World-space grid center — the pivot the voxel centers are rotated about when
+  // gridRotationDeg is non-zero. Absent => no rotation needed (or legacy result).
+  gridCenter?: [number, number, number];
   // Which Beer's-law weighting actually ran: 'single' (discrete) or 'multi'
   // (full-waveform, beams grouped + misses gap-filled). Derived from the
   // backend's authoritative detection, not the requested return type.

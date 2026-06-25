@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.40.1"
+BACKEND_VERSION = "0.40.2"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2867,6 +2867,7 @@ class LADComputeResponse(BaseModel):
     nz: int = 1
     grid_center: List[float] = []
     grid_size: List[float] = []
+    grid_rotation: float = 0.0        # azimuth about +z, degrees (rotated grids)
     bounds: List[List[float]] = []   # [[lo_x,lo_y,lo_z], [hi_x,hi_y,hi_z]]
     is_multi_return: bool = False
     return_mode: str = "single"      # "single" | "multi"
@@ -4446,6 +4447,11 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         grid_center = list(request.grid.center)
         grid_size = list(request.grid.size)
         grid_nx, grid_ny, grid_nz = request.grid.nx, request.grid.ny, request.grid.nz
+        # Azimuthal rotation of the grid box about +z (degrees in the request;
+        # Helios's addGrid takes radians). The rotation pivots about grid_center,
+        # so the lad_shift recenter below (a pure translation) leaves it unchanged.
+        grid_rotation_deg = float(request.grid.rotation)
+        grid_rotation_rad = math.radians(grid_rotation_deg)
 
         # Moving-platform scans carry a 6-DOF trajectory; their per-beam origins are
         # reconstructed and fed to PyHelios's float32 geometry path. If the
@@ -4706,8 +4712,17 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 cloud.addHitPointsWithData(
                     sid, entry["xyz"], entry["dirs"],
                     entry["labels"], entry["vals"])
+        # Honor the grid box's azimuthal rotation. Helios stores the cells in the
+        # rotated frame, so getCellCenter returns rotated centers and the beam
+        # tracing / Beer's-law inversion run against the rotated voxels — matching
+        # the rotated grid mesh the user laid out. Without this the LAD result grid
+        # came back axis-aligned and visibly skewed off the original box.
+        # NOTE: Helios's LiDARcloud::addGrid takes the rotation in DEGREES (it
+        # multiplies by pi/180 internally), despite the PyHelios docstring saying
+        # radians — pass degrees, matching the <grid><rotation> XML triangulation path.
         cloud.addGrid(center=grid_center, size=grid_size,
-                      ndiv=[grid_nx, grid_ny, grid_nz])
+                      ndiv=[grid_nx, grid_ny, grid_nz],
+                      rotation=grid_rotation_deg)
 
         # Moving-platform scans cannot be triangulated: their pulses don't lie on a
         # fixed theta-phi grid, so there's no scan raster to mesh and derive the
@@ -4827,7 +4842,8 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         n_cells = cloud.getGridCellCount()
         cell_centers = [cloud.getCellCenter(i) for i in range(n_cells)]
         cell_sizes = [cloud.getCellSize(i) for i in range(n_cells)]
-        hit_counts = _count_points_per_cell(scan_xyz_for_counts, cell_centers, cell_sizes)
+        hit_counts = _count_points_per_cell(scan_xyz_for_counts, cell_centers, cell_sizes,
+                                            grid_rotation_rad)
 
         cells = []
         total_leaf_area = 0.0
@@ -4903,8 +4919,17 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 "for a solution, so no confidence interval could be reported."
             )
 
-        bb_lo = [grid_center[k] - grid_size[k] / 2 for k in range(3)]
-        bb_hi = [grid_center[k] + grid_size[k] / 2 for k in range(3)]
+        # Report the grid center + bounds in true WORLD coordinates, consistent
+        # with the per-cell `center` (which adds lad_shift back above). On a
+        # moving-platform scan with large coordinates `grid_center` was recentered
+        # by `lad_shift` into the local compute frame; undo that here so a consumer
+        # can't read a grid_center/bounds that disagrees with the voxels by the
+        # shift (hundreds of km for a UTM scene). Static scans leave it untouched.
+        grid_center_world = (
+            [grid_center[k] + lad_shift[k] for k in range(3)]
+            if lad_shift is not None else list(grid_center))
+        bb_lo = [grid_center_world[k] - grid_size[k] / 2 for k in range(3)]
+        bb_hi = [grid_center_world[k] + grid_size[k] / 2 for k in range(3)]
 
         _report(1.0, "Done")
         return {
@@ -4913,8 +4938,12 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "nx": grid_nx,
             "ny": grid_ny,
             "nz": grid_nz,
-            "grid_center": grid_center,
+            "grid_center": grid_center_world,
             "grid_size": grid_size,
+            # Azimuthal rotation of the grid box about +z (degrees). The cell
+            # centers are already in the rotated lattice; the renderer needs this
+            # to orient each voxel cube so the result grid aligns with the box.
+            "grid_rotation": grid_rotation_deg,
             "bounds": [bb_lo, bb_hi],
             "is_multi_return": is_multi,
             "return_mode": return_mode,
@@ -4963,12 +4992,21 @@ def _bin_points_to_cells(points, grid_center, grid_size, nx: int, ny: int, nz: i
     return bin_points_to_cells(points, grid_center, grid_size, nx, ny, nz)
 
 
-def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: list):
-    """Count how many scan points fall inside each voxel (axis-aligned cells).
+def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: list,
+                           grid_rotation_rad: float = 0.0):
+    """Count how many scan points fall inside each voxel.
 
     Bins the in-RAM (N,3) position arrays (one per scan) by the grid's regular
     structure inferred from the cell centers/sizes. Used only to populate the
     per-voxel `hit_count` for the UI — not part of the LAD math.
+
+    A rotated grid (``grid_rotation_rad`` != 0, azimuth about +z) is handled by
+    inverse-rotating the POINTS about the grid center into the axis-aligned cell
+    frame before binning — the same convention Helios uses internally
+    (getContainingGridCell inverse-rotates the query point by -rotation). NOTE:
+    Helios's getCellCenter returns the UNROTATED lattice center (the rotation is
+    stored per-cell, not baked into the center), so the cell centers here are
+    already axis-aligned and must NOT be rotated.
     """
     import numpy as np
 
@@ -4980,7 +5018,23 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
     centers = np.array([[c.x, c.y, c.z] for c in cell_centers], dtype=np.float64)
     sizes = np.array([[s.x, s.y, s.z] for s in cell_sizes], dtype=np.float64)
 
-    # Grid lower corner and per-axis cell counts/steps from the cell layout.
+    # Pivot for inverse-rotating points: the grid center. The cell centers are the
+    # UNROTATED lattice, so their mean is exactly the grid center. Rotation is
+    # about +z, so z is untouched.
+    pivot = centers.mean(axis=0)
+
+    def _unrotate(p):
+        if abs(grid_rotation_rad) <= 1e-9:
+            return p
+        theta = -grid_rotation_rad  # inverse rotation about +z
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        d = p - pivot
+        out = p.copy()
+        out[:, 0] = pivot[0] + d[:, 0] * cos_t - d[:, 1] * sin_t
+        out[:, 1] = pivot[1] + d[:, 0] * sin_t + d[:, 1] * cos_t
+        return out
+
+    # Grid lower corner and per-axis cell counts/steps from the (axis-aligned) cells.
     grid_lo = (centers - sizes / 2).min(axis=0)
     grid_hi = (centers + sizes / 2).max(axis=0)
     step = sizes[0]  # cells are uniform within a Helios grid
@@ -5003,6 +5057,7 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
         xyz = np.asarray(xyz, dtype=np.float64)
         if xyz.size == 0:
             continue
+        xyz = _unrotate(xyz)
         ijk = np.floor((xyz - grid_lo) / safe_step).astype(int)
         inside = np.all((ijk >= 0) & (ijk < nper), axis=1)
         ijk = ijk[inside]

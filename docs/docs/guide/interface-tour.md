@@ -20,6 +20,11 @@ or **Skeleton** when auto-detection picks the wrong type for an ambiguous
 format like `.ply`. To remove scans, select them in the **Scans** panel
 and delete.
 
+**File → New** (<kbd>⌘/Ctrl</kbd>+<kbd>N</kbd>) clears everything — all
+point clouds, meshes, skeletons, plant models, scans, and analysis results —
+and resets the app to a fresh start, the same as relaunching it. It asks for
+confirmation first because it can&rsquo;t be undone.
+
 ## Left tool column
 
 A vertical column down the left side. At the top are the **view** controls

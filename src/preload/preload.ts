@@ -92,6 +92,9 @@ const api = {
   // Tell main the renderer has mounted and can receive OpenFiles; main flushes
   // any paths queued before this (the window/backend take ~10-20s to come up).
   notifyRendererReady: (): void => ipcRenderer.send(IPC.RendererReady),
+  // File → New: ask main to reload the renderer for a fresh start. Done in main
+  // (webContents.reload) because the window blocks in-page navigation.
+  reloadApp: (): void => ipcRenderer.send(IPC.AppReload),
   onBackendStatus: (handler: (payload: BackendStatusPayload) => void): (() => void) => {
     const listener = (_e: unknown, payload: BackendStatusPayload) => handler(payload);
     ipcRenderer.on(IPC.BackendStatus, listener);

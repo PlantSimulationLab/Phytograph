@@ -6,6 +6,7 @@ On macOS use <kbd>⌘</kbd> where the table says <kbd>Ctrl</kbd>.
 
 | Shortcut | Action |
 |---|---|
+| <kbd>Ctrl</kbd>+<kbd>N</kbd> | New — clear everything and reset to a fresh start |
 | <kbd>Ctrl</kbd>+<kbd>K</kbd> | Open the command palette |
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Open Settings |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo |

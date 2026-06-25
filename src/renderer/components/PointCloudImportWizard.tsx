@@ -587,18 +587,6 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                 </div>
               )}
 
-              {total > 1 && (
-                <label className="flex items-center gap-2 text-[11px] text-neutral-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    data-testid="import-wizard-apply-all"
-                    checked={applyToAll}
-                    onChange={(e) => setApplyToAll(e.target.checked)}
-                    className="w-3.5 h-3.5 rounded border-neutral-600 bg-neutral-700 text-blue-500 focus:ring-0 cursor-pointer"
-                  />
-                  Apply these settings to all scans with the same column layout
-                </label>
-              )}
             </>
           )}
 
@@ -684,6 +672,16 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                 >
                   Next <ChevronRight className="w-3.5 h-3.5" />
                 </button>
+                <label className="ml-2 flex items-center gap-2 text-[11px] text-neutral-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="import-wizard-apply-all"
+                    checked={applyToAll}
+                    onChange={(e) => setApplyToAll(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-neutral-600 bg-neutral-700 text-blue-500 focus:ring-0 cursor-pointer"
+                  />
+                  Apply these settings to all scans with the same column layout
+                </label>
               </>
             )}
           </div>

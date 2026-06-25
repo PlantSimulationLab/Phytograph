@@ -66,7 +66,10 @@ test('Computes per-voxel leaf area density for the leaf-cube fixture', async () 
     const gridSelect = page.getByTestId('lad-grid-select');
     await expect(gridSelect).toBeVisible();
 
-    // Mirror the C++ self-test triangulation parameters.
+    // The new-triangulation path now runs a real Helios triangulation (mesh added
+    // to the Meshes panel) and reuses it for the inversion. Lmax defaults to Auto
+    // (Otsu); force the C++ self-test value 0.04 so the hollow leaf cube isn't
+    // bridged by long triangles that inflate G(theta) and bias the LAD.
     await page.getByTestId('lad-input-lmax').fill('0.04');
     await page.getByTestId('lad-input-aspect').fill('10');
     await page.getByTestId('lad-input-min-hits').fill('1');
@@ -91,6 +94,62 @@ test('Computes per-voxel leaf area density for the leaf-cube fixture', async () 
     const ladMax = parseFloat((await ladRow.getAttribute('data-lad-max'))!);
     expect(ladMax).toBeGreaterThan(1.5);
     expect(ladMax).toBeLessThan(2.7);
+
+    // The voxel grid must actually PAINT in the 3D viewer on first completion,
+    // with NO visibility toggle. We can't reach into three.js, so assert a
+    // DOM-observable render proxy: hover the viewer over the centered leaf-cube
+    // grid and require the per-voxel readout to appear. The hover handler
+    // resolves a voxel only by R3F raycasting against drawn, pickable instances,
+    // so a tooltip is proof the instanced mesh rendered and is interactive.
+    // Sweep a few points near center since the exact screen position of the 1 m
+    // cube depends on the framing.
+    //
+    // Note: this guards first-paint render correctness in general. It does NOT
+    // deterministically reproduce the specific "grid missing after inversion"
+    // bug this assertion was added alongside — that bug needs an R3F mesh
+    // *remount* where `drawn` stays referentially stable (a reconciliation
+    // re-create), which the single-result leafcube flow doesn't reliably
+    // trigger. A negative control (reverting LADVoxelGrid to its dep-array-only
+    // fill) still passed here. The fix is in LADVoxelGrid's ref-callback +
+    // useLayoutEffect; this is the closest DOM-level render check we can make
+    // without window reach-in.
+    const canvas = page.locator('canvas').first();
+    const cbox = await canvas.boundingBox();
+    if (!cbox) throw new Error('viewer canvas has no bounding box');
+    const ladTooltip = page.getByTestId('lad-voxel-tooltip');
+    const cx = cbox.x + cbox.width / 2;
+    const cy = cbox.y + cbox.height / 2;
+    const offsets: Array<[number, number]> = [
+      [0, 0], [-0.08, 0], [0.08, 0], [0, -0.08], [0, 0.08],
+      [-0.08, -0.08], [0.08, 0.08], [-0.12, 0.06], [0.12, -0.06],
+    ];
+    let sawTooltip = false;
+    for (const [dx, dy] of offsets) {
+      await page.mouse.move(cx + dx * cbox.width, cy + dy * cbox.height);
+      if (await ladTooltip.isVisible().catch(() => false)) { sawTooltip = true; break; }
+    }
+    expect(sawTooltip, 'LAD voxel grid did not render on first completion (no toggle)').toBe(true);
+    // The readout reflects the real voxel value (~2.0 m²/m³), not just presence.
+    await expect(ladTooltip).toContainText(/LAD \d/);
+    await page.mouse.move(cbox.x + 2, cbox.y + 2); // move off so the tooltip clears
+    await expect(ladTooltip).toHaveCount(0);
+
+    // The new-triangulation path emits the surface mesh into the Meshes panel (so
+    // the user can inspect/refine it) AND reuses it for this inversion — the same
+    // surface G(theta) was derived from. Assert that side effect: a Helios mesh row
+    // now exists, and reopening LAD offers it as a reusable triangulation.
+    const heliosMeshRow = page.getByTestId('mesh-row')
+      .filter({ hasText: 'Helios triangulation' });
+    await expect(heliosMeshRow).toBeVisible();
+
+    await scanRows.nth(0).getByTestId('scan-row-name').click();
+    await page.getByTestId('tool-compute-lad').click();
+    await expect(page.getByTestId('lad-popup')).toBeVisible();
+    const triSelect = page.getByTestId('lad-triangulation-select');
+    await expect(triSelect).toBeVisible();
+    // index 0 = "Run a new triangulation"; the mesh just created is a real option.
+    await expect(triSelect.locator('option')).toHaveCount(2);
+    await page.getByTestId('lad-close').click();
 
     // The LAD colorbar reflects the same range.
     const colorbar = page.getByTestId('lad-colorbar');

@@ -76,7 +76,7 @@ const METHOD_DESCRIPTIONS: Record<TriangulationMethod, string> = {
   poisson: 'Creates watertight meshes, good for noisy data',
   alpha_shape: 'Good for concave shapes',
   delaunay: 'Fast 2D projection, best for roughly planar surfaces',
-  helios: 'Spherical Delaunay triangulation for multi-scan LiDAR data',
+  helios: 'Bailey & Mahaffee / Helios spherical Delaunay triangulation for multi-scan LiDAR data',
 };
 
 // Unified triangulation setup. Models LADPopup / the old HeliosTriangulationPopup:
@@ -104,6 +104,14 @@ export function TriangulationPopup({
         ? scans.filter(s => hasData(s) && hasParams(s))
         : scans.filter(s => hasData(s)),
     [scans, method],
+  );
+
+  // Whether the Helios method is usable: at least one scan carries the scanner
+  // parameters needed to reconstruct per-pulse directions. Drives the
+  // "(recommended)" label on the method dropdown.
+  const heliosAvailable = useMemo(
+    () => scans.some(s => hasData(s) && hasParams(s)),
+    [scans],
   );
 
   const [selectedScanIds, setSelectedScanIds] = useState<Set<string>>(new Set());
@@ -330,11 +338,13 @@ export function TriangulationPopup({
               onChange={(e) => setMethod(e.target.value as TriangulationMethod)}
               className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
             >
+              <option value="helios">
+                Bailey &amp; Mahaffee / Helios{heliosAvailable ? ' (recommended)' : ''}
+              </option>
               <option value="ball_pivoting">Ball Pivoting</option>
-              <option value="poisson">Poisson</option>
-              <option value="alpha_shape">Alpha Shape</option>
-              <option value="delaunay">Delaunay (2D)</option>
-              <option value="helios">Helios</option>
+              <option value="poisson">Poisson (not recommended for leaf angle)</option>
+              <option value="alpha_shape">Alpha Shape (not recommended for leaf angle)</option>
+              <option value="delaunay">Delaunay (2D) (not recommended for leaf angle)</option>
             </select>
             <p className="text-[9px] text-neutral-500 mt-1">{METHOD_DESCRIPTIONS[method]}</p>
           </div>

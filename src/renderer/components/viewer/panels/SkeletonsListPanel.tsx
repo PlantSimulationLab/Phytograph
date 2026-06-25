@@ -46,7 +46,7 @@ export function SkeletonsListPanel({
   onColorByBranchOrderChange,
 }: SkeletonsListPanelProps) {
   return (
-    <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col">
+    <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col shrink-0">
       <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
         <GitBranch className="w-4 h-4 text-neutral-400" />
         <span className="text-xs font-medium text-neutral-300 flex-1">Skeletons</span>

@@ -8,6 +8,7 @@ import type { MeshData } from '../lib/pointCloudTypes';
 import { hasData, hasParams, isBackfillEligible } from '../lib/scan';
 import { isMovingScan } from '../lib/scanParameters';
 import { buildLADRequest, extractReuseMeshPayload, type ReuseMeshPayload } from '../lib/pointCloudHelpers';
+import { InfoHint } from './InfoHint';
 
 // An existing Helios triangulation the user can REUSE. Selecting it locks the
 // inversion to the same scans + grid + lmax/aspect that produced the mesh, and
@@ -53,8 +54,20 @@ interface LADPopupProps {
   // existing Helios mesh (null for a fresh run). When present the request is sent
   // as a binary frame carrying the mesh, and the backend injects it instead of
   // re-triangulating.
+  // `newTri` is set ONLY on the static "run new triangulation" path: instead of
+  // letting the backend re-triangulate internally at a fixed Lmax, the caller
+  // runs a real Helios triangulation first (Otsu-estimated Lmax, mesh added to
+  // the Meshes pane), then reuses that mesh for the inversion — so the user can
+  // see and refine the surface G(theta) was computed on. It carries the source
+  // scans + grid + the dialog's Lmax/aspect (the triangulation seeds its own
+  // Otsu default but honours an explicit override). Null/absent for the
+  // reuse-existing-mesh and moving-platform paths.
   onStartLAD: (request: LADRequest, scanColors: string[], gridMeshId: string,
-               reuseMesh: ReuseMeshPayload | null) => void;
+               reuseMesh: ReuseMeshPayload | null,
+               newTri?: { scans: Scan[]; grid: HeliosGrid; gridMeshId: string;
+                          // Undefined Lmax = Auto (Otsu estimate seeds the mesh);
+                          // a value forces that edge length.
+                          lmax?: number; maxAspectRatio: number } | null) => void;
   scans: Scan[];
   initialSelectedIds?: Set<string>;
   // Voxel boxes available as the LAD grid. LAD REQUIRES one — when empty (and no
@@ -74,9 +87,11 @@ interface LADPopupProps {
   defaultMaxAspectRatio?: number;
   // Invoked when the user clicks "Backfill Misses" in the in-modal banner (a
   // selected scan has no misses yet). Closes the modal and runs the backfill for
-  // the eligible scans; the user reopens LAD afterward. Omitted → the banner
-  // shows the requirement but offers no in-place action.
-  onBackfill?: (scanIds: string[]) => void;
+  // the recoverable scans, then reopens LAD with the same scan selection once it
+  // finishes. `selectedIds` is the modal's current selection so the reopened
+  // popup restores it exactly. Omitted → the banner shows the requirement but
+  // offers no in-place action.
+  onBackfill?: (recoverableIds: string[], selectedIds: Set<string>) => void;
 }
 
 // Per-voxel leaf area density setup. Models HeliosTriangulationPopup but the
@@ -106,7 +121,13 @@ export function LADPopup({
   const [reuseTriId, setReuseTriId] = useState<string>('');
   useEffect(() => {
     if (!isOpen) return;
-    setReuseTriId(prev => (triangulationOptions.some(t => t.id === prev) ? prev : ''));
+    // Default to reusing the first compatible triangulation when one exists
+    // (re-triangulating is wasteful when an eligible mesh is already on hand);
+    // fall back to '' (run a new triangulation) only when none are available.
+    setReuseTriId(prev =>
+      triangulationOptions.some(t => t.id === prev)
+        ? prev
+        : (triangulationOptions[0]?.id ?? ''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, triangulationOptions]);
   const reuseTri = useMemo(
@@ -144,7 +165,9 @@ export function LADPopup({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
-  const [lmaxStr, setLmaxStr] = useState('0.1');
+  // Lmax defaults to '' = Auto (Otsu estimate seeds the new triangulation). A
+  // typed value forces that edge length instead. Reuse mode locks it to the mesh.
+  const [lmaxStr, setLmaxStr] = useState('');
   const [maxAspectRatioStr, setMaxAspectRatioStr] = useState('4.0');
   const [minVoxelHitsStr, setMinVoxelHitsStr] = useState('5');
   // Characteristic vegetation element width (m). Drives the Pimont (2018)
@@ -243,7 +266,14 @@ export function LADPopup({
       return;
     }
 
-    const lmax = reuseTri ? reuseTri.lmax : (parseFloat(lmaxStr) || 0.1);
+    // New-triangulation Lmax: blank/non-finite = Auto (let the triangulation's
+    // Otsu estimate seed it); a finite positive value forces that edge length.
+    const lmaxParsed = parseFloat(lmaxStr);
+    const explicitLmax = Number.isFinite(lmaxParsed) && lmaxParsed > 0 ? lmaxParsed : undefined;
+    // The lmax handed to buildLADRequest is only consulted by the backend's own
+    // re-triangulation path, which static scans no longer take (newTri below makes
+    // the inversion reuse a mesh). Fall back to 0.1 so the field is still valid.
+    const lmax = reuseTri ? reuseTri.lmax : (explicitLmax ?? 0.1);
     const maxAspectRatio = reuseTri ? reuseTri.maxAspectRatio : (parseFloat(maxAspectRatioStr) || 4.0);
     const minVoxelHits = Math.max(1, parseInt(minVoxelHitsStr, 10) || 1);
     const elementWidth = Math.max(0, parseFloat(elementWidthStr) || 0.05);
@@ -280,7 +310,16 @@ export function LADPopup({
     // new-triangulation mode that's the selected voxel box; in reuse mode it's
     // the box the reused triangulation's grid matches (if it's still around).
     const gridMeshId = reuseTri ? (reuseTri.gridMeshId ?? '') : (selectedGrid?.id ?? '');
-    onStartLAD(request, selectedScans.map(s => s.color), gridMeshId, reuseMesh);
+
+    // Static "run new triangulation": hand the caller the scans + grid so it runs
+    // a real Helios triangulation first (Otsu Lmax, mesh into the Meshes pane) and
+    // reuses it for the inversion. Skipped for reuse (already have a mesh) and for
+    // moving-platform scans (beam-based path, no triangulation).
+    const newTri = (!reuseTri && !anyMoving)
+      ? { scans: selectedScans, grid, gridMeshId, lmax: explicitLmax, maxAspectRatio }
+      : null;
+
+    onStartLAD(request, selectedScans.map(s => s.color), gridMeshId, reuseMesh, newTri);
     onClose();
   }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, gthetaStr, onStartLAD, onClose]);
 
@@ -330,41 +369,47 @@ export function LADPopup({
         <div className="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
           {/* Triangulation source: run a new one, or reuse an existing mesh (which
               locks the scans, grid, and lmax/aspect to reproduce its G-function).
-              Shown when any triangulation exists — reusable ones are selectable;
+              Always shown — "Run a new triangulation" is the default option, so
+              the user sees explicitly that a fresh triangulation will run even
+              when there's nothing to reuse. Reusable meshes are selectable;
               ineligible ones (e.g. a merged/unpinned ball-pivot mesh) appear
               disabled with the reason so the user knows why and how to fix it. */}
-          {(triangulationOptions.length > 0 || ineligibleTriangulations.length > 0) && (
-            <div>
-              <label className="text-xs font-medium text-neutral-300 block mb-1">Triangulation</label>
-              <select
-                data-testid="lad-triangulation-select"
-                value={reuseTriId}
-                onChange={(e) => setReuseTriId(e.target.value)}
-                className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
-              >
-                <option value="">Run a new triangulation</option>
-                {triangulationOptions.map(t => (
-                  <option key={t.id} value={t.id}>Reuse: {t.label}</option>
-                ))}
-                {ineligibleTriangulations.map(t => (
-                  <option key={t.id} value="" disabled data-testid="lad-triangulation-ineligible">
-                    {`⛔ ${t.label} — ${t.reason}`}
-                  </option>
-                ))}
-              </select>
-              {reuseTri && (
-                <p className="text-[9px] text-neutral-500 mt-1" data-testid="lad-reuse-summary">
-                  Reusing {reuseTri.label}: {reuseTri.scanIds.length} scan{reuseTri.scanIds.length > 1 ? 's' : ''},
-                  grid {reuseTri.grid.nx}×{reuseTri.grid.ny}×{reuseTri.grid.nz},
-                  Lmax {(reuseTri.lmax * 100).toFixed(1)} cm, aspect ≤ {reuseTri.maxAspectRatio}.
-                  Scans, grid, and filter are locked to match this mesh.
-                  {reuseScansMissing > 0 && (
-                    <span className="text-amber-300"> {reuseScansMissing} source scan(s) no longer available.</span>
-                  )}
-                </p>
-              )}
-            </div>
-          )}
+          <div>
+            <label className="text-xs font-medium text-neutral-300 block mb-1">Triangulation</label>
+            <select
+              data-testid="lad-triangulation-select"
+              value={reuseTriId}
+              onChange={(e) => setReuseTriId(e.target.value)}
+              className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+            >
+              <option value="">Run a new triangulation</option>
+              {triangulationOptions.map(t => (
+                <option key={t.id} value={t.id}>Reuse: {t.label}</option>
+              ))}
+              {ineligibleTriangulations.map(t => (
+                <option key={t.id} value="" disabled data-testid="lad-triangulation-ineligible">
+                  {`⛔ ${t.label} — ${t.reason}`}
+                </option>
+              ))}
+            </select>
+            {reuseTri ? (
+              <p className="text-[9px] text-neutral-500 mt-1" data-testid="lad-reuse-summary">
+                Reusing {reuseTri.label}: {reuseTri.scanIds.length} scan{reuseTri.scanIds.length > 1 ? 's' : ''},
+                grid {reuseTri.grid.nx}×{reuseTri.grid.ny}×{reuseTri.grid.nz},
+                Lmax {(reuseTri.lmax * 100).toFixed(1)} cm, aspect ≤ {reuseTri.maxAspectRatio}.
+                Scans, grid, and filter are locked to match this mesh.
+                {reuseScansMissing > 0 && (
+                  <span className="text-amber-300"> {reuseScansMissing} source scan(s) no longer available.</span>
+                )}
+              </p>
+            ) : (
+              <p className="text-[9px] text-neutral-500 mt-1" data-testid="lad-new-tri-summary">
+                A new triangulation is built from the scans and grid below, added to the
+                Meshes panel, and reused for the inversion. Lmax is auto-estimated unless
+                you set it.
+              </p>
+            )}
+          </div>
 
           {/* Scan picker — only when running a NEW triangulation. When reusing,
               the scans are fixed by the mesh, so we hide the picker. */}
@@ -476,33 +521,59 @@ export function LADPopup({
           <div className="border-t border-neutral-700 pt-4">
             <label className="text-xs font-medium text-neutral-300 block mb-3">Parameters</label>
 
+            {/* On the new-triangulation path the surface mesh is now built like the
+                standalone Triangulate tool and added to the Meshes panel, so the
+                user can review/refine it and re-run LAD by reusing it. */}
+            {!reuseTri && !anyMoving && (
+              <div className="mb-3 text-[10px] text-neutral-400 bg-neutral-800/60 border border-neutral-700 rounded px-2.5 py-2 leading-relaxed">
+                A new surface mesh is built and added to the{' '}
+                <span className="text-neutral-200">Meshes</span> panel. Leave Lmax on{' '}
+                <span className="text-neutral-200">Auto</span> to size it from the data
+                (Otsu estimate, recommended), or enter a value to force it. Either way,
+                review the mesh and adjust its filter there, then reopen this dialog and
+                pick it under <span className="text-neutral-200">Triangulation</span> to
+                recompute.
+              </div>
+            )}
+
             <div className="grid grid-cols-3 gap-3">
               {/* Lmax + Aspect drive the G-function triangulation, so they're
                   locked when reusing an existing triangulation (the mesh already
-                  fixes them). Hidden in reuse mode; the reuse summary shows them. */}
+                  fixes them). Hidden in reuse mode; the reuse summary shows them.
+                  On a new triangulation Lmax defaults to "Auto" (empty) → the
+                  Otsu estimate seeds the mesh; a typed value forces it. */}
               {!reuseTri && (
               <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">
+                <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
                   Max Edge Length (Lmax)
+                  <InfoHint
+                    data-testid="lad-lmax-help"
+                    label="Max edge length (Lmax)"
+                    text="Longest triangle edge (metres) allowed when triangulating each scan into the surface used to derive the G-function (the leaf-projection coefficient). Leave blank for Auto — the edge length is estimated from the data (Otsu over the candidate edge-length distribution), the same estimate the standalone Triangulate tool seeds. Enter a value to force it: lower keeps only tight, well-sampled triangles; higher bridges sparser regions. Too small drops valid leaf surface; too large spans gaps between separate leaves."
+                  />
                 </label>
                 <input
                   data-testid="lad-input-lmax"
-                  type="number"
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="Auto"
                   onWheel={(e) => e.currentTarget.blur()}
                   value={lmaxStr}
                   onChange={(e) => setLmaxStr(e.target.value)}
-                  step="0.01"
-                  min="0.001"
                   className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
                 />
-                <p className="text-[9px] text-neutral-500 mt-0.5">G-function triangulation</p>
               </div>
               )}
 
               {!reuseTri && (
               <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">
+                <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
                   Max Aspect Ratio
+                  <InfoHint
+                    data-testid="lad-aspect-help"
+                    label="Max aspect ratio"
+                    text="Rejects long, skinny triangles whose longest edge exceeds this multiple of their shortest. Such slivers usually span the gap between separate leaves rather than a real leaf surface, biasing the G-function. Lower it to filter more aggressively; raise it to keep elongated triangles. 4 is a sensible default."
+                  />
                 </label>
                 <input
                   data-testid="lad-input-aspect"
@@ -514,13 +585,17 @@ export function LADPopup({
                   min="1"
                   className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
                 />
-                <p className="text-[9px] text-neutral-500 mt-0.5">Filters skinny triangles</p>
               </div>
               )}
 
               <div>
-                <label className="text-[10px] text-neutral-400 block mb-1">
+                <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
                   Min Voxel Hits
+                  <InfoHint
+                    data-testid="lad-min-hits-help"
+                    label="Min voxel hits"
+                    text="Minimum number of beam interceptions a voxel must receive before LAD is solved for it. Voxels below this are left empty rather than reported from too few rays, where the transmission estimate is noisy and unreliable. Raise it to suppress sparse, uncertain voxels; lower it to fill more of the grid at the cost of noisier edges."
+                  />
                 </label>
                 <input
                   data-testid="lad-input-min-hits"
@@ -532,7 +607,6 @@ export function LADPopup({
                   min="1"
                   className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
                 />
-                <p className="text-[9px] text-neutral-500 mt-0.5">Skip sparse voxels</p>
               </div>
             </div>
 
@@ -540,8 +614,13 @@ export function LADPopup({
                 uncertainty reported alongside the LAD estimate. Presets set
                 common values; the field stays editable. */}
             <div className="mt-4">
-              <label className="text-[10px] text-neutral-400 block mb-1">
+              <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
                 Element width (m)
+                <InfoHint
+                  data-testid="lad-element-width-help"
+                  label="Element width"
+                  text="Characteristic width of a single foliage element — leaf for broadleaf, needle for conifer (metres). It sets the spatial scale at which beams resolve the canopy, feeding the Pimont et al. (2018) sampling-uncertainty interval reported with each result. It does not change the LAD value itself, only its confidence bounds. Use the presets as starting points: broadleaf ≈ 0.05 m, conifer needle ≈ 0.002 m."
+                />
               </label>
               <div className="flex items-center gap-2">
                 <input
@@ -571,10 +650,6 @@ export function LADPopup({
                   Conifer (0.002)
                 </button>
               </div>
-              <p className="text-[9px] text-neutral-500 mt-0.5">
-                Characteristic leaf/needle width. Sets the Pimont et al. (2018)
-                sampling-uncertainty interval reported with the result.
-              </p>
             </div>
 
             {/* G(theta) — only for moving-platform scans, which can't be
@@ -582,8 +657,13 @@ export function LADPopup({
                 coefficient; 0.5 = spherical leaf-angle distribution. */}
             {anyMoving && (
               <div className="mt-4" data-testid="lad-gtheta-section">
-                <label className="text-[10px] text-neutral-400 block mb-1">
+                <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
                   G(θ) — mean leaf-projection coefficient
+                  <InfoHint
+                    data-testid="lad-gtheta-help"
+                    label="G(θ) — mean leaf-projection coefficient"
+                    text="Mean fraction of leaf area projected onto the plane perpendicular to the beam, averaged over leaf orientations. It converts measured beam attenuation into leaf area density. Moving-platform scans can't be triangulated to derive it, so supply it here: 0.5 corresponds to a spherical (randomly oriented) leaf-angle distribution and is the usual default; lower it for more horizontal foliage, raise it for more vertical."
+                  />
                 </label>
                 <div className="flex items-center gap-2">
                   <input
@@ -606,10 +686,6 @@ export function LADPopup({
                     Spherical (0.5)
                   </button>
                 </div>
-                <p className="text-[9px] text-neutral-500 mt-0.5">
-                  Required for moving-platform scans (no triangulation to derive
-                  it). 0.5 = spherical/random leaf-angle distribution.
-                </p>
               </div>
             )}
 
@@ -617,12 +693,14 @@ export function LADPopup({
                 the grid is fixed by the mesh (shown in the reuse summary above). */}
             {!reuseTri && (
             <>
-            <label className="text-xs font-medium text-neutral-300 block mt-4 mb-1">Voxel Grid (required)</label>
-            <p className="text-[9px] text-neutral-500 mb-2">
-              LAD is computed per voxel, so an explicit voxel grid is the basis of
-              the calculation. Use a voxel box from the viewer and set its
-              subdivisions for the grid resolution.
-            </p>
+            <label className="text-xs font-medium text-neutral-300 mt-4 mb-2 flex items-center gap-1">
+              Voxel Grid (required)
+              <InfoHint
+                data-testid="lad-grid-help"
+                label="Voxel grid"
+                text="LAD is computed independently for every voxel, so an explicit grid is the basis of the calculation, not just a bounding region. Pick a voxel box created in the viewer; its bounds set the analysed volume and its subdivisions set the grid resolution. Finer grids give more spatial detail but spread the same beams over more voxels, so each gets fewer hits — balance resolution against Min Voxel Hits."
+              />
+            </label>
             {gridOptions.length === 0 ? (
               <div
                 className="text-[10px] text-amber-300 bg-amber-500/5 border border-amber-500/30 rounded px-2 py-1.5"
@@ -668,7 +746,7 @@ export function LADPopup({
                   {onBackfill && (
                     <button
                       data-testid="lad-backfill-button"
-                      onClick={() => { onBackfill(recoverable.map(s => s.id)); onClose(); }}
+                      onClick={() => { onBackfill(recoverable.map(s => s.id), new Set(selectedScanIds)); onClose(); }}
                       className="shrink-0 px-2 py-1 text-[10px] rounded font-medium bg-amber-600 hover:bg-amber-500 text-white"
                     >
                       Backfill Misses

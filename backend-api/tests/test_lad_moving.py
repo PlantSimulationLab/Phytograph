@@ -182,6 +182,30 @@ class TestMovingScanRoundTrip:
             min_voxel_hits=1, gtheta=0.5)
         return main._do_lad_computation(req)
 
+    def _run_moving_shifted(self, xyz, cols, offset):
+        """Same as _run_moving, but the whole scene (points, trajectory, grid) is
+        translated by `offset`. Large offsets (UTM-scale) trigger the internal
+        `lad_shift` local-frame recenter, which is what the world-frame round-trip
+        below exercises."""
+        ox, oy, oz = offset
+        xyz_shifted = xyz + np.asarray(offset, dtype=np.float64)
+        p0 = [self.P0[0] + ox, self.P0[1] + oy, self.P0[2] + oz]
+        p1 = [self.P1[0] + ox, self.P1[1] + oy, self.P1[2] + oz]
+        grid_center = [self.GRID_CENTER[0] + ox, self.GRID_CENTER[1] + oy,
+                       self.GRID_CENTER[2] + oz]
+        traj = _identity_trajectory(0.0, 1.0, p0, p1)
+        scan = main.HeliosScanEntry(
+            points=xyz_shifted.tolist(), scalar_columns=cols,
+            origin=p0, trajectory=traj, return_type="single",
+            n_theta=self.NTHETA, n_phi=self.NPHI,
+            theta_min=0, theta_max=180, phi_min=0, phi_max=360)
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=grid_center, size=self.GRID_SIZE,
+                                 nx=2, ny=2, nz=2),
+            min_voxel_hits=1, gtheta=0.5)
+        return main._do_lad_computation(req), grid_center
+
     def _run_single_origin_control(self, xyz, cols):
         """Same hits, NO trajectory: the static path pins one origin (the trajectory
         midpoint). This is the (wrong-for-a-moving-platform) baseline."""
@@ -243,3 +267,37 @@ class TestMovingScanRoundTrip:
         # aliases the two paths.)
         assert moving_cv < control_cv * 0.95, \
             f"per-beam CV {moving_cv:.3f} not better than control {control_cv:.3f}"
+
+    def test_shifted_scene_reports_world_frame_grid_and_bounds(self):
+        """A moving scan at large (UTM-scale) coordinates triggers the internal
+        `lad_shift` local-frame recenter. The response must report grid_center,
+        bounds, AND the per-cell centers all in TRUE WORLD coordinates — they must
+        not disagree by the shift. (Regression: grid_center/bounds were left in the
+        shifted local frame while the cells were un-shifted back to world.)"""
+        xyz, cols = self._generate_moving_scan()
+        OFFSET = [500000.0, 4000000.0, 0.0]  # easting/northing-scale, forces lad_shift
+        result, grid_center_req = self._run_moving_shifted(xyz, cols, OFFSET)
+        assert result["success"] is True, result.get("error")
+
+        # grid_center comes back at the REQUESTED world center (not the local frame).
+        gc = result["grid_center"]
+        assert gc == pytest.approx(grid_center_req, abs=1e-3), \
+            f"grid_center {gc} not in world frame (expected {grid_center_req})"
+
+        # bounds bracket that world center by half the grid size.
+        half = [s / 2 for s in self.GRID_SIZE]
+        exp_lo = [grid_center_req[k] - half[k] for k in range(3)]
+        exp_hi = [grid_center_req[k] + half[k] for k in range(3)]
+        assert result["bounds"][0] == pytest.approx(exp_lo, abs=1e-3)
+        assert result["bounds"][1] == pytest.approx(exp_hi, abs=1e-3)
+
+        # The decisive consistency check: every cell center must lie inside the
+        # reported world bounds. If the cells were world but bounds/grid_center
+        # were local (the bug), the offset (~500 km) would put every cell far
+        # outside its own grid box.
+        lo, hi = result["bounds"]
+        for c in result["cells"]:
+            cx, cy, cz = c["center"]
+            assert lo[0] - 1e-6 <= cx <= hi[0] + 1e-6, (cx, lo[0], hi[0])
+            assert lo[1] - 1e-6 <= cy <= hi[1] + 1e-6, (cy, lo[1], hi[1])
+            assert lo[2] - 1e-6 <= cz <= hi[2] + 1e-6, (cz, lo[2], hi[2])

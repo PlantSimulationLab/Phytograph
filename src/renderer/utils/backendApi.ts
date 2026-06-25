@@ -682,6 +682,10 @@ export interface LADResponse {
   nz: number;
   grid_center: number[];
   grid_size: number[];
+  // Azimuthal rotation of the grid box about +z (degrees). Non-zero for a
+  // rotated voxel grid; the renderer orients each result voxel cube by it so the
+  // LAD grid aligns with the original (rotated) grid mesh. Omitted/0 = axis-aligned.
+  grid_rotation?: number;
   bounds: number[][];          // [[lo...], [hi...]]
   is_multi_return: boolean;
   return_mode: string;         // "single" | "multi"
