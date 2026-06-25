@@ -455,6 +455,36 @@ class TestScanOptions:
             sess_meta = by_id[sid]["session"]
             assert sess_meta is not None and sess_meta["miss_count"] > 0
 
+    def test_multi_scanner_reports_per_scan_progress(self, client):
+        # syntheticScan fires a per-scan progress callback at the start of each
+        # scan's trace; _do_lidar_scan maps those into determinate "Ray-tracing
+        # scene (scan i/N)" markers inside the [0.15, 0.85] ray-trace band, so a
+        # multi-scanner scan shows real progress across the batch instead of one
+        # opaque indeterminate step. (A single scanner has no per-scan signal and
+        # stays indeterminate — that is the null-fraction branch.)
+        pytest.importorskip("pyhelios")
+        markers = []
+        req = main.LidarScanRequest(
+            meshes=[main.LidarScanMesh(vertices=_PYRAMID_VERTS, triangles=_PYRAMID_TRIS)],
+            scanners=[main.LidarScanScanner(**_scanner("A", origin=(0.0, 0.0, 3.0))),
+                      main.LidarScanScanner(**_scanner("B", origin=(3.0, 0.0, 0.3)))],
+        )
+        result = main._do_lidar_scan(req, progress=lambda f, m: markers.append((f, m)))
+        assert result["success"] is True, result.get("error")
+
+        raytrace = [(f, m) for (f, m) in markers if m.startswith("Ray-tracing scene")]
+        assert raytrace, "no ray-tracing progress markers emitted"
+        # With two scanners every ray-trace marker is determinate (no null pulse),
+        # both per-scan ticks surface, and the fractions stay in-band and never
+        # regress as the batch advances.
+        assert all(f is not None for (f, _m) in raytrace)
+        labels = {m for (_f, m) in raytrace}
+        assert "Ray-tracing scene (scan 1/2)" in labels
+        assert "Ray-tracing scene (scan 2/2)" in labels
+        fracs = [f for (f, _m) in raytrace]
+        assert fracs == sorted(fracs)
+        assert all(0.15 - 1e-9 <= f <= 0.85 + 1e-9 for f in fracs)
+
 
 # A wide, low ground slab so a moving overhead pass produces hits along the whole
 # flight line (not just under one static viewpoint). 8x2 m in x/y, ~0.4 m tall so

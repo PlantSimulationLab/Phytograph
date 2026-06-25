@@ -6475,9 +6475,33 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 _ckpt()
                 # The ray trace's per-scan loop and inner ray loop honor a cancel
                 # flag (see _scan_cancel_flag below), so a cancel mid-trace bails
-                # the C++ pass; report it as indeterminate (null fraction) so the
-                # bar pulses rather than sitting frozen during the long step.
-                _report(None, "Ray-tracing scene")
+                # the C++ pass.
+                #
+                # syntheticScan fires a progress callback at the start of each
+                # scan's trace (serial, on this thread, outside its OpenMP regions),
+                # passing scans-completed / scanCount in [0, 1]. With more than one
+                # scanner that's genuine determinate progress across the long trace,
+                # so map it into this op's ray-trace band [0.15, 0.85]. The callback
+                # only ticks at per-scan boundaries, so a single-scanner trace can't
+                # animate mid-scan — fall back to the indeterminate pulse (null
+                # fraction) there so the bar moves rather than freezing. (_report
+                # only queues a marker and never raises, so it is safe to invoke
+                # from inside the native callback; cancellation is handled out of
+                # band via _scan_cancel_flag, not by raising through C++.)
+                n_scanners = len(request.scanners)
+                if n_scanners > 1:
+                    def _on_scan_progress(fraction, _message):
+                        # fraction = scans-completed / scanCount; the scan being
+                        # traced is that count + 1 (round, not int — the C++ float
+                        # division lands a hair under the integer, e.g. 1/3*3≈0.9999,
+                        # which int() would truncate to the wrong scan number).
+                        frac = 0.0 if fraction < 0.0 else 1.0 if fraction > 1.0 else fraction
+                        current = min(n_scanners, round(frac * n_scanners) + 1)
+                        _report(0.15 + 0.70 * frac,
+                                f"Ray-tracing scene (scan {current}/{n_scanners})")
+                    lidar.setProgressCallback(_on_scan_progress)
+                else:
+                    _report(None, "Ray-tracing scene")
                 lidar.syntheticScan(
                     ctx,
                     rays_per_pulse=int(request.rays_per_pulse),
@@ -6487,6 +6511,10 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                     append=False,
                     cancel_flag=_scan_cancel_flag,
                 )
+                # Drop the native callback bridge promptly once the trace returns
+                # (the LiDARCloud context manager would also release it on exit).
+                if n_scanners > 1:
+                    lidar.setProgressCallback(None)
 
                 _prof["raytrace"] = time.perf_counter()
                 # The C++ trace may have stopped early on a cancel — surface it as

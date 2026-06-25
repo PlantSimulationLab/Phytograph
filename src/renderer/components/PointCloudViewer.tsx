@@ -5227,25 +5227,35 @@ export default function PointCloudViewer({
       // "Extracting hits" marker arrives). Floored so a tiny scan still animates.
       const estimatedMs = Math.max(1500, rayWork / 400);
 
-      // The ray-trace is one opaque C++ call reported as a null fraction; ease the
-      // bar across its band with an asymptotic creep, snapping onto truth whenever
-      // a real marker arrives. Mirrors the Backfill Misses gapfill reporter.
+      // Ray-trace progress. The backend reports the trace one of two ways: a single
+      // scanner is one opaque C++ call with a null fraction, while a multi-scanner
+      // scan streams a determinate "Ray-tracing scene (scan i/N)" tick at the start
+      // of each scan (its true scans-completed fraction, mapped into the band). For
+      // either shape we ease the bar across the band with an asymptotic creep and
+      // treat each ray-trace marker as a floor: a per-scan tick snaps the floor up
+      // to truth, and the creep keeps the bar moving between ticks so a long
+      // individual scan never looks frozen. Non-ray-trace markers ("Configuring
+      // scanners", "Extracting hits") are stage transitions — snap exactly and end
+      // the creep. Mirrors the Backfill Misses gapfill reporter.
       let lastValue = 0;
       let synthTimer: ReturnType<typeof setInterval> | null = null;
       const stopSynth = () => { if (synthTimer) { clearInterval(synthTimer); synthTimer = null; } };
       scanSynthStopRef.current = stopSynth;
       const report = (p: number | null, msg: string) => {
-        if (p != null) {
-          // Real marker: snap the bar onto the streamed fraction and end any creep.
+        const isRayTrace = msg.startsWith('Ray-tracing scene');
+        if (p != null && !isRayTrace) {
+          // Real stage marker: snap the bar onto the streamed fraction, end creep.
           stopSynth();
           lastValue = p;
           setScanProgress({ label: msg, value: p });
           return;
         }
-        // Indeterminate stage (the ray-trace): ease from where we are toward a cap
-        // just shy of the next real marker (0.85 "Extracting hits"), never quite
-        // reaching it — real completion snaps the bar forward.
-        const bandStart = Math.max(lastValue, 0.15);
+        // Ray-trace stage: seed the creep floor (from the real per-scan fraction
+        // when present, else the band start), then ease toward a cap just shy of
+        // the next real marker (0.85 "Extracting hits"), never quite reaching it.
+        // Each new per-scan tick re-seeds a higher floor; the snap is forward-only.
+        const bandStart = p != null ? Math.max(lastValue, p) : Math.max(lastValue, 0.15);
+        lastValue = bandStart;
         const bandEnd = 0.82;
         const span = Math.max(bandEnd - bandStart, 0);
         const t0 = performance.now();
@@ -5255,7 +5265,8 @@ export default function PointCloudViewer({
           const elapsed = performance.now() - t0;
           // 1 - e^(-t/τ) approaches 1 asymptotically; τ = estimatedMs/3 reaches
           // ~95% of the band at the estimate, so the bar sits near the band end
-          // before the real marker arrives.
+          // before the real marker arrives. Re-seeded per tick, so for N scanners
+          // each segment covers ~1-e^(-3/N) of its span before the next snap.
           const eased = 1 - Math.exp(-elapsed / (estimatedMs / 3));
           setScanProgress({ label: msg, value: bandStart + span * eased });
         }, 100);

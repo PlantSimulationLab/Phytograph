@@ -398,9 +398,12 @@ moment rather than running to completion in the background. (A scan with a
 single, very high-resolution scanner finishes the current tracing pass before
 it can stop, so cancellation is near-immediate for typical multi-scanner or
 multi-stage runs and may take a beat on one enormous single scan.) The
-ray-tracing pass doesn't report fine-grained progress, so the bar advances at
-an estimated pace during it (scaled to the scan's pulse count) and then snaps
-onto the next real stage when it completes. Meanwhile the **Run Synthetic
+ray-tracing pass reports real progress per scanner: in a multi-scanner scan the
+bar steps to a true fraction as each scanner's trace begins (labelled *scan
+i/N*) and eases smoothly between those steps, so you can see how far through the
+batch it is. A single scanner has no per-scan checkpoint, so during its one
+trace the bar instead advances at an estimated pace (scaled to the scan's pulse
+count) and snaps onto the next real stage when it completes. Meanwhile the **Run Synthetic
 LiDAR Scan** button in the Scans panel shows a "Scanning…" spinner with a
 **Cancel** button beside it — the same cancellation as the status indicator,
 placed where you started the scan.
