@@ -163,6 +163,22 @@ import. Textured `.obj` import reads UV coordinates (`vt`) and per-material
 diffuse color (`Kd`) and texture (`map_Kd`); textures are **not** written on
 export.
 
+A [DEM](../workflows/generate-dem.md) is stored as a surface mesh, so it
+exports through the same OBJ / PLY / STL formats.
+
+### DEM rasters
+
+A [DEM](../workflows/generate-dem.md) can also be exported as a **GIS raster**
+elevation grid (from the **GIS raster** row in the mesh export panel):
+
+| Format | Import | Export | Notes |
+|---|---|---|---|
+| `.asc` (ESRI ASCII grid) | ❌ | ✅ | Cell-centred elevation grid with an `ncols/nrows/xllcorner/yllcorner/cellsize/NODATA_value` header. **Distinct from the `.asc` *point-cloud* import format above** — here it's a raster. |
+| `.tif` (GeoTIFF) | ❌ | ✅ | Georeferenced raster (pixel scale + tiepoint, and a CRS when known). Written without GDAL, readable in QGIS / ArcGIS. |
+
+The raster is written in the cloud's own coordinates; voids (cells with no
+nearby ground) are written as the `NODATA_value`.
+
 ### PLY: point cloud or mesh?
 
 `.ply` is an ambiguous container — the same extension is used for point

@@ -141,7 +141,9 @@ const hiddenImports = [
 // (NOT a bare hidden-import) is REQUIRED so that data dir travels with the bundle —
 // otherwise the geographic->UTM transform in sbet.py crashes only in the packaged
 // app ("proj.db not found"), never in dev.
-const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'numpy_indexed', 'pye57', 'pyproj'];
+// tifffile writes GeoTIFF DEM rasters (/api/dem/export-raster) — pure-Python (no
+// GDAL), but collect-all pulls its submodules PyInstaller doesn't always trace.
+const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'numpy_indexed', 'pye57', 'pyproj', 'tifffile'];
 
 // Vendored TreeIso (MIT) lives under backend-api/vendor/ and is imported lazily
 // via a runtime sys.path tweak in main.py. Add vendor/ to the analysis path so

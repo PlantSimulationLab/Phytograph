@@ -2,9 +2,9 @@ import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, X} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -42,6 +42,7 @@ import { BulkImportProgress, type BulkImportProgressState } from './BulkImportPr
 import StatusPill from './StatusPill';
 import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams } from '../lib/scanParameters';
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
+import { demDefaultsForExtent } from '../lib/demDefaults';
 import { poseStreamToWire, trajectoryDurationS, deriveMovingScanGrid } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible } from '../lib/scan';
@@ -86,7 +87,7 @@ import { applyTriangleFilter, computeTriangleMetrics, triangleFilterCounts } fro
 import type { TriangleFilterEstimate } from '../lib/triangleFilter';
 import { Colorbar } from './viewer/Colorbar';
 import { ClassLegend } from './viewer/ClassLegend';
-import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, GROUND_CLASS_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
@@ -116,6 +117,7 @@ import { OrthoProjectionOverride } from './viewer/gizmos/OrthoProjectionOverride
 import { EraseBrush } from './viewer/gizmos/EraseBrush';
 import { EraseBrushOctree, type EraseSquareFrame } from './viewer/gizmos/EraseBrushOctree';
 import { GroundSegmentPanel } from './viewer/panels/GroundSegmentPanel';
+import { DEMPanel } from './viewer/panels/DEMPanel';
 import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode, type WoodMethod } from './viewer/panels/WoodSegmentPanel';
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
@@ -692,6 +694,26 @@ export default function PointCloudViewer({
     }
     groundPanelWasOpen.current = showGroundSegmentPanel;
   }, [showGroundSegmentPanel, clouds, selectedIds]);
+  // DEM (Digital Elevation Model) generation state. Like CSF, the cell size is an
+  // absolute distance, so seed it from the selected cloud's horizontal extent
+  // each time the DEM panel opens (guarded by a ref so it only fires on the open
+  // transition and never clobbers a manual tweak). The user can override it.
+  const [showDEMPanel, setShowDEMPanel] = useState(false);
+  const [demInProgress, setDemInProgress] = useState(false);
+  const [demError, setDemError] = useState<string | null>(null);
+  const [demCellSize, setDemCellSize] = useState(0.05);
+  const [demMethod, setDemMethod] = useState<DemInterpMethod>('tin');
+  const [demFillVoids, setDemFillVoids] = useState(false);
+  const [demComputeHAG, setDemComputeHAG] = useState(false);
+  const demPanelWasOpen = useRef(false);
+  useEffect(() => {
+    if (showDEMPanel && !demPanelWasOpen.current) {
+      const sel = clouds.find((c) => selectedIds.has(c.id));
+      const size = sel?.data.bounds?.size;
+      if (size) setDemCellSize(demDefaultsForExtent(Math.max(size.x, size.y)).cellSize);
+    }
+    demPanelWasOpen.current = showDEMPanel;
+  }, [showDEMPanel, clouds, selectedIds]);
   // Wood/leaf segmentation state (geometric, non-ML).
   const [showWoodSegmentPanel, setShowWoodSegmentPanel] = useState(false);
   const [woodSegmentInProgress, setWoodSegmentInProgress] = useState(false);
@@ -1635,6 +1657,7 @@ export default function PointCloudViewer({
     }
     if (except !== 'triangulation') setShowTriangulationPopup(false);
     if (except !== 'ground-segment') setShowGroundSegmentPanel(false);
+    if (except !== 'dem') setShowDEMPanel(false);
     if (except !== 'wood-segment') setShowWoodSegmentPanel(false);
     if (except !== 'tree-segment') { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }
     if (except !== 'skeleton') setShowSkeletonPanel(false);
@@ -3643,6 +3666,7 @@ export default function PointCloudViewer({
       // current selection but not requiring one), so it stays clickable whenever
       // any cloud exists in the scene — like the other picker-driven tools.
       { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPopup(true); }, category: 'Point Cloud', toolGroup: 'reconstruct', icon: Triangle, testId: 'tool-triangulate', multiInput: true, isActive: () => showTriangulationPopup },
+      { id: 'cloud-dem', name: 'Generate DEM', keywords: ['dem', 'dtm', 'terrain', 'elevation', 'ground', 'surface', 'heightmap', 'bare earth', 'digital elevation model'], action: () => { closeAllToolPanels('dem'); setShowDEMPanel(!showDEMPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Mountain, testId: 'tool-dem', isActive: () => showDEMPanel },
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Dna, testId: 'tool-skeleton', isActive: () => showSkeletonPanel },
       { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: QsmIcon, testId: 'tool-qsm', multiInput: true, isActive: () => showQSMPopup },
       { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setLadReopenSelection(null); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
@@ -3694,7 +3718,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showExportPanel, showPlantGrowthPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showExportPanel, showPlantGrowthPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
 
   // Bridge for the native Tools menu (src/main/menu.ts → App.tsx) to run a tool
   // by id. A ref keeps the latest `commands` (with fresh action closures) so the
@@ -4905,6 +4929,53 @@ export default function PointCloudViewer({
     setShowExportPanel(false);
   }, [meshes, clouds, downloadFile]);
 
+  // Export a DEM surface mesh as a GIS raster (.asc / GeoTIFF). The triangulated
+  // surface has lost the grid structure, so this round-trips the regular grid
+  // (kept on mesh.demGrid) through the backend, which writes the raster bytes;
+  // the renderer saves them via the main-process fs bridge. The grid origin is
+  // shifted back to true-world coordinates (world_shift re-added) for georef.
+  const handleExportDEMRaster = useCallback(async (meshId: string, format: 'asc' | 'tif') => {
+    const mesh = meshes.find(m => m.id === meshId);
+    if (!mesh?.demGrid) return;
+    const grid = mesh.demGrid;
+    const NODATA = -9999;
+    const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
+    const baseName = (sourceCloud?.data.fileName?.replace(/\.[^.]+$/, '') || 'dem');
+    const ext = format === 'tif' ? 'tif' : 'asc';
+
+    const savePath = await window.electronAPI?.dialog.save({
+      defaultPath: `${baseName}_dem.${ext}`,
+      title: format === 'tif' ? 'Export DEM (GeoTIFF)' : 'Export DEM (ESRI ASCII grid)',
+      filters: [{ name: format === 'tif' ? 'GeoTIFF' : 'ESRI ASCII grid', extensions: [ext] }],
+    });
+    if (!savePath) return;
+
+    try {
+      // Encode voids as NODATA (JSON can't carry NaN); shift origin to world coords.
+      const z = Array.from(grid.z, v => (Number.isFinite(v) ? v : NODATA));
+      const resp = await exportDemRaster({
+        format,
+        grid_z: z,
+        nx: grid.nx,
+        ny: grid.ny,
+        cell_size: grid.cellSize,
+        origin: [grid.origin[0] + grid.worldShift[0], grid.origin[1] + grid.worldShift[1]],
+        nodata: NODATA,
+        crs_epsg: grid.crsEpsg ?? null,
+      });
+      if (!resp.success) throw new Error('DEM raster export failed');
+      const bin = atob(resp.data_base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      await window.electronAPI?.fs.writeBinary(savePath, bytes.buffer.slice(0) as ArrayBuffer);
+      showToast({ title: 'DEM Exported', type: 'success', message: `Wrote ${ext.toUpperCase()} raster (${grid.nx}×${grid.ny}).` });
+    } catch (error) {
+      showToast({ title: 'Export Failed', type: 'error',
+        message: error instanceof Error ? error.message : 'Unknown error' });
+    }
+    setShowExportPanel(false);
+  }, [meshes, clouds]);
+
   // Whether a mesh was produced by triangulating a point cloud (standard or
   // Helios) — as opposed to a procedural plant, a shape/voxel primitive, or an
   // imported OBJ. Only these meshes get the per-triangle "Color by" control,
@@ -6058,6 +6129,150 @@ export default function PointCloudViewer({
       setGroundSegmentInProgress(false);
     }
   }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds]);
+
+  // Generate a DEM (Digital Elevation Model) from the selected cloud's ground
+  // points. The bare-earth surface comes back as a heightmap mesh (stored as a
+  // MeshEntry tagged method:'dem', coloured by elevation) plus the regular grid
+  // (kept on the mesh's demGrid for raster export). Optionally writes a
+  // height_above_ground scalar onto the source cloud (a CHM precursor).
+  const handleGenerateDEM = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    if (!cloud) return;
+
+    setDemInProgress(true);
+    setDemError(null);
+    const baseName = cloud.data.fileName ?? id;
+
+    const finishMesh = (result: Awaited<ReturnType<typeof generateDEM>>) => {
+      const meshData: MeshData = {
+        vertices: result.vertices,
+        indices: result.triangles,
+        normals: result.normals,
+        vertexCount: result.numVertices,
+        triangleCount: result.numTriangles,
+        surfaceArea: result.surfaceArea,
+      };
+      const meshEntry: MeshEntry = {
+        id: crypto.randomUUID(),
+        sourceCloudId: id,
+        data: meshData,
+        visible: true,
+        color: '#8c6643',
+        method: 'dem',
+        name: `${baseName} DEM`,
+        demGrid: result.grid
+          ? { ...result.grid, crsEpsg: result.grid.crsEpsg ?? null }
+          : undefined,
+      };
+      addMesh(meshEntry, undefined, 'Generate DEM');
+      // Default the DEM surface to elevation colouring.
+      setMeshColorModes(prev => new Map(prev).set(meshEntry.id, 'elevation'));
+      return meshEntry;
+    };
+
+    try {
+      const ps = buildPointSource(cloud);
+
+      // --- Session-backed octree cloud: DEM from the in-RAM array (ground-aware
+      // via the ground_class column), optional height_above_ground + rebuild. ---
+      if (ps.kind === 'source') {
+        const octreeInfo = cloud.data.octree;
+        if (!octreeInfo?.sessionId) throw new Error('Octree cloud is missing its editable session.');
+        const result = await generateSessionDEM(octreeInfo.sessionId, {
+          cell_size: demCellSize,
+          method: demMethod,
+          fill_voids: demFillVoids,
+          add_height_column: demComputeHAG,
+        });
+        if (!result.success) throw new Error(result.error || 'DEM generation failed');
+        finishMesh(result);
+
+        // The HAG column was baked into the rebuilt octree; refresh the cloud and
+        // recolour by the new continuous scalar.
+        if (demComputeHAG && result.cacheId && result.rawMeta) {
+          onUpdateCloud(id, buildSessionOctreeData(result.rawMeta as unknown as OctreeMetadata, octreeInfo, baseName));
+          registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+          setColorMode('scalar');
+          setSelectedScalarField(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+        }
+        setShowDEMPanel(false);
+        showToast({
+          type: 'success',
+          title: 'DEM Generated',
+          message: `${result.numTriangles.toLocaleString()} cells${result.warning ? ` — ${result.warning}` : ''}`,
+        });
+        return;
+      }
+
+      // --- Flat cloud: send inline points; pass ground_class labels when present
+      // so the DEM is ground-aware. HAG is written as a scalar field. ---
+      const displayData = ps.data;
+      const count = displayData.pointCount;
+      const points: number[][] = new Array(count);
+      for (let i = 0; i < count; i++) {
+        points[i] = [
+          displayData.positions[i * 3],
+          displayData.positions[i * 3 + 1],
+          displayData.positions[i * 3 + 2],
+        ];
+      }
+      const groundField = displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE];
+      const groundLabels = groundField && groundField.values.length === count
+        ? Array.from(groundField.values, v => Math.round(v))
+        : undefined;
+
+      const result = await generateDEM({
+        points,
+        ground_labels: groundLabels,
+        auto_segment_ground: !groundLabels,
+        cell_size: demCellSize,
+        method: demMethod,
+        fill_voids: demFillVoids,
+        compute_height_above_ground: demComputeHAG,
+      });
+      if (!result.success) throw new Error(result.error || 'DEM generation failed');
+      finishMesh(result);
+
+      // The backend returns a gap-free height-above-ground buffer (ground sampled
+      // under every point, extrapolated past the ground footprint) — so canopy
+      // beyond the ground extent isn't slammed to 0.
+      if (demComputeHAG && result.heightAboveGround && result.heightAboveGround.length === count) {
+        const hag = result.heightAboveGround;
+        let hmin = Infinity, hmax = -Infinity;
+        for (let i = 0; i < count; i++) {
+          const h = hag[i];
+          if (h < hmin) hmin = h;
+          if (h > hmax) hmax = h;
+        }
+        if (!Number.isFinite(hmin)) { hmin = 0; hmax = 1; }
+        registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+        onUpdateCloud(id, {
+          ...displayData,
+          scalarFields: {
+            ...(displayData.scalarFields ?? {}),
+            [HEIGHT_ABOVE_GROUND_ATTRIBUTE]: { values: hag, min: hmin, max: hmax },
+          },
+        });
+        setColorMode('scalar');
+        setSelectedScalarField(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+      }
+      setShowDEMPanel(false);
+      showToast({
+        type: 'success',
+        title: 'DEM Generated',
+        message: `${result.numTriangles.toLocaleString()} cells${result.warning ? ` — ${result.warning}` : ''}`,
+      });
+    } catch (error) {
+      console.error('DEM generation error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'DEM generation failed';
+      setDemError(errorMessage);
+      showToast({ type: 'error', title: 'DEM Generation Failed', message: errorMessage });
+    } finally {
+      setDemInProgress(false);
+    }
+  }, [selectedIds, clouds, buildPointSource, addMesh, onUpdateCloud, buildSessionOctreeData, demCellSize, demMethod, demFillVoids, demComputeHAG]);
 
   // Pull a per-point reflectance/intensity scalar from a flat cloud's display
   // data for the inline reflectance-assist path, as a plain number[] aligned to
@@ -12279,6 +12494,7 @@ export default function PointCloudViewer({
             onOpacityChange={(id, value) => setMeshOpacities(prev => new Map(prev).set(id, value))}
             onWireframeChange={setMeshWireframe}
             onOpenLeafAngles={setShowLeafAngleMeshId}
+            onExportDEMRaster={handleExportDEMRaster}
             onHeliosFilterChange={handleHeliosFilterChange}
             onCheckSpacing={handleCheckSpacing}
             ladIneligibilityReason={ladIneligibilityReason}
@@ -13061,6 +13277,34 @@ export default function PointCloudViewer({
         />
       )}
 
+      {/* DEM (Digital Elevation Model) Panel */}
+      {showDEMPanel && selectedIds.size === 1 && (() => {
+        const sel = clouds.find((c) => selectedIds.has(c.id));
+        const hasGroundClass = !!(
+          sel?.data.scalarFields?.[GROUND_CLASS_ATTRIBUTE] ||
+          sel?.data.octree?.attributeRanges?.[GROUND_CLASS_ATTRIBUTE]
+        );
+        return (
+          <DEMPanel
+            cellSize={demCellSize}
+            method={demMethod}
+            fillVoids={demFillVoids}
+            computeHeightAboveGround={demComputeHAG}
+            hasGroundClass={hasGroundClass}
+            extentX={sel?.data.bounds?.size?.x}
+            extentY={sel?.data.bounds?.size?.y}
+            inProgress={demInProgress}
+            error={demError}
+            onClose={() => setShowDEMPanel(false)}
+            onCellSizeChange={setDemCellSize}
+            onMethodChange={setDemMethod}
+            onFillVoidsChange={setDemFillVoids}
+            onComputeHeightAboveGroundChange={setDemComputeHAG}
+            onGenerate={handleGenerateDEM}
+          />
+        );
+      })()}
+
       {/* Wood/Leaf Segmentation Panel */}
       {showWoodSegmentPanel && selectedIds.size >= 1 && (
         <WoodSegmentPanel
@@ -13372,6 +13616,7 @@ export default function PointCloudViewer({
           meshSelected={!!selectedMesh}
           meshName={selectedMesh ? displayNameOfMesh(selectedMesh) : ''}
           meshTriangleCount={selectedMesh?.data.triangleCount ?? 0}
+          meshIsDem={selectedMesh?.method === 'dem' && !!selectedMesh?.demGrid}
           isScanning={isScanning}
           skeletonSelected={!!selectedSkeleton}
           skeletonName={selectedSkeleton ? (clouds.find(c => c.id === selectedSkeleton.sourceCloudId)?.data.fileName || '') : ''}
@@ -13380,6 +13625,7 @@ export default function PointCloudViewer({
           onClose={() => setShowExportPanel(false)}
           onExportCloud={exportPointCloud}
           onExportMesh={(format) => { if (selectedMesh) exportMesh(selectedMesh.id, format); }}
+          onExportDEMRaster={(format) => { if (selectedMesh) handleExportDEMRaster(selectedMesh.id, format); }}
           onExportSkeleton={(format) => { if (selectedSkeleton) exportSkeleton(selectedSkeleton.id, format); }}
           onRunScan={() => handleRunScan()}
         />

@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.41.4"
+BACKEND_VERSION = "0.42.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2178,6 +2178,471 @@ async def segment_ground_points(request: GroundSegmentationRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Ground segmentation failed: {str(e)}")
+
+
+# ==================== DIGITAL ELEVATION MODEL (DEM) ====================
+# Build a bare-earth terrain surface from a point cloud. Logically downstream of
+# ground segmentation: when the cloud carries a `ground_class` column (or the
+# caller passes ground labels), only ground points are gridded; otherwise CSF is
+# run on the fly (auto) or, as a last resort, the lowest returns of all points
+# are used. The elevation surface is built by TIN / Delaunay-linear interpolation
+# (the las2dem / PDAL approach) onto a regular cell-centred grid, with a per-cell
+# low-percentile pre-bin for outlier robustness and convex-hull void masking (no
+# extrapolation beyond measured data unless `fill_voids` is set). Output is a
+# heightmap surface mesh (same PHB1 transport as /api/triangulate) plus the
+# underlying regular grid, which the renderer round-trips to /api/dem/export-raster
+# for ESRI ASCII (.asc) / GeoTIFF (.tif) export.
+
+# Default DEM cell-size seeding bounds (metres). Mirrors groundSegmentDefaults:
+# scale-dependent, so seed from extent when the caller doesn't specify.
+_DEM_CELL_MIN = 0.01
+_DEM_CELL_MAX = 5.0
+# Hard cap on grid cells (nx*ny). A too-fine cell on a huge extent would allocate
+# an enormous grid; reject with a clear error instead (mirrors the TreeIso cap).
+_DEM_MAX_CELLS = 4_000_000
+
+
+class DemRequest(BaseModel):
+    """Generate a DEM from a flat cloud's inline `points` or a `source` descriptor.
+
+    Ground-aware: pass `ground_labels` (1=ground, 2=plant, aligned 1:1 with the
+    resolved points) to grid only ground points; else CSF is run when
+    `auto_segment_ground` is set, else all points are used (lowest-return surface).
+    """
+    points: Optional[List[List[float]]] = None
+    source: Optional[PointSource] = None
+    # Per-point ground labels (1=ground) aligned to the resolved point order. When
+    # present, the DEM is built from ground points only (the "column" path).
+    ground_labels: Optional[List[int]] = None
+    # Run CSF to derive ground when no labels are supplied. CSF tuning mirrors
+    # GroundSegmentationRequest's close-range defaults.
+    auto_segment_ground: bool = True
+    cloth_resolution: float = 0.05
+    rigidness: int = 3
+    class_threshold: float = 0.02
+    # Grid + algorithm
+    cell_size: Optional[float] = None        # None ⇒ seed from extent
+    bbox: Optional[List[float]] = None        # [minx, miny, maxx, maxy]; None ⇒ ground AABB
+    method: str = "tin"                        # "tin"/"linear", "nearest", "idw"
+    ground_percentile: float = 5.0            # per-cell z percentile (robust near-min)
+    fill_voids: bool = False                   # nearest-neighbour extrapolate into gaps
+    # Also return a per-point height-above-ground buffer (point z − gap-free
+    # ground), aligned to the resolved points. Used by the flat-cloud CHM path.
+    compute_height_above_ground: bool = False
+
+
+def _resolve_dem_points(request: "DemRequest") -> np.ndarray:
+    """Resolve a DemRequest to an Nx3 float64 array (full resolution)."""
+    if request.source is not None:
+        src = request.source.model_copy(update={"max_points": None})
+        points, _, _ = _read_points_from_source(src)
+        return points
+    if request.points is not None:
+        return np.array(request.points, dtype=np.float64)
+    raise HTTPException(status_code=400, detail="Provide either `points` or `source`.")
+
+
+
+def _compute_dem(
+    points: np.ndarray,
+    *,
+    cell_size: Optional[float] = None,
+    bbox: Optional[List[float]] = None,
+    method: str = "tin",
+    ground_percentile: float = 5.0,
+    fill_voids: bool = False,
+    sample_xy: Optional[np.ndarray] = None,
+    progress=None,
+) -> dict:
+    """Grid ground elevation into a DEM and build its heightmap surface mesh.
+
+    `points` are the points to grid (already ground-filtered by the caller, or
+    all points). Returns a result dict shaped for `_pack_dem_frame`: success,
+    vertices/triangles/normals, surface_area, counts, method_used, plus the
+    regular grid (`grid_z` row-major (ny*nx), `grid_nx`, `grid_ny`, `grid_cell`,
+    `grid_origin` = [minx, miny] lower-left corner) and `voids`. Raises
+    ValueError when the requested cell size would exceed the grid-cell cap."""
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
+    from scipy.interpolate import griddata
+
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] < 3 or len(pts) < 3:
+        return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
+                "num_vertices": 0, "error": "Need at least 3 points to build a DEM."}
+
+    xy = pts[:, :2]
+    z = pts[:, 2]
+    if bbox is not None and len(bbox) == 4:
+        minx, miny, maxx, maxy = (float(v) for v in bbox)
+    else:
+        minx, miny = float(xy[:, 0].min()), float(xy[:, 1].min())
+        maxx, maxy = float(xy[:, 0].max()), float(xy[:, 1].max())
+    ext_x, ext_y = maxx - minx, maxy - miny
+    if not (ext_x > 0 and ext_y > 0):
+        return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
+                "num_vertices": 0, "error": "Point cloud has a degenerate XY extent."}
+
+    if cell_size is None or cell_size <= 0:
+        cell = float(np.clip(max(ext_x, ext_y) / 256.0, _DEM_CELL_MIN, _DEM_CELL_MAX))
+    else:
+        cell = float(cell_size)
+    nx = max(int(np.ceil(ext_x / cell)), 1)
+    ny = max(int(np.ceil(ext_y / cell)), 1)
+    if nx * ny > _DEM_MAX_CELLS:
+        raise ValueError(
+            f"Cell size {cell:g} m is too fine for this extent "
+            f"({nx:,}×{ny:,} = {nx*ny:,} cells; cap {_DEM_MAX_CELLS:,}). "
+            "Use a larger cell size.")
+
+    _report(0.2, "Binning ground points")
+    # --- Per-cell low-percentile pre-bin (robust near-minimum representative) ---
+    # Clip points to the grid; bin into flat cell indices; per populated cell take
+    # the Nth-percentile z. This kills high outliers (residual low vegetation),
+    # is steadier than a hard per-cell minimum, AND bounds the triangulation input
+    # to <= nx*ny points regardless of cloud size.
+    ci = np.clip(((xy[:, 0] - minx) / cell).astype(np.int64), 0, nx - 1)
+    cj = np.clip(((xy[:, 1] - miny) / cell).astype(np.int64), 0, ny - 1)
+    flat = cj * nx + ci
+    order = np.lexsort((z, flat))      # sort by cell, then z ascending
+    flat_s = flat[order]
+    z_s = z[order]
+    uniq, start = np.unique(flat_s, return_index=True)
+    counts = np.diff(np.append(start, len(flat_s)))
+    p = float(np.clip(ground_percentile, 0.0, 100.0)) / 100.0
+    pick = start + np.floor((counts - 1) * p).astype(np.int64)
+    rep_z = z_s[pick]
+    rep_ci = uniq % nx
+    rep_cj = uniq // nx
+    rep_xy = np.column_stack([minx + (rep_ci + 0.5) * cell,
+                              miny + (rep_cj + 0.5) * cell])
+
+    if len(uniq) < 3:
+        return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
+                "num_vertices": 0,
+                "error": "Too few populated cells to build a DEM; use a finer cell size."}
+
+    _report(0.5, "Interpolating elevation grid")
+    # Target: every cell center.
+    gx = minx + (np.arange(nx) + 0.5) * cell
+    gy = miny + (np.arange(ny) + 0.5) * cell
+    GX, GY = np.meshgrid(gx, gy)        # (ny, nx)
+    grid_xy = np.column_stack([GX.ravel(), GY.ravel()])
+
+    m = (method or "tin").lower()
+    if m in ("tin", "linear"):
+        zi = griddata(rep_xy, rep_z, grid_xy, method="linear")
+    elif m == "nearest":
+        zi = griddata(rep_xy, rep_z, grid_xy, method="nearest")
+    elif m == "idw":
+        from scipy.spatial import cKDTree
+        tree = cKDTree(rep_xy)
+        k = int(min(12, len(rep_xy)))
+        dist, idx = tree.query(grid_xy, k=k)
+        if k == 1:
+            dist = dist[:, None]; idx = idx[:, None]
+        with np.errstate(divide="ignore"):
+            w = 1.0 / np.maximum(dist, 1e-12) ** 2
+        zi = np.sum(w * rep_z[idx], axis=1) / np.sum(w, axis=1)
+        zi[dist[:, 0] == 0] = rep_z[idx[dist[:, 0] == 0, 0]]
+    else:
+        return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
+                "num_vertices": 0, "error": f"Unknown DEM method {method!r}."}
+    grid_z = zi.reshape(ny, nx).astype(np.float64)
+
+    if fill_voids:
+        nanmask = ~np.isfinite(grid_z)
+        if nanmask.any():
+            znear = griddata(rep_xy, rep_z, grid_xy, method="nearest").reshape(ny, nx)
+            grid_z[nanmask] = znear[nanmask]
+
+    voids = int((~np.isfinite(grid_z)).sum())
+
+    _report(0.75, "Building surface mesh")
+    # --- Heightmap mesh: vertices at cell centres, 2 triangles per quad whose
+    # four corner cells are all finite (clean holes at voids). ---
+    finite = np.isfinite(grid_z)
+    verts_full = np.column_stack([GX.ravel(), GY.ravel(), grid_z.ravel()])
+    ii, jj = np.meshgrid(np.arange(nx - 1), np.arange(ny - 1))
+    v00 = (jj * nx + ii).ravel()
+    v10 = (jj * nx + ii + 1).ravel()
+    v01 = ((jj + 1) * nx + ii).ravel()
+    v11 = ((jj + 1) * nx + ii + 1).ravel()
+    ok = (finite[jj, ii] & finite[jj, ii + 1] &
+          finite[jj + 1, ii] & finite[jj + 1, ii + 1]).ravel()
+    v00, v10, v01, v11 = v00[ok], v10[ok], v01[ok], v11[ok]
+    if len(v00) == 0:
+        return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
+                "num_vertices": 0,
+                "error": "DEM produced no surface (too few ground points or all cells empty)."}
+    # CCW winding so face normals point up (+z).
+    tris_full = np.vstack([np.column_stack([v00, v10, v11]),
+                           np.column_stack([v00, v11, v01])])
+    used = np.unique(tris_full)
+    remap = np.full(len(verts_full), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    verts = verts_full[used].astype(np.float64)
+    tris = remap[tris_full].astype(np.int64)
+
+    # Normals + surface area via open3d (consistent with other meshes).
+    normals = None
+    surface_area = None
+    try:
+        import open3d as o3d
+        mesh = o3d.geometry.TriangleMesh()
+        mesh.vertices = o3d.utility.Vector3dVector(verts)
+        mesh.triangles = o3d.utility.Vector3iVector(tris.astype(np.int32))
+        mesh.compute_vertex_normals()
+        normals = np.asarray(mesh.vertex_normals, dtype=np.float32)
+        surface_area = float(mesh.get_surface_area())
+    except Exception:
+        pass
+
+    # Gap-free ground elevation at arbitrary XY (for height-above-ground). The
+    # DEM mesh keeps honest voids, but HAG needs a ground value under EVERY point
+    # — including canopy that overhangs past the ground's footprint or sits over a
+    # gap with no ground returns — or those points would be left without a ground
+    # reference. So sample the ground surface with linear interpolation inside the
+    # ground points' convex hull and NEAREST-ground extrapolation outside it,
+    # rather than the void-prone grid (whose NaNs would otherwise collapse those
+    # points to height 0 and read as "at ground level").
+    sample_ground_z = None
+    if sample_xy is not None and len(sample_xy):
+        sg = griddata(rep_xy, rep_z, sample_xy, method="linear")
+        outside = ~np.isfinite(sg)
+        if outside.any():
+            sg[outside] = griddata(rep_xy, rep_z, sample_xy[outside], method="nearest")
+        sample_ground_z = sg
+
+    _report(0.95, "Packing DEM")
+    return {
+        "success": True,
+        "vertices": verts.astype(np.float32),
+        "triangles": tris.astype(np.int64),
+        "normals": normals,
+        "surface_area": surface_area,
+        "num_vertices": int(len(verts)),
+        "num_triangles": int(len(tris)),
+        "method_used": f"dem_{m}",
+        "points_used": int(len(uniq)),
+        "grid_z": grid_z.astype(np.float32).ravel(),   # row-major, row 0 = min y
+        "grid_nx": nx,
+        "grid_ny": ny,
+        "grid_cell": cell,
+        "grid_origin": [minx, miny],                    # lower-left corner
+        "voids": voids,
+        # Per-sample ground z aligned to `sample_xy` (caller pops this — it's not
+        # framed). None when sample_xy wasn't supplied.
+        "sample_ground_z": sample_ground_z,
+    }
+
+
+def _pack_dem_frame(result: dict) -> bytes:
+    """Pack a `_compute_dem` result into a PHB1 frame: vertices/indices/normals as
+    buffers plus the regular `grid_z` grid (for raster export); everything else
+    (counts, grid params, ground_source, world_shift, cache info) rides in meta."""
+    array_keys = {"vertices", "triangles", "normals", "grid_z", "hag", "sample_ground_z"}
+    if not result.get("success"):
+        return _bin_frame_bytes({k: v for k, v in result.items() if k not in array_keys}, [])
+    meta = {k: v for k, v in result.items() if k not in array_keys}
+    buffers = [("vertices", result["vertices"], "f32"),
+               ("indices", result["triangles"], "u32")]
+    if result.get("normals") is not None:
+        buffers.append(("normals", result["normals"], "f32"))
+    if result.get("grid_z") is not None:
+        buffers.append(("grid_z", result["grid_z"], "f32"))
+    if result.get("hag") is not None:
+        buffers.append(("hag", result["hag"], "f32"))
+    return _bin_frame_bytes(meta, buffers)
+
+
+def _auto_csf_params(points: np.ndarray) -> dict:
+    """Extent-scaled CSF parameters for the DEM tool's automatic ground
+    extraction. CSF's cloth resolution is an ABSOLUTE distance: a 5 cm cloth
+    suits a ~1 m plant scan but is pathological on a field/ALS tile — a 186 m
+    tile at 5 cm is a ~3700×3700 (~14 M-node) cloth simulated 500× and
+    effectively hangs. The Ground Segmentation tool seeds these from the cloud's
+    extent (see groundSegmentDefaults.ts); the DEM panel exposes no CSF controls,
+    so its auto path must self-scale identically. Flat terrain → coarse stiff
+    cloth ∝ extent; sloped (relief ratio ≥ 0.2) → finer, low-rigidness,
+    slope-smoothed cloth that conforms instead of bridging."""
+    xy = points[:, :2]
+    ext = float(max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1])))
+    if not (ext > 0):
+        ext = 1.5
+    relief = float(np.ptp(points[:, 2]))
+    ratio = relief / ext
+    CLOTH_MIN, CLOTH_MAX, THR_MIN, THR_MAX = 0.05, 2.0, 0.02, 1.0
+    if ratio >= 0.2:
+        cloth = min(ext / 200.0, 1.0)
+        return {"cloth_resolution": float(np.clip(cloth, CLOTH_MIN, CLOTH_MAX)),
+                "class_threshold": 0.5, "rigidness": 1, "slope_smooth": True}
+    scaled = ext / 100.0
+    return {"cloth_resolution": float(np.clip(scaled, CLOTH_MIN, CLOTH_MAX)),
+            "class_threshold": float(np.clip(scaled, THR_MIN, THR_MAX)),
+            "rigidness": 3, "slope_smooth": False}
+
+
+def _dem_ground_mask(points: np.ndarray, request: "DemRequest") -> "tuple[Optional[np.ndarray], str, Optional[str]]":
+    """Resolve the ground mask for a stateless DEM request. Returns
+    (mask | None, ground_source, warning). Mask None ⇒ use all points."""
+    n = len(points)
+    if request.ground_labels is not None and len(request.ground_labels) == n:
+        mask = np.asarray(request.ground_labels, dtype=np.int64) == GROUND_CLASS_GROUND
+        if int(mask.sum()) >= 3:
+            return mask, "column", None
+        return None, "all_points", "Ground class had too few points; used all points."
+    if request.auto_segment_ground:
+        try:
+            csf = _auto_csf_params(points)   # extent-scaled — never the 5 cm plant default on a big tile
+            labels = segment_ground(points, **csf)
+            mask = labels == GROUND_CLASS_GROUND
+            if int(mask.sum()) >= 3:
+                return mask, "csf_auto", None
+        except ImportError:
+            return None, "all_points", "CSF not installed; used all points (lowest returns)."
+    return None, "all_points", "No ground classification; used all points (lowest returns)."
+
+
+def _do_dem(request: "DemRequest", progress=None) -> dict:
+    """Stateless DEM: resolve points, derive a ground mask, grid the surface."""
+    try:
+        points = _resolve_dem_points(request)
+        if len(points) < 3:
+            return {"success": False, "method_used": f"dem_{request.method}",
+                    "num_triangles": 0, "num_vertices": 0,
+                    "error": "Need at least 3 points to build a DEM."}
+        mask, ground_source, warning = _dem_ground_mask(points, request)
+        ground_pts = points[mask] if mask is not None else points
+        result = _compute_dem(ground_pts, cell_size=request.cell_size, bbox=request.bbox,
+                              method=request.method, ground_percentile=request.ground_percentile,
+                              fill_voids=request.fill_voids,
+                              sample_xy=(points[:, :2] if request.compute_height_above_ground else None),
+                              progress=progress)
+        if result.get("success"):
+            sample_ground_z = result.pop("sample_ground_z", None)
+            result["ground_source"] = ground_source
+            result["world_shift"] = [0.0, 0.0, 0.0]
+            if warning:
+                result["warning"] = warning
+            # Per-point height-above-ground buffer (gap-free ground under every
+            # point), framed for the flat-cloud CHM path.
+            if request.compute_height_above_ground and sample_ground_z is not None:
+                hag = points[:, 2] - sample_ground_z
+                hag[~np.isfinite(hag)] = 0.0
+                result["hag"] = hag.astype(np.float32)
+        else:
+            result.pop("sample_ground_z", None)
+        return result
+    except ValueError as e:
+        return {"success": False, "method_used": f"dem_{request.method}",
+                "num_triangles": 0, "num_vertices": 0, "error": str(e)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "method_used": f"dem_{request.method}",
+                "num_triangles": 0, "num_vertices": 0, "error": f"DEM generation failed: {e}"}
+
+
+@app.post("/api/dem")
+async def generate_dem(request: DemRequest, http_request: Request):
+    """Generate a DEM from a flat cloud (inline points / source). Returns a PHB1
+    binary frame (heightmap mesh + regular grid)."""
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: _pack_dem_frame(_do_dem(request, progress=progress)),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+# ---- DEM raster export (.asc / GeoTIFF) ----
+# The renderer round-trips the grid it received from /api/dem (or the session DEM
+# endpoint) here, with voids encoded as `nodata` (JSON can't carry NaN) and the
+# origin shifted back to true-world coordinates (world_shift re-added). The .asc
+# path is pure text (no dependency); GeoTIFF uses tifffile (pure-Python — no
+# GDAL) to write the raster plus the georeferencing tags.
+
+class DemRasterExportRequest(BaseModel):
+    format: str = "asc"                # "asc" | "tif"
+    grid_z: List[float]                # row-major (ny*nx), row 0 = min y; voids = nodata
+    nx: int
+    ny: int
+    cell_size: float
+    origin: List[float]                # [minx, miny] true-world lower-left corner
+    nodata: float = -9999.0
+    crs_epsg: Optional[int] = None     # set georeferencing CRS when known
+
+
+def _dem_asc_bytes(grid: np.ndarray, minx: float, miny: float, cell: float, nodata: float) -> bytes:
+    """ESRI ASCII grid. Rows are written north (max y) to south. Cell-centred
+    grid with the corner origin (xllcorner/yllcorner)."""
+    ny, nx = grid.shape
+    lines = [f"ncols {nx}", f"nrows {ny}", f"xllcorner {minx:.6f}",
+             f"yllcorner {miny:.6f}", f"cellsize {cell:.6f}", f"NODATA_value {nodata:g}"]
+    out = "\n".join(lines) + "\n"
+    rows = []
+    for j in range(ny - 1, -1, -1):    # north to south
+        row = grid[j]
+        rows.append(" ".join(f"{v:.4f}" if np.isfinite(v) else f"{nodata:g}" for v in row))
+    return (out + "\n".join(rows) + "\n").encode("utf-8")
+
+
+def _dem_geotiff_bytes(grid: np.ndarray, minx: float, miny: float, cell: float,
+                       nodata: float, crs_epsg: Optional[int]) -> bytes:
+    """GeoTIFF via tifffile (no GDAL). Writes the raster north-up with
+    ModelPixelScale + ModelTiepoint, plus a GeoKeyDirectory when an EPSG is given."""
+    import io
+    import tifffile
+    ny, nx = grid.shape
+    data = np.where(np.isfinite(grid), grid, nodata).astype(np.float32)
+    data = data[::-1]                  # raster row 0 = north (max y)
+    maxy = miny + ny * cell
+    extratags = [
+        (33550, 12, 3, (float(cell), float(cell), 0.0), True),                 # ModelPixelScale
+        (33922, 12, 6, (0.0, 0.0, 0.0, float(minx), float(maxy), 0.0), True),  # ModelTiepoint
+        (42113, 2, 0, str(nodata), True),                                      # GDAL_NODATA
+    ]
+    if crs_epsg:
+        try:
+            import pyproj
+            geographic = pyproj.CRS.from_epsg(int(crs_epsg)).is_geographic
+        except Exception:
+            geographic = False
+        if geographic:
+            geokeys = (1, 1, 0, 3, 1024, 0, 1, 2, 1025, 0, 1, 1, 2048, 0, 1, int(crs_epsg))
+        else:
+            geokeys = (1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, int(crs_epsg))
+        extratags.append((34735, 3, len(geokeys), geokeys, True))              # GeoKeyDirectory
+    buf = io.BytesIO()
+    tifffile.imwrite(buf, data, extratags=extratags)
+    return buf.getvalue()
+
+
+@app.post("/api/dem/export-raster")
+async def export_dem_raster(request: DemRasterExportRequest):
+    """Write a DEM grid to ESRI ASCII (.asc) or GeoTIFF (.tif); returns base64."""
+    import base64
+    if request.nx <= 0 or request.ny <= 0 or len(request.grid_z) != request.nx * request.ny:
+        raise HTTPException(status_code=400, detail="grid_z length must equal nx*ny.")
+    grid = np.asarray(request.grid_z, dtype=np.float64).reshape(request.ny, request.nx)
+    grid = np.where(grid == request.nodata, np.nan, grid)   # decode voids
+    minx, miny = float(request.origin[0]), float(request.origin[1])
+    fmt = request.format.lower()
+    try:
+        if fmt == "asc":
+            data = _dem_asc_bytes(grid, minx, miny, request.cell_size, request.nodata)
+            ext = "asc"
+        elif fmt in ("tif", "tiff", "geotiff"):
+            data = _dem_geotiff_bytes(grid, minx, miny, request.cell_size, request.nodata, request.crs_epsg)
+            ext = "tif"
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown raster format {request.format!r}.")
+    except ImportError:
+        raise HTTPException(status_code=500, detail="tifffile not installed (required for GeoTIFF export).")
+    return {"success": True, "format": ext, "data_base64": base64.b64encode(data).decode("ascii")}
 
 
 # ==================== WOOD/LEAF SEGMENTATION ====================
@@ -16459,6 +16924,68 @@ class CloudSession:
     # when the LAS carried no origin triple. Defaulted so existing direct
     # CloudSession(...) constructions need no change.
     beam_origins: Optional[np.ndarray] = None  # (N,3) float64 | None
+    # EPSG code of the source file's coordinate reference system, parsed from the
+    # LAS/LAZ CRS VLRs at create (None for ASCII/PLY or a file with no CRS). Used
+    # to georeference DEM raster exports (GeoTIFF). Defaulted so existing direct
+    # CloudSession(...) constructions need no change.
+    crs_epsg: Optional[int] = None
+
+
+def _epsg_from_wkt_vlr(header) -> Optional[int]:
+    """Pull the top-level EPSG code straight from a LAS WKT CRS VLR's raw string.
+
+    pyproj's `to_epsg()` refuses a WKT whose body differs from the canonical EPSG
+    definition — e.g. a `TOWGS84[0,…]` clause, common in real survey LAS files —
+    even when the WKT's own top-level `AUTHORITY` clearly names the code. WKT1's
+    top-level object closes with its own `AUTHORITY["EPSG","<code>"]` (so the LAST
+    authority in the string is the CRS code, after any child datum/unit codes);
+    WKT2 uses `ID["EPSG",<code>]`. Each candidate is validated as a real CRS so a
+    stray unit/datum/ellipsoid authority can't be mistaken for the CRS."""
+    import re
+    wkt = None
+    for v in getattr(header, "vlrs", []):
+        s = getattr(v, "string", None)
+        if s and any(tok in s for tok in ("PROJCS", "GEOGCS", "PROJCRS", "GEOGCRS")):
+            wkt = s
+            break
+    if not wkt:
+        return None
+    codes = [int(a or b) for a, b in
+             re.findall(r'(?:AUTHORITY\[\s*"EPSG"\s*,\s*"?(\d+)"?\]|ID\[\s*"EPSG"\s*,\s*(\d+))', wkt)]
+    try:
+        import pyproj
+    except Exception:
+        return None
+    for code in reversed(codes):   # top-level CRS authority is last in WKT1
+        try:
+            crs = pyproj.CRS.from_epsg(code)
+            if crs.is_projected or crs.is_geographic:
+                return code
+        except Exception:
+            continue
+    return None
+
+
+def _read_las_crs_epsg(path: "_Path") -> Optional[int]:
+    """Best-effort EPSG code from a LAS/LAZ file's CRS VLRs. Tries pyproj's clean
+    database match first, then falls back to the EPSG code embedded in the file's
+    own WKT CRS VLR (real survey files often carry a CRS pyproj won't match to an
+    EPSG, but whose WKT names the code). Returns None for a non-LAS source or no
+    recoverable CRS. Reads only the header (no point data)."""
+    if path.suffix.lower() not in (".las", ".laz"):
+        return None
+    try:
+        import laspy
+        with laspy.open(str(path)) as reader:
+            header = reader.header
+        crs = header.parse_crs()
+        if crs is not None:
+            epsg = crs.to_epsg()
+            if epsg is not None:
+                return int(epsg)
+        return _epsg_from_wkt_vlr(header)
+    except Exception:
+        return None
 
 
 def _get_cloud_session(session_id: str) -> "CloudSession":
@@ -17148,6 +17675,7 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             timestamps=timestamps,  # float64 GPS/relative time, not in float32 extras
             gps_time_encoding=gps_time_encoding,
             beam_origins=beam_origins,  # float64 ExtraBytes origins; bypass the join
+            crs_epsg=_read_las_crs_epsg(source_path),  # for DEM raster georeferencing
             deleted=np.zeros(n, dtype=bool),
             deleted_history=[],
             octree_cache_id=None,
@@ -17720,6 +18248,7 @@ def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSess
         # Inherit the parent's import shift so the subset's stored positions stay
         # in the same (shifted) space and still restore to world coords on read.
         world_shift=(sess.world_shift.copy() if sess.world_shift is not None else None),
+        crs_epsg=sess.crs_epsg,  # subsets keep the parent's CRS for DEM georeferencing
         deleted=np.zeros(int(keep.sum()), dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -17908,6 +18437,118 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
 
 
+class SessionDemRequest(BaseModel):
+    """Generate a DEM from a session's in-RAM survivors. Ground-aware: a prior
+    `ground_class` column restricts gridding to ground points; else CSF is run
+    when `auto_segment_ground` is set, else all points are used. Optionally write
+    a `height_above_ground` (CHM) scalar back onto the cloud and rebuild."""
+    auto_segment_ground: bool = True
+    cloth_resolution: float = 0.05
+    rigidness: int = 3
+    class_threshold: float = 0.02
+    cell_size: Optional[float] = None
+    bbox: Optional[List[float]] = None
+    method: str = "tin"
+    ground_percentile: float = 5.0
+    fill_voids: bool = False
+    add_height_column: bool = False
+
+
+def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress=None) -> dict:
+    """Session DEM worker. The mesh is built in the session's (world_shift-
+    subtracted) display coordinates so it aligns with the rendered octree; the
+    `world_shift` rides in the result so raster export can recover true-world
+    coordinates. When `add_height_column`, samples the DEM at every survivor and
+    appends a `height_above_ground` column, then rebuilds the octree."""
+    try:
+        with _cloud_session_lock:
+            keep = ~sess.deleted
+            pts = sess.positions[keep].copy()
+            ground_col = sess.extras.get(GROUND_CLASS_SLUG)
+            is_ground = (ground_col[keep] == GROUND_CLASS_GROUND
+                         if ground_col is not None else None)
+            world_shift = sess.world_shift
+            crs_epsg = sess.crs_epsg
+        if len(pts) < 3:
+            return {"success": False, "method_used": f"dem_{request.method}", "num_triangles": 0,
+                    "num_vertices": 0, "error": "Need at least 3 points to build a DEM."}
+
+        warning = None
+        if is_ground is not None and int(is_ground.sum()) >= 3:
+            ground_source = "column"
+            ground_pts = pts[is_ground]
+        elif request.auto_segment_ground:
+            try:
+                if progress is not None:
+                    progress(0.05, "Extracting ground points (CSF)")
+                csf = _auto_csf_params(pts)   # extent-scaled — never the 5 cm plant default on a big tile
+                labels = segment_ground(pts, **csf)
+                gmask = labels == GROUND_CLASS_GROUND
+                if int(gmask.sum()) >= 3:
+                    ground_source = "csf_auto"
+                    ground_pts = pts[gmask]
+                else:
+                    ground_source = "all_points"; ground_pts = pts
+                    warning = "CSF found too few ground points; used all points."
+            except ImportError:
+                ground_source = "all_points"; ground_pts = pts
+                warning = "CSF not installed; used all points (lowest returns)."
+        else:
+            ground_source = "all_points"; ground_pts = pts
+            warning = "No ground classification; used all points (lowest returns)."
+
+        # When writing height-above-ground, hand _compute_dem every survivor's XY
+        # so it returns a gap-free ground elevation under each point (linear in the
+        # ground hull, nearest-ground outside) — never a 0-height artifact for
+        # canopy past the ground footprint or over a ground gap.
+        result = _compute_dem(ground_pts, cell_size=request.cell_size, bbox=request.bbox,
+                              method=request.method, ground_percentile=request.ground_percentile,
+                              fill_voids=request.fill_voids,
+                              sample_xy=(pts[:, :2] if request.add_height_column else None),
+                              progress=progress)
+        if not result.get("success"):
+            return result
+        sample_ground_z = result.pop("sample_ground_z", None)   # not framed
+        result["ground_source"] = ground_source
+        result["world_shift"] = [float(v) for v in (world_shift if world_shift is not None else (0.0, 0.0, 0.0))]
+        if crs_epsg is not None:
+            result["crs_epsg"] = int(crs_epsg)
+        if warning:
+            result["warning"] = warning
+
+        if request.add_height_column and sample_ground_z is not None:
+            hag = pts[:, 2] - sample_ground_z
+            hag[~np.isfinite(hag)] = 0.0
+            with _cloud_session_lock:
+                _session_add_extra_column(sess, HEIGHT_ABOVE_GROUND_SLUG, HEIGHT_ABOVE_GROUND_LABEL, hag)
+            cache_key, cache_dir, meta = _session_rebuild(sess)
+            result["cache_id"] = cache_key
+            result["cache_dir"] = str(cache_dir)
+            result["point_count"] = int(len(pts))
+            result.update(meta)
+        return result
+    except ValueError as e:
+        return {"success": False, "method_used": f"dem_{request.method}", "num_triangles": 0,
+                "num_vertices": 0, "error": str(e)}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "method_used": f"dem_{request.method}", "num_triangles": 0,
+                "num_vertices": 0, "error": f"DEM generation failed: {e}"}
+
+
+@app.post("/api/cloud/session/{session_id}/dem")
+async def session_generate_dem(session_id: str, request: SessionDemRequest, http_request: Request):
+    """DEM from a session's in-RAM survivors (ground-aware). Returns a PHB1 frame
+    (heightmap mesh + grid). When `add_height_column`, also appends a
+    `height_above_ground` scalar and rebuilds the octree (cache_id in meta)."""
+    sess = _get_cloud_session(session_id)
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: _pack_dem_frame(_do_session_dem(sess, request, progress=progress)),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
 class SessionWoodSegmentRequest(WoodSegmentationRequest):
     """Run wood/leaf segmentation on the session's in-RAM points and append a
     `wood_class` column (1=wood, 2=leaf). Inherits the segment_wood tuning
@@ -18094,6 +18735,11 @@ async def delete_cloud_session(session_id: str):
 
 GROUND_CLASS_SLUG = "ground_class"
 GROUND_CLASS_LABEL = "Ground Class"
+
+# Height-above-ground (DEM-normalized elevation; canopy-height-model precursor).
+# Written onto a cloud by the session DEM endpoint when add_height_column is set.
+HEIGHT_ABOVE_GROUND_SLUG = "height_above_ground"
+HEIGHT_ABOVE_GROUND_LABEL = "Height Above Ground"
 
 def _load_cloud_for_segmentation(
     source_path: _Path, ascii_format: Optional[str],

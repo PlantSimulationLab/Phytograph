@@ -23,7 +23,7 @@ export interface BackendPointSource {
 
 // ==================== TRIANGULATION API ====================
 
-export type TriangulationMethod = 'ball_pivoting' | 'poisson' | 'alpha_shape' | 'delaunay' | 'helios';
+export type TriangulationMethod = 'ball_pivoting' | 'poisson' | 'alpha_shape' | 'delaunay' | 'helios' | 'dem';
 
 export interface TriangulationRequest {
   points?: number[][];  // [[x, y, z], ...] — omit when `source` is set
@@ -267,6 +267,188 @@ export async function segmentGround(
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('Ground segmentation failed:', error);
+    throw error;
+  }
+}
+
+// ==================== DEM (DIGITAL ELEVATION MODEL) API ====================
+
+export type DemInterpMethod = 'tin' | 'idw' | 'nearest';
+
+export interface DemGenerateRequest {
+  points?: number[][];          // flat clouds — omit when `source` is set
+  source?: BackendPointSource;  // octree-backed clouds read from disk
+  ground_labels?: number[];     // 1=ground; restricts gridding to ground points
+  auto_segment_ground?: boolean;
+  cloth_resolution?: number;
+  rigidness?: number;
+  class_threshold?: number;
+  cell_size?: number | null;
+  bbox?: number[] | null;
+  method?: DemInterpMethod;
+  ground_percentile?: number;
+  fill_voids?: boolean;
+  // Also return a per-point height-above-ground buffer (gap-free ground under
+  // every point). Used by the flat-cloud CHM path.
+  compute_height_above_ground?: boolean;
+}
+
+export interface DemSessionRequest {
+  auto_segment_ground?: boolean;
+  cloth_resolution?: number;
+  rigidness?: number;
+  class_threshold?: number;
+  cell_size?: number | null;
+  bbox?: number[] | null;
+  method?: DemInterpMethod;
+  ground_percentile?: number;
+  fill_voids?: boolean;
+  add_height_column?: boolean;  // also write height_above_ground + rebuild octree
+}
+
+// The regular DEM grid, kept alongside the surface mesh so raster export can
+// reconstruct the raster (the mesh has lost the grid structure). `z` is
+// row-major (ny*nx), row 0 = min y, with NaN for void cells. `origin` is the
+// lower-left corner in the cloud's DISPLAY coordinates; `worldShift` re-adds the
+// import-time global shift to recover true-world coordinates for georeferencing.
+export interface DemGrid {
+  z: Float32Array;
+  nx: number;
+  ny: number;
+  cellSize: number;
+  origin: [number, number];
+  worldShift: [number, number, number];
+  // EPSG code of the source cloud's CRS (from the LAS/LAZ header), when known —
+  // written into the GeoTIFF for georeferencing. null/undefined when unknown.
+  crsEpsg?: number | null;
+}
+
+export interface DemResult {
+  success: boolean;
+  error?: string;
+  vertices: Float32Array;
+  triangles: Uint32Array;
+  normals?: Float32Array;
+  surfaceArea?: number;
+  numVertices: number;
+  numTriangles: number;
+  groundSource?: string;   // "column" | "csf_auto" | "all_points"
+  warning?: string;
+  grid?: DemGrid;
+  // Per-point height-above-ground (point z − gap-free ground), aligned to the
+  // resolved points. Present when compute_height_above_ground was set (flat path).
+  heightAboveGround?: Float32Array;
+  // Set only when a session DEM wrote a height_above_ground column and rebuilt:
+  cacheId?: string;
+  pointCount?: number;
+  // Raw frame meta (octree fields etc.) for buildSessionOctreeData after a rebuild.
+  rawMeta?: Record<string, unknown>;
+}
+
+function decodeDemFrame(meta: Record<string, unknown>, buffers: Record<string, ArrayBufferView>): DemResult {
+  if (!meta.success) {
+    return {
+      success: false,
+      error: (meta.error as string) ?? 'DEM generation failed',
+      vertices: new Float32Array(0),
+      triangles: new Uint32Array(0),
+      numVertices: 0,
+      numTriangles: 0,
+    };
+  }
+  const gridZ = buffers.grid_z as Float32Array | undefined;
+  const origin = (meta.grid_origin as number[]) ?? [0, 0];
+  const ws = (meta.world_shift as number[]) ?? [0, 0, 0];
+  return {
+    success: true,
+    vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
+    triangles: (buffers.indices as Uint32Array) ?? new Uint32Array(0),
+    normals: buffers.normals as Float32Array | undefined,
+    surfaceArea: meta.surface_area as number | undefined,
+    numVertices: meta.num_vertices as number,
+    numTriangles: meta.num_triangles as number,
+    groundSource: meta.ground_source as string | undefined,
+    warning: meta.warning as string | undefined,
+    heightAboveGround: buffers.hag as Float32Array | undefined,
+    grid: gridZ
+      ? {
+          z: gridZ,
+          nx: meta.grid_nx as number,
+          ny: meta.grid_ny as number,
+          cellSize: meta.grid_cell as number,
+          origin: [origin[0], origin[1]],
+          worldShift: [ws[0], ws[1], ws[2]],
+          crsEpsg: (meta.crs_epsg as number | undefined) ?? null,
+        }
+      : undefined,
+    cacheId: meta.cache_id as string | undefined,
+    pointCount: meta.point_count as number | undefined,
+    rawMeta: meta,
+  };
+}
+
+/** Generate a DEM from a flat cloud (inline points / source). Returns a
+ * heightmap surface mesh + the regular grid (PHB1 binary frame). */
+export async function generateDEM(
+  request: DemGenerateRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<DemResult> {
+  const { meta, buffers } = await fetchBinaryFrame('/api/dem', request, signal, 600000, onProgress, onRunId);
+  return decodeDemFrame(meta, buffers);
+}
+
+/** Generate a DEM from a session's in-RAM survivors (ground-aware). When
+ * `add_height_column`, also appends a height_above_ground scalar and rebuilds
+ * the octree (cacheId in the result). */
+export async function generateSessionDEM(
+  sessionId: string,
+  request: DemSessionRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<DemResult> {
+  const { meta, buffers } = await fetchBinaryFrame(
+    `/api/cloud/session/${sessionId}/dem`, request, signal, 600000, onProgress, onRunId);
+  return decodeDemFrame(meta, buffers);
+}
+
+export interface DemRasterExportRequest {
+  format: 'asc' | 'tif';
+  grid_z: number[];         // row-major (ny*nx); voids encoded as `nodata`
+  nx: number;
+  ny: number;
+  cell_size: number;
+  origin: [number, number]; // true-world lower-left corner
+  nodata?: number;
+  crs_epsg?: number | null;
+}
+
+/** Write a DEM grid to ESRI ASCII (.asc) or GeoTIFF (.tif); returns the file
+ * bytes (base64) for the renderer to save via the main-process fs bridge. */
+export async function exportDemRaster(
+  request: DemRasterExportRequest,
+): Promise<{ success: boolean; format: string; data_base64: string }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  try {
+    const response = await fetch(`${baseUrl}/api/dem/export-raster`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('DEM raster export failed:', error);
     throw error;
   }
 }

@@ -70,8 +70,9 @@ interface TriangulationPopupProps {
   error?: string | null;
 }
 
-// Per-method one-liner shown under the dropdown.
-const METHOD_DESCRIPTIONS: Record<TriangulationMethod, string> = {
+// Per-method one-liner shown under the dropdown. DEM is not a user-selectable
+// triangulation method here (it's its own tool), so it's omitted.
+const METHOD_DESCRIPTIONS: Partial<Record<TriangulationMethod, string>> = {
   ball_pivoting: 'Good for clean, uniformly sampled point clouds',
   poisson: 'Creates watertight meshes, good for noisy data',
   alpha_shape: 'Good for concave shapes',

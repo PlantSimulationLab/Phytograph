@@ -31,6 +31,12 @@ export interface CategoricalScheme {
 // case in this app's scans).
 export const GROUND_CLASS_ATTRIBUTE = 'ground_class';
 
+// Height-above-ground (DEM-normalized elevation; canopy-height-model precursor).
+// Written onto a cloud by the DEM tool when "compute height above ground" is on.
+// CONTINUOUS, not categorical — rendered as a gradient with a numeric colorbar
+// (register it via registerContinuousSlug, the opposite of ground_class).
+export const HEIGHT_ABOVE_GROUND_ATTRIBUTE = 'height_above_ground';
+
 const GROUND_SCHEME: CategoricalScheme = {
   attribute: GROUND_CLASS_ATTRIBUTE,
   classes: [

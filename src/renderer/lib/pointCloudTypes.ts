@@ -253,7 +253,8 @@ export interface MeshData {
 //   area        — triangle surface area
 //   scan        — the source scan each triangle came from, in that scan's color
 //                 (Helios multi-scan meshes only)
-export type MeshColorMode = 'solid' | 'inclination' | 'azimuth' | 'area' | 'scan';
+//   elevation   — the triangle's centroid height (Z), for DEM surfaces
+export type MeshColorMode = 'solid' | 'inclination' | 'azimuth' | 'area' | 'scan' | 'elevation';
 
 // Material definition for textured meshes
 export interface PlantMaterialDef {
@@ -363,6 +364,21 @@ export interface MeshEntry {
   // (z=0), coplanar with the ground grid; this flags the renderer to apply a
   // depth polygon-offset so it doesn't z-fight the grid.
   isPlane?: boolean;
+  // DEM-only (method === 'dem'): the regular elevation grid behind the surface
+  // mesh, kept so the raster-export path can write ESRI ASCII / GeoTIFF (the
+  // triangulated surface alone has lost the grid structure). `z` is row-major
+  // (ny*nx), row 0 = min y, NaN for voids; `origin` is the lower-left corner in
+  // display coords and `worldShift` recovers true-world coordinates for
+  // georeferencing.
+  demGrid?: {
+    z: Float32Array;
+    nx: number;
+    ny: number;
+    cellSize: number;
+    origin: [number, number];
+    worldShift: [number, number, number];
+    crsEpsg?: number | null;
+  };
 }
 
 // Human-readable label for a triangulation method, used in the default mesh
@@ -373,6 +389,7 @@ export const TRIANGULATION_METHOD_LABELS: Record<TriangulationMethod, string> = 
   alpha_shape: 'Alpha-shape',
   delaunay: 'Delaunay',
   helios: 'Helios',
+  dem: 'DEM',
 };
 
 // The label shown for a mesh in the scene list, delete confirm, and export panel.

@@ -377,6 +377,22 @@ export function computeMeshTriangleScalars(
   let min = Infinity;
   let max = -Infinity;
 
+  // Elevation: each triangle's centroid height (Z). Used for DEM surfaces; needs
+  // no face-normal geometry, so handle it directly.
+  if (mode === 'elevation') {
+    for (let t = 0; t < triangleCount; t++) {
+      const a = indices[t * 3] * 3;
+      const b = indices[t * 3 + 1] * 3;
+      const c = indices[t * 3 + 2] * 3;
+      const z = (vertices[a + 2] + vertices[b + 2] + vertices[c + 2]) / 3;
+      values[t] = z;
+      if (z < min) min = z;
+      if (z > max) max = z;
+    }
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return { values, min: 0, max: 1 };
+    return { values, min, max };
+  }
+
   // Only azimuth needs the outward reference; skip the lookup for other modes.
   const refFor = mode === 'azimuth' ? outwardRefForMesh(data) : null;
 
@@ -491,6 +507,7 @@ export function meshColorModeLabel(mode: MeshColorMode): string {
     case 'azimuth': return 'Azimuth (°)';
     case 'area': return 'Triangle area';
     case 'scan': return 'Source scan';
+    case 'elevation': return 'Elevation (m)';
     default: return '';
   }
 }

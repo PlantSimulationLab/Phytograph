@@ -120,6 +120,7 @@ nav:
           - Segment individual trees: workflows/segment-trees.md
       - 3. Reconstruction & analysis:
           - Triangulate a mesh: workflows/triangulate.md
+          - Generate a DEM: workflows/generate-dem.md
           - Extract a skeleton: workflows/extract-skeleton.md
           - Build a QSM: workflows/build-qsm.md
           - Add leaves to a QSM: workflows/add-leaves.md

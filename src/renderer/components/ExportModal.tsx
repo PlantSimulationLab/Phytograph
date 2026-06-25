@@ -46,6 +46,9 @@ export interface ExportModalProps {
   meshSelected: boolean;
   meshName: string;
   meshTriangleCount: number;
+  // True when the single selected mesh is a DEM surface (method === 'dem'),
+  // which unlocks the GIS raster export row.
+  meshIsDem: boolean;
   isScanning: boolean;
   skeletonSelected: boolean;
   skeletonName: string;
@@ -67,6 +70,8 @@ export interface ExportModalProps {
     columns: string[], dataFormat: string, gridIds: string[],
   ) => void;
   onExportMesh: (format: 'obj' | 'ply' | 'stl') => void;
+  // DEM raster export (mesh.method === 'dem' only): ESRI ASCII grid or GeoTIFF.
+  onExportDEMRaster: (format: 'asc' | 'tif') => void;
   onExportSkeleton: (format: 'obj' | 'ply' | 'json') => void;
   onRunScan: () => void;
 }
@@ -96,6 +101,7 @@ export function ExportModal({
   meshSelected,
   meshName,
   meshTriangleCount,
+  meshIsDem,
   isScanning,
   skeletonSelected,
   skeletonName,
@@ -103,6 +109,7 @@ export function ExportModal({
   skeletonTotalLength,
   onClose,
   onExportCloud,
+  onExportDEMRaster,
   onExportScanXml,
   onExportMesh,
   onExportSkeleton,
@@ -445,6 +452,19 @@ export function ExportModal({
                     className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200">{f.toUpperCase()}</button>
                 ))}
               </div>
+              {meshIsDem && (
+                <div data-testid="export-dem-raster" className="mt-2">
+                  <div className="text-[10px] text-neutral-500 mb-1">GIS raster (elevation grid)</div>
+                  <div className="grid grid-cols-2 gap-1">
+                    <button data-testid="export-dem-asc" onClick={() => onExportDEMRaster('asc')}
+                      title="ESRI ASCII grid (.asc)"
+                      className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200">ASC</button>
+                    <button data-testid="export-dem-tif" onClick={() => onExportDEMRaster('tif')}
+                      title="GeoTIFF (.tif)"
+                      className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200">GeoTIFF</button>
+                  </div>
+                </div>
+              )}
               <button onClick={onRunScan} disabled={isScanning}
                 className="mt-2 w-full px-2 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-600 disabled:cursor-not-allowed rounded text-xs text-white flex items-center justify-center gap-1.5">
                 {isScanning ? <><Loader2 className="w-3 h-3 animate-spin" />Scanning…</> : <><Radio className="w-3 h-3" />Synthetic LiDAR Scan</>}

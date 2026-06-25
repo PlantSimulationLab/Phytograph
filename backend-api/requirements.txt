@@ -50,3 +50,8 @@ cut_pursuit_py>=1.0.12
 numpy-indexed>=0.3.7
 scikit-image>=0.22.0
 PyMaxflow>=1.3.0
+# GeoTIFF writer for DEM raster export (/api/dem/export-raster). Pure-Python (no
+# GDAL/rasterio — keeps the PyInstaller bundle small); writes the raster plus
+# GeoTIFF georeferencing tags directly. Bundled via `collectAll` in
+# scripts/build-backend.mjs.
+tifffile>=2023.7.10

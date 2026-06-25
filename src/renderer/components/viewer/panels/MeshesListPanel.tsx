@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle, Maximize2 } from 'lucide-react';
+import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle, Maximize2, Download } from 'lucide-react';
 import type { MeshEntry, MeshColorMode, PointCloudEntry } from '../../../lib/pointCloudTypes';
 import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS } from '../../../lib/pointCloudTypes';
 import { meshHasScanColors } from '../../../lib/pointCloudHelpers';
@@ -350,6 +350,8 @@ interface MeshesListPanelProps {
   onWireframeChange: (v: boolean) => void;
   // Open the leaf-angle distribution plot for a Helios mesh.
   onOpenLeafAngles: (id: string) => void;
+  // Export a DEM surface mesh's elevation grid as a GIS raster (mesh.method === 'dem').
+  onExportDEMRaster: (id: string, format: 'asc' | 'tif') => void;
   // Apply the interactive Lmax / aspect filter to a Helios triangulation mesh.
   onHeliosFilterChange: (id: string, next: { lmax: number; maxAspectRatio: number }) => void;
   // Run the opt-in point-spacing cross-check on a Helios mesh (offered when the
@@ -400,6 +402,7 @@ export function MeshesListPanel({
   onOpacityChange,
   onWireframeChange,
   onOpenLeafAngles,
+  onExportDEMRaster,
   onHeliosFilterChange,
   onCheckSpacing,
   ladIneligibilityReason,
@@ -731,6 +734,9 @@ export function MeshesListPanel({
                   <option value="inclination">Inclination (zenith of normal)</option>
                   <option value="azimuth">Azimuth (of normal)</option>
                   <option value="area">Triangle area</option>
+                  {mesh.method === 'dem' && (
+                    <option value="elevation">Elevation (height)</option>
+                  )}
                   {meshHasScanColors(mesh.data) && (
                     <option value="scan">Source scan</option>
                   )}
@@ -770,11 +776,12 @@ export function MeshesListPanel({
                     />
                   </div>
                 )}
-                {/* Leaf-angle distribution — any triangulated mesh (Helios or the
-                    Open3D methods). The plot is pure triangle geometry; it reads
-                    per-voxel cells when the mesh carries a grid, else falls back
-                    to a single whole-mesh distribution. */}
-                {isTriangulated(mesh) && (
+                {/* Leaf-angle distribution — any triangulated SURFACE mesh (Helios
+                    or the Open3D methods). The plot is pure triangle geometry; it
+                    reads per-voxel cells when the mesh carries a grid, else falls
+                    back to a single whole-mesh distribution. Not meaningful for a
+                    DEM (terrain, not foliage), so it's hidden there. */}
+                {isTriangulated(mesh) && mesh.method !== 'dem' && (
                   <button
                     data-testid="mesh-leaf-angles"
                     onClick={(e) => { e.stopPropagation(); onOpenLeafAngles(mesh.id); }}
@@ -784,6 +791,35 @@ export function MeshesListPanel({
                     <ChartPie className="w-3 h-3" />
                     Leaf angles…
                   </button>
+                )}
+                {/* DEM raster export — write the elevation grid as a GIS raster,
+                    right where the DEM lives (the surface mesh exports as OBJ/PLY/
+                    STL via the Export panel like any mesh). */}
+                {mesh.method === 'dem' && mesh.demGrid && (
+                  <div className="space-y-1">
+                    <div className="text-[10px] text-neutral-400 flex items-center gap-1">
+                      <Download className="w-3 h-3" />
+                      Export raster
+                    </div>
+                    <div className="grid grid-cols-2 gap-1">
+                      <button
+                        data-testid="mesh-dem-export-tif"
+                        onClick={(e) => { e.stopPropagation(); onExportDEMRaster(mesh.id, 'tif'); }}
+                        title="Export as GeoTIFF (.tif) — georeferenced when the source CRS is known"
+                        className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
+                      >
+                        GeoTIFF
+                      </button>
+                      <button
+                        data-testid="mesh-dem-export-asc"
+                        onClick={(e) => { e.stopPropagation(); onExportDEMRaster(mesh.id, 'asc'); }}
+                        title="Export as ESRI ASCII grid (.asc)"
+                        className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
+                      >
+                        ASCII grid
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
             )}

@@ -7,7 +7,7 @@ or as a target for cloud-to-mesh registration.
 
 ## Where meshes come from
 
-There are three ways to bring a mesh into Phytograph:
+There are four ways to bring a mesh into Phytograph:
 
 1. **Import** an existing `.obj`, `.ply`, or `.stl` file. A textured `.obj`
    with a sibling `.mtl` and image files is imported with its textures applied
@@ -16,6 +16,9 @@ There are three ways to bring a mesh into Phytograph:
    [File formats: PLY](../reference/file-formats.md#ply-point-cloud-or-mesh).
 2. **Triangulate** a point cloud — see [Triangulate a mesh](../workflows/triangulate.md).
 3. **Generate** a plant — every procedurally generated plant arrives as a mesh of stems, branches, and leaves. See [Generate a plant](../workflows/generate-plant.md).
+4. **Generate a DEM** — a bare-earth terrain surface reconstructed from a cloud's
+   ground points, stored as a heightmap mesh coloured by elevation and
+   exportable as a GIS raster. See [Generate a DEM](../workflows/generate-dem.md).
 
 ## Triangulation methods
 
