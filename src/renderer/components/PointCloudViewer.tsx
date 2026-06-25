@@ -5230,46 +5230,76 @@ export default function PointCloudViewer({
       // Ray-trace progress. The backend reports the trace one of two ways: a single
       // scanner is one opaque C++ call with a null fraction, while a multi-scanner
       // scan streams a determinate "Ray-tracing scene (scan i/N)" tick at the start
-      // of each scan (its true scans-completed fraction, mapped into the band). For
-      // either shape we ease the bar across the band with an asymptotic creep and
-      // treat each ray-trace marker as a floor: a per-scan tick snaps the floor up
-      // to truth, and the creep keeps the bar moving between ticks so a long
-      // individual scan never looks frozen. Non-ray-trace markers ("Configuring
-      // scanners", "Extracting hits") are stage transitions — snap exactly and end
-      // the creep. Mirrors the Backfill Misses gapfill reporter.
-      let lastValue = 0;
+      // of each scan (its true scans-completed fraction, mapped into the band). The
+      // ticks are sparse (one per scanner) and a single scan reports nothing mid-
+      // trace, so a naive snap-to-each-tick bar sits then jumps. Instead we run a
+      // steady constant-speed creep across the band [0.15, 0.82] and smooth the
+      // displayed value toward it, so the bar always glides:
+      //   • the creep's pace self-calibrates from each real tick (the pulse-count
+      //     estimate is only a starting prior — a slow scan corrects it);
+      //   • the creep is capped at the NEXT per-scan checkpoint (rtFloor+segWidth)
+      //     so it can never run ahead of reality and then stall at the band end;
+      //   • a per-frame lerp eases the shown value toward that target, turning the
+      //     per-scan corrections into smooth slides rather than jumps.
+      // Non-ray-trace markers ("Configuring scanners", "Extracting hits") are stage
+      // transitions — settle onto them and end the creep. Mirrors the Backfill
+      // Misses gapfill reporter.
+      const RB0 = 0.15, RB1 = 0.82;          // ray-trace progress band
+      let lastValue = 0;                      // monotonic last-shown value
+      let displayed = 0;                      // smoothed bar position during the trace
+      let rtFloor = RB0;                      // highest real ray-trace fraction seen
+      let rtStart = -1;                       // perf-time the ray-trace phase began (-1 = not yet)
+      let rtEstTotal = estimatedMs;           // current estimate of total ray-trace ms
+      let segWidth = RB1 - RB0;               // band rise per scan (= band/N; whole band if N unknown)
+      let curLabel = '';
       let synthTimer: ReturnType<typeof setInterval> | null = null;
       const stopSynth = () => { if (synthTimer) { clearInterval(synthTimer); synthTimer = null; } };
       scanSynthStopRef.current = stopSynth;
+      const rayTick = () => {
+        const elapsed = performance.now() - rtStart;
+        // Constant-speed creep across the band over the (calibrated) total estimate.
+        const creep = RB0 + (RB1 - RB0) * Math.min(elapsed / rtEstTotal, 1);
+        // Never show more than the next real checkpoint: a slow scan parks the bar
+        // just under the upcoming tick instead of racing to the band end.
+        const ceil = Math.min(RB1, rtFloor + segWidth);
+        const target = Math.min(Math.max(rtFloor, creep), ceil);
+        // Ease toward the target (~140 ms time constant) so every move is a glide.
+        displayed += (target - displayed) * 0.25;
+        if (displayed > target) displayed = target;
+        if (displayed < lastValue) displayed = lastValue;
+        lastValue = displayed;
+        setScanProgress({ label: curLabel, value: displayed });
+      };
       const report = (p: number | null, msg: string) => {
         const isRayTrace = msg.startsWith('Ray-tracing scene');
-        if (p != null && !isRayTrace) {
-          // Real stage marker: snap the bar onto the streamed fraction, end creep.
+        if (!isRayTrace) {
+          // Stage transition (loading / configuring / extracting): end the creep and
+          // settle the bar onto the streamed fraction (forward-only).
           stopSynth();
-          lastValue = p;
-          setScanProgress({ label: msg, value: p });
+          if (p != null) displayed = Math.max(displayed, p);
+          lastValue = Math.max(lastValue, displayed);
+          setScanProgress({ label: msg, value: p != null ? Math.max(p, lastValue) : displayed });
           return;
         }
-        // Ray-trace stage: seed the creep floor (from the real per-scan fraction
-        // when present, else the band start), then ease toward a cap just shy of
-        // the next real marker (0.85 "Extracting hits"), never quite reaching it.
-        // Each new per-scan tick re-seeds a higher floor; the snap is forward-only.
-        const bandStart = p != null ? Math.max(lastValue, p) : Math.max(lastValue, 0.15);
-        lastValue = bandStart;
-        const bandEnd = 0.82;
-        const span = Math.max(bandEnd - bandStart, 0);
-        const t0 = performance.now();
-        setScanProgress({ label: msg, value: bandStart });
-        stopSynth();
-        synthTimer = setInterval(() => {
-          const elapsed = performance.now() - t0;
-          // 1 - e^(-t/τ) approaches 1 asymptotically; τ = estimatedMs/3 reaches
-          // ~95% of the band at the estimate, so the bar sits near the band end
-          // before the real marker arrives. Re-seeded per tick, so for N scanners
-          // each segment covers ~1-e^(-3/N) of its span before the next snap.
-          const eased = 1 - Math.exp(-elapsed / (estimatedMs / 3));
-          setScanProgress({ label: msg, value: bandStart + span * eased });
-        }, 100);
+        curLabel = msg;
+        if (rtStart < 0) {
+          rtStart = performance.now();
+          displayed = Math.max(displayed, lastValue, RB0);
+        }
+        // "Ray-tracing scene (scan i/N)" → one scan is band/N of the bar; this sizes
+        // both the per-scan creep ceiling and (with a real fraction) recalibration.
+        const m = /\(scan \d+\/(\d+)\)/.exec(msg);
+        if (m) segWidth = (RB1 - RB0) / Math.max(parseInt(m[1], 10), 1);
+        if (p != null) {
+          rtFloor = Math.max(rtFloor, p);
+          const elapsed = performance.now() - rtStart;
+          // Re-derive the total-trace estimate from the real pace so the creep tracks
+          // the scan's actual speed for the remaining scanners.
+          if (p > RB0 + 1e-3 && elapsed > 250) {
+            rtEstTotal = Math.max(800, Math.min(elapsed * (RB1 - RB0) / (p - RB0), 600000));
+          }
+        }
+        if (!synthTimer) synthTimer = setInterval(rayTick, 40);
       };
 
       // Split the retained-field selection: non-standard fields (deviation /
