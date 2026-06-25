@@ -406,10 +406,27 @@ class TestScanOptions:
         dist = np.linalg.norm(pos - np.array([0.0, 0.0, 3.0]), axis=1)
         assert np.allclose(dist, radius, rtol=1e-4)  # all on the sphere
 
-    def test_no_session_when_misses_not_recorded(self, client):
-        # Default (record_misses off): plain in-memory cloud, no session created.
+    def test_session_created_even_without_misses(self, client):
+        # Every synthetic scan with hits is routed through a cloud session (not
+        # just miss-recording ones) so triangulation / LAD / edits read its points
+        # by session_id instead of serialising the whole cloud as an uncapped
+        # inline JSON `points` body — which overflows the JS string limit
+        # ("Invalid string length") / OOMs the pydantic parse on a large scan.
         body = self._scan_full(client, [_scanner("n")])
-        assert body["results"][0]["session"] is None
+        res = body["results"][0]
+        assert res["num_points"] > 0
+        session = res["session"]
+        assert session is not None, "a hit-bearing scan must create a cloud session"
+        # No misses recorded → a hits-only session.
+        assert session["has_misses"] is False
+        assert session["miss_count"] == 0
+        sid = session["session_id"]
+
+        # The session must actually hold this scan's hits (the source of truth a
+        # session_id-based triangulation reads), aligned 1:1 with the render array.
+        sess = main._cloud_sessions[sid]
+        assert sess.positions.shape[0] == res["num_points"]
+        assert session["point_count"] == res["num_points"]
 
     def test_is_miss_partition_uses_compact_dtype(self, client, monkeypatch):
         # Memory contract: the per-hit miss flag is a 0/1 value, so the per-scanner

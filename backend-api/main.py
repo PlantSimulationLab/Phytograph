@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.41.3"
+BACKEND_VERSION = "0.41.4"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -6618,14 +6618,21 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
         while results:
             _ckpt()
             r = results.pop(0)
-            # When this scan recorded any miss, build a cloud session for it so the
-            # existing session-based miss overlay + LAD work. The session is built
-            # from the FULL `r` (hits + misses): its octree is hits-only, and the
-            # misses live in the session's is_miss extra dim for the overlay + LAD.
+            # Route EVERY synthetic scan through a cloud session (octree-backed,
+            # exactly like an imported cloud) so its in-RAM points are the
+            # backend's source of truth for triangulation / LAD / edits. A
+            # session_id keeps those requests tiny; the previous misses-off path
+            # left the scan a FLAT in-RAM cloud, so Helios triangulation / LAD had
+            # to serialise every point as an uncapped JSON `points` body — which
+            # overflows the JS string limit ("Invalid string length") and OOMs the
+            # pydantic parse on a multi-million-point scan, and rendered a large
+            # flat cloud past V8's heap limit. The session is built from the FULL
+            # `r` (hits + misses): its octree is hits-only, and any misses live in
+            # the session's is_miss extra dim for the overlay + LAD.
             is_miss = r["is_miss"]  # (m,) u8, 1==miss
             has_misses = bool(record_misses and is_miss.size and np.any(is_miss != 0))
             session = None
-            if has_misses:
+            if r["points"].shape[0] > 0:
                 try:
                     session = _create_lidar_scan_session(r, request.retained_standard_fields)
                 except Exception:
@@ -6708,8 +6715,10 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
 def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[str]] = None) -> dict:
     """Build a CloudSession from one synthetic scanner's in-memory hits and return
     the create_cloud_session-style metadata (session_id + octree cache + miss
-    summary). Routing a miss-recording scan through a session lets the existing
-    session-based miss overlay + LAD consume it, exactly like an imported cloud.
+    summary). Every synthetic scan is routed through a session (not just
+    miss-recording ones) so triangulation / LAD / edits read its points from the
+    backend by session_id, exactly like an imported cloud — no uncapped inline
+    `points` body. The miss overlay rides the same session when misses exist.
 
     `r` carries `points` (list of [x,y,z]), optional `colors`, the per-hit
     `scalars` dict, an `is_miss` list (1==sky), and the scanner `origin`. The
@@ -6876,8 +6885,8 @@ def _pack_lidar_scan(result: dict) -> bytes:
             "scanner_id": r["scanner_id"], "num_points": npts,
             "has_colors": has_colors, "scalar_fields": fields,
         }
-        # When a session was created (misses recorded), forward its metadata so
-        # the renderer wires sessionId/hasMisses onto the cloud's octree.
+        # Forward the cloud session's metadata (created for every scan with hits)
+        # so the renderer wires sessionId/hasMisses onto the cloud's octree.
         if r.get("session"):
             entry_meta["session"] = r["session"]
         scanners_meta.append(entry_meta)

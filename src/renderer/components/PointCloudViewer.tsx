@@ -5090,12 +5090,13 @@ export default function PointCloudViewer({
       result.scalars, n, retainedFields, STANDARD_HIT_FIELD_SLUGS,
     );
 
-    // When the backend recorded misses it routed this scan through a cloud
-    // session; attach a minimal octree ref carrying the session id + miss flag +
-    // the projected-miss octree id so the MissOctree overlay and session-backed
-    // ops (LAD, crop) work. Unlike imported octree clouds, the synthetic cloud
-    // still renders from its in-memory `positions` above — the session is only the
-    // source of truth for misses/LAD, not the primary render.
+    // Every synthetic scan with hits is routed through an octree-backed cloud
+    // session (like an imported cloud); attach the octree ref carrying the cache
+    // id + session id + miss flag + projected-miss octree id so it renders via
+    // OctreePointCloud and session-backed ops (triangulation, LAD, crop, the
+    // MissOctree overlay) read the points by session_id instead of serialising
+    // the whole cloud inline. `result.session` is absent only when the scan
+    // returned no hits or the octree build failed, leaving a plain flat cloud.
     let octree: PointCloudData['octree'];
     const session = result.session;
     if (session?.session_id) {
