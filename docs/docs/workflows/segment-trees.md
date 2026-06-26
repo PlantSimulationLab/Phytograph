@@ -36,14 +36,19 @@ Phytograph warns you (but still runs).
 3. Open the **Segment Trees** tool from the toolbar (the trees/forest icon in
    the **Tools** › Segmentation group) or the command palette
    (`Cmd/Ctrl-K` → "Segment Trees").
-4. Adjust parameters if needed:
+4. Adjust parameters if needed. The size-dependent settings (the internal
+   decimation and the max-gap below) are seeded from the cloud's extent each time
+   the panel opens — fine for a close-range scan, coarser for a field- or
+   airborne-scale tile — so a large-area scan is handled as efficiently as a
+   close-range one instead of stalling:
     - **3D reg. strength (λ₁)** — regularization for the initial 3D
       segmentation. Default `1.0`.
     - **2D reg. strength (λ₂)** — regularization for the intermediate 2D
       grouping; the most influential knob. Default `15`.
     - **Max intra-tree gap (m)** — the largest gap (from occlusion) still
-      treated as belonging to one tree. Default `2.0`. Lower it when trees stand
-      close together so neighbours aren't merged.
+      treated as belonging to one tree. Default `2.0` (seeded larger for very
+      large tiles). Lower it when trees stand close together so neighbours aren't
+      merged.
     - **Split into one cloud per tree** — when checked, also adds a separate
       cloud for each tree to the scan list.
 5. Click **Segment Trees**.
@@ -51,9 +56,10 @@ Phytograph warns you (but still runs).
 ## Results
 
 The cloud is recoloured by the `tree_instance` attribute: each tree gets a
-distinct colour, and a legend (Tree 1, Tree 2, …) appears in the bottom-right.
-Points TreeIso could not assign keep ID `0` ("Unassigned", shown grey). If you
-enabled **Split**, one new cloud per tree (`… (tree N)`) is added to the list.
+distinct colour. Points TreeIso could not assign keep ID `0` ("Unassigned",
+shown grey). (No legend is shown for tree instances — with one entry per tree it
+would fill the viewport and the IDs are arbitrary anyway.) If you enabled
+**Split**, one new cloud per tree (`… (tree N)`) is added to the list.
 
 ## Seeding trunks (optional)
 
@@ -82,6 +88,8 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
   trunk **seeds**.
 - If one tree is split into several, raise **2D reg. strength** or **Merge** the
   pieces afterward.
+- Segmentation runs in the background, so the rest of the app stays responsive
+  while it works; closing the panel cancels the run.
 
 ## See also
 

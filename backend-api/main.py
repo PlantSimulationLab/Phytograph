@@ -2908,6 +2908,68 @@ def _treeiso_params(request: "TreeSegmentationRequest"):
     )
 
 
+def _auto_treeiso_decimation(points: np.ndarray, p) -> None:
+    """Raise TreeIso's stage-1/2 voxel sizes in place when they're finer than the
+    cloud's actual point spacing — otherwise voxel decimation is a no-op and
+    cut-pursuit runs over the full N (a 2.6 M-node ALS tile → 15-20 min hang).
+
+    Mirrors `_auto_csf_params`: the renderer seeds these from extent
+    (treeSegmentDefaults.ts) when the Segment Trees panel opens, but the inline /
+    eval path rides request defaults, so the backend must self-scale or it can
+    still hang un-seeded. We measure the real signal — median nearest-neighbor
+    spacing (the `_do_spacing_check` cKDTree k=2 pattern, sampled to stay cheap on
+    multi-M clouds) — rather than extent, since spacing is exactly what makes the
+    decimation a no-op.
+
+    We bump ONLY when `decimate_res` is still at-or-below the upstream paper
+    default (0.05 / 0.1) AND too fine for the spacing. A coarser value (already
+    seeded by the UI for a big tile, or chosen by a power user) is left alone, so
+    this is idempotent with the frontend seed. Small clouds early-out and keep the
+    paper defaults bit-for-bit."""
+    from scipy.spatial import cKDTree
+
+    n = len(points)
+    if n < 50_000:
+        # Small clouds decimate fine and finish fast; never probe, never bump.
+        return
+    pts = np.asarray(points, dtype=np.float64)[:, :3]
+    finite = np.isfinite(pts).all(axis=1)
+    pts = pts[finite]
+    if len(pts) < 50_000:
+        return
+    # Median NN spacing on a sample (cKDTree k=2: [0] is the point itself,
+    # [1] its nearest neighbor). Sampling keeps the probe O(sample) on big tiles.
+    sample = pts
+    if len(pts) > 200_000:
+        idx = np.random.default_rng(0).choice(len(pts), 200_000, replace=False)
+        sample = pts[idx]
+    tree = cKDTree(pts)
+    dist, _ = tree.query(sample, k=2, workers=-1)
+    nn = dist[:, 1]
+    nn = nn[np.isfinite(nn) & (nn > 0)]
+    if nn.size == 0:
+        return
+    spacing = float(np.median(nn))
+
+    # Aim for ~3× spacing so each stage-1 voxel pools a handful of points.
+    target1 = 3.0 * spacing
+    # Defensive: if 3× spacing would still leave a huge decimated cloud (very
+    # dense tile near the point cap), coarsen further so the decimated graph stays
+    # bounded (~≤1 M nodes). Voxel count scales ~ (spacing / res)³ at constant
+    # density, so res ∝ spacing · (n / target_nodes)^(1/3).
+    TARGET_DECIMATED_NODES = 1_000_000
+    if len(pts) > TARGET_DECIMATED_NODES:
+        target1 = max(target1, spacing * (len(pts) / TARGET_DECIMATED_NODES) ** (1.0 / 3.0))
+
+    # Only raise, and only when riding the paper default (gate a hair above 0.05 /
+    # 0.1 for float tolerance — a UI-coarsened value is > 0.051 and no-ops here).
+    if p.decimate_res1 <= 0.051 and target1 > p.decimate_res1:
+        p.decimate_res1 = round(target1, 3)
+    target2 = 2.0 * p.decimate_res1
+    if p.decimate_res2 <= 0.101 and target2 > p.decimate_res2:
+        p.decimate_res2 = round(target2, 3)
+
+
 def _looks_like_ground_present(points: np.ndarray) -> bool:
     """Cheap advisory heuristic: is there a broad, flat, dense layer at the bottom?
 
@@ -2972,13 +3034,19 @@ def segment_trees(
 
 
 @app.post("/api/segment/trees", response_model=TreeSegmentationResponse)
-async def segment_trees_points(request: TreeSegmentationRequest):
+async def segment_trees_points(request: TreeSegmentationRequest, http_request: Request):
     """Segment a multi-tree cloud into per-point tree instance ids via TreeIso.
 
     Mirrors `/api/segment/ground`: inline `points` or a `source` descriptor in,
     per-point integer labels out (0 = unassigned, 1..N = trees), full resolution
     so labels align 1:1. Persisting onto an octree-backed cloud is done by
     `/api/cloud/session/{session_id}/segment_trees`.
+
+    The TreeIso pipeline is CPU-bound and runs for tens of seconds on a large
+    tile, so it executes off the event loop (`_run_blocking_until_disconnect`):
+    other `/api/*` requests stay responsive, and if the client disconnects (panel
+    closed, fetch timeout) this returns at once instead of holding the request
+    open.
 
     Labels-only by design: this interactive path returns predicted instance ids
     and nothing else. If the source carries ground-truth fields (e.g. a
@@ -3032,8 +3100,19 @@ async def segment_trees_points(request: TreeSegmentationRequest):
             np.asarray(request.seed_points, dtype=np.float64)
             if request.seed_points else None
         )
+        def _segment():
+            ti_params = _treeiso_params(request)
+            _auto_treeiso_decimation(pts, ti_params)   # ~0.8s probe — keep off-loop too
+            return segment_trees(pts, ti_params, seeds)
+
         try:
-            sub_labels = segment_trees(pts, _treeiso_params(request), seeds)
+            sub_labels = await _run_blocking_until_disconnect(_segment, http_request)
+        except ClientDisconnected:
+            # Client gave up (panel closed / fetch timeout). Nothing to return.
+            return TreeSegmentationResponse(
+                success=False, num_points=n_full,
+                error="Tree segmentation was cancelled (client disconnected).",
+            )
         except ImportError as e:
             return TreeSegmentationResponse(
                 success=False, num_points=n_full,
@@ -13909,6 +13988,46 @@ def _clear_run(run_id: str) -> None:
         _CANCEL_REGISTRY.pop(run_id, None)
 
 
+class ClientDisconnected(Exception):
+    """Raised by `_run_blocking_until_disconnect` when the HTTP client goes away
+    (panel closed, fetch AbortController timeout) before the blocking work
+    returns."""
+
+
+async def _run_blocking_until_disconnect(fn, http_request: "Optional[Request]" = None,
+                                         poll: float = 0.25):
+    """Run a blocking callable off the event loop and stop awaiting it the moment
+    the client disconnects.
+
+    For a long, CPU-bound, *non-streaming* JSON endpoint (e.g. TreeIso tree
+    segmentation), calling the worker directly inside the `async def` pins a CPU
+    core AND blocks the event loop, so the server can't service other requests
+    and a closed panel / fetch-timeout leaves the request hanging until the work
+    finishes. This runs `fn` in the default thread-pool executor instead and
+    polls `http_request.is_disconnected()`; on disconnect it raises
+    `ClientDisconnected` so the caller returns at once.
+
+    Honest limitation: the orphaned thread keeps running to completion (TreeIso's
+    cut-pursuit C-extension exposes no cancel hook and Python threads can't be
+    force-killed); its result is simply discarded. What this *does* buy is an
+    unblocked event loop and a request that no longer hangs after the client is
+    gone — the worker is no longer wedged onto the live request. The auto-scaled
+    decimation already bounds the runtime, so the orphaned thread is short-lived."""
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    fut = loop.run_in_executor(None, fn)
+    if http_request is None:
+        return await fut
+    while not fut.done():
+        if await http_request.is_disconnected():
+            # Detach: the executor thread finishes on its own and its result is
+            # GC'd. We surface the disconnect so the endpoint returns promptly.
+            raise ClientDisconnected()
+        await asyncio.sleep(poll)
+    return await fut
+
+
 class _ProgressReporter:
     """Callable progress reporter handed to streaming workers.
 
@@ -17820,8 +17939,20 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
     moving = request.trajectory is not None
     origins = None
     if moving:
-        dirs, labels, vals, origins = _apply_trajectory_origins(
-            xyz, dirs, labels, vals, request.trajectory)
+        # The join key is a per-return 'timestamp'; without it _apply_trajectory_origins
+        # raises. A moving scan virtually always carries one, but eligibility only
+        # requires timestamp OR grid — so a grid-only moving scan would otherwise break
+        # the stream with a raw 500. Return a clean, actionable error in the JSON tail
+        # instead (mirrors the gapfill-failure / PyHelios-unavailable handling below).
+        try:
+            dirs, labels, vals, origins = _apply_trajectory_origins(
+                xyz, dirs, labels, vals, request.trajectory)
+        except ValueError as exc:
+            return {"backfilled": 0, "miss_count": 0, "has_misses": False,
+                    "scan_origin": list(origin), "already_had_misses": False,
+                    "error": (f"{exc} A moving-platform scan needs a per-return "
+                              "timestamp to join returns to its trajectory; re-import "
+                              "a format that retains per-point timestamps.")}
 
     # Choose the reconstruction path by what we feed the cloud. The C++ dispatcher
     # auto-selects row/column whenever BOTH 'row'/'column' and 'timestamp' exist,
@@ -18620,9 +18751,15 @@ class SessionTreeSegmentRequest(TreeSegmentationRequest):
 
 
 @app.post("/api/cloud/session/{session_id}/segment_trees")
-async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequest):
+async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequest,
+                                http_request: Request):
     """TreeIso on the in-RAM survivors → append `tree_instance` → rebuild octree
     from the arrays. No source file read.
+
+    The TreeIso pipeline runs off the event loop (`_run_blocking_until_disconnect`)
+    so the server stays responsive during the tens-of-seconds compute and a client
+    disconnect (panel closed / fetch timeout) returns promptly instead of holding
+    the request open.
 
     If the cloud carries a `ground_class` column (from a prior ground
     segmentation that was *labeled* but not removed), the ground points are
@@ -18655,7 +18792,19 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         np.asarray(request.seed_points, dtype=np.float64)
         if request.seed_points else None
     )
-    plant_labels = segment_trees(pts[plant_mask], _treeiso_params(request), seeds=seeds)
+    plant_pts = pts[plant_mask]
+
+    def _segment():
+        ti_params = _treeiso_params(request)
+        _auto_treeiso_decimation(plant_pts, ti_params)   # ~0.8s probe — keep off-loop too
+        return segment_trees(plant_pts, ti_params, seeds=seeds)
+
+    try:
+        plant_labels = await _run_blocking_until_disconnect(_segment, http_request)
+    except ClientDisconnected:
+        # Client gave up before the octree rebuild; skip it and leave the session
+        # untouched (no tree_instance column written).
+        raise HTTPException(status_code=499, detail="Tree segmentation cancelled (client disconnected).")
     # Scatter the plant tree ids back onto all survivors; ground stays 0.
     labels = np.zeros(len(pts), dtype=np.int64)
     labels[plant_mask] = np.asarray(plant_labels)

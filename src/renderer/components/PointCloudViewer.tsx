@@ -43,6 +43,7 @@ import StatusPill from './StatusPill';
 import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams } from '../lib/scanParameters';
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
+import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
 import { poseStreamToWire, trajectoryDurationS, deriveMovingScanGrid } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible } from '../lib/scan';
@@ -743,6 +744,30 @@ export default function PointCloudViewer({
   const [treeRegStrength1, setTreeRegStrength1] = useState(1.0);
   const [treeRegStrength2, setTreeRegStrength2] = useState(15.0);
   const [treeMaxGap, setTreeMaxGap] = useState(2.0);
+  // Voxel-decimation sizes (paper defaults). Not surfaced in the panel — raw
+  // voxel sizes are an implementation detail and a foot-gun (typing 0.05 on an
+  // ALS tile re-triggers the cut-pursuit hang). They're auto-seeded from the
+  // cloud's extent when the panel opens and flow into the request invisibly; the
+  // backend additionally self-scales from actual point spacing. See
+  // treeSegmentDefaults.ts and _auto_treeiso_decimation in backend-api/main.py.
+  const [treeDecimateRes1, setTreeDecimateRes1] = useState(0.05);
+  const [treeDecimateRes2, setTreeDecimateRes2] = useState(0.1);
+  const [treeMaxOutlierGap, setTreeMaxOutlierGap] = useState(3.0);
+  const treePanelWasOpen = useRef(false);
+  useEffect(() => {
+    if (showTreeSegmentPanel && !treePanelWasOpen.current) {
+      const sel = clouds.find((c) => selectedIds.has(c.id));
+      const size = sel?.data.bounds?.size;
+      if (size) {
+        const d = treeSegmentDefaultsForExtent(Math.max(size.x, size.y));
+        setTreeDecimateRes1(d.decimateRes1);
+        setTreeDecimateRes2(d.decimateRes2);
+        setTreeMaxGap(d.maxGap);
+        setTreeMaxOutlierGap(d.maxOutlierGap);
+      }
+    }
+    treePanelWasOpen.current = showTreeSegmentPanel;
+  }, [showTreeSegmentPanel, clouds, selectedIds]);
   const [treeSplitClouds, setTreeSplitClouds] = useState(false);
   // Human-in-the-loop trunk seeding: when seeding, clicks drop a seed marker.
   const [treeSeedMode, setTreeSeedMode] = useState(false);
@@ -2735,8 +2760,14 @@ export default function PointCloudViewer({
             setBackfillProgress({ label: `${prefix}${msg}`, value });
           }, 100);
         };
+        // Moving-platform scan: forward the trajectory (same wire shape and frame
+        // buildLADRequest uses) so the backend reconstructs a PER-BEAM emission
+        // origin per return (joined by timestamp) instead of fanning misses from a
+        // single static apex. Omitted (undefined → dropped from the JSON body) for
+        // static scans, which keep the single-origin path unchanged.
+        const trajectory = p?.trajectory ? poseStreamToWire(p.trajectory) : undefined;
         try {
-          const res = await backfillMisses(oct.sessionId!, origin, raster, undefined, abort.signal, report);
+          const res = await backfillMisses(oct.sessionId!, origin, raster, trajectory, abort.signal, report);
           stopSynth();  // the request resolved — no more synthetic creep for this scan
           if (abort.signal.aborted) return;
           if (res.error) {
@@ -6640,7 +6671,10 @@ export default function PointCloudViewer({
     const tiParams = {
       reg_strength1: treeRegStrength1,
       reg_strength2: treeRegStrength2,
+      decimate_res1: treeDecimateRes1,
+      decimate_res2: treeDecimateRes2,
       max_gap: treeMaxGap,
+      max_outlier_gap: treeMaxOutlierGap,
     };
     const seeds = treeSeedPoints.length > 0 ? treeSeedPoints.map(p => [p[0], p[1], p[2]]) : undefined;
 
@@ -6771,7 +6805,7 @@ export default function PointCloudViewer({
     } finally {
       setTreeSegmentInProgress(false);
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, treeRegStrength1, treeRegStrength2, treeMaxGap, treeSplitClouds, treeSeedPoints]);
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints]);
 
   // Refine the tree_instance field in place (flat clouds only — octree clouds
   // bake the attribute on disk and would need a backend re-run). Reads the
@@ -13647,8 +13681,17 @@ export default function PointCloudViewer({
           flush against the colorbar when it grows to the bottom. Laid out in
           one bottom-aligned flex row so any combination of colorbars coexists
           without overlapping each other. */}
-      <div className="absolute bottom-4 right-[296px] z-20 flex flex-row items-end gap-3 pointer-events-none">
-        {isScalarColorMode && colorMode === 'scalar' && selectedScalarField &&
+      <div
+        data-testid="scalar-overlay"
+        data-active-scalar={colorMode === 'scalar' ? selectedScalarField ?? '' : ''}
+        className="absolute bottom-4 right-[296px] z-20 flex flex-row items-end gap-3 pointer-events-none"
+      >
+        {/* Tree instance ids are arbitrary nominal labels — a per-tree legend
+            would list every tree (Tree 1…Tree N), filling the viewport height,
+            and a continuous colorbar would be meaningless. So show neither when
+            coloring by tree_instance; the points stay colored, just no overlay. */}
+        {selectedScalarField === TREE_INSTANCE_ATTRIBUTE ? null :
+         isScalarColorMode && colorMode === 'scalar' && selectedScalarField &&
          dataRange && categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max]) ? (
           <div
             data-testid="class-legend"

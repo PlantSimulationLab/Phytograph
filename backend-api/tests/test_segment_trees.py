@@ -212,6 +212,181 @@ def test_oversize_cloud_rejected_with_actionable_error(client, monkeypatch):
     assert "exceeds" in body["error"] and "limit" in body["error"]
 
 
+# --- Auto-scaled decimation (the hang fix) ----------------------------------
+# TreeIso's paper defaults (decimate_res1 0.05 m, res2 0.1 m) are tuned for ~1 m
+# TLS scans. On a large/sparse cloud whose spacing is coarser than 5 cm,
+# decimation becomes a no-op and cut-pursuit runs over the full N — the
+# 15-20 min hang. `_auto_treeiso_decimation` self-scales the voxel sizes from the
+# cloud's actual median spacing so the inline / eval path can't hang un-seeded.
+
+
+def _treeiso_params_defaults():
+    """A TreeIsoParams-like object carrying the paper decimation defaults.
+
+    Uses a plain namespace so this test runs without the TreeIso C-extension —
+    `_auto_treeiso_decimation` only reads/writes `decimate_res1` / `decimate_res2`."""
+    from types import SimpleNamespace
+    return SimpleNamespace(decimate_res1=0.05, decimate_res2=0.1)
+
+
+def test_auto_decimation_leaves_small_dense_cloud_at_paper_defaults():
+    """A small, dense (TLS-scale) cloud decimates fine — params stay untouched,
+    so close-range behaviour is bit-for-bit unchanged."""
+    rng = np.random.default_rng(0)
+    # 20k points in a 1 m box, ~few-mm spacing — well under the 50k early-out.
+    pts = rng.uniform(0, 1.0, size=(20_000, 3))
+    p = _treeiso_params_defaults()
+    main._auto_treeiso_decimation(pts, p)
+    assert p.decimate_res1 == 0.05
+    assert p.decimate_res2 == 0.1
+
+
+def test_auto_decimation_coarsens_large_sparse_cloud():
+    """A large, sparse (ALS-scale) cloud whose spacing exceeds the 5 cm voxel gets
+    its decimation bumped to ~3× spacing, with res2 = 2× res1."""
+    rng = np.random.default_rng(1)
+    # 120k points over a ~70 m tile, ~0.3 m horizontal grid + 20 m random Z →
+    # median 3D NN spacing ~0.4 m, far coarser than the 0.05 m default voxel (the
+    # BR04 failure mode in miniature). Measure the actual spacing so the assertion
+    # tracks the cKDTree result rather than a hand-guessed number.
+    from scipy.spatial import cKDTree
+    side = int(np.ceil(120_000 ** 0.5))
+    gx, gy = np.meshgrid(np.arange(side), np.arange(side))
+    grid = np.c_[gx.ravel(), gy.ravel()][:120_000].astype(np.float64) * 0.3
+    pts = np.c_[grid, rng.uniform(0, 20.0, len(grid))]
+    pts[:, :2] += rng.uniform(-0.02, 0.02, size=(len(pts), 2))  # light jitter
+    d, _ = cKDTree(pts).query(pts, k=2, workers=-1)
+    spacing = float(np.median(d[:, 1]))
+    p = _treeiso_params_defaults()
+    main._auto_treeiso_decimation(pts, p)
+    assert p.decimate_res1 > 0.05, "decimation must coarsen for a sparse tile"
+    assert p.decimate_res1 == pytest.approx(3 * spacing, rel=0.01)  # ~3 × spacing
+    assert p.decimate_res2 == pytest.approx(2 * p.decimate_res1, rel=1e-6)
+
+
+def test_auto_decimation_leaves_user_coarsened_value_alone():
+    """A request already carrying a coarse decimate (UI-seeded for a big tile, or
+    a power-user choice) is left untouched — idempotent with the frontend seed."""
+    rng = np.random.default_rng(2)
+    side = int(np.ceil(120_000 ** 0.5))
+    gx, gy = np.meshgrid(np.arange(side), np.arange(side))
+    grid = np.c_[gx.ravel(), gy.ravel()][:120_000].astype(np.float64) * 0.15
+    pts = np.c_[grid, rng.uniform(0, 20.0, len(grid))]
+    from types import SimpleNamespace
+    p = SimpleNamespace(decimate_res1=0.5, decimate_res2=1.0)  # already coarse
+    main._auto_treeiso_decimation(pts, p)
+    assert p.decimate_res1 == 0.5  # gate (<= 0.051) excludes it → no change
+    assert p.decimate_res2 == 1.0
+
+
+@requires_treeiso
+def test_large_sparse_cloud_segments_in_bounded_time():
+    """Regression for the hang: a large, sparse multi-tree cloud must segment in
+    well under a minute (it ran 15-20+ min before the auto-decimation fix) and
+    recover a plausible number of trees — asserting correctness AND bounded time,
+    not merely "didn't throw"."""
+    import time
+    from treeiso.treeiso_core import segment_trees, TreeIsoParams
+
+    rng = np.random.default_rng(3)
+    # 9 well-separated "trees" on a 3×3 grid over a ~120 m plot (40 m spacing),
+    # each ~22k points: a vertical trunk + a Gaussian crown ball. Trees are far
+    # apart relative to their crown radius so they're genuinely separable, while
+    # the overall extent is coarse enough (~0.1-0.3 m spacing) to exercise the
+    # auto-decimation path. ~200k points total — the BR04 scale in miniature.
+    n_trees = 9
+    spacing_m = 40.0
+    centers = np.array([(i * spacing_m, j * spacing_m)
+                        for i in range(3) for j in range(3)], dtype=np.float64)
+    clouds, truth = [], []
+    for i, (cx, cy) in enumerate(centers):
+        # Trunk: a thin vertical column 0-8 m.
+        kt = 4_000
+        trunk = np.c_[
+            cx + rng.normal(0, 0.1, kt),
+            cy + rng.normal(0, 0.1, kt),
+            rng.uniform(0, 8.0, kt),
+        ]
+        # Crown: a 3 m-radius ball centred at ~11 m.
+        kc = 18_000
+        crown = np.c_[
+            cx + rng.normal(0, 3.0, kc),
+            cy + rng.normal(0, 3.0, kc),
+            11.0 + rng.normal(0, 2.5, kc),
+        ]
+        clouds.append(np.vstack([trunk, crown]))
+        truth.append(np.full(kt + kc, i))
+    pts = np.vstack(clouds)
+    truth = np.concatenate(truth)
+    # Sanity: spacing is genuinely coarser than the paper voxel (else the test
+    # wouldn't exercise the bug).
+    p = TreeIsoParams()
+    main._auto_treeiso_decimation(pts, p)
+    assert p.decimate_res1 > 0.05, "test cloud must trigger the coarsening path"
+
+    t0 = time.perf_counter()
+    labels = segment_trees(pts, p)
+    elapsed = time.perf_counter() - t0
+    print(f"\nbounded-time: {len(pts)} pts, res1={p.decimate_res1} -> "
+          f"{len(np.unique(labels))} trees in {elapsed:.1f}s")
+    assert elapsed < 60.0, f"segmentation took {elapsed:.1f}s (regression: was hanging)"
+    n_found = len(np.unique(labels))
+    assert 5 <= n_found <= 20, f"expected ~{n_trees} trees, got {n_found}"
+
+
+# --- Off-loop execution + client-disconnect handling ------------------------
+# The TreeIso pipeline is CPU-bound and runs for tens of seconds on a large tile.
+# `_run_blocking_until_disconnect` runs it off the event loop so the server stays
+# responsive and a client disconnect (panel closed / fetch timeout) returns
+# promptly instead of holding the request open while the worker grinds on.
+
+
+def test_run_blocking_returns_worker_result_when_connected():
+    """With a still-connected client, the helper returns the worker's value."""
+    import asyncio
+
+    class _Connected:
+        async def is_disconnected(self):
+            return False
+
+    def work():
+        return 1234
+
+    out = asyncio.run(main._run_blocking_until_disconnect(work, _Connected(), poll=0.01))
+    assert out == 1234
+
+
+def test_run_blocking_raises_on_client_disconnect_without_awaiting_worker():
+    """When the client disconnects mid-run, the helper raises ClientDisconnected
+    PROMPTLY — it must NOT block until the (slow) worker finishes. We prove both:
+    the exception type, and that we returned long before the worker's own runtime."""
+    import asyncio
+    import time
+
+    def slow_work():
+        # Simulates the uninterruptible TreeIso pipeline: a long blocking call
+        # with no cancel hook. 5 s is far longer than the ~0.02 s it should take
+        # the helper to notice the disconnect and bail.
+        time.sleep(5.0)
+        return "should-be-discarded"
+
+    class _DisconnectsImmediately:
+        async def is_disconnected(self):
+            return True
+
+    async def run():
+        t0 = time.perf_counter()
+        with pytest.raises(main.ClientDisconnected):
+            await main._run_blocking_until_disconnect(slow_work, _DisconnectsImmediately(), poll=0.01)
+        return time.perf_counter() - t0
+
+    # Returned promptly on disconnect — did NOT wait out the 5 s worker. (The
+    # orphaned worker thread keeps running and is GC'd; Python can't kill it —
+    # that's the documented limitation. The point is the request didn't hang.)
+    elapsed = asyncio.run(run())
+    assert elapsed < 1.0, f"helper blocked for {elapsed:.2f}s waiting on the worker"
+
+
 # --- PLY support (the benchmark format) -------------------------------------
 # The Cherlet TLS benchmark ships as PLY with `instance` / `semantic` fields.
 # These tests cover that the segmentation path reads PLY and CARRIES the GT

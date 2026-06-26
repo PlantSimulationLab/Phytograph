@@ -12,8 +12,8 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'multi_tree.xyz');
 // (cut-pursuit) segments it into multiple individual trees. Imports become
 // octree-backed, so this drives the real `/api/segment/trees/apply` path:
 // import → select → open Tree Segmentation → run → assert the cloud is
-// re-coloured by the discrete `tree_instance` attribute (legend shows per-tree
-// classes), exercising the live backend end-to-end (no mocks).
+// re-coloured by the discrete `tree_instance` attribute (no legend is shown for
+// tree instances — see below), exercising the live backend end-to-end (no mocks).
 const EXPECTED_POINTS = readFileSync(FIXTURE, 'utf8')
   .split('\n')
   .filter((l) => l.trim().length > 0).length;
@@ -39,14 +39,18 @@ test('segments individual trees and colours by the tree_instance attribute', asy
     // Run TreeIso. The backend re-converts the octree carrying tree_instance.
     await page.getByTestId('tree-segment-run-button').click();
 
-    // Once tree_instance is the active scalar, the discrete class legend appears
-    // — proof the cloud is coloured per-tree (categorical), not by a gradient.
-    const legend = page.getByTestId('class-legend');
-    await expect(legend).toBeVisible({ timeout: 120_000 });
-    await expect(legend).toHaveAttribute('data-legend-attribute', 'tree_instance');
-    // At least two distinct trees were found and labelled.
-    await expect(legend.getByText('Tree 1', { exact: true })).toBeVisible();
-    await expect(legend.getByText('Tree 2', { exact: true })).toBeVisible();
+    // The cloud becomes coloured by the tree_instance scalar — proof the
+    // segmentation ran and its labels drive colour. We read the active scalar
+    // from the always-present overlay container rather than the legend, because
+    // tree_instance deliberately shows NO legend (one entry per tree would fill
+    // the viewport; the ids are arbitrary nominal labels).
+    const overlay = page.getByTestId('scalar-overlay');
+    await expect(overlay).toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 120_000 });
+
+    // And the per-tree legend is suppressed for tree_instance (the regression
+    // this asserts: no full-height Tree 1…Tree N list, no colorbar).
+    await expect(page.getByTestId('class-legend')).toHaveCount(0);
+    await expect(page.getByTestId('colorbar')).toHaveCount(0);
   } finally {
     await close();
   }
