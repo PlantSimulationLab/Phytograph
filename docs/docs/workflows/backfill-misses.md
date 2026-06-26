@@ -66,5 +66,8 @@ one-click **Backfill Misses** button. See
   on the cropped cloud before estimating leaf-area density. (A crop never
   deletes sky/miss points themselves; it only removes hits.)
 - For [moving-platform scans](../concepts/scans.md#moving-platform-scans),
-  misses are reconstructed from the per-return timestamps (the row/column
-  path doesn't apply to a moving sweep).
+  each return's timestamp is joined to the platform **trajectory** to
+  reconstruct a per-beam emission origin, so the recovered misses follow the
+  flight path rather than fanning from a single static apex. (The row/column
+  grid path doesn't apply to a moving sweep; a per-return timestamp is
+  required.)

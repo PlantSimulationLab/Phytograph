@@ -479,3 +479,83 @@ def test_session_to_lad_arrays_appends_buffer_as_misses(stub_pyhelios):
         sess, [0, 0, 5], include_backfilled=False)
     assert rxyz.shape[0] == len(_TS_POSITIONS)
     assert rflags["has_misses"] is False
+
+
+# ---------------------------------------------------------------------------
+# Moving-platform path: a request carrying a trajectory reconstructs per-beam
+# emission origins (joined by timestamp) instead of fanning misses from a single
+# static apex. Mirrors what the renderer now forwards (poseStreamToWire) and the
+# LAD beam path already does via _apply_trajectory_origins.
+# ---------------------------------------------------------------------------
+
+def _trajectory(t0=1.0, t1=3.0):
+    """A two-pose PoseStream spanning [t0, t1] with distinct positions (identity
+    attitude) so the timestamp join yields per-return origins that VARY."""
+    return main.PoseStream(
+        poses=[
+            main.PoseSample(t=t0, x=0.0, y=0.0, z=10.0, qx=0.0, qy=0.0, qz=0.0, qw=1.0),
+            main.PoseSample(t=t1, x=20.0, y=0.0, z=10.0, qx=0.0, qy=0.0, qz=0.0, qw=1.0),
+        ],
+    )
+
+
+def test_moving_trajectory_reconstructs_per_beam_origins(stub_pyhelios):
+    # A moving-platform scan: timestamps in [1,3] join to a trajectory spanning the
+    # same range. _apply_trajectory_origins must run — appending origin_x/y/z data
+    # columns the C++ beam path reads — and the persisted buffer must carry the
+    # per-miss origins so the LAD reader gets an origin column.
+    sess = _make_session(
+        _TS_POSITIONS, {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}])
+    _register(sess)
+
+    resp = _call(sess.session_id, origin=[0, 0, 10], trajectory=_trajectory())
+
+    assert resp["backfilled"] == _FakeCloud.SYNTH
+    assert resp["has_misses"] is True
+    # The trajectory join attached origin_x/y/z to the hit data map (proof the
+    # moving branch ran, not the static single-origin one).
+    cloud = stub_pyhelios.instances[-1]
+    for slug in ("origin_x", "origin_y", "origin_z"):
+        assert slug in cloud._labels_seen
+    # The miss buffer carries a broadcast per-miss origin column for the LAD reader.
+    assert sess.backfilled_misses is not None
+    origins = sess.backfilled_misses.get("origins")
+    assert origins is not None
+    assert origins.shape == (_FakeCloud.SYNTH, 3)
+
+
+def test_static_request_omits_trajectory_keeps_single_origin(stub_pyhelios):
+    # Regression: with no trajectory the moving branch is skipped entirely — no
+    # origin_x/y/z columns, no buffer origins — identical to the legacy static path.
+    sess = _make_session(
+        _TS_POSITIONS, {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}])
+    _register(sess)
+
+    resp = _call(sess.session_id, origin=[0, 0, 5])  # no trajectory
+
+    assert resp["backfilled"] == _FakeCloud.SYNTH
+    cloud = stub_pyhelios.instances[-1]
+    assert "origin_x" not in cloud._labels_seen
+    assert sess.backfilled_misses.get("origins") is None
+
+
+def test_moving_without_timestamp_returns_clean_error(stub_pyhelios):
+    # A grid-only session is eligible (has_grid) but a trajectory needs a per-return
+    # timestamp to join. The unguarded join would raise ValueError mid-stream; the
+    # worker must instead return a clean, actionable error in the JSON tail.
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"row_index": [0, 1, 2], "column_index": [0, 0, 1]},
+        [{"slug": "row_index", "label": "Row Index"},
+         {"slug": "column_index", "label": "Column Index"}],
+    )
+    _register(sess)
+
+    resp = _call(sess.session_id, origin=[0, 0, 10], trajectory=_trajectory())
+
+    assert resp["backfilled"] == 0
+    assert resp["has_misses"] is False
+    assert "timestamp" in resp["error"].lower()
+    assert sess.backfilled_misses is None  # nothing persisted on the guarded error
