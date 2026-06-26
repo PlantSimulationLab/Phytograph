@@ -816,6 +816,19 @@ export interface LADScanEntry extends HeliosScanEntry {
   trajectory?: unknown;
 }
 
+// A DEM elevation raster sent to terrain-following LAD. Mirrors the backend
+// DemRaster model. `grid_z` is row-major (row 0 = min y), `origin` is the world
+// lower-left corner [minx, miny], and voids are encoded as `nodata` (JSON can't
+// carry NaN). Built from a DEM MeshEntry's demGrid (origin shifted to world).
+export interface LADDemRaster {
+  grid_z: number[];
+  nx: number;
+  ny: number;
+  cell: number;
+  origin: [number, number];
+  nodata?: number;
+}
+
 export interface LADRequest {
   scans: LADScanEntry[];
   grid: HeliosGrid;              // REQUIRED — the LAD voxel grid
@@ -834,6 +847,12 @@ export interface LADRequest {
   // Required only for moving-platform scans, whose pulses can't be triangulated
   // to derive G(theta) per cell. Ignored for static scans.
   gtheta?: number;
+  // Terrain following: when true (with a DEM), each voxel column rides the DEM
+  // surface. `safety_fraction` is the clearance between the surface and the lowest
+  // cell, as a fraction of one cell's height. `dem` is required when enabled.
+  terrain_follow?: boolean;
+  safety_fraction?: number;
+  dem?: LADDemRaster;
 }
 
 export interface LADVoxelResult {

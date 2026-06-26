@@ -58,8 +58,15 @@ class _FakeCloud:
     def addHitPointsWithData(self, scanID, xyz, dirs, labels, vals):
         self.calls.append(("addHitPointsWithData", scanID, len(xyz), tuple(labels or [])))
 
-    def addGrid(self, center, size, ndiv, rotation=0.0):
-        self.calls.append(("addGrid", tuple(center), tuple(size), tuple(ndiv), rotation))
+    def addGrid(self, center, size, ndiv, rotation=0.0, column_offsets=None):
+        self.calls.append(("addGrid", tuple(center), tuple(size), tuple(ndiv), rotation,
+                           tuple(column_offsets) if column_offsets is not None else None))
+        # Mimic Helios's k-major (for k: for j: for i) cell ordering so the result
+        # loop's `i % (nx*ny)` column mapping and the dropped-column filter can be
+        # exercised against a multi-cell grid.
+        self.gridcells = int(ndiv[0]) * int(ndiv[1]) * int(ndiv[2])
+        self._ndiv = (int(ndiv[0]), int(ndiv[1]), int(ndiv[2]))
+        self._column_offsets = list(column_offsets) if column_offsets is not None else None
 
     def triangulateHitPoints(self, lmax, aspect):
         self.calls.append(("triangulate", lmax, aspect))
@@ -87,7 +94,22 @@ class _FakeCloud:
         return self.gridcells
 
     def getCellCenter(self, i):
-        return main_vec(0.0, 0.0, 0.5)
+        # Single-cell default keeps the legacy stub behavior. For a multi-cell grid
+        # (terrain tests) reconstruct the unrotated lattice center + per-column
+        # offset, mirroring the real LiDARcloud::addGrid arithmetic, so tests can
+        # assert the reported z tracks the DEM.
+        ndiv = getattr(self, "_ndiv", (1, 1, 1))
+        nx, ny, nz = ndiv
+        if nx * ny * nz <= 1:
+            return main_vec(0.0, 0.0, 0.5)
+        k = i // (nx * ny)
+        rem = i % (nx * ny)
+        j = rem // nx
+        ii = rem % nx
+        # grid center [0,0,*], size [nx,ny,nz] => unit cells; lattice z origin at 0.
+        z = 0.5 + k * 1.0
+        off = (self._column_offsets[rem] if getattr(self, "_column_offsets", None) else 0.0)
+        return main_vec(-0.5 * nx + ii + 0.5, -0.5 * ny + j + 0.5, z + off)
 
     def getCellSize(self, i):
         return main_vec(1.0, 1.0, 1.0)
@@ -1072,3 +1094,216 @@ class TestCountPointsPerCellRotation:
         counts = main._count_points_per_cell([pts], centers, sizes, grid_rotation_rad=0.0)
         assert counts[1] == 1   # (+0.4, 0) -> cell 1 (x=+0.5)
         assert counts[0] == 1   # (-0.4, 0) -> cell 0 (x=-0.5)
+
+
+# ---------------------------------------------------------------------------
+# Terrain-following voxel grids (DEM-sampled per-column z offsets)
+# ---------------------------------------------------------------------------
+
+def _flat_dem(nx, ny, cell, origin, z):
+    """A fully-valid DEM raster at a constant elevation."""
+    return main.DemRaster(grid_z=[float(z)] * (nx * ny), nx=nx, ny=ny,
+                          cell=cell, origin=list(origin))
+
+
+class TestSampleDemColumns:
+    """Pure-function tests for _sample_dem_columns (no pyhelios needed)."""
+
+    def test_flat_dem_offsets_lift_grid_bottom_to_surface_plus_clearance(self):
+        # 2x2x4 grid, size 2x2x4 (unit cells), centered so its bottom is at z=0.
+        # Grid center z = 2.0 (bottom = 0.0). DEM at z=10 everywhere.
+        # safety_fraction 0.5, cell height = size.z/nz = 4/4 = 1 -> clearance 0.5.
+        # Each column's bottom should land at 10 + 0.5 = 10.5, so the offset added
+        # to the regular lattice (whose bottom is at grid_bottom=0) is 10.5.
+        offs, kept, dropped = main._sample_dem_columns(
+            grid_center=[0.0, 0.0, 2.0], grid_size=[2.0, 2.0, 4.0],
+            grid_nx=2, grid_ny=2, grid_nz=4, grid_rotation_rad=0.0,
+            dem=_flat_dem(4, 4, 1.0, [-2.0, -2.0], 10.0), safety_fraction=0.5)
+        assert dropped == 0
+        assert kept.all()
+        assert len(offs) == 4
+        for o in offs:
+            assert o == pytest.approx(10.5)
+
+    def test_sloped_dem_gives_per_column_offsets(self):
+        # DEM elevation increases with x: cell (di) has z = di. With a 2x2x2 grid
+        # spanning the DEM, the +x columns should get a larger offset than -x.
+        nx_d, ny_d = 4, 4
+        grid_z = []
+        for j in range(ny_d):
+            for i in range(nx_d):
+                grid_z.append(float(i))  # z rises with x
+        dem = main.DemRaster(grid_z=grid_z, nx=nx_d, ny=ny_d, cell=1.0,
+                             origin=[-2.0, -2.0])
+        offs, kept, dropped = main._sample_dem_columns(
+            grid_center=[0.0, 0.0, 1.0], grid_size=[2.0, 2.0, 2.0],
+            grid_nx=2, grid_ny=2, grid_nz=2, grid_rotation_rad=0.0,
+            dem=dem, safety_fraction=0.0)
+        assert dropped == 0 and kept.all()
+        # columns: [j*nx+i]; i=0 are -x, i=1 are +x. +x columns sample a higher DEM.
+        assert offs[1] > offs[0]   # (i=1,j=0) > (i=0,j=0)
+        assert offs[3] > offs[2]   # (i=1,j=1) > (i=0,j=1)
+
+    def test_void_cell_inherits_nearest_valid(self):
+        # One void (NaN) cell in the middle of an otherwise-flat DEM; the column
+        # over it must inherit a finite neighbor, not be dropped.
+        nan = float("nan")
+        grid_z = [5.0] * 9
+        grid_z[4] = nan  # center cell void
+        dem = main.DemRaster(grid_z=grid_z, nx=3, ny=3, cell=1.0, origin=[-1.5, -1.5])
+        offs, kept, dropped = main._sample_dem_columns(
+            grid_center=[0.0, 0.0, 1.0], grid_size=[1.0, 1.0, 2.0],
+            grid_nx=1, grid_ny=1, grid_nz=2, grid_rotation_rad=0.0,
+            dem=dem, safety_fraction=0.0)
+        # Single column samples the (void) center cell -> inherits 5.0, kept.
+        assert dropped == 0
+        assert kept.all()
+        assert offs[0] == pytest.approx(5.0)  # grid bottom at 0 -> offset == dem_z
+
+    def test_columns_outside_footprint_are_dropped(self):
+        # Grid larger than the DEM: outer columns fall outside the raster footprint.
+        # 4x4 grid over a 10-unit span -> column centers at +-3.75, +-1.25. A DEM
+        # footprint of [-2, 2] catches the +-1.25 columns and drops the +-3.75 ones.
+        dem = _flat_dem(4, 4, 1.0, [-2.0, -2.0], 3.0)  # footprint x,y in [-2, 2]
+        offs, kept, dropped = main._sample_dem_columns(
+            grid_center=[0.0, 0.0, 1.0], grid_size=[10.0, 10.0, 2.0],
+            grid_nx=4, grid_ny=4, grid_nz=1, grid_rotation_rad=0.0,
+            dem=dem, safety_fraction=0.0)
+        assert dropped > 0
+        assert not kept.all()
+        assert kept.any()  # the central columns over the DEM survive
+        # Exactly the inner 2x2 block of columns (|center| = 1.25) survives.
+        assert kept.sum() == 4
+
+
+class TestLADTerrainFollow:
+    """Request-path tests with pyhelios stubbed."""
+
+    def _terrain_request(self, tmp_path, dem, nx=2, ny=2, nz=2, **over):
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5 0\n-0.1 0.0 0.6 0\n0.2 -0.1 0.4 0\n9.0 9.0 9.0 1\n")
+        grid = main.HeliosGrid(center=[0, 0, 1.0], size=[2, 2, 2], nx=nx, ny=ny, nz=nz)
+        scan = main.HeliosScanEntry(file_path=str(f), ascii_format="x y z is_miss",
+                                    origin=[0, 0, 5], return_type="single")
+        return main.LADComputeRequest(
+            scans=[scan], grid=grid, lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1,
+            terrain_follow=True, dem=dem, **over)
+
+    def test_offsets_passed_to_addgrid(self, tmp_path, stub_pyhelios):
+        dem = _flat_dem(4, 4, 1.0, [-2.0, -2.0], 10.0)
+        result = main._do_lad_computation(self._terrain_request(tmp_path, dem))
+        assert result["success"] is True
+        assert result["terrain_follow"] is True
+        assert result["dropped_columns"] == 0
+        cloud = stub_pyhelios.instances[-1]
+        addgrid = [c for c in cloud.calls if c[0] == "addGrid"][-1]
+        column_offsets = addgrid[5]
+        assert column_offsets is not None
+        assert len(column_offsets) == 4   # nx*ny
+        # flat DEM at 10, clearance 0.5*(2/2)=0.5, grid bottom 0 -> offset 10.5
+        for o in column_offsets:
+            assert o == pytest.approx(10.5)
+        # Reported cell centers track the lifted columns (bottom layer z ~ 11.0).
+        zmin = min(c["center"][2] for c in result["cells"])
+        assert zmin == pytest.approx(11.0, abs=1e-6)  # 0.5 (cell mid) + 10.5 offset
+
+    def test_terrain_follow_requires_dem(self, tmp_path, stub_pyhelios):
+        req = self._terrain_request(tmp_path, _flat_dem(4, 4, 1.0, [-2.0, -2.0], 1.0))
+        object.__setattr__(req, "dem", None)
+        result = main._do_lad_computation(req)
+        assert result["success"] is False
+        assert "dem" in result["error"].lower()
+
+    def test_dropped_columns_excluded_and_reported(self, tmp_path, stub_pyhelios):
+        # DEM smaller than the grid footprint: outer columns drop out.
+        dem = _flat_dem(1, 1, 1.0, [-0.5, -0.5], 4.0)  # footprint only [-0.5,0.5]
+        req = self._terrain_request(tmp_path, dem, nx=2, ny=2, nz=1)
+        result = main._do_lad_computation(req)
+        # 2x2 grid spanning [-1,1]; columns at +-0.5 centers -> all 4 inside [-0.5,0.5]?
+        # Centers are at +-0.5; the DEM covers [-0.5,0.5], so di=floor((+-0.5+0.5)/1)
+        # = 0 or 1; only the in-range ones survive. Expect at least one dropped.
+        assert result["dropped_columns"] >= 1
+        # Surviving cells count == kept columns * nz.
+        assert len(result["cells"]) == (4 - result["dropped_columns"])
+        assert any("dropped" in w.lower() for w in result.get("warnings", []))
+
+    def test_all_columns_dropped_errors(self, tmp_path, stub_pyhelios):
+        # DEM far away from the grid -> every column outside footprint.
+        dem = _flat_dem(2, 2, 1.0, [1000.0, 1000.0], 4.0)
+        result = main._do_lad_computation(self._terrain_request(tmp_path, dem))
+        assert result["success"] is False
+        assert "outside the dem" in result["error"].lower()
+
+
+class TestCountPointsTerrain:
+    """_count_points_per_cell must bin correctly when columns are z-shifted."""
+
+    def test_terrain_offsets_restore_regular_binning(self):
+        # 1x1x2 grid, one column lifted by +10. A point at z = 10.5 (world) sits in
+        # the LOWER terrain cell (whose world z-range is [10, 11]); without terrain
+        # awareness it would bin against an unshifted [0,2] lattice and miss.
+        nx, ny, nz = 1, 1, 2
+        col_off = [10.0]
+        # cells (unrotated lattice z 0.5/1.5) + offset 10 -> world centers 10.5/11.5
+        centers = [main_vec(0.0, 0.0, 0.5 + 10.0), main_vec(0.0, 0.0, 1.5 + 10.0)]
+        sizes = [main_vec(1.0, 1.0, 1.0), main_vec(1.0, 1.0, 1.0)]
+        pts = np.array([[0.0, 0.0, 10.4], [0.0, 0.0, 11.6]], dtype=np.float64)
+        counts = main._count_points_per_cell(
+            [pts], centers, sizes, grid_rotation_rad=0.0,
+            column_z_offsets=col_off, ndiv=(nx, ny, nz))
+        assert counts[0] == 1   # 10.4 -> lower terrain cell [10,11]
+        assert counts[1] == 1   # 11.6 -> upper terrain cell [11,12]
+
+
+class TestLADGthetaOverride:
+    """A static scan can skip triangulation and invert with a supplied G(theta)."""
+
+    def _static_request(self, tmp_path, **over):
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5 0\n-0.1 0.0 0.6 0\n0.2 -0.1 0.4 0\n9.0 9.0 9.0 1\n")
+        grid = main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1)
+        scan = main.HeliosScanEntry(file_path=str(f), ascii_format="x y z is_miss",
+                                    origin=[0, 0, 5], return_type="single")
+        return main.LADComputeRequest(scans=[scan], grid=grid, lmax=0.1,
+                                      max_aspect_ratio=4.0, min_voxel_hits=1, **over)
+
+    def test_override_skips_triangulation_and_passes_gtheta(self, tmp_path, stub_pyhelios):
+        req = self._static_request(tmp_path, gtheta_override=True, gtheta=0.5)
+        result = main._do_lad_computation(req)
+        assert result["success"] is True
+        cloud = stub_pyhelios.instances[-1]
+        names = [c[0] for c in cloud.calls]
+        # The override path must NOT triangulate...
+        assert "triangulate" not in names
+        # ...and must pass the supplied G(theta) to calculateLeafArea.
+        cla = [c for c in cloud.calls if c[0] == "calculateLeafArea"][-1]
+        assert cla[3] == pytest.approx(0.5)   # (name, min_hits, element_width, Gtheta)
+
+    def test_static_without_override_still_triangulates(self, tmp_path, stub_pyhelios):
+        result = main._do_lad_computation(self._static_request(tmp_path))
+        assert result["success"] is True
+        cloud = stub_pyhelios.instances[-1]
+        names = [c[0] for c in cloud.calls]
+        assert "triangulate" in names
+        cla = [c for c in cloud.calls if c[0] == "calculateLeafArea"][-1]
+        assert cla[3] is None   # no supplied G(theta) on the triangulated path
+
+    def test_override_defaults_gtheta_to_half_with_warning(self, tmp_path, stub_pyhelios):
+        # Override on but no gtheta supplied -> default 0.5 + a warning.
+        req = self._static_request(tmp_path, gtheta_override=True)
+        result = main._do_lad_computation(req)
+        assert result["success"] is True
+        cloud = stub_pyhelios.instances[-1]
+        cla = [c for c in cloud.calls if c[0] == "calculateLeafArea"][-1]
+        assert cla[3] == pytest.approx(0.5)
+        assert any("g(theta)" in w.lower() for w in result.get("warnings", []))
+
+    def test_override_rejects_reused_mesh(self, tmp_path, stub_pyhelios):
+        # A reused triangulation is incompatible with a G(theta) override.
+        req = self._static_request(tmp_path, gtheta_override=True, gtheta=0.5)
+        fake_mesh = (np.zeros((3, 3), np.float32),
+                     np.array([[0, 1, 2]], np.int64),
+                     np.array([0], np.int32))
+        result = main._do_lad_computation(req, reuse_mesh=fake_mesh)
+        assert result["success"] is False
+        assert "override" in result["error"].lower() or "g(theta)" in result["error"].lower()

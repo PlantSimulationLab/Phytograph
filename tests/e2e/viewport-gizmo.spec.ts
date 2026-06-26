@@ -80,3 +80,84 @@ test('viewport gizmo orients down a world axis with Z-up and no zoom change', as
     await close();
   }
 });
+
+// Regression guard for two bugs the direct-__orientToAxis test above could NOT
+// catch, because it never touched the gizmo's actual click path:
+//   1. A full-height left-toolbar overlay (overflow-y-auto, so it captures
+//      pointer events across its whole box) sat on top of the bottom-left gizmo
+//      and swallowed every click — nothing reached the canvas.
+//   2. The gizmo lives in drei's Hud portal, whose R3F pointer events are dead
+//      once JFAOutline owns the render loop; clicks never reached the sprites.
+// This drives a REAL mouse click on the rendered +X axis head and asserts the
+// camera actually reoriented — so either regression fails the test.
+test('clicking the gizmo +X head (real mouse) reorients the camera', async () => {
+  const { app, page, close } = await launchApp();
+
+  try {
+    await importFiles(app, page, 'import-auto', FIXTURE);
+    await completeImportWizard(page);
+
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+
+    await page.waitForFunction(
+      () => typeof (window as any).__orientToAxis === 'function'
+        && typeof (window as any).__getCameraState === 'function'
+        && typeof (window as any).__gizmoHeadScreenPos === 'function',
+      { timeout: 20_000 },
+    );
+
+    const dist = (p: number[], t: number[]) =>
+      Math.hypot(p[0] - t[0], p[1] - t[1], p[2] - t[2]);
+
+    // Start looking down +Y, then let the gizmo's per-frame orientation sync
+    // settle so the +X head is projected from its CURRENT (post-orient) screen
+    // position — reading it too early would aim the click at where the head was.
+    // Before the click the camera is on the +Y side and NOT the +X side, so a
+    // click on the +X head must flip it; a no-op (regressed) click leaves it on
+    // +Y and fails the test.
+    await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));
+    const before = await page.evaluate(() => (window as any).__getCameraState());
+    const radiusBefore = dist(before.position, before.target);
+    expect(before.position[1] - before.target[1]).toBeGreaterThan(radiusBefore * 0.9); // on +Y
+    expect(Math.abs(before.position[0] - before.target[0])).toBeLessThan(1e-3);        // not on +X
+
+    // Pixel center of the rendered +X head (read after a couple of animation
+    // frames so the gizmo has re-synced to the +Y view), then click it for real.
+    // (__gizmoHeadScreenPos takes the head's world direction as a [x,y,z] tuple.)
+    const pos = await page.evaluate(
+      () => new Promise<{ x: number; y: number } | null>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() =>
+          resolve((window as any).__gizmoHeadScreenPos([1, 0, 0])),
+        ));
+      }),
+    );
+    expect(pos, 'gizmo +X head must project to a screen position').not.toBeNull();
+    // Guard: nothing must overlay the head's pixel (a left-toolbar overlap was
+    // exactly the bug — it intercepted the click before it reached the canvas).
+    const blocker = await page.evaluate((p) => {
+      const topEl = document.elementFromPoint(p.x, p.y);
+      return topEl && topEl.tagName !== 'CANVAS'
+        ? `${topEl.tagName}.${topEl.className}`
+        : null;
+    }, pos!);
+    expect(blocker, `a DOM element overlays the gizmo head and would eat the click: ${blocker}`).toBeNull();
+    await page.mouse.click(pos!.x, pos!.y);
+
+    // The real click must have routed through the hit-test to __orientToAxis:
+    // the camera now looks down +X (on the +X side, y/z aligned with the
+    // target), Z-up, same distance (reorient only — no zoom jump).
+    await expect.poll(async () => {
+      const s = await page.evaluate(() => (window as any).__getCameraState());
+      return s.position[0] - s.target[0];
+    }, { timeout: 5_000 }).toBeGreaterThan(radiusBefore * 0.9);
+
+    const after = await page.evaluate(() => (window as any).__getCameraState());
+    expect(Math.abs(after.position[1] - after.target[1])).toBeLessThan(1e-3);
+    expect(Math.abs(after.position[2] - after.target[2])).toBeLessThan(1e-3);
+    expect(dist(after.position, after.target)).toBeCloseTo(radiusBefore, 4);
+    expect(after.up[2]).toBeCloseTo(1, 5);
+  } finally {
+    await close();
+  }
+});

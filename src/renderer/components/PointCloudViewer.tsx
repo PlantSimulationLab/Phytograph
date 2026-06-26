@@ -16,7 +16,7 @@ import {
 import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenerationPopup';
 import { TriangulationPopup, type TriangulationStartArgs } from './TriangulationPopup';
 import type { GridOption } from '../lib/gridOption';
-import { LADPopup, type LADTriangulationOption } from './LADPopup';
+import { LADPopup, type LADTriangulationOption, type DEMGridOption } from './LADPopup';
 import { BackfillMissesPopup } from './BackfillMissesPopup';
 import { QSMPopup, type QSMStartOptions } from './QSMPopup';
 import { Toolbar } from './Toolbar';
@@ -8863,6 +8863,18 @@ export default function PointCloudViewer({
   }, [meshes, meshPositions, meshScales, meshRotations, displayNameOfMesh]);
   useEffect(() => { heliosGridOptionsRef.current = heliosGridOptions; }, [heliosGridOptions]);
 
+  // DEMs the LAD tool can use as the terrain surface for a terrain-following grid.
+  // A DEM mesh carries `demGrid` (the elevation raster); the LAD popup samples it
+  // under each voxel column. The raster travels with the mesh, so no recompute.
+  const ladDemOptions = useMemo<DEMGridOption[]>(() => {
+    const options: DEMGridOption[] = [];
+    for (const m of meshes) {
+      if (m.method !== 'dem' || !m.demGrid) continue;
+      options.push({ id: m.id, label: displayNameOfMesh(m), demGrid: m.demGrid });
+    }
+    return options;
+  }, [meshes, displayNameOfMesh]);
+
   // Existing Helios triangulations the LAD tool can REUSE. The backend always
   // re-triangulates internally, so "reuse" means locking the inversion to the
   // exact scans + grid + lmax/aspect that produced the mesh — reproducing its
@@ -12737,7 +12749,11 @@ export default function PointCloudViewer({
           bottom-left status readout) and scrollable, so the now-taller toolbar
           stack — View, Snap, Create, Simulate, Tools — never overlaps the status
           bar on short windows. `pr-1` keeps the scrollbar off the buttons. */}
-      <div className="absolute top-4 left-4 bottom-16 flex flex-col gap-2 overflow-y-auto overflow-x-hidden pr-1">
+      {/* pointer-events-none on the column so its empty lower region (it spans
+          full height for scrolling) doesn't swallow clicks meant for the
+          viewport — notably the bottom-left axes gizmo, which sits inside this
+          box's footprint. Each interactive child re-enables pointer events. */}
+      <div className="absolute top-4 left-4 bottom-16 flex flex-col gap-2 overflow-y-auto overflow-x-hidden pr-1 pointer-events-none [&>*]:pointer-events-auto">
         {/* View Controls */}
         <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg flex gap-1">
           <button onClick={() => (window as any).__resetPointCloudCamera?.()} className="p-2 hover:bg-neutral-700 rounded transition-colors flex items-center justify-center" title="Reset View — frame all content from the default isometric angle">
@@ -14301,6 +14317,7 @@ export default function PointCloudViewer({
         gridOptions={heliosGridOptions}
         triangulationOptions={ladTriangulationOptions}
         ineligibleTriangulations={ineligibleLadTriangulations}
+        demOptions={ladDemOptions}
         onStartLAD={handleComputeLAD}
         initialSelectedIds={ladReopenSelection ?? selectedScanIds}
         defaultLmax={[...meshes].reverse().find(m => m.triangleFilter)?.triangleFilter?.lmax}

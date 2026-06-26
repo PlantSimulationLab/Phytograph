@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.42.0"
+BACKEND_VERSION = "0.43.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -3351,6 +3351,26 @@ class SpacingCheckResponse(BaseModel):
 # recover LAD. Unlike triangulation, the voxel grid is REQUIRED — it is the
 # basis of the calculation.
 
+class DemRaster(BaseModel):
+    """A regular axis-aligned DEM elevation raster, as produced by /api/dem.
+
+    Used by terrain-following LAD to sample a ground height under each voxel
+    column. ``grid_z`` is the elevation per cell, row-major with row 0 = min y
+    (``grid_z[j*nx + i]``), matching the renderer's MeshEntry.demGrid. Void cells
+    are NaN. ``origin`` is the lower-left corner [minx, miny]; ``cell`` is the cell
+    size (m). Coordinates are in the SAME frame as the scan points / grid (the
+    renderer round-trips world_shift so the raster aligns with the cloud)."""
+    grid_z: List[float]
+    nx: int
+    ny: int
+    cell: float
+    origin: List[float]                    # [minx, miny] in WORLD coords, cell-corner of (0,0)
+    # JSON can't carry NaN, so the renderer encodes DEM voids as this sentinel
+    # (mirroring the GeoTIFF export). Cells equal to it are treated as voids and
+    # nearest-filled. None => no sentinel (all grid_z finite).
+    nodata: Optional[float] = None
+
+
 class LADComputeRequest(BaseModel):
     """Request model for leaf area density computation.
 
@@ -3360,6 +3380,14 @@ class LADComputeRequest(BaseModel):
     """
     scans: List[HeliosScanEntry]
     grid: HeliosGrid                       # REQUIRED — the LAD voxel grid
+    # Terrain following: when enabled, each voxel column is shifted vertically so
+    # its bottom face rides a DEM surface (clear of the ground). `dem` is REQUIRED
+    # when terrain_follow is true. `safety_fraction` is the clearance between the
+    # DEM surface and the lowest cell, expressed as a fraction of one cell's height
+    # (size.z/nz) so it auto-scales with voxel resolution.
+    terrain_follow: bool = False
+    safety_fraction: float = 0.5
+    dem: Optional[DemRaster] = None
     lmax: float = 0.1                      # max triangle edge length (G-function)
     max_aspect_ratio: float = 4.0         # max triangle aspect ratio
     min_voxel_hits: Optional[int] = None  # min ray hits for a voxel to be solved
@@ -3374,13 +3402,21 @@ class LADComputeRequest(BaseModel):
     theta_max: float = 130.0
     phi_min: float = 0.0
     phi_max: float = 360.0
-    # Mean leaf-projection coefficient G(theta), in (0, 1]. Required ONLY for
-    # moving-platform scans: their pulses don't lie on a fixed theta-phi grid, so
-    # they cannot be triangulated to derive G(theta) per cell. Instead the caller
-    # supplies it (0.5 = spherical/random leaf-angle distribution) and the
-    # beam-based inversion uses each return's per-beam origin. Ignored for static
-    # scans, which derive G(theta) from triangulation as before.
+    # Mean leaf-projection coefficient G(theta), in (0, 1] (0.5 = spherical/random
+    # leaf-angle distribution). Used in two cases:
+    #   1. Moving-platform scans ALWAYS need it — their pulses don't lie on a fixed
+    #      theta-phi grid, so they can't be triangulated to derive G(theta).
+    #   2. Static scans when gtheta_override is True (see below).
     gtheta: Optional[float] = None
+    # Static-scan G(theta) override. When True, a static (terrestrial) scan SKIPS
+    # triangulation and inverts Beer's law with the supplied `gtheta` directly —
+    # the same beam-based path moving scans use. This is the right choice for a
+    # homogeneous canopy whose leaf-angle distribution is known (or assumed
+    # spherical), and for aerial-style data where triangulating sparse overhead
+    # returns recovers a biased G(theta). Ignored for moving scans (they always
+    # use the supplied G(theta)). When False, static scans triangulate to estimate
+    # G(theta) per cell as before.
+    gtheta_override: bool = False
 
 class LADCell(BaseModel):
     """A single voxel result."""
@@ -3413,6 +3449,10 @@ class LADComputeResponse(BaseModel):
     grid_size: List[float] = []
     grid_rotation: float = 0.0        # azimuth about +z, degrees (rotated grids)
     bounds: List[List[float]] = []   # [[lo_x,lo_y,lo_z], [hi_x,hi_y,hi_z]]
+    # Terrain following (echoed for display). dropped_columns counts (x,y) columns
+    # whose center fell outside the DEM footprint and were excluded from `cells`.
+    terrain_follow: bool = False
+    dropped_columns: int = 0
     is_multi_return: bool = False
     return_mode: str = "single"      # "single" | "multi"
     total_leaf_area: float = 0.0
@@ -4925,6 +4965,94 @@ def _run_gapfill_extract(cloud):
     return synth_xyz, int(mask.sum())
 
 
+def _sample_dem_columns(grid_center, grid_size, grid_nx, grid_ny, grid_nz,
+                        grid_rotation_rad, dem: "DemRaster", safety_fraction: float):
+    """Sample a DEM under each voxel column for terrain-following LAD.
+
+    For each of the nx*ny columns of the (possibly rotated) grid, compute the
+    column center's WORLD (x,y) — rotating the local lattice center by +rotation
+    about grid_center, the forward of the inverse-rotation `_points_inside_grid` /
+    `_count_points_per_cell` apply — then sample the axis-aligned DEM raster there.
+
+    The per-column vertical offset shifts the regular lattice so the column's
+    BOTTOM face sits at ``dem_z + safety_fraction*(size.z/nz)`` (clearance scales
+    with one cell's height). Concretely the lattice z-origin is the grid bottom
+    (grid_center.z - size.z/2), so the offset added to every cell in the column is
+    ``dem_z + clearance - (grid_center.z - size.z/2)``.
+
+    Void DEM cells (NaN) that lie INSIDE the raster footprint inherit the nearest
+    valid DEM cell's elevation (so a hole doesn't drop the column). Columns whose
+    center lies OUTSIDE the raster footprint are dropped (excluded from results).
+
+    Returns (column_offsets, kept_mask, dropped_count):
+      column_offsets : list[float] length nx*ny, row-major [j*nx + i]; dropped
+                       columns get 0.0 (their cells are filtered from the response).
+      kept_mask      : np.ndarray[bool] length nx*ny; False = dropped column.
+      dropped_count  : int, number of dropped columns.
+    """
+    import numpy as np
+
+    nx, ny, nz = int(grid_nx), int(grid_ny), int(grid_nz)
+    cx, cy, cz = float(grid_center[0]), float(grid_center[1]), float(grid_center[2])
+    sx, sy, sz = float(grid_size[0]), float(grid_size[1]), float(grid_size[2])
+
+    # DEM raster as a (ny, nx)-ish 2D array, row-major min-y first.
+    z2d = np.asarray(dem.grid_z, dtype=np.float64).reshape(dem.ny, dem.nx)
+    # Decode the void sentinel (JSON-safe stand-in for NaN) back to NaN.
+    if dem.nodata is not None:
+        z2d = np.where(z2d == float(dem.nodata), np.nan, z2d)
+    cell = float(dem.cell)
+    ox, oy = float(dem.origin[0]), float(dem.origin[1])
+
+    # Precompute a nearest-valid lookup over the DEM so in-footprint voids inherit
+    # the closest measured elevation. distance_transform_edt returns, for each cell,
+    # the index of the nearest non-void cell — one pass, vectorized.
+    valid = np.isfinite(z2d)
+    if valid.all():
+        filled = z2d
+    elif valid.any():
+        from scipy import ndimage
+        inv = ~valid
+        # indices of nearest valid cell for every (void) cell
+        nearest_idx = ndimage.distance_transform_edt(
+            inv, return_distances=False, return_indices=True)
+        filled = z2d[tuple(nearest_idx)]
+    else:
+        # DEM is entirely void — nothing to follow; treat all columns as dropped.
+        filled = z2d
+
+    cos_t, sin_t = math.cos(grid_rotation_rad), math.sin(grid_rotation_rad)
+    grid_bottom_z = cz - 0.5 * sz
+    clearance = float(safety_fraction) * (sz / nz)
+
+    column_offsets = [0.0] * (nx * ny)
+    kept_mask = np.zeros(nx * ny, dtype=bool)
+    dropped = 0
+
+    for j in range(ny):
+        ly = -0.5 * sy + (j + 0.5) * (sy / ny)
+        for i in range(nx):
+            lx = -0.5 * sx + (i + 0.5) * (sx / nx)
+            # forward-rotate the local lattice center about +z, then translate to world
+            wx = cx + (lx * cos_t - ly * sin_t)
+            wy = cy + (lx * sin_t + ly * cos_t)
+            di = int(math.floor((wx - ox) / cell))
+            dj = int(math.floor((wy - oy) / cell))
+            col = j * nx + i
+            if di < 0 or di >= dem.nx or dj < 0 or dj >= dem.ny:
+                dropped += 1
+                continue
+            dem_z = filled[dj, di]
+            if not np.isfinite(dem_z):
+                # in-footprint but no valid neighbor anywhere (fully-void DEM)
+                dropped += 1
+                continue
+            column_offsets[col] = float(dem_z) + clearance - grid_bottom_z
+            kept_mask[col] = True
+
+    return column_offsets, kept_mask, dropped
+
+
 def _do_lad_computation(request: "LADComputeRequest", progress=None,
                         reuse_mesh: "Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]" = None) -> dict:
     """Compute per-voxel leaf area density via PyHelios. Returns a result dict.
@@ -5264,32 +5392,80 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         # NOTE: Helios's LiDARcloud::addGrid takes the rotation in DEGREES (it
         # multiplies by pi/180 internally), despite the PyHelios docstring saying
         # radians — pass degrees, matching the <grid><rotation> XML triangulation path.
-        cloud.addGrid(center=grid_center, size=grid_size,
-                      ndiv=[grid_nx, grid_ny, grid_nz],
-                      rotation=grid_rotation_deg)
+        #
+        # Terrain following: when enabled (with a DEM), shift each voxel column
+        # vertically so its bottom rides the DEM surface. The offset is baked into
+        # the Helios cell centers here so the beam tracing / inversion run against
+        # the terrain-following voxels — a renderer-only shift would be wrong.
+        column_offsets = None
+        terrain_dropped = 0
+        terrain_kept_mask = None
+        if request.terrain_follow:
+            if request.dem is None:
+                raise ValueError("terrain_follow requires a DEM (none supplied).")
+            # Sample the DEM in the COMPUTE frame: on a moving-platform scan the
+            # points + grid were recentered by lad_shift, so shift the DEM origin by
+            # the same (x,y) so raster, grid, and points share one frame.
+            dem_for_sampling = request.dem
+            if lad_shift is not None:
+                dem_for_sampling = DemRaster(
+                    grid_z=request.dem.grid_z, nx=request.dem.nx, ny=request.dem.ny,
+                    cell=request.dem.cell,
+                    origin=[request.dem.origin[0] - float(lad_shift[0]),
+                            request.dem.origin[1] - float(lad_shift[1])],
+                    nodata=request.dem.nodata)
+            column_offsets, terrain_kept_mask, terrain_dropped = _sample_dem_columns(
+                grid_center, grid_size, grid_nx, grid_ny, grid_nz,
+                grid_rotation_rad, dem_for_sampling, request.safety_fraction)
+            if not terrain_kept_mask.any():
+                return {
+                    "success": False,
+                    "cells": [],
+                    "method_used": "helios",
+                    "error": "Terrain following dropped every voxel column — the grid "
+                             "footprint lies entirely outside the DEM. Check that the "
+                             "grid and DEM overlap.",
+                    "warnings": warnings,
+                }
+            if terrain_dropped:
+                warnings.append(
+                    f"Terrain following dropped {terrain_dropped} voxel column(s) whose "
+                    f"footprint fell outside the DEM; their voxels were excluded.")
 
-        # Moving-platform scans cannot be triangulated: their pulses don't lie on a
-        # fixed theta-phi grid, so there's no scan raster to mesh and derive the
-        # per-cell G-function from. Instead the caller supplies a mean G(theta) and
-        # the beam-based inversion uses each return's own per-beam origin
-        # (getHitOrigin / origin_x/y/z). When ANY scan is moving we take this path
-        # for the whole cloud. Static-only requests triangulate exactly as before.
+        if column_offsets is not None:
+            cloud.addGrid(center=grid_center, size=grid_size,
+                          ndiv=[grid_nx, grid_ny, grid_nz],
+                          rotation=grid_rotation_deg,
+                          column_offsets=column_offsets)
+        else:
+            cloud.addGrid(center=grid_center, size=grid_size,
+                          ndiv=[grid_nx, grid_ny, grid_nz],
+                          rotation=grid_rotation_deg)
+
+        # Two inversion paths:
+        #   - Supplied-G(theta) (beam-based): no triangulation. Each return is
+        #     traced from its own beam origin and the caller's mean G(theta) is
+        #     used. Taken when ANY scan is moving (their pulses can't be
+        #     triangulated) OR when gtheta_override is set for a static scan (a
+        #     homogeneous/known-G canopy, or aerial-style data where triangulating
+        #     sparse overhead returns biases G).
+        #   - Triangulated: static scans estimate G(theta) per cell from a mesh.
         any_moving = any(s["moving"] for s in scans_arrays)
-        if any_moving:
-            # A reused triangulation cannot apply to a moving-platform scan: moving
-            # scans have no fixed theta-phi grid to triangulate, so any mesh the
-            # caller attached is a client bug. Reject loudly rather than silently
-            # ignore it.
+        use_supplied_gtheta = any_moving or bool(request.gtheta_override)
+        if use_supplied_gtheta:
+            # A reused triangulation is meaningless when we invert from a supplied
+            # G(theta) (no mesh is used). Reject loudly rather than silently ignore.
             if reuse_mesh is not None:
                 raise ValueError(
                     "A reused triangulation cannot be combined with a moving-platform "
-                    "scan (moving scans are inverted from a supplied G(theta), not a mesh).")
+                    "scan or a G(theta) override (both invert from a supplied G(theta), "
+                    "not a mesh).")
             supplied_gtheta = request.gtheta if request.gtheta is not None else 0.5
             if request.gtheta is None:
                 warnings.append(
-                    "Moving-platform LAD needs a mean leaf-projection coefficient "
-                    "G(theta); defaulted to 0.5 (spherical leaf-angle distribution). "
-                    "Set it to match the canopy if known.")
+                    "LAD with a G(theta) override needs a mean leaf-projection "
+                    "coefficient; defaulted to 0.5 (spherical leaf-angle "
+                    "distribution). Set it to match the canopy if known.")
             if not (0.0 < supplied_gtheta <= 1.0):
                 raise ValueError("gtheta must be in (0, 1] (0.5 = spherical).")
         elif reuse_mesh is not None:
@@ -5368,9 +5544,11 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         _ckpt()
         _report(0.80, "Inverting Beer's law")
         with Context() as ctx:
-            if any_moving:
-                # Beam-based inversion: traverses each beam from its own per-beam
-                # origin (getHitOrigin), uses the supplied G(theta), no triangulation.
+            if use_supplied_gtheta:
+                # Beam-based inversion: traverses each beam from its own origin
+                # (getHitOrigin), uses the supplied G(theta), no triangulation.
+                # Works for both moving-platform scans and static scans with a
+                # G(theta) override.
                 cloud.calculateLeafArea(ctx, min_hits, element_width,
                                         Gtheta=supplied_gtheta)
             else:
@@ -5387,14 +5565,23 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         cell_centers = [cloud.getCellCenter(i) for i in range(n_cells)]
         cell_sizes = [cloud.getCellSize(i) for i in range(n_cells)]
         hit_counts = _count_points_per_cell(scan_xyz_for_counts, cell_centers, cell_sizes,
-                                            grid_rotation_rad)
+                                            grid_rotation_rad,
+                                            column_z_offsets=column_offsets,
+                                            ndiv=(grid_nx, grid_ny, grid_nz))
 
         cells = []
         total_leaf_area = 0.0
         solved_indices = []  # voxels with a real LAD solution + defined variance
+        # For terrain following, cells in dropped columns (outside the DEM footprint)
+        # are excluded from the reported results. Helios still holds them (so the ray
+        # tracing/lattice is intact); we just don't surface them. Column of cell i is
+        # i % (nx*ny) under Helios's k-major ordering.
+        ncols_terrain = grid_nx * grid_ny
         for i in range(n_cells):
             if (i & 0xFFF) == 0:  # every 4096 voxels — negligible overhead
                 _ckpt()
+            if terrain_kept_mask is not None and not terrain_kept_mask[i % ncols_terrain]:
+                continue
             c = cell_centers[i]
             s = cell_sizes[i]
             la = float(cloud.getCellLeafArea(i))
@@ -5489,6 +5676,8 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # to orient each voxel cube so the result grid aligns with the box.
             "grid_rotation": grid_rotation_deg,
             "bounds": [bb_lo, bb_hi],
+            "terrain_follow": bool(request.terrain_follow),
+            "dropped_columns": int(terrain_dropped),
             "is_multi_return": is_multi,
             "return_mode": return_mode,
             "total_leaf_area": total_leaf_area,
@@ -5537,7 +5726,9 @@ def _bin_points_to_cells(points, grid_center, grid_size, nx: int, ny: int, nz: i
 
 
 def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: list,
-                           grid_rotation_rad: float = 0.0):
+                           grid_rotation_rad: float = 0.0,
+                           column_z_offsets: "Optional[list]" = None,
+                           ndiv: "Optional[tuple]" = None):
     """Count how many scan points fall inside each voxel.
 
     Bins the in-RAM (N,3) position arrays (one per scan) by the grid's regular
@@ -5551,6 +5742,14 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
     Helios's getCellCenter returns the UNROTATED lattice center (the rotation is
     stored per-cell, not baked into the center), so the cell centers here are
     already axis-aligned and must NOT be rotated.
+
+    Terrain following: when ``column_z_offsets`` (length nx*ny, row-major [j*nx+i])
+    and ``ndiv``=(nx,ny,nz) are given, each voxel column was shifted vertically by
+    its offset, so the cell z's are no longer a regular lattice. We restore the
+    regular frame for binning by subtracting each cell's column offset from its
+    center z, and each point's column offset from its z (looked up by the point's
+    (i,j) column in the unrotated frame). Helios orders cells k-major (for k: for
+    j: for i), so cell index ``idx`` has column ``idx % (nx*ny)``.
     """
     import numpy as np
 
@@ -5562,9 +5761,19 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
     centers = np.array([[c.x, c.y, c.z] for c in cell_centers], dtype=np.float64)
     sizes = np.array([[s.x, s.y, s.z] for s in cell_sizes], dtype=np.float64)
 
+    terrain = column_z_offsets is not None and ndiv is not None
+    if terrain:
+        nx, ny = int(ndiv[0]), int(ndiv[1])
+        ncols = nx * ny
+        col_off = np.asarray(column_z_offsets, dtype=np.float64)
+        # Un-shift cell centers back to the regular lattice for axis-aligned z bins.
+        cell_col = np.arange(n_cells) % ncols
+        centers[:, 2] -= col_off[cell_col]
+
     # Pivot for inverse-rotating points: the grid center. The cell centers are the
     # UNROTATED lattice, so their mean is exactly the grid center. Rotation is
-    # about +z, so z is untouched.
+    # about +z, so z is untouched. (For terrain grids the x,y pivot is unaffected
+    # by the z un-shift above.)
     pivot = centers.mean(axis=0)
 
     def _unrotate(p):
@@ -5602,6 +5811,18 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
         if xyz.size == 0:
             continue
         xyz = _unrotate(xyz)
+        if terrain:
+            # Subtract each point's column offset from its z so it bins into the
+            # same regular lattice the (un-shifted) cells now occupy. Points whose
+            # (i,j) column lies outside the grid get no offset and fail the bounds
+            # check below anyway.
+            xy_idx = np.floor((xyz[:, :2] - grid_lo[:2]) / safe_step[:2]).astype(int)
+            in_xy = np.all((xy_idx >= 0) & (xy_idx < nper[:2]), axis=1)
+            pi = np.clip(xy_idx[:, 0], 0, nx - 1)
+            pj = np.clip(xy_idx[:, 1], 0, ny - 1)
+            pt_off = np.where(in_xy, col_off[pj * nx + pi], 0.0)
+            xyz = xyz.copy()
+            xyz[:, 2] -= pt_off
         ijk = np.floor((xyz - grid_lo) / safe_step).astype(int)
         inside = np.all((ijk >= 0) & (ijk < nper), axis=1)
         ijk = ijk[inside]

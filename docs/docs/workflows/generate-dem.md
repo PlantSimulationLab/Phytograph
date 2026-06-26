@@ -56,6 +56,11 @@ If you ticked **Compute height above ground**, the source cloud gains a
 continuous `height_above_ground` attribute and recolours by it (a gradient with
 a numeric colorbar). Switch back to it any time from the **Color by** picker.
 
+A DEM also drives **terrain following** in the
+[leaf-area-density](estimate-leaf-area-density.md#terrain-following) tool: tick
+**Follow terrain** there to make the voxel grid ride this surface, so each column
+measures the same height above sloping ground.
+
 ### Export
 
 - **GIS raster** — expand the DEM in the **Meshes** panel and use the **Export

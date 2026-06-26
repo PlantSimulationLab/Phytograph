@@ -26,6 +26,8 @@ import {
   worldToDisplay,
   displayToWorld,
   buildLADRequest,
+  demGridToLADRaster,
+  LAD_DEM_NODATA,
   buildHeliosTriangulationRequest,
   resolveHeliosScanSource,
 } from './pointCloudHelpers';
@@ -1056,6 +1058,61 @@ describe('buildLADRequest — moving-platform scans', () => {
     });
     expect(req.scans[0].trajectory).toBeUndefined();
     expect(req.gtheta).toBeUndefined();
+  });
+
+  it('omits terrain fields when no DEM is supplied', () => {
+    const scan: Scan = {
+      id: 's3', label: 'static', visible: true, color: '#fff',
+      data: makeMovingCloud(), params: { ...DEFAULT_SCAN_PARAMETERS },
+    };
+    const req = buildLADRequest([scan], GRID, {
+      lmax: 0.1, maxAspectRatio: 4, minVoxelHits: 1,
+    });
+    expect(req.terrain_follow).toBeUndefined();
+    expect(req.dem).toBeUndefined();
+  });
+
+  it('sets terrain_follow + dem + safety_fraction when a DEM is supplied', () => {
+    const scan: Scan = {
+      id: 's4', label: 'static', visible: true, color: '#fff',
+      data: makeMovingCloud(), params: { ...DEFAULT_SCAN_PARAMETERS },
+    };
+    const dem = demGridToLADRaster({
+      z: new Float32Array([1, 2, 3, 4]), nx: 2, ny: 2, cellSize: 1,
+      origin: [10, 20], worldShift: [100, 200, 0],
+    });
+    const req = buildLADRequest([scan], GRID, {
+      lmax: 0.1, maxAspectRatio: 4, minVoxelHits: 1, dem, safetyFraction: 0.25,
+    });
+    expect(req.terrain_follow).toBe(true);
+    expect(req.safety_fraction).toBe(0.25);
+    expect(req.dem).toBe(dem);
+  });
+});
+
+describe('demGridToLADRaster', () => {
+  it('shifts origin to world coords and copies grid shape', () => {
+    const raster = demGridToLADRaster({
+      z: new Float32Array([1, 2, 3, 4]), nx: 2, ny: 2, cellSize: 0.5,
+      origin: [10, 20], worldShift: [100, 200, 7],
+    });
+    // display origin [10,20] + worldShift [100,200] -> world [110, 220].
+    expect(raster.origin).toEqual([110, 220]);
+    expect(raster.nx).toBe(2);
+    expect(raster.ny).toBe(2);
+    expect(raster.cell).toBe(0.5);
+    expect(raster.grid_z).toEqual([1, 2, 3, 4]);
+  });
+
+  it('encodes NaN voids as the NODATA sentinel', () => {
+    const raster = demGridToLADRaster({
+      z: new Float32Array([1, NaN, 3, NaN]), nx: 2, ny: 2, cellSize: 1,
+      origin: [0, 0], worldShift: [0, 0, 0],
+    });
+    expect(raster.nodata).toBe(LAD_DEM_NODATA);
+    expect(raster.grid_z[1]).toBe(LAD_DEM_NODATA);
+    expect(raster.grid_z[3]).toBe(LAD_DEM_NODATA);
+    expect(raster.grid_z[0]).toBe(1);
   });
 });
 

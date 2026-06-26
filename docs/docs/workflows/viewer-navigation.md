@@ -60,6 +60,8 @@ In the right-side properties panel, toggle:
 
 - **Grid** — a 1m × 1m grid on the world XY plane. Helpful for sanity-
   checking units and scale.
+- **Axes** — the bottom-left orientation gizmo. On by default; turn it off
+  to clear the corner.
 
 The **orientation gizmo** in the bottom-left corner (red = X, green = Y,
 blue = Z) always tracks the current camera orientation; click its axis

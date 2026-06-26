@@ -2,7 +2,7 @@
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
 import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
-import type { HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADRequest, LADScanEntry } from '../utils/backendApi';
+import type { HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { poseStreamToWire } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
@@ -857,6 +857,29 @@ export function buildHeliosTriangulationRequest(
 // these names (the backend records them under the same keys).
 const LAD_MULTI_RETURN_FIELDS = ['timestamp', 'target_index', 'target_count'] as const;
 
+// Sentinel for DEM voids on the wire. JSON can't carry NaN; matches the GeoTIFF
+// export path's NODATA so the two encodings agree.
+export const LAD_DEM_NODATA = -9999;
+
+// Convert a DEM mesh's `demGrid` into the wire raster terrain-following LAD needs.
+// The demGrid origin is in DISPLAY coords; the backend samples in the same WORLD
+// frame the scan origins/grid use, so shift origin by worldShift (matching the
+// DEM raster export). Voids (NaN) are encoded as LAD_DEM_NODATA.
+export function demGridToLADRaster(demGrid: {
+  z: Float32Array; nx: number; ny: number; cellSize: number;
+  origin: [number, number]; worldShift: [number, number, number];
+}): LADDemRaster {
+  return {
+    grid_z: Array.from(demGrid.z, v => (Number.isFinite(v) ? v : LAD_DEM_NODATA)),
+    nx: demGrid.nx,
+    ny: demGrid.ny,
+    cell: demGrid.cellSize,
+    origin: [demGrid.origin[0] + demGrid.worldShift[0],
+             demGrid.origin[1] + demGrid.worldShift[1]],
+    nodata: LAD_DEM_NODATA,
+  };
+}
+
 export function buildLADRequest(
   scans: Scan[],
   grid: HeliosGrid,
@@ -866,6 +889,11 @@ export function buildLADRequest(
     // Mean leaf-projection coefficient G(theta) — required for moving-platform
     // scans (no triangulation to derive it), ignored for static scans.
     gtheta?: number;
+    // Terrain following: when `dem` is supplied, each voxel column rides the DEM
+    // surface. `safetyFraction` is the clearance (fraction of a cell's height)
+    // between the surface and the lowest cell.
+    dem?: LADDemRaster;
+    safetyFraction?: number;
   },
 ): LADRequest {
   const requestScans: LADScanEntry[] = scans.map(scan => {
@@ -965,6 +993,17 @@ export function buildLADRequest(
     // G(theta) for moving-platform scans (no-op for static); omit to let the
     // backend default it to 0.5 (spherical) with a warning.
     ...(params.gtheta !== undefined ? { gtheta: params.gtheta } : {}),
+    // Terrain following: only sent when a DEM is supplied. The backend requires a
+    // DEM whenever terrain_follow is true, so the two travel together.
+    ...(params.dem !== undefined
+      ? {
+          terrain_follow: true,
+          dem: params.dem,
+          ...(params.safetyFraction !== undefined
+            ? { safety_fraction: params.safetyFraction }
+            : {}),
+        }
+      : {}),
     // Request-level angular fallbacks (per-scan values above take precedence).
     theta_min: 30,
     theta_max: 130,

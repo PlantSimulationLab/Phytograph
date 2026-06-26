@@ -13,6 +13,8 @@ surface.
   from XML**) or attach parameters from the Scans panel. A scan with only
   point data and no parameters cannot be used.
 - A **voxel grid** — LAD requires one (unlike triangulation).
+- *(Optional)* A **[DEM](generate-dem.md)** if you want the grid to follow
+  sloping ground — see [Terrain following](#terrain-following) below.
 - **Sky/miss points.** LAD needs the beams that passed through the canopy
   without returning (the Beer's-law transmission denominator), so each
   scan must carry misses. Formats like E57 and structured PLY retain them;
@@ -110,6 +112,15 @@ surface.
       result (Pimont et al. 2018). Use the **Broadleaf (0.05)** or
       **Conifer (0.002)** preset, or type your own value. It does not
       change the LAD point estimate, only the confidence interval.
+    - **Follow terrain (DEM).** On sloping or undulating ground, tick this to
+      make each voxel column ride a [DEM](generate-dem.md) surface instead of a
+      flat datum, so every column measures the same height *above ground* (a flat
+      grid would put canopy and bare slope in the same voxel layer). Pick the DEM
+      to follow and set the **safety clearance** — the gap kept between the ground
+      and the lowest cell, as a fraction of one voxel's height (so it scales with
+      grid resolution; 0.5 = half a voxel). The option is disabled until you've
+      [generated a DEM](generate-dem.md) from this cloud. Columns whose footprint
+      falls outside the DEM are dropped from the result (with a count reported).
     - The **return type** is shown read-only; it follows each scan's own
       parameters. Multi-return scans need per-pulse metadata in the source
       (see [the concept page](../concepts/leaf-area-density.md#single-vs-multi-return-scans)).
@@ -134,6 +145,36 @@ surface.
   beams that entered the voxels*; it does **not** capture occlusion bias
   (foliage no beam ever reached). If the interval falls outside the
   method's validity range, it is not reported.
+
+## Terrain following
+
+A flat voxel grid assumes level ground: voxel layer *k* is at the same absolute
+height everywhere, so on a slope the bottom layer can be buried in soil on the
+uphill side and floating above the canopy downhill. **Follow terrain** fixes this
+by shifting each vertical column of voxels so its **bottom rides a DEM surface**,
+keeping every column a constant height above the local ground.
+
+To use it:
+
+1. [**Generate a DEM**](generate-dem.md) from the cloud first (Generate DEM). The
+   DEM is the ground surface the grid will follow; it appears in the Meshes panel.
+2. In the LAD dialog, lay out the voxel grid as usual, then tick **Follow terrain
+   (DEM)** and choose the DEM. Set the **safety clearance** to keep the lowest
+   cell off the ground (a fraction of one voxel's height).
+3. **Compute LAD.** Each column is sampled under its center, lifted to the DEM
+   surface plus the clearance, and the inversion runs against the terrain-following
+   voxels. The result voxels track the ground in the viewer.
+
+Notes:
+
+- The DEM is sampled under each column's center. Columns over small DEM holes
+  inherit the nearest measured elevation; columns whose footprint lies entirely
+  **outside** the DEM are dropped (the result reports how many).
+- The grid's height (its z-extent) is now measured **above the terrain**, so size
+  it to the canopy height you expect above ground, not to absolute elevations.
+- Terrain following only shifts columns vertically — it does not tilt or rotate
+  the grid. Combine it with an azimuthal grid rotation (above) for a row that is
+  both sloping and off-axis.
 
 ## Moving-platform scans
 
