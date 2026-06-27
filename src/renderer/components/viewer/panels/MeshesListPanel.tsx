@@ -3,6 +3,8 @@ import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, Cha
 import type { MeshEntry, MeshColorMode, PointCloudEntry } from '../../../lib/pointCloudTypes';
 import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS } from '../../../lib/pointCloudTypes';
 import { meshHasScanColors } from '../../../lib/pointCloudHelpers';
+import { DebouncedNumberInput } from '../../DebouncedNumberInput';
+import { InfoHint } from '../../InfoHint';
 import type { TriangleFilterEstimate } from '../../../lib/triangleFilter';
 import { ColormapName, COLORMAP_NAMES } from '../../../lib/colormaps';
 
@@ -352,6 +354,11 @@ interface MeshesListPanelProps {
   onOpenLeafAngles: (id: string) => void;
   // Export a DEM surface mesh's elevation grid as a GIS raster (mesh.method === 'dem').
   onExportDEMRaster: (id: string, format: 'asc' | 'tif') => void;
+  // "Snap to ground": displace a voxel grid's columns to follow a DEM. The grid
+  // then carries authoritative per-column offsets used by both the viewport and
+  // the LAD inversion. Clearing removes the snap (grid returns to flat).
+  onSnapGridToGround: (gridMeshId: string, demMeshId: string, safetyFraction: number) => void;
+  onClearGridSnap: (gridMeshId: string) => void;
   // Apply the interactive Lmax / aspect filter to a Helios triangulation mesh.
   onHeliosFilterChange: (id: string, next: { lmax: number; maxAspectRatio: number }) => void;
   // Run the opt-in point-spacing cross-check on a Helios mesh (offered when the
@@ -403,6 +410,8 @@ export function MeshesListPanel({
   onWireframeChange,
   onOpenLeafAngles,
   onExportDEMRaster,
+  onSnapGridToGround,
+  onClearGridSnap,
   onHeliosFilterChange,
   onCheckSpacing,
   ladIneligibilityReason,
@@ -459,6 +468,7 @@ export function MeshesListPanel({
             <div key={mesh.id}>
             <div
               data-testid="mesh-row"
+              data-mesh-id={mesh.id}
               data-mesh-name={displayName}
               data-triangle-count={mesh.data.triangleCount}
               data-is-plant={mesh.isPlant ? 'true' : 'false'}
@@ -599,6 +609,7 @@ export function MeshesListPanel({
                 <Maximize2 className="w-3 h-3" />
               </button>
               <button
+                data-testid={`mesh-delete-${mesh.id}`}
                 onClick={(e) => { e.stopPropagation(); onRequestDelete(mesh.id, displayName); }}
                 className="p-1 hover:bg-red-600/30 rounded"
                 title="Remove"
@@ -624,6 +635,16 @@ export function MeshesListPanel({
                     </div>
                   );
                 })()}
+                {/* Snap to ground: displace the grid columns to follow a DEM.
+                    Disabled (with a hint) until a DEM exists in the scene. */}
+                {mesh.gridSubdivisions && (
+                  <GridSnapControls
+                    gridMesh={mesh}
+                    demMeshes={meshes.filter(m => m.method === 'dem' && !!m.demGrid)}
+                    onSnap={onSnapGridToGround}
+                    onClear={onClearGridSnap}
+                  />
+                )}
                 {/* Plane geometry: center (mesh position), size (width × length
                     from the scale x/y; the base quad is a unit square and z is
                     unused), and rotation (Euler degrees). */}
@@ -839,6 +860,95 @@ export function MeshesListPanel({
           Wireframe
         </label>
       </div>
+    </div>
+  );
+}
+
+// Per-grid "Snap to ground" controls in the Meshes-panel expanded row. Picks a
+// DEM (when more than one exists) + a safety clearance, then snaps; once snapped,
+// offers to clear. Disabled with a hint when no DEM is available.
+function GridSnapControls({
+  gridMesh,
+  demMeshes,
+  onSnap,
+  onClear,
+}: {
+  gridMesh: MeshEntry;
+  demMeshes: MeshEntry[];
+  onSnap: (gridMeshId: string, demMeshId: string, safetyFraction: number) => void;
+  onClear: (gridMeshId: string) => void;
+}) {
+  const [demId, setDemId] = useState<string>('');
+  const [fraction, setFraction] = useState<number>(0.1);
+  const selectedDemId = demMeshes.some(d => d.id === demId) ? demId : (demMeshes[0]?.id ?? '');
+  const snapped = !!gridMesh.gridGroundSnap;
+  const noDem = demMeshes.length === 0;
+
+  return (
+    <div className="mt-1 pt-1 border-t border-neutral-700/60 space-y-1.5" data-testid="mesh-grid-snap-section">
+      <div className="text-[10px] text-neutral-400 flex items-center gap-1">
+        Terrain follow
+        <InfoHint
+          data-testid="mesh-grid-snap-help"
+          label="Snap to ground"
+          text="Displace each voxel column vertically so the grid follows a DEM surface (level grids assume flat ground). Generate a DEM first. The safety clearance keeps the lowest cell off the ground, as a fraction of one voxel's height. The snapped grid is what both the viewport and the LAD inversion use; editing the grid's transform clears the snap."
+        />
+      </div>
+      {snapped ? (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] text-green-300">Snapped to ground</span>
+          <button
+            data-testid="mesh-grid-snap-clear"
+            onClick={(e) => { e.stopPropagation(); onClear(gridMesh.id); }}
+            className="px-2 py-1 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-white"
+          >
+            Clear snap
+          </button>
+        </div>
+      ) : noDem ? (
+        <div
+          className="text-[10px] text-neutral-500"
+          data-testid="mesh-grid-snap-no-dem"
+          title="Generate a DEM first (select the cloud → Generate DEM) so the grid can follow the ground."
+        >
+          Generate a DEM first to enable terrain following.
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {demMeshes.length > 1 && (
+            <select
+              data-testid="mesh-grid-snap-dem-select"
+              value={selectedDemId}
+              onChange={(e) => { e.stopPropagation(); setDemId(e.target.value); }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+            >
+              {demMeshes.map(d => (
+                <option key={d.id} value={d.id}>{d.name || 'DEM'}</option>
+              ))}
+            </select>
+          )}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-neutral-400 shrink-0">Clearance (× cell)</span>
+            <DebouncedNumberInput
+              data-testid="mesh-grid-snap-fraction"
+              value={fraction}
+              min={0}
+              debounceMs={0}
+              onCommit={setFraction}
+              className="w-16 px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+            />
+          </div>
+          <button
+            data-testid="mesh-grid-snap"
+            disabled={!selectedDemId}
+            onClick={(e) => { e.stopPropagation(); if (selectedDemId) onSnap(gridMesh.id, selectedDemId, fraction); }}
+            className="w-full px-2 py-1 text-[10px] rounded font-medium bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white"
+          >
+            Snap to ground
+          </button>
+        </div>
+      )}
     </div>
   );
 }

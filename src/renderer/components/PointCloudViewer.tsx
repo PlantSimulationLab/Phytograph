@@ -1,10 +1,11 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
+import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -16,7 +17,7 @@ import {
 import { PlantGenerationPopup, type PlantGenerationPayload } from './PlantGenerationPopup';
 import { TriangulationPopup, type TriangulationStartArgs } from './TriangulationPopup';
 import type { GridOption } from '../lib/gridOption';
-import { LADPopup, type LADTriangulationOption, type DEMGridOption } from './LADPopup';
+import { LADPopup, type LADTriangulationOption } from './LADPopup';
 import { BackfillMissesPopup } from './BackfillMissesPopup';
 import { QSMPopup, type QSMStartOptions } from './QSMPopup';
 import { Toolbar } from './Toolbar';
@@ -68,6 +69,9 @@ import {
   octreeScalarFieldOptions,
   assembleScanScalarFields,
   voxelMeshToHeliosGrid,
+  gridSnapSignature,
+  gridColumnLocalOffsets,
+  demGridToLADRaster,
   buildMeshNonIndexedPositions,
   buildMeshTriangleColors,
   buildMeshScanColors,
@@ -80,6 +84,8 @@ import {
   displayViewToWorldView,
   buildLADRequest,
   buildHeliosTriangulationRequest,
+  triangulationGridEnvelope,
+  ladReuseGrid,
   extractReuseMeshPayload,
   type Vec3Like,
   type ReuseMeshPayload,
@@ -1812,6 +1818,33 @@ export default function PointCloudViewer({
       }
     }
   }, [selectedIds, startHistoryEntry]);
+
+  // Commit ONE undoable mesh transform edit from the Transform panel (a numeric
+  // entry, a reset, or fit-to-scans). The panel's setters are non-history
+  // `replaceCollection` writes, so without this the edit never reaches the undo
+  // stack — and worse, undo→redo replays the mesh's `add` action, whose seeded
+  // identity transform then CLOBBERS the live value (the "grid snaps back to
+  // defaults on redo" bug). `mutate(meshId)` MUST update both the relevant
+  // transform ref (meshPositionsRef/…) synchronously AND dispatch the store
+  // setter — exactly as handleMoveToOrigin does — because the store dispatch is
+  // async, so commitHistoryEntry's captureTransform reads the AFTER value from
+  // the refs, not from scene.state. We capture BEFORE, run the mutation, then
+  // commit a `transform` action pairing before↔after.
+  const commitMeshTransformEdit = useCallback((meshId: string, mutate: (id: string) => void) => {
+    startHistoryEntry('mesh', meshId);
+    mutate(meshId);
+    commitHistoryEntry();
+  }, [startHistoryEntry, commitHistoryEntry]);
+
+  // Commit an undoable grid-subdivision edit. Subdivisions live on the MeshEntry
+  // (`gridSubdivisions`), not in a transform map, so this rides a `replaceObject`
+  // action (before/after of the whole entry) rather than a `transform`.
+  const commitMeshGridEdit = useCallback((meshId: string, nextSubs: { x: number; y: number; z: number }) => {
+    const before = scene.state.meshes.find(m => m.id === meshId);
+    if (!before) return;
+    const after: MeshEntry = { ...before, gridSubdivisions: nextSubs };
+    scene.commit({ label: 'edit grid', actions: [{ t: 'replaceObject', kind: 'mesh', id: meshId, before, after }] });
+  }, [scene]);
 
   // Undo via the unified store. Stitch is now just another transaction in the
   // same history (Phase D folded the old separate stitch stack in), so there's
@@ -5292,12 +5325,16 @@ export default function PointCloudViewer({
       if (options.cropToGrid) {
         const gridMesh = meshes.find(m => m.visible && m.gridSubdivisions);
         if (gridMesh) {
-          grid = voxelMeshToHeliosGrid(
+          const g = voxelMeshToHeliosGrid(
             meshPositions.get(gridMesh.id),
             meshScales.get(gridMesh.id),
             gridMesh.gridSubdivisions,
             meshRotations.get(gridMesh.id)?.z,
-          ) ?? undefined;
+            gridMesh.gridGroundSnap,
+          );
+          // A snapped grid crops to the flat envelope of its displaced columns so
+          // the scan keeps points across the whole terrain-following volume.
+          grid = g ? triangulationGridEnvelope(g) : undefined;
         }
       }
 
@@ -6239,20 +6276,40 @@ export default function PointCloudViewer({
 
       // --- Flat cloud: send inline points; pass ground_class labels when present
       // so the DEM is ground-aware. HAG is written as a scalar field. ---
+      // EXCLUDE sky/miss points (is_miss != 0): a miss is a ray that hit nothing,
+      // projected ~1 km out, so it both has no place in a ground surface AND
+      // inflates the cloud extent by ~1000×. That blown-up extent makes the
+      // auto-CSF cloth (and the gridding) pathological — the DEM appears to hang.
+      // The session-octree DEM path already gets hits-only data; this flat-cloud
+      // path is the one place misses can leak in, so filter them here (mirroring
+      // the miss exclusion triangulate/skeleton/QSM apply).
       const displayData = ps.data;
-      const count = displayData.pointCount;
-      const points: number[][] = new Array(count);
-      for (let i = 0; i < count; i++) {
-        points[i] = [
+      const rawCount = displayData.pointCount;
+      const missField = displayData.scalarFields?.[MISS_ATTRIBUTE];
+      const isHit = (i: number) =>
+        !missField || missField.values.length !== rawCount || missField.values[i] === 0;
+      const groundField = displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE];
+      const hasGround = !!groundField && groundField.values.length === rawCount;
+
+      const points: number[][] = [];
+      const groundLabels: number[] | undefined = hasGround ? [] : undefined;
+      // hitIndices[k] = the full-cloud index of the k-th hit point we send, so a
+      // per-resolved-point result (HAG) can be scattered back to full length.
+      const hitIndices: number[] = [];
+      for (let i = 0; i < rawCount; i++) {
+        if (!isHit(i)) continue;   // drop sky/miss points
+        hitIndices.push(i);
+        points.push([
           displayData.positions[i * 3],
           displayData.positions[i * 3 + 1],
           displayData.positions[i * 3 + 2],
-        ];
+        ]);
+        if (groundLabels) groundLabels.push(Math.round(groundField!.values[i]));
       }
-      const groundField = displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE];
-      const groundLabels = groundField && groundField.values.length === count
-        ? Array.from(groundField.values, v => Math.round(v))
-        : undefined;
+      const count = points.length;
+      if (count < 3) {
+        throw new Error('DEM needs at least 3 hit points (all points are sky/misses).');
+      }
 
       const result = await generateDEM({
         points,
@@ -6270,14 +6327,23 @@ export default function PointCloudViewer({
       // under every point, extrapolated past the ground footprint) — so canopy
       // beyond the ground extent isn't slammed to 0.
       if (demComputeHAG && result.heightAboveGround && result.heightAboveGround.length === count) {
-        const hag = result.heightAboveGround;
+        // The backend's HAG buffer is aligned to the HIT points we sent (`count`).
+        // Scatter it back to the FULL cloud (`rawCount`) so the scalar field lines
+        // up with every point's position; excluded misses get 0 (rendered as
+        // "ground level", which is the only sensible value for a sky point).
+        const hitHag = result.heightAboveGround;
+        const hag = new Float32Array(rawCount);
         let hmin = Infinity, hmax = -Infinity;
-        for (let i = 0; i < count; i++) {
-          const h = hag[i];
+        for (let k = 0; k < count; k++) {
+          const h = hitHag[k];
+          hag[hitIndices[k]] = h;
           if (h < hmin) hmin = h;
           if (h > hmax) hmax = h;
         }
         if (!Number.isFinite(hmin)) { hmin = 0; hmax = 1; }
+        // Misses contribute 0; widen the range to include it so the colour scale
+        // doesn't clip them.
+        if (count < rawCount) { hmin = Math.min(hmin, 0); hmax = Math.max(hmax, 0); }
         registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
         onUpdateCloud(id, {
           ...displayData,
@@ -6304,6 +6370,90 @@ export default function PointCloudViewer({
       setDemInProgress(false);
     }
   }, [selectedIds, clouds, buildPointSource, addMesh, onUpdateCloud, buildSessionOctreeData, demCellSize, demMethod, demFillVoids, demComputeHAG]);
+
+  // "Snap to ground": displace a voxel grid's columns to follow a DEM. The backend
+  // (/api/lad/snap-grid) computes the per-column offsets ONCE from the DEM; we
+  // store them on the grid mesh so the viewport renders the displaced grid AND the
+  // LAD inversion receives the same offsets verbatim — viewport == backend.
+  const handleSnapGridToGround = useCallback(async (
+    gridMeshId: string, demMeshId: string, safetyFraction: number,
+  ) => {
+    const gridMesh = meshes.find(m => m.id === gridMeshId);
+    const demMesh = meshes.find(m => m.id === demMeshId);
+    if (!gridMesh || !gridMesh.gridSubdivisions || !demMesh || !demMesh.demGrid) return;
+
+    const grid = voxelMeshToHeliosGrid(
+      meshPositions.get(gridMeshId),
+      meshScales.get(gridMeshId),
+      gridMesh.gridSubdivisions,
+      meshRotations.get(gridMeshId)?.z,
+    );
+    if (!grid) return;
+    try {
+      const resp = await snapGridToGround({
+        grid,
+        dem: demGridToLADRaster(demMesh.demGrid),
+        safety_fraction: safetyFraction,
+      });
+      const ncols = grid.nx * grid.ny;
+      if (resp.column_offsets.length !== ncols) {
+        showToast({ title: 'Snap returned an unexpected grid size', type: 'error' });
+        return;
+      }
+      const signature = gridSnapSignature(
+        meshPositions.get(gridMeshId), meshScales.get(gridMeshId),
+        gridMesh.gridSubdivisions, meshRotations.get(gridMeshId)?.z);
+      const snap = {
+        columnOffsets: Float32Array.from(resp.column_offsets),
+        keptMask: Uint8Array.from(resp.kept_columns, v => (v ? 1 : 0)),
+        demMeshId,
+        safetyFraction,
+        signature,
+      };
+      setMeshes(prev => prev.map(m => m.id === gridMeshId ? { ...m, gridGroundSnap: snap } : m));
+      if (resp.dropped_columns > 0) {
+        showToast({
+          title: `Snapped to ground — ${resp.dropped_columns} column(s) fell outside the DEM and were dropped`,
+          type: 'info',
+        });
+      } else {
+        showToast({ title: 'Grid snapped to ground', type: 'success' });
+      }
+    } catch (e) {
+      showToast({ title: `Snap to ground failed: ${e instanceof Error ? e.message : 'Unknown error'}`, type: 'error' });
+    }
+  }, [meshes, meshPositions, meshScales, meshRotations, setMeshes]);
+
+  const handleClearGridSnap = useCallback((gridMeshId: string) => {
+    setMeshes(prev => prev.map(m => {
+      if (m.id !== gridMeshId || !m.gridGroundSnap) return m;
+      const { gridGroundSnap, ...rest } = m;
+      void gridGroundSnap;
+      return rest;
+    }));
+  }, [setMeshes]);
+
+  // Auto-clear a stale snap: the moment a snapped grid's transform or subdivisions
+  // change, its per-column offsets no longer match the geometry, so drop them (the
+  // grid renders flat again and the user re-snaps). A single reactive guard keyed
+  // on the live transform signature — so NO edit path can be missed.
+  useEffect(() => {
+    const stale = meshes.filter(m => {
+      if (!m.gridGroundSnap) return false;
+      const sig = gridSnapSignature(
+        meshPositions.get(m.id), meshScales.get(m.id),
+        m.gridSubdivisions, meshRotations.get(m.id)?.z);
+      return sig !== m.gridGroundSnap.signature;
+    });
+    if (stale.length === 0) return;
+    const staleIds = new Set(stale.map(m => m.id));
+    setMeshes(prev => prev.map(m => {
+      if (!staleIds.has(m.id) || !m.gridGroundSnap) return m;
+      const { gridGroundSnap, ...rest } = m;
+      void gridGroundSnap;
+      return rest;
+    }));
+  }, [meshes, meshPositions, meshScales, meshRotations, setMeshes]);
 
   // Pull a per-point reflectance/intensity scalar from a flat cloud's display
   // data for the inline reflectance-assist path, as a plain number[] aligned to
@@ -8843,37 +8993,29 @@ export default function PointCloudViewer({
     const options: GridOption[] = [];
     for (const m of meshes) {
       if (!m.gridSubdivisions) continue;
+      // A snapped grid carries authoritative per-column offsets: ride them into
+      // the HeliosGrid so LAD inverts exactly the displaced grid the viewport shows.
       const grid = voxelMeshToHeliosGrid(
         meshPositions.get(m.id),
         meshScales.get(m.id),
         m.gridSubdivisions,
         meshRotations.get(m.id)?.z,
+        m.gridGroundSnap,
       );
       if (!grid) continue;
       const sx = grid.size[0], sy = grid.size[1], sz = grid.size[2];
       const fmt = (n: number) => Number(n.toFixed(2)).toString();
       const name = displayNameOfMesh(m);
+      const snapNote = m.gridGroundSnap ? ', snapped to ground' : '';
       options.push({
         id: m.id,
-        label: `${name} (${fmt(sx)}×${fmt(sy)}×${fmt(sz)} m, ${grid.nx}×${grid.ny}×${grid.nz})`,
+        label: `${name} (${fmt(sx)}×${fmt(sy)}×${fmt(sz)} m, ${grid.nx}×${grid.ny}×${grid.nz}${snapNote})`,
         grid,
       });
     }
     return options;
   }, [meshes, meshPositions, meshScales, meshRotations, displayNameOfMesh]);
   useEffect(() => { heliosGridOptionsRef.current = heliosGridOptions; }, [heliosGridOptions]);
-
-  // DEMs the LAD tool can use as the terrain surface for a terrain-following grid.
-  // A DEM mesh carries `demGrid` (the elevation raster); the LAD popup samples it
-  // under each voxel column. The raster travels with the mesh, so no recompute.
-  const ladDemOptions = useMemo<DEMGridOption[]>(() => {
-    const options: DEMGridOption[] = [];
-    for (const m of meshes) {
-      if (m.method !== 'dem' || !m.demGrid) continue;
-      options.push({ id: m.id, label: displayNameOfMesh(m), demGrid: m.demGrid });
-    }
-    return options;
-  }, [meshes, displayNameOfMesh]);
 
   // Existing Helios triangulations the LAD tool can REUSE. The backend always
   // re-triangulates internally, so "reuse" means locking the inversion to the
@@ -8913,11 +9055,24 @@ export default function PointCloudViewer({
       // only if it's still in the scene — so the LAD run can hide it to avoid
       // z-fighting. Drops to undefined if the box was deleted.
       const gridMeshId = m.triangulationParams?.gridMeshId;
-      const gridBoxPresent = gridMeshId != null && meshes.some(x => x.id === gridMeshId);
+      const liveGridOption = gridMeshId != null
+        ? heliosGridOptions.find(g => g.id === gridMeshId)
+        : undefined;
+      const gridBoxPresent = !!liveGridOption;
+      // The grid stored on the mesh is the FLAT triangulation envelope
+      // (column_offsets stripped by triangulationGridEnvelope so the Helios <grid>
+      // can crop to a box). The LAD inversion, however, must run on the actual
+      // displaced grid. So when the source voxel box is still in the scene, drive
+      // the inversion from its LIVE HeliosGrid — which carries the current
+      // snap-to-ground column_offsets — rather than the flat stored grid. This is
+      // what makes a REUSE run follow the terrain exactly like the viewport (and
+      // like the first new-triangulation run did). Falls back to the stored grid
+      // only when the box was deleted (no live offsets to recover).
+      const ladGrid = ladReuseGrid(grid, liveGridOption?.grid);
       options.push({
         id: m.id,
         label: displayNameOfMesh(m),
-        grid,
+        grid: ladGrid,
         scanIds,
         lmax,
         maxAspectRatio,
@@ -8930,7 +9085,7 @@ export default function PointCloudViewer({
       });
     }
     return options;
-  }, [meshes, scans, displayNameOfMesh]);
+  }, [meshes, scans, displayNameOfMesh, heliosGridOptions]);
 
   // Why a ball-pivot mesh can't be re-used for the leaf-area (LAD) inversion, or
   // null if it can (or it isn't a ball-pivot mesh). The eligibility rule: built
@@ -10698,6 +10853,13 @@ export default function PointCloudViewer({
       <Canvas
         camera={{ fov: 60, near: 0.01, far: 10000, position: [0, 0, 10] }}
         gl={{ antialias: true, alpha: false }}
+        // Drop wheel raycasting: a scroll-to-zoom doesn't need to know what's
+        // under the cursor (OrbitControls reads the wheel off the DOM canvas,
+        // not through R3F's synthetic events, and nothing carries an onWheel
+        // handler), so skip the per-tick scene raycast entirely. See
+        // lib/canvasEvents.ts. (Pointer-down / click still raycast for mesh
+        // selection — the BVH keeps those fast.)
+        events={createNoWheelPointerEvents}
         onCreated={({ gl }) => { gl.setClearColor('#171717'); }}
         // Left-click on empty space clears the mesh selection (single-focus,
         // matching a plain panel click). Gated so it never fires mid-tool, and
@@ -10980,7 +11142,12 @@ export default function PointCloudViewer({
                   material-group renderer when UVs and a textured material are
                   present; otherwise fall back to the vertex-colored mesh.
                   Key includes regenerationKey to force remount on regeneration. */}
-              {mesh.data.uvCoordinates && mesh.data.uvCoordinates.length > 0 &&
+              {/* A snapped voxel grid's flat box faces would render at the
+                  undisplaced position (the unit-cube geometry can't deform per
+                  column), so suppress them — the displaced wireframe overlay below
+                  is the visual. */}
+              {mesh.gridGroundSnap ? null :
+               mesh.data.uvCoordinates && mesh.data.uvCoordinates.length > 0 &&
                mesh.plantMaterials && mesh.plantMaterials.some(m => m.textureData) ? (
                 <TexturedPlantMesh
                   key={`mesh-${mesh.id}-${mesh.regenerationKey ?? 0}`}
@@ -11025,10 +11192,25 @@ export default function PointCloudViewer({
                 />
               )}
               </OutlineSelect>
-              {mesh.gridSubdivisions &&
-                (mesh.gridSubdivisions.x > 1 || mesh.gridSubdivisions.y > 1 || mesh.gridSubdivisions.z > 1) && (
-                  <VoxelGridOverlay subdivisions={mesh.gridSubdivisions} />
-                )}
+              {mesh.gridSubdivisions && (() => {
+                // Terrain-following ("snapped") grid: render the displaced
+                // wireframe so the viewport shows exactly the per-column geometry
+                // the backend inverts. The same offsets ride into the LAD request
+                // (gridGroundSnap → HeliosGrid.column_offsets), so render==backend.
+                const snap = mesh.gridGroundSnap;
+                const localOffsets = snap
+                  ? gridColumnLocalOffsets(snap.columnOffsets, meshScale.z)
+                  : undefined;
+                const showOverlay = !!snap
+                  || mesh.gridSubdivisions.x > 1 || mesh.gridSubdivisions.y > 1 || mesh.gridSubdivisions.z > 1;
+                return showOverlay ? (
+                  <VoxelGridOverlay
+                    subdivisions={mesh.gridSubdivisions}
+                    columnLocalOffsets={localOffsets}
+                    keptMask={snap?.keptMask}
+                  />
+                ) : null;
+              })()}
             </group>
           );
         })}
@@ -12541,6 +12723,8 @@ export default function PointCloudViewer({
             onWireframeChange={setMeshWireframe}
             onOpenLeafAngles={setShowLeafAngleMeshId}
             onExportDEMRaster={handleExportDEMRaster}
+            onSnapGridToGround={handleSnapGridToGround}
+            onClearGridSnap={handleClearGridSnap}
             onHeliosFilterChange={handleHeliosFilterChange}
             onCheckSpacing={handleCheckSpacing}
             ladIneligibilityReason={ladIneligibilityReason}
@@ -13483,37 +13667,50 @@ export default function PointCloudViewer({
             onMoveToOrigin={handleMoveToOrigin}
             onFitToScans={() => {
               if (!fit) return;
+              // Position + scale change together → one undoable transaction.
+              startHistoryEntry('mesh', mesh.id);
+              meshPositionsRef.current.set(mesh.id, fit.center);
+              meshScalesRef.current.set(mesh.id, fit.size);
               setMeshPositions(prev => new Map(prev).set(mesh.id, fit.center));
               setMeshScales(prev => new Map(prev).set(mesh.id, fit.size));
+              commitHistoryEntry();
             }}
-            onSetPosition={(axis, v) => setMeshPositions(prev => {
-              const next = new Map(prev);
-              next.set(mesh.id, { ...(next.get(mesh.id) || { x: 0, y: 0, z: 0 }), [axis]: v });
-              return next;
+            onSetPosition={(axis, v) => commitMeshTransformEdit(mesh.id, (id) => {
+              const cur = meshPositionsRef.current.get(id) || { x: 0, y: 0, z: 0 };
+              const nextVal = { ...cur, [axis]: v };
+              meshPositionsRef.current.set(id, nextVal);
+              setMeshPositions(prev => new Map(prev).set(id, nextVal));
             })}
-            onResetPosition={() => setMeshPositions(prev => new Map(prev).set(mesh.id, { x: 0, y: 0, z: 0 }))}
-            onSetRotation={(axis, v) => setMeshRotations(prev => {
-              const next = new Map(prev);
-              next.set(mesh.id, { ...(next.get(mesh.id) || { x: 0, y: 0, z: 0 }), [axis]: v });
-              return next;
+            onResetPosition={() => commitMeshTransformEdit(mesh.id, (id) => {
+              meshPositionsRef.current.set(id, { x: 0, y: 0, z: 0 });
+              setMeshPositions(prev => new Map(prev).set(id, { x: 0, y: 0, z: 0 }));
             })}
-            onResetRotation={() => setMeshRotations(prev => new Map(prev).set(mesh.id, { x: 0, y: 0, z: 0 }))}
-            onSetScale={(axis, v) => setMeshScales(prev => {
-              const next = new Map(prev);
-              next.set(mesh.id, scaleLocked ? { x: v, y: v, z: v } : { ...scale, [axis]: v });
-              return next;
+            onSetRotation={(axis, v) => commitMeshTransformEdit(mesh.id, (id) => {
+              const cur = meshRotationsRef.current.get(id) || { x: 0, y: 0, z: 0 };
+              const nextVal = { ...cur, [axis]: v };
+              meshRotationsRef.current.set(id, nextVal);
+              setMeshRotations(prev => new Map(prev).set(id, nextVal));
             })}
-            onResetScale={() => setMeshScales(prev => new Map(prev).set(mesh.id, { x: 1, y: 1, z: 1 }))}
+            onResetRotation={() => commitMeshTransformEdit(mesh.id, (id) => {
+              meshRotationsRef.current.set(id, { x: 0, y: 0, z: 0 });
+              setMeshRotations(prev => new Map(prev).set(id, { x: 0, y: 0, z: 0 }));
+            })}
+            onSetScale={(axis, v) => commitMeshTransformEdit(mesh.id, (id) => {
+              const nextVal = scaleLocked ? { x: v, y: v, z: v } : { ...scale, [axis]: v };
+              meshScalesRef.current.set(id, nextVal);
+              setMeshScales(prev => new Map(prev).set(id, nextVal));
+            })}
+            onResetScale={() => commitMeshTransformEdit(mesh.id, (id) => {
+              meshScalesRef.current.set(id, { x: 1, y: 1, z: 1 });
+              setMeshScales(prev => new Map(prev).set(id, { x: 1, y: 1, z: 1 }));
+            })}
             onSetGrid={(axis, value) => {
               const v = Math.max(1, Math.floor(value));
               if (!Number.isFinite(v)) return;
-              setMeshes(prev => prev.map(m => {
-                if (m.id !== mesh.id) return m;
-                const cur = m.gridSubdivisions || { x: 1, y: 1, z: 1 };
-                return { ...m, gridSubdivisions: { ...cur, [axis]: v } };
-              }));
+              const cur = mesh.gridSubdivisions || { x: 1, y: 1, z: 1 };
+              commitMeshGridEdit(mesh.id, { ...cur, [axis]: v });
             }}
-            onResetGrid={() => setMeshes(prev => prev.map(m => m.id === mesh.id ? { ...m, gridSubdivisions: { x: 1, y: 1, z: 1 } } : m))}
+            onResetGrid={() => commitMeshGridEdit(mesh.id, { x: 1, y: 1, z: 1 })}
           />
         );
       })()}
@@ -14071,8 +14268,8 @@ export default function PointCloudViewer({
             </div>
             <div className="text-xs text-neutral-400 mb-4">
               {deleteConfirm.ids.length > 1
-                ? <>Are you sure you want to delete {deleteConfirm.label}? This action cannot be undone.</>
-                : <>Are you sure you want to delete "{deleteConfirm.label}"? This action cannot be undone.</>}
+                ? <>Are you sure you want to delete {deleteConfirm.label}? You can undo this with {navigator.platform.includes('Mac') ? '⌘Z' : 'Ctrl+Z'}.</>
+                : <>Are you sure you want to delete "{deleteConfirm.label}"? You can undo this with {navigator.platform.includes('Mac') ? '⌘Z' : 'Ctrl+Z'}.</>}
             </div>
             <div className="flex gap-2 justify-end">
               <button
@@ -14317,7 +14514,6 @@ export default function PointCloudViewer({
         gridOptions={heliosGridOptions}
         triangulationOptions={ladTriangulationOptions}
         ineligibleTriangulations={ineligibleLadTriangulations}
-        demOptions={ladDemOptions}
         onStartLAD={handleComputeLAD}
         initialSelectedIds={ladReopenSelection ?? selectedScanIds}
         defaultLmax={[...meshes].reverse().find(m => m.triangleFilter)?.triangleFilter?.lmax}

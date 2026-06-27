@@ -7,9 +7,8 @@ import type { Scan } from '../lib/scan';
 import type { MeshData } from '../lib/pointCloudTypes';
 import { hasData, hasParams, isBackfillEligible } from '../lib/scan';
 import { isMovingScan } from '../lib/scanParameters';
-import { buildLADRequest, demGridToLADRaster, extractReuseMeshPayload, type ReuseMeshPayload } from '../lib/pointCloudHelpers';
+import { buildLADRequest, extractReuseMeshPayload, type ReuseMeshPayload } from '../lib/pointCloudHelpers';
 import { InfoHint } from './InfoHint';
-import { DebouncedNumberInput } from './DebouncedNumberInput';
 
 // An existing Helios triangulation the user can REUSE. Selecting it locks the
 // inversion to the same scans + grid + lmax/aspect that produced the mesh, and
@@ -93,10 +92,6 @@ interface LADPopupProps {
   // Triangulations that exist but can't be reused (e.g. a merged or unpinned
   // ball-pivot mesh), shown as disabled dropdown entries explaining why.
   ineligibleTriangulations?: IneligibleTriangulation[];
-  // DEMs available as the terrain surface for a terrain-following grid. Terrain
-  // following is gated on at least one existing — when empty the option is shown
-  // disabled with a hint to generate a DEM first.
-  demOptions?: DEMGridOption[];
   // Pre-fill Lmax / max aspect ratio from the filter the user dialed in on a
   // Helios triangulation mesh, so the inversion bakes in that filtering. Still
   // editable here. Omitted → fall back to the standard defaults.
@@ -125,7 +120,6 @@ export function LADPopup({
   gridOptions = [],
   triangulationOptions = [],
   ineligibleTriangulations = [],
-  demOptions = [],
   defaultLmax,
   defaultMaxAspectRatio,
   onBackfill,
@@ -168,24 +162,11 @@ export function LADPopup({
     [gridOptions, selectedGridId],
   );
 
-  // Terrain following: when enabled, each voxel column rides a chosen DEM surface.
-  // Requires at least one DEM in the scene; the toggle resets when the dialog
-  // reopens. `safetyFractionStr` is the clearance below the lowest cell as a
-  // fraction of one cell's height (parsed at commit; see DebouncedNumberInput).
-  const [terrainFollow, setTerrainFollow] = useState<boolean>(false);
-  const [selectedDemId, setSelectedDemId] = useState<string>('');
-  const [safetyFractionStr, setSafetyFractionStr] = useState<string>('0.5');
-  useEffect(() => {
-    if (!isOpen) return;
-    setTerrainFollow(false);
-    setSelectedDemId(prev =>
-      demOptions.some(d => d.id === prev) ? prev : (demOptions[0]?.id ?? ''));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, demOptions]);
-  const selectedDem = useMemo(
-    () => demOptions.find(d => d.id === selectedDemId) ?? null,
-    [demOptions, selectedDemId],
-  );
+  // Terrain following is now done by "Snap to ground" on the grid mesh itself
+  // (Meshes panel): the snapped grid carries authoritative per-column offsets that
+  // ride into the HeliosGrid here, so the inversion follows the terrain the user
+  // sees. The old in-dialog DEM picker is gone — the grid is the source of truth.
+  const gridIsSnapped = !!selectedGrid?.grid.column_offsets;
 
   useEffect(() => {
     if (isOpen) {
@@ -319,29 +300,16 @@ export function LADPopup({
       ? Math.min(1, Math.max(1e-3, parseFloat(gthetaStr) || 0.5))
       : undefined;
 
-    // Terrain following: when enabled, sample the chosen DEM under each voxel
-    // column. A DEM must be selected (the backend requires it when terrain_follow
-    // is set), so block rather than silently fall back to a flat grid.
-    let dem;
-    let safetyFraction: number | undefined;
-    if (terrainFollow) {
-      if (!selectedDem) {
-        setError('Select a DEM for terrain following, or turn it off');
-        return;
-      }
-      dem = demGridToLADRaster(selectedDem.demGrid);
-      const sf = parseFloat(safetyFractionStr);
-      safetyFraction = Number.isFinite(sf) && sf >= 0 ? sf : 0.5;
-    }
-
+    // Terrain following rides on the grid itself: when the chosen grid was
+    // "snapped to ground" (Meshes panel), `grid.column_offsets` is already set and
+    // travels through buildLADRequest verbatim, so the inversion follows the terrain
+    // shown in the viewport. Nothing to do here.
     const request = buildLADRequest(selectedScans, grid, {
       lmax,
       maxAspectRatio,
       minVoxelHits,
       elementWidth,
       gtheta,
-      dem,
-      safetyFraction,
     });
 
     // Reuse: extract the filtered mesh (vertices/indices) with per-triangle scan
@@ -375,7 +343,7 @@ export function LADPopup({
 
     onStartLAD(request, selectedScans.map(s => s.color), gridMeshId, reuseMesh, newTri);
     onClose();
-  }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, gthetaStr, terrainFollow, selectedDem, safetyFractionStr, onStartLAD, onClose]);
+  }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, gthetaStr, onStartLAD, onClose]);
 
   if (!isOpen) return null;
 
@@ -783,64 +751,21 @@ export function LADPopup({
               </>
             )}
 
-            {/* Terrain following: ride the voxel grid on a DEM surface. Gated on a
-                DEM existing; the checkbox is disabled (with a hint) when none. */}
-            <label className="text-xs font-medium text-neutral-300 mt-4 mb-2 flex items-center gap-1">
-              Terrain Following
-              <InfoHint
-                data-testid="lad-terrain-help"
-                label="Terrain following"
-                text="Shift each voxel column vertically so its bottom rides a DEM surface, keeping the grid a fixed height above sloping or undulating ground (the original flat grid assumes level terrain). Requires a DEM generated from this cloud (Generate DEM). The safety clearance keeps the lowest cell off the ground; it is a fraction of one voxel's height, so it scales with grid resolution. Columns whose footprint falls outside the DEM are dropped."
-              />
-            </label>
-            {demOptions.length === 0 ? (
+            {/* Terrain following: when the chosen grid was "snapped to ground"
+                (Meshes panel), it follows the DEM — show that, since the inversion
+                will use the displaced grid the viewport shows. */}
+            {gridIsSnapped && (
               <div
-                className="text-[10px] text-amber-300 bg-amber-500/5 border border-amber-500/30 rounded px-2 py-1.5"
-                data-testid="lad-no-dem-warning"
+                className="text-[10px] text-green-300 bg-green-500/5 border border-green-500/30 rounded px-2 py-1.5 mt-3 flex items-center gap-1"
+                data-testid="lad-grid-snapped-note"
               >
-                No DEM available. Generate a DEM from this cloud (Generate DEM) to
-                make the grid follow the terrain.
+                This grid is snapped to ground — LAD will follow the terrain.
+                <InfoHint
+                  data-testid="lad-terrain-help"
+                  label="Terrain following"
+                  text="The grid was displaced to ride a DEM surface (Meshes panel → Snap to ground). Each voxel column tracks the ground, so the inversion uses exactly the grid you see. To change it, re-snap or clear the snap on the grid in the Meshes panel."
+                />
               </div>
-            ) : (
-              <>
-                <label className="flex items-center gap-2 text-xs text-neutral-300">
-                  <input
-                    type="checkbox"
-                    data-testid="lad-terrain-toggle"
-                    checked={terrainFollow}
-                    onChange={(e) => setTerrainFollow(e.target.checked)}
-                    className="accent-green-500"
-                  />
-                  Follow terrain (DEM)
-                </label>
-                {terrainFollow && (
-                  <div className="mt-2 space-y-2">
-                    <select
-                      data-testid="lad-dem-select"
-                      value={selectedDemId}
-                      onChange={(e) => setSelectedDemId(e.target.value)}
-                      className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
-                    >
-                      {demOptions.map(d => (
-                        <option key={d.id} value={d.id}>{d.label}</option>
-                      ))}
-                    </select>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-neutral-400 shrink-0">
-                        Safety clearance (× cell height)
-                      </span>
-                      <DebouncedNumberInput
-                        data-testid="lad-safety-fraction"
-                        value={parseFloat(safetyFractionStr) || 0}
-                        min={0}
-                        debounceMs={0}
-                        onCommit={(v) => setSafetyFractionStr(String(v))}
-                        className="w-20 px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
-                      />
-                    </div>
-                  </div>
-                )}
-              </>
             )}
             </>
             )}

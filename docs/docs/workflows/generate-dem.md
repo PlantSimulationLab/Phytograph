@@ -56,10 +56,11 @@ If you ticked **Compute height above ground**, the source cloud gains a
 continuous `height_above_ground` attribute and recolours by it (a gradient with
 a numeric colorbar). Switch back to it any time from the **Color by** picker.
 
-A DEM also drives **terrain following** in the
-[leaf-area-density](estimate-leaf-area-density.md#terrain-following) tool: tick
-**Follow terrain** there to make the voxel grid ride this surface, so each column
-measures the same height above sloping ground.
+A DEM also drives **terrain following** for leaf-area density: expand a voxel
+grid's row in the Meshes panel and click **Snap to ground** to displace the grid
+so it rides this surface — each column then measures the same height above sloping
+ground, and the LAD inversion uses the displaced grid you see. See
+[Terrain following](estimate-leaf-area-density.md#terrain-following-snap-the-grid-to-the-ground).
 
 ### Export
 

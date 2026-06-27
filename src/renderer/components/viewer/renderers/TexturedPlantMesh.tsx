@@ -2,6 +2,7 @@ import { useRef, useMemo, useState, useEffect } from 'react';
 import * as THREE from 'three';
 import type { MeshData, PlantMaterialDef } from '../../../lib/pointCloudTypes';
 import { TriangleMesh } from './TriangleMesh';
+import { buildBoundsTree, freeBoundsTree } from '../../../lib/bvhRaycast';
 
 // Helper to load base64 image as Three.js texture
 function useBase64Texture(base64Data: string | undefined): THREE.Texture | null {
@@ -136,7 +137,14 @@ function MaterialSubmesh({ vertices, normals, uvs, materialDef, opacity, wirefra
     }
   }, [texture, materialDef.hasAlpha]);
 
-  useEffect(() => () => { geometry.dispose(); }, [geometry]);
+  // Build the picking BVH in the same effect that frees it, so StrictMode's
+  // build → cleanup → build cycle can't leave boundsTree=null (which would make
+  // acceleratedRaycast fall back to brute force). See TriangleMesh for the full
+  // rationale; accelerates picking on large imported OBJ surfaces.
+  useEffect(() => {
+    buildBoundsTree(geometry);
+    return () => { freeBoundsTree(geometry); geometry.dispose(); };
+  }, [geometry]);
   useEffect(() => () => { material.dispose(); }, [material]);
 
   return <mesh ref={meshRef} geometry={geometry} material={material} />;

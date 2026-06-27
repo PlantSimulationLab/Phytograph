@@ -9,6 +9,13 @@ import { BackendSplash } from "./components/BackendSplash";
 import { SceneProvider } from "./state/sceneStore";
 import { initBackendUrl, deleteCloudSession } from "./utils/backendApi";
 import { installConsoleForwarding } from "./lib/logger";
+import { installBvhRaycast } from "./lib/bvhRaycast";
+
+// Patch THREE.Mesh.prototype.raycast with three-mesh-bvh so R3F's per-event
+// scene raycasts (pointerdown/up/click AND every wheel tick) are O(log n) on
+// large triangulated meshes instead of O(triangles). Must run before any mesh
+// renders. See lib/bvhRaycast.ts for the full rationale.
+installBvhRaycast();
 
 // Forward console.error/warn into the unified session log file (via main) so a
 // bug report can attach renderer-side errors, which otherwise only live in the

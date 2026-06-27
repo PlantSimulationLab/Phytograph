@@ -44,6 +44,12 @@ export function LADResultsPanel({
                 data-testid="lad-row"
                 data-voxel-count={result.voxels.length}
                 data-lad-max={max}
+                // Per-voxel centers (rounded [x,y,z]) for E2E assertions (e.g.
+                // terrain-following slope tracking). Capped so a huge grid doesn't
+                // bloat the DOM; ample for the small test grids that read it.
+                data-voxel-centers={result.voxels.length <= 512
+                  ? JSON.stringify(result.voxels.map(v => v.center.map(n => Math.round(n * 1000) / 1000)))
+                  : undefined}
                 data-return-mode={result.returnMode}
                 data-selected={isSelected ? 'true' : 'false'}
                 onClick={() => onSelect(result.id)}

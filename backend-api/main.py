@@ -2475,12 +2475,25 @@ def _auto_csf_params(points: np.ndarray) -> dict:
     relief = float(np.ptp(points[:, 2]))
     ratio = relief / ext
     CLOTH_MIN, CLOTH_MAX, THR_MIN, THR_MAX = 0.05, 2.0, 0.02, 1.0
+
+    # Hard node-count backstop. The cloth is an (ext/cloth)² grid simulated ~500×,
+    # so even the CLOTH_MAX (2 m) ceiling lets the node count explode on a huge
+    # extent — and a sky/miss-contaminated cloud (misses sit ~1 km out) inflates
+    # `ext` ~1000×, producing a cloth that effectively hangs (millions of nodes ×
+    # 500 iterations is minutes-to-hours). Callers should exclude misses before
+    # gridding a DEM (the DEM tool does — this is only a defensive backstop), so
+    # bias hard toward "fast but coarse" over "accurate but hangs": floor the
+    # resolution so the cloth never exceeds ~600 nodes per side (~360 K nodes),
+    # which a normal in-extent cloud never hits but a runaway extent is clamped to.
+    MAX_CLOTH_NODES_PER_SIDE = 600
+    cloth_floor = ext / MAX_CLOTH_NODES_PER_SIDE
+
     if ratio >= 0.2:
         cloth = min(ext / 200.0, 1.0)
-        return {"cloth_resolution": float(np.clip(cloth, CLOTH_MIN, CLOTH_MAX)),
+        return {"cloth_resolution": max(float(np.clip(cloth, CLOTH_MIN, CLOTH_MAX)), cloth_floor),
                 "class_threshold": 0.5, "rigidness": 1, "slope_smooth": True}
     scaled = ext / 100.0
-    return {"cloth_resolution": float(np.clip(scaled, CLOTH_MIN, CLOTH_MAX)),
+    return {"cloth_resolution": max(float(np.clip(scaled, CLOTH_MIN, CLOTH_MAX)), cloth_floor),
             "class_threshold": float(np.clip(scaled, THR_MIN, THR_MAX)),
             "rigidness": 3, "slope_smooth": False}
 
@@ -3246,6 +3259,17 @@ class HeliosGrid(BaseModel):
     # without it a rotated UI grid would crop only its axis-aligned extent,
     # leaking points past the rotated walls. 0 / absent = axis-aligned.
     rotation: float = 0.0
+    # Per-(x,y)-column vertical offset for a terrain-following ("snapped") grid,
+    # row-major as [j*nx + i], length nx*ny. Each value is the z shift added to
+    # the regular lattice for that column (same convention _sample_dem_columns
+    # returns: dem_z + clearance - grid_bottom_z). When present these are the
+    # AUTHORITATIVE offsets — computed once by /api/lad/snap-grid, rendered in the
+    # viewport, and sent here verbatim so the inversion runs on exactly the grid
+    # the user sees. None/absent = flat grid. `kept_columns` (when present, same
+    # length) marks which columns survived the DEM footprint; False columns are
+    # excluded from the result. None => all columns kept.
+    column_offsets: Optional[List[float]] = None
+    kept_columns: Optional[List[bool]] = None
 
 class HeliosTriangulationRequest(BaseModel):
     """Request model for Helios triangulation"""
@@ -3386,7 +3410,7 @@ class LADComputeRequest(BaseModel):
     # DEM surface and the lowest cell, expressed as a fraction of one cell's height
     # (size.z/nz) so it auto-scales with voxel resolution.
     terrain_follow: bool = False
-    safety_fraction: float = 0.5
+    safety_fraction: float = 0.1
     dem: Optional[DemRaster] = None
     lmax: float = 0.1                      # max triangle edge length (G-function)
     max_aspect_ratio: float = 4.0         # max triangle aspect ratio
@@ -4969,16 +4993,21 @@ def _sample_dem_columns(grid_center, grid_size, grid_nx, grid_ny, grid_nz,
                         grid_rotation_rad, dem: "DemRaster", safety_fraction: float):
     """Sample a DEM under each voxel column for terrain-following LAD.
 
-    For each of the nx*ny columns of the (possibly rotated) grid, compute the
-    column center's WORLD (x,y) — rotating the local lattice center by +rotation
-    about grid_center, the forward of the inverse-rotation `_points_inside_grid` /
-    `_count_points_per_cell` apply — then sample the axis-aligned DEM raster there.
+    For each of the nx*ny columns of the (possibly rotated) grid, sample the DEM
+    over the column's FOOTPRINT — its 4 corners + center, each forward-rotated
+    about +z into world coords (the forward of the inverse-rotation
+    `_points_inside_grid` / `_count_points_per_cell` apply, so a rotated grid is
+    handled) — and take the MAXIMUM ground height. The whole cell (not just its
+    center) must clear the ground: on a slope the ground rises across a column's
+    footprint, so lifting to the center height would bury the uphill edge. Using
+    the footprint max places the bottom above the highest ground the column
+    overlaps.
 
     The per-column vertical offset shifts the regular lattice so the column's
-    BOTTOM face sits at ``dem_z + safety_fraction*(size.z/nz)`` (clearance scales
-    with one cell's height). Concretely the lattice z-origin is the grid bottom
-    (grid_center.z - size.z/2), so the offset added to every cell in the column is
-    ``dem_z + clearance - (grid_center.z - size.z/2)``.
+    BOTTOM face sits at ``ground_max + safety_fraction*(size.z/nz)`` (clearance
+    scales with one cell's height). Concretely the lattice z-origin is the grid
+    bottom (grid_center.z - size.z/2), so the offset added to every cell in the
+    column is ``ground_max + clearance - (grid_center.z - size.z/2)``.
 
     Void DEM cells (NaN) that lie INSIDE the raster footprint inherit the nearest
     valid DEM cell's elevation (so a hole doesn't drop the column). Columns whose
@@ -5024,6 +5053,16 @@ def _sample_dem_columns(grid_center, grid_size, grid_nx, grid_ny, grid_nz,
     cos_t, sin_t = math.cos(grid_rotation_rad), math.sin(grid_rotation_rad)
     grid_bottom_z = cz - 0.5 * sz
     clearance = float(safety_fraction) * (sz / nz)
+    half_cx = 0.5 * (sx / nx)   # half a column footprint in x (local)
+    half_cy = 0.5 * (sy / ny)   # half a column footprint in y (local)
+
+    def _sample(wx, wy):
+        """Nearest-filled DEM elevation at world (wx, wy), or NaN if outside."""
+        di = int(math.floor((wx - ox) / cell))
+        dj = int(math.floor((wy - oy) / cell))
+        if di < 0 or di >= dem.nx or dj < 0 or dj >= dem.ny:
+            return None
+        return float(filled[dj, di])
 
     column_offsets = [0.0] * (nx * ny)
     kept_mask = np.zeros(nx * ny, dtype=bool)
@@ -5033,21 +5072,33 @@ def _sample_dem_columns(grid_center, grid_size, grid_nx, grid_ny, grid_nz,
         ly = -0.5 * sy + (j + 0.5) * (sy / ny)
         for i in range(nx):
             lx = -0.5 * sx + (i + 0.5) * (sx / nx)
-            # forward-rotate the local lattice center about +z, then translate to world
-            wx = cx + (lx * cos_t - ly * sin_t)
-            wy = cy + (lx * sin_t + ly * cos_t)
-            di = int(math.floor((wx - ox) / cell))
-            dj = int(math.floor((wy - oy) / cell))
             col = j * nx + i
-            if di < 0 or di >= dem.nx or dj < 0 or dj >= dem.ny:
+
+            # The ENTIRE cell must clear the ground, not just its center: on a
+            # slope the ground under one column rises across the footprint, so we
+            # lift the column to clear the HIGHEST ground it overlaps. Sample the
+            # DEM over the column footprint — the 4 corners + center, each
+            # forward-rotated about +z into world coords (handles a rotated grid) —
+            # and take the max. This places the flat bottom face at
+            # max_ground + clearance, so even the uphill (highest) edge clears it.
+            ground_max = -math.inf
+            in_footprint = False
+            for ddx in (-half_cx, 0.0, half_cx):
+                for ddy in (-half_cy, 0.0, half_cy):
+                    sx_l, sy_l = lx + ddx, ly + ddy
+                    wx = cx + (sx_l * cos_t - sy_l * sin_t)
+                    wy = cy + (sx_l * sin_t + sy_l * cos_t)
+                    z = _sample(wx, wy)
+                    if z is None or not np.isfinite(z):
+                        continue
+                    in_footprint = True
+                    if z > ground_max:
+                        ground_max = z
+            if not in_footprint:
+                # Column footprint lies entirely outside the DEM (or fully void).
                 dropped += 1
                 continue
-            dem_z = filled[dj, di]
-            if not np.isfinite(dem_z):
-                # in-footprint but no valid neighbor anywhere (fully-void DEM)
-                dropped += 1
-                continue
-            column_offsets[col] = float(dem_z) + clearance - grid_bottom_z
+            column_offsets[col] = ground_max + clearance - grid_bottom_z
             kept_mask[col] = True
 
     return column_offsets, kept_mask, dropped
@@ -5400,7 +5451,39 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         column_offsets = None
         terrain_dropped = 0
         terrain_kept_mask = None
-        if request.terrain_follow:
+        ncols_grid = grid_nx * grid_ny
+        if request.grid.column_offsets is not None:
+            # AUTHORITATIVE offsets: the grid was "snapped to ground" in the UI
+            # (POST /api/lad/snap-grid computed these from the DEM, the viewport
+            # rendered the displaced grid, and they were sent back verbatim). Use
+            # them as-is so the inversion runs on exactly the voxels the user sees
+            # — do NOT re-sample the DEM. The offsets are pure z shifts, unaffected
+            # by the x/y-only lad_shift recenter, so no frame adjustment is needed.
+            if len(request.grid.column_offsets) != ncols_grid:
+                raise ValueError(
+                    f"grid.column_offsets must have length nx*ny={ncols_grid}, "
+                    f"got {len(request.grid.column_offsets)}.")
+            column_offsets = [float(v) for v in request.grid.column_offsets]
+            if request.grid.kept_columns is not None:
+                if len(request.grid.kept_columns) != ncols_grid:
+                    raise ValueError(
+                        f"grid.kept_columns must have length nx*ny={ncols_grid}, "
+                        f"got {len(request.grid.kept_columns)}.")
+                terrain_kept_mask = np.asarray(request.grid.kept_columns, dtype=bool)
+            else:
+                terrain_kept_mask = np.ones(ncols_grid, dtype=bool)
+            terrain_dropped = int((~terrain_kept_mask).sum())
+            if not terrain_kept_mask.any():
+                return {
+                    "success": False,
+                    "cells": [],
+                    "method_used": "helios",
+                    "error": "The snapped grid has no valid columns — every column "
+                             "fell outside the DEM. Re-snap with a grid that overlaps "
+                             "the DEM.",
+                    "warnings": warnings,
+                }
+        elif request.terrain_follow:
             if request.dem is None:
                 raise ValueError("terrain_follow requires a DEM (none supplied).")
             # Sample the DEM in the COMPUTE frame: on a moving-platform scan the
@@ -5676,7 +5759,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # to orient each voxel cube so the result grid aligns with the box.
             "grid_rotation": grid_rotation_deg,
             "bounds": [bb_lo, bb_hi],
-            "terrain_follow": bool(request.terrain_follow),
+            "terrain_follow": bool(request.terrain_follow or column_offsets is not None),
             "dropped_columns": int(terrain_dropped),
             "is_multi_return": is_multi,
             "return_mode": return_mode,
@@ -5930,6 +6013,43 @@ async def lad_compute(http_request: Request):
             _do_lad_computation(request, progress=progress, reuse_mesh=reuse_mesh)
         ).encode("utf-8"),
         request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+class SnapGridRequest(BaseModel):
+    """Compute per-column ground offsets for a 'snap to ground' grid displacement.
+
+    The grid is sampled against the DEM exactly as terrain-following LAD does (one
+    source of truth: _sample_dem_columns). The renderer applies the returned
+    offsets to displace the grid in the viewport, then sends the SAME offsets back
+    on the grid for the LAD inversion — so what is seen is what is inverted."""
+    grid: HeliosGrid
+    dem: DemRaster
+    safety_fraction: float = 0.1
+
+
+class SnapGridResponse(BaseModel):
+    # Per-(x,y)-column z offset, row-major [j*nx + i], length nx*ny. Dropped
+    # columns (outside the DEM footprint) get 0.0 and kept_columns[col] = False.
+    column_offsets: List[float]
+    kept_columns: List[bool]
+    dropped_columns: int
+
+
+@app.post("/api/lad/snap-grid", response_model=SnapGridResponse)
+async def lad_snap_grid(request: SnapGridRequest):
+    """Sample a DEM under each voxel column so the grid can be displaced to follow
+    the ground. Returns the authoritative per-column offsets the UI both renders
+    and feeds to the LAD inversion (HeliosGrid.column_offsets)."""
+    grid = request.grid
+    grid_rotation_rad = math.radians(float(grid.rotation))
+    offsets, kept_mask, dropped = _sample_dem_columns(
+        grid.center, grid.size, grid.nx, grid.ny, grid.nz,
+        grid_rotation_rad, request.dem, request.safety_fraction)
+    return SnapGridResponse(
+        column_offsets=[float(v) for v in offsets],
+        kept_columns=[bool(v) for v in kept_mask.tolist()],
+        dropped_columns=int(dropped),
+    )
 
 
 class TrajectoryParseRequest(BaseModel):
@@ -18814,7 +18934,21 @@ def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress
     appends a `height_above_ground` column, then rebuilds the octree."""
     try:
         with _cloud_session_lock:
-            keep = ~sess.deleted
+            surv = ~sess.deleted
+            keep = surv.copy()
+            # ALWAYS exclude sky/miss points (is_miss != 0): a miss is a ray that
+            # hit nothing, projected ~1 km out, so it has no place in a ground
+            # surface AND inflates the cloud extent ~1000× — which makes the CSF
+            # cloth (and the gridding) pathological enough to hang. Mirrors the
+            # Helios-triangulation feed's miss exclusion; the backfilled-miss buffer
+            # lives outside `positions` (excluded for free), interleaved is_miss
+            # points are dropped here.
+            if _MISS_SLUG in sess.extras:
+                keep = keep & (sess.extras[_MISS_SLUG] == 0)
+            # Survivor-relative hit mask: `pts` is `positions[keep]`, but the HAG
+            # column must align to ALL survivors (`positions[surv]`), so record
+            # which survivor rows are hits to scatter HAG back over (misses → 0).
+            hit_in_surv = keep[surv]
             pts = sess.positions[keep].copy()
             ground_col = sess.extras.get(GROUND_CLASS_SLUG)
             is_ground = (ground_col[keep] == GROUND_CLASS_GROUND
@@ -18869,8 +19003,14 @@ def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress
             result["warning"] = warning
 
         if request.add_height_column and sample_ground_z is not None:
-            hag = pts[:, 2] - sample_ground_z
-            hag[~np.isfinite(hag)] = 0.0
+            hag_hits = pts[:, 2] - sample_ground_z
+            hag_hits[~np.isfinite(hag_hits)] = 0.0
+            # Scatter the hit-aligned HAG back over ALL survivors so it matches the
+            # column _session_add_extra_column expects (positions[~deleted]); the
+            # excluded misses get 0 (sky points have no meaningful height-above-
+            # ground). `hit_in_surv` marks which survivor rows are hits.
+            hag = np.zeros(int(hit_in_surv.shape[0]), dtype=np.float64)
+            hag[hit_in_surv] = hag_hits
             with _cloud_session_lock:
                 _session_add_extra_column(sess, HEIGHT_ABOVE_GROUND_SLUG, HEIGHT_ABOVE_GROUND_LABEL, hag)
             cache_key, cache_dir, meta = _session_rebuild(sess)

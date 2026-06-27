@@ -1215,16 +1215,23 @@ class TestLADTerrainFollow:
         assert "dem" in result["error"].lower()
 
     def test_dropped_columns_excluded_and_reported(self, tmp_path, stub_pyhelios):
-        # DEM smaller than the grid footprint: outer columns drop out.
-        dem = _flat_dem(1, 1, 1.0, [-0.5, -0.5], 4.0)  # footprint only [-0.5,0.5]
+        # The grid is center=[0,0,1], size=[2,2,2], 2x2 columns: each column footprint
+        # is 1x1 m, so the +x columns span x in [0,1] and the -x columns x in [-1,0].
+        # A DEM covering only x in [-2,0] (and all y) leaves the +x columns' ENTIRE
+        # footprint outside it, so they drop. A column is kept if ANY part of its
+        # footprint overlaps the DEM (the whole-cell-clears-ground rule samples the
+        # footprint, not just the center).
+        dem = main.DemRaster(grid_z=[4.0] * (4 * 4), nx=4, ny=4, cell=1.0,
+                             origin=[-2.0, -2.0])  # footprint x,y in [-2, 2]
+        # Shrink to the -x half: only x in [-2, 0].
+        dem = main.DemRaster(grid_z=[4.0] * (2 * 4), nx=2, ny=4, cell=1.0,
+                             origin=[-2.0, -2.0])  # x in [-2, 0], y in [-2, 2]
         req = self._terrain_request(tmp_path, dem, nx=2, ny=2, nz=1)
         result = main._do_lad_computation(req)
-        # 2x2 grid spanning [-1,1]; columns at +-0.5 centers -> all 4 inside [-0.5,0.5]?
-        # Centers are at +-0.5; the DEM covers [-0.5,0.5], so di=floor((+-0.5+0.5)/1)
-        # = 0 or 1; only the in-range ones survive. Expect at least one dropped.
-        assert result["dropped_columns"] >= 1
-        # Surviving cells count == kept columns * nz.
-        assert len(result["cells"]) == (4 - result["dropped_columns"])
+        # The 2 +x columns (footprint x in [0,1]) lie outside the DEM and drop;
+        # the 2 -x columns (x in [-1,0]) overlap it and are kept.
+        assert result["dropped_columns"] == 2
+        assert len(result["cells"]) == 2
         assert any("dropped" in w.lower() for w in result.get("warnings", []))
 
     def test_all_columns_dropped_errors(self, tmp_path, stub_pyhelios):
@@ -1307,3 +1314,79 @@ class TestLADGthetaOverride:
         result = main._do_lad_computation(req, reuse_mesh=fake_mesh)
         assert result["success"] is False
         assert "override" in result["error"].lower() or "g(theta)" in result["error"].lower()
+
+
+class TestSnapGridEndpoint:
+    """POST /api/lad/snap-grid runs _sample_dem_columns (single source of truth)."""
+
+    def test_snap_returns_offsets_tracking_slope(self):
+        # DEM elevation rises with x; the snapped columns' offsets must rise too.
+        nx_d, ny_d = 4, 4
+        grid_z = [float(i) for j in range(ny_d) for i in range(nx_d)]
+        dem = main.DemRaster(grid_z=grid_z, nx=nx_d, ny=ny_d, cell=1.0,
+                             origin=[-2.0, -2.0])
+        grid = main.HeliosGrid(center=[0, 0, 1.0], size=[2, 2, 2], nx=2, ny=2, nz=2)
+        req = main.SnapGridRequest(grid=grid, dem=dem, safety_fraction=0.0)
+        # Call the helper the endpoint wraps (avoids spinning up the ASGI app).
+        import math as _m
+        offsets, kept, dropped = main._sample_dem_columns(
+            grid.center, grid.size, grid.nx, grid.ny, grid.nz,
+            _m.radians(grid.rotation), dem, req.safety_fraction)
+        assert dropped == 0 and kept.all()
+        # +x columns sample a higher DEM than -x columns.
+        assert offsets[1] > offsets[0]
+        assert offsets[3] > offsets[2]
+
+
+class TestLADAuthoritativeOffsets:
+    """A snapped grid's column_offsets are used verbatim; the DEM is NOT re-sampled."""
+
+    def _request(self, tmp_path, **grid_over):
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5 0\n-0.1 0.0 0.6 0\n0.2 -0.1 0.4 0\n9.0 9.0 9.0 1\n")
+        grid = main.HeliosGrid(center=[0, 0, 1.0], size=[2, 2, 2], nx=2, ny=2, nz=1,
+                               **grid_over)
+        scan = main.HeliosScanEntry(file_path=str(f), ascii_format="x y z is_miss",
+                                    origin=[0, 0, 5], return_type="single")
+        return main.LADComputeRequest(scans=[scan], grid=grid, lmax=0.1,
+                                      max_aspect_ratio=4.0, min_voxel_hits=1)
+
+    def test_offsets_used_verbatim_without_resampling(self, tmp_path, stub_pyhelios, monkeypatch):
+        # If _do_lad_computation re-sampled the DEM, this would blow up — proving
+        # the authoritative path skips it entirely.
+        def _boom(*a, **k):
+            raise AssertionError("_sample_dem_columns must NOT run for an authoritative grid")
+        monkeypatch.setattr(main, "_sample_dem_columns", _boom)
+
+        offs = [1.0, 2.0, 3.0, 4.0]  # nx*ny = 4
+        req = self._request(tmp_path, column_offsets=offs)
+        result = main._do_lad_computation(req)
+        assert result["success"] is True
+        assert result["terrain_follow"] is True
+        cloud = stub_pyhelios.instances[-1]
+        addgrid = [c for c in cloud.calls if c[0] == "addGrid"][-1]
+        assert list(addgrid[5]) == offs   # passed straight through to addGrid
+
+    def test_kept_columns_drop_excludes_cells(self, tmp_path, stub_pyhelios):
+        # Mark one column dropped; its cells must be excluded from the result.
+        offs = [1.0, 2.0, 3.0, 4.0]
+        kept = [True, False, True, True]   # column 1 dropped
+        req = self._request(tmp_path, column_offsets=offs, kept_columns=kept)
+        result = main._do_lad_computation(req)
+        assert result["success"] is True
+        # nz=1 so cells == columns; 3 kept of 4.
+        assert len(result["cells"]) == 3
+        assert result["dropped_columns"] == 1
+
+    def test_wrong_length_offsets_error(self, tmp_path, stub_pyhelios):
+        req = self._request(tmp_path, column_offsets=[1.0, 2.0])  # need 4
+        result = main._do_lad_computation(req)
+        assert result["success"] is False
+        assert "column_offsets" in result["error"]
+
+    def test_all_columns_dropped_errors(self, tmp_path, stub_pyhelios):
+        req = self._request(tmp_path, column_offsets=[1.0, 2.0, 3.0, 4.0],
+                            kept_columns=[False, False, False, False])
+        result = main._do_lad_computation(req)
+        assert result["success"] is False
+        assert "no valid columns" in result["error"].lower()

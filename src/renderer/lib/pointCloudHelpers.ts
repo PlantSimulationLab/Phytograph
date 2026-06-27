@@ -224,6 +224,10 @@ export function voxelMeshToHeliosGrid(
   scale: { x: number; y: number; z: number } | undefined,
   subdivisions: { x: number; y: number; z: number } | undefined,
   rotationDeg?: number,
+  // Terrain-following ("snapped") grid: per-column z offsets + kept mask. When
+  // present they ride along into the HeliosGrid so the backend builds exactly the
+  // displaced grid the viewport shows (authoritative — no DEM re-sampling).
+  groundSnap?: { columnOffsets: Float32Array; keptMask: Uint8Array },
 ): HeliosGrid | null {
   if (!subdivisions) return null;
   const p = position ?? { x: 0, y: 0, z: 0 };
@@ -236,7 +240,46 @@ export function voxelMeshToHeliosGrid(
     nz: Math.max(1, Math.round(subdivisions.z)),
   };
   if (rotationDeg && Math.abs(rotationDeg) > 1e-6) grid.rotation = rotationDeg;
+  if (groundSnap && groundSnap.columnOffsets.length === grid.nx * grid.ny) {
+    grid.column_offsets = Array.from(groundSnap.columnOffsets);
+    grid.kept_columns = Array.from(groundSnap.keptMask, v => v !== 0);
+  }
   return grid;
+}
+
+// Signature of a voxel grid's transform + subdivisions. Stored on a snap so a
+// reactive guard can clear stale offsets the instant the grid is moved, resized,
+// rotated, or re-divided (the offsets are computed against this exact geometry).
+export function gridSnapSignature(
+  position: { x: number; y: number; z: number } | undefined,
+  scale: { x: number; y: number; z: number } | undefined,
+  subdivisions: { x: number; y: number; z: number } | undefined,
+  rotationDeg?: number,
+): string {
+  const p = position ?? { x: 0, y: 0, z: 0 };
+  const s = scale ?? { x: 1, y: 1, z: 1 };
+  const g = subdivisions ?? { x: 1, y: 1, z: 1 };
+  const r = rotationDeg ?? 0;
+  const f = (n: number) => Number(n).toFixed(6);
+  return `${f(p.x)},${f(p.y)},${f(p.z)}|${f(s.x)},${f(s.y)},${f(s.z)}|${f(r)}|` +
+    `${Math.round(g.x)},${Math.round(g.y)},${Math.round(g.z)}`;
+}
+
+// Convert a snapped grid's per-column WORLD-z offsets into LOCAL-space offsets for
+// rendering. The grid renders as a unit cube (±0.5 local) scaled by size.z, so a
+// world-z shift maps to localZ = worldZ / size.z. The shift is purely vertical and
+// the grid's only rotation is azimuthal (about +z, applied by the parent group
+// AFTER), so it is rotation-invariant — matching how Helios bakes z then rotates.
+// This is the single helper feeding BOTH the wireframe and the face geometry, so
+// they can never diverge. Returns a Float32Array (len nx*ny) of local offsets.
+export function gridColumnLocalOffsets(
+  columnOffsets: Float32Array,
+  sizeZ: number,
+): Float32Array {
+  const inv = sizeZ !== 0 ? 1 / sizeZ : 0;
+  const out = new Float32Array(columnOffsets.length);
+  for (let i = 0; i < columnOffsets.length; i++) out[i] = columnOffsets[i] * inv;
+  return out;
 }
 
 // Per-triangle geometry derived from the face normal, in the leaf-angle
@@ -835,6 +878,11 @@ export function buildHeliosTriangulationRequest(
     return entry;
   });
 
+  // A snapped grid's triangulation crops to the flat ENVELOPE that contains every
+  // displaced column (the Helios <grid> can't undulate), so a reused mesh spans
+  // all the LAD voxels. Non-snapped grids pass through unchanged.
+  const triGrid = grid ? triangulationGridEnvelope(grid) : null;
+
   return {
     scans: requestScans,
     lmax: 1.0e9,
@@ -843,7 +891,7 @@ export function buildHeliosTriangulationRequest(
     theta_max: 130,
     phi_min: 0,
     phi_max: 360,
-    ...(grid ? { grid } : {}),
+    ...(triGrid ? { grid: triGrid } : {}),
   };
 }
 
@@ -878,6 +926,57 @@ export function demGridToLADRaster(demGrid: {
              demGrid.origin[1] + demGrid.worldShift[1]],
     nodata: LAD_DEM_NODATA,
   };
+}
+
+// A snapped (terrain-following) grid's bottom undulates, but the Helios
+// triangulation `<grid>` block crops to a single FLAT box (no per-column offsets).
+// Triangulating against the original flat box would under-cover the up-slope
+// columns (lifted above the box top), so a reused mesh wouldn't span every voxel.
+// Return a flat box (no offsets) whose z-extent CONTAINS every displaced column,
+// so the surface mesh covers all voxels and reuse is consistent. The LAD grid
+// still uses the exact per-column offsets; only the triangulation crop is widened.
+// A grid with no offsets is returned unchanged.
+export function triangulationGridEnvelope(grid: HeliosGrid): HeliosGrid {
+  const offs = grid.column_offsets;
+  if (!offs || offs.length === 0) return grid;
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < offs.length; i++) {
+    // Only kept columns bound the envelope; dropped columns aren't inverted.
+    if (grid.kept_columns && grid.kept_columns[i] === false) continue;
+    if (offs[i] < lo) lo = offs[i];
+    if (offs[i] > hi) hi = offs[i];
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return grid;
+  const [cx, cy, cz] = grid.center;
+  const [sx, sy, sz] = grid.size;
+  const zLo = (cz - sz / 2) + lo;   // lowest displaced cell bottom
+  const zHi = (cz + sz / 2) + hi;   // highest displaced cell top
+  const { column_offsets, kept_columns, ...flat } = grid;
+  void column_offsets; void kept_columns;
+  return { ...flat, center: [cx, cy, (zLo + zHi) / 2], size: [sx, sy, zHi - zLo] };
+}
+
+// Pick the grid a REUSED triangulation should drive the LAD inversion on.
+//
+// The grid stored on a Helios mesh is the FLAT triangulation envelope:
+// `triangulationGridEnvelope` strips `column_offsets` (and widens z) so the
+// Helios `<grid>` can crop to a box. That's correct for triangulation but WRONG
+// for the inversion — re-using it would lay the LAD voxels out on a flat grid,
+// dropping the terrain follow the user set up with "Snap to ground".
+//
+// When the source voxel box is still in the scene, its LIVE HeliosGrid carries
+// the current snap offsets, so the inversion should run on THAT — reproducing
+// the displaced grid the viewport shows, exactly like the first (new-
+// triangulation) run did. When the box was deleted there's nothing to recover,
+// so fall back to the stored (flat) grid.
+//
+// `liveGrid` should be the grid box's live HeliosGrid (or null/undefined if the
+// box is gone). `storedGrid` is the mesh's recorded grid (the flat envelope).
+export function ladReuseGrid(
+  storedGrid: HeliosGrid,
+  liveGrid: HeliosGrid | null | undefined,
+): HeliosGrid {
+  return liveGrid ?? storedGrid;
 }
 
 export function buildLADRequest(

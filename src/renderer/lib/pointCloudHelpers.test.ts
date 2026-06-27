@@ -28,6 +28,10 @@ import {
   buildLADRequest,
   demGridToLADRaster,
   LAD_DEM_NODATA,
+  gridSnapSignature,
+  gridColumnLocalOffsets,
+  triangulationGridEnvelope,
+  ladReuseGrid,
   buildHeliosTriangulationRequest,
   resolveHeliosScanSource,
 } from './pointCloudHelpers';
@@ -1113,6 +1117,137 @@ describe('demGridToLADRaster', () => {
     expect(raster.grid_z[1]).toBe(LAD_DEM_NODATA);
     expect(raster.grid_z[3]).toBe(LAD_DEM_NODATA);
     expect(raster.grid_z[0]).toBe(1);
+  });
+});
+
+describe('voxelMeshToHeliosGrid — ground snap', () => {
+  it('rides snap offsets + kept mask into the HeliosGrid', () => {
+    const grid = voxelMeshToHeliosGrid(
+      { x: 0, y: 0, z: 1 }, { x: 2, y: 2, z: 1 }, { x: 2, y: 1, z: 1 }, 0,
+      { columnOffsets: Float32Array.from([0.1, 0.2]), keptMask: Uint8Array.from([1, 0]) },
+    );
+    expect(grid!.column_offsets![0]).toBeCloseTo(0.1, 5);
+    expect(grid!.column_offsets![1]).toBeCloseTo(0.2, 5);
+    expect(grid!.kept_columns).toEqual([true, false]);
+  });
+
+  it('ignores a snap whose length mismatches nx*ny', () => {
+    const grid = voxelMeshToHeliosGrid(
+      { x: 0, y: 0, z: 1 }, { x: 2, y: 2, z: 1 }, { x: 2, y: 2, z: 1 }, 0,
+      { columnOffsets: Float32Array.from([0.1, 0.2]), keptMask: Uint8Array.from([1, 1]) },
+    );
+    expect(grid!.column_offsets).toBeUndefined();  // need 4, got 2
+  });
+
+  it('omits snap fields for a flat grid', () => {
+    const grid = voxelMeshToHeliosGrid(
+      { x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 }, { x: 1, y: 1, z: 1 }, 0);
+    expect(grid!.column_offsets).toBeUndefined();
+    expect(grid!.kept_columns).toBeUndefined();
+  });
+});
+
+describe('gridSnapSignature', () => {
+  it('changes when any transform or subdivision changes', () => {
+    const base = gridSnapSignature({ x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 }, { x: 2, y: 2, z: 1 }, 0);
+    expect(gridSnapSignature({ x: 0.5, y: 0, z: 0 }, { x: 1, y: 1, z: 1 }, { x: 2, y: 2, z: 1 }, 0)).not.toBe(base);
+    expect(gridSnapSignature({ x: 0, y: 0, z: 0 }, { x: 2, y: 1, z: 1 }, { x: 2, y: 2, z: 1 }, 0)).not.toBe(base);
+    expect(gridSnapSignature({ x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 }, { x: 3, y: 2, z: 1 }, 0)).not.toBe(base);
+    expect(gridSnapSignature({ x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 }, { x: 2, y: 2, z: 1 }, 20)).not.toBe(base);
+  });
+
+  it('is stable for identical inputs', () => {
+    const a = gridSnapSignature({ x: 1, y: 2, z: 3 }, { x: 4, y: 5, z: 6 }, { x: 2, y: 3, z: 4 }, 12.5);
+    const b = gridSnapSignature({ x: 1, y: 2, z: 3 }, { x: 4, y: 5, z: 6 }, { x: 2, y: 3, z: 4 }, 12.5);
+    expect(a).toBe(b);
+  });
+});
+
+describe('gridColumnLocalOffsets', () => {
+  it('divides world-z offsets by size.z (local-space units)', () => {
+    const local = gridColumnLocalOffsets(Float32Array.from([0.5, 1.0, 2.0]), 2);
+    expect(Array.from(local)).toEqual([0.25, 0.5, 1.0]);
+  });
+
+  it('handles size.z = 0 without dividing by zero', () => {
+    const local = gridColumnLocalOffsets(Float32Array.from([1, 2]), 0);
+    expect(Array.from(local)).toEqual([0, 0]);
+  });
+});
+
+describe('triangulationGridEnvelope', () => {
+  it('returns a flat grid unchanged (no offsets)', () => {
+    const grid = { center: [0, 0, 1] as [number, number, number], size: [2, 2, 1] as [number, number, number], nx: 2, ny: 2, nz: 1 };
+    expect(triangulationGridEnvelope(grid)).toBe(grid);
+  });
+
+  it('grows the z-extent to bound every displaced column, dropping offsets', () => {
+    // center.z=1, size.z=1 => flat box z in [0.5, 1.5]. Offsets [0, 0.5, 1, 2]
+    // lift the bottom to [0.5, 2.5] and the top to [1.5, 3.5], so the envelope is
+    // z in [0.5+0, 1.5+2] = [0.5, 3.5] -> center.z 2, size.z 3.
+    const grid = {
+      center: [0, 0, 1] as [number, number, number],
+      size: [2, 2, 1] as [number, number, number],
+      nx: 2, ny: 2, nz: 1,
+      column_offsets: [0, 0.5, 1, 2],
+    };
+    const env = triangulationGridEnvelope(grid);
+    expect(env.column_offsets).toBeUndefined();
+    expect(env.center[2]).toBeCloseTo(2, 6);
+    expect(env.size[2]).toBeCloseTo(3, 6);
+    // x/y untouched.
+    expect(env.center[0]).toBe(0);
+    expect(env.size[0]).toBe(2);
+  });
+
+  it('only bounds KEPT columns', () => {
+    const grid = {
+      center: [0, 0, 1] as [number, number, number],
+      size: [2, 2, 1] as [number, number, number],
+      nx: 2, ny: 2, nz: 1,
+      column_offsets: [0, 0.5, 1, 99],   // col 3 dropped
+      kept_columns: [true, true, true, false],
+    };
+    const env = triangulationGridEnvelope(grid);
+    // max kept offset is 1 -> top = 1.5 + 1 = 2.5, bottom = 0.5 + 0 = 0.5.
+    expect(env.center[2]).toBeCloseTo(1.5, 6);
+    expect(env.size[2]).toBeCloseTo(2, 6);
+  });
+});
+
+describe('ladReuseGrid', () => {
+  // The snapped grid the user dialled in: per-column offsets ride the terrain.
+  const snapped = {
+    center: [0, 0, 1] as [number, number, number],
+    size: [2, 2, 1] as [number, number, number],
+    nx: 2, ny: 2, nz: 1,
+    column_offsets: [0, 0.5, 1, 2],
+    kept_columns: [true, true, true, true],
+  };
+
+  it('recovers the snapped grid from the live box, NOT the flat stored grid', () => {
+    // A reused Helios mesh stores the FLAT triangulation envelope (offsets gone).
+    const stored = triangulationGridEnvelope(snapped);
+    expect(stored.column_offsets).toBeUndefined();      // the regression: flat
+
+    // With the source voxel box still in the scene, its live grid carries the
+    // current offsets — that's what the inversion must run on so it follows the
+    // terrain, exactly like the first new-triangulation run did.
+    const chosen = ladReuseGrid(stored, snapped);
+    expect(chosen).toBe(snapped);
+    expect(chosen.column_offsets).toEqual([0, 0.5, 1, 2]);
+  });
+
+  it('falls back to the stored grid when the source box was deleted', () => {
+    const stored = triangulationGridEnvelope(snapped);
+    expect(ladReuseGrid(stored, null)).toBe(stored);
+    expect(ladReuseGrid(stored, undefined)).toBe(stored);
+  });
+
+  it('uses the live grid even for a non-snapped box (keeps one source of truth)', () => {
+    const stored = { center: [0, 0, 1] as [number, number, number], size: [2, 2, 1] as [number, number, number], nx: 2, ny: 2, nz: 1 };
+    const live = { ...stored, nx: 4, ny: 4 };   // user re-subdivided the box
+    expect(ladReuseGrid(stored, live)).toBe(live);
   });
 });
 

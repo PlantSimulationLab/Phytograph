@@ -240,6 +240,59 @@ describe('replaceObject action', () => {
     s = run(s, { c: 'undo' });
     expect(s.meshes[0].name).toBe('young');
   });
+
+  it('round-trips a voxel-grid subdivision edit (Transform panel)', () => {
+    // Grid subdivisions live on the MeshEntry, so a panel edit rides a
+    // replaceObject action — matching commitMeshGridEdit in PointCloudViewer.
+    let s = makeInitialSceneState();
+    const grid = makeMesh('g1', { gridSubdivisions: { x: 1, y: 1, z: 1 } });
+    s = run(s, { c: 'commit', tx: tx('add grid', [{ t: 'add', kind: 'mesh', id: 'g1', object: grid }]) });
+    const after = { ...grid, gridSubdivisions: { x: 4, y: 3, z: 2 } };
+    s = run(s, { c: 'commit', tx: tx('edit grid', [{ t: 'replaceObject', kind: 'mesh', id: 'g1', before: grid, after }]) });
+    expect(s.meshes[0].gridSubdivisions).toEqual({ x: 4, y: 3, z: 2 });
+
+    s = run(s, { c: 'undo' });
+    expect(s.meshes[0].gridSubdivisions).toEqual({ x: 1, y: 1, z: 1 });
+    s = run(s, { c: 'redo' });
+    expect(s.meshes[0].gridSubdivisions).toEqual({ x: 4, y: 3, z: 2 });
+  });
+});
+
+// Regression: the voxel-grid undo/redo bug. A grid is created (its `add`
+// action seeds identity transforms), then resized/moved/rotated via the
+// Transform panel. Earlier those panel edits bypassed history entirely, so a
+// single undo jumped past them and the following redo replayed only the `add` —
+// whose seeded identity transform clobbered the live values, snapping the grid
+// back to defaults. The fix records each panel edit as its own transform/
+// replaceObject transaction; this test pins the resulting invariant: editing
+// after a create, then undo→redo, preserves the edited transform.
+describe('create-then-edit-then-undo-redo (grid bug)', () => {
+  it('a transform edit after an add survives one undo + one redo', () => {
+    let s = makeInitialSceneState();
+    // 1. Create grid — add seeds identity transforms (origin / no-rot / unit).
+    const grid = makeMesh('g1', { gridSubdivisions: { x: 1, y: 1, z: 1 } });
+    const identity = { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } };
+    s = run(s, { c: 'commit', tx: tx('Create shape', [{ t: 'add', kind: 'mesh', id: 'g1', object: grid, transform: identity }]) });
+
+    // 2. Resize + move + rotate via the panel — each a transform transaction.
+    const moved = { position: { x: 10, y: 20, z: 30 }, rotation: { x: 0.5, y: 0, z: 0 }, scale: { x: 3, y: 3, z: 3 } };
+    s = run(s, { c: 'commit', tx: tx('move mesh', [{ t: 'transform', kind: 'mesh', id: 'g1', before: identity, after: moved }]) });
+    expect(s.meshPositions.get('g1')).toEqual({ x: 10, y: 20, z: 30 });
+    expect(s.meshScales.get('g1')).toEqual({ x: 3, y: 3, z: 3 });
+
+    // 3. One undo reverts only the LAST edit (not the create); the grid stays.
+    s = run(s, { c: 'undo' });
+    expect(s.meshes).toHaveLength(1); // grid not removed
+    expect(s.meshPositions.get('g1')).toEqual({ x: 0, y: 0, z: 0 });
+    expect(s.meshScales.get('g1')).toEqual({ x: 1, y: 1, z: 1 });
+
+    // 4. Redo restores the edited transform — NOT the add's identity defaults.
+    s = run(s, { c: 'redo' });
+    expect(s.meshes).toHaveLength(1);
+    expect(s.meshPositions.get('g1')).toEqual({ x: 10, y: 20, z: 30 });
+    expect(s.meshRotations.get('g1')).toEqual({ x: 0.5, y: 0, z: 0 });
+    expect(s.meshScales.get('g1')).toEqual({ x: 3, y: 3, z: 3 });
+  });
 });
 
 // ── batching ─────────────────────────────────────────────────────────────────

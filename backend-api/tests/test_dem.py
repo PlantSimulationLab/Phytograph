@@ -188,6 +188,31 @@ def test_do_dem_ground_labels_path():
     assert r["world_shift"] == [0.0, 0.0, 0.0]
 
 
+def test_auto_csf_params_caps_cloth_nodes_on_runaway_extent():
+    """Defensive backstop: a sky/miss-contaminated cloud (misses ~1 km out)
+    inflates the XY extent ~1000×. Auto-CSF must floor the cloth resolution so the
+    (ext/cloth)² × ~500-iteration simulation can't explode into a multi-million-
+    node hang — it degrades to a coarse-but-finite cloth instead. (Callers exclude
+    misses upstream; this only guards a request that slips through.)"""
+    # A tiny dense canopy plus far-flung sky points -> a 2 km extent.
+    canopy = np.random.default_rng(0).uniform(-2.5, 2.5, size=(2000, 3))
+    sky = np.array([[-1000.0, -1000.0, 800.0], [1000.0, 1000.0, 800.0]])
+    pts = np.vstack([canopy, sky])
+    csf = main._auto_csf_params(pts)
+    ext = float(max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])))
+    nodes_per_side = ext / csf["cloth_resolution"]
+    # The floor keeps the cloth bounded regardless of the runaway extent.
+    assert nodes_per_side <= 600 + 1, (ext, csf["cloth_resolution"], nodes_per_side)
+
+
+def test_auto_csf_params_unchanged_on_normal_extent():
+    """The backstop must NOT perturb a normal in-extent cloud: a ~5 m plant scan
+    still gets the fine 5 cm cloth (the floor only bites on a runaway extent)."""
+    pts = np.random.default_rng(1).uniform(-2.5, 2.5, size=(2000, 3))
+    csf = main._auto_csf_params(pts)
+    assert csf["cloth_resolution"] == pytest.approx(0.05)
+
+
 # --------------------------------- endpoints ---------------------------------
 
 def test_dem_endpoint_mesh_frame_decodes(client):

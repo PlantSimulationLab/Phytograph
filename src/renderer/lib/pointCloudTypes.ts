@@ -360,6 +360,26 @@ export interface MeshEntry {
   // Voxel-specific: per-axis grid subdivision count for the PyHelios LiDAR grid.
   // Only set on shape-voxel meshes; renders as a wireframe overlay when any axis > 1.
   gridSubdivisions?: { x: number; y: number; z: number };
+  // Voxel-grid "snap to ground": per-(x,y)-column vertical offsets that make the
+  // grid follow a DEM surface. Computed ONCE by the backend (/api/lad/snap-grid),
+  // rendered as the displaced grid in the viewport, AND sent verbatim to the LAD
+  // inversion (HeliosGrid.column_offsets) — so the viewport and the backend run on
+  // exactly the same geometry. `columnOffsets` is row-major [j*nx + i], length
+  // nx*ny, in WORLD-z meters (added to the regular lattice). `keptMask` marks
+  // columns inside the DEM footprint (0 = dropped: not drawn, not inverted).
+  // Cleared whenever the grid's transform or subdivisions change (offsets would be
+  // stale). Absent => flat grid.
+  gridGroundSnap?: {
+    columnOffsets: Float32Array;   // len nx*ny, row-major [j*nx+i], world-z meters
+    keptMask: Uint8Array;          // len nx*ny; 0 = dropped column
+    demMeshId: string;             // provenance: which DEM it was snapped to
+    safetyFraction: number;
+    // Transform signature (the grid's center/size/rotation/subdivisions) at snap
+    // time, so a reactive guard can auto-clear the snap the moment the grid is
+    // moved/resized/rotated/re-divided — the offsets would otherwise be stale.
+    // Format: "cx,cy,cz|sx,sy,sz|rotZ|nx,ny,nz" (see gridSnapSignature()).
+    signature: string;
+  };
   // Set on shape-plane meshes. A flat plane is usually placed at the ground
   // (z=0), coplanar with the ground grid; this flags the renderer to apply a
   // depth polygon-offset so it doesn't z-fight the grid.

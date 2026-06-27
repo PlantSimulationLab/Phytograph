@@ -682,6 +682,13 @@ export interface HeliosGrid {
   // axis-aligned grids. Carried so a rotated grid round-trips into the
   // Helios XML's <rotation> tag on scan export.
   rotation?: number;
+  // Per-(x,y)-column z offsets for a terrain-following ("snapped") grid,
+  // row-major [j*nx + i], length nx*ny. When present these are authoritative —
+  // the backend uses them verbatim (no DEM re-sampling). `kept_columns` marks
+  // columns inside the DEM footprint (false = dropped). Both come from
+  // /api/lad/snap-grid via the grid mesh's gridGroundSnap.
+  column_offsets?: number[];
+  kept_columns?: boolean[];
 }
 
 export interface HeliosTriangulationRequest {
@@ -827,6 +834,37 @@ export interface LADDemRaster {
   cell: number;
   origin: [number, number];
   nodata?: number;
+}
+
+// "Snap to ground": ask the backend to sample a DEM under each voxel column so
+// the grid can be displaced to follow the terrain. The returned offsets are
+// rendered in the viewport AND fed back to LAD verbatim (single source of truth).
+export interface SnapGridRequest {
+  grid: HeliosGrid;
+  dem: LADDemRaster;
+  safety_fraction: number;
+}
+
+export interface SnapGridResponse {
+  column_offsets: number[];  // row-major [j*nx + i], len nx*ny, world-z meters
+  kept_columns: boolean[];   // false = column outside the DEM footprint (dropped)
+  dropped_columns: number;
+}
+
+export async function snapGridToGround(
+  request: SnapGridRequest,
+): Promise<SnapGridResponse> {
+  const baseUrl = getBackendUrl();
+  const response = await fetch(`${baseUrl}/api/lad/snap-grid`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+  }
+  return await response.json();
 }
 
 export interface LADRequest {

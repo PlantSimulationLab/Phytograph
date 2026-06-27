@@ -1,6 +1,7 @@
 import { useRef, useMemo, useEffect } from 'react';
 import * as THREE from 'three';
 import type { MeshData } from '../../../lib/pointCloudTypes';
+import { buildBoundsTree, freeBoundsTree } from '../../../lib/bvhRaycast';
 
 // Triangle mesh component for rendering triangulated surfaces
 export interface TriangleMeshProps {
@@ -185,7 +186,21 @@ export function TriangleMesh({ data, color = '#4ade80', opacity = 0.7, wireframe
     }
   }, [color, opacity, wireframe, useColorAttr, forceDepthWrite]);
 
-  useEffect(() => () => { geometry.dispose(); }, [geometry]);
+  // Build the raycast BVH in the SAME effect that disposes it, so build and
+  // teardown can never desync. This matters under React.StrictMode, which in dev
+  // runs every effect as build → cleanup → build: a tree built in useMemo and
+  // freed in a separate cleanup effect would be nulled by that first cleanup and
+  // never rebuilt (the memo's deps are unchanged), leaving boundsTree=null so
+  // acceleratedRaycast silently falls back to the O(triangles) brute path — the
+  // exact bug that made this whole change a no-op. Co-locating them guarantees a
+  // valid tree after the StrictMode double-run, and frees it on real unmount.
+  useEffect(() => {
+    buildBoundsTree(geometry);
+    return () => {
+      freeBoundsTree(geometry);
+      geometry.dispose();
+    };
+  }, [geometry]);
   useEffect(() => () => { material.dispose(); }, [material]);
 
   return <mesh ref={meshRef} geometry={geometry} material={material} renderOrder={renderOrder} />;

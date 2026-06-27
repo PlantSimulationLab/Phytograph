@@ -202,6 +202,7 @@ export function TransformPanel({
             <div key={axis} className="flex items-center gap-2">
               <label className="text-[10px] text-neutral-500 w-3 uppercase font-medium">{axis}</label>
               <DebouncedNumberInput
+                data-testid={`mesh-scale-${axis}`}
                 step={0.1}
                 min={0}
                 value={scale[axis]}
