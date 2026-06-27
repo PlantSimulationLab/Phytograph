@@ -176,3 +176,5 @@ project that ships behavior changes frequently.
 Do **not** sign commits with AI co-author trailers. No `Co-Authored-By: Claude …`, no "Generated with Claude Code" lines in PR descriptions, no model attribution of any kind. Commits should appear authored solely by the human committer.
 
 When asked to commit, commit on the **current branch**. Do **not** create a new/separate branch unless explicitly told to "commit to a separate branch" (or similar). Creating a branch on your own initiative disrupts the user's workflow.
+
+**Do not commit planning files.** Roadmap docs, gap analyses, scratch notes, task breakdowns, and similar planning artifacts (e.g. a `*_GAPS.md` / `*_PLAN.md` left in the repo root) are working aids, not deliverables — leave them untracked. When a "commit everything pending" request would sweep one in, exclude it and stage only the real code/doc changes by path.
