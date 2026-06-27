@@ -13,12 +13,23 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import waitOn from 'wait-on';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
+
+// Give the dev session its own octree cache, separate from the default per-user
+// dir a packaged app (and E2E launches) use. The cache is content-addressed but
+// NOT keyed by instance, so a dev session sharing the default dir can have its
+// streaming octree evicted/replaced by a concurrent packaged app or test run.
+// A STABLE (not per-run) path lets a dev restart reuse octrees it already built.
+// Both the backend (_octree_cache_root) and the Electron protocol handler
+// (octreeCacheRoot in src/main/octreeProtocol.ts) honor this env var.
+const devOctreeCacheRoot =
+  process.env.PHYTOGRAPH_OCTREE_CACHE_ROOT || join(tmpdir(), 'phytograph-dev-octrees');
 
 // Ask the OS for a free TCP port (bind :0, read the assignment). Each
 // `npm run dev` picks its own backend + renderer ports so concurrent dev
@@ -66,8 +77,14 @@ async function runOnce(cmd, args) {
   await runOnce('npx', ['vite', 'build', '--config', 'vite.preload.config.ts']);
   await runOnce('npx', ['vite', 'build', '--config', 'vite.main.config.ts']);
 
+  console.log(`[dev] octree cache root: ${devOctreeCacheRoot}`);
+
   let uvicorn = null;
-  const electronEnv = { ...process.env, PHYTOGRAPH_RENDERER_PORT: String(rendererPort) };
+  const electronEnv = {
+    ...process.env,
+    PHYTOGRAPH_RENDERER_PORT: String(rendererPort),
+    PHYTOGRAPH_OCTREE_CACHE_ROOT: devOctreeCacheRoot,
+  };
 
   if (existsSync(venvPython)) {
     // Build the PyHelios native library up front if it's missing, so the first
@@ -102,7 +119,13 @@ async function runOnce(cmd, args) {
       venvPython,
       ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(backendPort),
        '--reload', '--reload-dir', '.'],
-      { stdio: ['inherit', 'inherit', 'pipe'], cwd: backendDir, env: process.env },
+      {
+        stdio: ['inherit', 'inherit', 'pipe'],
+        cwd: backendDir,
+        // Point the dev backend at the same cache the Electron protocol handler
+        // reads, so both ends of the octree pipeline agree on the dir.
+        env: { ...process.env, PHYTOGRAPH_OCTREE_CACHE_ROOT: devOctreeCacheRoot },
+      },
     );
     let stderrTail = '';
     uvicorn.stderr.on('data', (chunk) => {

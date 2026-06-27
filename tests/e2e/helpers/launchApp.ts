@@ -1,6 +1,8 @@
 import { _electron, type ElectronApplication, type Page } from '@playwright/test';
 import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { waitForBackend } from './waitForBackend';
@@ -29,6 +31,10 @@ export interface LaunchedApp {
   app: ElectronApplication;
   page: Page;
   backendVersion: string;
+  // The per-launch octree cache root (PHYTOGRAPH_OCTREE_CACHE_ROOT). Exposed so
+  // a spec can locate/delete a cloud's cache dir to exercise the missing-octree
+  // recovery path. Removed by close().
+  octreeCacheRoot: string;
   // Use this instead of app.close() — it awaits the Electron process exit,
   // not just the window close. Prevents spec-N+1 from racing spec-N's
   // teardown (which on macOS can briefly surface a window).
@@ -64,6 +70,17 @@ export async function launchApp(): Promise<LaunchedApp> {
 
   const backendPort = await findFreePort();
 
+  // Isolate the on-disk octree cache per launch. The cache is otherwise a single
+  // per-user dir (~/Library/Application Support/Phytograph/cache/octrees) shared
+  // by every instance — a concurrent dev app or parallel spec writing/evicting
+  // there can corrupt the entry another instance is streaming. Both the backend
+  // (_octree_cache_root) and the Electron protocol handler (octreeCacheRoot in
+  // src/main/octreeProtocol.ts) honor PHYTOGRAPH_OCTREE_CACHE_ROOT, and the
+  // supervisor forwards the full env to the spawned backend, so setting it here
+  // points both at this run's private dir. Mirrors the pytest cache-isolation
+  // fixtures. Removed in close().
+  const octreeCacheRoot = await mkdtemp(join(tmpdir(), 'phyto-octree-'));
+
   const app = await _electron.launch({
     args: ['.'],
     cwd: repoRoot,
@@ -75,6 +92,8 @@ export async function launchApp(): Promise<LaunchedApp> {
       PHYTOGRAPH_E2E: '1',
       // Pin the supervised backend to this run's private port.
       PHYTOGRAPH_BACKEND_PORT: String(backendPort),
+      // Private octree cache for this launch (see comment above).
+      PHYTOGRAPH_OCTREE_CACHE_ROOT: octreeCacheRoot,
     },
   });
   const page = await app.firstWindow();
@@ -95,7 +114,10 @@ export async function launchApp(): Promise<LaunchedApp> {
       exited,
       new Promise<void>((r) => setTimeout(r, 5_000)),
     ]);
+    // Drop this run's private octree cache. Best-effort — a cleanup failure must
+    // never fail the test.
+    await rm(octreeCacheRoot, { recursive: true, force: true }).catch(() => {});
   };
 
-  return { app, page, backendVersion: version, close };
+  return { app, page, backendVersion: version, octreeCacheRoot, close };
 }
