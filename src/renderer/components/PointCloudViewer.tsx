@@ -5,7 +5,7 @@ import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -2010,6 +2010,62 @@ export default function PointCloudViewer({
     }
     return data;
   }, []);
+
+  // Recover a cloud whose octree is missing on disk. The octree cache is content-
+  // addressed and persists across backend restarts, but it can vanish: the OS
+  // clears the cache dir, a user deletes it, the cacheVersion bumps, or the
+  // in-RAM session that built it was evicted on a backend restart. When that
+  // happens OctreePointCloud's loader gets a 404 from the app:// protocol handler
+  // and rejects (a JSON-parse error on the 404 body); without recovery the cloud
+  // silently fails to render.
+  //
+  // The OctreeRef still carries the full rebuild descriptor (sourceXyzPath +
+  // asciiFormat + columnPlan + worldShift), so we re-create the session from the
+  // source file. createCloudSession is deterministic — an unchanged source
+  // rebuilds to the SAME cache_id — so we write the result back (refreshing the
+  // sessionId) AND bump a retry tick so the loader re-fires even when the cacheId
+  // didn't change. If the source is gone (moved/deleted) or this is a synthetic
+  // cloud with no on-disk source, we can't rebuild — surface an actionable toast.
+  const handleOctreeMissing = useCallback(async (cloudId: string) => {
+    const cloud = clouds.find(c => c.id === cloudId);
+    const octreeInfo = cloud?.data.octree;
+    if (!cloud || !octreeInfo) return;
+    const fileName = cloud.data.fileName ?? cloud.id;
+    if (!octreeInfo.sourceXyzPath) {
+      showToast({
+        title: 'Point cloud unavailable',
+        message: `The cached octree for ${fileName} is missing and there is no source file to rebuild it from. Re-import the cloud.`,
+        type: 'error',
+        duration: 0,
+      });
+      return;
+    }
+    try {
+      const rebuilt = await createCloudSession(
+        octreeInfo.sourceXyzPath,
+        octreeInfo.asciiFormat ?? null,
+        octreeInfo.columnPlan ?? null,
+        octreeInfo.worldShift ?? null,
+      );
+      // Refresh the sessionId — the old session is gone if the backend restarted.
+      const newData = buildSessionOctreeData(rebuilt, octreeInfo, fileName, rebuilt.session_id);
+      onUpdateCloud(cloud.id, newData);
+      // Force the loader to re-run even if the cacheId is unchanged (deterministic
+      // rebuild → same hash). Bumping the paint generation remounts the component
+      // with the now-present octree files.
+      setOctreePaintGen(prev => ({
+        ...prev,
+        [rebuilt.cache_id]: (prev[rebuilt.cache_id] ?? 0) + 1,
+      }));
+    } catch (err) {
+      showToast({
+        title: 'Point cloud unavailable',
+        message: `The cached octree for ${fileName} is missing and could not be rebuilt from ${octreeInfo.sourceXyzPath}: ${err instanceof Error ? err.message : String(err)}. Re-import the file.`,
+        type: 'error',
+        duration: 0,
+      });
+    }
+  }, [clouds, onUpdateCloud, buildSessionOctreeData]);
 
   // Duplicate a scan — its point data AND any scan-parameter metadata — into a
   // fully independent copy. Three flavors:
@@ -11091,6 +11147,10 @@ export default function PointCloudViewer({
                       ? (oct) => { eraseOctreeRef.current = oct as any; }
                       : undefined
                   }
+                  // The octree files are gone on disk (cache cleared / evicted /
+                  // version-bumped). Rebuild from the source descriptor or, if
+                  // that's impossible, surface a clear message.
+                  onOctreeMissing={() => handleOctreeMissing(cloud.id)}
                 />
               ) : (
                 <PointCloud

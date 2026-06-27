@@ -106,6 +106,12 @@ export interface OctreePointCloudProps {
   // effect; this is the narrowest way to expose it without plumbing the potree
   // manager's internals through React.
   onOctreeReady?: (octree: PointCloudOctree | null) => void;
+  // Called when the octree files can't be loaded because they're absent on disk
+  // (the app:// protocol handler 404s and the loader rejects). The parent owns
+  // recovery: rebuild the octree from the source descriptor or surface an
+  // actionable message. Invoked at most once per cacheId (guarded here) so a
+  // genuinely unrecoverable cloud can't spin a rebuild loop.
+  onOctreeMissing?: () => void;
 }
 
 // Point a tile geometry's `intensity` attribute at the named scalar
@@ -197,6 +203,7 @@ export function OctreePointCloud({
   displayOffset,
   onFirstTilesReady,
   onOctreeReady,
+  onOctreeMissing,
 }: OctreePointCloudProps) {
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
   const firstTilesFiredRef = useRef(false);
@@ -215,6 +222,17 @@ export function OctreePointCloud({
   // cacheId) doesn't re-run when the parent passes a new callback identity.
   const onOctreeReadyRef = useRef(onOctreeReady);
   onOctreeReadyRef.current = onOctreeReady;
+
+  // Same ref pattern for the missing-octree callback, so the cacheId-keyed loader
+  // effect doesn't re-run when the parent passes a new callback identity.
+  const onOctreeMissingRef = useRef(onOctreeMissing);
+  onOctreeMissingRef.current = onOctreeMissing;
+
+  // The cacheId we've already reported as missing, so a load failure fires the
+  // recovery callback at most once per octree — even if React re-runs the effect.
+  // A rebuild produces a new mount (bumped paint generation) with a working
+  // octree, so this guard never blocks a legitimate retry.
+  const reportedMissingRef = useRef<string | null>(null);
 
   // Latest translation in a ref so the cacheId-keyed loader effect can seed the
   // initial position without taking `translation` as a dependency (which would
@@ -273,7 +291,19 @@ export function OctreePointCloud({
         onOctreeReadyRef.current?.(pco);
       })
       .catch((err) => {
+        if (cancelled) return;
         console.error(`Octree load failed for ${data.octree?.cacheId}:`, err);
+        // A load rejection here means the octree files are unavailable on disk:
+        // the app:// protocol handler 404s and potree-core throws (a JSON-parse
+        // error on the 404 body). Don't string-match the message — any failure to
+        // load is treated as "octree missing" and handed to the parent for
+        // recovery (rebuild from source / actionable toast). Guard so it fires at
+        // most once per cacheId.
+        const id = data.octree?.cacheId;
+        if (id && reportedMissingRef.current !== id) {
+          reportedMissingRef.current = id;
+          onOctreeMissingRef.current?.();
+        }
       });
     return () => {
       cancelled = true;
