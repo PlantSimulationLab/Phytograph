@@ -24,7 +24,9 @@ that pass through each voxel:
    used only to estimate the per-voxel **G-function**, `G(θ)`: the mean
    projection of the leaves onto the plane perpendicular to the beam. For
    a random (spherical) leaf-angle distribution `G(θ) ≈ 0.5`; for erect
-   (vertical) leaves it is lower.
+   (vertical) leaves it is lower. (You can also skip this step and
+   [prescribe `G(θ)` directly](#leaf-angle-distributions-and-gθ) from a known
+   leaf-angle distribution.)
 2. **Trace every beam** through the voxel grid and measure the path
    length `dr` it travels inside each voxel.
 3. **Count returns** to estimate the gap probability `P` (the fraction of
@@ -34,6 +36,45 @@ that pass through each voxel:
 Because it works from transmission (gaps) rather than from visible
 surface, the inversion accounts for occluded foliage — which is the whole
 point.
+
+## Leaf-angle distributions and G(θ)
+
+`G(θ)` is the **mean leaf-projection coefficient**: the fraction of leaf area
+projected onto the plane perpendicular to a beam travelling at zenith angle `θ`,
+averaged over the leaves' orientations. It depends on the canopy's **leaf-angle
+distribution** `g_L(θ_L)` (how leaf inclinations are spread between horizontal and
+vertical) and on the beam zenith. For a given distribution,
+
+`G(θ) = ∫ A(θ, θ_L) · g_L(θ_L) dθ_L`
+
+where `A` is the standard azimuthally-averaged projection kernel (Warren-Wilson /
+Lemeur). Three common cases:
+
+- **Spherical (random):** leaf normals point in every direction equally;
+  `G(θ) ≈ 0.5` at all zeniths. This is the usual default.
+- **Planophile (mostly horizontal):** `G` is high near nadir and falls toward the
+  horizon.
+- **Erectophile (mostly vertical):** the opposite — `G` is low near nadir and
+  rises toward the horizon.
+
+Phytograph normally **estimates `G(θ)` per voxel from a triangulation** of the hit
+points (the surface normals give the leaf orientations). But you can also
+**prescribe it directly** — see
+[Override G(θ) directly](../workflows/estimate-leaf-area-density.md#override-gθ-directly).
+Three ways to specify it:
+
+1. **Constant value** — e.g. `G(θ) = 0.42`.
+2. **de Wit classical distribution** — pick a named family (spherical, planophile,
+   erectophile, plagiophile, extremophile, uniform); `G(θ)` is derived by
+   integrating the kernel over the **actual beam zenith angles** in your scan.
+3. **Beta (μ, ν)** — Goel–Strebel parameters (the same convention used by
+   [Adjust leaf angles](../workflows/adjust-leaf-angles.md) and the
+   [leaf-angle de Wit fitting](../workflows/triangulate.md) on the triangulation
+   side); `G(θ)` is derived as for de Wit.
+
+Each can be applied **uniformly** across the grid or as a **vertical profile** (one
+method, with the parameter varying by z-level) when leaf inclination changes with
+canopy height.
 
 ## The voxel grid is required
 

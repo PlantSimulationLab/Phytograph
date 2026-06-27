@@ -867,6 +867,30 @@ export async function snapGridToGround(
   return await response.json();
 }
 
+// ---- Direct G(theta) / leaf-angle-distribution override -------------------
+// The third triangulation source (alongside "run a new triangulation" and
+// "reuse a triangulation"): specify the leaf-angle distribution / G(theta)
+// directly, either constant across the grid or as a vertical profile (per
+// z-level), with G(theta) given as a constant value, derived from a de Wit
+// classical distribution, or derived from Beta (Goel-Strebel) parameters.
+export type DeWitDistribution =
+  | 'spherical' | 'planophile' | 'erectophile'
+  | 'plagiophile' | 'extremophile' | 'uniform';
+
+export interface GThetaValueSpec {
+  kind: 'constant' | 'dewit' | 'beta';
+  value?: number;               // kind='constant', in (0,1]
+  dewit?: DeWitDistribution;    // kind='dewit'
+  beta_mu?: number;             // kind='beta' (toward-horizontal weight)
+  beta_nu?: number;             // kind='beta' (toward-vertical weight)
+}
+
+export interface GThetaOverrideSpec {
+  spatial: 'constant' | 'profile';
+  spec?: GThetaValueSpec;          // spatial='constant'
+  profile?: GThetaValueSpec[];     // spatial='profile', length === grid.nz (z0 = lowest)
+}
+
 export interface LADRequest {
   scans: LADScanEntry[];
   grid: HeliosGrid;              // REQUIRED — the LAD voxel grid
@@ -885,6 +909,9 @@ export interface LADRequest {
   // Required only for moving-platform scans, whose pulses can't be triangulated
   // to derive G(theta) per cell. Ignored for static scans.
   gtheta?: number;
+  // Direct G(theta) override (the third triangulation source). When set, it
+  // selects the supplied-G(theta) inversion path and wins over `gtheta`.
+  gtheta_spec?: GThetaOverrideSpec;
   // Terrain following: when true (with a DEM), each voxel column rides the DEM
   // surface. `safety_fraction` is the clearance between the surface and the lowest
   // cell, as a fraction of one cell's height. `dem` is required when enabled.
@@ -938,6 +965,9 @@ export interface LADResponse {
   group_lad_ci_upper?: number | null;   // m²/m³
   confidence_level?: number | null;     // e.g. 0.95
   element_width?: number | null;        // width used (m)
+  // Resolved G(theta) per z-level when a vertical-profile override was used
+  // (index 0 = lowest band). null/absent otherwise.
+  gtheta_profile?: number[] | null;
   warnings: string[];
   error?: string;
 }

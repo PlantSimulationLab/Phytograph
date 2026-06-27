@@ -2,13 +2,24 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, Grid3x3 } from 'lucide-react';
 import { LADRequest } from '../utils/backendApi';
 import type { GridOption } from '../lib/gridOption';
-import type { HeliosGrid } from '../utils/backendApi';
+import type { HeliosGrid, GThetaOverrideSpec, GThetaValueSpec, DeWitDistribution } from '../utils/backendApi';
 import type { Scan } from '../lib/scan';
 import type { MeshData } from '../lib/pointCloudTypes';
 import { hasData, hasParams, isBackfillEligible } from '../lib/scan';
 import { isMovingScan } from '../lib/scanParameters';
 import { buildLADRequest, extractReuseMeshPayload, type ReuseMeshPayload } from '../lib/pointCloudHelpers';
 import { InfoHint } from './InfoHint';
+
+// The canonical de Wit leaf-inclination distributions, with short descriptions
+// for the dropdown. Order matches the backend's GThetaValueSpec.dewit literal.
+const DEWIT_OPTIONS: { value: DeWitDistribution; label: string }[] = [
+  { value: 'spherical', label: 'Spherical (random) — G ≈ 0.5' },
+  { value: 'planophile', label: 'Planophile (mostly horizontal)' },
+  { value: 'erectophile', label: 'Erectophile (mostly vertical)' },
+  { value: 'plagiophile', label: 'Plagiophile (mostly oblique ~45°)' },
+  { value: 'extremophile', label: 'Extremophile (horizontal + vertical)' },
+  { value: 'uniform', label: 'Uniform (flat across inclinations)' },
+];
 
 // An existing Helios triangulation the user can REUSE. Selecting it locks the
 // inversion to the same scans + grid + lmax/aspect that produced the mesh, and
@@ -142,9 +153,16 @@ export function LADPopup({
         : (triangulationOptions[0]?.id ?? ''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, triangulationOptions]);
+  // G(θ) source (declared early so reuseTri can fold to null in supplied mode).
+  // 'triangulation' = derive G(θ) from a mesh; 'supplied' = prescribe it directly.
+  const [gthetaSource, setGthetaSource] = useState<'triangulation' | 'supplied'>('triangulation');
+  // A reused triangulation is meaningful only on the triangulation path; in
+  // supplied-G(θ) mode no mesh is used, so fold it to null for all UI gating.
   const reuseTri = useMemo(
-    () => triangulationOptions.find(t => t.id === reuseTriId) ?? null,
-    [triangulationOptions, reuseTriId],
+    () => (gthetaSource === 'supplied'
+      ? null
+      : triangulationOptions.find(t => t.id === reuseTriId) ?? null),
+    [gthetaSource, triangulationOptions, reuseTriId],
   );
 
   // Which voxel box drives the grid. Default to the first available box;
@@ -192,10 +210,29 @@ export function LADPopup({
   // uncertainty that the backend computes on every run. Broadleaf ≈ 0.05 m,
   // conifer needles ≈ 0.002 m — presets below set common values.
   const [elementWidthStr, setElementWidthStr] = useState('0.05');
-  // Mean leaf-projection coefficient G(θ), used only for moving-platform scans
-  // (they can't be triangulated to derive it). 0.5 = spherical leaf-angle dist.
-  const [gthetaStr, setGthetaStr] = useState('0.5');
   const [error, setError] = useState<string | null>(null);
+
+  // --- Direct G(θ) / leaf-angle-distribution override (the third source) ------
+  // (gthetaSource is declared above, near reuseTri.)
+  // Constant across the grid, or a vertical profile (one method, per-level value).
+  const [gthetaSpatial, setGthetaSpatial] = useState<'constant' | 'profile'>('constant');
+  // How each G(θ) is obtained: a constant value, a de Wit distribution, or Beta.
+  const [gthetaMethod, setGthetaMethod] = useState<'constant' | 'dewit' | 'beta'>('constant');
+  // Single-spec drafts (also used as the seed for new profile rows).
+  const [gthetaConstStr, setGthetaConstStr] = useState('0.5');
+  const [gthetaDewit, setGthetaDewit] = useState<DeWitDistribution>('spherical');
+  // Default the Beta (μ, ν) to the spherical-equivalent shape (μ≈1.10, ν≈1.93 →
+  // G(θ)≈0.5), not μ=ν=1 (which is the UNIFORM distribution, G≈0.54). This keeps
+  // the default consistent with the spherical default used everywhere else; a true
+  // exact spherical canopy is the de Wit "spherical" option.
+  const [gthetaBetaMuStr, setGthetaBetaMuStr] = useState('1.1');
+  const [gthetaBetaNuStr, setGthetaBetaNuStr] = useState('1.93');
+  // Per-z-level parameter values for the profile editor (one entry per nz level,
+  // index 0 = lowest band). The METHOD is shared (gthetaMethod); only the value
+  // varies with height. Holds drafts as strings/enum so partial edits don't snap.
+  const [gthetaProfileRows, setGthetaProfileRows] = useState<{
+    constStr: string; dewit: DeWitDistribution; betaMuStr: string; betaNuStr: string;
+  }[]>([]);
 
   // Seed Lmax / aspect from the mesh filter the user dialed in (when provided)
   // each time the dialog opens, so the inversion reproduces that filtering. The
@@ -259,6 +296,63 @@ export function LADPopup({
     [selectedScans],
   );
 
+  // Moving-platform scans can't be triangulated, so they must supply G(θ) directly.
+  // Force the source to 'supplied' (and the user picks a method below).
+  useEffect(() => {
+    if (anyMoving) setGthetaSource('supplied');
+  }, [anyMoving]);
+
+  // Whether the inversion will use a directly-supplied G(θ) (vs. a triangulation).
+  const useSuppliedGtheta = gthetaSource === 'supplied' || anyMoving;
+
+  // Number of z-levels the active grid will produce — the profile editor's rows.
+  // Reuse mode locks the grid to the mesh; otherwise the selected voxel box.
+  const profileGrid = reuseTri ? reuseTri.grid : selectedGrid?.grid;
+  const nz = profileGrid?.nz ?? 0;
+
+  // Keep the per-level profile rows sized to nz, seeding new/blank rows from the
+  // single-spec drafts so a fresh profile starts from the user's current choice.
+  useEffect(() => {
+    if (gthetaSpatial !== 'profile' || nz <= 0) return;
+    setGthetaProfileRows(prev => {
+      if (prev.length === nz) return prev;
+      const seed = {
+        constStr: gthetaConstStr, dewit: gthetaDewit,
+        betaMuStr: gthetaBetaMuStr, betaNuStr: gthetaBetaNuStr,
+      };
+      const next = prev.slice(0, nz);
+      while (next.length < nz) next.push({ ...seed });
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gthetaSpatial, nz]);
+
+  // Build one GThetaValueSpec for the active method from a set of string/enum
+  // drafts. Throws (with a user-facing message) when a value is missing/invalid.
+  const buildValueSpec = useCallback((
+    method: 'constant' | 'dewit' | 'beta',
+    d: { constStr: string; dewit: DeWitDistribution; betaMuStr: string; betaNuStr: string },
+    levelLabel?: string,
+  ): GThetaValueSpec => {
+    const where = levelLabel ? ` (${levelLabel})` : '';
+    if (method === 'constant') {
+      const v = parseFloat(d.constStr);
+      if (!Number.isFinite(v) || v <= 0 || v > 1) {
+        throw new Error(`G(θ)${where} must be a number in (0, 1] (0.5 = spherical)`);
+      }
+      return { kind: 'constant', value: v };
+    }
+    if (method === 'dewit') {
+      return { kind: 'dewit', dewit: d.dewit };
+    }
+    const mu = parseFloat(d.betaMuStr);
+    const nu = parseFloat(d.betaNuStr);
+    if (!Number.isFinite(mu) || mu <= 0 || !Number.isFinite(nu) || nu <= 0) {
+      throw new Error(`Beta parameters${where} must be positive numbers (μ and ν)`);
+    }
+    return { kind: 'beta', beta_mu: mu, beta_nu: nu };
+  }, []);
+
   const handleCompute = useCallback(() => {
     setError(null);
 
@@ -296,9 +390,41 @@ export function LADPopup({
     const minVoxelHits = Math.max(1, parseInt(minVoxelHitsStr, 10) || 1);
     const elementWidth = Math.max(0, parseFloat(elementWidthStr) || 0.05);
 
-    const gtheta = anyMoving
-      ? Math.min(1, Math.max(1e-3, parseFloat(gthetaStr) || 0.5))
-      : undefined;
+    // Direct G(θ) override (constant or vertical profile, value/de Wit/Beta). When
+    // active it selects the supplied-G(θ) path: no triangulation, no mesh reuse.
+    let gthetaSpec: GThetaOverrideSpec | undefined;
+    if (useSuppliedGtheta) {
+      try {
+        if (gthetaSpatial === 'profile') {
+          if (nz <= 0) {
+            setError('Select a voxel grid — a vertical G(θ) profile needs its z-levels');
+            return;
+          }
+          const rows = gthetaProfileRows.length === nz
+            ? gthetaProfileRows
+            // Fallback if the sizing effect hasn't run yet: seed every level.
+            : Array.from({ length: nz }, () => ({
+                constStr: gthetaConstStr, dewit: gthetaDewit,
+                betaMuStr: gthetaBetaMuStr, betaNuStr: gthetaBetaNuStr,
+              }));
+          gthetaSpec = {
+            spatial: 'profile',
+            profile: rows.map((r, i) => buildValueSpec(gthetaMethod, r, `level ${i + 1}`)),
+          };
+        } else {
+          gthetaSpec = {
+            spatial: 'constant',
+            spec: buildValueSpec(gthetaMethod, {
+              constStr: gthetaConstStr, dewit: gthetaDewit,
+              betaMuStr: gthetaBetaMuStr, betaNuStr: gthetaBetaNuStr,
+            }),
+          };
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Invalid G(θ) specification');
+        return;
+      }
+    }
 
     // Terrain following rides on the grid itself: when the chosen grid was
     // "snapped to ground" (Meshes panel), `grid.column_offsets` is already set and
@@ -309,15 +435,16 @@ export function LADPopup({
       maxAspectRatio,
       minVoxelHits,
       elementWidth,
-      gtheta,
+      gthetaSpec,
     });
 
     // Reuse: extract the filtered mesh (vertices/indices) with per-triangle scan
     // ids remapped to the request's scan order, so the backend injects it instead
     // of re-triangulating. Build the payload and the request from the SAME
-    // selectedScans so the scan ordering is one source of truth.
+    // selectedScans so the scan ordering is one source of truth. Skipped on the
+    // supplied-G(θ) path (no mesh is used).
     let reuseMesh: ReuseMeshPayload | null = null;
-    if (reuseTri) {
+    if (reuseTri && !useSuppliedGtheta) {
       try {
         reuseMesh = extractReuseMeshPayload(
           reuseTri.meshData, lmax, maxAspectRatio,
@@ -329,21 +456,23 @@ export function LADPopup({
     }
 
     // The grid mesh to auto-hide so it doesn't z-fight the LAD voxel result. In
-    // new-triangulation mode that's the selected voxel box; in reuse mode it's
-    // the box the reused triangulation's grid matches (if it's still around).
-    const gridMeshId = reuseTri ? (reuseTri.gridMeshId ?? '') : (selectedGrid?.id ?? '');
+    // new-triangulation / supplied mode that's the selected voxel box; in reuse
+    // mode it's the box the reused triangulation's grid matches (if still around).
+    const gridMeshId = (reuseTri && !useSuppliedGtheta)
+      ? (reuseTri.gridMeshId ?? '')
+      : (selectedGrid?.id ?? '');
 
     // Static "run new triangulation": hand the caller the scans + grid so it runs
     // a real Helios triangulation first (Otsu Lmax, mesh into the Meshes pane) and
-    // reuses it for the inversion. Skipped for reuse (already have a mesh) and for
-    // moving-platform scans (beam-based path, no triangulation).
-    const newTri = (!reuseTri && !anyMoving)
+    // reuses it for the inversion. Skipped for reuse (already have a mesh), the
+    // supplied-G(θ) path (no triangulation), and moving-platform scans.
+    const newTri = (!reuseTri && !useSuppliedGtheta)
       ? { scans: selectedScans, grid, gridMeshId, lmax: explicitLmax, maxAspectRatio }
       : null;
 
     onStartLAD(request, selectedScans.map(s => s.color), gridMeshId, reuseMesh, newTri);
     onClose();
-  }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, gthetaStr, onStartLAD, onClose]);
+  }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, useSuppliedGtheta, gthetaSpatial, nz, gthetaProfileRows, gthetaMethod, gthetaConstStr, gthetaDewit, gthetaBetaMuStr, gthetaBetaNuStr, buildValueSpec, onStartLAD, onClose]);
 
   if (!isOpen) return null;
 
@@ -389,13 +518,58 @@ export function LADPopup({
         </div>
 
         <div className="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
+          {/* G(θ) source: derive the leaf-projection coefficient from a leaf
+              surface (triangulation), or prescribe it directly. Moving-platform
+              scans can't be triangulated, so the choice is forced to "supplied". */}
+          <div data-testid="lad-gtheta-source">
+            <label className="text-xs font-medium text-neutral-300 mb-1 flex items-center gap-1">
+              G(θ) source
+              <InfoHint
+                data-testid="lad-gtheta-source-help"
+                label="G(θ) source"
+                text="How the leaf-projection coefficient G(θ) — which converts beam attenuation into leaf area — is obtained. 'Derive from triangulation' meshes the hit points and estimates G(θ) per voxel from the leaf surface orientations. 'Supply directly' lets you prescribe the leaf-angle distribution / G(θ) yourself (a constant, a de Wit classical distribution, or Beta parameters), either the same everywhere or varying with height — useful when the canopy structure is known or assumed, or to skip triangulation."
+              />
+            </label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                data-testid="lad-gtheta-source-triangulation"
+                disabled={anyMoving}
+                onClick={() => setGthetaSource('triangulation')}
+                className={`flex-1 px-2 py-1.5 text-xs rounded border transition-colors ${
+                  !useSuppliedGtheta
+                    ? 'border-green-500 bg-green-500/10 text-white'
+                    : 'border-neutral-600 text-neutral-300 hover:bg-neutral-700'
+                } ${anyMoving ? 'opacity-40 cursor-not-allowed' : ''}`}
+              >
+                Derive from triangulation
+              </button>
+              <button
+                type="button"
+                data-testid="lad-gtheta-source-supplied"
+                onClick={() => setGthetaSource('supplied')}
+                className={`flex-1 px-2 py-1.5 text-xs rounded border transition-colors ${
+                  useSuppliedGtheta
+                    ? 'border-green-500 bg-green-500/10 text-white'
+                    : 'border-neutral-600 text-neutral-300 hover:bg-neutral-700'
+                }`}
+              >
+                Supply G(θ) directly
+              </button>
+            </div>
+            {anyMoving && (
+              <p className="text-[9px] text-amber-300 mt-1" data-testid="lad-gtheta-moving-note">
+                Moving-platform scans can't be triangulated — G(θ) must be supplied.
+              </p>
+            )}
+          </div>
+
           {/* Triangulation source: run a new one, or reuse an existing mesh (which
               locks the scans, grid, and lmax/aspect to reproduce its G-function).
-              Always shown — "Run a new triangulation" is the default option, so
-              the user sees explicitly that a fresh triangulation will run even
-              when there's nothing to reuse. Reusable meshes are selectable;
-              ineligible ones (e.g. a merged/unpinned ball-pivot mesh) appear
-              disabled with the reason so the user knows why and how to fix it. */}
+              Hidden when supplying G(θ) directly (no mesh is built). Reusable
+              meshes are selectable; ineligible ones (e.g. a merged/unpinned
+              ball-pivot mesh) appear disabled with the reason. */}
+          {!useSuppliedGtheta && (
           <div>
             <label className="text-xs font-medium text-neutral-300 block mb-1">Triangulation</label>
             <select
@@ -432,9 +606,233 @@ export function LADPopup({
               </p>
             )}
           </div>
+          )}
 
-          {/* Scan picker — only when running a NEW triangulation. When reusing,
-              the scans are fixed by the mesh, so we hide the picker. */}
+          {/* Supply G(θ) directly: prescribe the leaf-angle distribution / G(θ)
+              instead of triangulating — constant across the grid or as a vertical
+              profile, with each value given as a constant, a de Wit distribution,
+              or Beta (μ, ν) parameters. */}
+          {useSuppliedGtheta && (
+          <div data-testid="lad-gtheta-supply-panel" className="border border-neutral-700 rounded p-3 space-y-3">
+            {/* Spatial mode */}
+            <div>
+              <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+                Vary with height?
+                <InfoHint
+                  data-testid="lad-gtheta-spatial-help"
+                  label="Constant vs. vertical profile"
+                  text="Constant applies one G(θ) to every voxel. Vertical profile lets G(θ) change with height — you pick the method once and enter its value for each z-level of the grid (level 1 = lowest). Use a profile when leaf inclination differs between the lower and upper canopy."
+                />
+              </label>
+              <div className="flex gap-2">
+                {(['constant', 'profile'] as const).map(mode => (
+                  <button
+                    key={mode}
+                    type="button"
+                    data-testid={`lad-gtheta-spatial-${mode}`}
+                    onClick={() => setGthetaSpatial(mode)}
+                    className={`flex-1 px-2 py-1 text-xs rounded border transition-colors ${
+                      gthetaSpatial === mode
+                        ? 'border-green-500 bg-green-500/10 text-white'
+                        : 'border-neutral-600 text-neutral-300 hover:bg-neutral-700'
+                    }`}
+                  >
+                    {mode === 'constant' ? 'Constant' : 'Vertical profile'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Method */}
+            <div>
+              <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+                Method
+                <InfoHint
+                  data-testid="lad-gtheta-method-help"
+                  label="G(θ) method"
+                  text="How each G(θ) is obtained. Constant value: enter G(θ) directly (0.5 = spherical). de Wit: choose a classical leaf-inclination distribution; G(θ) is derived by integrating the projection kernel over the scan's beam directions. Beta (μ, ν): Goel-Strebel parameters (ν = toward-vertical weight, μ = toward-horizontal); G(θ) derived as for de Wit."
+                />
+              </label>
+              <div className="flex gap-2">
+                {(['constant', 'dewit', 'beta'] as const).map(m => (
+                  <button
+                    key={m}
+                    type="button"
+                    data-testid={`lad-gtheta-method-${m}`}
+                    onClick={() => setGthetaMethod(m)}
+                    className={`flex-1 px-2 py-1 text-xs rounded border transition-colors ${
+                      gthetaMethod === m
+                        ? 'border-green-500 bg-green-500/10 text-white'
+                        : 'border-neutral-600 text-neutral-300 hover:bg-neutral-700'
+                    }`}
+                  >
+                    {m === 'constant' ? 'Constant value' : m === 'dewit' ? 'de Wit' : 'Beta (μ,ν)'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Constant-spatial inputs (single value/distribution) */}
+            {gthetaSpatial === 'constant' && (
+              <div data-testid="lad-gtheta-constant-inputs">
+                {gthetaMethod === 'constant' && (
+                  <div className="flex items-center gap-2">
+                    <input
+                      data-testid="lad-gtheta-value"
+                      type="text"
+                      inputMode="decimal"
+                      onWheel={(e) => e.currentTarget.blur()}
+                      value={gthetaConstStr}
+                      onChange={(e) => setGthetaConstStr(e.target.value)}
+                      className="w-28 px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                    />
+                    <button
+                      type="button"
+                      data-testid="lad-gtheta-preset-spherical"
+                      onClick={() => setGthetaConstStr('0.5')}
+                      className="px-2 py-1 text-[10px] rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-700 transition-colors"
+                    >
+                      Spherical (0.5)
+                    </button>
+                  </div>
+                )}
+                {gthetaMethod === 'dewit' && (
+                  <select
+                    data-testid="lad-gtheta-dewit"
+                    value={gthetaDewit}
+                    onChange={(e) => setGthetaDewit(e.target.value as DeWitDistribution)}
+                    className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                  >
+                    {DEWIT_OPTIONS.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                )}
+                {gthetaMethod === 'beta' && (
+                  <div className="flex items-center gap-2">
+                    <label className="text-[10px] text-neutral-400">μ</label>
+                    <input
+                      data-testid="lad-gtheta-beta-mu"
+                      type="text"
+                      inputMode="decimal"
+                      onWheel={(e) => e.currentTarget.blur()}
+                      value={gthetaBetaMuStr}
+                      onChange={(e) => setGthetaBetaMuStr(e.target.value)}
+                      className="w-20 px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                    />
+                    <label className="text-[10px] text-neutral-400">ν</label>
+                    <input
+                      data-testid="lad-gtheta-beta-nu"
+                      type="text"
+                      inputMode="decimal"
+                      onWheel={(e) => e.currentTarget.blur()}
+                      value={gthetaBetaNuStr}
+                      onChange={(e) => setGthetaBetaNuStr(e.target.value)}
+                      className="w-20 px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                    />
+                    <button
+                      type="button"
+                      data-testid="lad-gtheta-beta-spherical"
+                      onClick={() => { setGthetaBetaMuStr('1.1'); setGthetaBetaNuStr('1.93'); }}
+                      className="px-2 py-1 text-[10px] rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-700 transition-colors"
+                    >
+                      Spherical (1.1, 1.93)
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Vertical-profile editor: one row per z-level (level 1 = lowest). */}
+            {gthetaSpatial === 'profile' && (
+              nz <= 0 ? (
+                <p className="text-[10px] text-amber-300" data-testid="lad-gtheta-profile-nogrid">
+                  Select a voxel grid below — the profile has one row per z-level.
+                </p>
+              ) : (
+                <div data-testid="lad-gtheta-profile-editor" className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-neutral-400">
+                      {nz} level{nz > 1 ? 's' : ''} (level 1 = lowest)
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="lad-gtheta-profile-fill"
+                      onClick={() => setGthetaProfileRows(rows =>
+                        rows.map(() => ({
+                          constStr: gthetaConstStr, dewit: gthetaDewit,
+                          betaMuStr: gthetaBetaMuStr, betaNuStr: gthetaBetaNuStr,
+                        })))}
+                      className="px-2 py-0.5 text-[10px] rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-700 transition-colors"
+                    >
+                      Apply level 1 to all
+                    </button>
+                  </div>
+                  {gthetaProfileRows.map((row, i) => (
+                    <div key={i} className="flex items-center gap-2" data-testid="lad-gtheta-profile-row">
+                      <span className="w-10 text-[10px] text-neutral-500 text-right">L{i + 1}</span>
+                      {gthetaMethod === 'constant' && (
+                        <input
+                          data-testid="lad-gtheta-profile-value"
+                          type="text"
+                          inputMode="decimal"
+                          onWheel={(e) => e.currentTarget.blur()}
+                          value={row.constStr}
+                          onChange={(e) => setGthetaProfileRows(rows =>
+                            rows.map((r, j) => j === i ? { ...r, constStr: e.target.value } : r))}
+                          className="w-24 px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                        />
+                      )}
+                      {gthetaMethod === 'dewit' && (
+                        <select
+                          data-testid="lad-gtheta-profile-dewit"
+                          value={row.dewit}
+                          onChange={(e) => setGthetaProfileRows(rows =>
+                            rows.map((r, j) => j === i ? { ...r, dewit: e.target.value as DeWitDistribution } : r))}
+                          className="flex-1 px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                        >
+                          {DEWIT_OPTIONS.map(o => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      )}
+                      {gthetaMethod === 'beta' && (
+                        <>
+                          <label className="text-[10px] text-neutral-400">μ</label>
+                          <input
+                            data-testid="lad-gtheta-profile-mu"
+                            type="text"
+                            inputMode="decimal"
+                            onWheel={(e) => e.currentTarget.blur()}
+                            value={row.betaMuStr}
+                            onChange={(e) => setGthetaProfileRows(rows =>
+                              rows.map((r, j) => j === i ? { ...r, betaMuStr: e.target.value } : r))}
+                            className="w-16 px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                          />
+                          <label className="text-[10px] text-neutral-400">ν</label>
+                          <input
+                            data-testid="lad-gtheta-profile-nu"
+                            type="text"
+                            inputMode="decimal"
+                            onWheel={(e) => e.currentTarget.blur()}
+                            value={row.betaNuStr}
+                            onChange={(e) => setGthetaProfileRows(rows =>
+                              rows.map((r, j) => j === i ? { ...r, betaNuStr: e.target.value } : r))}
+                            className="w-16 px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
+                          />
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+          </div>
+          )}
+
+          {/* Scan picker — only when running a NEW triangulation. When reusing or
+              supplying G(θ), the scans are fixed/independent, so we hide it for
+              reuse but still show it on the supplied path (the user picks scans). */}
           {!reuseTri && (
           <>
           {/* Select controls + count */}
@@ -546,7 +944,7 @@ export function LADPopup({
             {/* On the new-triangulation path the surface mesh is now built like the
                 standalone Triangulate tool and added to the Meshes panel, so the
                 user can review/refine it and re-run LAD by reusing it. */}
-            {!reuseTri && !anyMoving && (
+            {!reuseTri && !useSuppliedGtheta && (
               <div className="mb-3 text-[10px] text-neutral-400 bg-neutral-800/60 border border-neutral-700 rounded px-2.5 py-2 leading-relaxed">
                 A new surface mesh is built and added to the{' '}
                 <span className="text-neutral-200">Meshes</span> panel. Leave Lmax on{' '}
@@ -564,7 +962,7 @@ export function LADPopup({
                   fixes them). Hidden in reuse mode; the reuse summary shows them.
                   On a new triangulation Lmax defaults to "Auto" (empty) → the
                   Otsu estimate seeds the mesh; a typed value forces it. */}
-              {!reuseTri && (
+              {!reuseTri && !useSuppliedGtheta && (
               <div>
                 <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
                   Max Edge Length (Lmax)
@@ -587,7 +985,7 @@ export function LADPopup({
               </div>
               )}
 
-              {!reuseTri && (
+              {!reuseTri && !useSuppliedGtheta && (
               <div>
                 <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
                   Max Aspect Ratio
@@ -674,42 +1072,9 @@ export function LADPopup({
               </div>
             </div>
 
-            {/* G(theta) — only for moving-platform scans, which can't be
-                triangulated to derive it. Supplied mean leaf-projection
-                coefficient; 0.5 = spherical leaf-angle distribution. */}
-            {anyMoving && (
-              <div className="mt-4" data-testid="lad-gtheta-section">
-                <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
-                  G(θ) — mean leaf-projection coefficient
-                  <InfoHint
-                    data-testid="lad-gtheta-help"
-                    label="G(θ) — mean leaf-projection coefficient"
-                    text="Mean fraction of leaf area projected onto the plane perpendicular to the beam, averaged over leaf orientations. It converts measured beam attenuation into leaf area density. Moving-platform scans can't be triangulated to derive it, so supply it here: 0.5 corresponds to a spherical (randomly oriented) leaf-angle distribution and is the usual default; lower it for more horizontal foliage, raise it for more vertical."
-                  />
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    data-testid="lad-input-gtheta"
-                    type="number"
-                    onWheel={(e) => e.currentTarget.blur()}
-                    value={gthetaStr}
-                    onChange={(e) => setGthetaStr(e.target.value)}
-                    step="0.05"
-                    min="0.001"
-                    max="1"
-                    className="w-28 px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
-                  />
-                  <button
-                    data-testid="lad-preset-spherical"
-                    type="button"
-                    onClick={() => setGthetaStr('0.5')}
-                    className="px-2 py-1 text-[10px] rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-700 transition-colors"
-                  >
-                    Spherical (0.5)
-                  </button>
-                </div>
-              </div>
-            )}
+            {/* Note: the supplied-G(θ) panel (above, when "Supply G(θ) directly"
+                is selected) now covers moving-platform scans too — they always use
+                a supplied G(θ) since they can't be triangulated. */}
 
             {/* Voxel grid — only when running a new triangulation. When reusing,
                 the grid is fixed by the mesh (shown in the reuse summary above). */}

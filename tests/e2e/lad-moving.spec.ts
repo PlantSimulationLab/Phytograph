@@ -68,12 +68,14 @@ test('Computes moving-platform leaf area density from a trajectory + scan', asyn
     const ladPopup = page.getByTestId('lad-popup');
     await expect(ladPopup).toBeVisible();
 
-    // The G(theta) field is shown ONLY because the selected scan is moving —
-    // its presence proves the UI recognized the trajectory and will take the
-    // beam-based path. Pin it to the spherical 0.5 for the uniform cube.
-    await expect(page.getByTestId('lad-gtheta-section')).toBeVisible();
-    await page.getByTestId('lad-preset-spherical').click();
-    await expect(page.getByTestId('lad-input-gtheta')).toHaveValue('0.5');
+    // A moving scan can't be triangulated, so the UI forces the "supply G(theta)
+    // directly" path: the supply panel is shown and the source toggle is on
+    // "supplied". Its presence proves the UI recognized the trajectory and will
+    // take the beam-based path. Pin G(theta) to spherical 0.5 for the uniform cube.
+    await expect(page.getByTestId('lad-gtheta-supply-panel')).toBeVisible();
+    await page.getByTestId('lad-gtheta-method-constant').click();
+    await page.getByTestId('lad-gtheta-preset-spherical').click();
+    await expect(page.getByTestId('lad-gtheta-value')).toHaveValue('0.5');
 
     await page.getByTestId('lad-input-min-hits').fill('1');
     await page.getByTestId('lad-preset-broadleaf').click();

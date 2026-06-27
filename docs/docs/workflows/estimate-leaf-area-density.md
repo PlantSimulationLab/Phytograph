@@ -64,7 +64,16 @@ surface.
    box exists — the tooltip tells you which is missing.
 
 4. **In the dialog:**
-    - **Triangulation.** If you've already triangulated over a voxel grid —
+    - **G(θ) source.** First choose how the leaf-projection coefficient *G(θ)* —
+      the term that converts beam attenuation into leaf area — is obtained:
+        - **Derive from triangulation** *(default)* — mesh the hit points and
+          estimate *G(θ)* per voxel from the leaf-surface orientations. This is
+          the original workflow; the triangulation choice below applies.
+        - **Supply G(θ) directly** — prescribe the leaf-angle distribution / *G(θ)*
+          yourself and skip triangulation entirely. See
+          [Override G(θ) directly](#override-gθ-directly) below. Moving-platform
+          scans always use this path (they can't be triangulated).
+    - **Triangulation.** *(Derive-from-triangulation only.)* If you've already triangulated over a voxel grid —
       either a [Helios triangulation](triangulate.md), or a **per-scan Ball
       Pivot mesh pinned to a grid** — choose **Reuse: \<that mesh\>** here. The
       inversion then uses that mesh *directly* — the exact triangles you see
@@ -187,6 +196,37 @@ Notes:
   the grid. Combine it with an azimuthal grid rotation (above) for a row that is
   both sloping and off-axis.
 
+## Override G(θ) directly
+
+Instead of deriving *G(θ)* from a triangulated surface, you can prescribe the
+leaf-angle distribution / *G(θ)* yourself. Choose **Supply G(θ) directly** under
+**G(θ) source**, then pick:
+
+- **Spatial mode:**
+    - **Constant** — one *G(θ)* applied to every voxel.
+    - **Vertical profile** — *G(θ)* varies with height. You pick the method once,
+      then enter its value for each z-level of the grid (level 1 = lowest band).
+      Use this when leaf inclination differs between the lower and upper canopy.
+      A **Apply level 1 to all** button fills the column from the first row.
+- **Method** (how each value is obtained):
+    - **Constant value** — type *G(θ)* directly (0.5 = spherical). A
+      **Spherical (0.5)** preset is provided.
+    - **de Wit** — choose a classical leaf-inclination distribution (spherical,
+      planophile, erectophile, plagiophile, extremophile, uniform). *G(θ)* is
+      **derived** by integrating the Ross projection kernel over the actual
+      distribution of beam zenith angles in your scan(s) — so it reflects your
+      acquisition geometry, not a single nominal angle.
+    - **Beta (μ, ν)** — Goel–Strebel parameters (ν = toward-vertical weight,
+      μ = toward-horizontal; mean inclination fraction ν/(ν+μ)), the same
+      convention used by [Adjust leaf angles](adjust-leaf-angles.md). *G(θ)* is
+      derived as for de Wit. See
+      [Leaf-angle distributions and G(θ)](../concepts/leaf-area-density.md#leaf-angle-distributions-and-gθ)
+      for the math.
+
+This path skips triangulation, so the **Lmax / aspect** fields are hidden. When you
+use a vertical profile, the result reports the resolved **G(θ) per level**, and the
+per-voxel *G(θ)* you read on hover varies by height accordingly.
+
 ## Moving-platform scans
 
 If a scan carries a [platform trajectory](../concepts/scans.md#moving-platform-scans),
@@ -194,9 +234,11 @@ LAD is computed with a **beam-based** inversion: every return is traced
 from its own per-beam origin (the platform pose when that pulse fired),
 joined to the trajectory by the return's timestamp. This path does **not**
 triangulate the scan — a moving sweep has no fixed angular grid to mesh —
-so instead of estimating *G(θ)* from a triangulation it uses a **supplied
-mean G(θ)** (0.5 for a spherical / randomly-oriented leaf-angle
-distribution; set it to match the canopy if known). The point cloud must
+so it always uses the **[Supply G(θ) directly](#override-gθ-directly)** path
+(the G(θ) source is forced to *supplied*). The simplest choice is a constant
+mean *G(θ)* of 0.5 (spherical / randomly-oriented leaves; set it to match the
+canopy if known), but the de Wit and Beta methods — and the vertical profile —
+work for moving scans too, since their per-beam directions are known. The point cloud must
 carry a per-return `timestamp` column (for the trajectory join) and miss
 points — run [Backfill Misses](backfill-misses.md) first if the scan has a
 timestamp but no recorded misses, as for any LAD.

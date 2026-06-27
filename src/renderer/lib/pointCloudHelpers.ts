@@ -2,7 +2,7 @@
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
 import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
-import type { HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry } from '../utils/backendApi';
+import type { GThetaOverrideSpec, HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { poseStreamToWire } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
@@ -988,6 +988,9 @@ export function buildLADRequest(
     // Mean leaf-projection coefficient G(theta) — required for moving-platform
     // scans (no triangulation to derive it), ignored for static scans.
     gtheta?: number;
+    // Direct G(theta) / leaf-angle-distribution override (the third triangulation
+    // source). When set, selects the supplied-G(theta) path and wins over gtheta.
+    gthetaSpec?: GThetaOverrideSpec;
     // Terrain following: when `dem` is supplied, each voxel column rides the DEM
     // surface. `safetyFraction` is the clearance (fraction of a cell's height)
     // between the surface and the lowest cell.
@@ -1092,6 +1095,8 @@ export function buildLADRequest(
     // G(theta) for moving-platform scans (no-op for static); omit to let the
     // backend default it to 0.5 (spherical) with a warning.
     ...(params.gtheta !== undefined ? { gtheta: params.gtheta } : {}),
+    // Direct G(theta) override (constant or vertical profile, value/de Wit/Beta).
+    ...(params.gthetaSpec !== undefined ? { gtheta_spec: params.gthetaSpec } : {}),
     // Terrain following: only sent when a DEM is supplied. The backend requires a
     // DEM whenever terrain_follow is true, so the two travel together.
     ...(params.dem !== undefined

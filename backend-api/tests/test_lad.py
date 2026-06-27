@@ -492,6 +492,72 @@ class TestLeafCubeLAD:
         rmse = math.sqrt(sum((c["lad"] - 2.0) ** 2 for c in cells) / len(cells))
         assert rmse < 0.5, f"per-cell LAD RMSE too high: {rmse}"
 
+    # --- Direct G(theta) override (the third triangulation source) ------------
+
+    def _request_spec(self, spec, nx=1, ny=1, nz=1):
+        req = self._request(nx=nx, ny=ny, nz=nz)
+        req.gtheta_spec = spec
+        return req
+
+    def test_constant_dewit_spherical_matches_triangulation(self):
+        """A constant spherical-de-Wit override should reproduce the triangulated
+        spherical result (G ~ 0.5, LAD ~ 2.0) — it routes through the scalar path
+        and exercises NO triangulation."""
+        pytest.importorskip("pyhelios")
+        spec = main.GThetaOverrideSpec(
+            spatial="constant",
+            spec=main.GThetaValueSpec(kind="dewit", dewit="spherical"))
+        result = main._do_lad_computation(self._request_spec(spec))
+        assert result["success"] is True, result.get("error")
+        # Constant mode does not produce a per-z profile.
+        assert result.get("gtheta_profile") is None
+        cell = result["cells"][0]
+        assert cell["gtheta"] == pytest.approx(0.5, abs=1e-2)
+        # The supplied-G(theta) beam path recovers the true LAD=2.0 too.
+        assert cell["lad"] == pytest.approx(2.0, rel=0.15)
+
+    def test_constant_value_override_sets_cell_gtheta(self):
+        pytest.importorskip("pyhelios")
+        spec = main.GThetaOverrideSpec(
+            spatial="constant",
+            spec=main.GThetaValueSpec(kind="constant", value=0.42))
+        result = main._do_lad_computation(self._request_spec(spec))
+        assert result["success"] is True, result.get("error")
+        # Every solved cell gets exactly the supplied constant.
+        assert result["cells"][0]["gtheta"] == pytest.approx(0.42, abs=1e-4)
+
+    def test_profile_override_varies_gtheta_by_zlevel(self):
+        """A vertical-profile override with a different constant per z-level must
+        produce a z-varying gtheta_profile AND z-varying per-cell G(theta)."""
+        pytest.importorskip("pyhelios")
+        nz = 2
+        spec = main.GThetaOverrideSpec(
+            spatial="profile",
+            profile=[
+                main.GThetaValueSpec(kind="constant", value=0.30),  # lowest band
+                main.GThetaValueSpec(kind="constant", value=0.70),  # upper band
+            ])
+        result = main._do_lad_computation(self._request_spec(spec, nz=nz))
+        assert result["success"] is True, result.get("error")
+        assert result["gtheta_profile"] == pytest.approx([0.30, 0.70], abs=1e-4)
+        # Cells are k-major: index i -> z-level i // (nx*ny). With nx=ny=1, the
+        # first cell is the lowest band, the second the upper band.
+        cells = sorted(result["cells"], key=lambda c: c["center"][2])
+        assert len(cells) == nz
+        assert cells[0]["gtheta"] == pytest.approx(0.30, abs=1e-4)
+        assert cells[1]["gtheta"] == pytest.approx(0.70, abs=1e-4)
+
+    def test_profile_length_mismatch_errors(self):
+        pytest.importorskip("pyhelios")
+        spec = main.GThetaOverrideSpec(
+            spatial="profile",
+            profile=[main.GThetaValueSpec(kind="constant", value=0.5)])  # 1 != nz=3
+        # The mismatch is caught and surfaced as a failed result (not a raw raise).
+        result = main._do_lad_computation(self._request_spec(spec, nz=3))
+        assert result["success"] is False
+        assert "profile" in result["error"].lower()
+        assert "3" in result["error"]
+
 
 # ---------------------------------------------------------------------------
 # Faithful port of the C++ "LiDAR Eight Voxel Isotropic Patches Test"

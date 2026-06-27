@@ -378,6 +378,14 @@ fit: spherical (R²=0.94)"*). The chosen curve is overlaid as a dashed line so
 you can see how well the canopy matches the archetype. Hiding cells re-fits to
 just the visible ones.
 
+!!! tip "Same distributions feed the LAD G(θ) override"
+    These de Wit families and the Beta (Goel–Strebel) fit below are exactly the
+    distributions you can prescribe in the
+    [LAD tool's *Supply G(θ) directly* option](estimate-leaf-area-density.md#override-gθ-directly)
+    to derive `G(θ)` without triangulating — useful when you know (or measured)
+    the canopy's leaf-angle distribution. See
+    [Leaf-angle distributions and G(θ)](../concepts/leaf-area-density.md#leaf-angle-distributions-and-gθ).
+
 ### Beta-distribution fit (Goel–Strebel)
 
 Below the inclination chart a **fitted distribution parameters** table reports,

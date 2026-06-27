@@ -220,7 +220,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.43.0"
+BACKEND_VERSION = "0.44.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -3395,6 +3395,59 @@ class DemRaster(BaseModel):
     nodata: Optional[float] = None
 
 
+class GThetaValueSpec(BaseModel):
+    """How to obtain a single G(theta) value for a cell (or a whole z-level)."""
+    kind: Literal["constant", "dewit", "beta"]
+    # kind="constant": the mean leaf-projection coefficient directly, in (0, 1].
+    value: Optional[float] = None
+    # kind="dewit": one of the canonical de Wit leaf-inclination distributions. G(theta)
+    # is derived by integrating the Ross projection kernel over the scan's beam zeniths.
+    dewit: Optional[Literal[
+        "spherical", "planophile", "erectophile",
+        "plagiophile", "extremophile", "uniform"]] = None
+    # kind="beta": Goel-Strebel Beta parameters (Helios convention: nu=toward-vertical,
+    # mu=toward-horizontal; mean inclination fraction nu/(nu+mu)). G(theta) derived as
+    # for de Wit.
+    beta_mu: Optional[float] = None
+    beta_nu: Optional[float] = None
+
+
+class GThetaOverrideSpec(BaseModel):
+    """Direct G(theta) override. `spatial` chooses constant-vs-vertical-profile; the
+    value spec(s) choose how each G(theta) is obtained (constant / de Wit / Beta).
+
+    - spatial="constant": `spec` is required and applies to every voxel (one scalar).
+    - spatial="profile": `profile` is required, one GThetaValueSpec per z-level, length
+      must equal grid.nz (the method is the same across levels; the per-level parameters
+      vary with height). z-level 0 is the lowest band.
+    """
+    spatial: Literal["constant", "profile"] = "constant"
+    spec: Optional[GThetaValueSpec] = None
+    profile: Optional[List[GThetaValueSpec]] = None
+
+
+def _resolve_gtheta_value_spec(spec: "GThetaValueSpec", beam_zenith) -> float:
+    """Resolve a single GThetaValueSpec to a scalar G(theta) in (0,1], deriving from a
+    distribution (de Wit / Beta) over the supplied beam-zenith samples (radians) when
+    needed. Raises ValueError on a malformed spec."""
+    import lad_gtheta
+    if spec is None:
+        raise ValueError("A G(theta) override needs a value spec (constant/dewit/beta).")
+    if spec.kind == "constant":
+        if spec.value is None:
+            raise ValueError("A constant G(theta) spec needs a 'value'.")
+        return lad_gtheta.gtheta_constant(spec.value)
+    if spec.kind == "dewit":
+        if not spec.dewit:
+            raise ValueError("A de Wit G(theta) spec needs a 'dewit' distribution name.")
+        return lad_gtheta.gtheta_from_dewit(spec.dewit, beam_zenith)
+    if spec.kind == "beta":
+        if spec.beta_mu is None or spec.beta_nu is None:
+            raise ValueError("A Beta G(theta) spec needs both 'beta_mu' and 'beta_nu'.")
+        return lad_gtheta.gtheta_from_beta(spec.beta_mu, spec.beta_nu, beam_zenith)
+    raise ValueError(f"Unknown G(theta) spec kind '{spec.kind}'.")
+
+
 class LADComputeRequest(BaseModel):
     """Request model for leaf area density computation.
 
@@ -3441,6 +3494,13 @@ class LADComputeRequest(BaseModel):
     # use the supplied G(theta)). When False, static scans triangulate to estimate
     # G(theta) per cell as before.
     gtheta_override: bool = False
+    # Direct leaf-angle-distribution / G(theta) override (the third option alongside
+    # "run a new triangulation" and "reuse a triangulation"). When set, it WINS over the
+    # legacy scalar gtheta/gtheta_override fields and selects the supplied-G(theta) path:
+    # G(theta) is derived analytically from a prescribed distribution (de Wit / Beta) or
+    # taken as a constant, either uniformly (spatial="constant") or per z-level
+    # (spatial="profile"). See GThetaOverrideSpec (defined above).
+    gtheta_spec: Optional[GThetaOverrideSpec] = None
 
 class LADCell(BaseModel):
     """A single voxel result."""
@@ -3491,6 +3551,10 @@ class LADComputeResponse(BaseModel):
     group_lad_ci_upper: Optional[float] = None   # m^2/m^3
     confidence_level: Optional[float] = None     # e.g. 0.95
     element_width: Optional[float] = None         # echo of the width used (m)
+    # When a direct G(theta) override with a vertical profile was used, the resolved
+    # G(theta) per z-level (index 0 = lowest band), so the UI can show what was applied.
+    # None for the triangulation, scalar-override, and constant-override paths.
+    gtheta_profile: Optional[List[float]] = None
     warnings: List[str] = []
     error: Optional[str] = None
 
@@ -5134,6 +5198,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
     import math
     import os
     import numpy as np
+    import lad_gtheta
 
     def _report(fraction, message):
         if progress is not None:
@@ -5534,7 +5599,14 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         #     sparse overhead returns biases G).
         #   - Triangulated: static scans estimate G(theta) per cell from a mesh.
         any_moving = any(s["moving"] for s in scans_arrays)
-        use_supplied_gtheta = any_moving or bool(request.gtheta_override)
+        # A direct G(theta)/leaf-angle-distribution override (gtheta_spec) is the third
+        # source alongside triangulation and reuse; it forces the supplied-G(theta) path.
+        gspec = request.gtheta_spec
+        use_supplied_gtheta = any_moving or bool(request.gtheta_override) or gspec is not None
+        # Resolved G(theta): exactly one of these is set on the supplied path.
+        supplied_gtheta = None      # scalar, broadcast to every voxel
+        gtheta_per_cell = None      # per-voxel list (vertical-profile override)
+        gtheta_profile_out = None   # per z-level G(theta), echoed to the response
         if use_supplied_gtheta:
             # A reused triangulation is meaningless when we invert from a supplied
             # G(theta) (no mesh is used). Reject loudly rather than silently ignore.
@@ -5543,14 +5615,46 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     "A reused triangulation cannot be combined with a moving-platform "
                     "scan or a G(theta) override (both invert from a supplied G(theta), "
                     "not a mesh).")
-            supplied_gtheta = request.gtheta if request.gtheta is not None else 0.5
-            if request.gtheta is None:
-                warnings.append(
-                    "LAD with a G(theta) override needs a mean leaf-projection "
-                    "coefficient; defaulted to 0.5 (spherical leaf-angle "
-                    "distribution). Set it to match the canopy if known.")
-            if not (0.0 < supplied_gtheta <= 1.0):
-                raise ValueError("gtheta must be in (0, 1] (0.5 = spherical).")
+            if gspec is not None:
+                # Derive G(theta) from the prescribed distribution(s). Pool the per-beam
+                # zeniths across all scans (works for static and moving scans alike) so
+                # de Wit / Beta derivations reflect the actual acquisition geometry.
+                beam_dirs = [s["dirs"] for s in scans_arrays
+                             if s.get("dirs") is not None and len(s["dirs"]) > 0]
+                if beam_dirs:
+                    pooled_dirs = np.vstack(beam_dirs)
+                    beam_zen = lad_gtheta.beam_zenith_samples(pooled_dirs)
+                else:
+                    beam_zen = np.array([])
+                if gspec.spatial == "profile":
+                    if not gspec.profile:
+                        raise ValueError(
+                            "A vertical-profile G(theta) override needs a 'profile' "
+                            "(one spec per z-level).")
+                    if len(gspec.profile) != grid_nz:
+                        raise ValueError(
+                            f"The G(theta) profile has {len(gspec.profile)} levels but the "
+                            f"grid has {grid_nz} (nz). Supply exactly one spec per z-level.")
+                    gtheta_profile_out = [
+                        _resolve_gtheta_value_spec(lvl, beam_zen) for lvl in gspec.profile]
+                    # Expand per-z values to per-cell, using Helios's k-major cell order
+                    # (cell i -> z-level i // (nx*ny)); robust to terrain column offsets.
+                    n_cells_grid = cloud.getGridCellCount()
+                    cells_per_level = grid_nx * grid_ny
+                    gtheta_per_cell = [
+                        gtheta_profile_out[min(i // cells_per_level, grid_nz - 1)]
+                        for i in range(n_cells_grid)]
+                else:  # constant spatial mode -> one scalar
+                    supplied_gtheta = _resolve_gtheta_value_spec(gspec.spec, beam_zen)
+            else:
+                supplied_gtheta = request.gtheta if request.gtheta is not None else 0.5
+                if request.gtheta is None:
+                    warnings.append(
+                        "LAD with a G(theta) override needs a mean leaf-projection "
+                        "coefficient; defaulted to 0.5 (spherical leaf-angle "
+                        "distribution). Set it to match the canopy if known.")
+                if not (0.0 < supplied_gtheta <= 1.0):
+                    raise ValueError("gtheta must be in (0, 1] (0.5 = spherical).")
         elif reuse_mesh is not None:
             # Reuse a previously-run triangulation: inject it instead of re-running
             # the Delaunay pass. The mesh's vertices are world coordinates; the
@@ -5630,10 +5734,13 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             if use_supplied_gtheta:
                 # Beam-based inversion: traverses each beam from its own origin
                 # (getHitOrigin), uses the supplied G(theta), no triangulation.
-                # Works for both moving-platform scans and static scans with a
-                # G(theta) override.
-                cloud.calculateLeafArea(ctx, min_hits, element_width,
-                                        Gtheta=supplied_gtheta)
+                # Works for moving-platform scans and static scans with a G(theta)
+                # override. A per-cell vector (vertical-profile override) is passed
+                # straight through; otherwise a single scalar is broadcast.
+                cloud.calculateLeafArea(
+                    ctx, min_hits, element_width,
+                    Gtheta=(gtheta_per_cell if gtheta_per_cell is not None
+                            else supplied_gtheta))
             else:
                 cloud.calculateLeafArea(ctx, min_hits, element_width)
 
@@ -5770,6 +5877,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "group_lad_ci_upper": group_lad_ci_upper,
             "confidence_level": conf_level,
             "element_width": element_width,
+            "gtheta_profile": gtheta_profile_out,
             "gapfilled_misses": 0,  # LAD no longer gapfills; misses come from Backfill Misses / source
             "had_miss_points": any_has_misses,
             "method_used": "helios",
