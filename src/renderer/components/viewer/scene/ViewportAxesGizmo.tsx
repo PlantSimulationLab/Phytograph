@@ -272,15 +272,17 @@ export function ViewportAxesGizmo() {
   // axis-head clicks never fired. GizmoPicker (inside GizmoAxes) hit-tests the
   // heads itself against the Hud's ortho camera and routes hits to
   // __orientToAxis — see the comments there.
-  // Left margin clears the left toolbar column (a full-height, left-anchored
-  // scroll panel ~150px wide). At the old 80px the gizmo sat in the toolbar's
-  // lane: invisible on a tall window (the toolbar's cards are top-anchored, so
-  // its lower region is empty there) but on a short window (min height 600) the
-  // cards reach down over the gizmo and intercept its clicks. 200px puts the
-  // whole widget to the right of the toolbar at any window height.
+  // Left margin centers the gizmo under the left toolbar column (a full-height,
+  // left-anchored scroll panel anchored at left-4 ≈ 16px, ~150px wide, so its
+  // horizontal center sits ~90px from the viewport edge). The gizmo lives at the
+  // bottom of the viewport where the toolbar's top-anchored cards don't reach on
+  // a tall window; on a short window (min height 600) the bottom margin (120px)
+  // keeps it below the lowest card, so it stays clickable while aligned with the
+  // palette lane. (An earlier 200px value pushed it clear to the right of the
+  // toolbar, which read as misaligned.)
   const groupRef = useRef<Object3D | null>(null);
   return (
-    <GizmoHelper alignment="bottom-left" margin={[200, 120]} renderPriority={2}>
+    <GizmoHelper alignment="bottom-left" margin={[90, 120]} renderPriority={2}>
       <GizmoAxes groupRef={groupRef} />
     </GizmoHelper>
   );
