@@ -929,6 +929,22 @@ export default function PointCloudViewer({
     // box: center → position, size → scale, Nx/Ny/Nz → gridSubdivisions,
     // rotation (deg about z) → mesh z-rotation.
     grids.forEach((g, i) => {
+      // A terrain-following ("snapped") grid round-trips its per-column offsets via
+      // <columnOffsets>. Reattach them as gridGroundSnap so the imported grid renders
+      // terrain-following exactly as exported. The snap has no DEM in this scene, so
+      // demMeshId is a sentinel and the signature is recomputed from the imported
+      // grid's OWN geometry — that keeps the reactive staleness guard satisfied (it
+      // only clears the snap when the grid is moved/resized/rotated/re-divided away
+      // from this signature), so the offsets persist instead of being auto-cleared.
+      const gridGroundSnap = g.columnOffsets
+        ? {
+            columnOffsets: g.columnOffsets,
+            keptMask: g.keptMask ?? new Uint8Array(g.subdivisions.x * g.subdivisions.y).fill(1),
+            demMeshId: 'imported',
+            safetyFraction: 0,
+            signature: gridSnapSignature(g.center, g.size, g.subdivisions, g.rotationDeg),
+          }
+        : undefined;
       importMesh(
         {
           sourceCloudId: `helios-grid-${i}`,
@@ -938,6 +954,7 @@ export default function PointCloudViewer({
           method: 'delaunay', // placeholder, matches handleCreateShape
           name: g.label,
           gridSubdivisions: { ...g.subdivisions },
+          ...(gridGroundSnap ? { gridGroundSnap } : {}),
         },
         {
           position: { ...g.center },
@@ -1121,6 +1138,11 @@ export default function PointCloudViewer({
 
   // Export panel state
   const [showExportPanel, setShowExportPanel] = useState(false);
+  // Scan-export in flight. The backend serializes every scan's points to base64
+  // (5-10 s for a large bundle) with no streaming progress, so we close the modal
+  // and show an indeterminate StatusPill for the duration — otherwise the user
+  // stares at a frozen dialog and re-clicks Export.
+  const [isExportingScan, setIsExportingScan] = useState(false);
 
   // Global app settings (persisted via electron-store, edited in SettingsDialog).
   // Loaded once on mount: the triangulate point cap for octree clouds, plus the
@@ -4467,12 +4489,10 @@ export default function PointCloudViewer({
   // Export point cloud in various formats
   // `columns` is the ordered ASCII column slug list (xyz/txt/csv) chosen in the
   // export modal, or null for binary/structured formats (fixed schema).
-  const exportPointCloud = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null = null) => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
-
+  // Inner worker: does the actual per-format serialize/encode/download for a
+  // resolved cloud. Defined before exportPointCloud so the latter can list it as a
+  // dependency without a temporal-dead-zone reference. Keeps its own early returns.
+  const exportPointCloudInner = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null, cloud: PointCloudEntry) => {
     const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
 
     // Octree-backed cloud: it has no renderer positions to format, so every
@@ -4507,7 +4527,6 @@ export default function PointCloudViewer({
       } catch (error) {
         showToast({ title: 'Export Failed', message: error instanceof Error ? error.message : 'Unknown error', type: 'error' });
       }
-      setShowExportPanel(false);
       return;
     }
 
@@ -4570,7 +4589,6 @@ export default function PointCloudViewer({
         console.error('LAZ export failed:', error);
         showToast({ title: 'Export Failed', message: error instanceof Error ? error.message : 'Unknown error', type: 'error' });
       }
-      setShowExportPanel(false);
       return;
     }
 
@@ -4756,8 +4774,26 @@ export default function PointCloudViewer({
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     }
+  }, [getDisplayData, buildPointSource, downloadFile]);
+
+  const exportPointCloud = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null = null) => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    if (!cloud) return;
+
+    // A large cloud takes seconds to serialize/compress on the backend with no
+    // streaming progress, so dismiss the modal and raise the StatusPill for the
+    // duration — same treatment as the scan export. The inner work keeps its own
+    // early returns; the finally clears the pill on every path.
     setShowExportPanel(false);
-  }, [selectedIds, clouds, getDisplayData, buildPointSource, downloadFile]);
+    setIsExportingScan(true);
+    try {
+      await exportPointCloudInner(format, columns, cloud);
+    } finally {
+      setIsExportingScan(false);
+    }
+  }, [selectedIds, clouds, exportPointCloudInner]);
 
   // Export the selected scan(s) as a Helios XML metadata file + one ASCII data
   // file per scan (re-loadable via loadXML, round-trips back into Phytograph).
@@ -4783,8 +4819,12 @@ export default function PointCloudViewer({
       phi_max: params.azimuthMaxDeg,
       beam_exit_diameter: params.beamExitDiameterM,
       beam_divergence: params.beamDivergenceMrad,
-      // Carried for the round-trip; backend cannot yet write it to the XML.
+      // Round-trips into the XML: the backend writes a <scanAzimuthOffset> tag
+      // and the importer reads it back.
       scan_azimuth_offset: params.azimuthOffsetDeg,
+      // Instrument identity (e.g. 'riegl_vz400i'). Round-trips via a <scannerModel>
+      // tag the backend injects and the importer reads back.
+      scanner_model: params.scannerModel,
     };
     const t = getEditState(cloud.id).translation;
     if (t.x !== 0 || t.y !== 0 || t.z !== 0) entry.translation = [t.x, t.y, t.z];
@@ -4873,6 +4913,12 @@ export default function PointCloudViewer({
     const dir = savePath.slice(0, savePath.lastIndexOf(sep));
     const chosenBase = savePath.slice(savePath.lastIndexOf(sep) + 1).replace(/\.[^.]+$/, '') || 'scan';
 
+    // The path is chosen — the work now begins. Dismiss the modal and raise the
+    // StatusPill so the (5-10 s, no-stream) serialize/encode/write isn't a silent
+    // freeze the user is tempted to re-trigger. Covers BOTH the XML bundle and the
+    // data-only export — they share this backend round-trip, only write_xml differs.
+    setShowExportPanel(false);
+    setIsExportingScan(true);
     try {
       const resp = await exportScanXml({
         scans: entries, base_name: chosenBase, include_misses: includeMisses,
@@ -4896,8 +4942,9 @@ export default function PointCloudViewer({
     } catch (error) {
       showToast({ title: 'Export Failed', type: 'error',
         message: error instanceof Error ? error.message : 'Unknown error' });
+    } finally {
+      setIsExportingScan(false);
     }
-    setShowExportPanel(false);
   }, [clouds, buildScanExportEntry]);
 
   // Export mesh in various formats
@@ -12035,6 +12082,8 @@ export default function PointCloudViewer({
           the backend crop round-trip runs (octree re-conversion is ~15-20s);
           the to-be-cropped points stay hidden via isApplyingCrop. */}
       {isApplyingCrop && <StatusPill label="Cropping…" />}
+
+      {isExportingScan && <StatusPill testId="scan-export-running" label="Exporting scan…" />}
 
       {/* Open3D triangulation status indicator (ball pivoting / poisson / etc.) */}
       {triangulationInProgress && !isHeliosRunning && (

@@ -210,6 +210,14 @@ the box's position, size, subdivisions, and rotation, so it's ready to use as
 the grid input for [leaf-area-density](estimate-leaf-area-density.md) with no
 manual setup. A grid-only XML (no `<scan>`) imports just the grids.
 
+A grid that was **snapped to the ground** before export carries its per-column
+terrain offsets in the XML (`<columnOffsets>`/`<keptColumns>` — see the
+[file-format reference](../reference/file-formats.md#scan-position-files)), so it
+re-imports already snapped, bending to follow the same terrain, without needing
+the DEM in the scene. Likewise, a scan's chosen **scanner model** round-trips via
+a `<scannerModel>` tag, so a re-imported RIEGL/Leica/FARO/etc. scan keeps its
+instrument identity rather than reverting to generic.
+
 ### Importing textured meshes
 
 A `.obj` that references a `.mtl` material library is imported with its
@@ -349,6 +357,11 @@ The per-scan file split is always kept (the XML metadata references each data
 file by scan). Edits (crop, translation, filtering) are baked into the exported
 coordinates — what you see is what gets written. If the scene holds no scans
 with parameters, the section does not appear.
+
+After you choose a save location the export dialog closes and a small **progress
+pill** appears at the top of the viewer while the scans are written (a large
+bundle can take a few seconds). The pill clears and a toast confirms the file
+count when the write finishes — there's no need to click Export twice.
 
 ### Mesh formats
 

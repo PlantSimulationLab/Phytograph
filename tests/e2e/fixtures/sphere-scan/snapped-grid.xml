@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<helios>
+
+<scan>
+    <origin>-2 0 0.5</origin>
+    <size>10 20</size>
+    <thetaMin>0</thetaMin>
+    <thetaMax>180</thetaMax>
+    <phiMin>0</phiMin>
+    <phiMax>360</phiMax>
+    <filename>sphere_scan0.xyz</filename>
+    <ASCII_format>row column x y z r g b reflectance</ASCII_format>
+</scan>
+
+<grid>
+    <center>0 0 1</center>
+    <size>2 2 2</size>
+    <Nx>2</Nx>
+    <Ny>2</Ny>
+    <Nz>1</Nz>
+    <columnOffsets>0.0 0.1 0.2 0.3</columnOffsets>
+    <keptColumns>1 1 0 1</keptColumns>
+</grid>
+
+</helios>

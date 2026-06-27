@@ -195,6 +195,10 @@ Notes:
 - Terrain following only shifts columns vertically — it does not tilt or rotate
   the grid. Combine it with an azimuthal grid rotation (above) for a row that is
   both sloping and off-axis.
+- **The snap survives export.** Exporting the scene to Helios scan XML writes the
+  per-column offsets into the `<grid>` block, so re-importing the XML brings the
+  grid back already snapped — no need to re-run the DEM and snap. See the
+  [file-format reference](../reference/file-formats.md#scan-position-files).
 
 ## Override G(θ) directly
 

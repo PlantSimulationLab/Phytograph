@@ -24,6 +24,11 @@
 // are still ignored.
 
 import { DEFAULT_SCAN_PARAMETERS, type ScanParameters } from './scanParameters';
+import { SCANNER_MODELS, type ScannerModelId } from './scannerModels';
+
+// Valid scanner-model ids, for validating an imported <scannerModel> tag. An
+// unknown value degrades to undefined (→ generic) rather than rendering nothing.
+const SCANNER_MODEL_IDS = new Set<string>(SCANNER_MODELS.map(m => m.id));
 
 // Recognised spellings of the spinning-multibeam <scanPattern> value, matching
 // helios-core's case-insensitive acceptance (spinning_multibeam /
@@ -58,6 +63,13 @@ export interface HeliosXmlGrid {
   subdivisions: { x: number; y: number; z: number }; // Nx, Ny, Nz (>= 1)
   rotationDeg: number; // about z; 0 when absent
   label: string;       // "Grid N"
+  // Terrain-following ("snapped") grid: per-(x,y)-column world-z offsets, row-major
+  // [j*nx+i], length nx*ny — parsed from <columnOffsets>. Present only for a snapped
+  // grid; the caller reattaches them as the mesh's gridGroundSnap. keptMask (from
+  // <keptColumns>, same length, 0 = dropped outside the DEM footprint) defaults to
+  // all-1 when offsets are present but the mask tag is absent.
+  columnOffsets?: Float32Array;
+  keptMask?: Uint8Array;
 }
 
 export interface HeliosXmlParseResult {
@@ -127,13 +139,31 @@ function parseGridElement(el: Element, index: number): HeliosXmlGrid {
   const nz = Math.max(1, Math.round(parseNumberTag(el, 'Nz') ?? 1));
   const rotationDeg = parseNumberTag(el, 'rotation') ?? 0;
 
-  return {
+  const grid: HeliosXmlGrid = {
     center: { x: center[0], y: center[1], z: center[2] },
     size: { x: size[0], y: size[1], z: size[2] },
     subdivisions: { x: nx, y: ny, z: nz },
     rotationDeg,
     label: `Grid ${index + 1}`,
   };
+
+  // Terrain-following offsets (Phytograph extension; Helios ignores these tags).
+  // Only accept them when the list length matches the column count nx*ny — the
+  // invariant the whole snap pipeline relies on. A wrong-length or absent list
+  // simply leaves the grid flat. keptColumns is optional; when offsets are present
+  // without it, every column is kept.
+  const ncols = nx * ny;
+  const offsets = parseFloatListTag(el, 'columnOffsets');
+  if (offsets && offsets.length === ncols) {
+    grid.columnOffsets = Float32Array.from(offsets);
+    const kept = parseFloatListTag(el, 'keptColumns');
+    grid.keptMask =
+      kept && kept.length === ncols
+        ? Uint8Array.from(kept, v => (v !== 0 ? 1 : 0))
+        : new Uint8Array(ncols).fill(1);
+  }
+
+  return grid;
 }
 
 function parseScanElement(el: Element, index: number): HeliosXmlScan {
@@ -218,11 +248,23 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
   // default heading (0), so XML written before this field existed still loads.
   const azimuthOffsetDeg = parseNumberTag(el, 'scanAzimuthOffset');
 
+  // <scannerModel> is the instrument id (e.g. 'riegl_vz400i'). Validate against the
+  // catalog so a junk / unknown value degrades to undefined (→ the generic marker)
+  // rather than rendering nothing. Absent tag → undefined → generic (the default).
+  const scannerModelRaw = tagText(el, 'scannerModel');
+  const scannerModel =
+    scannerModelRaw && SCANNER_MODEL_IDS.has(scannerModelRaw)
+      ? (scannerModelRaw as ScannerModelId)
+      : undefined;
+
   const filenameRaw = tagText(el, 'filename');
   const asciiFormatRaw = tagText(el, 'ASCII_format');
 
   const params: ScanParameters = {
     origin: { x: origin[0], y: origin[1], z: origin[2] },
+    // Instrument identity. undefined when absent/unknown so the consumer's default
+    // ('generic') applies; a valid id flows straight through to the scanner marker.
+    scannerModel,
     pattern: isMultibeam ? 'spinning_multibeam' : 'raster',
     zenithPoints: Math.max(1, zenithPoints),
     // azimuthPoints is guaranteed non-null here (raster requires <size>;

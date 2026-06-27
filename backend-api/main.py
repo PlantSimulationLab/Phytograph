@@ -3645,12 +3645,25 @@ def _file_xyz_bounds(file_path: str, ascii_format: Optional[str] = None):
 
 
 def _grid_xml_block(center: list, size: list, nx: int = 1, ny: int = 1,
-                    nz: int = 1, rotation_deg: float = 0.0) -> list:
+                    nz: int = 1, rotation_deg: float = 0.0,
+                    column_offsets: Optional[list] = None,
+                    kept_columns: Optional[list] = None) -> list:
     """Build the lines of a Helios ``<grid>`` block. ``rotation_deg`` (azimuth
     about +z) is emitted as a ``<rotation>`` tag only when meaningfully non-zero
     — the Helios parser treats it as optional, defaulting to 0. Shared by the
     triangulation config writer and the scan-export grid round-trip so both stay
-    consistent."""
+    consistent.
+
+    For a terrain-following ("snapped") grid, ``column_offsets`` (per-(x,y)-column
+    world-z shift, row-major ``[j*nx + i]``, length nx*ny) is emitted as a
+    Phytograph-specific ``<columnOffsets>`` child — a space-joined float list.
+    Helios's XML loader ignores the unknown tag (verified: it loads the plain box
+    unchanged), so the bundle stays Helios-compatible while Phytograph reads the
+    offsets back out-of-band on import. ``kept_columns`` (same length; False marks a
+    column dropped outside the DEM footprint) is emitted as a 0/1 ``<keptColumns>``
+    list, but ONLY when at least one column is dropped — an all-kept mask is the
+    default and is omitted. Wrong-length lists are skipped rather than written
+    corrupt."""
     lines = ['<grid>']
     lines.append(f'    <center>{center[0]} {center[1]} {center[2]}</center>')
     lines.append(f'    <size>{size[0]} {size[1]} {size[2]}</size>')
@@ -3659,6 +3672,15 @@ def _grid_xml_block(center: list, size: list, nx: int = 1, ny: int = 1,
     lines.append(f'    <Nz>{nz}</Nz>')
     if abs(float(rotation_deg)) > 1e-9:
         lines.append(f'    <rotation>{rotation_deg}</rotation>')
+    ncols = int(nx) * int(ny)
+    if column_offsets is not None and len(column_offsets) == ncols:
+        joined = ' '.join(repr(float(v)) for v in column_offsets)
+        lines.append(f'    <columnOffsets>{joined}</columnOffsets>')
+        # Only meaningful alongside the offsets, and only when something was dropped.
+        if kept_columns is not None and len(kept_columns) == ncols \
+                and not all(bool(k) for k in kept_columns):
+            kept_str = ' '.join('1' if bool(k) else '0' for k in kept_columns)
+            lines.append(f'    <keptColumns>{kept_str}</keptColumns>')
     lines.append('</grid>')
     return lines
 
@@ -3673,7 +3695,9 @@ def _inject_grids_into_helios_xml(xml_path: str, grids: list) -> None:
     blocks = []
     for g in grids:
         blocks.append('')
-        blocks.extend(_grid_xml_block(g.center, g.size, g.nx, g.ny, g.nz, g.rotation))
+        blocks.extend(_grid_xml_block(
+            g.center, g.size, g.nx, g.ny, g.nz, g.rotation,
+            getattr(g, 'column_offsets', None), getattr(g, 'kept_columns', None)))
     addition = '\n'.join(blocks) + '\n'
 
     with open(xml_path, "r") as fh:
@@ -3685,6 +3709,38 @@ def _inject_grids_into_helios_xml(xml_path: str, grids: list) -> None:
         text = text[:idx] + addition + text[idx:]
     with open(xml_path, "w") as fh:
         fh.write(text)
+
+
+def _inject_scanner_models_into_helios_xml(xml_path: str, models: list) -> None:
+    """Insert a ``<scannerModel>`` tag into each ``<scan>`` block of an existing
+    Helios XML, matching ``models`` by position (the Nth scan block gets
+    ``models[N]``). PyHelios exportScans() emits no model field, so we splice one
+    in post-export, mirroring the grid round-trip. A None / "generic" entry writes
+    nothing — bundles for unknown scanners stay clean, and pre-existing tooling
+    that never names a model is unaffected. Helios's loader ignores the unknown
+    tag, so the bundle stays Helios-loadable. No-op when no model is named."""
+    if not models or all(m is None or m == 'generic' for m in models):
+        return
+    with open(xml_path, "r") as fh:
+        text = fh.read()
+    out = []
+    pos = 0
+    scan_i = 0
+    close = '</scan>'
+    while True:
+        nxt = text.find(close, pos)
+        if nxt == -1:
+            out.append(text[pos:])
+            break
+        model = models[scan_i] if scan_i < len(models) else None
+        out.append(text[pos:nxt])
+        if model is not None and model != 'generic':
+            out.append(f'    <scannerModel>{model}</scannerModel>\n')
+        out.append(close)
+        pos = nxt + len(close)
+        scan_i += 1
+    with open(xml_path, "w") as fh:
+        fh.write(''.join(out))
 
 
 def _generate_helios_xml(tmpdir: str, scans_info: list, grid_center: list,
@@ -6229,6 +6285,14 @@ class ScanExportGrid(BaseModel):
     ny: int = 1
     nz: int = 1
     rotation: float = 0.0    # degrees about +z
+    # Per-(x,y)-column vertical offset for a terrain-following ("snapped") grid,
+    # row-major as [j*nx + i], length nx*ny — same convention as HeliosGrid. When
+    # present, written into the <grid> as a <columnOffsets> tag so a snapped grid
+    # round-trips (the Helios loader ignores the unknown tag; Phytograph reads it
+    # back on import). `kept_columns` (same length; False = dropped outside the DEM
+    # footprint) rides along as <keptColumns>, omitted when all columns are kept.
+    column_offsets: Optional[List[float]] = None
+    kept_columns: Optional[List[bool]] = None
 
 
 class ScanExportEntry(BaseModel):
@@ -6252,6 +6316,11 @@ class ScanExportEntry(BaseModel):
     # exportScans() (v0.1.23+), which writes a <scanAzimuthOffset> tag the renderer
     # reads back on import.
     scan_azimuth_offset: Optional[float] = None
+    # Scanner instrument id (e.g. "riegl_vz400i"), matching the renderer's
+    # ScannerModelId catalog. Round-trips into the XML as a <scannerModel> tag
+    # (injected post-export, since PyHelios exportScans() has no model concept)
+    # which the renderer reads back on import. "generic"/None writes no tag.
+    scanner_model: Optional[str] = None
     # Point source (one of):
     session_id: Optional[str] = None             # live edited session (honors deletions)
     points: Optional[List[List[float]]] = None   # inline flat cloud
@@ -6820,6 +6889,11 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
         # <grid> blocks just before the closing </helios>.
         if request.grids:
             _inject_grids_into_helios_xml(xml_path, request.grids)
+        # PyHelios has no scanner-model concept, so inject a <scannerModel> tag into
+        # each <scan> block (in order) for non-generic instruments, so the renderer
+        # re-imports the same instrument identity.
+        _inject_scanner_models_into_helios_xml(
+            xml_path, [s.scanner_model for s in request.scans])
         files = []
         for name in sorted(os.listdir(tmpdir)):
             with open(os.path.join(tmpdir, name), "rb") as fh:

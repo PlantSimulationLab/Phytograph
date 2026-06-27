@@ -65,6 +65,12 @@ test('exports a multi-scan XML bundle for the sphere fixture', async () => {
     await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
       .toBeGreaterThan(0);
 
+    // UX: once the path is chosen the modal dismisses and a progress pill takes
+    // over for the (multi-second, no-stream) serialize/encode/write — so the user
+    // never stares at a frozen dialog. The export is fast for this fixture, so the
+    // pill may come and go quickly; assert the modal is gone (the durable signal).
+    await expect(page.getByTestId('export-modal')).not.toBeVisible({ timeout: 10_000 });
+
     // Wait for the bundle to land on disk: sphere.xml + sphere_0..3.xyz.
     await expect.poll(
       () => (existsSync(xmlPath) ? readdirSync(outDir).filter(f => f.endsWith('.xyz')).length : 0),

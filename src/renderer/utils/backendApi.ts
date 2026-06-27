@@ -2005,6 +2005,10 @@ export interface ScanExportEntry {
   // writes a <scanAzimuthOffset> tag via PyHelios exportScans (v0.1.23+) and
   // reads it back on import.
   scan_azimuth_offset?: number;
+  // Scanner instrument id (ScannerModelId, e.g. 'riegl_vz400i'). Round-trips into
+  // the XML: the backend injects a <scannerModel> tag and the renderer's XML
+  // importer reads it back. 'generic'/undefined writes no tag.
+  scanner_model?: import('../lib/scannerModels').ScannerModelId;
   session_id?: string;
   points?: number[][];
   scalar_columns?: Record<string, number[]>;

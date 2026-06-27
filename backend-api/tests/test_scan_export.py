@@ -366,6 +366,119 @@ class TestScanExportGrids:
             os.chdir(cwd)
 
 
+class TestScanExportColumnOffsets:
+    """A terrain-following ("snapped") grid round-trips its per-column z offsets
+    via a <columnOffsets> tag (+ <keptColumns> when some columns were dropped).
+    Helios's loader ignores these unknown tags, so the bundle stays loadable."""
+
+    def _snapped_grid(self, kept=None):
+        # 2x2 columns (nx*ny == 4) → four offsets, row-major [j*nx+i].
+        return main.ScanExportGrid(
+            center=[0.0, 0.0, 1.0], size=[2.0, 2.0, 2.0], nx=2, ny=2, nz=1,
+            column_offsets=[0.0, 0.1, 0.2, 0.3], kept_columns=kept)
+
+    def test_column_offsets_written_in_order(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="co",
+            include_misses=True, grids=[self._snapped_grid()]))
+        assert res["success"] is True, res.get("error")
+        body = re.search(r"<grid>(.*?)</grid>", _decode(res["files"], ".xml"), re.S).group(1)
+        off = re.search(r"<columnOffsets>(.*?)</columnOffsets>", body)
+        assert off is not None, body
+        vals = [float(v) for v in off.group(1).split()]
+        assert vals == pytest.approx([0.0, 0.1, 0.2, 0.3])
+
+    def test_kept_columns_written_when_some_dropped(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="kc", include_misses=True,
+            grids=[self._snapped_grid(kept=[True, True, False, True])]))
+        body = re.search(r"<grid>(.*?)</grid>", _decode(res["files"], ".xml"), re.S).group(1)
+        assert re.search(r"<keptColumns>\s*1\s+1\s+0\s+1\s*</keptColumns>", body), body
+
+    def test_all_kept_omits_kept_columns_tag(self):
+        pytest.importorskip("pyhelios")
+        # An all-True mask is the default — don't bloat the XML with it.
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="ak", include_misses=True,
+            grids=[self._snapped_grid(kept=[True, True, True, True])]))
+        xml = _decode(res["files"], ".xml")
+        assert "<columnOffsets>" in xml
+        assert "<keptColumns>" not in xml
+
+    def test_wrong_length_offsets_skipped(self):
+        pytest.importorskip("pyhelios")
+        # Length != nx*ny is corrupt — drop it rather than write a bad tag.
+        bad = main.ScanExportGrid(
+            center=[0.0, 0.0, 1.0], size=[2.0, 2.0, 2.0], nx=2, ny=2, nz=1,
+            column_offsets=[0.0, 0.1])  # only 2, need 4
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="wl",
+            include_misses=True, grids=[bad]))
+        xml = _decode(res["files"], ".xml")
+        assert "<grid>" in xml and "<columnOffsets>" not in xml
+
+    def test_snapped_grid_reloads_through_pyhelios(self, tmp_path):
+        pytest.importorskip("pyhelios")
+        from pyhelios import LiDARCloud
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_inline_entry(_PTS, _MISS)], base_name="cort", include_misses=True,
+            grids=[self._snapped_grid(kept=[True, True, False, True])]))
+        assert res["success"] is True, res.get("error")
+        for f in res["files"]:
+            (tmp_path / f["name"]).write_bytes(base64.b64decode(f["data"]))
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            cloud = LiDARCloud()
+            cloud.disableMessages()
+            cloud.loadXML("cort.xml")
+            # The unknown tags don't break Helios; the box still materializes (4 cells).
+            assert cloud.getGridCellCount() == 4
+        finally:
+            os.chdir(cwd)
+
+
+class TestScanExportScannerModel:
+    """A non-generic scanner instrument round-trips via a <scannerModel> tag,
+    injected per <scan> block after PyHelios writes the XML."""
+
+    def test_model_tag_written_for_non_generic(self):
+        pytest.importorskip("pyhelios")
+        entry = _inline_entry(_PTS, _MISS)
+        entry.scanner_model = "riegl_vz400i"
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="sm", include_misses=True))
+        assert res["success"] is True, res.get("error")
+        xml = _decode(res["files"], ".xml")
+        assert "<scannerModel>riegl_vz400i</scannerModel>" in xml
+
+    def test_generic_and_none_write_no_tag(self):
+        pytest.importorskip("pyhelios")
+        generic = _inline_entry(_PTS, _MISS)
+        generic.scanner_model = "generic"
+        none_entry = _inline_entry(_PTS, _MISS)  # scanner_model defaults to None
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[generic, none_entry], base_name="smg", include_misses=True))
+        assert "<scannerModel>" not in _decode(res["files"], ".xml")
+
+    def test_model_lands_in_correct_scan_block(self):
+        pytest.importorskip("pyhelios")
+        # Two scans, only the SECOND names a model → the tag must appear after the
+        # first </scan>, not before it.
+        s0 = _inline_entry(_PTS, _MISS)            # generic
+        s1 = _inline_entry(_PTS, _MISS)
+        s1.scanner_model = "leica_p40"
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[s0, s1], base_name="smo", include_misses=True))
+        xml = _decode(res["files"], ".xml")
+        assert xml.count("<scannerModel>") == 1
+        # The model tag sits after the first scan's close, i.e. in the second block.
+        first_close = xml.index("</scan>")
+        assert xml.index("<scannerModel>leica_p40</scannerModel>") > first_close
+
+
 class TestScanExportErrors:
     def test_no_scans_fails(self):
         res = main._do_scan_export(main.ScanExportRequest(scans=[], include_misses=True))

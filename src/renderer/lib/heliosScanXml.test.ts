@@ -368,4 +368,90 @@ describe('parseHeliosScanXml', () => {
     expect(scans[0].params.zenithMinDeg).toBe(180);
     expect(scans[0].params.zenithMaxDeg).toBe(0);
   });
+
+  it('parses a valid <scannerModel> into params.scannerModel', () => {
+    const xml = `
+      <scan>
+        <origin>0 0 1</origin>
+        <size>10 20</size>
+        <scannerModel>riegl_vz400i</scannerModel>
+      </scan>
+    `;
+    const { scans } = parseHeliosScanXml(xml);
+    expect(scans[0].params.scannerModel).toBe('riegl_vz400i');
+  });
+
+  it('degrades an unknown <scannerModel> to undefined (→ generic)', () => {
+    const xml = `
+      <scan>
+        <origin>0 0 1</origin>
+        <size>10 20</size>
+        <scannerModel>not_a_real_scanner</scannerModel>
+      </scan>
+    `;
+    const { scans } = parseHeliosScanXml(xml);
+    // Unknown id is rejected so the consumer's 'generic' default applies, rather
+    // than rendering a non-existent marker.
+    expect(scans[0].params.scannerModel).toBeUndefined();
+  });
+
+  it('leaves scannerModel undefined when the tag is absent', () => {
+    const xml = '<scan><origin>0 0 0</origin><size>10 10</size></scan>';
+    const { scans } = parseHeliosScanXml(xml);
+    expect(scans[0].params.scannerModel).toBeUndefined();
+  });
+
+  it('parses <columnOffsets>/<keptColumns> on a snapped grid (length nx*ny)', () => {
+    const xml = `
+      <grid>
+        <center>0 0 1</center>
+        <size>2 2 2</size>
+        <Nx>2</Nx><Ny>2</Ny><Nz>1</Nz>
+        <columnOffsets>0 0.1 0.2 0.3</columnOffsets>
+        <keptColumns>1 1 0 1</keptColumns>
+      </grid>
+    `;
+    const { grids } = parseHeliosScanXml(xml);
+    expect(grids[0].columnOffsets).toBeInstanceOf(Float32Array);
+    expect(Array.from(grids[0].columnOffsets!)).toEqual([
+      expect.closeTo(0, 6), expect.closeTo(0.1, 6),
+      expect.closeTo(0.2, 6), expect.closeTo(0.3, 6),
+    ]);
+    expect(grids[0].keptMask).toBeInstanceOf(Uint8Array);
+    expect(Array.from(grids[0].keptMask!)).toEqual([1, 1, 0, 1]);
+  });
+
+  it('defaults keptMask to all-1 when <columnOffsets> present but <keptColumns> absent', () => {
+    const xml = `
+      <grid>
+        <center>0 0 1</center>
+        <size>2 2 2</size>
+        <Nx>2</Nx><Ny>2</Ny><Nz>1</Nz>
+        <columnOffsets>0 0.1 0.2 0.3</columnOffsets>
+      </grid>
+    `;
+    const { grids } = parseHeliosScanXml(xml);
+    expect(Array.from(grids[0].keptMask!)).toEqual([1, 1, 1, 1]);
+  });
+
+  it('ignores wrong-length <columnOffsets> (grid stays flat)', () => {
+    const xml = `
+      <grid>
+        <center>0 0 1</center>
+        <size>2 2 2</size>
+        <Nx>2</Nx><Ny>2</Ny><Nz>1</Nz>
+        <columnOffsets>0 0.1</columnOffsets>
+      </grid>
+    `;
+    const { grids } = parseHeliosScanXml(xml);
+    // length 2 != nx*ny (4) → dropped; the grid imports as a plain box.
+    expect(grids[0].columnOffsets).toBeUndefined();
+    expect(grids[0].keptMask).toBeUndefined();
+  });
+
+  it('leaves columnOffsets undefined on an ordinary (non-snapped) grid', () => {
+    const xml = '<grid><center>0 0 0</center><size>1 1 1</size></grid>';
+    const { grids } = parseHeliosScanXml(xml);
+    expect(grids[0].columnOffsets).toBeUndefined();
+  });
 });

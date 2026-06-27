@@ -238,10 +238,17 @@ resolved next to the XML on disk.
 
 Per `<scan>`, Phytograph reads `<origin>`, `<size>` (theta/phi point counts),
 the `<thetaMin>`/`<thetaMax>`/`<phiMin>`/`<phiMax>` sweep bounds,
-`<exitDiameter>`/`<beamDivergence>` (multi-return optics), and `<scanTilt>` —
+`<exitDiameter>`/`<beamDivergence>` (multi-return optics), `<scanTilt>` —
 two numbers, `roll pitch` in degrees, giving the scanner's residual tilt away
-from level (absent → level). `<filename>` and `<ASCII_format>` auto-attach the
+from level (absent → level) — and `<scanAzimuthOffset>` (the initial scanner
+heading, in degrees). `<filename>` and `<ASCII_format>` auto-attach the
 referenced point data.
+
+A `<scannerModel>` tag (a Phytograph extension carrying an instrument id such as
+`riegl_vz400i`) restores the **scanner model** chosen in the Add/Edit Scan dialog.
+Scans exported from Phytograph write it so a non-default instrument round-trips;
+an absent or unrecognised value imports as the generic scanner. Helios ignores
+the tag, so the bundle stays Helios-loadable.
 
 A `<scan>` carrying `<scanPattern>spinning_multibeam</scanPattern>` imports as a
 **spinning-multibeam** scan instead of a raster scan. Such a scan replaces the
@@ -262,6 +269,18 @@ each `<grid>` becomes a **voxel grid** object named `Grid 1`, `Grid 2`, …:
 | `<size>` x y z | grid size | full extent per axis; all > 0 (required) |
 | `<Nx>` `<Ny>` `<Nz>` | subdivisions | integer cells per axis; default 1 |
 | `<rotation>` | z-rotation | degrees about the z-axis; default 0 |
+| `<columnOffsets>` | terrain-following snap | `Nx*Ny` floats, row-major; per-column vertical (z) shift |
+| `<keptColumns>` | dropped-column mask | `Nx*Ny` of `0`/`1`; `0` = column outside the DEM footprint |
+
+The last two are a Phytograph extension that round-trips a grid **snapped to the
+ground** (see [Estimate Leaf Area Density](../workflows/estimate-leaf-area-density.md)).
+`<columnOffsets>` lists the per-(x, y)-column vertical offset that bends the grid
+to follow the terrain, in row-major `[j*Nx + i]` order (x fastest); `<keptColumns>`
+(written only when some columns were dropped) marks which columns fell inside the
+DEM. A grid imported with these tags comes back already snapped, ready to use —
+even with no DEM in the scene. The offsets are ignored by Helios's own loader and
+are dropped if their count doesn't match `Nx*Ny`, in which case the grid imports
+flat.
 
 An XML with only `<grid>` blocks (no `<scan>`) imports just the grids.
 
