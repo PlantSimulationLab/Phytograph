@@ -36,7 +36,12 @@ surface.
       so edge points aren't clipped). The button is enabled whenever one or
       more scans with points are selected, and you can re-fit at any time.
     - Adjust the box (Position / Scale) if you want a tighter or different
-      region. The box is its own object in the scene. **Rotating** the box
+      region. The box is its own object in the scene. Changing its
+      **Position** (origin) or **Scale** re-frames the viewport on the box's
+      new location, so it stays in view as you move it away from the
+      default unit cube at the origin — the view updates when you commit a
+      value (press **Enter** or click away / pause typing), not on every
+      keystroke. **Rotating** the box
       about the vertical axis is honored — the LAD voxels are computed in the
       rotated frame and the result grid lines up with the box you laid out
       (e.g. to follow a planted row that isn't axis-aligned).

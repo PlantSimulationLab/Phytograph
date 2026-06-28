@@ -125,6 +125,47 @@ class TestScanExportShape:
         fmt = re.search(r"<ASCII_format>(.*?)</ASCII_format>", _decode(res["files"], ".xml")).group(1)
         assert fmt.split() == ["x", "y", "z", "is_miss"]
 
+    def test_is_miss_forced_when_columns_omit_it(self):
+        # Regression: a synthetic scan exported with "include misses" ON but a
+        # column picker that DROPPED is_miss (e.g. ASCII_format "x y z timestamp")
+        # used to write the far-field miss ROWS with no sentinel COLUMN, so the
+        # round-trip lost every miss signal and the points re-imported as real
+        # returns. is_miss must be forced back in whenever misses are written.
+        pytest.importorskip("pyhelios")
+        entry = main.ScanExportEntry(
+            origin=[0.0, 0.0, 3.0], n_theta=20, n_phi=20,
+            theta_min=0, theta_max=180, phi_min=0, phi_max=360,
+            points=[list(p) for p in _PTS],
+            scalar_columns={"is_miss": list(_MISS), "timestamp": [0, 1, 2, 3]},
+            columns=["x", "y", "z", "timestamp"])  # is_miss deliberately omitted
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="s", include_misses=True))
+        assert res["success"] is True, res.get("error")
+        fmt = re.search(r"<ASCII_format>(.*?)</ASCII_format>",
+                        _decode(res["files"], ".xml")).group(1).split()
+        assert "is_miss" in fmt, f"is_miss must survive export; got {fmt}"
+        # And the flagged row carries a 1 (the far-field miss).
+        data = [l for l in _decode(res["files"], ".xyz").splitlines()
+                if l and l[0] != "#"]
+        mi = fmt.index("is_miss")
+        flags = [int(float(row.split()[mi])) for row in data]
+        assert sum(flags) == sum(_MISS) == 1
+
+    def test_is_miss_forced_in_data_only_csv(self):
+        # Same guarantee on the data-only (write_xml=False) per-format path, which
+        # flows through the other resolver (_resolve_scan_for_format).
+        pytest.importorskip("pyhelios")
+        entry = main.ScanExportEntry(
+            origin=[0, 0, 3], n_theta=20, n_phi=20,
+            points=[list(p) for p in _PTS],
+            scalar_columns={"is_miss": list(_MISS), "reflectance": [0.1, 0.2, 0.3, 0.4]},
+            columns=["x", "y", "z", "reflectance"])  # is_miss omitted
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="b", include_misses=True,
+            write_xml=False, data_format="csv"))
+        head = base64.b64decode(res["files"][0]["data"]).decode().splitlines()[0]
+        assert "is_miss" in head.split(","), head
+
     def test_translation_is_applied(self):
         pytest.importorskip("pyhelios")
         res = main._do_scan_export(main.ScanExportRequest(
@@ -153,16 +194,20 @@ class TestScanExportDataFormats:
 
     def test_ascii_data_honors_column_order(self):
         pytest.importorskip("pyhelios")
+        # Column ordering is honored among the chosen scalars. Use a no-miss cloud
+        # so the forced is_miss column (see test_is_miss_forced_*) doesn't muddy the
+        # assertion — this test is purely about respecting the requested order.
         entry = main.ScanExportEntry(
             origin=[0, 0, 3], n_theta=20, n_phi=20,
             points=[list(p) for p in _PTS],
-            scalar_columns={"is_miss": list(_MISS), "reflectance": [0.1, 0.2, 0.3, 0.4]},
-            columns=["x", "y", "z", "reflectance"])
+            scalar_columns={"reflectance": [0.1, 0.2, 0.3, 0.4],
+                            "target_index": [0, 0, 0, 0]},
+            columns=["x", "y", "z", "target_index", "reflectance"])
         res = main._do_scan_export(main.ScanExportRequest(
             scans=[entry], base_name="b", include_misses=True,
             write_xml=False, data_format="csv"))
         head = base64.b64decode(res["files"][0]["data"]).decode().splitlines()[0]
-        assert head == "x,y,z,reflectance"
+        assert head == "x,y,z,target_index,reflectance"
 
     def test_e57_round_trips(self, tmp_path):
         pytest.importorskip("pyhelios")

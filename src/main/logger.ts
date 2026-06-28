@@ -23,6 +23,7 @@ import { app } from 'electron';
 import { dirname, join } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { isBrokenPipe, pipeErrCode } from './brokenPipe.js';
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'verbose' | 'debug';
 
@@ -44,6 +45,26 @@ export function initLogging(): void {
   // the terminal; quiet it in packaged builds (nothing reads stdout there).
   electronLog.transports.console.level = app.isPackaged ? false : 'info';
 
+  // Broken-pipe armor at the source. If the controlling terminal closes or the
+  // system sleeps and tears down stdio, the next console write throws EIO/EPIPE.
+  // That used to bubble up as an UNCAUGHT exception → fatal crash dialog → exit
+  // → relaunch → re-crash (the dialog/logging path re-writes the dead pipe), a
+  // 20×-and-counting loop. Wrap the console transport's writeFn so a dead pipe
+  // degrades to "no terminal output" instead of throwing: swallow EIO/EPIPE and
+  // permanently disable the console transport so we stop hammering it.
+  const defaultConsoleWrite = electronLog.transports.console.writeFn;
+  electronLog.transports.console.writeFn = (params) => {
+    try {
+      defaultConsoleWrite(params);
+    } catch (e) {
+      if (isBrokenPipe(e)) {
+        disableConsoleTransport();
+        return;
+      }
+      throw e;
+    }
+  };
+
   // Route main-process console.* through electron-log so existing console.log
   // calls in main.ts/octreeProtocol.ts/etc. also land in the file without
   // touching every call site. (Renderer console is forwarded separately over IPC.)
@@ -61,10 +82,25 @@ export function initLogging(): void {
   //     exit afterward.
   //   - unhandled promise REJECTION ('Unhandled rejection') — usually a stray
   //     async error the app can survive, so we log it and soldier on (no dialog).
+  //   - a broken-stdio error ('EIO'/'EPIPE') — NOT a corrupted app, just a dead
+  //     stdout/stderr pipe (terminal closed, system sleep tore down child procs).
+  //     Fatal-dialoging on it caused a crash-loop: the dialog/logging path itself
+  //     re-writes to the dead pipe → re-throws EIO → re-dialogs. Treat it as
+  //     non-fatal and survive (the file transport still works). See isBrokenPipe.
   // Returning false stops electron-log from logging it a second time.
   electronLog.errorHandler.startCatching({
     showDialog: false,
     onError: ({ error, errorName }) => {
+      // A dead stdout/stderr pipe is recoverable, not a corrupted app: disable
+      // the console transport first so the warning below can't re-throw on the
+      // same dead pipe, then log to the (still-working) file transport.
+      if (isBrokenPipe(error)) {
+        disableConsoleTransport();
+        electronLog
+          .scope('main')
+          .warn(`stdio write failed (${pipeErrCode(error)}); console output disabled, continuing.`);
+        return false;
+      }
       electronLog.scope('main').error(`${errorName}:`, error);
       if (errorName !== 'Unhandled rejection') {
         // Let main.ts surface the crash dialog (it owns the BrowserWindow and the
@@ -80,6 +116,18 @@ export function initLogging(): void {
       return false;
     },
   });
+}
+
+/**
+ * Stop electron-log echoing to the (now-dead) console. Once stdout/stderr is a
+ * broken pipe, every subsequent console.* would re-throw EIO; disabling the
+ * console transport keeps the file transport (and the rest of the app) alive.
+ * Idempotent.
+ */
+function disableConsoleTransport(): void {
+  if (electronLog.transports.console.level !== false) {
+    electronLog.transports.console.level = false;
+  }
 }
 
 // Set by main.ts. Invoked for a fatal uncaught exception in the main process so

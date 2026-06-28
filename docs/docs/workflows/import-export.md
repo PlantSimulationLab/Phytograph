@@ -338,9 +338,11 @@ formats (LAS / LAZ / PLY / OBJ / E57) use their own fixed schema, so the column
 picker is hidden for them.
 
 **Include miss points** — when on (default), the sky/miss points and the
-`is_miss` flag are written, so misses survive the round-trip. Turn it off for a
-returns-only export. Available only when at least one checked scan carries
-misses.
+`is_miss` flag are written, so misses survive the round-trip. The `is_miss`
+column is always included while this is on, even if you unchecked it in the
+column picker — without that flag the far-field miss points would re-import as
+real returns, breaking the round-trip. Turn it off for a returns-only export.
+Available only when at least one checked scan carries misses.
 
 **Export grid** — shown only in **XML + data** mode when the scene holds one or
 more [voxel grids](../concepts/scans.md). Tick it to reveal a checklist of the

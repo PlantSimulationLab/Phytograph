@@ -1593,39 +1593,7 @@ export default function PointCloudViewer({
     if (newMeshIds.length > 0) {
       const newMesh = meshes.find(m => m.id === newMeshIds[0]);
       if (newMesh && newMesh.data.vertices && newMesh.data.vertexCount > 0) {
-        setTimeout(() => {
-          const frameSelection = (window as any).__frameSelection;
-          if (frameSelection) {
-            // Frame the mesh in WORLD space. computeBoundsFromPositions on the raw
-            // local vertices ignores the mesh transform, which for a Helios <grid>
-            // voxel (a unit cube placed at [center] with [size] scale) collapses to
-            // a ±0.5 box at the origin and makes the framing zoom to near-zero
-            // distance, culling everything. Transform first (scale -> rotate Euler
-            // XYZ -> translate, matching extractMeshWorldGeometry).
-            const pos = meshPositionsRef.current.get(newMesh.id) || { x: 0, y: 0, z: 0 };
-            const scl = meshScalesRef.current.get(newMesh.id) || { x: 1, y: 1, z: 1 };
-            const rot = meshRotationsRef.current.get(newMesh.id) || { x: 0, y: 0, z: 0 };
-            const rotX = rot.x * Math.PI / 180, rotY = rot.y * Math.PI / 180, rotZ = rot.z * Math.PI / 180;
-            const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-            const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-            const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
-            const min = new THREE.Vector3(Infinity, Infinity, Infinity);
-            const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-            const v = newMesh.data.vertices;
-            for (let i = 0; i < newMesh.data.vertexCount; i++) {
-              const x = v[i * 3] * scl.x, y = v[i * 3 + 1] * scl.y, z = v[i * 3 + 2] * scl.z;
-              const y1 = y * cosX - z * sinX, z1 = y * sinX + z * cosX;
-              const x2 = x * cosY + z1 * sinY, z2 = -x * sinY + z1 * cosY;
-              const x3 = x2 * cosZ - y1 * sinZ, y3 = x2 * sinZ + y1 * cosZ;
-              const wx = x3 + pos.x, wy = y3 + pos.y, wz = z2 + pos.z;
-              min.x = Math.min(min.x, wx); min.y = Math.min(min.y, wy); min.z = Math.min(min.z, wz);
-              max.x = Math.max(max.x, wx); max.y = Math.max(max.y, wy); max.z = Math.max(max.z, wz);
-            }
-            const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
-            const size = new THREE.Vector3().subVectors(max, min);
-            frameSelection({ center, size });
-          }
-        }, 50);
+        setTimeout(() => frameMeshInViewport(newMesh), 50);
       }
     }
 
@@ -1852,6 +1820,46 @@ export default function PointCloudViewer({
   // async, so commitHistoryEntry's captureTransform reads the AFTER value from
   // the refs, not from scene.state. We capture BEFORE, run the mutation, then
   // commit a `transform` action pairing before↔after.
+  // Re-frame the viewport on a mesh in WORLD space, preserving the current
+  // camera→target direction (re-centers + re-zooms only, via __frameSelection).
+  // Used both when a mesh is first added and when a voxel grid's origin/scale is
+  // edited — so the box stays framed as the user dials in real-world values
+  // instead of leaving the default unit-cube-at-origin framing far off-screen.
+  // Reads the live transform refs, so callers can invoke it right after mutating
+  // them (no need to wait for the React state round-trip). Transforms the local
+  // vertices first (scale -> rotate Euler XYZ -> translate, matching
+  // extractMeshWorldGeometry); a Helios <grid> voxel is a unit cube whose local
+  // bounds collapse to a ±0.5 box at the origin, so framing the raw vertices
+  // would zoom to near-zero distance.
+  const frameMeshInViewport = useCallback((mesh: MeshEntry) => {
+    if (!mesh || !mesh.data.vertices || !(mesh.data.vertexCount > 0)) return;
+    const meshId = mesh.id;
+    const frameSelection = (window as any).__frameSelection;
+    if (!frameSelection) return;
+    const pos = meshPositionsRef.current.get(meshId) || { x: 0, y: 0, z: 0 };
+    const scl = meshScalesRef.current.get(meshId) || { x: 1, y: 1, z: 1 };
+    const rot = meshRotationsRef.current.get(meshId) || { x: 0, y: 0, z: 0 };
+    const rotX = rot.x * Math.PI / 180, rotY = rot.y * Math.PI / 180, rotZ = rot.z * Math.PI / 180;
+    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+    const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
+    const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+    const v = mesh.data.vertices;
+    for (let i = 0; i < mesh.data.vertexCount; i++) {
+      const x = v[i * 3] * scl.x, y = v[i * 3 + 1] * scl.y, z = v[i * 3 + 2] * scl.z;
+      const y1 = y * cosX - z * sinX, z1 = y * sinX + z * cosX;
+      const x2 = x * cosY + z1 * sinY, z2 = -x * sinY + z1 * cosY;
+      const x3 = x2 * cosZ - y1 * sinZ, y3 = x2 * sinZ + y1 * cosZ;
+      const wx = x3 + pos.x, wy = y3 + pos.y, wz = z2 + pos.z;
+      min.x = Math.min(min.x, wx); min.y = Math.min(min.y, wy); min.z = Math.min(min.z, wz);
+      max.x = Math.max(max.x, wx); max.y = Math.max(max.y, wy); max.z = Math.max(max.z, wz);
+    }
+    const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+    const size = new THREE.Vector3().subVectors(max, min);
+    frameSelection({ center, size });
+  }, []);
+
   const commitMeshTransformEdit = useCallback((meshId: string, mutate: (id: string) => void) => {
     startHistoryEntry('mesh', meshId);
     mutate(meshId);
@@ -4022,6 +4030,8 @@ export default function PointCloudViewer({
           return next;
         });
         commitHistoryEntry();
+        // Keep a voxel grid framed after re-centering it on the origin.
+        if (mesh.gridSubdivisions) frameMeshInViewport(mesh);
       }
     } else if (selectedSkeletonId) {
       // For skeletons, calculate center offset
@@ -13783,17 +13793,27 @@ export default function PointCloudViewer({
               setMeshPositions(prev => new Map(prev).set(mesh.id, fit.center));
               setMeshScales(prev => new Map(prev).set(mesh.id, fit.size));
               commitHistoryEntry();
+              frameMeshInViewport(mesh);
             }}
-            onSetPosition={(axis, v) => commitMeshTransformEdit(mesh.id, (id) => {
-              const cur = meshPositionsRef.current.get(id) || { x: 0, y: 0, z: 0 };
-              const nextVal = { ...cur, [axis]: v };
-              meshPositionsRef.current.set(id, nextVal);
-              setMeshPositions(prev => new Map(prev).set(id, nextVal));
-            })}
-            onResetPosition={() => commitMeshTransformEdit(mesh.id, (id) => {
-              meshPositionsRef.current.set(id, { x: 0, y: 0, z: 0 });
-              setMeshPositions(prev => new Map(prev).set(id, { x: 0, y: 0, z: 0 }));
-            })}
+            onSetPosition={(axis, v) => {
+              commitMeshTransformEdit(mesh.id, (id) => {
+                const cur = meshPositionsRef.current.get(id) || { x: 0, y: 0, z: 0 };
+                const nextVal = { ...cur, [axis]: v };
+                meshPositionsRef.current.set(id, nextVal);
+                setMeshPositions(prev => new Map(prev).set(id, nextVal));
+              });
+              // Re-frame voxel grids so the box stays in view as its origin is
+              // dialed in. Commits only fire on Enter/blur/debounce (see
+              // DebouncedNumberInput), not per keystroke, so this won't thrash.
+              if (isVoxel) frameMeshInViewport(mesh);
+            }}
+            onResetPosition={() => {
+              commitMeshTransformEdit(mesh.id, (id) => {
+                meshPositionsRef.current.set(id, { x: 0, y: 0, z: 0 });
+                setMeshPositions(prev => new Map(prev).set(id, { x: 0, y: 0, z: 0 }));
+              });
+              if (isVoxel) frameMeshInViewport(mesh);
+            }}
             onSetRotation={(axis, v) => commitMeshTransformEdit(mesh.id, (id) => {
               const cur = meshRotationsRef.current.get(id) || { x: 0, y: 0, z: 0 };
               const nextVal = { ...cur, [axis]: v };
@@ -13804,15 +13824,21 @@ export default function PointCloudViewer({
               meshRotationsRef.current.set(id, { x: 0, y: 0, z: 0 });
               setMeshRotations(prev => new Map(prev).set(id, { x: 0, y: 0, z: 0 }));
             })}
-            onSetScale={(axis, v) => commitMeshTransformEdit(mesh.id, (id) => {
-              const nextVal = scaleLocked ? { x: v, y: v, z: v } : { ...scale, [axis]: v };
-              meshScalesRef.current.set(id, nextVal);
-              setMeshScales(prev => new Map(prev).set(id, nextVal));
-            })}
-            onResetScale={() => commitMeshTransformEdit(mesh.id, (id) => {
-              meshScalesRef.current.set(id, { x: 1, y: 1, z: 1 });
-              setMeshScales(prev => new Map(prev).set(id, { x: 1, y: 1, z: 1 }));
-            })}
+            onSetScale={(axis, v) => {
+              commitMeshTransformEdit(mesh.id, (id) => {
+                const nextVal = scaleLocked ? { x: v, y: v, z: v } : { ...scale, [axis]: v };
+                meshScalesRef.current.set(id, nextVal);
+                setMeshScales(prev => new Map(prev).set(id, nextVal));
+              });
+              if (isVoxel) frameMeshInViewport(mesh);
+            }}
+            onResetScale={() => {
+              commitMeshTransformEdit(mesh.id, (id) => {
+                meshScalesRef.current.set(id, { x: 1, y: 1, z: 1 });
+                setMeshScales(prev => new Map(prev).set(id, { x: 1, y: 1, z: 1 }));
+              });
+              if (isVoxel) frameMeshInViewport(mesh);
+            }}
             onSetGrid={(axis, value) => {
               const v = Math.max(1, Math.floor(value));
               if (!Number.isFinite(v)) return;

@@ -6440,6 +6440,14 @@ def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
         wanted = [s for s in chosen if s not in ('x', 'y', 'z')]
     else:
         wanted = list(_SCAN_EXPORT_SCALAR_COLUMNS)
+    # When misses are being written, the `is_miss` sentinel MUST travel with them
+    # regardless of the modal's column picker: a file with miss rows but no flag
+    # column loses every signal the importer keys off (no is_miss, and a bare
+    # ASCII_format like "x y z timestamp" carries no target_index either), so the
+    # far-field points re-import as real returns. Force it in (front, before the
+    # other scalars) so the round-trip survives.
+    if include_misses and _MISS_SLUG not in wanted:
+        wanted = [_MISS_SLUG] + wanted
     labels: List[str] = []
     cols: list = []
     for slug in wanted:
@@ -6556,6 +6564,12 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool):
     chosen = getattr(scan_entry, 'columns', None)
     wanted = ([s for s in chosen if s not in _DATA_GEOMETRY_SLUGS + _DATA_COLOR_SLUGS]
               if chosen else list(_SCAN_EXPORT_SCALAR_COLUMNS))
+    # Force the `is_miss` sentinel into the export when misses are written, even
+    # if the modal's column picker dropped it — otherwise the miss rows ship with
+    # no flag column and re-import as far-field returns (see the matching note in
+    # _resolve_scan_export_arrays).
+    if include_misses and _MISS_SLUG not in wanted:
+        wanted = [_MISS_SLUG] + wanted
     scalars: dict = {}
     ordered: list = []
     for slug in wanted:
