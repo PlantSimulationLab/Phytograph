@@ -34,13 +34,15 @@ function Toast({ toast, onClose }: ToastProps) {
   useEffect(() => {
     // Error toasts persist until the user dismisses them — a failure the user
     // misses is worse than a stale toast. They can still set an explicit
-    // duration to override. Non-errors auto-dismiss after `duration` (3s
-    // default). `duration: 0` forces persistence for any type.
+    // duration to override. Non-errors auto-dismiss after `duration`, defaulting
+    // per type: warnings linger (10s) so they're not missed, success/info clear
+    // sooner (4s). `duration: 0` forces persistence for any type.
     const persist = toast.duration === 0 || (toast.type === 'error' && toast.duration === undefined);
     if (!persist) {
+      const defaultDuration = toast.type === 'warning' ? 10000 : 4000;
       const timer = setTimeout(() => {
         onClose(toast.id);
-      }, toast.duration || 3000);
+      }, toast.duration || defaultDuration);
       return () => clearTimeout(timer);
     }
   }, [toast, onClose]);
@@ -97,12 +99,17 @@ function Toast({ toast, onClose }: ToastProps) {
   );
 }
 
+let toastSeq = 0;
+
 export function ToastContainer() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   useEffect(() => {
     const handleToast = (event: CustomEvent<ToastMessage>) => {
-      setToasts(prev => [...prev, { ...event.detail, id: Date.now().toString() }]);
+      // Monotonic counter, not Date.now() — two toasts fired in the same
+      // millisecond would otherwise collide and produce duplicate React keys.
+      const id = `${Date.now()}-${toastSeq++}`;
+      setToasts(prev => [...prev, { ...event.detail, id }]);
     };
 
     window.addEventListener('show-toast' as any, handleToast);

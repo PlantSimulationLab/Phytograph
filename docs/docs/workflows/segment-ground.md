@@ -49,7 +49,9 @@ labels the points the cloth settles onto as ground.
       large relative to its footprint.
 4. (Optional) Tick **Split into ground + plant clouds** to also produce two
    new clouds — ground and non-ground — alongside the classified original.
-5. Click **Segment Ground**.
+5. Click **Segment Ground**. While it runs, the button shows a spinner and a
+   **Cancel** button appears beside it — click Cancel to stop a long or stuck run
+   immediately (the computation is killed and the cloud is left unchanged).
 
 When it finishes, the cloud is recoloured by a new **Ground Class**
 attribute, with a legend in the corner showing which colour is which. The

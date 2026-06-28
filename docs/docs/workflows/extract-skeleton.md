@@ -34,7 +34,9 @@ classification field), do so first.
 5. **Branch simplification tolerance** — slider in meters. Higher
    values merge more colinear edges, yielding cleaner but lower-detail
    skeletons. Start at the default and adjust based on results.
-6. Click **Extract**.
+6. Click **Extract**. While it runs, the button shows a spinner and a **Cancel**
+   button appears beside it — click Cancel to stop a long or stuck run
+   immediately (the computation is killed and nothing is added).
 
 A new entry appears in the **Skeletons** list, with:
 

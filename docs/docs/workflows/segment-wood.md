@@ -56,7 +56,9 @@ There are three methods (see **Method** below):
       `… (wood)` and `… (leaf)`, alongside the classified original.
     - **Remove wood (keep leaves only)** — drop the wood points, leaving a
       leaf-only cloud (the classic "wood removal" result).
-6. Click **Segment Wood / Leaf**.
+6. Click **Segment Wood / Leaf**. While it runs, the button shows a spinner and
+   a **Cancel** button appears beside it — click Cancel to stop a long or stuck
+   run immediately (the computation is killed and the cloud is left unchanged).
 
 ### Multiple scans
 

@@ -264,10 +264,10 @@ async def test_create_session_keeps_misses_out_of_octree(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_misses_endpoint_projects_just_beyond_farthest_hit(tmp_path, monkeypatch):
     """With a scanner origin supplied, misses are projected onto a sphere centred
-    on that origin at a radius JUST BEYOND the farthest hit — a THIN halo hugging
-    the cloud (so the LOD-streamed miss octree stays inside the camera's framing
-    of the hits and isn't frustum-culled). The fixture's hits sit 5.0 from the
-    origin; misses land at 5.0 + a small margin."""
+    on that origin at radius = 1.4 * far (far = the farthest hit distance) — a
+    fixed 40% margin so the sky/miss halo sits clearly outside the cloud as a
+    distinct shell. The fixture's hits sit 5.0 from the origin; misses land at
+    5.0 * 1.4 = 7.0."""
     src = tmp_path / "scan.e57"
     _write_e57(src, with_misses=True)
     monkeypatch.setattr(
@@ -281,11 +281,10 @@ async def test_misses_endpoint_projects_just_beyond_farthest_hit(tmp_path, monke
     sess = main._cloud_sessions[sid]
     pos, radius = main._gather_miss_positions(sess, list(_ORIGIN))
     assert pos.shape[0] == 2
-    # radius = far + max(0.05*depth, 0.05*far, 0.05). All hits here sit at exactly
-    # 5.0 from the origin (depth == 0), so the 0.05*far term wins → 5.0 + 0.25.
+    # radius = 1.4 * far. All hits here sit at exactly 5.0 from the origin, so the
+    # shell lands at 5.0 * 1.4 = 7.0.
     far = 5.0
-    margin = max(0.05 * 0.0, 0.05 * far, 0.05)
-    assert radius == pytest.approx(far + margin, rel=1e-4)
+    assert radius == pytest.approx(far * 1.4, rel=1e-4)
     dist = np.linalg.norm(pos - _ORIGIN, axis=1)
     assert np.allclose(dist, radius, rtol=1e-4)
     assert float(dist.min()) > far  # strictly outside the farthest hit

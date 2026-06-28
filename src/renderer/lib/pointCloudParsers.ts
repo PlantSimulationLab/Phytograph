@@ -764,6 +764,10 @@ export async function parsePointCloudFromPath(
   // from AppSettings by the importer. Forwarded to createCloudSession; null →
   // backend default (1001 m). Only the octree path consumes it.
   missDistanceThreshold?: number | null,
+  // Scanner head position [x, y, z] from an imported Helios scan XML bundle's
+  // <origin>, when known. Forwarded to createCloudSession so the backend can
+  // reproject sky/miss points onto the display shell instead of far-field.
+  origin?: [number, number, number] | null,
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -776,7 +780,8 @@ export async function parsePointCloudFromPath(
     // The optional CloudCompare-style global shift is subtracted at session
     // create (the array + octree get small coords); the backend echoes it back.
     const meta = await createCloudSession(
-      path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null, missDistanceThreshold ?? null,
+      path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
+      missDistanceThreshold ?? null, origin ?? null,
     );
     return buildPointCloudFromOctree(
       meta, path, name, asciiFormat, columnPlan, categoricalAttributes, meta.session_id,

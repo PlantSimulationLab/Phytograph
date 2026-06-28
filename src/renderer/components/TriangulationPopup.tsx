@@ -8,7 +8,7 @@ import {
 import type { GridOption } from '../lib/gridOption';
 import type { Scan } from '../lib/scan';
 import { hasData, hasParams } from '../lib/scan';
-import { buildHeliosTriangulationRequest } from '../lib/pointCloudHelpers';
+import { buildHeliosTriangulationRequest, gridCropBox } from '../lib/pointCloudHelpers';
 
 // What the modal hands back when the user clicks Triangulate. The Open3D path
 // (ball_pivoting / poisson / alpha_shape / delaunay) is a thin descriptor the
@@ -191,18 +191,15 @@ export function TriangulationPopup({
   // so the pinned mesh contains only in-grid geometry. Null when no real box is
   // chosen ("Auto — fit to all points" = no crop). Method-gated by the caller, so
   // it's safe to derive unconditionally here.
-  const cropBox = useMemo(() => {
-    if (!selectedGrid) return null;
-    const [cx, cy, cz] = selectedGrid.grid.center;
-    const [sx, sy, sz] = selectedGrid.grid.size;
-    return {
-      min: [cx - sx / 2, cy - sy / 2, cz - sz / 2] as [number, number, number],
-      max: [cx + sx / 2, cy + sy / 2, cz + sz / 2] as [number, number, number],
-      // Carry the grid's azimuthal rotation so the backend crops the rotated box
-      // (the min/max above are the box's AXIS-ALIGNED extent before rotation).
-      ...(selectedGrid.grid.rotation ? { rotationDeg: selectedGrid.grid.rotation } : {}),
-    };
-  }, [selectedGrid]);
+  // Crop points to the selected grid's FLAT envelope (gridCropBox). For a
+  // terrain-snapped grid this widens the box's z-span to cover the lifted columns,
+  // so the uphill canopy isn't clipped away (which left clear-cut lines at the
+  // unshifted grid's top and empty uphill voxels when the mesh fed LAD). No-op for
+  // a non-snapped grid; same envelope the Helios path crops to.
+  const cropBox = useMemo(
+    () => (selectedGrid ? gridCropBox(selectedGrid.grid) : null),
+    [selectedGrid],
+  );
 
   const toggleScan = useCallback((scanId: string) => {
     setSelectedScanIds(prev => {

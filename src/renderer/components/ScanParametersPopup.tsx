@@ -52,7 +52,7 @@ interface ScanParametersPopupProps {
   // it can resolve any <filename> references relative to the XML directory and
   // create voxel-grid meshes from any <grid> blocks.
   showBulkImport?: boolean;
-  onBulkImport?: (scans: HeliosXmlScan[], grids: HeliosXmlGrid[], xmlPath: string) => void | Promise<void>;
+  onBulkImport?: (scans: HeliosXmlScan[], grids: HeliosXmlGrid[], xmlPath: string, warnings: string[]) => void | Promise<void>;
 }
 
 export function ScanParametersPopup({
@@ -161,7 +161,7 @@ export function ScanParametersPopup({
     //      happening. Parent shows a progress modal instead.
     // Fire-and-forget the import; the parent owns errors/progress now.
     onClose();
-    void onBulkImport?.(parsed.scans, parsed.grids, path);
+    void onBulkImport?.(parsed.scans, parsed.grids, path, parsed.warnings);
   };
 
   // Import a moving-platform trajectory file (t,x,y,z + quaternion or Euler rows).
@@ -632,6 +632,11 @@ export function ScanParametersPopup({
                   <button
                     type="button"
                     data-testid="scan-azimuth-mode-toggle"
+                    // Keep this unit toggle out of the Tab order so tabbing from
+                    // the Zenith input lands on the Azimuth input (it sits before
+                    // that input in the DOM), not on this button. It stays
+                    // click-discoverable.
+                    tabIndex={-1}
                     onClick={() =>
                       setRayInputMode(m => (m === 'points' ? 'resolution' : 'points'))
                     }

@@ -14,6 +14,8 @@ import math
 import os
 import sys
 import time
+import signal
+import atexit
 import subprocess
 from pathlib import Path
 from pytexit import py2tex
@@ -31,9 +33,18 @@ from pytexit import py2tex
 #      file under helios-core/ or native/ is newer than the compiled lib).
 # In packaged (PyInstaller) builds the submodule and build script aren't present;
 # pyhelios is bundled via collect-all instead, so we skip the whole block.
+#
+# IMPORTANT — seg_worker exemption: when this module is imported by the killable
+# segmentation worker (seg_worker.py, marked by PHYTOGRAPH_SEG_WORKER), we DO NOT
+# preload pyhelios. Segmentation (CSF / open3d / cut-pursuit) never touches
+# pyhelios, and on macOS libhelios links GLFW (via the lidar→visualizer plugin)
+# whose Objective-C classes COLLIDE with open3d's bundled GLFW when both load in
+# one process ("Class GLFWHelper is implemented in both …" → SIGSEGV). Skipping
+# the pyhelios load in the worker avoids the double-GLFW crash entirely.
+_IS_SEG_WORKER = bool(os.environ.get("PHYTOGRAPH_SEG_WORKER"))
 _PYHELIOS_SRC = Path(__file__).resolve().parent.parent / "pyhelios"
 
-if (_PYHELIOS_SRC / "pyhelios" / "__init__.py").exists():
+if not _IS_SEG_WORKER and (_PYHELIOS_SRC / "pyhelios" / "__init__.py").exists():
     if str(_PYHELIOS_SRC) not in sys.path:
         sys.path.insert(0, str(_PYHELIOS_SRC))
 
@@ -197,7 +208,12 @@ def _assert_pyhelios_native() -> None:
     print("[pyhelios] native LiDAR + plant-architecture wrappers verified (not mock)", flush=True)
 
 
-_assert_pyhelios_native()
+# The seg-worker never calls pyhelios (segmentation is CSF/open3d/cut-pursuit) and
+# deliberately did NOT preload it (see the GLFW double-load note above), so the
+# native-mode assertion would needlessly import — and crash on — libhelios. Skip it
+# in the worker; the parent backend still enforces native mode at its own startup.
+if not _IS_SEG_WORKER:
+    _assert_pyhelios_native()
 
 # Unicode subscript to ASCII conversion for phytorch compatibility
 SUBSCRIPT_TO_ASCII = {
@@ -220,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.44.0"
+BACKEND_VERSION = "0.46.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2132,11 +2148,15 @@ def _resolve_segmentation_points(request: GroundSegmentationRequest) -> np.ndarr
 
 
 @app.post("/api/segment/ground", response_model=GroundSegmentationResponse)
-async def segment_ground_points(request: GroundSegmentationRequest):
+async def segment_ground_points(request: GroundSegmentationRequest, http_request: Request):
     """Classify a point cloud into ground (1) and plant (2) points using the
     Cloth Simulation Filter. Returns per-point labels aligned to input order;
     persisting the result onto an octree-backed cloud is done by
-    `/api/cloud/session/{session_id}/segment_ground`."""
+    `/api/cloud/session/{session_id}/segment_ground`.
+
+    The CSF compute runs in a KILLABLE subprocess (see `_run_killable`) so the
+    panel's Cancel button can SIGKILL it mid-run; on client disconnect a cancelled
+    response is returned at once."""
     try:
         points = _resolve_segmentation_points(request)
 
@@ -2147,21 +2167,31 @@ async def segment_ground_points(request: GroundSegmentationRequest):
                 error="Need at least 10 points for ground segmentation",
             )
 
+        csf_params = dict(
+            cloth_resolution=request.cloth_resolution,
+            rigidness=request.rigidness,
+            class_threshold=request.class_threshold,
+            iterations=request.iterations,
+            slope_smooth=request.slope_smooth,
+        )
         try:
-            labels = segment_ground(
-                points,
-                cloth_resolution=request.cloth_resolution,
-                rigidness=request.rigidness,
-                class_threshold=request.class_threshold,
-                iterations=request.iterations,
-                slope_smooth=request.slope_smooth,
-            )
-        except ImportError:
+            labels = await _run_killable("ground", points, csf_params, http_request=http_request)
+        except ClientDisconnected:
             return GroundSegmentationResponse(
                 success=False,
                 num_points=len(points),
-                error="CSF (cloth-simulation-filter) not installed. Run: pip install cloth-simulation-filter",
+                error="Ground segmentation was cancelled.",
             )
+        except RuntimeError as e:
+            # The CSF C-extension raises ImportError inside the worker when it's
+            # missing; the worker surfaces it as a traceback string.
+            if "CSF" in str(e) or "cloth" in str(e).lower():
+                return GroundSegmentationResponse(
+                    success=False,
+                    num_points=len(points),
+                    error="CSF (cloth-simulation-filter) not installed. Run: pip install cloth-simulation-filter",
+                )
+            raise
 
         num_ground = int(np.count_nonzero(labels == GROUND_CLASS_GROUND))
         return GroundSegmentationResponse(
@@ -2755,7 +2785,7 @@ def _wood_segment_kwargs(request: "WoodSegmentationRequest") -> dict:
 
 
 @app.post("/api/segment/wood", response_model=WoodSegmentationResponse)
-async def segment_wood_points(request: WoodSegmentationRequest):
+async def segment_wood_points(request: WoodSegmentationRequest, http_request: Request):
     """Classify a point cloud into wood (1) and leaf (2) points from geometry.
     Returns per-point labels aligned to input order; persisting the result onto
     an octree-backed cloud is done by
@@ -2806,9 +2836,21 @@ async def segment_wood_points(request: WoodSegmentationRequest):
                 error="Need at least 3 points for wood/leaf segmentation",
             )
 
-        warns: List[str] = []
-        labels = segment_wood(points, reflectance=reflectance, warnings=warns,
-                              **_wood_segment_kwargs(request))
+        # The compute runs in a KILLABLE subprocess (see `_run_killable`); the
+        # worker collects `segment_wood`'s warnings and ships them back so the
+        # endpoint can still surface advisories (e.g. ground-not-removed).
+        try:
+            labels, wood_meta = await _run_killable(
+                "wood", points, _wood_segment_kwargs(request),
+                http_request=http_request, reflectance=reflectance,
+            )
+        except ClientDisconnected:
+            return WoodSegmentationResponse(
+                success=False,
+                num_points=len(points),
+                error="Wood/leaf segmentation was cancelled.",
+            )
+        warns = list(wood_meta.get("warnings", []))
         num_wood = int(np.count_nonzero(labels == WOOD_CLASS_WOOD))
         return WoodSegmentationResponse(
             success=True,
@@ -2900,24 +2942,29 @@ class TreeSegmentationResponse(BaseModel):
     error: Optional[str] = None
 
 
-def _treeiso_params(request: "TreeSegmentationRequest"):
-    """Build a vendored TreeIsoParams from the request's tuning fields."""
+_TREEISO_PARAM_FIELDS = (
+    "reg_strength1", "min_nn1", "decimate_res1", "reg_strength2", "min_nn2",
+    "decimate_res2", "max_gap", "rel_height_length_ratio", "vertical_weight",
+    "min_nn3", "score_candidate_thresh", "init_stem_rel_length_thresh",
+    "max_outlier_gap",
+)
+
+
+def _treeiso_params_from_dict(params: dict):
+    """Build a vendored TreeIsoParams from a plain dict of tuning fields. Used by
+    the killable subprocess worker (seg_worker.py), which only has the JSON-safe
+    scalars — not the pydantic request — across the process boundary. Missing
+    keys fall back to TreeIsoParams' own defaults."""
     from treeiso.treeiso_core import TreeIsoParams
 
-    return TreeIsoParams(
-        reg_strength1=request.reg_strength1,
-        min_nn1=request.min_nn1,
-        decimate_res1=request.decimate_res1,
-        reg_strength2=request.reg_strength2,
-        min_nn2=request.min_nn2,
-        decimate_res2=request.decimate_res2,
-        max_gap=request.max_gap,
-        rel_height_length_ratio=request.rel_height_length_ratio,
-        vertical_weight=request.vertical_weight,
-        min_nn3=request.min_nn3,
-        score_candidate_thresh=request.score_candidate_thresh,
-        init_stem_rel_length_thresh=request.init_stem_rel_length_thresh,
-        max_outlier_gap=request.max_outlier_gap,
+    kwargs = {k: params[k] for k in _TREEISO_PARAM_FIELDS if k in params}
+    return TreeIsoParams(**kwargs)
+
+
+def _treeiso_params(request: "TreeSegmentationRequest"):
+    """Build a vendored TreeIsoParams from the request's tuning fields."""
+    return _treeiso_params_from_dict(
+        {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
     )
 
 
@@ -3056,10 +3103,10 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
     `/api/cloud/session/{session_id}/segment_trees`.
 
     The TreeIso pipeline is CPU-bound and runs for tens of seconds on a large
-    tile, so it executes off the event loop (`_run_blocking_until_disconnect`):
-    other `/api/*` requests stay responsive, and if the client disconnects (panel
-    closed, fetch timeout) this returns at once instead of holding the request
-    open.
+    tile, so it executes in a KILLABLE subprocess (`_run_killable`): other
+    `/api/*` requests stay responsive, and if the client disconnects (panel
+    closed, Cancel, fetch timeout) the worker is SIGKILLed and this returns at
+    once instead of holding the request open.
 
     Labels-only by design: this interactive path returns predicted instance ids
     and nothing else. If the source carries ground-truth fields (e.g. a
@@ -3113,25 +3160,29 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
             np.asarray(request.seed_points, dtype=np.float64)
             if request.seed_points else None
         )
-        def _segment():
-            ti_params = _treeiso_params(request)
-            _auto_treeiso_decimation(pts, ti_params)   # ~0.8s probe — keep off-loop too
-            return segment_trees(pts, ti_params, seeds)
-
+        # The TreeIso pipeline (param probe + cut-pursuit) runs in a KILLABLE
+        # subprocess (see `_run_killable`); the worker reconstructs TreeIsoParams,
+        # runs `_auto_treeiso_decimation`, then `segment_trees`. Cancel SIGKILLs it.
+        ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
         try:
-            sub_labels = await _run_blocking_until_disconnect(_segment, http_request)
+            sub_labels = await _run_killable(
+                "trees", pts, ti_param_dict, http_request=http_request, seeds=seeds,
+            )
         except ClientDisconnected:
-            # Client gave up (panel closed / fetch timeout). Nothing to return.
+            # Client gave up (panel closed / Cancel / fetch timeout). The worker
+            # was killed; nothing to return.
             return TreeSegmentationResponse(
                 success=False, num_points=n_full,
-                error="Tree segmentation was cancelled (client disconnected).",
+                error="Tree segmentation was cancelled.",
             )
-        except ImportError as e:
-            return TreeSegmentationResponse(
-                success=False, num_points=n_full,
-                error=f"TreeIso dependencies not installed ({e}). "
-                      "Run: pip install -r backend-api/requirements.txt",
-            )
+        except RuntimeError as e:
+            if "treeiso" in str(e).lower() or "ModuleNotFoundError" in str(e) or "ImportError" in str(e):
+                return TreeSegmentationResponse(
+                    success=False, num_points=n_full,
+                    error=f"TreeIso dependencies not installed ({e}). "
+                          "Run: pip install -r backend-api/requirements.txt",
+                )
+            raise
 
         labels = np.zeros(n_full, dtype=np.int64)
         labels[eligible] = np.asarray(sub_labels)
@@ -3736,6 +3787,47 @@ def _inject_scanner_models_into_helios_xml(xml_path: str, models: list) -> None:
         out.append(text[pos:nxt])
         if model is not None and model != 'generic':
             out.append(f'    <scannerModel>{model}</scannerModel>\n')
+        out.append(close)
+        pos = nxt + len(close)
+        scan_i += 1
+    with open(xml_path, "w") as fh:
+        fh.write(''.join(out))
+
+
+def _inject_return_modes_into_helios_xml(xml_path: str, modes: list) -> None:
+    """Insert the precise pulse return mode into each ``<scan>`` block, matching
+    ``modes`` by position. Each entry is a dict ``{mode, selection, max_returns}``
+    (any field may be None). Return mode is NOT representable in stock Helios scan
+    XML and CANNOT be inferred faithfully from the exported columns/optics — beam
+    optics are written for every scan, and a single-return scan's selection leaves
+    no column trace — so we splice it in post-export, mirroring <scannerModel>.
+    Helios's loader ignores the unknown tags, so the bundle stays Helios-loadable.
+    A None entry (or one whose ``mode`` is None) writes nothing — pre-existing
+    tooling that never names a mode is unaffected and the importer falls back to
+    its legacy heuristic. No-op when no entry names a mode."""
+    if not modes or all(m is None or m.get('mode') is None for m in modes):
+        return
+    with open(xml_path, "r") as fh:
+        text = fh.read()
+    out = []
+    pos = 0
+    scan_i = 0
+    close = '</scan>'
+    while True:
+        nxt = text.find(close, pos)
+        if nxt == -1:
+            out.append(text[pos:])
+            break
+        entry = modes[scan_i] if scan_i < len(modes) else None
+        out.append(text[pos:nxt])
+        if entry is not None and entry.get('mode') is not None:
+            out.append(f'    <returnMode>{entry["mode"]}</returnMode>\n')
+            sel = entry.get('selection')
+            if sel is not None:
+                out.append(f'    <returnSelection>{sel}</returnSelection>\n')
+            mx = entry.get('max_returns')
+            if mx is not None:
+                out.append(f'    <maxReturns>{int(mx)}</maxReturns>\n')
         out.append(close)
         pos = nxt + len(close)
         scan_i += 1
@@ -4657,7 +4749,7 @@ def _directions_from_origin(xyz: "np.ndarray", origin) -> "np.ndarray":
 
 
 def _cull_to_grid(xyz: "np.ndarray", origin, grid_center, grid_size,
-                  expand: float = 0.05) -> "np.ndarray":
+                  expand: float = 0.05, column_offsets=None) -> "np.ndarray":
     """Boolean keep-mask for points whose beam (origin -> point) can pass through
     the grid's (expanded) AABB.
 
@@ -4671,6 +4763,14 @@ def _cull_to_grid(xyz: "np.ndarray", origin, grid_center, grid_size,
     `origin` is either a single (3,) position (static) or per-beam (N,3) origins
     (moving platform); the slab math broadcasts identically for both, and the
     axis-parallel `origin_in` test becomes per-beam when origins are per-beam.
+
+    For a terrain-following ("snapped") grid, `column_offsets` (per-column z
+    shifts) lift voxel columns vertically OUT of the base box's z-slab. The AABB
+    used here must therefore span the SHIFTED extent — from the lowest column's
+    bottom face to the highest column's top face — or beams to the uphill canopy
+    (whose lifted voxels sit above the unshifted box) get culled and those voxels
+    come back empty. Expand the z-slab by [min(offset), max(offset)] when offsets
+    are supplied; without them the box is unchanged (axis-regular grid).
     """
     import numpy as np
 
@@ -4678,6 +4778,13 @@ def _cull_to_grid(xyz: "np.ndarray", origin, grid_center, grid_size,
     half = np.asarray(grid_size, dtype=np.float64) / 2.0 + expand
     lo = np.asarray(grid_center, dtype=np.float64) - half
     hi = np.asarray(grid_center, dtype=np.float64) + half
+    # Terrain following: stretch the z-slab to cover every column's lifted extent.
+    # Offsets are added to cell z (see addGrid / _sample_dem_columns), so the
+    # snapped grid occupies [base_lo_z + min_off, base_hi_z + max_off].
+    if column_offsets is not None and len(column_offsets):
+        offs = np.asarray(column_offsets, dtype=np.float64)
+        lo[2] += float(offs.min())
+        hi[2] += float(offs.max())
 
     d = np.asarray(xyz, dtype=np.float64) - o  # segment vector (length = range)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -5355,6 +5462,29 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         scans_arrays = []
         scan_xyz_for_counts = []
         n_scans = max(len(request.scans), 1)
+        # Terrain-following column offsets lift voxel columns OUT of the base grid
+        # box, so the per-scan beam-frustum cull below must widen its z-slab to the
+        # SNAPPED extent or it drops the beams feeding the lifted (uphill) voxels —
+        # which then come back empty. Resolve the offsets ONCE here, before the cull:
+        #   - explicit (pre-snapped) offsets ride on request.grid.column_offsets;
+        #   - terrain_follow=True samples them from the DEM (same _sample_dem_columns
+        #     the inversion uses below, so the cull box matches the actual voxels).
+        cull_offsets = request.grid.column_offsets
+        if cull_offsets is None and request.terrain_follow and request.dem is not None:
+            _dem_cull = request.dem
+            if lad_shift is not None:
+                _dem_cull = DemRaster(
+                    grid_z=request.dem.grid_z, nx=request.dem.nx, ny=request.dem.ny,
+                    cell=request.dem.cell,
+                    origin=[request.dem.origin[0] - float(lad_shift[0]),
+                            request.dem.origin[1] - float(lad_shift[1])],
+                    nodata=request.dem.nodata)
+            try:
+                cull_offsets, _km, _dr = _sample_dem_columns(
+                    grid_center, grid_size, grid_nx, grid_ny, grid_nz,
+                    grid_rotation_rad, _dem_cull, request.safety_fraction)
+            except Exception:
+                cull_offsets = None  # fall back to the base box; the snap below re-validates
         _report(0.05, "Reading scans")
         for scan_idx, scan_entry in enumerate(request.scans):
             # Step 0.05 → 0.35 across scans so multi-scan ingest visibly advances.
@@ -5451,7 +5581,11 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # whose beams never touch the grid — the biggest win for a localized
             # grid in a large scene. For moving scans `cull_origin` is per-beam.
             n_before = xyz.shape[0]
-            keep = _cull_to_grid(xyz, cull_origin, grid_center, grid_size)
+            # Pass the snapped grid's column offsets so the cull AABB covers the
+            # lifted (terrain-following) voxel extent — otherwise beams to the
+            # uphill canopy are dropped and those lifted voxels return empty.
+            keep = _cull_to_grid(xyz, cull_origin, grid_center, grid_size,
+                                 column_offsets=cull_offsets)
             if not keep.all():
                 xyz = xyz[keep]
                 dirs = dirs[keep]
@@ -5463,14 +5597,15 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                       f"({100.0 * n_after / max(n_before, 1):.1f}%)", flush=True)
 
             # A scan flagged multi-return whose resolved data lacks the per-pulse
-            # columns can't run the full-waveform algorithm (gapfillMisses() would
+            # columns can't run the multi-return weighting (gapfillMisses() would
             # hard-error). Surface that rather than silently mislabeling it.
             if (scan_entry.return_type or "single") == "multi" and not scan_multi:
                 warnings.append(
                     "Scan marked multi-return but its point data lacks the per-pulse "
-                    "timestamp/target_index/target_count columns; computed as "
-                    "single-return. Re-import or re-scan preserving those columns "
-                    "for full-waveform LAD."
+                    "target_index/target_count columns needed to group returns into "
+                    "pulses; computed as single-return (every point counted as one "
+                    "hit). Re-scan in multi-return mode or re-import data that "
+                    "preserves those columns for a multi-return inversion."
                 )
 
             # Miss accounting drives LAD accuracy. A scan is in good shape if it
@@ -6321,6 +6456,17 @@ class ScanExportEntry(BaseModel):
     # (injected post-export, since PyHelios exportScans() has no model concept)
     # which the renderer reads back on import. "generic"/None writes no tag.
     scanner_model: Optional[str] = None
+    # Pulse return mode. Helios scan XML has NO native field for this (it's a
+    # processing choice, not scan geometry), and it CANNOT be inferred faithfully
+    # from the exported columns/optics — beam optics are written for every scan,
+    # and a single-return scan's selection (strongest/first/last) leaves no column
+    # trace at all. So the precise mode is injected post-export as <returnMode>/
+    # <returnSelection>/<maxReturns> tags (parallel to <scannerModel>) and read
+    # back on import. Helios's loader ignores the unknown tags. When None, no tag
+    # is written and the importer falls back to its legacy optics heuristic.
+    return_mode: Optional[str] = None          # "single" | "multi"
+    return_selection: Optional[str] = None     # "strongest" | "first" | "last" (single)
+    max_returns: Optional[int] = None          # cap on returns per pulse (multi)
     # Point source (one of):
     session_id: Optional[str] = None             # live edited session (honors deletions)
     points: Optional[List[List[float]]] = None   # inline flat cloud
@@ -6908,6 +7054,11 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
         # re-imports the same instrument identity.
         _inject_scanner_models_into_helios_xml(
             xml_path, [s.scanner_model for s in request.scans])
+        # Inject the precise return mode (single+selection / multi+maxReturns) so
+        # the renderer re-imports the SAME mode rather than guessing from optics.
+        _inject_return_modes_into_helios_xml(
+            xml_path, [{'mode': s.return_mode, 'selection': s.return_selection,
+                        'max_returns': s.max_returns} for s in request.scans])
         files = []
         for name in sorted(os.listdir(tmpdir)):
             with open(os.path.join(tmpdir, name), "rb") as fh:
@@ -10085,13 +10236,17 @@ def calculate_skeleton_length(skeleton_points: np.ndarray) -> float:
     return float(np.sum(segment_lengths))
 
 
-@app.post("/api/skeleton/extract", response_model=SkeletonResponse)
-async def extract_stem_skeleton(request: SkeletonRequest):
-    """
-    Extract tree skeleton from point cloud using BFS graph-based algorithm.
+def compute_skeleton(points: np.ndarray, params: dict) -> dict:
+    """BFS graph-based tree skeleton extraction (Li et al. 2017).
 
-    Based on Li et al. 2017 "An Automatic Tree Skeleton Extracting Method
-    Based on Point Cloud of Terrestrial Laser Scanner"
+    Pure compute: takes the already-read (and max-points-guarded) points plus a
+    plain dict of the SkeletonRequest tuning fields, and returns a plain dict of
+    the SkeletonResponse fields (so it round-trips through JSON unchanged). The
+    `/api/skeleton/extract` endpoint and the killable subprocess worker
+    (seg_worker.py) both call this — the worker because it runs in its own
+    process so Cancel can SIGKILL it. Heavy/hang-prone (outlier removal, KD-tree,
+    BFS, clustering) and CPU-bound; the early-exit guards return
+    `{"success": False, ...}` dicts rather than raising.
 
     Algorithm stages:
     1. Pre-processing: Statistical outlier removal
@@ -10104,9 +10259,261 @@ async def extract_stem_skeleton(request: SkeletonRequest):
     8. Compute skeleton nodes from block centroids
     9. Build skeleton edges based on block connectivity
     10. Apply Laplace smoothing
-
-    Returns skeleton points, edges, and metrics.
     """
+    dominant_axis = params.get("dominant_axis", "z")
+    points_original_count = len(points)
+
+    if len(points) < 50:
+        return dict(
+            success=False,
+            skeleton_points=[],
+            num_nodes=0,
+            dominant_axis=dominant_axis,
+            points_before_filtering=points_original_count,
+            points_after_filtering=len(points),
+            error="Need at least 50 points for BFS skeleton extraction"
+        )
+
+    # Stage 1: Pre-processing - Statistical outlier removal
+    if params.get("remove_outliers", True):
+        points = remove_statistical_outliers(
+            points,
+            nb_neighbors=params.get("outlier_nb_neighbors", 20),
+            std_ratio=params.get("outlier_std_ratio", 2.0)
+        )
+
+        if len(points) < 50:
+            return dict(
+                success=False,
+                skeleton_points=[],
+                num_nodes=0,
+                dominant_axis=dominant_axis,
+                points_before_filtering=points_original_count,
+                points_after_filtering=len(points),
+                error="Too few points remaining after outlier removal. Try increasing std_ratio."
+            )
+
+    points_after_filtering = len(points)
+    print(f"[BFS Skeleton] After outlier removal: {points_after_filtering} points")
+
+    # Auto-calculate search_radius from point density when it's left unset
+    # (the UI sends 0 for "auto"). Done backend-side so octree clouds —
+    # whose renderer has no positions to sample — get a sensible radius;
+    # the flat path historically computed this in JS, but the backend KD-tree
+    # estimate is identical and works for both paths.
+    effective_search_radius = params.get("search_radius", 0.05)
+    if effective_search_radius is None or effective_search_radius < 0.001:
+        from scipy.spatial import KDTree as _KDTree
+        sample_n = min(500, len(points))
+        # Deterministic evenly-spaced sample (no RNG) — same density estimate
+        # without per-call variation.
+        sample_idx = np.linspace(0, len(points) - 1, sample_n).astype(np.int64)
+        tree = _KDTree(points)
+        # k=2: nearest is the point itself (dist 0), second is the true NN.
+        dists, _ = tree.query(points[sample_idx], k=2)
+        nn = dists[:, 1]
+        nn = nn[nn > 0]
+        avg_nn = float(nn.mean()) if nn.size > 0 else 0.05
+        effective_search_radius = avg_nn * 2.5
+        print(f"[BFS Skeleton] Auto search_radius={effective_search_radius:.4f} "
+              f"(avg NN dist {avg_nn:.4f})")
+
+    # Stage 2: Build KD-tree neighbor graph
+    print(f"[BFS Skeleton] Building neighbor graph with radius={effective_search_radius}")
+    graph_info = build_neighbor_graph(
+        points,
+        search_radius=effective_search_radius,
+        max_neighbors=params.get("max_neighbors", 20)
+    )
+    neighbors = graph_info['neighbors']
+
+    # Check connectivity
+    connected_count = sum(1 for n in neighbors if len(n) > 0)
+    print(f"[BFS Skeleton] Connected points: {connected_count}/{len(points)}")
+
+    if connected_count < len(points) * 0.5:
+        # Too many disconnected points - try to auto-adjust radius
+        print(f"[BFS Skeleton] Warning: Many disconnected points. Consider increasing search_radius.")
+
+    # Stage 3: Select root points (near base)
+    root_indices = select_root_set(points, threshold=params.get("root_threshold", 0.02))
+    print(f"[BFS Skeleton] Selected {len(root_indices)} root points")
+
+    if len(root_indices) == 0:
+        return dict(
+            success=False,
+            skeleton_points=[],
+            num_nodes=0,
+            dominant_axis=dominant_axis,
+            points_before_filtering=points_original_count,
+            points_after_filtering=points_after_filtering,
+            error="No root points found. Check root_threshold parameter."
+        )
+
+    # Stage 4: BFS label all points with distance from root
+    print("[BFS Skeleton] Running BFS labeling...")
+    labels = bfs_label_points(neighbors, root_indices, len(points))
+
+    labeled_count = np.sum(labels >= 0)
+    print(f"[BFS Skeleton] Labeled {labeled_count}/{len(points)} points")
+
+    if labeled_count < len(points) * 0.3:
+        return dict(
+            success=False,
+            skeleton_points=[],
+            num_nodes=0,
+            dominant_axis=dominant_axis,
+            points_before_filtering=points_original_count,
+            points_after_filtering=points_after_filtering,
+            error=f"BFS only reached {labeled_count} points ({100*labeled_count/len(points):.1f}%). "
+                  "Try increasing search_radius for better connectivity."
+        )
+
+    # Stage 5: Nonlinear quantization using sqrt scaling
+    print(f"[BFS Skeleton] Quantizing labels into {params.get('quantization_levels', 60)} levels...")
+    quantized = quantize_labels(
+        labels,
+        num_levels=params.get("quantization_levels", 60),
+        use_nonlinear=params.get("use_nonlinear_quantization", True)
+    )
+
+    unique_levels = len(np.unique(quantized[quantized >= 0]))
+    print(f"[BFS Skeleton] Active quantization levels: {unique_levels}")
+
+    # Stage 6: Cluster connected points with same quantized label into blocks
+    print("[BFS Skeleton] Clustering blocks...")
+    block_assignments, block_info = cluster_blocks(quantized, neighbors)
+    num_blocks_before = len(block_info)
+    print(f"[BFS Skeleton] Created {num_blocks_before} blocks")
+
+    if num_blocks_before == 0:
+        return dict(
+            success=False,
+            skeleton_points=[],
+            num_nodes=0,
+            dominant_axis=dominant_axis,
+            points_before_filtering=points_original_count,
+            points_after_filtering=points_after_filtering,
+            error="No blocks created. Check point cloud connectivity."
+        )
+
+    # Find block connectivity (which blocks connect to which)
+    connectivity = find_block_connectivity(block_assignments, block_info, neighbors)
+
+    # Stage 7: Filter blocks using threshold filter and proportion filter
+    print(f"[BFS Skeleton] Filtering blocks (threshold={params.get('threshold_filter', 30)})...")
+    filtered_blocks, filtered_assignments, filtered_connectivity = filter_blocks(
+        block_info,
+        block_assignments,
+        connectivity,
+        threshold_filter=params.get("threshold_filter", 30),
+        use_proportion_filter=params.get("use_proportion_filter", True),
+        proportion_threshold=params.get("proportion_threshold", 0.1)
+    )
+    num_blocks_after = len(filtered_blocks)
+    print(f"[BFS Skeleton] Blocks after filtering: {num_blocks_after}")
+
+    if num_blocks_after < 2:
+        return dict(
+            success=False,
+            skeleton_points=[],
+            num_nodes=0,
+            num_blocks_before_filter=num_blocks_before,
+            num_blocks_after_filter=num_blocks_after,
+            dominant_axis=dominant_axis,
+            points_before_filtering=points_original_count,
+            points_after_filtering=points_after_filtering,
+            error=f"Only {num_blocks_after} blocks after filtering. "
+                  "Try reducing threshold_filter or disabling proportion_filter."
+        )
+
+    # Stage 8: Compute skeleton nodes from block centroids
+    print("[BFS Skeleton] Computing skeleton nodes...")
+    skeleton_nodes = compute_skeleton_nodes(points, filtered_blocks)
+
+    # Stage 9: Build skeleton edges based on block connectivity
+    print("[BFS Skeleton] Building skeleton tree...")
+    edges, edge_lengths = build_skeleton_tree(filtered_blocks, filtered_connectivity, skeleton_nodes)
+    print(f"[BFS Skeleton] Created {len(edges)} edges")
+
+    # Stage 10: Apply Laplace smoothing
+    if params.get("smooth_skeleton", True) and len(skeleton_nodes) > 2:
+        print(f"[BFS Skeleton] Smoothing ({params.get('smoothing_iterations', 2)} iterations)...")
+        skeleton_nodes = laplace_smooth_skeleton(
+            skeleton_nodes,
+            edges,
+            iterations=params.get("smoothing_iterations", 2)
+        )
+
+    # Order skeleton points from root to tips and get the ordering
+    ordered_points, block_id_to_idx = order_skeleton_points_with_mapping(skeleton_nodes, edges, filtered_blocks)
+
+    # Calculate total length
+    total_length = calculate_skeleton_length_from_edges(skeleton_nodes, edges)
+
+    # Count branch points (nodes with >2 connections)
+    num_branches = count_branch_points(edges)
+
+    # Calculate branch orders (Strahler numbers)
+    branch_order_by_id = calculate_branch_orders(skeleton_nodes, edges, filtered_blocks)
+
+    # Convert branch orders to array order (matching point indices)
+    # block_id_to_idx maps block_id -> array index, so we need to create array in that order
+    sorted_block_ids = sorted(block_id_to_idx.keys(), key=lambda bid: block_id_to_idx[bid])
+    branch_orders_list = [branch_order_by_id.get(bid, 1) for bid in sorted_block_ids]
+    max_branch_order = max(branch_orders_list) if branch_orders_list else 0
+
+    # Build block info for response (plain dicts so the result round-trips through
+    # JSON; the endpoint reconstructs SkeletonBlock from these).
+    block_response = [
+        dict(
+            block_id=b['id'],
+            center=list(skeleton_nodes[b['id']]),
+            quantized_level=b['level'],
+            num_points=b['size']
+        )
+        for b in filtered_blocks
+        if b['id'] in skeleton_nodes
+    ]
+
+    # Convert edges to list format [[from_idx, to_idx], ...] using array indices
+    edges_list = []
+    for e in edges:
+        from_id, to_id = e[0], e[1]
+        if from_id in block_id_to_idx and to_id in block_id_to_idx:
+            edges_list.append([block_id_to_idx[from_id], block_id_to_idx[to_id]])
+
+    print(f"[BFS Skeleton] Complete: {len(skeleton_nodes)} nodes, {len(edges)} edges, {num_branches} branches, max order: {max_branch_order}")
+
+    return dict(
+        success=True,
+        skeleton_points=ordered_points,
+        skeleton_edges=edges_list,
+        branch_orders=branch_orders_list,
+        total_length=total_length,
+        num_nodes=len(skeleton_nodes),
+        num_edges=len(edges),
+        num_branches=num_branches,
+        max_branch_order=max_branch_order,
+        blocks=block_response,
+        points_before_filtering=points_original_count,
+        points_after_filtering=points_after_filtering,
+        num_blocks_before_filter=num_blocks_before,
+        num_blocks_after_filter=num_blocks_after,
+        dominant_axis=dominant_axis,
+        num_slices=len(skeleton_nodes)  # Legacy compatibility
+    )
+
+
+@app.post("/api/skeleton/extract", response_model=SkeletonResponse)
+async def extract_stem_skeleton(request: SkeletonRequest, http_request: Request):
+    """Extract a tree skeleton via the BFS graph algorithm (Li et al. 2017).
+
+    Reads (and downsamples) the points, applies the max-points guard, then runs
+    the heavy `compute_skeleton` pipeline in a KILLABLE subprocess so the panel's
+    Cancel button can SIGKILL it mid-run (see `_run_killable`). On client
+    disconnect (Cancel / fetch timeout) the worker is killed and a cancelled
+    response is returned at once."""
     try:
         if request.source is not None:
             # Octree-backed cloud: read (and downsample) from the source file.
@@ -10130,245 +10537,24 @@ async def extract_stem_skeleton(request: SkeletonRequest):
                 ),
             )
 
-        if len(points) < 50:
+        params = request.model_dump(exclude={"points", "source"})
+        try:
+            result = await _run_killable("skeleton", points, params, http_request=http_request)
+        except ClientDisconnected:
             return SkeletonResponse(
                 success=False,
                 skeleton_points=[],
                 num_nodes=0,
                 dominant_axis=request.dominant_axis,
                 points_before_filtering=points_original_count,
-                points_after_filtering=len(points),
-                error="Need at least 50 points for BFS skeleton extraction"
+                points_after_filtering=points_original_count,
+                error="Skeleton extraction was cancelled.",
             )
 
-        # Stage 1: Pre-processing - Statistical outlier removal
-        if request.remove_outliers:
-            points = remove_statistical_outliers(
-                points,
-                nb_neighbors=request.outlier_nb_neighbors,
-                std_ratio=request.outlier_std_ratio
-            )
-
-            if len(points) < 50:
-                return SkeletonResponse(
-                    success=False,
-                    skeleton_points=[],
-                    num_nodes=0,
-                    dominant_axis=request.dominant_axis,
-                    points_before_filtering=points_original_count,
-                    points_after_filtering=len(points),
-                    error="Too few points remaining after outlier removal. Try increasing std_ratio."
-                )
-
-        points_after_filtering = len(points)
-        print(f"[BFS Skeleton] After outlier removal: {points_after_filtering} points")
-
-        # Auto-calculate search_radius from point density when it's left unset
-        # (the UI sends 0 for "auto"). Done backend-side so octree clouds —
-        # whose renderer has no positions to sample — get a sensible radius;
-        # the flat path historically computed this in JS, but the backend KD-tree
-        # estimate is identical and works for both paths.
-        effective_search_radius = request.search_radius
-        if effective_search_radius is None or effective_search_radius < 0.001:
-            from scipy.spatial import KDTree as _KDTree
-            sample_n = min(500, len(points))
-            # Deterministic evenly-spaced sample (no RNG) — same density estimate
-            # without per-call variation.
-            sample_idx = np.linspace(0, len(points) - 1, sample_n).astype(np.int64)
-            tree = _KDTree(points)
-            # k=2: nearest is the point itself (dist 0), second is the true NN.
-            dists, _ = tree.query(points[sample_idx], k=2)
-            nn = dists[:, 1]
-            nn = nn[nn > 0]
-            avg_nn = float(nn.mean()) if nn.size > 0 else 0.05
-            effective_search_radius = avg_nn * 2.5
-            print(f"[BFS Skeleton] Auto search_radius={effective_search_radius:.4f} "
-                  f"(avg NN dist {avg_nn:.4f})")
-
-        # Stage 2: Build KD-tree neighbor graph
-        print(f"[BFS Skeleton] Building neighbor graph with radius={effective_search_radius}")
-        graph_info = build_neighbor_graph(
-            points,
-            search_radius=effective_search_radius,
-            max_neighbors=request.max_neighbors
-        )
-        neighbors = graph_info['neighbors']
-
-        # Check connectivity
-        connected_count = sum(1 for n in neighbors if len(n) > 0)
-        print(f"[BFS Skeleton] Connected points: {connected_count}/{len(points)}")
-
-        if connected_count < len(points) * 0.5:
-            # Too many disconnected points - try to auto-adjust radius
-            print(f"[BFS Skeleton] Warning: Many disconnected points. Consider increasing search_radius.")
-
-        # Stage 3: Select root points (near base)
-        root_indices = select_root_set(points, threshold=request.root_threshold)
-        print(f"[BFS Skeleton] Selected {len(root_indices)} root points")
-
-        if len(root_indices) == 0:
-            return SkeletonResponse(
-                success=False,
-                skeleton_points=[],
-                num_nodes=0,
-                dominant_axis=request.dominant_axis,
-                points_before_filtering=points_original_count,
-                points_after_filtering=points_after_filtering,
-                error="No root points found. Check root_threshold parameter."
-            )
-
-        # Stage 4: BFS label all points with distance from root
-        print("[BFS Skeleton] Running BFS labeling...")
-        labels = bfs_label_points(neighbors, root_indices, len(points))
-
-        labeled_count = np.sum(labels >= 0)
-        print(f"[BFS Skeleton] Labeled {labeled_count}/{len(points)} points")
-
-        if labeled_count < len(points) * 0.3:
-            return SkeletonResponse(
-                success=False,
-                skeleton_points=[],
-                num_nodes=0,
-                dominant_axis=request.dominant_axis,
-                points_before_filtering=points_original_count,
-                points_after_filtering=points_after_filtering,
-                error=f"BFS only reached {labeled_count} points ({100*labeled_count/len(points):.1f}%). "
-                      "Try increasing search_radius for better connectivity."
-            )
-
-        # Stage 5: Nonlinear quantization using sqrt scaling
-        print(f"[BFS Skeleton] Quantizing labels into {request.quantization_levels} levels...")
-        quantized = quantize_labels(
-            labels,
-            num_levels=request.quantization_levels,
-            use_nonlinear=request.use_nonlinear_quantization
-        )
-
-        unique_levels = len(np.unique(quantized[quantized >= 0]))
-        print(f"[BFS Skeleton] Active quantization levels: {unique_levels}")
-
-        # Stage 6: Cluster connected points with same quantized label into blocks
-        print("[BFS Skeleton] Clustering blocks...")
-        block_assignments, block_info = cluster_blocks(quantized, neighbors)
-        num_blocks_before = len(block_info)
-        print(f"[BFS Skeleton] Created {num_blocks_before} blocks")
-
-        if num_blocks_before == 0:
-            return SkeletonResponse(
-                success=False,
-                skeleton_points=[],
-                num_nodes=0,
-                dominant_axis=request.dominant_axis,
-                points_before_filtering=points_original_count,
-                points_after_filtering=points_after_filtering,
-                error="No blocks created. Check point cloud connectivity."
-            )
-
-        # Find block connectivity (which blocks connect to which)
-        connectivity = find_block_connectivity(block_assignments, block_info, neighbors)
-
-        # Stage 7: Filter blocks using threshold filter and proportion filter
-        print(f"[BFS Skeleton] Filtering blocks (threshold={request.threshold_filter})...")
-        filtered_blocks, filtered_assignments, filtered_connectivity = filter_blocks(
-            block_info,
-            block_assignments,
-            connectivity,
-            threshold_filter=request.threshold_filter,
-            use_proportion_filter=request.use_proportion_filter,
-            proportion_threshold=request.proportion_threshold
-        )
-        num_blocks_after = len(filtered_blocks)
-        print(f"[BFS Skeleton] Blocks after filtering: {num_blocks_after}")
-
-        if num_blocks_after < 2:
-            return SkeletonResponse(
-                success=False,
-                skeleton_points=[],
-                num_nodes=0,
-                num_blocks_before_filter=num_blocks_before,
-                num_blocks_after_filter=num_blocks_after,
-                dominant_axis=request.dominant_axis,
-                points_before_filtering=points_original_count,
-                points_after_filtering=points_after_filtering,
-                error=f"Only {num_blocks_after} blocks after filtering. "
-                      "Try reducing threshold_filter or disabling proportion_filter."
-            )
-
-        # Stage 8: Compute skeleton nodes from block centroids
-        print("[BFS Skeleton] Computing skeleton nodes...")
-        skeleton_nodes = compute_skeleton_nodes(points, filtered_blocks)
-
-        # Stage 9: Build skeleton edges based on block connectivity
-        print("[BFS Skeleton] Building skeleton tree...")
-        edges, edge_lengths = build_skeleton_tree(filtered_blocks, filtered_connectivity, skeleton_nodes)
-        print(f"[BFS Skeleton] Created {len(edges)} edges")
-
-        # Stage 10: Apply Laplace smoothing
-        if request.smooth_skeleton and len(skeleton_nodes) > 2:
-            print(f"[BFS Skeleton] Smoothing ({request.smoothing_iterations} iterations)...")
-            skeleton_nodes = laplace_smooth_skeleton(
-                skeleton_nodes,
-                edges,
-                iterations=request.smoothing_iterations
-            )
-
-        # Order skeleton points from root to tips and get the ordering
-        ordered_points, block_id_to_idx = order_skeleton_points_with_mapping(skeleton_nodes, edges, filtered_blocks)
-
-        # Calculate total length
-        total_length = calculate_skeleton_length_from_edges(skeleton_nodes, edges)
-
-        # Count branch points (nodes with >2 connections)
-        num_branches = count_branch_points(edges)
-
-        # Calculate branch orders (Strahler numbers)
-        branch_order_by_id = calculate_branch_orders(skeleton_nodes, edges, filtered_blocks)
-
-        # Convert branch orders to array order (matching point indices)
-        # block_id_to_idx maps block_id -> array index, so we need to create array in that order
-        sorted_block_ids = sorted(block_id_to_idx.keys(), key=lambda bid: block_id_to_idx[bid])
-        branch_orders_list = [branch_order_by_id.get(bid, 1) for bid in sorted_block_ids]
-        max_branch_order = max(branch_orders_list) if branch_orders_list else 0
-
-        # Build block info for response
-        block_response = [
-            SkeletonBlock(
-                block_id=b['id'],
-                center=skeleton_nodes[b['id']],
-                quantized_level=b['level'],
-                num_points=b['size']
-            )
-            for b in filtered_blocks
-            if b['id'] in skeleton_nodes
-        ]
-
-        # Convert edges to list format [[from_idx, to_idx], ...] using array indices
-        edges_list = []
-        for e in edges:
-            from_id, to_id = e[0], e[1]
-            if from_id in block_id_to_idx and to_id in block_id_to_idx:
-                edges_list.append([block_id_to_idx[from_id], block_id_to_idx[to_id]])
-
-        print(f"[BFS Skeleton] Complete: {len(skeleton_nodes)} nodes, {len(edges)} edges, {num_branches} branches, max order: {max_branch_order}")
-
-        return SkeletonResponse(
-            success=True,
-            skeleton_points=ordered_points,
-            skeleton_edges=edges_list,
-            branch_orders=branch_orders_list,
-            total_length=total_length,
-            num_nodes=len(skeleton_nodes),
-            num_edges=len(edges),
-            num_branches=num_branches,
-            max_branch_order=max_branch_order,
-            blocks=block_response,
-            points_before_filtering=points_original_count,
-            points_after_filtering=points_after_filtering,
-            num_blocks_before_filter=num_blocks_before,
-            num_blocks_after_filter=num_blocks_after,
-            dominant_axis=request.dominant_axis,
-            num_slices=len(skeleton_nodes)  # Legacy compatibility
-        )
+        # `blocks` came back as plain dicts (JSON round-trip); rebuild the models.
+        if result.get("blocks"):
+            result["blocks"] = [SkeletonBlock(**b) for b in result["blocks"]]
+        return SkeletonResponse(**result)
 
     except Exception as e:
         import traceback
@@ -14526,43 +14712,250 @@ def _clear_run(run_id: str) -> None:
 
 
 class ClientDisconnected(Exception):
-    """Raised by `_run_blocking_until_disconnect` when the HTTP client goes away
-    (panel closed, fetch AbortController timeout) before the blocking work
-    returns."""
+    """Raised by `_run_killable` when the HTTP client goes away (panel closed,
+    Cancel button, fetch AbortController timeout) before the worker subprocess
+    finishes — after the worker has been SIGKILLed."""
 
 
-async def _run_blocking_until_disconnect(fn, http_request: "Optional[Request]" = None,
-                                         poll: float = 0.25):
-    """Run a blocking callable off the event loop and stop awaiting it the moment
-    the client disconnects.
+# ==================== Killable segmentation subprocess ====================
+# The four segmentation tools (ground / wood / trees / skeleton) run monolithic
+# numpy/scipy/open3d/C-extension pipelines that CANNOT be interrupted in-thread
+# (Python threads can't be force-killed; CSF / cut-pursuit / open3d expose no
+# cancel hook). So each runs in a CHILD PROCESS that the parent can SIGKILL the
+# instant the user clicks Cancel — the OS reclaims its CPU and memory at once,
+# even mid-hang. This supersedes the thread-based `_run_blocking_until_disconnect`
+# (which could only *abandon* a still-running thread) for those tools.
+#
+# The child is the SAME backend binary/interpreter, re-entered as a worker via
+# PHYTOGRAPH_SEG_WORKER (dispatched at the top of backend_wrapper.py → seg_worker).
+# Arrays cross the boundary as temp .npy files (robust to large clouds, trivial
+# cleanup); scalar params + the structured skeleton result cross as JSON.
 
-    For a long, CPU-bound, *non-streaming* JSON endpoint (e.g. TreeIso tree
-    segmentation), calling the worker directly inside the `async def` pins a CPU
-    core AND blocks the event loop, so the server can't service other requests
-    and a closed panel / fetch-timeout leaves the request hanging until the work
-    finishes. This runs `fn` in the default thread-pool executor instead and
-    polls `http_request.is_disconnected()`; on disconnect it raises
-    `ClientDisconnected` so the caller returns at once.
+# Live worker PIDs, so a backend shutdown can reap any stragglers (no worker
+# outlives the backend). Keyed by pid; value is the Popen handle.
+# Live worker handles, so a backend shutdown can reap stragglers. Keyed by pid.
+_SEG_WORKERS: dict = {}
+_SEG_WORKERS_LOCK = threading.Lock()
 
-    Honest limitation: the orphaned thread keeps running to completion (TreeIso's
-    cut-pursuit C-extension exposes no cancel hook and Python threads can't be
-    force-killed); its result is simply discarded. What this *does* buy is an
-    unblocked event loop and a request that no longer hangs after the client is
-    gone — the worker is no longer wedged onto the live request. The auto-scaled
-    decimation already bounds the runtime, so the orphaned thread is short-lived."""
+
+def _seg_worker_command() -> "list[str]":
+    """Argv to spawn the segmentation worker as a child of THIS process.
+
+    Frozen (PyInstaller): `sys.executable` IS the bundled backend binary, which
+    runs backend_wrapper at entry — re-running it with PHYTOGRAPH_SEG_WORKER set
+    dispatches into seg_worker. Dev: `sys.executable` is the venv python, so we
+    point it at backend_wrapper.py explicitly."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    wrapper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend_wrapper.py")
+    return [sys.executable, wrapper]
+
+
+class _SegProc:
+    """A worker child spawned via `os.posix_spawn` (POSIX) instead of
+    `subprocess.Popen`.
+
+    Why not Popen: on macOS the backend process has BOTH libhelios (which links
+    GLFW via the lidar→visualizer plugin) and open3d (its own bundled GLFW) loaded.
+    `Popen` here takes the fork()+exec() path — and forking a process with that
+    Objective-C/GLFW + OpenMP runtime loaded crashes the child in the post-fork /
+    pre-exec window (SIGSEGV, exit -11). `os.posix_spawn` does NOT fork the loaded
+    image, so the child reaches exec cleanly. (Real uvicorn happened to avoid the
+    fork crash, but TestClient reproduced it deterministically — posix_spawn fixes
+    both.) The child's own process group (POSIX_SPAWN_SETPGROUP) lets us killpg the
+    whole subtree on cancel. Worker stderr is redirected to `error_log` so a crash
+    is still diagnosable without a pipe (pipes complicate posix_spawn file actions).
+
+    Exposes the small Popen-like surface `_run_killable` uses: pid, poll(), wait(),
+    returncode."""
+
+    def __init__(self, argv, env, error_log: str):
+        # `setpgroup=0` puts the child in its OWN process group (pgid == its pid)
+        # so `_kill_seg_worker` can killpg the worker's subtree WITHOUT signalling
+        # the backend's own group. This is non-negotiable: getpgid would otherwise
+        # return the parent's group and a cancel would SIGKILL the whole backend.
+        # Send the child's stdout/stderr to the error log file (fd 1 & 2).
+        fd = os.open(error_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            file_actions = [
+                (os.POSIX_SPAWN_DUP2, fd, 1),
+                (os.POSIX_SPAWN_DUP2, fd, 2),
+            ]
+            self.pid = os.posix_spawn(argv[0], argv, env,
+                                      file_actions=file_actions, setpgroup=0)
+        finally:
+            os.close(fd)
+        self.returncode = None
+
+    def poll(self):
+        if self.returncode is not None:
+            return self.returncode
+        pid, status = os.waitpid(self.pid, os.WNOHANG)
+        if pid == 0:
+            return None
+        self.returncode = os.waitstatus_to_exitcode(status)
+        return self.returncode
+
+    def wait(self):
+        if self.returncode is not None:
+            return self.returncode
+        _, status = os.waitpid(self.pid, 0)
+        self.returncode = os.waitstatus_to_exitcode(status)
+        return self.returncode
+
+    def kill(self):
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
+
+def _spawn_seg_worker(env: dict, error_log: str):
+    """Spawn the worker. POSIX → `_SegProc` (posix_spawn, no fork). Windows →
+    `subprocess.Popen` (no fork there, so the GLFW double-load crash doesn't
+    apply); its own process group lets us TerminateProcess the tree."""
+    argv = _seg_worker_command()
+    if hasattr(os, "posix_spawn"):
+        return _SegProc(argv, env, error_log)
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    logf = open(error_log, "wb")
+    return subprocess.Popen(argv, env=env, stdout=logf, stderr=logf,
+                            creationflags=creationflags)
+
+
+def _kill_seg_worker(proc) -> None:
+    """Hard-kill a worker and everything it spawned. The child is its own process
+    group (posix_spawn setpgroup=0) so killpg reaps any grandchildren (e.g. an
+    open3d/BLAS thread pool) too; falls back to a single-pid kill on Windows / if
+    the group is already gone.
+
+    SAFETY: only killpg a group that is NOT the backend's own — if the child ever
+    ended up sharing our group (setpgroup failed), killpg would SIGKILL the whole
+    backend. We single-pid-kill in that case instead."""
+    pid = proc.pid
+    try:
+        if hasattr(os, "killpg"):
+            pgid = os.getpgid(pid)
+            if pgid != os.getpgid(0):
+                os.killpg(pgid, signal.SIGKILL)
+                return
+            # Shares the backend's group — never killpg it. Fall through to pid kill.
+    except (ProcessLookupError, OSError):
+        pass
+    try:
+        if hasattr(proc, "kill"):
+            proc.kill()
+        elif hasattr(os, "kill"):
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def reap_seg_workers() -> None:
+    """Kill any still-running segmentation workers. Called at backend shutdown so
+    a wedged worker never outlives the server. Workers run in their OWN process
+    groups (posix_spawn setpgroup=0), so they are NOT auto-reaped when the parent
+    dies — this is what cleans them up on a graceful exit."""
+    with _SEG_WORKERS_LOCK:
+        procs = list(_SEG_WORKERS.values())
+        _SEG_WORKERS.clear()
+    for proc in procs:
+        if proc.poll() is None:
+            _kill_seg_worker(proc)
+
+
+# Reap on graceful exit (the supervisor's SIGTERM → Python shutdown runs atexit).
+atexit.register(reap_seg_workers)
+
+
+async def _run_killable(
+    tool: str,
+    points: "np.ndarray",
+    params: dict,
+    *,
+    http_request: "Optional[Request]" = None,
+    reflectance: "Optional[np.ndarray]" = None,
+    seeds: "Optional[np.ndarray]" = None,
+    poll: float = 0.25,
+):
+    """Run one segmentation compute (`tool` ∈ ground|wood|trees|skeleton) in a
+    KILLABLE child process and return its result.
+
+    Returns an (N,) int label array for ground/wood/trees, or — for wood and
+    skeleton — a `(labels_or_None, result_dict)` is NOT used; instead:
+      - ground/trees → np.ndarray of labels
+      - wood        → (np.ndarray labels, dict {"warnings": [...]})
+      - skeleton    → dict (the SkeletonResponse fields)
+
+    The child is polled off the event loop; if `http_request` disconnects (the
+    renderer aborted the fetch — Cancel button or timeout) the worker is SIGKILLed
+    and `ClientDisconnected` is raised so the endpoint returns at once. A worker
+    that exits non-zero raises RuntimeError with its traceback."""
     import asyncio
+    import tempfile
 
     loop = asyncio.get_event_loop()
-    fut = loop.run_in_executor(None, fn)
-    if http_request is None:
-        return await fut
-    while not fut.done():
-        if await http_request.is_disconnected():
-            # Detach: the executor thread finishes on its own and its result is
-            # GC'd. We surface the disconnect so the endpoint returns promptly.
-            raise ClientDisconnected()
-        await asyncio.sleep(poll)
-    return await fut
+    with tempfile.TemporaryDirectory(prefix="phyto_seg_") as workdir:
+        # Stage inputs.
+        np.save(os.path.join(workdir, "input.npy"), np.ascontiguousarray(points))
+        if reflectance is not None:
+            np.save(os.path.join(workdir, "reflectance.npy"), np.asarray(reflectance))
+        if seeds is not None and len(seeds) > 0:
+            np.save(os.path.join(workdir, "seeds.npy"), np.asarray(seeds))
+        with open(os.path.join(workdir, "request.json"), "w") as f:
+            json.dump({"tool": tool, "params": params}, f)
+
+        # Scrub the bundle's lib-path vars (mirrors _run_potree_converter) so the
+        # child resolves libs the same way the parent did at its own launch.
+        env = os.environ.copy()
+        for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+            env.pop(var, None)
+        env["PHYTOGRAPH_SEG_WORKER"] = workdir
+
+        stderr_log = os.path.join(workdir, "worker_stderr.log")
+        proc = _spawn_seg_worker(env, stderr_log)
+        with _SEG_WORKERS_LOCK:
+            _SEG_WORKERS[proc.pid] = proc
+
+        try:
+            while proc.poll() is None:
+                if http_request is not None and await http_request.is_disconnected():
+                    _kill_seg_worker(proc)
+                    raise ClientDisconnected()
+                await asyncio.sleep(poll)
+            # Reap the OS process (poll already returned the code) off-loop.
+            await loop.run_in_executor(None, proc.wait)
+        finally:
+            with _SEG_WORKERS_LOCK:
+                _SEG_WORKERS.pop(proc.pid, None)
+
+        if proc.returncode != 0:
+            err = ""
+            err_path = os.path.join(workdir, "error.txt")
+            if os.path.exists(err_path):
+                with open(err_path, "r") as f:
+                    err = f.read().strip()
+            if not err and os.path.exists(stderr_log):
+                with open(stderr_log, "r", errors="replace") as f:
+                    err = f.read().strip()
+            if not err:
+                err = f"worker exited {proc.returncode}"
+            raise RuntimeError(err)
+
+        # Collect results.
+        out_path = os.path.join(workdir, "output.npy")
+        res_path = os.path.join(workdir, "result.json")
+        result_dict = None
+        if os.path.exists(res_path):
+            with open(res_path, "r") as f:
+                result_dict = json.load(f)
+
+        if tool == "skeleton":
+            return result_dict if result_dict is not None else {}
+        labels = np.load(out_path)
+        if tool == "wood":
+            return labels, (result_dict or {"warnings": []})
+        return labels
 
 
 class _ProgressReporter:
@@ -17988,10 +18381,10 @@ def _gather_miss_positions(sess: "CloudSession",
       radius 0. The miss octree is built at true coordinates; its own bbox keeps
       the ~20 km extent from ever touching the hits octree's framing.
     - `origin` supplied → project each placeable miss onto a sphere centred on
-      the origin at `radius = far + max(0.05*depth, 0.05*far, 0.05)` (far/near are
-      the max/min HIT distance from the origin, depth = far − near), a THIN halo
-      hugging the cloud. Misses sitting AT the origin (no beam direction yet) are
-      dropped.
+      the origin at `radius = 1.4 * far` (far = the max HIT distance from the
+      origin), a halo sitting a fixed 40% beyond the farthest return so the
+      sky/miss shell reads as distinct from the cloud. Misses sitting AT the
+      origin (no beam direction yet) are dropped.
 
     This is the projection math factored out of the former `get_cloud_misses`
     endpoint, MINUS the _MISS_OVERLAY_CAP stride — the octree streams via LOD, so
@@ -18024,16 +18417,13 @@ def _gather_miss_positions(sess: "CloudSession",
     if hit_pos.shape[0] > 0:
         hit_dists = np.linalg.norm(hit_pos - origin_arr, axis=1)
         far = float(np.max(hit_dists))
-        near = float(np.min(hit_dists))
-        # The radius clears the FARTHEST hit by only a SMALL, bounded margin so the
-        # miss shell reads as a thin halo HUGGING the cloud — not a band parked far
-        # outside it. The far*1.4 shell was the bug: the miss octree is LOD-streamed
-        # and frustum-culled like any cloud, so a shell beyond the camera's framing
-        # of the hits renders nothing. The margin scales with the cloud's own radial
-        # depth (far − near) so it adapts to scene size, with a small multiplicative
-        # floor (5% of far) and a small absolute floor for near-zero-depth clouds.
-        depth = max(far - near, 0.0)
-        radius = far + max(0.05 * depth, 0.05 * far, 0.05)
+        # The radius places the miss shell at 1.4x the FARTHEST hit distance from
+        # the scanner — a fixed 40% margin beyond the cloud so the sky/miss halo
+        # sits clearly OUTSIDE the returns and reads as a distinct surrounding
+        # shell, not interleaved with the hits. (Do NOT shrink this to a small
+        # `far + 0.05*...` margin: that keeps getting reintroduced and parks the
+        # shell so close it visually merges with the cloud. 1.4 is intentional.)
+        radius = far * 1.4
     else:
         radius = 1.0
     if radius <= 0:
@@ -18158,6 +18548,13 @@ class CloudSessionCreateRequest(BaseModel):
     # Mirrors Helios's LIDAR_RAYTRACE_MISS_T = 1001 m. None → 1001. The primary
     # signal (target_index == 99) needs neither this nor an origin.
     miss_distance_threshold: Optional[float] = None
+    # Scanner head position [x, y, z] in true-world coords, when known — e.g. the
+    # `<origin>` of an imported Helios scan XML bundle. Used to PROJECT sky/miss
+    # points onto the thin display shell hugging the hits (the miss octree); also
+    # serves as the distance-fallback origin for miss auto-detection. None for a
+    # bare cloud with no scanner geometry. E57 pose (resolved backend-side from the
+    # file) takes precedence when both are present.
+    origin: Optional[List[float]] = None
 
 
 class DeleteRegionRequest(BaseModel):
@@ -18307,7 +18704,15 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         # file (see CLAUDE.md "array is source of truth"). The DISTANCE fallback
         # compares against the scanner origin in the SAME frame as `positions`, so
         # shift the (true-world) origin by world_shift when one was applied.
+        #
+        # Origin precedence: an E57 pose (scan_meta) wins; otherwise the scanner
+        # `<origin>` carried by an imported Helios scan XML bundle (request.origin).
+        # WITHOUT an origin the miss octree falls back to true far-field coords —
+        # so threading the XML origin here is what lets re-imported scans reproject
+        # their misses onto the thin shell, exactly like a fresh synthetic scan.
         _miss_origin = scan_meta["origin"] if (scan_meta and scan_meta.get("origin") is not None) else None
+        if _miss_origin is None and request.origin is not None and len(request.origin) == 3:
+            _miss_origin = list(request.origin)
         if _miss_origin is not None and world_shift_arr is not None:
             _miss_origin = (np.asarray(_miss_origin, dtype=np.float64) - world_shift_arr).tolist()
         autodetected_misses = _autodetect_misses(
@@ -18859,6 +19264,25 @@ async def bake_cloud_session(session_id: str):
     }
 
 
+def _session_survivor_hit_mask(sess: "CloudSession") -> np.ndarray:
+    """Survivor-relative mask of HIT points (is_miss == 0), aligned to
+    `positions[~deleted]`. A miss is a ray that hit nothing, projected ~1 km out;
+    feeding misses to a reconstruction/segmentation tool inflates the extent
+    ~1000× and HANGS it (CSF/cut-pursuit/skeleton). Every session segmentation
+    feed must compute on `positions[surv][mask]` and scatter labels back over the
+    survivors (misses default to 0, and are dropped from the octree at rebuild —
+    `_session_to_las(exclude_misses=True)` — so the default never shows). Mirrors
+    the `_MISS_SLUG` filter in `_do_session_dem`. Caller holds the lock.
+
+    The backfilled-miss buffer lives OUTSIDE `positions` (excluded for free);
+    this drops the interleaved is_miss survivors. No `_MISS_SLUG` column ⇒ all
+    survivors are hits."""
+    surv = ~sess.deleted
+    if _MISS_SLUG in sess.extras:
+        return sess.extras[_MISS_SLUG][surv] == 0
+    return np.ones(int(surv.sum()), dtype=bool)
+
+
 def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, values: np.ndarray) -> None:
     """Append (or replace) a per-point scalar extra-dim column on the session
     array. `values` is aligned to the SURVIVING points (positions[~deleted]);
@@ -19080,25 +19504,45 @@ class SessionGroundSegmentRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/segment_ground")
-async def session_segment_ground(session_id: str, request: SessionGroundSegmentRequest):
+async def session_segment_ground(session_id: str, request: SessionGroundSegmentRequest,
+                                 http_request: Request):
     """CSF on the in-RAM survivors → append `ground_class` → rebuild octree from
-    the arrays. No source file read."""
+    the arrays. No source file read.
+
+    The CSF compute runs in a KILLABLE subprocess (see `_run_killable`) so the
+    panel's Cancel button can SIGKILL it. The column write + octree rebuild run in
+    the parent AFTER the compute returns, so a cancel during the long compute
+    leaves the session pristine."""
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
-        pts = sess.positions[~sess.deleted].copy()
+        # Compute on HIT survivors only — feeding misses (is_miss != 0, ~1 km out)
+        # to CSF inflates the extent ~1000× and hangs the cloth. Scatter labels
+        # back over all survivors (misses default 0, dropped from the octree at
+        # rebuild). See _session_survivor_hit_mask.
+        hit = _session_survivor_hit_mask(sess)
+        pts = sess.positions[~sess.deleted][hit].copy()
     if len(pts) < 10:
         raise HTTPException(status_code=400, detail="Need at least 10 points for ground segmentation.")
+    csf_params = dict(
+        cloth_resolution=request.cloth_resolution,
+        rigidness=request.rigidness,
+        class_threshold=request.class_threshold,
+        iterations=request.iterations,
+        slope_smooth=request.slope_smooth,
+    )
     try:
-        labels = segment_ground(
-            pts,
-            cloth_resolution=request.cloth_resolution,
-            rigidness=request.rigidness,
-            class_threshold=request.class_threshold,
-            iterations=request.iterations,
-            slope_smooth=request.slope_smooth,
-        )
-    except ImportError:
-        raise HTTPException(status_code=500, detail="CSF (cloth-simulation-filter) not installed.")
+        hit_labels = await _run_killable("ground", pts, csf_params, http_request=http_request)
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Ground segmentation was cancelled.")
+    except RuntimeError as e:
+        if "CSF" in str(e) or "cloth" in str(e).lower():
+            raise HTTPException(status_code=500, detail="CSF (cloth-simulation-filter) not installed.")
+        raise
+    # Scatter hit-labels back over ALL survivors (misses → 0). `len(hit)` is the
+    # survivor count captured under the first lock, so this stays aligned with the
+    # snapshot the compute ran on.
+    labels = np.zeros(len(hit), dtype=np.int64)
+    labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
     cache_key, cache_dir, meta = _session_rebuild(sess)
@@ -19276,25 +19720,44 @@ def _session_reflectance_scalar(sess, scalar_slug, keep):
 
 
 @app.post("/api/cloud/session/{session_id}/segment_wood")
-async def session_segment_wood(session_id: str, request: SessionWoodSegmentRequest):
+async def session_segment_wood(session_id: str, request: SessionWoodSegmentRequest,
+                               http_request: Request):
     """Wood/leaf segmentation on the in-RAM survivors → append `wood_class` →
-    rebuild octree from the arrays. No source file read."""
+    rebuild octree from the arrays. No source file read.
+
+    The compute runs in a KILLABLE subprocess (see `_run_killable`) so the panel's
+    Cancel button can SIGKILL it. The column write + octree rebuild run in the
+    parent AFTER the compute returns, so a cancel during the long compute leaves
+    the session pristine."""
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
-        keep = ~sess.deleted
-        pts = sess.positions[keep].copy()
+        # Compute on HIT survivors only — misses (is_miss != 0, ~1 km out) hang
+        # the per-point geometry / connectivity skeleton. Labels scatter back over
+        # all survivors (misses → 0, dropped at rebuild). See _session_survivor_hit_mask.
+        surv = ~sess.deleted
+        hit = _session_survivor_hit_mask(sess)
+        pts = sess.positions[surv][hit].copy()
         # Resolve an optional per-point reflectance scalar from the session,
-        # aligned 1:1 with the surviving points. `scalar_slug` picks a specific
-        # extra-dim (e.g. 'Reflectance'); default tries the common slugs then the
-        # LAS intensity field. None ⇒ pure geometry. The reflectance_weight_max
-        # request field still gates whether the assist runs at all.
+        # aligned 1:1 with the HIT points (the same set we compute on). `scalar_slug`
+        # picks a specific extra-dim (e.g. 'Reflectance'); default tries the common
+        # slugs then the LAS intensity field. None ⇒ pure geometry. The
+        # reflectance_weight_max request field still gates whether the assist runs.
         reflectance = None
         if request.reflectance_weight_max and request.reflectance_weight_max > 0:
-            reflectance = _session_reflectance_scalar(sess, request.scalar_slug, keep)
+            refl_surv = _session_reflectance_scalar(sess, request.scalar_slug, surv)
+            reflectance = refl_surv[hit] if refl_surv is not None else None
     if len(pts) < 3:
         raise HTTPException(status_code=400, detail="Need at least 3 points for wood/leaf segmentation.")
-    warns: List[str] = []
-    labels = segment_wood(pts, reflectance=reflectance, warnings=warns, **_wood_segment_kwargs(request))
+    try:
+        hit_labels, wood_meta = await _run_killable(
+            "wood", pts, _wood_segment_kwargs(request),
+            http_request=http_request, reflectance=reflectance,
+        )
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Wood/leaf segmentation was cancelled.")
+    warns = list(wood_meta.get("warnings", []))
+    labels = np.zeros(len(hit), dtype=np.int64)
+    labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
     cache_key, cache_dir, meta = _session_rebuild(sess)
@@ -19313,10 +19776,10 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     """TreeIso on the in-RAM survivors → append `tree_instance` → rebuild octree
     from the arrays. No source file read.
 
-    The TreeIso pipeline runs off the event loop (`_run_blocking_until_disconnect`)
-    so the server stays responsive during the tens-of-seconds compute and a client
-    disconnect (panel closed / fetch timeout) returns promptly instead of holding
-    the request open.
+    The TreeIso pipeline runs in a KILLABLE subprocess (see `_run_killable`) so the
+    panel's Cancel button can SIGKILL it mid-run; the column write + octree rebuild
+    run in the parent AFTER the compute returns, so a cancel during the long
+    compute leaves the session pristine.
 
     If the cloud carries a `ground_class` column (from a prior ground
     segmentation that was *labeled* but not removed), the ground points are
@@ -19333,7 +19796,13 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
             ground_col[keep] == GROUND_CLASS_GROUND
             if ground_col is not None else np.zeros(len(pts), dtype=bool)
         )
-    plant_mask = ~is_ground
+        # Survivor-aligned HIT mask: exclude misses (is_miss != 0, ~1 km out) —
+        # feeding them to cut-pursuit inflates the extent ~1000× and hangs it.
+        # Folded into plant_mask so misses stay tree id 0 (and are dropped at
+        # rebuild). See _session_survivor_hit_mask.
+        is_hit = _session_survivor_hit_mask(sess)
+    # TreeIso sees only non-ground HIT points; ground AND misses stay id 0.
+    plant_mask = (~is_ground) & is_hit
     n_plant = int(plant_mask.sum())
     if n_plant > _TREEISO_MAX_POINTS:
         raise HTTPException(
@@ -19351,17 +19820,15 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     )
     plant_pts = pts[plant_mask]
 
-    def _segment():
-        ti_params = _treeiso_params(request)
-        _auto_treeiso_decimation(plant_pts, ti_params)   # ~0.8s probe — keep off-loop too
-        return segment_trees(plant_pts, ti_params, seeds=seeds)
-
+    ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
     try:
-        plant_labels = await _run_blocking_until_disconnect(_segment, http_request)
+        plant_labels = await _run_killable(
+            "trees", plant_pts, ti_param_dict, http_request=http_request, seeds=seeds,
+        )
     except ClientDisconnected:
-        # Client gave up before the octree rebuild; skip it and leave the session
-        # untouched (no tree_instance column written).
-        raise HTTPException(status_code=499, detail="Tree segmentation cancelled (client disconnected).")
+        # Client gave up before the octree rebuild; the worker was killed and the
+        # session is left untouched (no tree_instance column written).
+        raise HTTPException(status_code=499, detail="Tree segmentation was cancelled.")
     # Scatter the plant tree ids back onto all survivors; ground stays 0.
     labels = np.zeros(len(pts), dtype=np.int64)
     labels[plant_mask] = np.asarray(plant_labels)

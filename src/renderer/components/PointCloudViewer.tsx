@@ -236,7 +236,7 @@ export interface ImportRefs {
   // Import scans + grids parsed from a Helios scan XML (File → Import / drop
   // zone reach the same flow the Add-Scan popup uses). xmlPath is the on-disk
   // path of the XML so relative <filename> references resolve; null when none.
-  bulkImportScans: (heliosScans: HeliosXmlScan[], grids: HeliosXmlGrid[], xmlPath: string | null) => Promise<void>;
+  bulkImportScans: (heliosScans: HeliosXmlScan[], grids: HeliosXmlGrid[], xmlPath: string | null, importWarnings?: string[]) => Promise<void>;
 }
 
 interface PointCloudViewerProps {
@@ -712,6 +712,12 @@ export default function PointCloudViewer({
   const [demMethod, setDemMethod] = useState<DemInterpMethod>('tin');
   const [demFillVoids, setDemFillVoids] = useState(false);
   const [demComputeHAG, setDemComputeHAG] = useState(false);
+  // DEM is a STREAMING op (PHB1 frame), so it cancels like triangulation/LAD:
+  // the run_id rides the first progress marker; Cancel POSTs /api/cancel/{runId}
+  // (stops the backend gridding + frees memory) and aborts the fetch.
+  const demAbortRef = useRef<AbortController | null>(null);
+  const demRunIdRef = useRef<string | null>(null);
+  const [demProgress, setDemProgress] = useState<{ label: string; value: number | null } | null>(null);
   const demPanelWasOpen = useRef(false);
   useEffect(() => {
     if (showDEMPanel && !demPanelWasOpen.current) {
@@ -742,7 +748,7 @@ export default function PointCloudViewer({
   // segment_wood's reflectance_weight_max when the assist is active.
   const WOOD_REFLECTANCE_WEIGHT_MAX = 0.4;
   // Holds the latest single-cloud wood segmenter; see segmentOneWoodCloud below.
-  const segmentOneWoodCloudRef = useRef<(cloud: PointCloudEntry, WOOD: number, LEAF: number, woodParams: WoodSegmentTuning) => Promise<void>>(async () => {});
+  const segmentOneWoodCloudRef = useRef<(cloud: PointCloudEntry, WOOD: number, LEAF: number, woodParams: WoodSegmentTuning, signal?: AbortSignal) => Promise<void>>(async () => {});
   // Tree (individual-tree) segmentation via TreeIso.
   const [showTreeSegmentPanel, setShowTreeSegmentPanel] = useState(false);
   const [treeSegmentInProgress, setTreeSegmentInProgress] = useState(false);
@@ -921,6 +927,7 @@ export default function PointCloudViewer({
     heliosScans: HeliosXmlScan[],
     grids: HeliosXmlGrid[],
     xmlPath: string | null,
+    importWarnings: string[] = [],
   ): Promise<void> => {
     if (heliosScans.length === 0 && grids.length === 0) return;
     // Create voxel-grid meshes from any <grid> blocks first — they're
@@ -1069,7 +1076,17 @@ export default function PointCloudViewer({
           if (r) {
             setBulkImportProgress({ current: attachedCount + 1, total: wizardPending.length, label: `Loading ${r.input.fileName}` });
             try {
-              const data = await parsePointCloudFromPath(p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs, null, r.continuousSlugs);
+              // Thread the scan's XML <origin> to the backend so re-imported scans
+              // reproject their sky/miss points onto the display shell (otherwise
+              // the miss octree is built at far-field true coords). A trajectory
+              // scan anchors its origin to the first pose; for a static scan it's
+              // the scanner head. Undefined when the params carry no origin.
+              const o = p.params?.origin;
+              const scanOrigin: [number, number, number] | null =
+                o ? [o.x, o.y, o.z] : null;
+              const data = await parsePointCloudFromPath(
+                p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs, null,
+                r.continuousSlugs, null, scanOrigin);
               for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
               for (const slug of r.continuousSlugs) registerContinuousSlug(slug);
               scan.data = data;
@@ -1109,6 +1126,17 @@ export default function PointCloudViewer({
       if (attachedCount > 0) parts.push(`${attachedCount} with data`);
       if (grids.length > 0) parts.push(`${grids.length} grid(s)`);
       showToast({ title: `Imported ${parts.join(', ')}`, type: 'success' });
+      // Surface non-fatal import advisories (e.g. a scan missing its <returnMode>
+      // tag, so the mode defaulted). Persist (duration 0) — the user must read and
+      // act on these before scanning / running LAD, not have them flash away.
+      if (importWarnings.length > 0) {
+        showToast({
+          title: 'Scan import warnings',
+          message: importWarnings.join(' '),
+          type: 'info',
+          duration: 0,
+        });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('Bulk import failed:', err);
@@ -1247,6 +1275,15 @@ export default function PointCloudViewer({
   const setLadResults = useMemo(() => makeFieldSetter('ladResults'), [makeFieldSetter]);
   const [isLadRunning, setIsLadRunning] = useState(false);
   const ladAbortRef = useRef<AbortController | null>(null);
+  // Cancel controllers for the four segmentation tools. Each handler creates a
+  // fresh AbortController and stores it here; the panel's Cancel button aborts
+  // the in-flight fetch, which closes the TCP connection so the backend SIGKILLs
+  // its worker subprocess (true kill — see backend `_run_killable`). These are
+  // non-streaming (no run_id), so the cancel handler is just `abort()`.
+  const groundSegmentAbortRef = useRef<AbortController | null>(null);
+  const woodSegmentAbortRef = useRef<AbortController | null>(null);
+  const treeSegmentAbortRef = useRef<AbortController | null>(null);
+  const skeletonAbortRef = useRef<AbortController | null>(null);
   // The LAD voxel currently under the cursor (for the value readout tooltip).
   const [hoveredLadVoxel, setHoveredLadVoxel] = useState<LADVoxel | null>(null);
   // Which LAD result drives the colorbar / details panel (last computed by default).
@@ -4891,6 +4928,12 @@ export default function PointCloudViewer({
       // Instrument identity (e.g. 'riegl_vz400i'). Round-trips via a <scannerModel>
       // tag the backend injects and the importer reads back.
       scanner_model: params.scannerModel,
+      // Precise return mode. Round-trips via <returnMode>/<returnSelection>/
+      // <maxReturns> tags the backend injects and the importer reads back, so a
+      // single-return scan re-imports as single (not mislabeled multi from optics).
+      return_mode: params.returnMode,
+      return_selection: params.returnSelection,
+      max_returns: params.maxReturns,
     };
     const t = getEditState(cloud.id).translation;
     if (t.x !== 0 || t.y !== 0 || t.z !== 0) entry.translation = [t.x, t.y, t.z];
@@ -6163,6 +6206,8 @@ export default function PointCloudViewer({
 
     setGroundSegmentInProgress(true);
     setGroundSegmentError(null);
+    const abort = new AbortController();
+    groundSegmentAbortRef.current = abort;
 
     const csfParams = {
       cloth_resolution: groundClothResolution,
@@ -6183,7 +6228,7 @@ export default function PointCloudViewer({
         }
         const baseName = cloud.data.fileName ?? id;
         const sessionId = octreeInfo.sessionId;
-        const meta = await sessionSegmentGround(sessionId, csfParams);
+        const meta = await sessionSegmentGround(sessionId, csfParams, abort.signal);
         // The parent keeps ALL points, classified + coloured by ground_class.
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
         setColorMode('scalar');
@@ -6232,7 +6277,7 @@ export default function PointCloudViewer({
         ];
       }
 
-      const response = await segmentGround({ points, ...csfParams });
+      const response = await segmentGround({ points, ...csfParams }, abort.signal);
       if (!response.success) {
         throw new Error(response.error || 'Ground segmentation failed');
       }
@@ -6302,12 +6347,15 @@ export default function PointCloudViewer({
         message: `${response.num_ground.toLocaleString()} ground, ${response.num_plant.toLocaleString()} plant`,
       });
     } catch (error) {
+      // User cancelled (Cancel button aborted the fetch) — not a failure.
+      if (error instanceof DOMException && error.name === 'AbortError') return;
       console.error('Ground segmentation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Ground segmentation failed';
       setGroundSegmentError(errorMessage);
       showToast({ type: 'error', title: 'Ground Segmentation Failed', message: errorMessage });
     } finally {
       setGroundSegmentInProgress(false);
+      groundSegmentAbortRef.current = null;
     }
   }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds]);
 
@@ -6324,6 +6372,11 @@ export default function PointCloudViewer({
 
     setDemInProgress(true);
     setDemError(null);
+    setDemProgress({ label: 'Generating DEM…', value: null });
+    const abort = new AbortController();
+    demAbortRef.current = abort;
+    const onDemProgress = (value: number | null, label: string) => setDemProgress({ label, value });
+    const onDemRunId = (runId: string) => { demRunIdRef.current = runId; };
     const baseName = cloud.data.fileName ?? id;
 
     const finishMesh = (result: Awaited<ReturnType<typeof generateDEM>>) => {
@@ -6366,7 +6419,7 @@ export default function PointCloudViewer({
           method: demMethod,
           fill_voids: demFillVoids,
           add_height_column: demComputeHAG,
-        });
+        }, abort.signal, onDemProgress, onDemRunId);
         if (!result.success) throw new Error(result.error || 'DEM generation failed');
         finishMesh(result);
 
@@ -6432,7 +6485,7 @@ export default function PointCloudViewer({
         method: demMethod,
         fill_voids: demFillVoids,
         compute_height_above_ground: demComputeHAG,
-      });
+      }, abort.signal, onDemProgress, onDemRunId);
       if (!result.success) throw new Error(result.error || 'DEM generation failed');
       finishMesh(result);
 
@@ -6475,12 +6528,18 @@ export default function PointCloudViewer({
         message: `${result.numTriangles.toLocaleString()} cells${result.warning ? ` — ${result.warning}` : ''}`,
       });
     } catch (error) {
+      // User cancelled (Cancel button → fetch abort or a terminal `cancelled`
+      // stream marker) — not a failure, no error toast/banner.
+      if (abort.signal.aborted || error instanceof ScanCancelledError) return;
       console.error('DEM generation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'DEM generation failed';
       setDemError(errorMessage);
       showToast({ type: 'error', title: 'DEM Generation Failed', message: errorMessage });
     } finally {
       setDemInProgress(false);
+      setDemProgress(null);
+      demAbortRef.current = null;
+      demRunIdRef.current = null;
     }
   }, [selectedIds, clouds, buildPointSource, addMesh, onUpdateCloud, buildSessionOctreeData, demCellSize, demMethod, demFillVoids, demComputeHAG]);
 
@@ -6640,6 +6699,8 @@ export default function PointCloudViewer({
 
     setWoodSegmentInProgress(true);
     setWoodSegmentError(null);
+    const abort = new AbortController();
+    woodSegmentAbortRef.current = abort;
 
     try {
       // === Aggregate: segment all selected scans TOGETHER (denser local
@@ -6690,7 +6751,7 @@ export default function PointCloudViewer({
             ...(allHaveRefl && reflParts.length === inlineParts.length
               ? { reflectance: reflParts }
               : {}),
-          });
+          }, abort.signal);
           if (!response.success) {
             throw new Error(response.error || 'Wood/leaf segmentation failed');
           }
@@ -6725,16 +6786,22 @@ export default function PointCloudViewer({
       // (capturing the current woodMode) is used — handleWoodSegment is memoised
       // and would otherwise close over a stale worker. ===
       for (const cloud of targets) {
-        await segmentOneWoodCloudRef.current(cloud, WOOD, LEAF, woodParams);
+        // Stop the sequential loop the instant the user cancels (the in-flight
+        // call also throws AbortError out of the loop; this skips any remainder).
+        if (abort.signal.aborted) break;
+        await segmentOneWoodCloudRef.current(cloud, WOOD, LEAF, woodParams, abort.signal);
       }
       setShowWoodSegmentPanel(false);
     } catch (error) {
+      // User cancelled (Cancel button aborted the fetch) — not a failure.
+      if (error instanceof DOMException && error.name === 'AbortError') return;
       console.error('Wood/leaf segmentation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Wood/leaf segmentation failed';
       setWoodSegmentError(errorMessage);
       showToast({ type: 'error', title: 'Wood/Leaf Segmentation Failed', message: errorMessage });
     } finally {
       setWoodSegmentInProgress(false);
+      woodSegmentAbortRef.current = null;
     }
   }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodMethod, woodUseReflectance, inlineReflectance]);
 
@@ -6745,6 +6812,7 @@ export default function PointCloudViewer({
     WOOD: number,
     LEAF: number,
     woodParams: WoodSegmentTuning,
+    signal?: AbortSignal,
   ) => {
     const id = cloud.id;
     {
@@ -6759,7 +6827,7 @@ export default function PointCloudViewer({
         }
         const baseName = cloud.data.fileName ?? id;
         const sessionId = octreeInfo.sessionId;
-        const meta = await sessionSegmentWood(sessionId, woodParams);
+        const meta = await sessionSegmentWood(sessionId, woodParams, signal);
         if (meta.warnings && meta.warnings.length > 0) {
           showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: meta.warnings.join(' ') });
         }
@@ -6832,7 +6900,7 @@ export default function PointCloudViewer({
         points,
         ...woodParams,
         ...(refl && refl.length === count ? { reflectance: refl } : {}),
-      });
+      }, signal);
       if (!response.success) {
         throw new Error(response.error || 'Wood/leaf segmentation failed');
       }
@@ -6930,6 +6998,8 @@ export default function PointCloudViewer({
 
     setTreeSegmentInProgress(true);
     setTreeSegmentError(null);
+    const abort = new AbortController();
+    treeSegmentAbortRef.current = abort;
 
     const tiParams = {
       reg_strength1: treeRegStrength1,
@@ -6955,7 +7025,7 @@ export default function PointCloudViewer({
         const meta = await sessionSegmentTrees(octreeInfo.sessionId, {
           ...tiParams,
           ...(seeds ? { seed_points: seeds } : {}),
-        });
+        }, abort.signal);
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
         setColorMode('scalar');
         setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
@@ -6989,7 +7059,7 @@ export default function PointCloudViewer({
           ? Array.from(groundField.values)
           : undefined;
 
-      const response = await segmentTrees({ points, seed_points: seeds, ground_class: groundClass, ...tiParams });
+      const response = await segmentTrees({ points, seed_points: seeds, ground_class: groundClass, ...tiParams }, abort.signal);
       if (!response.success) {
         throw new Error(response.error || 'Tree segmentation failed');
       }
@@ -7061,12 +7131,15 @@ export default function PointCloudViewer({
           : `Segmented ${response.num_trees} trees.`,
       });
     } catch (error) {
+      // User cancelled (Cancel button aborted the fetch) — not a failure.
+      if (error instanceof DOMException && error.name === 'AbortError') return;
       console.error('Tree segmentation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Tree segmentation failed';
       setTreeSegmentError(errorMessage);
       showToast({ type: 'error', title: 'Tree Segmentation Failed', message: errorMessage });
     } finally {
       setTreeSegmentInProgress(false);
+      treeSegmentAbortRef.current = null;
     }
   }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints]);
 
@@ -7586,6 +7659,8 @@ export default function PointCloudViewer({
 
     setSkeletonInProgress(true);
     setSkeletonError(null);
+    const abort = new AbortController();
+    skeletonAbortRef.current = abort;
 
     try {
       const MAX_SKELETON_POINTS = 20000;
@@ -7680,7 +7755,7 @@ export default function PointCloudViewer({
         // Smoothing
         smooth_skeleton: skeletonSmooth,
         smoothing_iterations: skeletonSmoothIterations,
-      });
+      }, abort.signal);
 
       if (!response.success) {
         throw new Error(response.error || 'Skeleton extraction failed');
@@ -7716,6 +7791,8 @@ export default function PointCloudViewer({
         message: `Length: ${skeletonData.totalLength.toFixed(2)}m, ${skeletonData.pointCount} points`,
       });
     } catch (error) {
+      // User cancelled (Cancel button aborted the fetch) — not a failure.
+      if (error instanceof DOMException && error.name === 'AbortError') return;
       console.error('Skeleton extraction error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Skeleton extraction failed';
       setSkeletonError(errorMessage);
@@ -7726,6 +7803,7 @@ export default function PointCloudViewer({
       });
     } finally {
       setSkeletonInProgress(false);
+      skeletonAbortRef.current = null;
     }
   }, [selectedIds, clouds, buildPointSource, skeletonRemoveOutliers, skeletonSearchRadius, skeletonRootThreshold, skeletonQuantizationLevels, skeletonUseNonlinearQuant, skeletonThresholdFilter, skeletonUseProportionFilter, skeletonProportionThreshold, skeletonSmooth, skeletonSmoothIterations]);
 
@@ -9943,6 +10021,17 @@ export default function PointCloudViewer({
     }
   }, [isLadRunning, handleHeliosTriangulate, handleHeliosFilterChange]);
 
+  const cancelDEM = useCallback(() => {
+    // Stop the backend gridding (frees the scipy/numpy memory), then abort the
+    // fetch. DEM streams, so this mirrors triangulation/LAD cancel.
+    if (demRunIdRef.current) void cancelRun(demRunIdRef.current);
+    demAbortRef.current?.abort();
+    setDemInProgress(false);
+    setDemProgress(null);
+    demAbortRef.current = null;
+    demRunIdRef.current = null;
+  }, []);
+
   const cancelLAD = useCallback(() => {
     // Stop the backend (frees the inversion's C++/numpy memory), then abort.
     if (ladRunIdRef.current) void cancelRun(ladRunIdRef.current);
@@ -9951,6 +10040,36 @@ export default function PointCloudViewer({
     setLadProgress(null);
     ladAbortRef.current = null;
     ladRunIdRef.current = null;
+  }, []);
+
+  // Cancel handlers for the four segmentation tools. Aborting the fetch closes
+  // the TCP connection; the backend detects the disconnect and SIGKILLs its
+  // worker subprocess (true kill — see backend `_run_killable`). These are
+  // non-streaming (no run_id to POST /api/cancel for), so abort is the whole
+  // mechanism. `setXxxInProgress(false)` flips the panel back to its run button;
+  // the handler's AbortError early-return suppresses an error toast.
+  const cancelGroundSegment = useCallback(() => {
+    groundSegmentAbortRef.current?.abort();
+    groundSegmentAbortRef.current = null;
+    setGroundSegmentInProgress(false);
+  }, []);
+
+  const cancelWoodSegment = useCallback(() => {
+    woodSegmentAbortRef.current?.abort();
+    woodSegmentAbortRef.current = null;
+    setWoodSegmentInProgress(false);
+  }, []);
+
+  const cancelTreeSegment = useCallback(() => {
+    treeSegmentAbortRef.current?.abort();
+    treeSegmentAbortRef.current = null;
+    setTreeSegmentInProgress(false);
+  }, []);
+
+  const cancelSkeleton = useCallback(() => {
+    skeletonAbortRef.current?.abort();
+    skeletonAbortRef.current = null;
+    setSkeletonInProgress(false);
   }, []);
 
   const removeLadResult = useCallback((id: string) => {
@@ -13627,6 +13746,7 @@ export default function PointCloudViewer({
           onSlopeSmoothChange={setGroundSlopeSmooth}
           onSplitCloudsChange={setGroundSplitClouds}
           onSegment={handleGroundSegment}
+          onCancel={cancelGroundSegment}
         />
       )}
 
@@ -13647,6 +13767,7 @@ export default function PointCloudViewer({
             extentX={sel?.data.bounds?.size?.x}
             extentY={sel?.data.bounds?.size?.y}
             inProgress={demInProgress}
+            progress={demProgress?.value ?? null}
             error={demError}
             onClose={() => setShowDEMPanel(false)}
             onCellSizeChange={setDemCellSize}
@@ -13654,6 +13775,7 @@ export default function PointCloudViewer({
             onFillVoidsChange={setDemFillVoids}
             onComputeHeightAboveGroundChange={setDemComputeHAG}
             onGenerate={handleGenerateDEM}
+            onCancel={cancelDEM}
           />
         );
       })()}
@@ -13681,6 +13803,7 @@ export default function PointCloudViewer({
           onMethodChange={setWoodMethod}
           onUseReflectanceChange={setWoodUseReflectance}
           onSegment={handleWoodSegment}
+          onCancel={cancelWoodSegment}
         />
       )}
 
@@ -13707,6 +13830,7 @@ export default function PointCloudViewer({
           onClearSeeds={() => setTreeSeedPoints([])}
           onSplitCloudsChange={setTreeSplitClouds}
           onSegment={handleSegmentTrees}
+          onCancel={cancelTreeSegment}
           onMergeAChange={setTreeMergeA}
           onMergeBChange={setTreeMergeB}
           onSplitIdChange={setTreeSplitId}
@@ -13742,6 +13866,7 @@ export default function PointCloudViewer({
           onUseProportionFilterChange={setSkeletonUseProportionFilter}
           onSmoothIterationsChange={setSkeletonSmoothIterations}
           onExtract={handleExtractSkeleton}
+          onCancel={cancelSkeleton}
         />
       )}
 

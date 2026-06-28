@@ -190,14 +190,12 @@ def test_miss_overlay_projects_beyond_all_hits_as_thin_shell(client, cache_root)
     hits = sess.positions[sess.extras[main._MISS_SLUG] == 0]
     far_hit = float(np.max(np.linalg.norm(hits - origin, axis=1)))
 
-    # Every projected miss is strictly beyond the farthest hit, but as a THIN halo
-    # HUGGING the cloud — not a generous shell parked far outside it. The far shell
-    # was the bug: the LOD-streamed miss octree is frustum-culled like any cloud,
-    # so a shell beyond the camera's framing of the hits renders nothing. The
-    # margin is small + bounded (radius = far + max(0.05*depth, 0.05*far, 0.05)).
+    # Every projected miss sits on a sphere at 1.4x the farthest hit distance — a
+    # fixed 40% margin that parks the sky/miss halo clearly OUTSIDE the returns so
+    # it reads as a distinct surrounding shell (the intended look; see
+    # test_gather_projection_radius_matches_formula). Strictly beyond the cloud,
+    # and a geometrically thin sphere (one radius, not a slab).
     assert r.min() > far_hit, "misses interleave with the hit cloud"
-    margin = r.min() - far_hit
-    assert margin > 0.0
-    assert margin < 0.25 * far_hit, "miss shell too far out — would be frustum-culled"
-    # And the shell is thin: all misses share one radius (a sphere, not a slab).
+    assert radius == pytest.approx(far_hit * 1.4, rel=1e-6)
+    # All misses share one radius (a sphere, not a slab).
     assert (r.max() - r.min()) < 1e-3

@@ -21,6 +21,46 @@ export interface BackendPointSource {
   session_id?: string | null;
 }
 
+// ==================== KILLABLE SEGMENTATION HELPER ====================
+
+/**
+ * POST a JSON request to a (non-streaming) segmentation endpoint, with a 5-minute
+ * safety timeout AND optional external cancellation. The external `signal` is the
+ * Cancel button: aborting the fetch closes the TCP connection, the backend detects
+ * the disconnect and SIGKILLs its worker subprocess (see `_run_killable`). The
+ * fetch aborts when EITHER the timeout fires OR the external signal aborts; on
+ * abort, `fetch` throws a DOMException named 'AbortError', which callers
+ * distinguish from a real failure (user cancel ≠ error).
+ */
+async function postSegment<T>(path: string, request: unknown, signal?: AbortSignal, timeoutMs = 300000): Promise<T> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  // Mirror the external signal into our controller so the fetch aborts on either
+  // the timeout or a user-initiated cancel. `once` keeps the listener from leaking.
+  const onExternalAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+  try {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+    if (signal) signal.removeEventListener('abort', onExternalAbort);
+  }
+}
+
 // ==================== TRIANGULATION API ====================
 
 export type TriangulationMethod = 'ball_pivoting' | 'poisson' | 'alpha_shape' | 'delaunay' | 'helios' | 'dem';
@@ -245,30 +285,10 @@ export interface GroundSegmentationResponse {
 }
 
 export async function segmentGround(
-  request: GroundSegmentationRequest
+  request: GroundSegmentationRequest,
+  signal?: AbortSignal
 ): Promise<GroundSegmentationResponse> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
-
-  try {
-    const response = await fetch(`${baseUrl}/api/segment/ground`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Ground segmentation failed:', error);
-    throw error;
-  }
+  return postSegment<GroundSegmentationResponse>('/api/segment/ground', request, signal);
 }
 
 // ==================== DEM (DIGITAL ELEVATION MODEL) API ====================
@@ -549,30 +569,10 @@ export interface WoodSegmentationResponse {
 }
 
 export async function segmentWood(
-  request: WoodSegmentationRequest
+  request: WoodSegmentationRequest,
+  signal?: AbortSignal
 ): Promise<WoodSegmentationResponse> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
-
-  try {
-    const response = await fetch(`${baseUrl}/api/segment/wood`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Wood/leaf segmentation failed:', error);
-    throw error;
-  }
+  return postSegment<WoodSegmentationResponse>('/api/segment/wood', request, signal);
 }
 
 // ==================== TREE INSTANCE SEGMENTATION API ====================
@@ -618,30 +618,10 @@ export interface TreeSegmentationResponse {
 }
 
 export async function segmentTrees(
-  request: TreeSegmentationRequest
+  request: TreeSegmentationRequest,
+  signal?: AbortSignal
 ): Promise<TreeSegmentationResponse> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
-
-  try {
-    const response = await fetch(`${baseUrl}/api/segment/trees`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Tree segmentation failed:', error);
-    throw error;
-  }
+  return postSegment<TreeSegmentationResponse>('/api/segment/trees', request, signal);
 }
 
 // ==================== HELIOS TRIANGULATION API ====================
@@ -1145,38 +1125,10 @@ export interface SkeletonResponse {
  * Extract skeleton from a stem point cloud
  */
 export async function extractSkeleton(
-  request: SkeletonRequest
+  request: SkeletonRequest,
+  signal?: AbortSignal
 ): Promise<SkeletonResponse> {
-  const baseUrl = getBackendUrl();
-  console.log('Skeleton extraction - baseUrl:', baseUrl, 'points:', request.points?.length ?? `source:${request.source?.source_path}`);
-
-  // Use AbortController for 5 minute timeout (skeleton extraction can be slow)
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
-
-  try {
-    const response = await fetch(`${baseUrl}/api/skeleton/extract`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Skeleton extraction failed:', error);
-    throw error;
-  }
+  return postSegment<SkeletonResponse>('/api/skeleton/extract', request, signal);
 }
 
 // ==================== PLANT MODEL GENERATION API ====================
@@ -2009,6 +1961,14 @@ export interface ScanExportEntry {
   // the XML: the backend injects a <scannerModel> tag and the renderer's XML
   // importer reads it back. 'generic'/undefined writes no tag.
   scanner_model?: import('../lib/scannerModels').ScannerModelId;
+  // Precise pulse return mode. Helios scan XML has no native field for it and it
+  // can't be inferred faithfully from columns/optics, so the backend injects
+  // <returnMode>/<returnSelection>/<maxReturns> tags the renderer reads back on
+  // import. Omitting return_mode writes no tags (importer falls back to its
+  // legacy optics heuristic).
+  return_mode?: 'single' | 'multi';
+  return_selection?: 'strongest' | 'first' | 'last';  // single only
+  max_returns?: number;                                // multi only
   session_id?: string;
   points?: number[][];
   scalar_columns?: Record<string, number[]>;
@@ -3195,6 +3155,12 @@ export async function createCloudSession(
   // from AppSettings.missDistanceThreshold by the importer; null → backend's
   // 1001 m default. Only used when the scan has no is_miss/target_index signal.
   missDistanceThreshold?: number | null,
+  // Scanner head position [x, y, z] in true-world coords, when known — e.g. the
+  // <origin> of an imported Helios scan XML bundle. Lets the backend reproject
+  // sky/miss points onto the thin display shell (the miss octree) instead of
+  // leaving them at far-field, matching a fresh synthetic scan. null when the
+  // source carries no scanner geometry.
+  origin?: [number, number, number] | null,
 ): Promise<CloudSessionMetadata> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
@@ -3209,6 +3175,7 @@ export async function createCloudSession(
         column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
         world_shift: worldShift ?? null,
         miss_distance_threshold: missDistanceThreshold ?? null,
+        origin: origin ?? null,
       }),
       signal: controller.signal,
     });
@@ -3459,28 +3426,9 @@ export async function duplicateCloudSession(
 export async function sessionSegmentGround(
   sessionId: string,
   params: { cloth_resolution?: number; rigidness?: number; class_threshold?: number; iterations?: number; slope_smooth?: boolean },
+  signal?: AbortSignal,
 ): Promise<CloudSessionBakeResult> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
-  try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/segment_ground`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as CloudSessionBakeResult;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('session_segment_ground failed:', error);
-    throw error;
-  }
+  return postSegment<CloudSessionBakeResult>(`/api/cloud/session/${sessionId}/segment_ground`, params, signal);
 }
 
 /** Run wood/leaf segmentation on the session's in-RAM points, append a
@@ -3489,28 +3437,9 @@ export async function sessionSegmentGround(
 export async function sessionSegmentWood(
   sessionId: string,
   params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number; method?: 'sota' | 'connectivity' | 'geometric'; backbone_support?: number; reflectance_weight_max?: number; scalar_slug?: string },
+  signal?: AbortSignal,
 ): Promise<CloudSessionBakeResult> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000);
-  try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/segment_wood`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as CloudSessionBakeResult;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('session_segment_wood failed:', error);
-    throw error;
-  }
+  return postSegment<CloudSessionBakeResult>(`/api/cloud/session/${sessionId}/segment_wood`, params, signal, 600000);
 }
 
 /** Run TreeIso on the session's in-RAM points, append a `tree_instance` column,
@@ -3518,28 +3447,9 @@ export async function sessionSegmentWood(
 export async function sessionSegmentTrees(
   sessionId: string,
   params: { [k: string]: number | number[][] | undefined; seed_points?: number[][] },
+  signal?: AbortSignal,
 ): Promise<CloudSessionBakeResult> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000);
-  try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/segment_trees`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as CloudSessionBakeResult;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('session_segment_trees failed:', error);
-    throw error;
-  }
+  return postSegment<CloudSessionBakeResult>(`/api/cloud/session/${sessionId}/segment_trees`, params, signal, 600000);
 }
 
 /**

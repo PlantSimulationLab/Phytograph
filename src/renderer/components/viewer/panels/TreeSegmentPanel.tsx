@@ -30,6 +30,7 @@ interface TreeSegmentPanelProps {
   onClearSeeds: () => void;
   onSplitCloudsChange: (v: boolean) => void;
   onSegment: () => void;
+  onCancel: () => void;
   onMergeAChange: (n: number) => void;
   onMergeBChange: (n: number) => void;
   onSplitIdChange: (n: number) => void;
@@ -58,6 +59,7 @@ export function TreeSegmentPanel({
   onClearSeeds,
   onSplitCloudsChange,
   onSegment,
+  onCancel,
   onMergeAChange,
   onMergeBChange,
   onSplitIdChange,
@@ -206,28 +208,35 @@ export function TreeSegmentPanel({
         </div>
       )}
 
-      <button
-        data-testid="tree-segment-run-button"
-        onClick={onSegment}
-        disabled={inProgress}
-        className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
-          inProgress
-            ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
-            : 'bg-green-600 hover:bg-green-500 text-white'
-        }`}
-      >
-        {inProgress ? (
-          <>
+      {inProgress ? (
+        <div className="flex gap-2">
+          <button
+            data-testid="tree-segment-run-button"
+            disabled
+            className="flex-1 px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-neutral-600 text-neutral-400 cursor-not-allowed"
+          >
             <Loader2 className="w-3 h-3 animate-spin" />
-            Segmenting...
-          </>
-        ) : (
-          <>
-            <Sprout className="w-3 h-3" />
-            Segment Trees
-          </>
-        )}
-      </button>
+            Segmenting…
+          </button>
+          <button
+            data-testid="tree-segment-cancel-button"
+            onClick={onCancel}
+            className="px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-1 bg-red-600 hover:bg-red-500 text-white"
+          >
+            <X className="w-3 h-3" />
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          data-testid="tree-segment-run-button"
+          onClick={onSegment}
+          className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
+        >
+          <Sprout className="w-3 h-3" />
+          Segment Trees
+        </button>
+      )}
 
       {/* Refine: merge / split the current tree_instance field (flat clouds). */}
       {hasTrees && (

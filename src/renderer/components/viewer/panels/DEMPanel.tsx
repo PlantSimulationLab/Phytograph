@@ -23,6 +23,9 @@ interface DEMPanelProps {
   extentX?: number;
   extentY?: number;
   inProgress: boolean;
+  // Streaming progress fraction (0–1) while running, or null before the first
+  // marker / when not running. Shown as a percentage on the spinner button.
+  progress?: number | null;
   error: string | null;
   onClose: () => void;
   onCellSizeChange: (n: number) => void;
@@ -30,6 +33,7 @@ interface DEMPanelProps {
   onFillVoidsChange: (v: boolean) => void;
   onComputeHeightAboveGroundChange: (v: boolean) => void;
   onGenerate: () => void;
+  onCancel: () => void;
 }
 
 export function DEMPanel({
@@ -41,6 +45,7 @@ export function DEMPanel({
   extentX,
   extentY,
   inProgress,
+  progress,
   error,
   onClose,
   onCellSizeChange,
@@ -48,6 +53,7 @@ export function DEMPanel({
   onFillVoidsChange,
   onComputeHeightAboveGroundChange,
   onGenerate,
+  onCancel,
 }: DEMPanelProps) {
   // Estimated grid dimensions for the current cell size (ceil(extent / cell) per
   // axis), so the user can see the resolution/cost before running. The true DEM
@@ -192,28 +198,35 @@ export function DEMPanel({
         </div>
       )}
 
-      <button
-        data-testid="dem-run-button"
-        onClick={onGenerate}
-        disabled={inProgress}
-        className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
-          inProgress
-            ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
-            : 'bg-green-600 hover:bg-green-500 text-white'
-        }`}
-      >
-        {inProgress ? (
-          <>
+      {inProgress ? (
+        <div className="flex gap-2">
+          <button
+            data-testid="dem-run-button"
+            disabled
+            className="flex-1 px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-neutral-600 text-neutral-400 cursor-not-allowed"
+          >
             <Loader2 className="w-3 h-3 animate-spin" />
-            Generating...
-          </>
-        ) : (
-          <>
-            <Mountain className="w-3 h-3" />
-            Generate DEM
-          </>
-        )}
-      </button>
+            {progress != null ? `Generating… ${Math.round(progress * 100)}%` : 'Generating…'}
+          </button>
+          <button
+            data-testid="dem-cancel-button"
+            onClick={onCancel}
+            className="px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-1 bg-red-600 hover:bg-red-500 text-white"
+          >
+            <X className="w-3 h-3" />
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          data-testid="dem-run-button"
+          onClick={onGenerate}
+          className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
+        >
+          <Mountain className="w-3 h-3" />
+          Generate DEM
+        </button>
+      )}
     </div>
   );
 }

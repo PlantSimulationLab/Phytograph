@@ -272,6 +272,42 @@ describe('segmentGround', () => {
     mockFetchError(500, { detail: 'CSF not installed' });
     await expect(segmentGround(req)).rejects.toThrow('CSF not installed');
   });
+
+  // Cancellation: the optional external AbortSignal is the panel's Cancel button.
+  // It must reach the fetch (combined with the internal 5-min timeout) so aborting
+  // it tears down the request — the backend then SIGKILLs its worker.
+  it('rejects with AbortError when the external signal is already aborted', async () => {
+    // fetch honors an already-aborted signal by rejecting synchronously.
+    vi.spyOn(global, 'fetch').mockImplementation((_url, init) => {
+      const sig = (init as RequestInit | undefined)?.signal;
+      if (sig?.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(segmentGround(req, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('aborts the in-flight fetch when the external signal aborts mid-request', async () => {
+    // A fetch that resolves only when its own signal fires — proving the external
+    // signal is mirrored into the controller passed to fetch.
+    vi.spyOn(global, 'fetch').mockImplementation((_url, init) => {
+      const sig = (init as RequestInit | undefined)?.signal;
+      return new Promise((_resolve, reject) => {
+        sig?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      });
+    });
+    const controller = new AbortController();
+    const p = segmentGround(req, controller.signal);
+    controller.abort();
+    await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('still resolves normally when no external signal is passed', async () => {
+    mockFetchOk({ success: true, labels: [1], num_ground: 1, num_plant: 0, num_points: 1 });
+    const result = await segmentGround(req);
+    expect(result.success).toBe(true);
+  });
 });
 
 describe('getAvailablePlantModels', () => {
@@ -734,6 +770,7 @@ describe('createCloudSession', () => {
       ascii_format: 'x y z target_index target_count',
       world_shift: null,
       miss_distance_threshold: null,
+      origin: null,
     });
   });
 
@@ -744,6 +781,15 @@ describe('createCloudSession', () => {
     await createCloudSession('/a.xyz', null, null, null, 2500);
     const body = JSON.parse(spy.mock.calls[0][1]?.body as string);
     expect(body.miss_distance_threshold).toBe(2500);
+  });
+
+  it('forwards the scanner origin so re-imported scans reproject misses', async () => {
+    const spy = vi
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify(okBody), { status: 200 }));
+    await createCloudSession('/a.xyz', 'x y z is_miss', null, null, null, [-1, 0, 1]);
+    const body = JSON.parse(spy.mock.calls[0][1]?.body as string);
+    expect(body.origin).toEqual([-1, 0, 1]);
   });
 });
 

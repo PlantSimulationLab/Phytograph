@@ -118,6 +118,11 @@ const hiddenImports = [
   'openpyxl',
   'pydantic',
   'pydantic.deprecated.decorator',
+  // seg_worker: the killable-segmentation child-process entry. backend_wrapper.py
+  // imports it (and re-execs the bundled binary with PHYTOGRAPH_SEG_WORKER set to
+  // run it), and it lazily imports `main`. Declared explicitly so PyInstaller
+  // bundles it even though that re-entry path is only taken at runtime.
+  'seg_worker',
 ];
 
 // --collect-all bundles a package's binaries + data files + submodules.

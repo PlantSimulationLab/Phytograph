@@ -334,41 +334,55 @@ def test_large_sparse_cloud_segments_in_bounded_time():
     assert 5 <= n_found <= 20, f"expected ~{n_trees} trees, got {n_found}"
 
 
-# --- Off-loop execution + client-disconnect handling ------------------------
-# The TreeIso pipeline is CPU-bound and runs for tens of seconds on a large tile.
-# `_run_blocking_until_disconnect` runs it off the event loop so the server stays
-# responsive and a client disconnect (panel closed / fetch timeout) returns
-# promptly instead of holding the request open while the worker grinds on.
+# --- Killable subprocess + client-disconnect handling -----------------------
+# The TreeIso pipeline is CPU-bound and runs for tens of seconds on a large tile,
+# so it runs in a KILLABLE subprocess (`_run_killable`): the server stays
+# responsive, and a client disconnect (panel closed / Cancel / fetch timeout)
+# SIGKILLs the worker and returns promptly. See tests/test_seg_kill.py for the
+# tool-agnostic coverage; these two pin the tree-specific path.
 
 
-def test_run_blocking_returns_worker_result_when_connected():
-    """With a still-connected client, the helper returns the worker's value."""
+def _small_three_trees(per_tree=400, seed=0):
+    """Three well-separated trunk+crown blobs — small + cheap, enough for TreeIso
+    to find ≥1 instance. Returns an (N, 3) float64 array."""
+    rng = np.random.default_rng(seed)
+    clouds = []
+    for i, (cx, cy) in enumerate([(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)]):
+        trunk = np.c_[cx + rng.normal(0, 0.1, per_tree // 4),
+                      cy + rng.normal(0, 0.1, per_tree // 4),
+                      rng.uniform(0, 3.0, per_tree // 4)]
+        crown = np.c_[cx + rng.normal(0, 1.0, per_tree),
+                      cy + rng.normal(0, 1.0, per_tree),
+                      4.0 + rng.normal(0, 1.0, per_tree)]
+        clouds.append(np.vstack([trunk, crown]))
+    return np.vstack(clouds).astype(np.float64)
+
+
+@pytest.mark.skipif(not _treeiso_available(), reason="treeiso not installed")
+def test_run_killable_trees_returns_labels_when_connected():
+    """With a still-connected client, the killable subprocess returns TreeIso's
+    per-point labels for the tree path."""
     import asyncio
 
-    class _Connected:
-        async def is_disconnected(self):
-            return False
-
-    def work():
-        return 1234
-
-    out = asyncio.run(main._run_blocking_until_disconnect(work, _Connected(), poll=0.01))
-    assert out == 1234
+    pts = _small_three_trees()
+    labels = asyncio.run(main._run_killable("trees", pts, {}, http_request=None))
+    assert labels.shape == (len(pts),)
+    assert len(np.unique(labels[labels > 0])) >= 1
+    assert len(main._SEG_WORKERS) == 0
 
 
-def test_run_blocking_raises_on_client_disconnect_without_awaiting_worker():
+@pytest.mark.skipif(not _treeiso_available(), reason="treeiso not installed")
+def test_run_killable_trees_kills_worker_on_disconnect():
     """When the client disconnects mid-run, the helper raises ClientDisconnected
-    PROMPTLY — it must NOT block until the (slow) worker finishes. We prove both:
-    the exception type, and that we returned long before the worker's own runtime."""
+    PROMPTLY (it does NOT wait out the worker) AND the worker process is actually
+    killed — no entry survives in the registry. This is the true-kill guarantee
+    the old thread-based path could not provide."""
     import asyncio
     import time
 
-    def slow_work():
-        # Simulates the uninterruptible TreeIso pipeline: a long blocking call
-        # with no cancel hook. 5 s is far longer than the ~0.02 s it should take
-        # the helper to notice the disconnect and bail.
-        time.sleep(5.0)
-        return "should-be-discarded"
+    # A larger multi-tree cloud so cut-pursuit takes well over the disconnect poll.
+    pts = np.vstack([_small_three_trees(per_tree=4000)] * 8).astype(np.float64)
+    pts += np.random.default_rng(7).normal(0, 1e-4, pts.shape)
 
     class _DisconnectsImmediately:
         async def is_disconnected(self):
@@ -377,14 +391,13 @@ def test_run_blocking_raises_on_client_disconnect_without_awaiting_worker():
     async def run():
         t0 = time.perf_counter()
         with pytest.raises(main.ClientDisconnected):
-            await main._run_blocking_until_disconnect(slow_work, _DisconnectsImmediately(), poll=0.01)
+            await main._run_killable("trees", pts, {},
+                                     http_request=_DisconnectsImmediately(), poll=0.05)
         return time.perf_counter() - t0
 
-    # Returned promptly on disconnect — did NOT wait out the 5 s worker. (The
-    # orphaned worker thread keeps running and is GC'd; Python can't kill it —
-    # that's the documented limitation. The point is the request didn't hang.)
     elapsed = asyncio.run(run())
-    assert elapsed < 1.0, f"helper blocked for {elapsed:.2f}s waiting on the worker"
+    assert elapsed < 10.0, f"helper blocked for {elapsed:.2f}s waiting on the worker"
+    assert len(main._SEG_WORKERS) == 0, "the worker subprocess was not reaped"
 
 
 # --- PLY support (the benchmark format) -------------------------------------

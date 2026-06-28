@@ -39,7 +39,10 @@ is built from the classified ground returns rather than the whole cloud.
     - **Compute height above ground** — also subtract the DEM from each point to
       add a `height_above_ground` scalar to the cloud (a canopy-height-model
       precursor). Off by default.
-5. Click **Generate DEM**.
+5. Click **Generate DEM**. While it runs, the button shows a spinner (with the
+   gridding progress) and a **Cancel** button appears beside it — click Cancel to
+   stop a long or stuck run immediately (the computation is killed and nothing is
+   added).
 
 For robustness against residual non-ground points (low vegetation that slipped
 into the ground class, stray low noise), each grid cell is represented by a

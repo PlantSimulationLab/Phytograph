@@ -49,6 +49,7 @@ interface WoodSegmentPanelProps {
   onMethodChange: (m: WoodMethod) => void;
   onUseReflectanceChange: (b: boolean) => void;
   onSegment: () => void;
+  onCancel: () => void;
 }
 
 export function WoodSegmentPanel({
@@ -72,6 +73,7 @@ export function WoodSegmentPanel({
   onMethodChange,
   onUseReflectanceChange,
   onSegment,
+  onCancel,
 }: WoodSegmentPanelProps) {
   return (
     <div data-testid="wood-segment-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
@@ -293,28 +295,35 @@ export function WoodSegmentPanel({
         </div>
       )}
 
-      <button
-        data-testid="wood-segment-run-button"
-        onClick={onSegment}
-        disabled={inProgress}
-        className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
-          inProgress
-            ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
-            : 'bg-green-600 hover:bg-green-500 text-white'
-        }`}
-      >
-        {inProgress ? (
-          <>
+      {inProgress ? (
+        <div className="flex gap-2">
+          <button
+            data-testid="wood-segment-run-button"
+            disabled
+            className="flex-1 px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-neutral-600 text-neutral-400 cursor-not-allowed"
+          >
             <Loader2 className="w-3 h-3 animate-spin" />
-            Segmenting...
-          </>
-        ) : (
-          <>
-            <Trees className="w-3 h-3" />
-            Segment Wood / Leaf
-          </>
-        )}
-      </button>
+            Segmenting…
+          </button>
+          <button
+            data-testid="wood-segment-cancel-button"
+            onClick={onCancel}
+            className="px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-1 bg-red-600 hover:bg-red-500 text-white"
+          >
+            <X className="w-3 h-3" />
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          data-testid="wood-segment-run-button"
+          onClick={onSegment}
+          className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
+        >
+          <Trees className="w-3 h-3" />
+          Segment Wood / Leaf
+        </button>
+      )}
     </div>
   );
 }

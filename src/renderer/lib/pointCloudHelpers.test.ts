@@ -31,6 +31,7 @@ import {
   gridSnapSignature,
   gridColumnLocalOffsets,
   triangulationGridEnvelope,
+  gridCropBox,
   ladReuseGrid,
   buildHeliosTriangulationRequest,
   resolveHeliosScanSource,
@@ -1212,6 +1213,40 @@ describe('triangulationGridEnvelope', () => {
     // max kept offset is 1 -> top = 1.5 + 1 = 2.5, bottom = 0.5 + 0 = 0.5.
     expect(env.center[2]).toBeCloseTo(1.5, 6);
     expect(env.size[2]).toBeCloseTo(2, 6);
+  });
+});
+
+describe('gridCropBox', () => {
+  it('crops a flat grid to its plain center ± size/2', () => {
+    const grid = { center: [0, 0, 1] as [number, number, number], size: [2, 2, 1] as [number, number, number], nx: 2, ny: 2, nz: 1 };
+    const cb = gridCropBox(grid);
+    expect(cb.min).toEqual([-1, -1, 0.5]);
+    expect(cb.max).toEqual([1, 1, 1.5]);
+    expect(cb.rotationDeg).toBeUndefined();
+  });
+
+  it('widens the z-crop to the snapped envelope so the uphill canopy is NOT clipped', () => {
+    // This is the ball-pivot regression: the base box is z in [0.5, 1.5], but the
+    // columns are lifted up to +2, so the actual canopy reaches z=3.5. Cropping to
+    // the base box would discard everything above 1.5 (the clear-cut line + empty
+    // uphill voxels). The crop must span [0.5, 3.5].
+    const snapped = {
+      center: [0, 0, 1] as [number, number, number],
+      size: [2, 2, 1] as [number, number, number],
+      nx: 2, ny: 2, nz: 1,
+      column_offsets: [0, 0.5, 1, 2],
+    };
+    const cb = gridCropBox(snapped);
+    expect(cb.min[2]).toBeCloseTo(0.5, 6);   // base bottom + min offset (0)
+    expect(cb.max[2]).toBeCloseTo(3.5, 6);   // base top + max offset (2)
+    // x/y crop unchanged by the offsets.
+    expect(cb.min[0]).toBe(-1);
+    expect(cb.max[0]).toBe(1);
+  });
+
+  it('carries the grid azimuthal rotation through', () => {
+    const grid = { center: [0, 0, 0] as [number, number, number], size: [2, 2, 2] as [number, number, number], nx: 1, ny: 1, nz: 1, rotation: 30 };
+    expect(gridCropBox(grid).rotationDeg).toBe(30);
   });
 });
 

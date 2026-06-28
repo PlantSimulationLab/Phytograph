@@ -37,16 +37,7 @@ export function installBvhRaycast(): void {
   installed = true;
   (THREE.BufferGeometry.prototype as WithBoundsTree).computeBoundsTree = computeBoundsTree;
   (THREE.BufferGeometry.prototype as WithBoundsTree).disposeBoundsTree = disposeBoundsTree;
-  // TEMP DIAGNOSTIC: log raycasts on large meshes so we can confirm a scroll-zoom
-  // produces ZERO of them (only click/pointer-down should). Remove after verify.
-  const accel = acceleratedRaycast as typeof THREE.Mesh.prototype.raycast;
-  THREE.Mesh.prototype.raycast = function (this: THREE.Mesh, raycaster, intersects) {
-    const tris = this.geometry.index
-      ? this.geometry.index.count / 3
-      : (this.geometry.getAttribute('position')?.count ?? 0) / 3;
-    if (tris > 50000) console.warn(`[raycast] tris=${tris.toLocaleString()}`);
-    accel.call(this, raycaster, intersects);
-  };
+  THREE.Mesh.prototype.raycast = acceleratedRaycast;
 }
 
 // Build a BVH bounds tree on a mesh geometry so R3F's per-event scene raycasts

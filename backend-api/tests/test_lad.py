@@ -1242,6 +1242,47 @@ class TestSampleDemColumns:
         assert kept.sum() == 4
 
 
+class TestCullToGridTerrainOffsets:
+    """Regression for the terrain-following cull bug: a snapped grid lifts voxel
+    columns OUT of the base box's z-slab, so _cull_to_grid must widen its z-extent
+    by the column-offset range or it drops the beams feeding the lifted (uphill)
+    voxels — which then come back empty/hidden. (Reproduced on UpslopeTest.xml: the
+    uphill i=5..7 columns, offset ~0.7-1.0 m on a 0.8 m-tall grid, returned LAD~0.)"""
+
+    def _setup(self):
+        import numpy as np
+        # Base grid box: center z=0, size z=0.8 -> base z-slab [-0.4, 0.4].
+        grid_center = [0.0, 0.0, 0.0]
+        grid_size = [3.0, 3.0, 0.8]
+        origin = np.array([0.0, 0.0, 1.0])  # a tripod ~1 m up
+        # A return up in the lifted (uphill) canopy at z~0.9 — ABOVE the base box,
+        # INSIDE the snapped grid once a ~1.0 m column offset lifts the voxels there.
+        pts = np.array([[0.5, 0.5, 0.9]])
+        return origin, grid_center, grid_size, pts
+
+    def test_uphill_beam_culled_without_offsets(self):
+        # Without offsets the cull uses the base z-slab [-0.4, 0.4]; the origin
+        # (z=1) -> point (z=0.9) segment never dips into it, so the beam is dropped.
+        origin, gc, gs, pts = self._setup()
+        keep = main._cull_to_grid(pts, origin, gc, gs)
+        assert not keep.any(), "expected the base-box cull to drop the uphill beam"
+
+    def test_uphill_beam_kept_with_offsets(self):
+        # With the column offsets, the cull z-slab stretches up to cover the lifted
+        # voxels (max offset ~1.0 -> top face ~1.4), so the same beam is now kept.
+        origin, gc, gs, pts = self._setup()
+        offsets = [0.05, 0.5, 0.9, 1.0]  # nx*ny for a 2x2 footprint; max lifts to ~1.4
+        keep = main._cull_to_grid(pts, origin, gc, gs, column_offsets=offsets)
+        assert keep.all(), "column offsets must widen the cull to keep uphill beams"
+
+    def test_offsets_none_is_unchanged(self):
+        # The non-terrain path must be byte-for-byte identical (no z widening).
+        origin, gc, gs, pts = self._setup()
+        a = main._cull_to_grid(pts, origin, gc, gs)
+        b = main._cull_to_grid(pts, origin, gc, gs, column_offsets=None)
+        assert list(a) == list(b)
+
+
 class TestLADTerrainFollow:
     """Request-path tests with pyhelios stubbed."""
 
@@ -1257,7 +1298,10 @@ class TestLADTerrainFollow:
 
     def test_offsets_passed_to_addgrid(self, tmp_path, stub_pyhelios):
         dem = _flat_dem(4, 4, 1.0, [-2.0, -2.0], 10.0)
-        result = main._do_lad_computation(self._terrain_request(tmp_path, dem))
+        # safety_fraction 0.5 + cell height (size.z/nz = 2/2 = 1) -> clearance 0.5,
+        # so each column's offset is dem(10) + 0.5 - grid_bottom(0) = 10.5.
+        result = main._do_lad_computation(
+            self._terrain_request(tmp_path, dem, safety_fraction=0.5))
         assert result["success"] is True
         assert result["terrain_follow"] is True
         assert result["dropped_columns"] == 0

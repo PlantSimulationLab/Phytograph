@@ -524,6 +524,59 @@ class TestScanExportScannerModel:
         assert xml.index("<scannerModel>leica_p40</scannerModel>") > first_close
 
 
+class TestScanExportReturnMode:
+    """The precise pulse return mode round-trips via explicit <returnMode> /
+    <returnSelection> / <maxReturns> tags injected per <scan> block, since Helios
+    scan XML has no native field for it and it can't be inferred from columns."""
+
+    def test_single_mode_writes_mode_and_selection(self):
+        pytest.importorskip("pyhelios")
+        entry = _inline_entry(_PTS, _MISS)
+        entry.return_mode = "single"
+        entry.return_selection = "last"
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="rm", include_misses=True))
+        assert res["success"] is True, res.get("error")
+        xml = _decode(res["files"], ".xml")
+        assert "<returnMode>single</returnMode>" in xml
+        assert "<returnSelection>last</returnSelection>" in xml
+        # Single mode does not write a maxReturns tag.
+        assert "<maxReturns>" not in xml
+
+    def test_multi_mode_writes_mode_and_max_returns(self):
+        pytest.importorskip("pyhelios")
+        entry = _inline_entry(_PTS, _MISS)
+        entry.return_mode = "multi"
+        entry.max_returns = 7
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="rmm", include_misses=True))
+        xml = _decode(res["files"], ".xml")
+        assert "<returnMode>multi</returnMode>" in xml
+        assert "<maxReturns>7</maxReturns>" in xml
+
+    def test_none_mode_writes_no_tag(self):
+        pytest.importorskip("pyhelios")
+        entry = _inline_entry(_PTS, _MISS)  # return_mode defaults to None
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[entry], base_name="rmn", include_misses=True))
+        assert "<returnMode>" not in _decode(res["files"], ".xml")
+
+    def test_mode_lands_in_correct_scan_block(self):
+        pytest.importorskip("pyhelios")
+        # Only the SECOND scan names a mode → the tag must land after the first
+        # </scan>, mirroring the scanner-model injection.
+        s0 = _inline_entry(_PTS, _MISS)            # no mode
+        s1 = _inline_entry(_PTS, _MISS)
+        s1.return_mode = "single"
+        s1.return_selection = "first"
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[s0, s1], base_name="rmo", include_misses=True))
+        xml = _decode(res["files"], ".xml")
+        assert xml.count("<returnMode>") == 1
+        first_close = xml.index("</scan>")
+        assert xml.index("<returnMode>single</returnMode>") > first_close
+
+
 class TestScanExportErrors:
     def test_no_scans_fails(self):
         res = main._do_scan_export(main.ScanExportRequest(scans=[], include_misses=True))

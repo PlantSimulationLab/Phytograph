@@ -8,9 +8,14 @@ const FIXTURE_PATH = resolve(__dirname, '../../../tests/e2e/fixtures/sphere.xml'
 describe('parseHeliosScanXml', () => {
   it('parses the bundled sphere.xml fixture into four scans', () => {
     const xml = readFileSync(FIXTURE_PATH, 'utf-8');
-    const { scans } = parseHeliosScanXml(xml);
+    const { scans, warnings } = parseHeliosScanXml(xml);
 
     expect(scans).toHaveLength(4);
+    // sphere.xml is a hand-written fixture with no <returnMode> tag, so each scan
+    // defaults to single AND raises an actionable warning (no silent guess).
+    expect(scans.every(s => s.params.returnMode === 'single')).toBe(true);
+    expect(warnings).toHaveLength(4);
+    expect(warnings[0]).toMatch(/no <returnMode> tag/);
 
     // First scan: origin (-2, 0, 0.5), 100x200, theta 0..150°.
     const s0 = scans[0];
@@ -148,7 +153,11 @@ describe('parseHeliosScanXml', () => {
     expect(() => parseHeliosScanXml(xml)).toThrow(/missing the azimuth count/);
   });
 
-  it('treats <exitDiameter> / <beamDivergence> as multi-return and converts mrad', () => {
+  it('reads <exitDiameter>/<beamDivergence> as optics only — NOT a return-mode signal', () => {
+    // Regression: beam optics are written for EVERY scan (single and multi). The
+    // old importer used their presence to infer multi-return, which flipped every
+    // round-tripped single-return scan to multi. Optics now only feed the optics
+    // params; with no <returnMode> tag the mode defaults to single + a warning.
     const xml = `
       <scan>
         <origin>1 2 3</origin>
@@ -157,12 +166,69 @@ describe('parseHeliosScanXml', () => {
         <beamDivergence>0.001</beamDivergence>
       </scan>
     `;
-    const { scans } = parseHeliosScanXml(xml);
+    const { scans, warnings } = parseHeliosScanXml(xml);
     expect(scans).toHaveLength(1);
-    expect(scans[0].params.returnMode).toBe('multi');
+    expect(scans[0].params.returnMode).toBe('single');
     expect(scans[0].params.beamExitDiameterM).toBe(0.025);
     // 0.001 rad → 1.0 mrad
     expect(scans[0].params.beamDivergenceMrad).toBeCloseTo(1.0, 6);
+    expect(warnings.some(w => /no <returnMode> tag/.test(w))).toBe(true);
+  });
+
+  it('reads an explicit <returnMode>single</returnMode> + <returnSelection>', () => {
+    const xml = `
+      <scan>
+        <origin>0 0 1</origin>
+        <size>100 360</size>
+        <exitDiameter>0.01</exitDiameter>
+        <beamDivergence>0.00035</beamDivergence>
+        <returnMode>single</returnMode>
+        <returnSelection>last</returnSelection>
+      </scan>
+    `;
+    const { scans, warnings } = parseHeliosScanXml(xml);
+    expect(scans[0].params.returnMode).toBe('single');
+    expect(scans[0].params.returnSelection).toBe('last');
+    // Explicit tag present → no return-mode warning.
+    expect(warnings.some(w => /returnMode/.test(w))).toBe(false);
+  });
+
+  it('reads an explicit <returnMode>multi</returnMode> + <maxReturns>', () => {
+    const xml = `
+      <scan>
+        <origin>0 0 1</origin>
+        <size>100 360</size>
+        <returnMode>multi</returnMode>
+        <maxReturns>7</maxReturns>
+      </scan>
+    `;
+    const { scans, warnings } = parseHeliosScanXml(xml);
+    expect(scans[0].params.returnMode).toBe('multi');
+    expect(scans[0].params.maxReturns).toBe(7);
+    expect(warnings.some(w => /returnMode/.test(w))).toBe(false);
+  });
+
+  it('round-trips a single-return scan without flipping it to multi (testscan.xml regression)', () => {
+    // The exact shape the backend now exports for a single-return scan: beam
+    // optics present, plus the explicit return-mode tags. Must import as single.
+    const xml = `
+      <scan>
+        <origin>0 0 1</origin>
+        <size>100 360</size>
+        <thetaMin>30</thetaMin>
+        <thetaMax>130</thetaMax>
+        <exitDiameter>0.010000</exitDiameter>
+        <beamDivergence>0.000350</beamDivergence>
+        <ASCII_format>x y z is_miss timestamp</ASCII_format>
+        <scannerModel>riegl_vz400i</scannerModel>
+        <returnMode>single</returnMode>
+        <returnSelection>strongest</returnSelection>
+      </scan>
+    `;
+    const { scans, warnings } = parseHeliosScanXml(xml);
+    expect(scans[0].params.returnMode).toBe('single');
+    expect(scans[0].params.returnSelection).toBe('strongest');
+    expect(warnings).toHaveLength(0);
   });
 
   it('parses <scanTilt> "roll pitch" (degrees) and defaults to level when absent', () => {

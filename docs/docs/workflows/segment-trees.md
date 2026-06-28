@@ -51,7 +51,9 @@ Phytograph warns you (but still runs).
       merged.
     - **Split into one cloud per tree** — when checked, also adds a separate
       cloud for each tree to the scan list.
-5. Click **Segment Trees**.
+5. Click **Segment Trees**. While it runs, the button shows a spinner and a
+   **Cancel** button appears beside it — click Cancel to stop a long or stuck run
+   immediately (the computation is killed and the cloud is left unchanged).
 
 ## Results
 

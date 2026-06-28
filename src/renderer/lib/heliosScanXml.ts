@@ -23,7 +23,12 @@
 // auto-create matching voxel-grid meshes. <translation> / per-scan <rotation>
 // are still ignored.
 
-import { DEFAULT_SCAN_PARAMETERS, type ScanParameters } from './scanParameters';
+import {
+  DEFAULT_SCAN_PARAMETERS,
+  type ScanParameters,
+  type PulseReturnMode,
+  type SingleReturnSelection,
+} from './scanParameters';
 import { SCANNER_MODELS, type ScannerModelId } from './scannerModels';
 
 // Valid scanner-model ids, for validating an imported <scannerModel> tag. An
@@ -75,6 +80,10 @@ export interface HeliosXmlGrid {
 export interface HeliosXmlParseResult {
   scans: HeliosXmlScan[];
   grids: HeliosXmlGrid[];
+  // Non-fatal import advisories (e.g. a scan missing its <returnMode> tag, so the
+  // return mode defaulted). The caller should surface these to the user — they
+  // flag silent assumptions the importer had to make.
+  warnings: string[];
 }
 
 export class HeliosXmlParseError extends Error {
@@ -113,9 +122,11 @@ export function parseHeliosScanXml(xmlText: string): HeliosXmlParseResult {
     throw new HeliosXmlParseError('No <scan> or <grid> elements found in XML.');
   }
 
-  const scans: HeliosXmlScan[] = scanEls.map((el, idx) => parseScanElement(el, idx));
+  const warnings: string[] = [];
+  const scans: HeliosXmlScan[] = scanEls.map((el, idx) =>
+    parseScanElement(el, idx, warnings));
   const grids: HeliosXmlGrid[] = gridEls.map((el, idx) => parseGridElement(el, idx));
-  return { scans, grids };
+  return { scans, grids, warnings };
 }
 
 function parseGridElement(el: Element, index: number): HeliosXmlGrid {
@@ -166,7 +177,11 @@ function parseGridElement(el: Element, index: number): HeliosXmlGrid {
   return grid;
 }
 
-function parseScanElement(el: Element, index: number): HeliosXmlScan {
+function parseScanElement(
+  el: Element,
+  index: number,
+  warnings: string[],
+): HeliosXmlScan {
   const origin = parseVec3Tag(el, 'origin');
   if (!origin) {
     throw new HeliosXmlParseError(`<scan> at index ${index} is missing required <origin>.`);
@@ -232,11 +247,55 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
   const phiMinDeg = parseNumberTag(el, 'phiMin') ?? DEFAULT_PHI_MIN_DEG;
   const phiMaxDeg = parseNumberTag(el, 'phiMax') ?? DEFAULT_PHI_MAX_DEG;
 
-  // <exitDiameter> / <beamDivergence> present → treat as multi-return.
-  // beamDivergence in the Helios spec is radians; pyhelios/our UI use mrad.
+  // Beam optics. These are written for EVERY scan (single and multi alike) and
+  // are NOT a return-mode signal — they only feed the beam_exit_diameter /
+  // beam_divergence params below. beamDivergence in the Helios spec is radians;
+  // pyhelios/our UI use mrad.
   const exitDiameterM = parseNumberTag(el, 'exitDiameter');
   const beamDivergenceRad = parseNumberTag(el, 'beamDivergence');
-  const isMulti = exitDiameterM !== null || beamDivergenceRad !== null;
+
+  // Return mode round-trips via an explicit <returnMode> tag (plus
+  // <returnSelection> for single / <maxReturns> for multi), injected by the
+  // backend on export. There is no faithful way to infer it from the geometry or
+  // columns, so a scan without the tag gets the defaults AND a loud, actionable
+  // warning — never a silent guess.
+  const scanName = `Scan ${index + 1}`;
+  const returnModeRaw = tagText(el, 'returnMode')?.toLowerCase() ?? null;
+  let returnMode: PulseReturnMode;
+  let returnSelection: SingleReturnSelection = DEFAULT_SCAN_PARAMETERS.returnSelection;
+  let maxReturns = DEFAULT_SCAN_PARAMETERS.maxReturns;
+  if (returnModeRaw === 'single' || returnModeRaw === 'multi') {
+    returnMode = returnModeRaw;
+    if (returnMode === 'single') {
+      const selRaw = tagText(el, 'returnSelection')?.toLowerCase() ?? null;
+      if (selRaw === 'strongest' || selRaw === 'first' || selRaw === 'last') {
+        returnSelection = selRaw;
+      } else if (selRaw !== null) {
+        warnings.push(
+          `${scanName}: unrecognised <returnSelection> "${selRaw}"; defaulted to ` +
+          `"${returnSelection}". Edit the scan's return selection if that's wrong.`,
+        );
+      }
+    } else {
+      const mxRaw = parseNumberTag(el, 'maxReturns');
+      if (mxRaw !== null && Number.isFinite(mxRaw) && mxRaw >= 1) {
+        maxReturns = Math.round(mxRaw);
+      } else if (mxRaw !== null) {
+        warnings.push(
+          `${scanName}: invalid <maxReturns> "${mxRaw}"; defaulted to ${maxReturns}. ` +
+          `Edit the scan's max returns if that's wrong.`,
+        );
+      }
+    }
+  } else {
+    returnMode = DEFAULT_SCAN_PARAMETERS.returnMode;
+    warnings.push(
+      `${scanName}: no <returnMode> tag in the XML, so the return mode defaulted ` +
+      `to "${returnMode} (${returnSelection})". This XML predates return-mode ` +
+      `round-tripping (or wasn't exported by Phytograph). Open the scan's ` +
+      `parameters and set the return mode before scanning or running LAD.`,
+    );
+  }
 
   // <scanTilt> is "roll pitch" in degrees (helios-core lidar fileIO.cpp converts
   // to radians on load). Maps directly onto our degree-based tilt fields. Absent
@@ -274,11 +333,11 @@ function parseScanElement(el: Element, index: number): HeliosXmlScan {
     zenithMaxDeg: thetaMaxDeg,
     azimuthMinDeg: phiMinDeg,
     azimuthMaxDeg: phiMaxDeg,
-    // The presence of beam optics is our proxy for a multi-return scan (the same
-    // heuristic as before); everything else imports as single-return.
-    returnMode: isMulti ? 'multi' : 'single',
-    maxReturns: DEFAULT_SCAN_PARAMETERS.maxReturns,
-    returnSelection: DEFAULT_SCAN_PARAMETERS.returnSelection,
+    // Resolved from the explicit <returnMode>/<returnSelection>/<maxReturns> tags
+    // above (or defaulted with a warning when the XML carries no <returnMode>).
+    returnMode,
+    maxReturns,
+    returnSelection,
     beamExitDiameterM: exitDiameterM ?? DEFAULT_SCAN_PARAMETERS.beamExitDiameterM,
     beamDivergenceMrad: beamDivergenceRad !== null
       ? beamDivergenceRad * 1000

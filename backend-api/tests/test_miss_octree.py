@@ -89,10 +89,12 @@ def test_miss_octree_disjoint_from_hits_octree(client, cache_root):
 
 
 def test_gather_projection_radius_matches_formula(client, cache_root):
-    """The projected misses sit on a thin sphere of the documented radius:
-    radius = far + max(0.05*depth, 0.05*far, 0.05), far/near = max/min hit distance
-    from the origin. A THIN halo (not the old far*1.4 shell) so the LOD-streamed
-    miss octree stays inside the camera's framing of the hits and isn't culled."""
+    """The projected misses sit on a sphere at radius = 1.4 * far, where far is the
+    max HIT distance from the scanner origin. The 1.4x (40%) margin is INTENTIONAL
+    and load-bearing: it parks the sky/miss halo clearly outside the returns so it
+    reads as a distinct surrounding shell. Do NOT replace it with a small
+    `far + 0.05*...` margin — that change keeps getting reintroduced and merges the
+    shell into the cloud. This test is the guard against that regression."""
     body = _create(client)
     sess = main._cloud_sessions[body["session_id"]]
     pos, radius = main._gather_miss_positions(sess, LEAFCUBE_ORIGIN)
@@ -101,14 +103,12 @@ def test_gather_projection_radius_matches_formula(client, cache_root):
     origin = np.asarray(LEAFCUBE_ORIGIN)
     hits = sess.positions[sess.extras[main._MISS_SLUG] == 0]
     hd = np.linalg.norm(hits - origin, axis=1)
-    far, near = float(hd.max()), float(hd.min())
-    expected = far + max(0.05 * (far - near), 0.05 * far, 0.05)
-    assert radius == pytest.approx(expected, rel=1e-6)
+    far = float(hd.max())
+    assert radius == pytest.approx(far * 1.4, rel=1e-6)
 
     d = np.linalg.norm(pos - origin, axis=1)
-    assert np.allclose(d, radius, rtol=1e-6)   # thin shell
+    assert np.allclose(d, radius, rtol=1e-6)   # all misses on the shell
     assert d.min() > far                        # strictly outside the cloud
-    assert radius < far * 1.25                  # but close — not parked far out
 
 
 def test_no_origin_keeps_true_coords(client, cache_root):
@@ -121,6 +121,37 @@ def test_no_origin_keeps_true_coords(client, cache_root):
     assert pos.shape[0] == EXPECTED_MISS_COUNT
     stored = sess.positions[sess.extras[main._MISS_SLUG] != 0]
     assert np.allclose(np.sort(pos, axis=0), np.sort(stored, axis=0))
+
+
+def test_create_origin_reprojects_misses(client, cache_root):
+    """Regression: an imported Helios scan XML bundle carries the scanner
+    `<origin>`, which the renderer now forwards as `origin` on the create request.
+    The backend must thread it onto `sess.miss_octree_origin` so the misses are
+    PROJECTED onto the thin shell — not left at far-field (the bug where re-imported
+    scans showed misses ~1 km out instead of hugging the hits).
+
+    Without the origin (the prior behavior) `miss_octree_origin` is None and the
+    misses keep their true far-field coords; with it, the stored origin matches and
+    the gathered positions sit on the projection shell."""
+    res = client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(LEAFCUBE_XYZ), "ascii_format": LEAFCUBE_FORMAT,
+              "origin": LEAFCUBE_ORIGIN},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    sess = main._cloud_sessions[body["session_id"]]
+    # The request origin landed on the session (no world_shift here, so verbatim).
+    assert sess.miss_octree_origin == LEAFCUBE_ORIGIN
+    # And the misses were projected: gathered positions sit on a thin shell at a
+    # radius hugging the hits, NOT at their stored far-field coordinates.
+    pos, radius = main._gather_miss_positions(sess, sess.miss_octree_origin)
+    assert radius > 0.0
+    stored = sess.positions[sess.extras[main._MISS_SLUG] != 0]
+    far_field = np.linalg.norm(stored - np.asarray(LEAFCUBE_ORIGIN), axis=1)
+    shell = np.linalg.norm(pos - np.asarray(LEAFCUBE_ORIGIN), axis=1)
+    assert shell.max() < far_field.min()  # pulled IN from far-field
+    assert np.allclose(shell, radius, rtol=1e-6)
 
 
 def test_empty_miss_set_builds_no_octree(client, cache_root, tmp_path):

@@ -218,6 +218,14 @@ the DEM in the scene. Likewise, a scan's chosen **scanner model** round-trips vi
 a `<scannerModel>` tag, so a re-imported RIEGL/Leica/FARO/etc. scan keeps its
 instrument identity rather than reverting to generic.
 
+A scan's **return mode** also round-trips, via `<returnMode>` (plus
+`<returnSelection>` for single-return or `<maxReturns>` for multi-return) tags.
+Helios scan XML has no native field for return mode, and it can't be inferred
+from the exported columns, so Phytograph writes it explicitly. If you import an
+older XML (or one not exported by Phytograph) that lacks these tags, the scan
+loads as single-return and a warning tells you to set the mode in the scan's
+parameters before scanning or running LAD — it never silently guesses.
+
 ### Importing textured meshes
 
 A `.obj` that references a `.mtl` material library is imported with its
@@ -252,13 +260,17 @@ by any scalar field later — see **[Color modes](../reference/color-modes.md)**
 
 ### Importing scans with sky/miss points
 
-`.e57` and structured `.ply` scans carry **sky/miss points** — pulses that hit
-the sky and returned nothing — which the
+`.e57` and structured `.ply` scans — and a re-imported Helios **scan XML
+bundle**, which carries the scanner `<origin>` and an `is_miss` column — bring
+**sky/miss points** — pulses that hit the sky and returned nothing — which the
 [leaf-area-density inversion](../concepts/leaf-area-density.md) relies on.
 Phytograph recovers and tags them on import. They're hidden by default (their
 true positions are ~20 km away); toggle the **Show misses** button on a scan row
 to draw them in a distinct colour, relocated onto the scan's bounding sphere, so
-you can confirm a scan actually carries miss information. See
+you can confirm a scan actually carries miss information. The relocation needs a
+scanner origin — supplied by the E57/PLY pose or the XML bundle's `<origin>`; a
+bare ASCII cloud with no scanner geometry shows its misses at their true
+far-field position instead. See
 **[Sky/miss points](../reference/file-formats.md#skymiss-points)**.
 
 ### Scans that bring their own parameters

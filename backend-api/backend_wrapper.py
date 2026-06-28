@@ -10,6 +10,18 @@ import logging
 import tempfile
 from logging.handlers import RotatingFileHandler
 
+# ==================== Killable segmentation worker re-entry ====================
+# When spawned with PHYTOGRAPH_SEG_WORKER set, this same binary/interpreter runs
+# ONE segmentation compute (in seg_worker) and exits — NOT the uvicorn server.
+# This is how the frozen PyInstaller binary (which has no script arg) re-enters
+# as a killable subprocess so the parent backend can SIGKILL it on Cancel. Done
+# at the very top, before the heavy matplotlib/uvicorn imports, so the worker
+# pays only for what it needs.
+_SEG_WORKER_DIR = os.environ.get("PHYTOGRAPH_SEG_WORKER")
+if _SEG_WORKER_DIR:
+    import seg_worker
+    sys.exit(seg_worker.run(_SEG_WORKER_DIR))
+
 
 def _configure_logging():
     """Send INFO+ to BOTH stderr (so the Electron supervisor's stdout/stderr tee

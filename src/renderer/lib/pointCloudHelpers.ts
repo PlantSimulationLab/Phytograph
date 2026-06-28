@@ -956,6 +956,28 @@ export function triangulationGridEnvelope(grid: HeliosGrid): HeliosGrid {
   return { ...flat, center: [cx, cy, (zLo + zHi) / 2], size: [sx, sy, zHi - zLo] };
 }
 
+// The axis-aligned crop box (min/max corners + optional azimuthal rotation) that
+// triangulation should crop points to before meshing a grid. Built from the grid's
+// FLAT envelope (triangulationGridEnvelope), so a terrain-snapped grid's lifted
+// columns are fully covered — cropping to the raw center ± size/2 would clip away
+// the uphill canopy (visible as a clear-cut line at the unshifted grid's top, and
+// empty uphill voxels when the mesh feeds LAD). A non-snapped grid is unchanged.
+// Shared by the Helios and ball-pivot triangulation paths so both crop identically.
+export function gridCropBox(grid: HeliosGrid): {
+  min: [number, number, number];
+  max: [number, number, number];
+  rotationDeg?: number;
+} {
+  const env = triangulationGridEnvelope(grid);
+  const [cx, cy, cz] = env.center;
+  const [sx, sy, sz] = env.size;
+  return {
+    min: [cx - sx / 2, cy - sy / 2, cz - sz / 2],
+    max: [cx + sx / 2, cy + sy / 2, cz + sz / 2],
+    ...(grid.rotation ? { rotationDeg: grid.rotation } : {}),
+  };
+}
+
 // Pick the grid a REUSED triangulation should drive the LAD inversion on.
 //
 // The grid stored on a Helios mesh is the FLAT triangulation envelope:
