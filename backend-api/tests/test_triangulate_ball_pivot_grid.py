@@ -1,14 +1,17 @@
 """Grid-pinning tests for /api/triangulate (Ball Pivot LAD reuse).
 
 When the Ball Pivot request carries a `grid`, the backend bins each output
-triangle's centroid into that grid and returns a per-triangle cell id
-(`triangle_cell_ids`), so the leaf-area (LAD) reuse path can keep only the
-triangles that actually lie inside the grid. These pin:
+triangle's centroid into that grid and DROPS any triangle whose centroid falls
+outside every cell, so "crop to grid" yields a mesh of only in-grid triangles
+(the per-triangle `triangle_cell_ids` ride back for the LAD reuse path). These pin:
 
-  - the cell ids are present, aligned 1:1 with the triangles, and in range
-    (`[0, nx*ny*nz)` or the uint32 "outside" sentinel 0xffffffff),
+  - the cell ids are present, aligned 1:1 with the (surviving) triangles, and in
+    range `[0, nx*ny*nz)` — every returned triangle is in-grid (no -1 sentinel),
   - a multi-cell grid splits the mesh across more than one cell,
-  - a triangle whose centroid falls outside the grid is marked outside,
+  - a triangle whose centroid falls outside the grid is DROPPED from the result,
+  - a terrain-snapped grid bins against the SHIFTED cells: ground under the lifted
+    columns triangulates inside the flat crop box but OUTSIDE the voxels, and must
+    be dropped (the bug that left clear-cut lines + out-of-grid ground triangles),
   - no `grid` ⇒ no cell ids (the legacy path is untouched).
 
 Miss exclusion (the third LAD gotcha) is covered separately in
@@ -83,10 +86,11 @@ def test_multi_cell_grid_splits_triangles_across_cells(client):
     assert len(np.unique(in_grid)) >= 2, np.unique(in_grid)
 
 
-def test_triangle_outside_grid_is_marked_outside(client):
+def test_triangle_outside_grid_is_dropped(client):
     """A patch placed beyond the grid (but NOT cropped away — no crop_box here)
-    produces triangles whose centroids fall outside every cell, marked with the
-    outside sentinel so the reuse path drops them."""
+    produces triangles whose centroids fall outside every cell. The backend DROPS
+    them, so the returned mesh contains only in-grid triangles (every cell id is a
+    valid in-range cell, none is the outside sentinel)."""
     # A small grid hugging the origin patch; a second patch sits well outside it.
     near = _bumpy_grid(12, offset=(0.0, 0.0, 0.0))
     far = _bumpy_grid(12, offset=(5.0, 0.0, 0.0))
@@ -94,16 +98,42 @@ def test_triangle_outside_grid_is_marked_outside(client):
     res = client.post("/api/triangulate", json={
         "method": "ball_pivoting",
         "points": points,
-        # No crop: keep the far patch so it produces out-of-grid triangles.
+        # No crop: the far patch's triangles must be dropped by the grid bin (not
+        # the crop_box), proving the bin itself enforces "only in-grid triangles".
         "grid": _grid_around_unit_patch(),  # box only covers the near patch
     })
     assert res.status_code == 200
     body, buffers = decode_bin_frame(res.content)
     assert body["success"] is True, body.get("error")
     cell_ids = buffers["triangle_cell_ids"]
-    # Some triangles are inside (cell 0), some outside (sentinel).
-    assert (cell_ids == 0).any(), "expected some in-grid triangles"
-    assert (cell_ids == CELL_OUTSIDE).any(), "expected some out-of-grid triangles"
+    assert len(cell_ids) > 0, "expected some surviving in-grid triangles"
+    # Every returned triangle is in-grid — the far patch was dropped, not marked.
+    assert (cell_ids == 0).all(), f"out-of-grid triangles leaked: {np.unique(cell_ids)}"
+    assert (cell_ids == CELL_OUTSIDE).sum() == 0
+
+
+def test_terrain_snapped_grid_drops_ground_under_lifted_columns(client):
+    """The regression: a snapped grid lifts its voxel column ABOVE a ground patch.
+    The flat crop box still admits the ground (it's within the displaced z-extent),
+    so the ground triangulates — but it sits BELOW the lifted cell and must be
+    dropped by the offset-aware bin. Without column_offsets the ground would be
+    (wrongly) binned into the cell as if the grid were flat."""
+    # Ground patch at z≈0. A 1×1×1 grid whose column is lifted by +2 so the cell
+    # spans z∈[1.5, 2.5] — entirely above the ground.
+    points = _bumpy_grid(16).tolist()
+    grid = {"center": [0.5, 0.5, 1.0], "size": [2.0, 2.0, 1.0],
+            "nx": 1, "ny": 1, "nz": 1, "column_offsets": [2.0]}
+    res = client.post("/api/triangulate", json={
+        "method": "ball_pivoting", "points": points, "grid": grid,
+    })
+    assert res.status_code == 200
+    body, buffers = decode_bin_frame(res.content)
+    assert body["success"] is True, body.get("error")
+    # The single lifted cell is far above the ground, so NO triangle is in-grid →
+    # all dropped → zero triangles returned (not ground triangles mislabeled cell 0).
+    assert body["num_triangles"] == 0, \
+        "ground under a lifted column must be dropped, not binned into the cell"
+    assert len(buffers.get("triangle_cell_ids", [])) == 0
 
 
 def test_no_grid_omits_cell_ids(client):

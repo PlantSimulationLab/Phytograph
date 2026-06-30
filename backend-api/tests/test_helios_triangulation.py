@@ -112,6 +112,51 @@ class TestBinPointsToCells:
         assert ids.tolist() == []
 
 
+class TestBinPointsToCellsTerrain:
+    """Offset-aware binning for terrain-snapped grids (the ball-pivot crop bug)."""
+
+    def test_no_offsets_matches_regular_bin(self):
+        from qsm.grid import bin_points_to_cells, bin_points_to_cells_terrain
+        pts = [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5], [100, 0, 0]]
+        a = bin_points_to_cells(pts, [0, 0, 0], [2, 2, 2], 2, 2, 2)
+        b = bin_points_to_cells_terrain(pts, [0, 0, 0], [2, 2, 2], 2, 2, 2,
+                                        column_offsets=None)
+        assert a.tolist() == b.tolist()
+
+    def test_lifted_column_excludes_ground_below_it(self):
+        # A 1x1x1 grid, base cell z∈[-0.5,0.5], lifted by +2 → cell now z∈[1.5,2.5].
+        from qsm.grid import bin_points_to_cells_terrain
+        pts = [
+            [0.0, 0.0, 0.0],   # ground — BELOW the lifted cell → outside
+            [0.0, 0.0, 2.0],   # inside the lifted cell → cell 0
+            [0.0, 0.0, 5.0],   # above → outside
+        ]
+        ids = bin_points_to_cells_terrain(pts, [0, 0, 0], [1, 1, 1], 1, 1, 1,
+                                          column_offsets=[2.0])
+        assert ids.tolist() == [-1, 0, -1]
+
+    def test_per_column_offsets_unshift_independently(self):
+        # 2x1x1 grid: cols i=0,1. size 2 in x → each column 1 wide; size 1 in z so
+        # base cell z∈[-0.5,0.5]. Offsets [0, 2]: col0 cell z∈[-0.5,0.5], col1 z∈[1.5,2.5].
+        from qsm.grid import bin_points_to_cells_terrain
+        pts = [
+            [-0.5, 0.0, 0.0],   # col 0, z in its cell → 0
+            [0.5, 0.0, 2.0],    # col 1, z in its lifted cell → 1
+            [0.5, 0.0, 0.0],    # col 1, z=0 is BELOW its lifted cell → -1
+        ]
+        ids = bin_points_to_cells_terrain(pts, [0, 0, 0], [2, 1, 1], 2, 1, 1,
+                                          column_offsets=[0.0, 2.0])
+        assert ids.tolist() == [0, 1, -1]
+
+    def test_dropped_column_excluded(self):
+        from qsm.grid import bin_points_to_cells_terrain
+        pts = [[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]]
+        ids = bin_points_to_cells_terrain(pts, [0, 0, 0], [2, 1, 1], 2, 1, 1,
+                                          column_offsets=[0.0, 0.0],
+                                          kept_columns=[True, False])
+        assert ids.tolist() == [0, -1]
+
+
 # ---------------------------------------------------------------------------
 # _generate_helios_xml
 # ---------------------------------------------------------------------------
@@ -329,6 +374,69 @@ class TestDoHeliosComputationShaping:
         )
         main._do_helios_computation(req)
         assert captured_xml["grid_rotation_deg"] == 61.0
+
+
+class TestHeliosSnappedGridDropsOutOfGrid:
+    """A snapped grid triangulates within the FLAT envelope (Helios <grid> can't
+    undulate), so the result holds ground UNDER the lifted columns. The backend
+    must bin against `bin_grid` (the snapped grid) and DROP the out-of-voxel
+    triangles, so the returned mesh is only in-grid."""
+
+    @pytest.fixture
+    def stub_triangles(self, monkeypatch):
+        """Stub pyhelios so the cloud emits fixed triangles, exercising the binning
+        + drop after triangulation (the real path past getTriangleCount() > 0)."""
+        import sys, types
+        import numpy as np
+
+        # Two triangles: one near z=0 (GROUND, under a lifted cell), one near z=2
+        # (inside a cell lifted by +2). Each is a small triangle (T*9 flat floats).
+        tris = np.array([
+            # ground triangle (z≈0)
+            [0.4, 0.4, 0.0, 0.6, 0.4, 0.0, 0.5, 0.6, 0.0],
+            # lifted-cell triangle (z≈2)
+            [0.4, 0.4, 2.0, 0.6, 0.4, 2.0, 0.5, 0.6, 2.0],
+        ], dtype=np.float64)
+
+        class _Cloud:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def disableMessages(self): pass
+            def loadXML(self, p): pass
+            def triangulateHitPoints(self, l, a): pass
+            def getTriangleCount(self): return tris.shape[0]
+            def getTriangulationStats(self):
+                return {"candidates": tris.shape[0], "dropped_lmax": 0,
+                        "dropped_aspect": 0, "dropped_degenerate": 0}
+            def getTriangleVerticesAll(self):
+                return tris.reshape(-1).copy(), None
+
+        fake = types.ModuleType("pyhelios")
+        fake.LiDARCloud = _Cloud
+        fake.Context = _Cloud
+        monkeypatch.setitem(sys.modules, "pyhelios", fake)
+
+    def test_ground_under_lifted_column_is_dropped(self, stub_triangles):
+        import numpy as np
+        # 1x1x1 grid: base cell z∈[-0.5,0.5], lifted by +2 → cell z∈[1.5,2.5].
+        # `grid` = flat envelope (covers z 0..2.5); `bin_grid` = snapped grid.
+        env = main.HeliosGrid(center=[0.5, 0.5, 1.0], size=[2.0, 2.0, 3.0], nx=1, ny=1, nz=1)
+        snap = main.HeliosGrid(center=[0.5, 0.5, 0.0], size=[2.0, 2.0, 1.0],
+                               nx=1, ny=1, nz=1, column_offsets=[2.0])
+        req = main.HeliosTriangulationRequest(
+            scans=[_points_scan([[0, 0, 0]], origin=[0, 0, 5])],
+            grid=env, bin_grid=snap, lmax=1e9, max_aspect_ratio=1e9,
+        )
+        result = main._do_helios_computation(req)
+        assert result["success"] is True, result.get("error")
+        # Only the lifted-cell triangle survives; the ground triangle is dropped.
+        assert result["num_triangles"] == 1
+        cids = np.asarray(result["triangle_cell_ids"])
+        assert cids.tolist() == [0]   # the one survivor is in cell 0
+        # The surviving triangle is the z≈2 one (centroid z ~ 2.0).
+        verts = np.asarray(result["vertices"])
+        tri = np.asarray(result["triangles"])[0]
+        assert abs(verts[tri].mean(axis=0)[2] - 2.0) < 1e-6
 
 
 # ---------------------------------------------------------------------------

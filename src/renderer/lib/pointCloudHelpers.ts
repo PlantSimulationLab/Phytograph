@@ -882,6 +882,12 @@ export function buildHeliosTriangulationRequest(
   // displaced column (the Helios <grid> can't undulate), so a reused mesh spans
   // all the LAD voxels. Non-snapped grids pass through unchanged.
   const triGrid = grid ? triangulationGridEnvelope(grid) : null;
+  // For a snapped grid the envelope crop still admits the ground UNDER the lifted
+  // columns and canopy ABOVE the voxel tops, so the backend must bin triangles into
+  // the actual displaced voxels and drop the out-of-grid ones. Send the SNAPPED grid
+  // (with column_offsets) as `bin_grid` for that. Only meaningful when offsets exist;
+  // a flat grid is binned against `grid` itself, so omit bin_grid there.
+  const isSnapped = !!(grid && grid.column_offsets && grid.column_offsets.length > 0);
 
   return {
     scans: requestScans,
@@ -892,6 +898,7 @@ export function buildHeliosTriangulationRequest(
     phi_min: 0,
     phi_max: 360,
     ...(triGrid ? { grid: triGrid } : {}),
+    ...(isSnapped ? { bin_grid: grid! } : {}),
   };
 }
 

@@ -1638,6 +1638,16 @@ class TriangulationGrid(BaseModel):
     # binning here is axis-aligned, but the C++ inversion re-bins each triangle
     # with a rotation-aware containment test, so a rotated grid is still correct.
     rotation: float = 0.0
+    # Per-(x,y)-column vertical offset for a terrain-following ("snapped") grid,
+    # row-major [j*nx + i], length nx*ny. Each value is the z shift added to the
+    # regular lattice for that column (same convention as HeliosGrid). REQUIRED for
+    # a snapped grid: the flat crop_box only bounds the displaced extent, so the
+    # ground under the lifted columns survives the crop and triangulates OUTSIDE the
+    # voxels. The per-triangle cell binning uses these offsets to assign (and drop)
+    # triangles against the actual snapped cells, so "crop to grid" yields only
+    # in-grid triangles. None = axis-regular grid (no shift).
+    column_offsets: Optional[List[float]] = None
+    kept_columns: Optional[List[bool]] = None
 
 
 class TriangulationRequest(BaseModel):
@@ -1719,6 +1729,114 @@ class TriangulationResponse(BaseModel):
     # centroid fell outside every cell. Aligned 1:1 with `triangles`. Empty when no
     # grid was supplied. Lets the LAD reuse path keep only in-grid triangles.
     triangle_cell_ids: List[int] = []
+
+
+def _ball_pivot_mesh(o3d, points_np, radii=None):
+    """Run BPA on a point array with cheap centroid-facing normals + an auto radius
+    ladder ([median, 2x, 4x] of NN spacing). Returns an open3d TriangleMesh. Shared
+    by the single-pass and adaptive-tiled paths so both estimate radii identically.
+    `radii` overrides the auto ladder (an explicit user value)."""
+    import numpy as np
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points_np)
+    pcd.estimate_normals()
+    centroid = points_np.mean(axis=0)
+    pcd.orient_normals_towards_camera_location(centroid)
+    pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
+    if radii is None:
+        ref = float(np.median(np.asarray(pcd.compute_nearest_neighbor_distance())))
+        radii = [ref, ref * 2, ref * 4]
+    return o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+        pcd, o3d.utility.DoubleVector(radii))
+
+
+# A single global ball radius can't mesh a variable-density scan: a tripod canopy is
+# dense near the scanner and several times coarser at range / uphill, so a radius
+# sized to the (dense-dominated) median leaves the coarse regions un-triangulated,
+# while a radius big enough to bridge them explodes combinatorially on the dense
+# regions AND, run after the small rungs, can't recover the coarse points the small
+# balls already fragmented. The fix is SPATIAL: split the xy footprint into tiles,
+# triangulate each with ITS OWN local-density radius (on fresh points), and merge.
+# Engaged only when the density actually varies (p90/median spacing exceeds
+# `_BPA_ADAPTIVE_SPREAD`), so uniform clouds keep the cheaper single pass.
+_BPA_ADAPTIVE_SPREAD = 1.8   # p90/median NN-spacing ratio that triggers tiling
+_BPA_TILE_TARGET = 120_000   # aim for ~this many points per tile (sets the tile count)
+_BPA_MIN_TILE_POINTS = 50    # skip tiles too sparse to mesh
+
+
+def _adaptive_ball_pivot(o3d, points_np, ckpt=None):
+    """Density-adaptive tiled BPA. Returns (vertices, triangles) merged across tiles,
+    or None to signal the caller should fall back to the single global pass (uniform
+    density, or too few points to tile). Each tile uses its own local radius, with an
+    overlap halo so seams mesh; only triangles whose centroid lies in a tile's CORE
+    are kept, so the halo overlap doesn't double-cover the seams."""
+    import numpy as np
+    n = points_np.shape[0]
+    if n < 4 * _BPA_MIN_TILE_POINTS:
+        return None
+
+    # Cheap global density-spread probe: tile only when spacing is non-uniform.
+    probe = o3d.geometry.PointCloud()
+    probe.points = o3d.utility.Vector3dVector(points_np)
+    nn = np.asarray(probe.compute_nearest_neighbor_distance())
+    med = float(np.median(nn)) if nn.size else 0.0
+    if med <= 0:
+        return None
+    p90 = float(np.percentile(nn, 90))
+    if p90 / med < _BPA_ADAPTIVE_SPREAD:
+        return None  # ~uniform — the single pass handles it fine and cheaper
+
+    # Tile the xy footprint into a roughly square grid sized to the point budget.
+    lo = points_np.min(axis=0); hi = points_np.max(axis=0)
+    n_tiles = max(1, int(round(n / _BPA_TILE_TARGET)))
+    side = max(1, int(round(math.sqrt(n_tiles))))
+    xedges = np.linspace(lo[0], hi[0], side + 1)
+    yedges = np.linspace(lo[1], hi[1], side + 1)
+    # Halo = a few median spacings, so a tile sees enough neighbors past its border
+    # to mesh the seam; the core-centroid filter below removes the duplicate overlap.
+    halo = max(8.0 * med, (hi[0] - lo[0]) / side * 0.05)
+
+    vert_blocks = []
+    tri_blocks = []
+    vbase = 0
+    for ix in range(side):
+        for iy in range(side):
+            x0, x1 = xedges[ix], xedges[ix + 1]
+            y0, y1 = yedges[iy], yedges[iy + 1]
+            m = ((points_np[:, 0] >= x0 - halo) & (points_np[:, 0] < x1 + halo) &
+                 (points_np[:, 1] >= y0 - halo) & (points_np[:, 1] < y1 + halo))
+            P = points_np[m]
+            if P.shape[0] < _BPA_MIN_TILE_POINTS:
+                continue
+            if ckpt is not None:
+                ckpt()
+            mesh = _ball_pivot_mesh(o3d, P)
+            tv = np.asarray(mesh.vertices)
+            tt = np.asarray(mesh.triangles)
+            if tt.shape[0] == 0:
+                continue
+            # Keep only triangles whose centroid is in this tile's CORE (not the halo),
+            # so the overlap between adjacent tiles isn't meshed twice. Edge tiles keep
+            # out to the footprint bound.
+            cent = tv[tt].mean(axis=1)
+            cx0 = x0 if ix > 0 else -np.inf
+            cx1 = x1 if ix < side - 1 else np.inf
+            cy0 = y0 if iy > 0 else -np.inf
+            cy1 = y1 if iy < side - 1 else np.inf
+            core = ((cent[:, 0] >= cx0) & (cent[:, 0] < cx1) &
+                    (cent[:, 1] >= cy0) & (cent[:, 1] < cy1))
+            tt = tt[core]
+            if tt.shape[0] == 0:
+                continue
+            vert_blocks.append(tv)
+            tri_blocks.append(tt + vbase)
+            vbase += tv.shape[0]
+
+    if not tri_blocks:
+        return None
+    vertices = np.concatenate(vert_blocks, axis=0)
+    triangles = np.concatenate(tri_blocks, axis=0)
+    return vertices, triangles
 
 
 def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> dict:
@@ -1882,31 +2000,39 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
         _report(0.45, f"Meshing ({request.method.replace('_', ' ')})")
 
         if request.method == "ball_pivoting":
-            # Ball Pivoting Algorithm
-            if not pcd.has_normals():
-                # Fallback for estimate_normals=False callers. Use the same cheap
-                # centroid-facing orientation as the main path above (NOT the
-                # minutes-long MST) — BPA only needs locally consistent normals.
-                pcd.estimate_normals()
-                centroid = np.asarray(pcd.points).mean(axis=0)
-                pcd.orient_normals_towards_camera_location(centroid)
-                pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
-
-            # Auto-compute radii if not provided.
+            # Ball Pivoting Algorithm.
             #
-            # Use the MEDIAN nearest-neighbor distance, not the mean: it is robust
-            # to the handful of sparse outliers that survive miss exclusion, so a
-            # few stray points can't inflate the ball radius (a too-large radius
-            # makes BPA explode combinatorially). The median reflects the real
-            # surface spacing.
+            # A single global ball radius can't serve a variable-density scan: sized
+            # to the (dense-dominated) median spacing it leaves coarse regions —
+            # e.g. the uphill / at-range canopy of a tripod scan — un-triangulated,
+            # but sized to bridge them it explodes on the dense regions. When the
+            # density actually varies, triangulate in spatial TILES, each with its
+            # own local-density radius, and merge (_adaptive_ball_pivot). Uniform
+            # clouds (and explicit user radii) take the cheaper single global pass.
+            # See also _do_helios_computation (no fixed ball, handles this natively).
+            adaptive = None
             if request.radii is None:
-                distances = pcd.compute_nearest_neighbor_distance()
-                ref_dist = float(np.median(distances))
-                radii = o3d.utility.DoubleVector([ref_dist, ref_dist * 2, ref_dist * 4])
+                adaptive = _adaptive_ball_pivot(o3d, np.asarray(points), ckpt=_ckpt)
+            if adaptive is not None:
+                a_verts, a_tris = adaptive
+                mesh = o3d.geometry.TriangleMesh()
+                mesh.vertices = o3d.utility.Vector3dVector(a_verts)
+                mesh.triangles = o3d.utility.Vector3iVector(a_tris)
             else:
-                radii = o3d.utility.DoubleVector(request.radii)
-
-            mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(pcd, radii)
+                # Single global pass (uniform density, explicit radii, or too few
+                # points to tile). Cheap centroid-facing normals if not already set.
+                if not pcd.has_normals():
+                    pcd.estimate_normals()
+                    centroid = np.asarray(pcd.points).mean(axis=0)
+                    pcd.orient_normals_towards_camera_location(centroid)
+                    pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
+                if request.radii is None:
+                    distances = pcd.compute_nearest_neighbor_distance()
+                    ref_dist = float(np.median(distances))
+                    radii = o3d.utility.DoubleVector([ref_dist, ref_dist * 2, ref_dist * 4])
+                else:
+                    radii = o3d.utility.DoubleVector(request.radii)
+                mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(pcd, radii)
 
         elif request.method == "poisson":
             # Poisson Surface Reconstruction
@@ -2017,25 +2143,41 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
         triangles = np.asarray(mesh.triangles)
         normals = np.asarray(mesh.vertex_normals) if mesh.has_vertex_normals() else None
 
-        # Pin to grid: bin each triangle's centroid into the request grid so the
-        # LAD reuse path can keep only in-grid triangles. The renderer already
-        # cropped points to the grid (honoring rotation via crop_box_rotation_deg),
-        # so almost every centroid lands inside; the few that straddle the boundary
-        # get -1 and are dropped downstream. Mirrors the Helios triangulation's
-        # per-triangle cell ids. Cell binning here is axis-aligned (rotation is
-        # ignored for the bin); the C++ setExternalTriangulation re-bins each
-        # centroid with getContainingGridCell, which DOES honor cell rotation, so
-        # a rotated grid is still assigned correctly at inversion time.
+        # Pin to grid: bin each triangle's centroid into the request grid, then DROP
+        # any triangle whose centroid falls outside every cell so the returned mesh
+        # is exactly "cropped to grid". The point crop (crop_box) only bounds the
+        # grid's WORLD AABB — for a terrain-snapped grid that flat box still admits
+        # the ground UNDER the lifted columns, which then triangulates outside the
+        # voxels. Binning against the SNAPPED cells (offset-aware) and dropping the
+        # out-of-grid triangles here is what makes the displayed standalone mesh
+        # honor the staircase, not just the LAD reuse path. Rotation is handled in
+        # the bin (inverse-rotate into the grid frame); the C++ inversion later
+        # re-bins with its own rotation/offset-aware containment test.
         triangle_cell_ids: list = []
         if request.grid is not None and triangles.shape[0] > 0:
+            from qsm.grid import bin_points_to_cells_terrain
             _report(0.97, "Binning into grid")
             g = request.grid
             v = vertices[triangles]  # (T, 3, 3)
             centroids = v.mean(axis=1)  # (T, 3)
-            cells = _bin_points_to_cells(
-                centroids, g.center, g.size, g.nx, g.ny, g.nz
+            cells = bin_points_to_cells_terrain(
+                centroids, g.center, g.size, g.nx, g.ny, g.nz,
+                column_offsets=g.column_offsets, rotation_deg=g.rotation,
+                kept_columns=g.kept_columns,
             )
-            triangle_cell_ids = cells
+            cells = np.asarray(cells)
+            in_grid = cells >= 0
+            if not in_grid.all():
+                # Keep only in-grid triangles; their vertices may now be unreferenced
+                # but that's harmless (the renderer indexes by triangle). Re-derive the
+                # surface area from the surviving triangles so it reflects the crop.
+                triangles = triangles[in_grid]
+                cells = cells[in_grid]
+                tv = vertices[triangles]
+                e1 = tv[:, 1] - tv[:, 0]
+                e2 = tv[:, 2] - tv[:, 0]
+                surface_area = float(0.5 * np.linalg.norm(np.cross(e1, e2), axis=1).sum())
+            triangle_cell_ids = cells.tolist()
 
         _report(1.0, "Finalizing")
         return {
@@ -3337,6 +3479,14 @@ class HeliosTriangulationRequest(BaseModel):
     # auto-creates a single-cell grid encompassing all scan points and flags
     # grid_warning on the response.
     grid: Optional[HeliosGrid] = None
+    # Terrain-following ("snapped") grids only: `grid` above is the FLAT envelope
+    # the Helios <grid> crops/triangulates within (it can't undulate), so it admits
+    # the ground UNDER the lifted columns and canopy ABOVE the voxel tops. `bin_grid`
+    # carries the actual SNAPPED grid (with column_offsets) so the backend bins each
+    # output triangle into the displaced voxels and DROPS the out-of-grid ones —
+    # making "crop to grid" yield only in-voxel triangles. When absent the bin uses
+    # `grid` itself (the flat / non-snapped case), unchanged.
+    bin_grid: Optional[HeliosGrid] = None
 
 class HeliosFilterEstimate(BaseModel):
     """Auto-estimated triangulation filter, derived from the candidate edge-length
@@ -4404,16 +4554,50 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         v2 = unique_arr[triangles_arr[:, 2]]
         total_area = float(0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1).sum())
 
-        # Per-triangle grid cell: bin each triangle's centroid into the request
-        # grid (the same grid Helios triangulated within). Lets the UI split the
-        # leaf-angle distribution per voxel. With the auto 1x1x1 grid this is all
-        # zeros. -1 (outside) is preserved; the binary packer casts it to the
-        # uint32 sentinel 0xffffffff the renderer already treats as "outside".
+        # Per-triangle grid cell: bin each triangle's centroid into the grid, then
+        # DROP any triangle whose centroid falls outside every cell so the mesh is
+        # exactly "cropped to grid". For a terrain-snapped grid the Helios <grid>
+        # cropped to the FLAT envelope (it can't undulate), so the result still holds
+        # the ground UNDER the lifted columns and canopy ABOVE the voxel tops; those
+        # triangles are outside the actual voxels and must go. `bin_grid` (the snapped
+        # grid with column_offsets) is the authoritative voxel geometry to bin
+        # against; absent it, bin against the triangulation grid itself (flat case).
+        # Lets the UI split the leaf-angle distribution per voxel. -1 (outside) is
+        # never returned now (dropped); the binary packer still maps any -1 to the
+        # uint32 sentinel for safety.
         _report(0.93, "Binning into grid")
         centroids = (v0 + v1 + v2) / 3.0
-        triangle_cell_ids = _bin_points_to_cells(
-            centroids, grid_center, grid_size, grid_nx, grid_ny, grid_nz
-        )
+        bg = request.bin_grid if request.bin_grid is not None else request.grid
+        if bg is not None and getattr(bg, "column_offsets", None):
+            from qsm.grid import bin_points_to_cells_terrain
+            triangle_cell_ids = bin_points_to_cells_terrain(
+                centroids, bg.center, bg.size, bg.nx, bg.ny, bg.nz,
+                column_offsets=bg.column_offsets, rotation_deg=bg.rotation,
+                kept_columns=bg.kept_columns,
+            )
+        else:
+            triangle_cell_ids = _bin_points_to_cells(
+                centroids, grid_center, grid_size, grid_nx, grid_ny, grid_nz
+            )
+        triangle_cell_ids = np.asarray(triangle_cell_ids)
+        # Drop out-of-grid triangles (snapped-grid ground/over-canopy, or anything
+        # outside a non-snapped grid). Only act when a real (non-auto) grid was given
+        # AND something is actually outside, so the auto 1x1x1 path is untouched.
+        if request.grid is not None and triangle_cell_ids.size:
+            in_grid = triangle_cell_ids >= 0
+            if not in_grid.all():
+                # triangles_arr, kept_scan_ids, and triangle_cell_ids share one
+                # per-triangle order (dedup only remapped vertices, not triangle
+                # order), so the same mask drops them in lockstep.
+                triangles_arr = triangles_arr[in_grid]
+                triangle_cell_ids = triangle_cell_ids[in_grid]
+                kept_scan_ids = kept_scan_ids[in_grid]
+                # Re-derive area from the surviving triangles.
+                v0 = unique_arr[triangles_arr[:, 0]]
+                v1 = unique_arr[triangles_arr[:, 1]]
+                v2 = unique_arr[triangles_arr[:, 2]]
+                total_area = float(
+                    0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1).sum())
 
         _report(1.0, "Finalizing")
         return {

@@ -11,9 +11,14 @@ output and dense surface coverage on planar input.
 """
 
 import numpy as np
-import open3d as o3d
 
 from tests.binframe import decode_bin_frame
+
+# NOTE: open3d is imported lazily inside the one test that needs it, NOT at module
+# scope. Importing open3d before `main` (and thus before pyhelios) loads open3d's
+# bundled GL dylibs first, which collide with libhelios's native load and make
+# `import main` fail with a LibraryLoadError at the client-fixture import. main.py
+# itself imports open3d lazily for the same reason; mirror that here.
 
 
 def _planar_grid(n: int = 30) -> list[list[float]]:
@@ -58,7 +63,10 @@ def test_alpha_shape_emits_no_invalid_tetra_warnings(client, capfd):
     planar grid produces zero such warnings.
     """
     # Open3D's verbosity is process-global; ensure we start from the default so
-    # the endpoint's context manager is what does the suppressing.
+    # the endpoint's context manager is what does the suppressing. Imported here
+    # (not at module scope) so pyhelios loads before open3d's GL dylibs — see the
+    # module-header note.
+    import open3d as o3d
     o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Warning)
 
     res = client.post(

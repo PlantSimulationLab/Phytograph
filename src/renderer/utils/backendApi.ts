@@ -683,6 +683,11 @@ export interface HeliosTriangulationRequest {
   // Explicit grid from a voxel box. When omitted, the backend auto-creates a
   // single-cell grid over all points and sets grid_warning on the response.
   grid?: HeliosGrid;
+  // Snapped-grid only: `grid` is the flat envelope Helios crops/triangulates
+  // within; `bin_grid` is the actual SNAPPED grid (with column_offsets) the backend
+  // bins triangles into so it can drop the ground-below / canopy-above triangles the
+  // flat crop admits. Omitted for non-snapped grids (binned against `grid`).
+  bin_grid?: HeliosGrid;
 }
 
 // Auto-estimate fields as returned by the backend.
