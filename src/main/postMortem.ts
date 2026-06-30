@@ -199,6 +199,16 @@ export function checkPreviousSession(): boolean {
 
 /** The post-mortem recovery dialog. Non-fatal: the app keeps launching normally. */
 function showRecoveryDialog(dumpPath: string | null): void {
+  // This runs before the main window exists, so the dialog is parentless and —
+  // on macOS — can open BEHIND whatever app the user is now looking at, leaving
+  // a launch silently blocked on a modal they can't see. Force the app to the
+  // foreground first so the dialog surfaces on top. (app.focus with
+  // steal:true is the macOS-correct way to grab activation; harmless elsewhere.)
+  try {
+    app.focus({ steal: true });
+  } catch {
+    /* best-effort — never block the dialog on a focus failure */
+  }
   const reportContext = dumpPath
     ? `previous session crashed (native minidump: ${dumpPath.split(/[\\/]/).pop()})`
     : 'previous session did not exit cleanly (no minidump — likely force-quit/OOM-kill)';

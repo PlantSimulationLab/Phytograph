@@ -357,6 +357,10 @@ app.whenReady().then(async () => {
   // only spawns when none answers), so calling it again is safe and cheap.
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
+      // Reopening after the window was closed starts a fresh live session;
+      // window-all-closed cleared the marker, so re-arm it to catch a crash in
+      // this new session.
+      markSessionStarted();
       await startBackend();
       createWindow();
     }
@@ -365,6 +369,18 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   stopBackend();
+  // Closing the last window is a clean, deliberate end of the session — clear
+  // the marker NOW. On macOS the app stays alive after the window closes (we
+  // don't quit on darwin), so 'before-quit' won't run until the process is
+  // later terminated, and that termination often comes as a SIGINT/SIGTERM from
+  // the dev terminal whose JS handler doesn't reliably run before Electron's
+  // native signal teardown — leaving the marker behind and making the NEXT
+  // launch falsely report a crash. Clearing here means the marker is already
+  // gone by the time the user Ctrl+C's `npm run dev`, regardless of how the
+  // process ultimately dies. markSessionStarted() rewrites it if the user
+  // reopens a window via the Dock ('activate'), so a genuine later crash is
+  // still caught.
+  clearCleanShutdownMarker();
   // Under E2E, always quit — even on darwin — so Playwright's app.close()
   // actually causes process exit and the next spec doesn't race the
   // previous Electron's teardown (which on macOS can briefly flash a

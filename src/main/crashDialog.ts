@@ -243,6 +243,14 @@ export function showBackendFailedDialog(reload: () => void): void {
  */
 export function showFatalMainErrorDialog(error: Error): void {
   crashLog.error('Fatal main-process error; showing dialog before exit:', error);
+  // A fatal main error can strike before the window exists (or with it dead), so
+  // the dialog may be parentless and open behind the foreground app on macOS.
+  // Pull the app forward so the user actually sees the modal they're blocked on.
+  try {
+    app.focus({ steal: true });
+  } catch {
+    /* best-effort */
+  }
   const reportContext = `main-process uncaught exception: ${error.message}`;
   // Loop so View Logs / Report don't dismiss the dialog — only Quit exits.
   for (;;) {
