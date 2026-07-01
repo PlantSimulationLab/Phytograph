@@ -36,6 +36,13 @@ EXPECTED_TOTAL = 9301
 EXPECTED_MISSES = 2779
 EXPECTED_HITS = EXPECTED_TOTAL - EXPECTED_MISSES  # 6522
 
+# leafcube_multi.xyz is a large, local-only dataset (not committed — see
+# example-datasets/README.md); skip when absent (e.g. CI).
+pytestmark = pytest.mark.skipif(
+    not LEAFCUBE_XYZ.is_file(),
+    reason="leafcube_multi.xyz fixture not available (local-only example dataset)",
+)
+
 
 @pytest.fixture
 def leafcube_session():

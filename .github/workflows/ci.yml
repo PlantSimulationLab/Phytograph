@@ -117,10 +117,12 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
           # Test-only deps (not in requirements.txt / not shipped in the bundle).
-          # pytest-cov is required because backend-api/pytest.ini's addopts pass
-          # --cov=main / --cov-report / --cov-fail-under; without it pytest exits
-          # with "unrecognized arguments" before collecting any test.
-          pip install pytest pytest-cov httpx
+          # pytest-cov: pytest.ini's addopts pass --cov=… (pytest exits with
+          #   "unrecognized arguments" without it).
+          # pytest-asyncio: pytest.ini sets asyncio_mode = auto, so the async
+          #   test_e57_import coroutines need it or they error as "async def not
+          #   natively supported".
+          pip install pytest pytest-cov pytest-asyncio httpx
 
       # Build libhelios from the submodule (needed by the backend bundle AND so
       # `import main` in the pytest conftest loads pyhelios rather than trying to

@@ -15,9 +15,11 @@ downstream consumer works unchanged. Two real assertions:
   - they are EXCLUDED from the hits-only octree, so `tight_bounds` is the real
     ~metre-scale geometry, NOT the ~1001 m far field.
 
-The end-to-end case uses the committed `example-datasets/leafcube_multi.xyz`
-fixture (the exact file the bug was reported against). Unit cases cover the
-distance fallback and the no-signal control via the helper directly.
+The end-to-end case uses the `example-datasets/leafcube_multi.xyz` fixture (the
+exact file the bug was reported against) — a large, local-only dataset that is
+NOT committed (see example-datasets/README.md), so the whole module skips when
+it's absent (e.g. CI). Unit cases cover the distance fallback and the no-signal
+control via the helper directly.
 """
 
 from pathlib import Path
@@ -45,6 +47,17 @@ def _converter_available() -> bool:
         return True
     except Exception:
         return False
+
+
+# leafcube_multi.xyz is a large, local-only dataset (not committed — see
+# example-datasets/README.md). Every test here reads it (the unit tests via the
+# leafcube_arrays fixture, the endpoint tests via source_path), so skip the whole
+# module when it's absent (e.g. CI). Endpoint tests add a _converter_available()
+# guard on top.
+pytestmark = pytest.mark.skipif(
+    not LEAFCUBE_XYZ.is_file(),
+    reason="leafcube_multi.xyz fixture not available (local-only example dataset)",
+)
 
 
 # ---------------------------------------------------------------------------
