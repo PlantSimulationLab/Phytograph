@@ -3845,6 +3845,73 @@ def _file_xyz_bounds(file_path: str, ascii_format: Optional[str] = None):
     return n, lo, hi
 
 
+def _read_file_xyz(file_path: str, ascii_format: Optional[str] = None) -> "Optional[np.ndarray]":
+    """Read an ASCII point file into an (N,3) float64 XYZ array.
+
+    Locates the x/y/z columns via the scan's ASCII_format (see
+    _xyz_column_indices), skips comment/short/non-numeric lines exactly like
+    _file_xyz_bounds, and returns only the coordinates. Used to crop a scan's
+    points to the triangulation grid before handing them to Helios. Returns None
+    if the file yields no usable coordinates.
+    """
+    import numpy as np
+    xi, yi, zi = _xyz_column_indices(ascii_format)
+    need = max(xi, yi, zi) + 1
+    rows = []
+    with open(file_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line[0] in '#/':
+                continue
+            cols = line.split()
+            if len(cols) < need:
+                continue
+            try:
+                rows.append((float(cols[xi]), float(cols[yi]), float(cols[zi])))
+            except ValueError:
+                continue
+    if not rows:
+        return None
+    return np.asarray(rows, dtype=np.float64)
+
+
+def _read_file_all_columns(file_path: str, ascii_format: Optional[str] = None):
+    """Read an ASCII point file into an (N, C) float64 array of ALL numeric
+    columns, plus the (x, y, z) column indices resolved from the ASCII_format.
+
+    Like `_read_file_xyz`, but keeps every column so the triangulation pre-crop
+    can rewrite an in-grid subset WITHOUT dropping ancillary columns (notably
+    target_index/target_count, which the multi-return triangulation filter needs).
+    Rows are kept only when they have at least `need` columns AND all parse as
+    floats — non-numeric ancillary tokens (there are none in the temp files this
+    reads) would drop the row. Returns (array (N, C), (xi, yi, zi)) or
+    (None, indices) when the file yields no usable rows.
+    """
+    import numpy as np
+    xi, yi, zi = _xyz_column_indices(ascii_format)
+    need = max(xi, yi, zi) + 1
+    rows = []
+    with open(file_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line[0] in '#/':
+                continue
+            cols = line.split()
+            if len(cols) < need:
+                continue
+            try:
+                rows.append([float(c) for c in cols])
+            except ValueError:
+                continue
+    if not rows:
+        return None, (xi, yi, zi)
+    # Ragged rows (differing column counts) can't stack; truncate to the shortest
+    # so the array is rectangular. In practice the temp files are uniform.
+    width = min(len(r) for r in rows)
+    arr = np.asarray([r[:width] for r in rows], dtype=np.float64)
+    return arr, (xi, yi, zi)
+
+
 def _grid_xml_block(center: list, size: list, nx: int = 1, ny: int = 1,
                     nz: int = 1, rotation_deg: float = 0.0,
                     column_offsets: Optional[list] = None,
@@ -4115,6 +4182,59 @@ def _session_hit_positions_for_triangulation(session_id: str) -> "np.ndarray":
     if world_shift is not None:
         positions = positions + np.asarray(world_shift, dtype=np.float64)
     return np.ascontiguousarray(positions)
+
+
+def _session_multireturn_columns_for_triangulation(session_id: str):
+    """Per-hit multi-return columns for a session's surviving HITS, aligned 1:1
+    with `_session_hit_positions_for_triangulation` (same ~deleted & non-miss
+    mask, same order). Returns a dict {slug: (N,) float64} carrying
+    target_index, target_count AND timestamp, or {} when the cloud is not
+    multi-return.
+
+    Why triangulation needs these: C++ triangulateHitPoints auto-detects
+    multi-return via isMultiReturnData() (any hit with target_count > 1) and, when
+    true, triangulates FIRST RETURNS ONLY with an adaptive separation filter —
+    yielding the correct leaf surface. If the temp file we hand Helios is bare
+    `x y z`, isMultiReturnData() is False and it triangulates ALL returns as
+    single-return, producing a sparse/biased mesh (~1/3 the true leaf area) whose
+    G(theta) is wrong. So we carry these columns into the temp file + ASCII_format
+    to keep a reused triangulation consistent with the inversion's own
+    (_do_lad_computation) triangulation.
+
+    timestamp is included because isMultiReturnData() itself hard-REQUIRES a
+    `timestamp` field once it sees target_count > 1 (it groups returns into beams
+    by timestamp) — omitting it makes the C++ call raise. Only returned when
+    target_index, target_count AND timestamp all exist AND at least one hit has
+    target_count > 1 (mirrors isMultiReturnData()).
+    """
+    import numpy as np
+    sess = _cloud_sessions.get(session_id)
+    if sess is None:
+        return {}
+    with _cloud_session_lock:
+        keep = ~sess.deleted
+        if _MISS_SLUG in sess.extras:
+            keep = keep & (sess.extras[_MISS_SLUG] == 0)
+        ti = sess.extras.get("target_index")
+        tc = sess.extras.get("target_count")
+        # timestamp lives on the dedicated float64 field (GPS-time precision),
+        # falling back to the float32 extra for the ASCII-import path.
+        if (sess.timestamps is not None
+                and sess.timestamps.shape[0] == sess.positions.shape[0]):
+            ts = sess.timestamps
+        else:
+            ts = sess.extras.get("timestamp")
+        if ti is None or tc is None or ts is None:
+            return {}
+        ti = np.asarray(ti[keep], dtype=np.float64)
+        tc = np.asarray(tc[keep], dtype=np.float64)
+        ts = np.asarray(ts[keep], dtype=np.float64)
+    # Only genuinely multi-return data (a second return exists) triggers the
+    # C++ multi-return path; single-return clouds with dummy target_count==1
+    # columns must stay on the single-return path.
+    if not np.any(tc > 1):
+        return {}
+    return {"target_index": ti, "target_count": tc, "timestamp": ts}
 _HELIOS_MERGED_MESSAGE = (
     "These points look like a merged multi-scan cloud — candidate edges are far "
     "larger than the point spacing, which happens when a single scan actually "
@@ -4303,15 +4423,37 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 bb_lo = np.minimum(bb_lo, xyz.min(axis=0))
                 bb_hi = np.maximum(bb_hi, xyz.max(axis=0))
                 pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
+                # Preserve multi-return columns (target_index/target_count) so the
+                # temp file Helios triangulates from is detected as multi-return
+                # (isMultiReturnData()) and gets the first-return + adaptive
+                # separation filter — matching the inversion's own triangulation.
+                # Without them a full-waveform cloud triangulates as single-return
+                # and the reused mesh's G(theta) is wrong (see
+                # _session_multireturn_columns_for_triangulation). Aligned 1:1 with
+                # xyz (same mask/order).
+                mr_cols = _session_multireturn_columns_for_triangulation(session_id)
                 # %.8g, not %.6g: world coords can sit near z~100 m, where 6
                 # sig-figs rounds to ~1 mm and quantizes the angular structure the
                 # spherical-projection Delaunay depends on — coarse enough to
                 # shatter leaf surfaces (most candidates then exceed Lmax). 8
                 # sig-figs keeps ~µm precision at 100 m.
-                np.savetxt(pts_path, xyz, fmt="%.8g", delimiter=" ")
+                if mr_cols:
+                    # Order the columns to match the ASCII_format string below.
+                    # timestamp is required by isMultiReturnData() once
+                    # target_count > 1 (it groups returns into beams).
+                    out = np.column_stack([
+                        xyz,
+                        mr_cols["target_index"],
+                        mr_cols["target_count"],
+                        mr_cols["timestamp"],
+                    ])
+                    np.savetxt(pts_path, out, fmt="%.8g", delimiter=" ")
+                    fmt = "x y z target_index target_count timestamp"
+                else:
+                    np.savetxt(pts_path, xyz, fmt="%.8g", delimiter=" ")
+                    fmt = "x y z"
                 n_theta, n_phi = _resolution(
                     scan_entry, xyz.shape[0], theta_max - theta_min, phi_max - phi_min)
-                fmt = "x y z"
                 fp = pts_path
             elif scan_entry.file_path:
                 # File-path mode: pyhelios reads the scan file directly from disk.
@@ -4384,6 +4526,57 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 "their bounding box. This assumes ground and trunk have already "
                 "been segmented or cropped."
             )
+
+        # Crop every scan's points to the voxel volume BEFORE triangulating. A
+        # scan's footprint (e.g. a 1 km TLS acquisition) can dwarf a small analysis
+        # grid; triangulating the whole footprint just to discard the out-of-grid
+        # triangles afterward wastes the Delaunay + FFI + dedup on points that can
+        # never contribute. Cropping to the grid first means Helios only ever sees
+        # in-voxel points, so every candidate triangle it builds is entirely within
+        # the grid by construction — no triangle can straddle the voxel wall (the
+        # per-triangle centroid crop this supersedes kept boundary triangles with a
+        # vertex poking outside). `bin_grid` (the terrain-SNAPPED grid) is the
+        # authoritative voxel geometry when present — cropping to it drops the ground
+        # UNDER the lifted columns and canopy ABOVE the voxel tops that the flat
+        # Helios <grid> would otherwise admit; absent it, crop to `grid` itself. Only
+        # runs for a real (explicit) grid — the auto single-cell bounding box already
+        # encloses every point, so there is nothing to crop.
+        if request.grid is not None:
+            from qsm.grid import bin_points_to_cells_terrain
+            _crop_bg = request.bin_grid if request.bin_grid is not None else request.grid
+            for _si, scan_info in enumerate(scans_info):
+                _ckpt()
+                # Read ALL columns (not just xyz) so the in-grid subset can be
+                # rewritten WITHOUT dropping ancillary columns the triangulation
+                # needs — notably target_index/target_count, which drive Helios's
+                # multi-return first-return + adaptive-separation filter. Cropping
+                # to xyz-only here would silently downgrade a full-waveform scan to
+                # single-return and bias the mesh's G(theta).
+                rows_in, (xi, yi, zi) = _read_file_all_columns(
+                    scan_info["filepath"], scan_info["ascii_format"])
+                if rows_in is None or rows_in.shape[0] == 0:
+                    continue
+                pts_in = rows_in[:, (xi, yi, zi)]
+                cell_ids = bin_points_to_cells_terrain(
+                    pts_in, _crop_bg.center, _crop_bg.size,
+                    _crop_bg.nx, _crop_bg.ny, _crop_bg.nz,
+                    column_offsets=getattr(_crop_bg, "column_offsets", None),
+                    rotation_deg=float(getattr(_crop_bg, "rotation", 0.0) or 0.0),
+                    kept_columns=getattr(_crop_bg, "kept_columns", None),
+                )
+                in_grid = np.asarray(cell_ids) >= 0
+                if in_grid.all():
+                    continue  # nothing outside — leave the scan file untouched
+                # Rewrite this scan to a temp file of only its in-voxel points,
+                # keeping ALL columns and the original ASCII_format. For a
+                # file_path scan this deliberately points AWAY from the original on
+                # disk (never overwrite it); %.8g keeps ~µm precision at 100 m, the
+                # same as the session/points writers above.
+                pts_path = os.path.join(tmpdir, f"scan_crop_{_si}.txt")
+                np.savetxt(pts_path, rows_in[in_grid], fmt="%.8g", delimiter=" ")
+                scan_info["filepath"] = pts_path
+                # ascii_format is unchanged — the rewritten file keeps the same
+                # column layout as the source it was read from.
 
         # Triangulate each scan independently and tag every output triangle with
         # its source scan index. Helios already triangulates per scan internally
@@ -4554,17 +4747,18 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
         v2 = unique_arr[triangles_arr[:, 2]]
         total_area = float(0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1).sum())
 
-        # Per-triangle grid cell: bin each triangle's centroid into the grid, then
-        # DROP any triangle whose centroid falls outside every cell so the mesh is
-        # exactly "cropped to grid". For a terrain-snapped grid the Helios <grid>
-        # cropped to the FLAT envelope (it can't undulate), so the result still holds
-        # the ground UNDER the lifted columns and canopy ABOVE the voxel tops; those
-        # triangles are outside the actual voxels and must go. `bin_grid` (the snapped
-        # grid with column_offsets) is the authoritative voxel geometry to bin
-        # against; absent it, bin against the triangulation grid itself (flat case).
-        # Lets the UI split the leaf-angle distribution per voxel. -1 (outside) is
-        # never returned now (dropped); the binary packer still maps any -1 to the
-        # uint32 sentinel for safety.
+        # Per-triangle grid cell: bin each triangle's centroid into the grid for the
+        # UI's per-voxel leaf-angle split. Points are now cropped to the voxel volume
+        # BEFORE triangulation (see the pre-crop above), so every triangle already
+        # lies entirely within the grid — this bin is primarily to LABEL each triangle
+        # with its voxel, not to crop. The residual centroid DROP below still fires for
+        # the one case pre-cropping can't catch: a triangle whose two endpoints sit in
+        # in-grid columns but which bridges ACROSS a culled column or an inter-voxel
+        # gap, landing its centroid outside every cell — that spanning triangle must
+        # still go. `bin_grid` (the snapped grid with column_offsets) is the
+        # authoritative voxel geometry; absent it, bin against the triangulation grid
+        # itself (flat case). -1 (outside) is never returned (dropped); the binary
+        # packer still maps any -1 to the uint32 sentinel for safety.
         _report(0.93, "Binning into grid")
         centroids = (v0 + v1 + v2) / 3.0
         bg = request.bin_grid if request.bin_grid is not None else request.grid
@@ -6032,11 +6226,12 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     raise ValueError("gtheta must be in (0, 1] (0.5 = spherical).")
         elif reuse_mesh is not None:
             # Reuse a previously-run triangulation: inject it instead of re-running
-            # the Delaunay pass. The mesh's vertices are world coordinates; the
-            # static path never applies lad_shift (only moving scans do), so they
-            # already match the cloud's points — assert that invariant rather than
-            # shifting. Expand the indexed mesh to the flat 9-floats-per-triangle
-            # soup setExternalTriangulation expects (one vectorized gather).
+            # the Delaunay pass. The renderer already translated the mesh vertices
+            # into the cloud's STORED frame (extractReuseMeshPayload subtracts the
+            # cloud's worldShift), so they match the session's STORED points directly.
+            # Reuse is static-only, so lad_shift (a moving-scan precision recenter) is
+            # never applied here — assert that invariant. Expand the indexed mesh to
+            # the flat 9-floats-per-triangle soup setExternalTriangulation expects.
             assert lad_shift is None, \
                 "triangulation reuse is static-only; lad_shift must be None"
             _ckpt()

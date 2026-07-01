@@ -64,7 +64,11 @@ function Toast({ toast, onClose }: ToastProps) {
   return (
     <div
       data-testid={`toast-${toast.type}`}
-      className={`flex items-start gap-3 p-4 rounded-lg border backdrop-blur-md ${backgrounds[toast.type]} animate-slide-in`}
+      // pointer-events-auto re-enables interaction on the card itself; the
+      // container wrapper is pointer-events-none so the empty space around the
+      // toasts (and behind a persistent toast's bounding box) stays click-through
+      // and never occludes the app controls anchored in the same corner.
+      className={`pointer-events-auto flex items-start gap-3 p-4 rounded-lg border backdrop-blur-md ${backgrounds[toast.type]} animate-slide-in`}
     >
       <span className="flex-shrink-0">{icons[toast.type]}</span>
       {/* min-w-0 lets the text column shrink so long, unbroken strings (e.g.
@@ -123,7 +127,7 @@ export function ToastContainer() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-[110] space-y-2 max-w-md">
+    <div className="fixed bottom-4 right-4 z-[110] space-y-2 max-w-md pointer-events-none">
       {toasts.map(toast => (
         <Toast key={toast.id} toast={toast} onClose={removeToast} />
       ))}

@@ -1095,14 +1095,81 @@ describe('buildLADRequest — moving-platform scans', () => {
   });
 });
 
+describe('worldShift STORED-frame conversion (LAD + triangulation)', () => {
+  // A large UTM-like shift so the subtraction is unambiguous.
+  const WS: [number, number, number] = [512000, 4300000, 120];
+
+  function utmCloud(): PointCloudData {
+    return {
+      positions: new Float32Array(0),
+      pointCount: 100,
+      bounds: {
+        min: new THREE.Vector3(0, 0, 0), max: new THREE.Vector3(1, 1, 1),
+        center: new THREE.Vector3(0.5, 0.5, 0.5), size: new THREE.Vector3(1, 1, 1),
+      },
+      fileName: 'utm.laz',
+      octree: { cacheId: 'c', sourceXyzPath: '/utm.laz', sessionId: 'sess', worldShift: WS },
+    };
+  }
+
+  it('buildLADRequest subtracts worldShift from the scan origin and every trajectory pose; grid stays STORED', () => {
+    // Poses in raw UTM/world coords (t x y z qx qy qz qw).
+    const trajectory = parsePoseStreamCsv(
+      ['0 512000 4300000 125 0 0 0 1', '2 512002 4300000 125 0 0 0 1'].join('\n'));
+    const scan: Scan = {
+      id: 's', label: 'utm', visible: true, color: '#fff',
+      data: utmCloud(), sourcePath: '/utm.laz',
+      params: { ...DEFAULT_SCAN_PARAMETERS, origin: { x: 512001, y: 4300001, z: 125 }, trajectory },
+    };
+    const GRID: HeliosGrid = { center: [1, 2, 3], size: [2, 2, 1], nx: 2, ny: 1, nz: 1 };
+    const req = buildLADRequest([scan], GRID, { lmax: 0.1, maxAspectRatio: 4, minVoxelHits: 1, gtheta: 0.5 });
+    // origin: world − worldShift → STORED.
+    expect(req.scans[0].origin).toEqual([1, 1, 5]);
+    // grid is already STORED (scene coords) → forwarded unchanged.
+    expect(req.grid.center).toEqual([1, 2, 3]);
+    // every trajectory pose shifted by −worldShift.
+    const poses = (req.scans[0].trajectory as { poses: Array<{ x: number; y: number; z: number }> }).poses;
+    expect([poses[0].x, poses[0].y, poses[0].z]).toEqual([0, 0, 5]);
+    expect([poses[1].x, poses[1].y, poses[1].z]).toEqual([2, 0, 5]);
+  });
+
+  it('is a no-op when the cloud carries no worldShift', () => {
+    const data = utmCloud();
+    data.octree!.worldShift = null;
+    const scan: Scan = {
+      id: 's', label: 'utm', visible: true, color: '#fff', data, sourcePath: '/utm.laz',
+      params: { ...DEFAULT_SCAN_PARAMETERS, origin: { x: 3, y: 4, z: 5 } },
+    };
+    const req = buildLADRequest([scan], { center: [1, 2, 3], size: [2, 2, 1], nx: 1, ny: 1, nz: 1 },
+      { lmax: 0.1, maxAspectRatio: 4, minVoxelHits: 1 });
+    expect(req.scans[0].origin).toEqual([3, 4, 5]);
+  });
+
+  it('buildHeliosTriangulationRequest shifts the grid to WORLD to match world-frame points; origin stays WORLD', () => {
+    const scan: Scan = {
+      id: 's', label: 'utm', visible: true, color: '#fff',
+      data: utmCloud(), sourcePath: '/utm.laz',
+      params: { ...DEFAULT_SCAN_PARAMETERS, origin: { x: 512001, y: 4300001, z: 125 } },
+    };
+    const GRID: HeliosGrid = { center: [1, 2, 3], size: [4, 4, 4], nx: 2, ny: 2, nz: 3 };
+    const req = buildHeliosTriangulationRequest([scan], GRID);
+    // grid center → WORLD (center + worldShift) so the crop matches world points.
+    expect(req.grid!.center).toEqual([512001, 4300002, 123]);
+    // origin already WORLD (params.origin) → unchanged.
+    expect(req.scans[0].origin).toEqual([512001, 4300001, 125]);
+  });
+});
+
 describe('demGridToLADRaster', () => {
-  it('shifts origin to world coords and copies grid shape', () => {
+  it('forwards the DEM origin in STORED frame (no worldShift add) and copies grid shape', () => {
     const raster = demGridToLADRaster({
       z: new Float32Array([1, 2, 3, 4]), nx: 2, ny: 2, cellSize: 0.5,
       origin: [10, 20], worldShift: [100, 200, 7],
     });
-    // display origin [10,20] + worldShift [100,200] -> world [110, 220].
-    expect(raster.origin).toEqual([110, 220]);
+    // LAD samples the DEM in the STORED frame that buildLADRequest sends the scan
+    // origins/grid/points in (worldShift subtracted there), so the display origin
+    // passes through unshifted — worldShift is ignored for the LAD feed.
+    expect(raster.origin).toEqual([10, 20]);
     expect(raster.nx).toBe(2);
     expect(raster.ny).toBe(2);
     expect(raster.cell).toBe(0.5);

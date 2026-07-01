@@ -48,6 +48,26 @@ describe('extractReuseMeshPayload', () => {
     expect(Array.from(payload.scanIds)).toEqual([1, 0, 1]);
   });
 
+  it('translates WORLD vertices into the STORED frame by subtracting worldShift (new buffer, input unmutated)', () => {
+    const mesh = makeMesh([{ edgeMax: 0.1, aspect: 2, scan: 0 }]);
+    const original = Float32Array.from(mesh.vertices);
+    const ws: [number, number, number] = [1000, 2000, 30];
+    const payload = extractReuseMeshPayload(mesh, 1, 100, ['A'], ['A'], ws);
+    // Triangle 0's first vertex is the origin [0,0,0] → [-1000,-2000,-30] after shift.
+    expect([payload.vertices[0], payload.vertices[1], payload.vertices[2]]).toEqual([-1000, -2000, -30]);
+    // The shared mesh buffer (also rendered) must not be mutated in place.
+    expect(Array.from(mesh.vertices)).toEqual(Array.from(original));
+    expect(payload.vertices).not.toBe(mesh.vertices);
+  });
+
+  it('passes vertices through unshifted when worldShift is null or zero', () => {
+    const mesh = makeMesh([{ edgeMax: 0.1, aspect: 2, scan: 0 }]);
+    const withNull = extractReuseMeshPayload(mesh, 1, 100, ['A'], ['A'], null);
+    const withZero = extractReuseMeshPayload(mesh, 1, 100, ['A'], ['A'], [0, 0, 0]);
+    expect([withNull.vertices[0], withNull.vertices[1], withNull.vertices[2]]).toEqual([0, 0, 0]);
+    expect([withZero.vertices[0], withZero.vertices[1], withZero.vertices[2]]).toEqual([0, 0, 0]);
+  });
+
   it('uses the filtered triangle set (drops triangles past lmax/aspect)', () => {
     const mesh = makeMesh([
       { edgeMax: 0.05, aspect: 2, scan: 0 },   // keep

@@ -45,7 +45,7 @@ import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams } 
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
 import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
-import { poseStreamToWire, trajectoryDurationS, deriveMovingScanGrid } from '../lib/poseStream';
+import { poseStreamToWire, shiftPoseStream, trajectoryDurationS, deriveMovingScanGrid } from '../lib/poseStream';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
@@ -1085,7 +1085,7 @@ export default function PointCloudViewer({
               const scanOrigin: [number, number, number] | null =
                 o ? [o.x, o.y, o.z] : null;
               const data = await parsePointCloudFromPath(
-                p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs, null,
+                p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs, r.worldShift,
                 r.continuousSlugs, null, scanOrigin);
               for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
               for (const slug of r.continuousSlugs) registerContinuousSlug(slug);
@@ -1127,14 +1127,18 @@ export default function PointCloudViewer({
       if (grids.length > 0) parts.push(`${grids.length} grid(s)`);
       showToast({ title: `Imported ${parts.join(', ')}`, type: 'success' });
       // Surface non-fatal import advisories (e.g. a scan missing its <returnMode>
-      // tag, so the mode defaulted). Persist (duration 0) — the user must read and
-      // act on these before scanning / running LAD, not have them flash away.
+      // tag, so the mode defaulted). These are informational, not blocking — the
+      // import succeeded with a sensible default. Give them a long-but-finite
+      // duration so the user has ample time to read them, but they auto-dismiss
+      // and never leave a persistent overlay occluding the scan list / export
+      // controls (a persistent `duration: 0` toast is fixed bottom-right and its
+      // card intercepts clicks on anything beneath it).
       if (importWarnings.length > 0) {
         showToast({
           title: 'Scan import warnings',
           message: importWarnings.join(' '),
-          type: 'info',
-          duration: 0,
+          type: 'warning',
+          duration: 12000,
         });
       }
     } catch (err) {
@@ -2852,10 +2856,17 @@ export default function PointCloudViewer({
       for (let i = 0; i < n; i++) {
         const cloud = eligible[i];
         const oct = cloud.data.octree!;
-        const origin: [number, number, number] =
+        // The backend gapfills against the session's STORED points (world − worldShift);
+        // params.origin / oct.scanOrigin are WORLD-frame, so shift them into the STORED
+        // frame or the reconstructed misses fan from a point millions of metres off the
+        // hits. No-op when the cloud carries no shift. Mirrors buildLADRequest.
+        const ws = oct.worldShift ?? [0, 0, 0];
+        const worldOrigin: [number, number, number] =
           cloud.params?.origin
             ? [cloud.params.origin.x, cloud.params.origin.y, cloud.params.origin.z]
             : (oct.scanOrigin ?? [0, 0, 0]);
+        const origin: [number, number, number] =
+          [worldOrigin[0] - ws[0], worldOrigin[1] - ws[1], worldOrigin[2] - ws[2]];
         // Forward the scan's REAL angular raster so the C++ gapfiller reconstructs
         // misses over the actual scan grid/sweep — not a point-count estimate that
         // assumes a full 0–180°/0–360° sweep (which fabricates a 360° ring of sky
@@ -2921,7 +2932,7 @@ export default function PointCloudViewer({
         // origin per return (joined by timestamp) instead of fanning misses from a
         // single static apex. Omitted (undefined → dropped from the JSON body) for
         // static scans, which keep the single-origin path unchanged.
-        const trajectory = p?.trajectory ? poseStreamToWire(p.trajectory) : undefined;
+        const trajectory = p?.trajectory ? poseStreamToWire(shiftPoseStream(p.trajectory, ws)) : undefined;
         try {
           const res = await backfillMisses(oct.sessionId!, origin, raster, trajectory, abort.signal, report);
           stopSynth();  // the request resolved — no more synthetic creep for this scan
@@ -9259,7 +9270,17 @@ export default function PointCloudViewer({
       // what makes a REUSE run follow the terrain exactly like the viewport (and
       // like the first new-triangulation run did). Falls back to the stored grid
       // only when the box was deleted (no live offsets to recover).
-      const ladGrid = ladReuseGrid(grid, liveGridOption?.grid);
+      // `grid` (m.data.grid) was recorded in the mesh's WORLD frame — the
+      // triangulation request grid is shifted to world to match the world-frame
+      // triangulation points. The LAD inversion runs in the cloud's STORED frame, so
+      // translate this fallback back by the source cloud's worldShift. (The live-box
+      // grid, when present, is already STORED scene coords, so ladReuseGrid prefers it
+      // and this only bites when the grid box was deleted.) No-op without a shift.
+      const reuseWs = scans.find(s => s.id === scanIds[0])?.data?.octree?.worldShift ?? [0, 0, 0];
+      const storedFallbackGrid = (reuseWs[0] === 0 && reuseWs[1] === 0 && reuseWs[2] === 0)
+        ? grid
+        : { ...grid, center: [grid.center[0] - reuseWs[0], grid.center[1] - reuseWs[1], grid.center[2] - reuseWs[2]] as [number, number, number] };
+      const ladGrid = ladReuseGrid(storedFallbackGrid, liveGridOption?.grid);
       options.push({
         id: m.id,
         label: displayNameOfMesh(m),
@@ -9914,6 +9935,9 @@ export default function PointCloudViewer({
           filterAspect,
           mesh.triangulationParams!.sourceScanIds ?? [],
           newTri.scans.map(s => s.id),
+          // WORLD-frame mesh verts → the cloud's STORED frame (matches the session
+          // points LAD runs against). All source scans share one cloud/worldShift.
+          newTri.scans[0]?.data?.octree?.worldShift ?? null,
         );
         gridMeshId = newTri.gridMeshId || undefined;
         setLadProgress({ label: 'Inverting Beer’s law…', value: null });
@@ -11341,6 +11365,15 @@ export default function PointCloudViewer({
           const cloudOffset = editState
             ? { x: editState.translation.x, y: editState.translation.y, z: editState.translation.z }
             : { x: 0, y: 0, z: 0 };
+          // A mesh triangulated/derived from a worldShift-imported cloud has WORLD-frame
+          // vertices (triangulation/skeleton readers add worldShift back), but the cloud
+          // renders in its STORED frame; subtract the source cloud's worldShift so the
+          // mesh lands on the cloud. EXCEPTION: DEM meshes are built STORED-frame
+          // (_do_session_dem keeps stored and carries worldShift in metadata), so they
+          // need no shift. No-op for meshes with no shifted source cloud (plant/imported).
+          const meshWs = mesh.method === 'dem'
+            ? [0, 0, 0]
+            : (sourceCloud?.data?.octree?.worldShift ?? [0, 0, 0]);
 
           return (
             <group
@@ -11349,9 +11382,9 @@ export default function PointCloudViewer({
               // mesh renders near the origin (secondary fix — mesh vertices are a
               // packed Float32Array, like flat clouds). Rotation/scale unaffected.
               position={[
-                meshPos.x + cloudOffset.x - displayOffset.x,
-                meshPos.y + cloudOffset.y - displayOffset.y,
-                meshPos.z + cloudOffset.z - displayOffset.z,
+                meshPos.x + cloudOffset.x - displayOffset.x - meshWs[0],
+                meshPos.y + cloudOffset.y - displayOffset.y - meshWs[1],
+                meshPos.z + cloudOffset.z - displayOffset.z - meshWs[2],
               ]}
               rotation={[meshRot.x * Math.PI / 180, meshRot.y * Math.PI / 180, meshRot.z * Math.PI / 180]}
               scale={[meshScale.x, meshScale.y, meshScale.z]}
@@ -11456,6 +11489,11 @@ export default function PointCloudViewer({
           if (!skeleton.visible) return null;
           // Apply skeleton's own position only - skeletons move independently from source clouds
           const skelPos = skeletonPositions.get(skeleton.id) || { x: 0, y: 0, z: 0 };
+          // A skeleton extracted from a worldShift-imported cloud has WORLD-frame
+          // vertices (the compute reader adds worldShift back); the cloud renders in
+          // its STORED frame, so subtract the source cloud's worldShift to co-locate
+          // them. No-op when the source cloud carries no shift.
+          const skelWs = clouds.find(c => c.id === skeleton.sourceCloudId)?.data?.octree?.worldShift ?? [0, 0, 0];
 
           return (
             <group
@@ -11464,9 +11502,9 @@ export default function PointCloudViewer({
               // skeleton renders near the origin (secondary fix — skeleton points
               // are a packed Float32Array).
               position={[
-                skelPos.x - displayOffset.x,
-                skelPos.y - displayOffset.y,
-                skelPos.z - displayOffset.z,
+                skelPos.x - displayOffset.x - skelWs[0],
+                skelPos.y - displayOffset.y - skelWs[1],
+                skelPos.z - displayOffset.z - skelWs[2],
               ]}
             >
               {skeletonShowAsCylinders ? (
@@ -11499,8 +11537,13 @@ export default function PointCloudViewer({
             group transform. */}
         {qsms.map(qsm => {
           if (!qsm.visible) return null;
+          // A QSM built from a worldShift-imported cloud has WORLD-frame cylinders/
+          // leaves (the compute reads world-frame points), but the cloud renders in
+          // its STORED frame; subtract the source cloud's worldShift on the outer
+          // group so the QSM lands on the cloud. No-op without a shift.
+          const qsmWs = clouds.find(c => c.id === qsm.sourceCloudId)?.data?.octree?.worldShift ?? [0, 0, 0];
           return (
-            <group key={qsm.id}>
+            <group key={qsm.id} position={[-qsmWs[0], -qsmWs[1], -qsmWs[2]]}>
               {/* QSM3D subtracts displayOffset in its own float64 vertex build
                   (recovers precision), so its group stays at the origin. The
                   leaves mesh is built at world coords, so it gets the offset via
@@ -11560,13 +11603,18 @@ export default function PointCloudViewer({
           // Glow follows the Scans-pane selection — single source of truth, so
           // the marker can never drift out of sync with the row highlight.
           const isMarkerSelected = selectedScanIds.has(scan.id);
+          // params.origin / params.trajectory are WORLD-frame, but the cloud renders
+          // in its STORED frame (world − worldShift); subtract worldShift so the
+          // marker (and its trajectory path) sit ON the cloud rather than millions of
+          // metres away. Folded into the display-offset wrapper. No-op without a shift.
+          const ws = scan.data?.octree?.worldShift ?? [0, 0, 0];
           return (
             // Render-only precision safety net: the marker's origin is a world
             // coord, so render it near the origin via a wrapping group. Markers go
             // through ScanMarkerEntry so the trajectory-derived arrays are
             // memoized (a fresh array per render would rebuild the marker's GPU
             // geometry every frame — a leak that OOM-crashed the renderer).
-            <group key={scan.id} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+            <group key={scan.id} position={[-displayOffset.x - ws[0], -displayOffset.y - ws[1], -displayOffset.z - ws[2]]}>
               <ScanMarkerEntry
                 params={scan.params}
                 color={scan.color}
@@ -11582,8 +11630,10 @@ export default function PointCloudViewer({
             geometry on the stable params reference to avoid a per-frame GPU rebuild. */}
         {showScanWireframes && scansWithParams.map(scan => {
           if (!scan.visible) return null;
+          // WORLD-frame params → STORED render frame (see the marker block above).
+          const ws = scan.data?.octree?.worldShift ?? [0, 0, 0];
           return (
-            <group key={`wf-${scan.id}`} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+            <group key={`wf-${scan.id}`} position={[-displayOffset.x - ws[0], -displayOffset.y - ws[1], -displayOffset.z - ws[2]]}>
               <ScanWireframeEntry
                 params={scan.params}
                 color={scan.color}

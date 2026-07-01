@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
 import type { GThetaOverrideSpec, HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
-import { poseStreamToWire } from './poseStream';
+import { poseStreamToWire, shiftPoseStream } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
 import { applyTriangleFilter } from './triangleFilter';
 
@@ -878,10 +878,23 @@ export function buildHeliosTriangulationRequest(
     return entry;
   });
 
+  // The backend triangulates WORLD-frame points (it reads them via the world-frame
+  // reader that adds worldShift back), but the grid is built in the STORED scene
+  // frame; shift the grid box into WORLD so the crop/bin matches the points. The
+  // per-scan origins (above) are already WORLD (params.origin), and the resulting
+  // mesh is WORLD too — reuse/render translate it back to STORED at their boundary.
+  // A pure translation of `center` leaves column_offsets (relative z) and the
+  // about-center rotation unchanged. No-op when the cloud carries no shift.
+  const ws = scans[0]?.data?.octree?.worldShift ?? [0, 0, 0];
+  const toWorld = (g: HeliosGrid): HeliosGrid =>
+    (ws[0] === 0 && ws[1] === 0 && ws[2] === 0)
+      ? g
+      : { ...g, center: [g.center[0] + ws[0], g.center[1] + ws[1], g.center[2] + ws[2]] };
+
   // A snapped grid's triangulation crops to the flat ENVELOPE that contains every
   // displaced column (the Helios <grid> can't undulate), so a reused mesh spans
   // all the LAD voxels. Non-snapped grids pass through unchanged.
-  const triGrid = grid ? triangulationGridEnvelope(grid) : null;
+  const triGrid = grid ? toWorld(triangulationGridEnvelope(grid)) : null;
   // For a snapped grid the envelope crop still admits the ground UNDER the lifted
   // columns and canopy ABOVE the voxel tops, so the backend must bin triangles into
   // the actual displaced voxels and drop the out-of-grid ones. Send the SNAPPED grid
@@ -898,7 +911,7 @@ export function buildHeliosTriangulationRequest(
     phi_min: 0,
     phi_max: 360,
     ...(triGrid ? { grid: triGrid } : {}),
-    ...(isSnapped ? { bin_grid: grid! } : {}),
+    ...(isSnapped ? { bin_grid: toWorld(grid!) } : {}),
   };
 }
 
@@ -917,9 +930,12 @@ const LAD_MULTI_RETURN_FIELDS = ['timestamp', 'target_index', 'target_count'] as
 export const LAD_DEM_NODATA = -9999;
 
 // Convert a DEM mesh's `demGrid` into the wire raster terrain-following LAD needs.
-// The demGrid origin is in DISPLAY coords; the backend samples in the same WORLD
-// frame the scan origins/grid use, so shift origin by worldShift (matching the
-// DEM raster export). Voids (NaN) are encoded as LAD_DEM_NODATA.
+// The demGrid origin is in DISPLAY (STORED) coords; LAD samples the DEM in the same
+// STORED frame as the scan origins/grid/session points that buildLADRequest sends
+// (worldShift is subtracted from those origins), so the DEM origin is forwarded
+// STORED — no shift. (The separate GeoTIFF DEM *export* still round-trips worldShift
+// for georeferencing; that path is unchanged.) `worldShift` is carried on the type
+// for that export sibling but intentionally unused here. Voids (NaN) → LAD_DEM_NODATA.
 export function demGridToLADRaster(demGrid: {
   z: Float32Array; nx: number; ny: number; cellSize: number;
   origin: [number, number]; worldShift: [number, number, number];
@@ -929,8 +945,7 @@ export function demGridToLADRaster(demGrid: {
     nx: demGrid.nx,
     ny: demGrid.ny,
     cell: demGrid.cellSize,
-    origin: [demGrid.origin[0] + demGrid.worldShift[0],
-             demGrid.origin[1] + demGrid.worldShift[1]],
+    origin: [demGrid.origin[0], demGrid.origin[1]],
     nodata: LAD_DEM_NODATA,
   };
 }
@@ -1029,8 +1044,14 @@ export function buildLADRequest(
 ): LADRequest {
   const requestScans: LADScanEntry[] = scans.map(scan => {
     const p = scan.params!;
+    // The backend feeds LAD from the session's STORED points (world − worldShift),
+    // and the grid is built in the same STORED scene frame; but params.origin and
+    // params.trajectory are WORLD-frame (from the file / first pose). Shift them
+    // into the cloud's STORED frame so origins, beams, points, and grid all agree.
+    // No-op when the cloud carries no shift (worldShift null → [0,0,0]).
+    const ws = scan.data?.octree?.worldShift ?? [0, 0, 0];
     const entry: LADScanEntry = {
-      origin: [p.origin.x, p.origin.y, p.origin.z],
+      origin: [p.origin.x - ws[0], p.origin.y - ws[1], p.origin.z - ws[2]],
       n_theta: p.zenithPoints,
       n_phi: p.azimuthPoints,
       theta_min: p.zenithMinDeg,
@@ -1049,9 +1070,10 @@ export function buildLADRequest(
     // per-beam origin per return (joined by timestamp) and runs the beam-based
     // (Gtheta) inversion. The point data must carry a `timestamp` column for the
     // join — session-backed clouds surface it from their extras; for an inline
-    // cloud it must be included in scalar_columns below.
+    // cloud it must be included in scalar_columns below. Shifted into the STORED
+    // frame (same as origin) so the reconstructed per-beam origins land on the cloud.
     if (p.trajectory) {
-      entry.trajectory = poseStreamToWire(p.trajectory);
+      entry.trajectory = poseStreamToWire(shiftPoseStream(p.trajectory, ws));
     }
     // Source priority mirrors the backend's feed resolution:
     //   1. session_id — a session-backed (octree) cloud, fed from its in-RAM
@@ -1183,12 +1205,17 @@ const CELL_OUTSIDE = 0xffffffff;
 // `meshData` is the mesh to reuse (the UNFILTERED Helios candidate set, or a
 // ball-pivot mesh's `data`); pass requestScanIdOrder = the exact scan-id list, in
 // order, that buildLADRequest will emit (i.e. selectedScans.map(s => s.id)).
+// `worldShift` is the source cloud's shift (world = stored + worldShift). Mesh
+// vertices are WORLD-frame (triangulation reads points in world frame), but LAD
+// runs against the session's STORED points, so the reused geometry is translated
+// into the STORED frame here. Null/zero → passed through unshifted (no allocation).
 export function extractReuseMeshPayload(
   meshData: MeshData,
   lmax: number,
   maxAspectRatio: number,
   sourceScanIds: string[],
   requestScanIdOrder: string[],
+  worldShift: [number, number, number] | null = null,
 ): ReuseMeshPayload {
   const filtered = applyTriangleFilter(meshData, lmax, maxAspectRatio);
   const n = filtered.triangleCount;
@@ -1231,9 +1258,24 @@ export function extractReuseMeshPayload(
     keptScanIds.push(reqIdx);
   }
 
+  // Translate WORLD-frame vertices into the cloud's STORED frame to match the
+  // session points LAD runs against. New buffer — filtered.vertices is the shared
+  // buffer the mesh renders from, so it must not be mutated.
+  const ws = worldShift ?? [0, 0, 0];
+  let vertices = filtered.vertices;
+  if (ws[0] !== 0 || ws[1] !== 0 || ws[2] !== 0) {
+    const src = filtered.vertices;
+    vertices = new Float32Array(src.length);
+    for (let i = 0; i < src.length; i += 3) {
+      vertices[i] = src[i] - ws[0];
+      vertices[i + 1] = src[i + 1] - ws[1];
+      vertices[i + 2] = src[i + 2] - ws[2];
+    }
+  }
+
   const T = keptScanIds.length;
   return {
-    vertices: filtered.vertices,
+    vertices,
     indices: Uint32Array.from(keptIndices),
     scanIds: Int32Array.from(keptScanIds),
     triangleCount: T,

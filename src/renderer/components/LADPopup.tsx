@@ -448,7 +448,10 @@ export function LADPopup({
       try {
         reuseMesh = extractReuseMeshPayload(
           reuseTri.meshData, lmax, maxAspectRatio,
-          reuseTri.scanIds, selectedScans.map(s => s.id));
+          reuseTri.scanIds, selectedScans.map(s => s.id),
+          // WORLD-frame mesh verts → the cloud's STORED frame (matches the session
+          // points LAD runs against). All source scans share one cloud/worldShift.
+          selectedScans[0]?.data?.octree?.worldShift ?? null);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Cannot reuse this triangulation');
         return;

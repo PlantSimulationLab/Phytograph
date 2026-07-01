@@ -12,6 +12,7 @@ import os
 import re
 from collections import Counter
 
+import numpy as np
 import pytest
 
 import main
@@ -497,6 +498,42 @@ class TestSphereReproduction:
         assert all(i == -1 or 0 <= i < 8 for i in cell_ids)
         # The sphere is not confined to a single octant — multiple cells get hits.
         assert len({i for i in cell_ids if i >= 0}) > 1
+
+    def test_small_grid_crops_points_before_triangulating(self):
+        """A grid covering only part of the sphere must confine the mesh to the
+        grid AND not waste work triangulating the out-of-grid footprint. Points
+        are cropped to the voxel volume BEFORE Helios runs, so (a) every returned
+        vertex lies inside the grid box and (b) `candidate_count` equals the
+        returned triangle count — the out-of-grid points produced no candidates at
+        all. Before the pre-crop, Helios triangulated the whole sphere and the
+        out-of-grid triangles inflated `candidate_count` above `num_triangles`,
+        only to be dropped afterward by a per-triangle centroid test."""
+        pytest.importorskip("pyhelios")
+        # Half-sphere grid: x in [0,1.2], spanning the +x hemisphere only. The
+        # -x hemisphere's points must be cropped away before triangulation.
+        cx, hx = 0.6, 0.6
+        grid = main.HeliosGrid(center=[cx, 0.0, 0.5], size=[2 * hx, 2.4, 2.4],
+                               nx=1, ny=1, nz=1)
+        result = main._do_helios_computation(self._request(grid=grid))
+        assert result["success"] is True, result.get("error")
+        assert result["num_triangles"] > 0
+
+        verts = np.asarray(result["vertices"], dtype=float)
+        tris = np.asarray(result["triangles"], dtype=int)
+        used = verts[tris.reshape(-1)]
+        # (a) Confinement: every vertex of every returned triangle is inside the
+        # grid box (a tiny epsilon absorbs the 5-dp dedup rounding). No triangle
+        # straddles the voxel wall — the whole point of cropping points, not
+        # centroids.
+        eps = 1e-3
+        assert used[:, 0].min() >= cx - hx - eps, used[:, 0].min()
+        assert used[:, 0].max() <= cx + hx + eps, used[:, 0].max()
+
+        # (b) No wasted candidates: the returned set is small (well under the
+        # payload cap), so candidate_count reflects exactly the in-grid triangles.
+        # Equality proves the out-of-grid points were never triangulated.
+        assert result["candidate_count"] == result["num_triangles"], (
+            result["candidate_count"], result["num_triangles"])
 
     def test_frontend_filter_reproduces_cpp_kept_set(self):
         """The interactive front-end filter (lib/heliosFilter.ts) must reproduce
