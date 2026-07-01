@@ -7605,6 +7605,13 @@ class LidarScanRequest(BaseModel):
     # Full-waveform tuning (used only when a scanner has return_type == "multi").
     rays_per_pulse: int = 100
     pulse_distance_threshold: float = 0.02
+    # RNG seed for the scan's Context. Waveform mode draws per-pulse cone sub-rays
+    # and range noise from the Context's generator; an unseeded Context is wall-
+    # clock seeded, so two scans of the identical scene differ by ~0.6% in point
+    # count. A fixed default makes a scan reproducible (identical scene+params =>
+    # identical cloud), so e.g. a memory-budget change is genuinely result-
+    # invariant. Callers may override for intentional stochastic variation.
+    seed: int = 20240607
     # Synthetic-scan run options (Synthetic Scan Options popup):
     #   record_misses  — include sky/miss points (rays that hit nothing). When on,
     #                     the result is routed through a cloud session so the
@@ -7937,6 +7944,12 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
         _ckpt()
         with tempfile.TemporaryDirectory(prefix="phyto_scan_tex_") as _tex_dir, \
                 Context() as ctx:
+            # Seed the Context RNG so the scan is reproducible: waveform mode draws
+            # per-pulse cone sub-rays / range noise from this generator, so an
+            # unseeded (wall-clock) Context makes two scans of the identical scene
+            # differ by ~0.6% in point count. A fixed seed makes chunked vs default
+            # memory-budget runs of the same scene produce the SAME cloud.
+            ctx.seedRandomGenerator(request.seed)
             # Load every mesh into the scannable scene (textured-aware).
             for mesh in request.meshes:
                 _ckpt()

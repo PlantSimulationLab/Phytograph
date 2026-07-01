@@ -5402,6 +5402,21 @@ export default function PointCloudViewer({
     let octree: PointCloudData['octree'];
     const session = result.session;
     if (session?.session_id) {
+      // Surface the octree's per-attribute ranges + labels so the Color-by
+      // dropdown can offer the retained per-hit scalar fields (timestamp,
+      // target_index, …). The picker reads these off the octree ref for octree-
+      // backed clouds (octreeScalarFieldOptions) rather than the flat
+      // scalarFields map, so without them a synthetic-scan cloud shows no scalar
+      // options at all — including constant-valued retained fields. Mirrors the
+      // meta.attributes → attributeRanges/labels conversion in pointCloudParsers.
+      const attributeRanges: Record<string, { min: number[]; max: number[] }> = {};
+      const attributeLabels: Record<string, string> = {};
+      for (const a of session.attributes ?? []) {
+        if (Array.isArray(a.min) && Array.isArray(a.max)) {
+          attributeRanges[a.name] = { min: a.min, max: a.max };
+        }
+        if (a.label) attributeLabels[a.name] = a.label;
+      }
       octree = {
         cacheId: session.cache_id ?? session.session_id,
         sourceXyzPath: session.cache_dir ?? '',
@@ -5409,6 +5424,8 @@ export default function PointCloudViewer({
         hasMisses: Boolean(session.has_misses),
         scanOrigin: session.scan_origin ?? null,
         missOctreeCacheId: session.miss_octree_cache_id ?? null,
+        ...(Object.keys(attributeRanges).length > 0 ? { attributeRanges } : {}),
+        ...(Object.keys(attributeLabels).length > 0 ? { attributeLabels } : {}),
       };
     }
 

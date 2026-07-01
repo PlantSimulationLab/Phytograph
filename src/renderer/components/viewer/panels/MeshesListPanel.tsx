@@ -731,11 +731,13 @@ export function MeshesListPanel({
                   }
                   return null;
                 })()}
-                {/* Interactive Lmax / aspect filter — on any triangulated mesh
-                    that carries the candidate metrics (Helios meshes from the
-                    backend; Open3D meshes get them computed client-side at build
-                    time). Helios meshes additionally show the Auto / separation
-                    diagnostics; Open3D meshes show just the Lmax / aspect inputs. */}
+                {/* Interactive Lmax / aspect filter — HELIOS meshes only. They
+                    carry the candidate metrics (triangleFilter + unfilteredMesh)
+                    plus the Auto / separation Otsu diagnostics. Open3D cloud
+                    methods (ball-pivot / alpha / poisson) each apply their own
+                    length scale, so a post-hoc edge-length filter is a no-op for
+                    them (see commit f0cf7ba); they carry neither field and this
+                    panel stays hidden for them. */}
                 {mesh.triangleFilter && mesh.unfilteredMesh && (
                   <TriangleFilterControls mesh={mesh} onChange={onHeliosFilterChange} onCheckSpacing={onCheckSpacing} />
                 )}

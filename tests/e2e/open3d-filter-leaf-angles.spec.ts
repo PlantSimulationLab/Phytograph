@@ -52,30 +52,16 @@ test('Open3D mesh: triangle filter + leaf-angle plot (no Helios)', async () => {
     const unfiltered = await countOf();
     expect(unfiltered).toBeGreaterThan(100);
 
-    // --- The triangle filter controls appear for an Open3D mesh ------------
+    // NOTE: the interactive Lmax/aspect triangle filter (mesh-tri-filter) is a
+    // Helios-only feature — commit f0cf7ba ("Drop post-triangulation Lmax/aspect
+    // filter for Open3D cloud methods") deliberately made it exclusive to Helios
+    // meshes, since each Open3D method (ball-pivot radius, alpha, poisson depth)
+    // already applies its own length scale. Open3D/Delaunay meshes carry no
+    // triangleFilter/unfilteredMesh, so MeshesListPanel hides those controls for
+    // them. This test therefore no longer asserts the filter panel; it verifies
+    // the leaf-angle plot, which IS available for any triangulated non-DEM mesh.
     await meshRow.click();
     await meshRow.getByTestId('mesh-color-expand').click();
-
-    const filter = page.getByTestId('mesh-tri-filter');
-    await expect(filter).toBeVisible();
-    // Helios-only diagnostics must be ABSENT (no backend Otsu estimate): the
-    // Auto button and the separation readout are hidden for Open3D meshes.
-    await expect(page.getByTestId('mesh-tri-auto')).toHaveCount(0);
-    await expect(page.getByTestId('mesh-tri-separation')).toHaveCount(0);
-    // The aspect field defaults blank ("no limit"), not a giant sentinel number.
-    await expect(page.getByTestId('mesh-tri-aspect')).toHaveValue('');
-
-    // --- Tighten Lmax → the mesh loses its long bridge triangles -----------
-    await page.getByTestId('mesh-tri-lmax').fill('0.05');
-    await page.getByTestId('mesh-tri-lmax').blur();
-    await expect.poll(countOf, { timeout: 10_000 }).toBeLessThan(unfiltered);
-    const filtered = await countOf();
-    expect(filtered).toBeGreaterThan(0);
-
-    // The provenance filter breakdown reflects the cut.
-    const stats = page.getByTestId('mesh-triangulation-filter-stats');
-    await expect(stats).toBeVisible();
-    await expect(stats).toContainText('Dropped');
 
     // --- Leaf-angle plot works on the Open3D mesh (gridless whole-mesh) ----
     await page.getByTestId('mesh-leaf-angles').click();
