@@ -189,6 +189,19 @@ jobs:
         if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true'
         run: nvcc -V
 
+      # The CUDA apt install above REMOVES the mesa/GLVND/X11 dev packages (apt
+      # resolved a conflict by uninstalling libgl1-mesa-dev / libglvnd-dev /
+      # libopengl-dev / libx11-dev etc.), so the visualizer plugin's bundled glew
+      # then fails `find_package(OpenGL)` with "missing: OPENGL_opengl_LIBRARY
+      # OPENGL_glx_LIBRARY OPENGL_INCLUDE_DIR". Re-install the GL/X11 headers AFTER
+      # CUDA so they're present when libhelios configures. (The earlier "Install
+      # Linux build dependencies" step installs them too, but CUDA runs after it.)
+      - name: Re-install GL/X11 dev headers after CUDA (Linux)
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev
+
       # Compile the PyHelios native library (libhelios) and editable-install the
       # package so PyInstaller's collect-all picks it up. plantarchitecture +
       # lidar plugins; --nogpu drops only the gpu_required plugins (radiation/
