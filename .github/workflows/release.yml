@@ -121,6 +121,17 @@ jobs:
         working-directory: backend-api
         run: |
           python -m pip install --upgrade pip
+          # phytorch-lib depends on torch, but the backend only uses it for CPU
+          # curve-fitting (stomatal/hydraulic models) — there is no torch.cuda /
+          # GPU usage anywhere. On Linux `pip install torch` defaults to the CUDA
+          # wheel (bundles cuDNN/cuBLAS/cu*.so ≈ 2-3 GB of dead weight), which
+          # pushed the packaged Linux AppImage past GitHub's 2 GiB asset limit.
+          # Pre-install the CPU-only torch wheel so phytorch-lib's dependency is
+          # already satisfied and pip doesn't pull the CUDA build. (macOS already
+          # gets CPU torch — no CUDA wheels exist for it; Windows is unaffected.)
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            pip install torch --index-url https://download.pytorch.org/whl/cpu
+          fi
           pip install -r requirements.txt
           pip install pyinstaller
 
