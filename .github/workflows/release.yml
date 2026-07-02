@@ -516,6 +516,10 @@ jobs:
           # Windows signing (optional — leave empty to skip)
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        # Force bash on every OS (default is PowerShell on Windows, where
+        # `rm -rf` is not valid and failed the step) so the cleanup below is
+        # cross-platform.
+        shell: bash
         # Clear any stale release/ output before electron-builder. On macOS the
         # v0.46.0 run failed with `EEXIST … link build/icon.icns -> release/
         # mac-arm64/Electron.app/…/icon.icns`: electron-builder 25.x hard-links
