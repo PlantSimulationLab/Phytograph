@@ -159,10 +159,28 @@ jobs:
         if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true'
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
-          cuda: '12.6.2'
+          # 12.6.3 (not 12.6.2): the network apt repo serves 12.6.3-1 packages
+          # whose meta-package `cuda-12-6` depends on `cuda-runtime-12-6 (>=
+          # 12.6.3)`. Requesting 12.6.2 while the repo has 12.6.3 left dpkg
+          # configuring packages out of order ("cuda-runtime-12-6 is not
+          # configured yet") and failed the Linux install with exit 100 on the
+          # v0.46.0 run. Pinning to the version the repo actually ships keeps the
+          # dependency set self-consistent.
+          cuda: '12.6.3'
           method: 'network'
           use-github-cache: true
           use-local-cache: true
+
+      # Linux apt/dpkg can still finish the CUDA meta-packages out of order (the
+      # v0.46.0 failure was a dpkg configure-ordering error, not a download
+      # failure). `dpkg --configure -a` + `apt-get -f install` finish configuring
+      # any half-installed packages before the build reads them. No-op on Windows
+      # (the action installs there via a different path) and when fully clean.
+      - name: Repair CUDA apt state (Linux)
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo dpkg --configure -a || true
+          sudo apt-get install -f -y || true
 
       - name: Verify CUDA (Windows + Linux)
         if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true'
@@ -498,7 +516,16 @@ jobs:
           # Windows signing (optional — leave empty to skip)
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-        run: npm run release
+        # Clear any stale release/ output before electron-builder. On macOS the
+        # v0.46.0 run failed with `EEXIST … link build/icon.icns -> release/
+        # mac-arm64/Electron.app/…/icon.icns`: electron-builder 25.x hard-links
+        # the icon into a partial app dir left from an earlier attempt/cache. A
+        # clean output dir avoids the collision (the backend bundle + signing
+        # done in prior steps live under resources/, not release/, so this is
+        # safe to wipe).
+        run: |
+          rm -rf release
+          npm run release
 
       # ---------------- Smoke-test the PACKAGED app ----------------
       # The steps above verify the backend BINARY boots and the .app is
