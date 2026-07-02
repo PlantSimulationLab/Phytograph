@@ -96,7 +96,7 @@ jobs:
           # xvfb: a virtual X display for the runtime backend smoke test —
           # importing libhelios links the visualizer's GL symbols, so give it a
           # framebuffer in case the load path touches a display on a headless runner.
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb libfuse2t64
 
       # Pin the cache to the exact PyHelios + helios-core commits so bumping
       # either submodule rebuilds the bundled native library.
@@ -205,7 +205,7 @@ jobs:
         # misreported as a backend crash-on-startup), and libtbb-dev is a build dep.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb libfuse2t64
 
       # Compile the PyHelios native library (libhelios) and editable-install the
       # package so PyInstaller's collect-all picks it up. plantarchitecture +
@@ -513,21 +513,25 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # Linux ships .deb only — AppImage is intentionally disabled (see
-      # build.linux.target in package.json, which lists just "deb"). In the
-      # v0.19.0 release run the AppImage target hung here in electron-builder
-      # for 30+ min on the hosted ubuntu-24.04 runner with no error and no
-      # artifact, while .deb, the macOS .dmg/.zip and the Windows .exe all
-      # built and uploaded fine. To re-enable, add "AppImage" back to
-      # build.linux.target. To debug the hang: it's most likely electron-
-      # builder's appimagetool/FUSE step stalling on the runner — try
-      # pinning/upgrading electron-builder, setting USE_SYSTEM_FUSE, or running
-      # the AppImage build under a step-level `timeout` so the stall point is
-      # captured in the log (the in-progress step log isn't retrievable from
-      # the API mid-run, so only a timeout-induced failure surfaces it).
+      # Linux ships AppImage (squashfs-compressed; the .deb was uncompressed and
+      # exceeded GitHub's 2 GiB release-asset limit for this GPU/open3d/torch
+      # bundle). The v0.19.0 AppImage hang was electron-builder's appimagetool
+      # FUSE-mounting to finalize the image: hosted ubuntu-24.04 ships fuse3 but
+      # appimagetool needs libfuse2 (renamed libfuse2t64 in 24.04, not installed
+      # by default), and a missing FUSE mount BLOCKS instead of erroring — hence
+      # "hung 30+ min, no output". Two mitigations below: APPIMAGE_EXTRACT_AND_RUN
+      # makes the tools extract-and-run instead of FUSE-mounting (the canonical CI
+      # fix), and the "Install Linux build dependencies" step installs
+      # libfuse2t64 as a belt. timeout-minutes is the safety net the old note
+      # asked for: a future stall fails loudly (flushing the step log) instead of
+      # burning the whole job budget.
       - name: Build & publish app
+        timeout-minutes: 45
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Linux AppImage: never FUSE-mount (avoids the appimagetool hang on
+          # hosted runners without a usable libfuse2). No-op on macOS/Windows.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
           # macOS code signing + notarization
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

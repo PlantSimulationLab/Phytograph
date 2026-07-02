@@ -260,13 +260,13 @@
       "icon": "build/icon.png",
       "artifactName": "${productName}.${ext}",
       "target": [
-        "deb"
+        "AppImage"
       ],
       "category": "Education",
       "maintainer": "Plant Simulation Laboratory <baileylabshared@gmail.com>"
     },
-    "deb": {
-      "artifactName": "${productName}-amd64.${ext}"
+    "appImage": {
+      "artifactName": "${productName}-x86_64.${ext}"
     },
     "publish": [
       {
