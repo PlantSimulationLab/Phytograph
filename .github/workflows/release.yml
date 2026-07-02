@@ -198,9 +198,14 @@ jobs:
       # Linux build dependencies" step installs them too, but CUDA runs after it.)
       - name: Re-install GL/X11 dev headers after CUDA (Linux)
         if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        # Re-install the SAME set the "Install Linux build dependencies" step did
+        # (CUDA's apt transaction removed them). Must include xvfb + libtbb-dev,
+        # not just the GL headers: xvfb-run wraps the packaged-backend smoke test
+        # (its removal made that step fail with "xvfb-run: command not found",
+        # misreported as a backend crash-on-startup), and libtbb-dev is a build dep.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
 
       # Compile the PyHelios native library (libhelios) and editable-install the
       # package so PyInstaller's collect-all picks it up. plantarchitecture +
