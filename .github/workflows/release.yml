@@ -155,32 +155,35 @@ jobs:
           docker-images: true
           swap-storage: false # the swap step below manages swap itself
 
-      - name: Install CUDA Toolkit (Windows + Linux)
-        if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true'
+      # Linux: install ONLY the CUDA compiler + libraries we compile against, not
+      # the full `cuda` meta-package. The v0.46.0 run failed here because the full
+      # package pulls in `cuda-runtime-12-6`, which depends on the NVIDIA GPU
+      # kernel driver `nvidia-open-560` — that can't configure on a GPU-less
+      # hosted runner, so dpkg aborts (exit 100). We don't need the driver to
+      # BUILD libhelios (nvcc resolves target archs via `nvcc --list-gpu-code`;
+      # cudart is linked statically). `sub-packages: ["nvcc"]` + the cudart dev
+      # libs give a driver-free toolkit (network method is required for sub-package
+      # selection on Linux).
+      - name: Install CUDA Toolkit (Linux)
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
-          # 12.6.3 (not 12.6.2): the network apt repo serves 12.6.3-1 packages
-          # whose meta-package `cuda-12-6` depends on `cuda-runtime-12-6 (>=
-          # 12.6.3)`. Requesting 12.6.2 while the repo has 12.6.3 left dpkg
-          # configuring packages out of order ("cuda-runtime-12-6 is not
-          # configured yet") and failed the Linux install with exit 100 on the
-          # v0.46.0 run. Pinning to the version the repo actually ships keeps the
-          # dependency set self-consistent.
           cuda: '12.6.3'
           method: 'network'
+          sub-packages: '["nvcc", "cudart-dev", "cudart"]'
           use-github-cache: true
           use-local-cache: true
 
-      # Linux apt/dpkg can still finish the CUDA meta-packages out of order (the
-      # v0.46.0 failure was a dpkg configure-ordering error, not a download
-      # failure). `dpkg --configure -a` + `apt-get -f install` finish configuring
-      # any half-installed packages before the build reads them. No-op on Windows
-      # (the action installs there via a different path) and when fully clean.
-      - name: Repair CUDA apt state (Linux)
-        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo dpkg --configure -a || true
-          sudo apt-get install -f -y || true
+      # Windows: the full network install works there (no apt/driver dpkg step),
+      # and building the CUDA path wants the standard toolkit layout.
+      - name: Install CUDA Toolkit (Windows)
+        if: runner.os == 'Windows' && steps.backend-cache.outputs.cache-hit != 'true'
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: '12.6.2'
+          method: 'network'
+          use-github-cache: true
+          use-local-cache: true
 
       - name: Verify CUDA (Windows + Linux)
         if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true'
@@ -516,20 +519,15 @@ jobs:
           # Windows signing (optional — leave empty to skip)
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-        # Force bash on every OS (default is PowerShell on Windows, where
-        # `rm -rf` is not valid and failed the step) so the cleanup below is
-        # cross-platform.
-        shell: bash
-        # Clear any stale release/ output before electron-builder. On macOS the
-        # v0.46.0 run failed with `EEXIST … link build/icon.icns -> release/
-        # mac-arm64/Electron.app/…/icon.icns`: electron-builder 25.x hard-links
-        # the icon into a partial app dir left from an earlier attempt/cache. A
-        # clean output dir avoids the collision (the backend bundle + signing
-        # done in prior steps live under resources/, not release/, so this is
-        # safe to wipe).
-        run: |
-          rm -rf release
-          npm run release
+          # macOS electron-builder 25.1.8 hard-links build/icon.icns into the
+          # packaged .app and, within a single build, attempts the link twice —
+          # the second fails `EEXIST … link build/icon.icns -> release/mac-arm64/
+          # Electron.app/…/icon.icns` (it is NOT a stale-dir issue; a clean
+          # release/ still hit it). Disabling electron-builder's hard-linking
+          # makes it COPY the icon instead, sidestepping the double-link. Harmless
+          # on Windows/Linux (they weren't hard-link-failing).
+          USE_HARD_LINKS: 'false'
+        run: npm run release
 
       # ---------------- Smoke-test the PACKAGED app ----------------
       # The steps above verify the backend BINARY boots and the .app is
