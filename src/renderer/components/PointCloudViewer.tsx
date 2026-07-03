@@ -45,7 +45,8 @@ import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams } 
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
 import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
-import { poseStreamToWire, shiftPoseStream, trajectoryDurationS, deriveMovingScanGrid } from '../lib/poseStream';
+import { poseStreamToWire, shiftPoseStream, trajectoryDurationS, deriveMovingScanGrid, poseStreamBounds } from '../lib/poseStream';
+import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
@@ -1667,6 +1668,13 @@ export default function PointCloudViewer({
     prevSkeletonIdsRef.current = currentIds;
   }, [skeletons]);
 
+  // Track previous scan-with-params IDs to detect newly added scans, and the id
+  // of a just-added scan that tripped the frame-mismatch check — only that scan
+  // is framed on its own (see the effect after frameScanInViewport). A normal
+  // same-frame add is left to the existing union-framing behavior.
+  const prevScanIdsRef = useRef<Set<string>>(new Set());
+  const pendingFrameScanIdRef = useRef<string | null>(null);
+
   // Initialize edit state for new clouds
   useEffect(() => {
     const newEditStates = new Map(editStates);
@@ -1900,6 +1908,66 @@ export default function PointCloudViewer({
     const size = new THREE.Vector3().subVectors(max, min);
     frameSelection({ center, size });
   }, []);
+
+  // World-space AABB of a params-only scan: the full trajectory extent for a
+  // moving-platform scan, else a small box around the static origin. Shared by
+  // frame-mismatch detection (its center is the anchor) and frameScanInViewport.
+  // Returns null only for a degenerate (no origin, no poses) scan.
+  const scanWorldBounds = useCallback((scan: Scan): {
+    min: THREE.Vector3; max: THREE.Vector3; center: THREE.Vector3; size: THREE.Vector3;
+  } | null => {
+    const params = scan.params;
+    if (!params) return null;
+    let min: THREE.Vector3;
+    let max: THREE.Vector3;
+    const traj = params.trajectory;
+    const tb = traj ? poseStreamBounds(traj) : null;
+    if (tb) {
+      min = new THREE.Vector3(tb.min[0], tb.min[1], tb.min[2]);
+      max = new THREE.Vector3(tb.max[0], tb.max[1], tb.max[2]);
+    } else {
+      // Static scan (or empty trajectory): a small box around the origin so the
+      // camera has a finite target to frame rather than a zero-size point.
+      const o = params.origin;
+      const r = 5;
+      min = new THREE.Vector3(o.x - r, o.y - r, o.z - r);
+      max = new THREE.Vector3(o.x + r, o.y + r, o.z + r);
+    }
+    const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+    const size = new THREE.Vector3().subVectors(max, min);
+    return { min, max, center, size };
+  }, []);
+
+  // Frame a newly added scan/trajectory WITHOUT changing the viewing angle
+  // (same rationale as frameMeshInViewport). Used only when a frame mismatch was
+  // detected on add — a far-off UTM trajectory that would otherwise be sub-pixel
+  // inside the union-framed bounds.
+  const frameScanInViewport = useCallback((scan: Scan) => {
+    const frameSelection = (window as any).__frameSelection;
+    if (!frameSelection) return;
+    const b = scanWorldBounds(scan);
+    if (!b) return;
+    frameSelection({ center: b.center, size: b.size });
+  }, [scanWorldBounds]);
+
+  // Frame a newly added scan on its own — but ONLY when the add tripped the
+  // frame-mismatch check (a far-off UTM trajectory). Without this, the
+  // CameraController union-frames the whole scene and a scan millions of metres
+  // from the origin plane collapses to sub-pixel ("auto-fits to nothing"). A
+  // normal same-frame add is deliberately left to the union framing. Mirrors the
+  // mesh/skeleton new-id effects; setTimeout(50) lets __frameSelection register.
+  useEffect(() => {
+    const currentIds = new Set(scansWithParams.map(s => s.id));
+    const prevIds = prevScanIdsRef.current;
+    const newIds = [...currentIds].filter(id => !prevIds.has(id));
+    const pending = pendingFrameScanIdRef.current;
+    if (pending && newIds.includes(pending)) {
+      const scan = scansWithParams.find(s => s.id === pending);
+      pendingFrameScanIdRef.current = null;
+      if (scan) setTimeout(() => frameScanInViewport(scan), 50);
+    }
+    prevScanIdsRef.current = currentIds;
+  }, [scansWithParams, frameScanInViewport]);
 
   const commitMeshTransformEdit = useCallback((meshId: string, mutate: (id: string) => void) => {
     startHistoryEntry('mesh', meshId);
@@ -3818,8 +3886,16 @@ export default function PointCloudViewer({
   const hasSkeletonSelected = selectedSkeletonId !== null;
   const hasPlantMeshSelected = hasMeshSelected && meshes.find(m => selectedMeshIds.has(m.id))?.isPlant;
   const hasQSMSelected = selectedQSMIds.size > 0;
+  // A selected params-only scan (scanner marker / moving-platform trajectory with
+  // no data yet). Data-bearing scans are already counted via selectedCloudCount;
+  // this catches the trajectory-only case so "Zoom to Selection" can frame it too.
+  const hasParamsScanSelected = useMemo(
+    () => scansWithParams.some(s => selectedScanIds.has(s.id) && !hasData(s)),
+    [scansWithParams, selectedScanIds],
+  );
   // True when any framable object is selected — gates "Zoom to Selection".
-  const hasAnySelection = hasCloudSelected || hasMeshSelected || hasSkeletonSelected || hasQSMSelected;
+  const hasAnySelection = hasCloudSelected || hasMeshSelected || hasSkeletonSelected
+    || hasQSMSelected || hasParamsScanSelected;
 
   // Command registry — the single source of truth for the static Toolbar, the
   // Cmd+K palette, and the native Tools menu (see lib/toolCommands.ts for the
@@ -4146,12 +4222,12 @@ export default function PointCloudViewer({
   const getSnapViewTarget = useCallback(() => {
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    let hasData = false;
+    let hasBounds = false;
     const grow = (x: number, y: number, z: number) => {
       minX = Math.min(minX, x); maxX = Math.max(maxX, x);
       minY = Math.min(minY, y); maxY = Math.max(maxY, y);
       minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
-      hasData = true;
+      hasBounds = true;
     };
 
     // Meshes — vertices are local; add the mesh's render position to reach world.
@@ -4196,7 +4272,18 @@ export default function PointCloudViewer({
       grow(bounds.max.x + trans.x, bounds.max.y + trans.y, bounds.max.z + trans.z);
     }
 
-    if (hasData) {
+    // Params-only scans (scanner markers / moving-platform trajectories with no
+    // data). Their world extent is the full trajectory (or a small box around a
+    // static origin) — the data-bearing case is already covered by the loop above.
+    for (const scan of scansWithParams) {
+      if (!selectedScanIds.has(scan.id) || hasData(scan)) continue;
+      const b = scanWorldBounds(scan);
+      if (!b) continue;
+      grow(b.min.x, b.min.y, b.min.z);
+      grow(b.max.x, b.max.y, b.max.z);
+    }
+
+    if (hasBounds) {
       return {
         center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
         size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ)
@@ -4208,7 +4295,7 @@ export default function PointCloudViewer({
       center: new THREE.Vector3(0, 0, 0),
       size: new THREE.Vector3(2, 2, 2)
     };
-  }, [selectedMeshIds, selectedSkeletonIds, selectedQSMIds, selectedIds, meshes, skeletons, qsms, clouds, meshPositions, skeletonPositions, getEditState]);
+  }, [selectedMeshIds, selectedSkeletonIds, selectedQSMIds, selectedIds, meshes, skeletons, qsms, clouds, meshPositions, skeletonPositions, getEditState, scansWithParams, selectedScanIds, scanWorldBounds]);
 
   // Frame the current selection (or everything, if nothing is selected) without
   // changing the viewing angle. Wired into zoomToSelectionRef (declared earlier)
@@ -14933,6 +15020,30 @@ export default function PointCloudViewer({
             // palette as data-bearing scans so the dot is consistent.
             const nextColor = allocateScanColor(new Set(scans.map(s => s.color)));
             const id = crypto.randomUUID();
+
+            // Frame-mismatch check: a trajectory/scan imported in a projected CRS
+            // (e.g. UTM, ~10^6 m) added to an origin-based scene sits millions of
+            // metres away, so the union auto-fit collapses everything to sub-pixel
+            // ("auto-fits to nothing"). Detect it, warn with a one-click recenter,
+            // and frame the new scan on its own so it stays visible. This runs
+            // BEFORE onAddScan, while combinedBounds still reflects the pre-add
+            // scene (React state hasn't updated this tick).
+            const hasVisibleContent =
+              clouds.some(c => c.visible) || meshes.some(m => m.visible) ||
+              skeletons.some(s => s.visible) || qsms.some(q => q.visible) ||
+              scansWithParams.some(s => s.visible);
+            const existing = hasVisibleContent
+              ? boundsCenterDiagonal(combinedBounds.min, combinedBounds.max)
+              : null;
+            const tb = params.trajectory ? poseStreamBounds(params.trajectory) : null;
+            const newAnchor: Vec3 = tb
+              ? boundsCenterDiagonal(
+                  { x: tb.min[0], y: tb.min[1], z: tb.min[2] },
+                  { x: tb.max[0], y: tb.max[1], z: tb.max[2] },
+                ).center
+              : { x: params.origin.x, y: params.origin.y, z: params.origin.z };
+            const { mismatch, distance } = detectFrameMismatch({ newAnchor, existing });
+
             onAddScan?.({
               id,
               label,
@@ -14940,6 +15051,54 @@ export default function PointCloudViewer({
               color: nextColor,
               params,
             });
+
+            if (mismatch && existing) {
+              // Frame the new scan on its own once it's in the scene.
+              pendingFrameScanIdRef.current = id;
+              // Capture everything the toast actions need up front — the closures
+              // travel through the show-toast CustomEvent, so they must not rely
+              // on React state read later.
+              const existingCenter = { ...existing.center };
+              const km = distance / 1000;
+              const distStr = km >= 1
+                ? `${km.toLocaleString(undefined, { maximumFractionDigits: 1 })} km`
+                : `${Math.round(distance)} m`;
+              showToast({
+                type: 'warning',
+                duration: 0,
+                title: 'Coordinate frame mismatch',
+                message:
+                  `"${label}" is ~${distStr} from the rest of the scene — it was `
+                  + 'likely imported in a different coordinate frame (e.g. UTM). '
+                  + 'Move it onto the existing scene, or keep it in its original frame.',
+                actions: [
+                  {
+                    label: 'Move onto scene',
+                    onClick: () => {
+                      const shift = recenterShiftFor(newAnchor, existingCenter);
+                      const nextParams = params.trajectory
+                        ? applyTrajectoryToParams(
+                            params,
+                            shiftPoseStream(params.trajectory, shift),
+                          )
+                        : {
+                            ...params,
+                            origin: {
+                              x: params.origin.x - shift[0],
+                              y: params.origin.y - shift[1],
+                              z: params.origin.z - shift[2],
+                            },
+                          };
+                      onUpdateScanParams(id, nextParams);
+                      // Reframe the now co-located scene a tick later, once
+                      // combinedBounds has recomputed with the shifted poses.
+                      setTimeout(() => (window as any).__resetPointCloudCamera?.(), 60);
+                    },
+                  },
+                  { label: 'Keep as-is', onClick: () => {} },
+                ],
+              });
+            }
           }
           setScanPopupState({ kind: 'closed' });
         }}

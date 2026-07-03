@@ -1,12 +1,22 @@
 import { useState, useEffect } from 'react';
 import { CheckCircle, X, AlertCircle, Info, Copy, Check } from 'lucide-react';
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface ToastMessage {
   id: string;
   type: 'success' | 'error' | 'info' | 'warning';
   title: string;
   message?: string;
   duration?: number;
+  // Optional action buttons rendered in the card (e.g. "Move onto scene" /
+  // "Keep as-is" for a frame-mismatch warning). Each button runs its onClick
+  // and then dismisses the toast. Actions travel through the show-toast
+  // CustomEvent, so their closures must be self-contained (no stale React state).
+  actions?: ToastAction[];
 }
 
 interface ToastProps {
@@ -79,6 +89,23 @@ function Toast({ toast, onClose }: ToastProps) {
         <p data-testid="toast-title" className="font-medium text-white break-words">{toast.title}</p>
         {toast.message && (
           <p data-testid="toast-message" className="text-sm text-white/70 mt-1 break-words whitespace-pre-wrap">{toast.message}</p>
+        )}
+        {toast.actions && toast.actions.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-2">
+            {toast.actions.map((action, i) => (
+              <button
+                key={i}
+                data-testid={`toast-action-${i}`}
+                onClick={() => {
+                  action.onClick();
+                  onClose(toast.id);
+                }}
+                className="px-2 py-1 text-xs font-medium rounded bg-white/10 hover:bg-white/20 text-white transition-colors"
+              >
+                {action.label}
+              </button>
+            ))}
+          </div>
         )}
       </div>
       <div className="flex-shrink-0 flex items-start gap-1">

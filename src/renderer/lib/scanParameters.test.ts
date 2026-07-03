@@ -7,7 +7,7 @@ import {
   scanParametersFromFile,
   type ScanParamsFromFile,
 } from './scanParameters';
-import type { PoseStream } from './poseStream';
+import { type PoseStream, shiftPoseStream } from './poseStream';
 
 // A minimal two-pose PoseStream for the trajectory-attach tests: the platform
 // moves from x=-1 to x=1 at z=5, identity attitude.
@@ -199,6 +199,30 @@ describe('applyTrajectoryToParams', () => {
     const before = JSON.stringify(base);
     applyTrajectoryToParams(base, makeTrajectory());
     expect(JSON.stringify(base)).toBe(before);
+  });
+
+  // The "Move onto scene" recenter path: shift a UTM trajectory by
+  // recenterShiftFor, then re-anchor via applyTrajectoryToParams. Origin must
+  // follow the shifted first pose and static tilt/heading stay zeroed.
+  it('re-anchors origin to the shifted first pose after a recenter shift', () => {
+    const utm: PoseStream = {
+      ...makeTrajectory(),
+      poses: [
+        { t: 0, x: 476638, y: 5428859, z: 955, qx: 0, qy: 0, qz: 0, qw: 1 },
+        { t: 2, x: 476640, y: 5428857, z: 956, qx: 0, qy: 0, qz: 0, qw: 1 },
+      ],
+    };
+    const base = makeDefaultScanParameters();
+    base.tiltRollDeg = 5;
+    base.azimuthOffsetDeg = 45;
+    // Move the trajectory's first pose to the origin.
+    const shifted = shiftPoseStream(utm, [476638, 5428859, 955]);
+    const p = applyTrajectoryToParams(base, shifted);
+    expect(p.origin).toEqual({ x: 0, y: 0, z: 0 });
+    expect(p.tiltRollDeg).toBe(0);
+    expect(p.azimuthOffsetDeg).toBe(0);
+    // Second pose kept its relative offset.
+    expect(p.trajectory?.poses[1]).toMatchObject({ x: 2, y: -2, z: 1 });
   });
 });
 

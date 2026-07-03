@@ -8,7 +8,9 @@ import {
   trajectoryDurationS,
   deriveMovingScanGrid,
   shiftPoseStream,
+  poseStreamBounds,
 } from './poseStream';
+import { recenterShiftFor, boundsCenterDiagonal } from './frameMismatch';
 
 describe('quatFromRpy', () => {
   it('returns identity for zero angles', () => {
@@ -287,6 +289,55 @@ describe('shiftPoseStream', () => {
     const before = utm.poses[0].x;
     shiftPoseStream(utm, [476000, 5428000, 0]);
     expect(utm.poses[0].x).toBe(before);
+  });
+});
+
+describe('poseStreamBounds', () => {
+  it('returns the axis-aligned extent of the poses', () => {
+    const s = parsePoseStreamCsv([
+      '0 1 2 3 0 0 0 1',
+      '1 -4 5 -6 0 0 0 1',
+      '2 10 0 3 0 0 0 1',
+    ].join('\n'));
+    const b = poseStreamBounds(s);
+    expect(b).not.toBeNull();
+    expect(b!.min).toEqual([-4, 0, -6]);
+    expect(b!.max).toEqual([10, 5, 3]);
+  });
+
+  it('returns null for an empty stream', () => {
+    // parsePoseStreamCsv rejects empty input, so construct the empty stream directly.
+    const s = { ...parsePoseStreamCsv('0 0 0 0 0 0 0 1'), poses: [] };
+    expect(poseStreamBounds(s)).toBeNull();
+  });
+});
+
+describe('shiftPoseStream ∘ recenterShiftFor (Move onto scene math)', () => {
+  it('lands the trajectory bounds-center on the existing content center', () => {
+    // A UTM trajectory far from an origin-based plane.
+    const utm = parsePoseStreamCsv([
+      '0 476638.59 5428859.08 954.99 0 0 0 1',
+      '1 476642.59 5428855.08 956.99 0 0 0 1',
+    ].join('\n'));
+    const b = poseStreamBounds(utm)!;
+    const anchor = boundsCenterDiagonal(
+      { x: b.min[0], y: b.min[1], z: b.min[2] },
+      { x: b.max[0], y: b.max[1], z: b.max[2] },
+    ).center;
+    // Existing content: a 25×25 m plane centered at the origin.
+    const existingCenter = { x: 0, y: 0, z: 0 };
+
+    const shift = recenterShiftFor(anchor, existingCenter);
+    const moved = shiftPoseStream(utm, shift);
+    const mb = poseStreamBounds(moved)!;
+    const movedCenter = boundsCenterDiagonal(
+      { x: mb.min[0], y: mb.min[1], z: mb.min[2] },
+      { x: mb.max[0], y: mb.max[1], z: mb.max[2] },
+    ).center;
+
+    expect(movedCenter.x).toBeCloseTo(existingCenter.x, 4);
+    expect(movedCenter.y).toBeCloseTo(existingCenter.y, 4);
+    expect(movedCenter.z).toBeCloseTo(existingCenter.z, 4);
   });
 });
 

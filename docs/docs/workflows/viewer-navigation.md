@@ -21,8 +21,11 @@ Two camera commands reframe the view, and they differ in *what* they
 fit and whether they change your viewing angle:
 
 - **Zoom to Selection** fits the **currently selected** cloud(s), mesh,
-  skeleton, or QSM to the viewport while **keeping your current orbit
+  skeleton, QSM, or scan to the viewport while **keeping your current orbit
   angle** — it only re-centers and re-zooms, so the scene doesn't rotate.
+  This works for a scan even before it has data: a selected scanner marker
+  or moving-platform trajectory is framed by its position (the whole
+  trajectory path, for a moving scan).
   This is the fast way to focus on one object in a crowded scene.
   Available three ways: press <kbd>F</kbd>, click **Zoom to Selection**
   in the **Snap View** panel (top-left), or **View → Fit to Selection**

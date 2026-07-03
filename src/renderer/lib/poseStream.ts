@@ -289,6 +289,28 @@ export function shiftPoseStream(
   };
 }
 
+// Axis-aligned bounds of a pose stream's positions (attitude ignored). Returns
+// null for an empty stream so callers can distinguish "no anchor" from a zero
+// box at the origin. Used to derive a trajectory's representative anchor for
+// frame-mismatch detection and to frame a newly imported trajectory in view.
+export function poseStreamBounds(
+  stream: PoseStream,
+): { min: [number, number, number]; max: [number, number, number] } | null {
+  const poses = stream.poses;
+  if (poses.length === 0) return null;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const p of poses) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.z < minZ) minZ = p.z;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
+}
+
 // Inverse of poseStreamToWire: build a renderer PoseStream from the backend wire
 // shape (snake_case), e.g. the JSON returned by POST /api/trajectory/parse for a
 // binary SBET. Validates the poses array so a malformed payload surfaces as a

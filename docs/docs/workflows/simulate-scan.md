@@ -246,6 +246,20 @@ Once a trajectory is attached:
   the zenith rows are its laser channels (the beam elevation angles), so
   there is no separate zenith count.
 
+!!! warning "Coordinate-frame mismatch"
+
+    Trajectory files are often recorded in a **projected coordinate frame**
+    (e.g. UTM easting/northing, in the hundreds of thousands to millions of
+    metres). If you add such a trajectory to a scene whose other geometry sits
+    near the origin (a ground plane, a generated plant), the two are millions of
+    metres apart — the view would otherwise fit both and show nothing. When
+    Phytograph detects this, it **frames the new trajectory on its own** so it
+    stays visible and shows a warning with two choices:
+
+    - **Move onto scene** — recenters the trajectory so it sits over the
+      existing content (its first pose is anchored to the scene centre). Undoable.
+    - **Keep as-is** — leaves the trajectory in its original coordinate frame.
+
 The scan simulates a real spinning sensor: it fires continuously at the
 PRF, the head spins at the rate the PRF and the per-revolution resolution
 imply, and the platform flies the trajectory — **for the entire flight**.
