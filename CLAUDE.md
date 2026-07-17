@@ -72,7 +72,7 @@ npm run package:win                           # Windows installer
 
 ### Release
 
-Push a tag (`git tag v0.2.0 && git push origin v0.2.0`); `.github/workflows/release.yml` handles signing/notarization and drafts a GitHub Release.
+Push a tag (`git tag v0.2.0 && git push origin v0.2.0`); `.github/workflows/release.yml` handles signing/notarization and publishes a GitHub Release. The release is published (not a draft) because `build.publish.releaseType` in `package.json` is `release` — this is required for the in-app "Check for Updates" (electron-updater) to detect it. The **Help → Check for Updates…** menu item (macOS app menu) triggers a manual check; `src/main/updater.ts` also auto-checks once on launch.
 
 ## Things worth knowing before touching code
 

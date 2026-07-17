@@ -166,6 +166,15 @@ the **Application** and **Backend** versions, plus the **PyHelios** and
 a bug — the same numbers are auto-attached to the
 [bug/feature reports](feedback.md) you send from within the app.
 
+## Checking for updates
+
+Open **Phytograph → Check for Updates…** (macOS) or **Help → Check for
+Updates…** (Windows/Linux) to see whether a newer release is available.
+If one is, Phytograph asks before downloading it, then prompts you to
+restart once the download finishes to install it in place. If you're
+already on the latest version, it tells you so. Phytograph also checks
+automatically once each time it starts.
+
 ## Command palette
 
 Press <kbd>⌘</kbd>+<kbd>K</kbd> (macOS) or <kbd>Ctrl</kbd>+<kbd>K</kbd>

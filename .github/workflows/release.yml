@@ -2,7 +2,9 @@ name: Release
 
 # Repo layout: the desktop app code lives at the repo root; the Python
 # backend lives in `backend-api/`. This workflow builds both, signs and
-# notarizes the macOS app, and publishes a draft GitHub Release.
+# notarizes the macOS app, and publishes a GitHub Release. The release is
+# published (not left as a draft) so electron-updater can detect it — see
+# `build.publish.releaseType` in package.json.
 
 on:
   push:

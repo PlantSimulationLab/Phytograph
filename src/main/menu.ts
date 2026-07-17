@@ -1,6 +1,7 @@
 import { BrowserWindow, Menu, MenuItemConstructorOptions, app, shell } from 'electron';
 import { IPC, type MenuCommandPayload, type SnapViewDirection } from '../shared/ipc.js';
 import { REPO_URL } from '../shared/constants.js';
+import { checkForUpdatesManually } from './updater.js';
 
 const isMac = process.platform === 'darwin';
 const isE2E = process.env.PHYTOGRAPH_E2E === '1';
@@ -41,6 +42,7 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
               // show Electron's framework logo + Electron's version. Ours lists
               // the app, backend, PyHelios, and helios-core versions.
               { label: 'About Phytograph', click: () => send({ kind: 'about' }) },
+              { label: 'Check for Updates…', click: () => void checkForUpdatesManually(getMainWindow) },
               { type: 'separator' },
               {
                 label: 'Settings…',
@@ -262,12 +264,14 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
             void shell.openExternal(REPO_URL);
           },
         },
-        // On macOS, About lives in the app menu (per convention). On
-        // Windows/Linux there's no app menu, so surface it under Help.
+        // On macOS, About and "Check for Updates…" live in the app menu (per
+        // convention). On Windows/Linux there's no app menu, so surface them
+        // under Help.
         ...(isMac
           ? []
           : ([
               { type: 'separator' },
+              { label: 'Check for Updates…', click: () => void checkForUpdatesManually(getMainWindow) },
               { label: 'About Phytograph', click: () => send({ kind: 'about' }) },
             ] as MenuItemConstructorOptions[])),
       ],
