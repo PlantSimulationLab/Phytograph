@@ -184,6 +184,45 @@ describe('buildCategoricalGradientStops', () => {
     expect(sampled).toEqual(hit);
     expect(sampled).not.toEqual(MISS_COLOR);
   });
+
+  // Regression (ground renders as a tree colour): after ground+tree
+  // segmentation, ground points carry tree_instance 0 and are meant to show as
+  // the grey "Unassigned" class. The octree bakes these stops into a 64-texel
+  // LinearFilter texture and the shader samples value 0 at t=0 (the range is
+  // [0, N]). Two ways this broke: (1) the original ±0.5 band gave class 0 only
+  // a sub-texel sliver [0, 0.5/N] that averaged away; (2) a naive "widen every
+  // band to ≥1 texel" fix made the bands OVERLAP for large N, so after sorting
+  // by t the neighbouring tree stops overwrote the grey. The real case that hit
+  // this was 87 tree classes over [0, 86]. The fix lays out non-overlapping
+  // cells and guarantees the edge cell (id 0 at t=0) at least one texel.
+  it.each([20, 86])('samples tree_instance 0 as grey with %i tree classes (non-overlapping)', (N) => {
+    const scheme = categoricalSchemeForRange('tree_instance', [0, N])!;
+    const stops = buildCategoricalGradientStops(scheme, [0, N]);
+    const unassigned = colorForClassValue(scheme, 0);
+    const tree1 = colorForClassValue(scheme, 1);
+    // The colour a texel at t samples ≈ the last stop at or before t. Ground
+    // points sample at t=0.
+    const sampleAt = (t: number): typeof unassigned => {
+      let c = stops[0][1];
+      for (const [st, color] of stops) {
+        if (st <= t) c = color;
+      }
+      return c;
+    };
+    // Ground (t=0) reads grey, not Tree 1.
+    expect(sampleAt(0)).toEqual(unassigned);
+    expect(sampleAt(0)).not.toEqual(tree1);
+    // Stops are monotonic in t (CanvasGradient.addColorStop requires it).
+    for (let i = 1; i < stops.length; i++) {
+      expect(stops[i][0]).toBeGreaterThanOrEqual(stops[i - 1][0]);
+    }
+    // Class 0 owns a full texel before the first non-grey stop appears — i.e.
+    // its cell does not overlap Tree 1's (the bug that buried the grey).
+    const firstNonGrey = stops.find(([, color]) =>
+      JSON.stringify(color) !== JSON.stringify(unassigned),
+    );
+    expect(firstNonGrey![0]).toBeGreaterThanOrEqual(1 / 64 - 1e-9);
+  });
 });
 
 describe('wizard-marked categorical fields (dynamic registry)', () => {

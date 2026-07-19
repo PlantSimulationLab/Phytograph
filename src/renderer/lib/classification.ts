@@ -67,7 +67,11 @@ const WOOD_SCHEME: CategoricalScheme = {
 // id 0 ("unassigned") is a muted gray.
 export const TREE_INSTANCE_ATTRIBUTE = 'tree_instance';
 
-const TREE_UNASSIGNED_COLOR: RGB = [0.55, 0.55, 0.55];
+// Dark gray, deliberately OUTSIDE the tree palette's lightness band (trees are
+// saturated hues at L≈0.50–0.62). A medium gray reads as just a desaturated
+// tree; going much darker makes "unassigned"/ground stand out as clearly
+// not-a-tree in the tree_instance colouring.
+const TREE_UNASSIGNED_COLOR: RGB = [0.22, 0.22, 0.22];
 // Golden-angle hue step keeps successive ids far apart on the color wheel.
 const GOLDEN_ANGLE_DEG = 137.508;
 
@@ -321,12 +325,31 @@ export function colorForClassValue(scheme: CategoricalScheme, value: number): RG
   return cls ? cls.color : UNKNOWN_CLASS_COLOR;
 }
 
+// potree-core bakes the stop array into a 64-texel CanvasGradient sampled with
+// LinearFilter, and the shader samples class value v at t = (v-lo)/span. Two
+// failure modes to avoid:
+//   (a) a band narrower than a texel gets averaged away — its colour bleeds
+//       into the neighbour;
+//   (b) widening bands so they OVERLAP is worse: after the stops are sorted by
+//       t, a later class's stop at the same offset overwrites the earlier one,
+//       so a class can be emitted yet buried.
+// The edge class matters most here: ground is tree_instance 0, sampled at
+// t = 0. With many classes (tree_instance over [0, 86]) its natural band is a
+// sub-texel sliver, so it read as Tree 1's colour instead of grey.
+const GRADIENT_TEXELS = 64; // potree-core canvas width (must match its bake)
+
 // Build a STEP gradient (array of [t, RGB] stops in 0..1) for the potree
 // INTENSITY_GRADIENT pipeline, given the value range [min,max] the octree
-// reports for the attribute. Each class occupies a constant-color band, so
-// sampling the gradient texture yields the exact class color (no interpolation
-// across class boundaries). Pairs of coincident stops at each band edge keep
-// the transition hard rather than ramped.
+// reports for the attribute. Bands are laid out as NON-OVERLAPPING cells: each
+// class owns [midpoint-with-prev, midpoint-with-next] in t-space, so sampling
+// value v at t = (v-lo)/span always lands in v's own cell (no interpolation
+// across class boundaries, and — unlike a widen-and-clamp scheme — no cell ever
+// overwrites its neighbour).
+//
+// The first and last cells are additionally guaranteed at least one texel of
+// width against the texture edge, so the edge classes (value == lo at t=0,
+// value == hi at t=1) survive the LinearFilter bake even when the range packs
+// classes tighter than a texel apart. That is what keeps ground (id 0) grey.
 //
 // `range` is [min, max] of the attribute (e.g. [1, 2] for ground_class).
 export function buildCategoricalGradientStops(
@@ -336,26 +359,38 @@ export function buildCategoricalGradientStops(
   const [lo, hi] = range;
   const span = hi - lo || 1;
   const clamp01 = (t: number) => Math.max(0, Math.min(1, t));
-  // Sort classes by value so bands are laid out left→right.
-  const classes = [...scheme.classes].sort((a, b) => a.value - b.value);
-  const stops: Array<[number, RGB]> = [];
-  for (const cls of classes) {
-    // Each integer class value v owns the band [v-0.5, v+0.5] in value space,
-    // projected onto 0..1. Clamp BOTH ends to [0,1] — a class whose band lies
-    // entirely outside [lo,hi] (e.g. when a split sub-cloud holds only one
-    // class) collapses to a zero-width band and contributes nothing, rather
-    // than emitting an out-of-range stop (CanvasGradient.addColorStop throws
-    // on t<0 or t>1).
-    const tStart = clamp01((cls.value - 0.5 - lo) / span);
-    const tEnd = clamp01((cls.value + 0.5 - lo) / span);
-    if (tEnd <= tStart) continue; // band outside the range — skip
-    // Hard edges: push the color at both ends of its band.
-    stops.push([tStart, cls.color]);
-    stops.push([tEnd, cls.color]);
+  const EDGE_MIN = 1 / GRADIENT_TEXELS; // one texel, in 0..1 texture space
+  // Classes sorted by value, keeping only those whose sample point lies within
+  // the rendered range — e.g. a split sub-cloud holds only some class values.
+  const cells = [...scheme.classes]
+    .sort((a, b) => a.value - b.value)
+    .map((cls) => ({ cls, tCenter: (cls.value - lo) / span }))
+    .filter((c) => c.tCenter >= -1e-9 && c.tCenter <= 1 + 1e-9);
+  if (cells.length === 0) return [[0, UNKNOWN_CLASS_COLOR], [1, UNKNOWN_CLASS_COLOR]];
+  if (cells.length === 1) {
+    // Single visible class fills the whole texture.
+    return [[0, cells[0].cls.color], [1, cells[0].cls.color]];
   }
-  // Guarantee coverage of the full 0..1 range.
-  if (stops.length === 0) return [[0, UNKNOWN_CLASS_COLOR], [1, UNKNOWN_CLASS_COLOR]];
-  if (stops[0][0] > 0) stops.unshift([0, stops[0][1]]);
-  if (stops[stops.length - 1][0] < 1) stops.push([1, stops[stops.length - 1][1]]);
+  // Cell boundaries: midpoints between adjacent sample points. Boundary i sits
+  // between cell i and cell i+1; boundary 0 = 0, boundary N = 1.
+  const bounds: number[] = [0];
+  for (let i = 0; i < cells.length - 1; i++) {
+    bounds.push(clamp01((cells[i].tCenter + cells[i + 1].tCenter) / 2));
+  }
+  bounds.push(1);
+  // Guarantee the edge cells are at least one texel wide so they survive the
+  // LinearFilter bake (nudge only the first inner boundary right / last left;
+  // this cannot cross because there are ≥2 cells and EDGE_MIN is tiny).
+  bounds[1] = Math.max(bounds[1], EDGE_MIN);
+  bounds[bounds.length - 2] = Math.min(bounds[bounds.length - 2], 1 - EDGE_MIN);
+  const stops: Array<[number, RGB]> = [];
+  for (let i = 0; i < cells.length; i++) {
+    const tStart = bounds[i];
+    const tEnd = bounds[i + 1];
+    if (tEnd <= tStart) continue; // squeezed to nothing by an interior neighbour
+    // Hard edges: same colour at both ends of the cell.
+    stops.push([tStart, cells[i].cls.color]);
+    stops.push([tEnd, cells[i].cls.color]);
+  }
   return stops;
 }
