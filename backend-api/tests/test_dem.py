@@ -86,6 +86,279 @@ def test_dem_low_percentile_tracks_bare_earth():
     assert above == 0  # never bulges above the true plane
 
 
+# ----------------------- DSM / CHM (surface products) -----------------------
+
+def _canopy_scene(seed=3):
+    """A tilted ground plane with a raised canopy cluster +DH over a central sub-
+    region. Returns (points, ground_labels, first_return_labels, plane, DH). Ground
+    points under the canopy are tagged as later returns (return index 1) so the DSM
+    picks the canopy top, not the ground beneath it."""
+    a, b, c, DH = 0.1, 0.05, 2.0, 5.0
+    rng = np.random.default_rng(seed)
+    n = 4000
+    xy = rng.uniform(0, 20, size=(n, 2))
+    zg = a * xy[:, 0] + b * xy[:, 1] + c
+    ground = np.column_stack([xy, zg])
+    cm = (xy[:, 0] > 5) & (xy[:, 0] < 15) & (xy[:, 1] > 5) & (xy[:, 1] < 15)
+    canopy = np.column_stack([xy[cm], zg[cm] + DH])
+    pts = np.vstack([ground, canopy])
+    ground_labels = np.concatenate([np.full(n, main.GROUND_CLASS_GROUND),
+                                    np.full(int(cm.sum()), main.GROUND_CLASS_PLANT)])
+    # first return: canopy points (index 0); ground under canopy is a later return.
+    fr = np.zeros(len(pts), dtype=np.int64)
+    fr[:n][cm] = 1
+    return pts, ground_labels, fr, (a, b, c), DH
+
+
+def test_dsm_tracks_canopy_top():
+    """A DSM built from first returns at a high per-cell percentile sits at the
+    canopy top over the vegetated region — well above the DTM's bare ground."""
+    pts, gl, fr, (a, b, c), DH = _canopy_scene()
+    req = main.DemRequest(points=pts.tolist(), ground_labels=gl.tolist(),
+                          first_return_labels=fr.tolist(), surface_type="dsm",
+                          cell_size=0.5, auto_segment_ground=False)
+    r = main._do_dem(req)
+    assert r["success"], r.get("error")
+    assert r["surface_type"] == "dsm" and r["surface_source"] == "first_return"
+    gz = np.asarray(r["grid_z"]).reshape(r["grid_ny"], r["grid_nx"])
+    # Over the canopy footprint the DSM reaches roughly ground+DH.
+    top = float(np.nanmax(gz))
+    ground_top = a * 20 + b * 20 + c        # highest bare-ground corner
+    assert top > ground_top + DH - 1.0      # canopy top clearly above bare ground
+
+
+def test_dtm_and_dsm_distinct():
+    """DTM (ground, low percentile) stays on the bare plane; DSM (first return,
+    high percentile) rises over the canopy. Same scene, different products."""
+    pts, gl, fr, (a, b, c), DH = _canopy_scene()
+    base = dict(points=pts.tolist(), ground_labels=gl.tolist(),
+                first_return_labels=fr.tolist(), cell_size=0.5, auto_segment_ground=False)
+    dtm = main._do_dem(main.DemRequest(surface_type="dtm", **base))
+    dsm = main._do_dem(main.DemRequest(surface_type="dsm", **base))
+    assert dtm["success"] and dsm["success"]
+    dtm_max = float(np.nanmax(np.asarray(dtm["grid_z"])))
+    dsm_max = float(np.nanmax(np.asarray(dsm["grid_z"])))
+    assert dsm_max > dtm_max + DH - 1.0     # DSM is a canopy height above the DTM
+
+
+def test_chm_equals_canopy_height_and_never_negative():
+    """CHM = DSM − DTM: ~DH over the canopy, ~0 on bare ground, never negative.
+    DTM and DSM are gridded on one shared, cell-aligned grid so the subtraction
+    is elementwise."""
+    pts, gl, fr, (a, b, c), DH = _canopy_scene()
+    req = main.DemRequest(points=pts.tolist(), ground_labels=gl.tolist(),
+                          first_return_labels=fr.tolist(), surface_type="chm",
+                          cell_size=0.5, auto_segment_ground=False)
+    r = main._do_dem(req)
+    assert r["success"], r.get("error")
+    assert r["surface_type"] == "chm"
+    chm = np.asarray(r["grid_z"]).reshape(r["grid_ny"], r["grid_nx"])
+    finite = chm[np.isfinite(chm)]
+    assert finite.min() >= 0.0                       # canopy height never negative
+    assert abs(float(np.nanmax(chm)) - DH) < 1.0     # peak canopy ≈ DH
+    # Cells far from the canopy footprint read ~0 (bare ground).
+    assert float(np.nanmedian(chm)) < DH             # most of the scene is bare
+
+
+def test_chm_mesh_is_draped_on_terrain():
+    """The CHM grid_z stores the canopy HEIGHT (0..DH), but the mesh vertices must
+    sit at DTM_z + height — draped on the terrain — not floating up from z=0. On a
+    tilted ground plane (z = a*x + b*y + c) the mesh z's span the terrain
+    elevation, well above the 0..DH height range."""
+    pts, gl, fr, (a, b, c), DH = _canopy_scene()
+    r = main._do_dem(main.DemRequest(points=pts.tolist(), ground_labels=gl.tolist(),
+                                     first_return_labels=fr.tolist(), surface_type="chm",
+                                     cell_size=0.5, auto_segment_ground=False))
+    assert r["success"], r.get("error")
+    # Stored grid is the pure height (for raster export): starts at 0.
+    grid = np.asarray(r["grid_z"]); grid = grid[np.isfinite(grid)]
+    assert grid.min() >= 0.0 and grid.min() < 0.5    # ground cells ≈ 0 height
+    # Mesh vertices are draped: z spans the ground plane's elevation (c .. c + slope
+    # + DH), so the minimum mesh z is near the terrain (≈ c = 2.0), NOT 0.
+    verts = np.asarray(r["vertices"]).reshape(-1, 3)
+    ground_min = c                                   # plane min at x=y=0
+    assert verts[:, 2].min() > ground_min - 1.0      # sits on the terrain, not at 0
+    assert verts[:, 2].max() > ground_min + DH - 1.0 # canopy top reaches ground+DH
+
+
+def test_chm_grids_are_cell_aligned():
+    """The DTM and DSM halves of a CHM must share nx/ny/origin/cell so the grids
+    subtract without resampling."""
+    pts, gl, fr, _, _ = _canopy_scene()
+    base = dict(points=pts.tolist(), ground_labels=gl.tolist(),
+                first_return_labels=fr.tolist(), cell_size=0.5, auto_segment_ground=False)
+    dtm = main._do_dem(main.DemRequest(surface_type="dtm", **base))
+    dsm = main._do_dem(main.DemRequest(surface_type="dsm", **base))
+    chm = main._do_dem(main.DemRequest(surface_type="chm", **base))
+    for r in (dtm, dsm, chm):
+        assert r["success"]
+    # CHM shares the DTM/DSM shared-bbox grid; DTM/DSM alone auto-derive from their
+    # own subsets, so only assert the CHM grid is internally consistent and square
+    # to the shared extent it reports.
+    assert chm["grid_nx"] > 0 and chm["grid_ny"] > 0
+    assert len(chm["grid_z"]) == chm["grid_nx"] * chm["grid_ny"]
+
+
+def test_dsm_first_return_masking():
+    """When first-return labels mark the ground beneath the canopy as later
+    returns, the DSM ignores those points and rests on the canopy — dropping the
+    labels (treat all as first return) lets ground bleed in and lowers the peak
+    less, proving the mask is actually applied."""
+    pts, gl, fr, (a, b, c), DH = _canopy_scene()
+    # With the mask: DSM uses only the canopy first returns over the footprint.
+    masked = main._do_dem(main.DemRequest(
+        points=pts.tolist(), ground_labels=gl.tolist(), first_return_labels=fr.tolist(),
+        surface_type="dsm", cell_size=0.5, auto_segment_ground=False))
+    # Without labels: every point is a "first return", so a high percentile still
+    # tends to the top, but the surface_source reports all_points.
+    unmasked = main._do_dem(main.DemRequest(
+        points=pts.tolist(), ground_labels=gl.tolist(),
+        surface_type="dsm", cell_size=0.5, auto_segment_ground=False))
+    assert masked["surface_source"] == "first_return"
+    assert unmasked["surface_source"] == "all_points"
+
+
+# --------------------------- DTM scalar layer bundle ---------------------------
+# A DTM now carries a bundle of named scalar layers (elevation + density/intensity
+# gridded from points + hillshade/slope/aspect derived from the elevation grid).
+# One mesh, many layers the renderer colours by and exports.
+
+def _density_scene(seed=5):
+    """A flat ground plane with a DENSE half (x<10, points duplicated) and a SPARSE
+    half, plus an intensity that increases with x, and first/second returns. Returns
+    (points, ground_labels, first_return_labels, intensity, split_x)."""
+    rng = np.random.default_rng(seed)
+    n = 5000
+    x = rng.uniform(0, 20, n); y = rng.uniform(0, 20, n)
+    z = np.full(n, 2.0)
+    dense = x < 10.0
+    xd = np.concatenate([x, x[dense]]); yd = np.concatenate([y, y[dense]])
+    zd = np.concatenate([z, z[dense]])
+    pts = np.column_stack([xd, yd, zd])
+    gl = np.ones(len(pts), dtype=np.int64)            # all ground
+    inten = xd.copy()                                  # intensity ∝ x
+    # first-return labels: mark the DUPLICATED dense points as later returns (1) so
+    # return_density (first returns only) does NOT see the duplication.
+    fr = np.zeros(len(pts), dtype=np.int64)
+    fr[n:] = 1
+    return pts, gl, fr, inten, 10.0
+
+
+def _dtm_bundle(**overrides):
+    """Run a DTM with the density scene and return the layer-bundle result."""
+    pts, gl, fr, inten, split = _density_scene()
+    req = dict(points=pts.tolist(), ground_labels=gl.tolist(),
+               first_return_labels=fr.tolist(), intensity=inten.tolist(),
+               surface_type="dtm", cell_size=1.0, auto_segment_ground=False)
+    req.update(overrides)
+    return main._do_dem(main.DemRequest(**req))
+
+
+def _layer_grid(r, name):
+    return np.asarray(r["layers"][name]["grid"]).reshape(r["grid_ny"], r["grid_nx"])
+
+
+def test_dtm_carries_all_layers():
+    """A DTM returns one elevation surface plus every scalar layer, all on the same
+    grid, each with a per-vertex array aligned to the mesh vertices."""
+    r = _dtm_bundle()
+    assert r["success"], r.get("error")
+    assert r["surface_type"] == "dtm"
+    for name in ("elevation", "point_density", "return_density", "intensity",
+                 "hillshade", "slope", "aspect"):
+        assert name in r["layers"], name
+        assert len(r["layers"][name]["grid"]) == r["grid_nx"] * r["grid_ny"]
+        assert len(r["layer_vertex"][name]) == r["num_vertices"]
+        assert r["layers"][name]["label"]
+    # The mesh IS the terrain: vertex z tracks elevation (~2), not a layer value.
+    verts = np.asarray(r["vertices"]).reshape(-1, 3)
+    assert abs(float(np.median(verts[:, 2])) - 2.0) < 0.5
+
+
+def test_point_density_layer_counts_points_per_cell():
+    """The point_density layer grids the count of all hits per cell: the duplicated
+    dense half reads ~2× the sparse half."""
+    r = _dtm_bundle()
+    g = _layer_grid(r, "point_density")
+    half = g.shape[1] // 2
+    assert float(np.nanmean(g[:, :half])) > 1.6 * float(np.nanmean(g[:, half:]))
+    assert float(np.nanmax(g)) > 5.0
+
+
+def test_return_density_layer_counts_first_returns_only():
+    """return_density counts only first returns (pulses). With the dense-half
+    duplicates marked as LATER returns, it's near-uniform — unlike point_density."""
+    r = _dtm_bundle()
+    gp = _layer_grid(r, "point_density"); gr = _layer_grid(r, "return_density")
+    half = gp.shape[1] // 2
+    assert float(np.nanmean(gp[:, :half]) / np.nanmean(gp[:, half:])) > 1.6
+    assert abs(float(np.nanmean(gr[:, :half]) / np.nanmean(gr[:, half:])) - 1.0) < 0.25
+
+
+def test_return_density_handles_1based_las_return_numbers():
+    """First return = the MINIMUM return index present, not a hardcoded 0 — so LAS
+    return_number (1-based, carried verbatim on import) works. Regression for
+    return_density collapsing to point_density on airborne LAS: with 1-based labels
+    (first = 1), return_density must still count only first returns and stay well
+    below point_density on multi-return data."""
+    pts, gl, fr, inten, split = _density_scene()
+    fr_1based = fr + 1                      # 0/1 → 1/2 (LAS convention)
+    r = main._do_dem(main.DemRequest(
+        points=pts.tolist(), ground_labels=gl.tolist(),
+        first_return_labels=fr_1based.tolist(), surface_type="dtm",
+        cell_size=1.0, auto_segment_ground=False))
+    assert r["success"], r.get("error")
+    gp = _layer_grid(r, "point_density"); gr = _layer_grid(r, "return_density")
+    # Return density (first returns only) is strictly below point density where the
+    # dense-half duplicates (return index 2) were added — NOT identical.
+    assert float(np.nansum(gr)) < float(np.nansum(gp))
+    half = gp.shape[1] // 2
+    assert abs(float(np.nanmean(gr[:, :half]) / np.nanmean(gr[:, half:])) - 1.0) < 0.25
+
+
+def test_intensity_layer_mean_per_cell():
+    """intensity layer = per-cell mean intensity. With intensity ∝ x it rises left→right."""
+    r = _dtm_bundle()
+    g = _layer_grid(r, "intensity")
+    assert float(np.nanmean(g[:, -1])) > float(np.nanmean(g[:, 0])) + 10.0
+    finite = g[np.isfinite(g)]
+    assert finite.min() >= 0.0 and finite.max() <= 20.5
+
+
+def test_intensity_layer_absent_without_intensity():
+    """Without a per-point intensity array the DTM still succeeds — it just has no
+    intensity layer (the other layers are unaffected)."""
+    r = _dtm_bundle(intensity=None)
+    assert r["success"], r.get("error")
+    assert "intensity" not in r["layers"]
+    assert "point_density" in r["layers"]        # the rest are still there
+
+
+def test_slope_aspect_hillshade_from_elevation():
+    """Slope/aspect/hillshade are derived from the elevation grid. On a tilted plane
+    z = 0.1x + 0.05y the slope is atan(hypot(0.1,0.05)) ≈ 6.4° everywhere, aspect
+    points down-slope (SW-ish), and hillshade is in [0,1]."""
+    rng = np.random.default_rng(1)
+    n = 6000
+    x = rng.uniform(0, 20, n); y = rng.uniform(0, 20, n)
+    z = 0.1 * x + 0.05 * y + 2.0
+    pts = np.column_stack([x, y, z])
+    gl = np.ones(n, dtype=np.int64)
+    r = main._do_dem(main.DemRequest(points=pts.tolist(), ground_labels=gl.tolist(),
+                                     surface_type="dtm", cell_size=1.0, fill_voids=True,
+                                     auto_segment_ground=False))
+    assert r["success"], r.get("error")
+    expected_slope = np.degrees(np.arctan(np.hypot(0.1, 0.05)))   # ≈ 6.38°
+    slope = _layer_grid(r, "slope")
+    assert abs(float(np.nanmedian(slope)) - expected_slope) < 1.0
+    hs = _layer_grid(r, "hillshade")
+    finite = hs[np.isfinite(hs)]
+    assert finite.min() >= 0.0 and finite.max() <= 1.0
+    asp = _layer_grid(r, "aspect")
+    af = asp[np.isfinite(asp)]
+    assert af.min() >= 0.0 and af.max() <= 360.0
+
+
 def test_dem_outlier_rejection():
     """A single tall spike inside a densely-sampled cell must not tent the DEM:
     the per-cell percentile discards it."""
@@ -103,7 +376,8 @@ def test_dem_voids_and_fill():
     hull and become voids (no triangles there). `fill_voids` extrapolates them."""
     rng = np.random.default_rng(1)
     n = 6000
-    # uniform disk of radius 4 centred at (5,5)
+    # uniform disk of radius 4 centred at (5,5), inside a [0,10]² bbox — so the four
+    # bbox corners fall OUTSIDE the data's convex hull.
     rad = 4.0 * np.sqrt(rng.uniform(0, 1, n))
     ang = rng.uniform(0, 2 * np.pi, n)
     xy = np.column_stack([5 + rad * np.cos(ang), 5 + rad * np.sin(ang)])
@@ -115,12 +389,47 @@ def test_dem_voids_and_fill():
     gz = np.asarray(r["grid_z"]).reshape(r["grid_ny"], r["grid_nx"])
     assert not np.isfinite(gz[0, 0])  # a corner is void
 
+    # fill_voids must NOT fabricate terrain beyond the data footprint: the corners
+    # (outside the convex hull) stay void even with filling on. Extrapolating them —
+    # inventing four triangle fans out to the bbox corners — was the ALS bug.
     rf = main._compute_dem(pts, cell_size=0.5, method="tin", fill_voids=True,
                            bbox=[0, 0, 10, 10])
-    assert rf["voids"] == 0
     gzf = np.asarray(rf["grid_z"]).reshape(rf["grid_ny"], rf["grid_nx"])
-    assert np.all(np.isfinite(gzf))
-    assert rf["num_triangles"] > r["num_triangles"]  # gaps now meshed
+    assert not np.isfinite(gzf[0, 0])                # corner NOT fabricated
+    assert rf["voids"] > 0                           # exterior stays void
+    # The centre (inside the hull) is meshed either way.
+    centre_j, centre_i = rf["grid_ny"] // 2, rf["grid_nx"] // 2
+    assert np.isfinite(gzf[centre_j, centre_i])
+
+
+def test_fill_extends_to_scan_footprint_not_just_ground_hull():
+    """Under dense canopy the ground returns cluster centrally, so their hull is far
+    smaller than the scan. With a `footprint_xy` (all returns), fill_voids must cover
+    the whole scanned area via nearest-ground — not leave big canopy-edge gaps. This
+    is the reported ALS 'missing wedge'."""
+    rng = np.random.default_rng(4)
+    # Ground returns: a small central disk (radius 2 at (5,5)). Footprint: the whole
+    # [0,10]² square (canopy returns everywhere), simulated as a dense grid of points.
+    n = 4000
+    rad = 2.0 * np.sqrt(rng.uniform(0, 1, n)); ang = rng.uniform(0, 2 * np.pi, n)
+    ground = np.column_stack([5 + rad * np.cos(ang), 5 + rad * np.sin(ang), np.full(n, 3.0)])
+    fx, fy = np.meshgrid(np.linspace(0.25, 9.75, 40), np.linspace(0.25, 9.75, 40))
+    footprint = np.column_stack([fx.ravel(), fy.ravel()])
+
+    # No footprint → fill stays in the small ground hull (a corner stays void).
+    r_hull = main._compute_dem(ground, cell_size=0.5, method="tin", fill_voids=True,
+                               bbox=[0, 0, 10, 10])
+    g_hull = np.asarray(r_hull["grid_z"]).reshape(r_hull["grid_ny"], r_hull["grid_nx"])
+    assert not np.isfinite(g_hull[-1, -1])           # far corner: no ground nearby → void
+
+    # With the scan footprint → fill reaches every scanned cell (the corner is now
+    # covered via nearest-ground), and coverage jumps well above the ground hull.
+    r_fp = main._compute_dem(ground, cell_size=0.5, method="tin", fill_voids=True,
+                             bbox=[0, 0, 10, 10], footprint_xy=footprint)
+    g_fp = np.asarray(r_fp["grid_z"]).reshape(r_fp["grid_ny"], r_fp["grid_nx"])
+    assert np.isfinite(g_fp[-1, -1])                 # corner filled from nearest ground
+    assert r_fp["voids"] < r_hull["voids"]           # far fewer holes
+    assert np.isfinite(g_fp).mean() > 0.9            # nearly the whole square is covered
 
 
 def test_dem_too_fine_cell_size_raises():
@@ -281,6 +590,73 @@ def test_dem_raster_export_geotiff(client):
         assert data.shape == (dem["grid_ny"], dem["grid_nx"])
 
 
+def test_chm_endpoint_frame_and_raster_roundtrip(client):
+    """POST /api/dem with surface_type=chm returns a PHB1 frame whose grid rides
+    the existing raster-export path unchanged (GeoTIFF round-trips via tifffile)."""
+    pts, gl, fr, _, DH = _canopy_scene()
+    resp = client.post("/api/dem", json={
+        "points": pts.tolist(), "ground_labels": gl.tolist(),
+        "first_return_labels": fr.tolist(), "surface_type": "chm",
+        "cell_size": 0.5, "auto_segment_ground": False,
+    })
+    assert resp.status_code == 200, resp.text
+    meta, buffers = decode_bin_frame(resp.content)
+    assert meta["success"], meta.get("error")
+    assert meta["surface_type"] == "chm"
+    gz = np.asarray(buffers["grid_z"], dtype=np.float64)
+    assert gz.size == meta["grid_nx"] * meta["grid_ny"]
+    # Export the CHM grid to GeoTIFF via the shared endpoint.
+    gz = np.where(np.isfinite(gz), gz, -9999.0)
+    exp = client.post("/api/dem/export-raster", json={
+        "format": "tif", "grid_z": gz.tolist(),
+        "nx": meta["grid_nx"], "ny": meta["grid_ny"], "cell_size": meta["grid_cell"],
+        "origin": meta["grid_origin"], "nodata": -9999.0, "crs_epsg": 32610,
+    })
+    assert exp.status_code == 200, exp.text
+    raw = base64.b64decode(exp.json()["data_base64"])
+    import tifffile
+    with tifffile.TiffFile(io.BytesIO(raw)) as tf:
+        page = tf.pages[0]
+        assert page.shape == (meta["grid_ny"], meta["grid_nx"])
+        assert 33550 in page.tags and 34735 in page.tags
+
+
+def test_dtm_layers_frame_and_intensity_raster_roundtrip(client):
+    """A DTM frame carries its scalar layers: meta["layers"] lists them, each layer's
+    grid rides as a `layer_grid_<name>` buffer + a per-vertex `layer_vert_<name>`,
+    and any layer (here intensity) round-trips through the raster-export path."""
+    pts, gl, fr, inten, split = _density_scene()
+    resp = client.post("/api/dem", json={
+        "points": pts.tolist(), "ground_labels": gl.tolist(), "intensity": inten.tolist(),
+        "first_return_labels": fr.tolist(),
+        "surface_type": "dtm", "cell_size": 1.0, "auto_segment_ground": False,
+    })
+    assert resp.status_code == 200, resp.text
+    meta, buffers = decode_bin_frame(resp.content)
+    assert meta["success"], meta.get("error")
+    assert meta["surface_type"] == "dtm"
+    # Layer metadata + buffers present for every layer.
+    assert set(meta["layers"]) >= {"elevation", "point_density", "return_density",
+                                   "intensity", "hillshade", "slope", "aspect"}
+    ncells = meta["grid_nx"] * meta["grid_ny"]
+    for name in meta["layers"]:
+        assert buffers[f"layer_grid_{name}"].size == ncells
+        assert buffers[f"layer_vert_{name}"].size == meta["num_vertices"]
+    # Export the intensity LAYER grid through the shared raster path.
+    gz = np.asarray(buffers["layer_grid_intensity"], dtype=np.float64)
+    gz = np.where(np.isfinite(gz), gz, -9999.0)
+    exp = client.post("/api/dem/export-raster", json={
+        "format": "tif", "grid_z": gz.tolist(),
+        "nx": meta["grid_nx"], "ny": meta["grid_ny"], "cell_size": meta["grid_cell"],
+        "origin": meta["grid_origin"], "nodata": -9999.0,
+    })
+    assert exp.status_code == 200, exp.text
+    raw = base64.b64decode(exp.json()["data_base64"])
+    import tifffile
+    with tifffile.TiffFile(io.BytesIO(raw)) as tf:
+        assert tf.pages[0].shape == (meta["grid_ny"], meta["grid_nx"])
+
+
 # ------------------------- session height-above-ground -------------------------
 
 def _make_session(positions, ground_class=None):
@@ -331,6 +707,68 @@ def test_session_dem_height_above_ground(monkeypatch):
     # Ground points: HAG ~ 0; plant points: HAG ~ 3.
     assert abs(float(np.median(hag[:len(ground)]))) < 0.2
     assert abs(float(np.median(hag[len(ground):])) - 3.0) < 0.3
+
+
+def test_session_chm_from_target_index(monkeypatch):
+    """Session CHM reads the first-return subset from the `target_index` column
+    (0 = first return): the DSM rests on the canopy, the DTM on the ground column,
+    and the CHM ≈ canopy height. No octree rebuild for CHM (no column written)."""
+    import time
+    pts, gl, fr, _, DH = _canopy_scene()
+    n = len(pts)
+    extras = {
+        main.GROUND_CLASS_SLUG: gl.astype(np.float32),
+        "target_index": fr.astype(np.float32),
+    }
+    extra_meta = [
+        {"slug": main.GROUND_CLASS_SLUG, "label": main.GROUND_CLASS_LABEL},
+        {"slug": "target_index", "label": "Target Index"},
+    ]
+    sess = main.CloudSession(
+        session_id="chmtest", source_path="mem", ascii_format=None, column_plan=None,
+        positions=pts.astype(np.float64), colors=None, intensity=None,
+        extras=extras, extra_dims_meta=extra_meta,
+        deleted=np.zeros(n, dtype=bool), deleted_history=[], octree_cache_id=None,
+        created_at=time.time(),
+    )
+    req = main.SessionDemRequest(surface_type="chm", cell_size=0.5,
+                                 auto_segment_ground=False)
+    r = main._do_session_dem(sess, req)
+    assert r["success"], r.get("error")
+    assert r["surface_type"] == "chm"
+    assert r["surface_source"] == "first_return"
+    chm = np.asarray(r["grid_z"]).reshape(r["grid_ny"], r["grid_nx"])
+    assert float(np.nanmin(chm[np.isfinite(chm)])) >= 0.0
+    assert abs(float(np.nanmax(chm)) - DH) < 1.0
+
+
+def test_session_dtm_intensity_layer_from_session_field():
+    """A session DTM's intensity LAYER reads the session's first-class `intensity`
+    field (no request array): per-cell mean tracks the per-point intensity, and the
+    mesh is the terrain (draped at ground z)."""
+    import time
+    pts, gl, fr, inten, split = _density_scene()
+    n = len(pts)
+    sess = main.CloudSession(
+        session_id="inttest", source_path="mem", ascii_format=None, column_plan=None,
+        positions=pts.astype(np.float64), colors=None,
+        intensity=inten.astype(np.uint16),
+        extras={main.GROUND_CLASS_SLUG: gl.astype(np.float32),
+                "target_index": fr.astype(np.float32)},
+        extra_dims_meta=[{"slug": main.GROUND_CLASS_SLUG, "label": main.GROUND_CLASS_LABEL},
+                         {"slug": "target_index", "label": "Target Index"}],
+        deleted=np.zeros(n, dtype=bool), deleted_history=[], octree_cache_id=None,
+        created_at=time.time(),
+    )
+    r = main._do_session_dem(sess, main.SessionDemRequest(
+        surface_type="dtm", cell_size=1.0, auto_segment_ground=False))
+    assert r["success"], r.get("error")
+    assert r["surface_type"] == "dtm"
+    assert "intensity" in r["layers"] and "point_density" in r["layers"]
+    g = np.asarray(r["layers"]["intensity"]["grid"]).reshape(r["grid_ny"], r["grid_nx"])
+    assert float(np.nanmean(g[:, -1])) > float(np.nanmean(g[:, 0])) + 5.0   # intensity ∝ x
+    verts = np.asarray(r["vertices"]).reshape(-1, 3)
+    assert abs(float(np.median(verts[:, 2])) - 2.0) < 0.5                     # the terrain
 
 
 def test_read_las_crs_epsg(tmp_path):

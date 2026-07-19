@@ -77,6 +77,42 @@ export function quatFromRpy(
   return [qx, qy, qz, qw];
 }
 
+// Inverse of quatFromRpy: recover intrinsic Z-Y-X roll/pitch/yaw (radians) from a
+// Hamilton (qx,qy,qz,qw) quaternion. Exact inverse of the formula above, so
+// quatToRpy(quatFromRpy(r,p,y)) round-trips to (r,p,y) away from gimbal lock.
+// At the ±90° pitch singularity (|sinPitch| ≈ 1) roll and yaw are coupled; we
+// clamp pitch and fold the coupled rotation into yaw (roll = 0), the standard
+// convention — the resulting quaternion is still correct, only the r/p/y split
+// is non-unique there. Needed so an imported quaternion trajectory can be shown
+// and edited as roll/pitch/yaw in the manual editor.
+export function quatToRpy(
+  qx: number,
+  qy: number,
+  qz: number,
+  qw: number,
+): [number, number, number] {
+  // roll (x-axis rotation)
+  const sinrCosp = 2 * (qw * qx + qy * qz);
+  const cosrCosp = 1 - 2 * (qx * qx + qy * qy);
+  // pitch (y-axis rotation)
+  const sinp = 2 * (qw * qy - qz * qx);
+  // yaw (z-axis rotation)
+  const sinyCosp = 2 * (qw * qz + qx * qy);
+  const cosyCosp = 1 - 2 * (qy * qy + qz * qz);
+
+  if (Math.abs(sinp) >= 1) {
+    // Gimbal lock: pitch at ±90°. Fold roll into yaw (roll = 0).
+    const pitch = Math.sign(sinp) * (Math.PI / 2);
+    const yaw = Math.atan2(2 * (qx * qy + qw * qz), 1 - 2 * (qx * qx + qz * qz));
+    return [0, pitch, yaw];
+  }
+
+  const roll = Math.atan2(sinrCosp, cosrCosp);
+  const pitch = Math.asin(sinp);
+  const yaw = Math.atan2(sinyCosp, cosyCosp);
+  return [roll, pitch, yaw];
+}
+
 // Column layouts the parser accepts. Either an 8-column quaternion row
 // (t x y z qx qy qz qw) or a 7-column Euler row (t x y z roll pitch yaw, radians).
 // A header line naming the columns is optional; without one, column count decides.

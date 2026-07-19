@@ -49,11 +49,19 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     // either way the UI must end up idle.)
     await cancelButton.click().catch(() => {});
 
-    // The UI returns to idle: the Cancel button is gone, the run button is enabled
-    // again, and NO error banner is shown (a user cancel is not a failure).
+    // The op ends one of two clean ways: cancelled (panel stays open, idle) or it
+    // beat the cancel and finished (panel auto-closes on success). Both are a valid
+    // recovery — the invariant is that the spinner/Cancel is gone and nothing errored.
     await expect(cancelButton).toBeHidden({ timeout: 10_000 });
-    await expect(runButton).toBeEnabled({ timeout: 10_000 });
     await expect(panel.locator('.bg-red-900\\/30')).toHaveCount(0);
+
+    // Reopen the panel if the run finished and closed it, so we can drive a fresh
+    // run either way.
+    if (!(await panel.isVisible())) {
+      await page.getByTestId('tool-dem').click();
+      await expect(panel).toBeVisible();
+    }
+    await expect(runButton).toBeEnabled({ timeout: 10_000 });
 
     // Prove a new op can start and complete after the cancel: run again and let it
     // finish, asserting a real DEM surface mesh appears (concrete output).

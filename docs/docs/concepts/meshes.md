@@ -16,9 +16,56 @@ There are four ways to bring a mesh into Phytograph:
    [File formats: PLY](../reference/file-formats.md#ply-point-cloud-or-mesh).
 2. **Triangulate** a point cloud — see [Triangulate a mesh](../workflows/triangulate.md).
 3. **Generate** a plant — every procedurally generated plant arrives as a mesh of stems, branches, and leaves. See [Generate a plant](../workflows/generate-plant.md).
-4. **Generate a DEM** — a bare-earth terrain surface reconstructed from a cloud's
-   ground points, stored as a heightmap mesh coloured by elevation and
-   exportable as a GIS raster. See [Generate a DEM](../workflows/generate-dem.md).
+4. **Generate a DEM / DSM / CHM** — a gridded terrain surface reconstructed from a
+   cloud, stored as a heightmap mesh coloured by elevation and exportable as a GIS
+   raster. See [Terrain surfaces](#terrain-surfaces-dtm-dsm-chm) below and
+   [Generate a DEM / DSM / CHM](../workflows/generate-dem.md).
+
+## Terrain surfaces: DTM, DSM, CHM
+
+The DEM tool builds three related gridded surfaces from a cloud. Each is a
+regular grid of one value per cell, reconstructed as a heightmap mesh and
+exportable as a GeoTIFF / ESRI ASCII raster:
+
+- **DTM (Digital Terrain Model)** — the **bare-earth** ground surface. Built from
+  the cloud's ground points (from [ground segmentation](../workflows/segment-ground.md),
+  or auto-detected), taking a *low* per-cell percentile so residual low
+  vegetation and noise don't lift the terrain. This is the classic "DEM".
+- **DSM (Digital Surface Model)** — the **top-of-canopy** surface: the highest
+  return in each cell (a *high* per-cell percentile over first returns). It
+  includes vegetation and structures, and does not need ground classification.
+- **CHM (Canopy Height Model)** — **`DSM − DTM`**: vegetation height above the
+  bare earth. The DTM and DSM are gridded on one aligned grid and subtracted, so
+  each cell reports the canopy height above the ground beneath it. Values are
+  floored at zero (canopy height is never negative) and a first-pass pit-fill
+  removes isolated within-canopy dips. The CHM is a core forestry product —
+  tree-height and canopy-structure metrics derive directly from it. The exported
+  raster holds the canopy *height* (referenced to the ground), while the displayed
+  CHM surface is **draped on the terrain** (drawn at ground elevation + height) so
+  it sits where the canopy actually is rather than floating from zero.
+
+First returns for the DSM are read from the cloud's multi-return `target_index`
+(0 = first return); a single-return cloud treats every point as a first return.
+
+### DTM layers: one surface, many bands
+
+A **DTM is a single surface that carries several scalar layers** on its grid — you
+colour the one terrain mesh by any of them (the **Color by** dropdown) and export
+any of them as a raster. This mirrors how a point cloud carries multiple scalar
+fields. All layers are computed automatically with the DTM and share its grid:
+
+- **Elevation** — the ground height (the default band).
+- **Point density** — points per cell; **Return density** — laser pulses (first
+  returns) per cell. Gridded directly from the points (empty cells stay void).
+- **Intensity** — mean return intensity per cell (when the cloud carries intensity).
+- **Hillshade / Slope / Aspect** — derived from the *elevation grid* (not from
+  points): hillshade is shaded relief with a fixed sun (azimuth 315°, altitude
+  45°); slope is the grid's steepness from horizontal; aspect its downslope compass
+  bearing. Grid-based, matching GIS conventions.
+
+Switching the layer recaptions the colorbar; **Export raster** writes the value of
+whichever band(s) you tick. DSM and CHM stay single-value surfaces (their geometry
+*is* the value).
 
 ## Triangulation methods
 

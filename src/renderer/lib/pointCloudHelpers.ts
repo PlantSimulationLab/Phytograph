@@ -412,6 +412,7 @@ export function outwardRefForMesh(
 export function computeMeshTriangleScalars(
   data: MeshData,
   mode: MeshColorMode,
+  layerValues?: Float32Array,
 ): { values: Float32Array; min: number; max: number } | null {
   if (mode === 'solid') return null;
 
@@ -420,24 +421,27 @@ export function computeMeshTriangleScalars(
   let min = Infinity;
   let max = -Infinity;
 
-  // Elevation: each triangle's centroid height (Z). Used for DEM surfaces; needs
-  // no face-normal geometry, so handle it directly.
-  if (mode === 'elevation') {
+  // Layer: colour each triangle by the centroid of its 3 vertices' stored layer
+  // values (a DTM's elevation / density / intensity / hillshade / slope / aspect
+  // band). `layerValues` is one value per mesh vertex, aligned to `vertices`.
+  if (mode === 'layer') {
+    if (!layerValues) return null;
     for (let t = 0; t < triangleCount; t++) {
-      const a = indices[t * 3] * 3;
-      const b = indices[t * 3 + 1] * 3;
-      const c = indices[t * 3 + 2] * 3;
-      const z = (vertices[a + 2] + vertices[b + 2] + vertices[c + 2]) / 3;
-      values[t] = z;
-      if (z < min) min = z;
-      if (z > max) max = z;
+      const a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
+      const v = (layerValues[a] + layerValues[b] + layerValues[c]) / 3;
+      values[t] = v;
+      if (Number.isFinite(v)) { if (v < min) min = v; if (v > max) max = v; }
     }
     if (!Number.isFinite(min) || !Number.isFinite(max)) return { values, min: 0, max: 1 };
     return { values, min, max };
   }
 
-  // Only azimuth needs the outward reference; skip the lookup for other modes.
-  const refFor = mode === 'azimuth' ? outwardRefForMesh(data) : null;
+  // Geometric modes: inclination (normal zenith), azimuth (normal bearing), area.
+  const geomKind = mode === 'inclination' ? 'inclination'
+    : mode === 'azimuth' ? 'azimuth'
+    : 'area';
+  // Only azimuth needs the outward reference; skip the lookup otherwise.
+  const refFor = geomKind === 'azimuth' ? outwardRefForMesh(data) : null;
 
   // Reused scratch — see `triangleGeometryInto`. Allocating one object per
   // triangle here (millions of them) is what flooded the GC and OOM'd the
@@ -445,8 +449,8 @@ export function computeMeshTriangleScalars(
   const g = { inclination: 0, azimuth: 0, area: 0 };
   for (let t = 0; t < triangleCount; t++) {
     triangleGeometryInto(vertices, indices, t, refFor ? refFor(t) : null, g);
-    const v = mode === 'area' ? g.area
-      : mode === 'inclination' ? g.inclination
+    const v = geomKind === 'area' ? g.area
+      : geomKind === 'inclination' ? g.inclination
       : g.azimuth;
 
     values[t] = v;
@@ -493,8 +497,9 @@ export function buildMeshTriangleColors(
   mode: MeshColorMode,
   colormap: ColormapName,
   rangeOverride?: { min: number; max: number },
+  layerValues?: Float32Array,
 ): { colors: Float32Array; min: number; max: number } | null {
-  const scalars = computeMeshTriangleScalars(data, mode);
+  const scalars = computeMeshTriangleScalars(data, mode, layerValues);
   if (!scalars) return null;
 
   const { triangleCount } = data;
@@ -532,8 +537,9 @@ export function buildMeshTriangleColorBuffers(
   mode: MeshColorMode,
   colormap: ColormapName,
   rangeOverride?: { min: number; max: number },
+  layerValues?: Float32Array,
 ): { positions: Float32Array; colors: Float32Array; min: number; max: number } | null {
-  const built = buildMeshTriangleColors(data, mode, colormap, rangeOverride);
+  const built = buildMeshTriangleColors(data, mode, colormap, rangeOverride, layerValues);
   if (!built) return null;
   return {
     positions: buildMeshNonIndexedPositions(data),
@@ -543,14 +549,14 @@ export function buildMeshTriangleColorBuffers(
   };
 }
 
-// Human-readable colorbar label for a mesh pseudocolor mode.
+// Human-readable colorbar label for a mesh pseudocolor mode. The 'layer' mode's
+// caption comes from the selected layer's stored `label`, not from here.
 export function meshColorModeLabel(mode: MeshColorMode): string {
   switch (mode) {
     case 'inclination': return 'Inclination (°)';
     case 'azimuth': return 'Azimuth (°)';
     case 'area': return 'Triangle area';
     case 'scan': return 'Source scan';
-    case 'elevation': return 'Elevation (m)';
     default: return '';
   }
 }

@@ -125,6 +125,25 @@ describe('computeMeshTriangleScalars', () => {
     expect(a).toBeCloseTo(b, 4);
     expect(a).toBeCloseTo(0, 3);
   });
+
+  // --- DTM 'layer' mode: colour a triangle by the centroid of its 3 vertices'
+  //     stored per-vertex layer values (density/intensity/elevation/… bands). ---
+
+  it('layer mode averages the 3 vertices’ layer values per triangle', () => {
+    // Two triangles sharing an edge; a per-vertex layer array of [10,20,30,40].
+    const mesh = makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0], [0, 1, 2, 1, 3, 2]);
+    const layer = new Float32Array([10, 20, 30, 40]);
+    const r = computeMeshTriangleScalars(mesh, 'layer', layer)!;
+    expect(r.values[0]).toBeCloseTo((10 + 20 + 30) / 3, 5);   // tri 0 = verts 0,1,2
+    expect(r.values[1]).toBeCloseTo((20 + 40 + 30) / 3, 5);   // tri 1 = verts 1,3,2
+    expect(r.min).toBeCloseTo(20, 5);
+    expect(r.max).toBeCloseTo(30, 5);
+  });
+
+  it('layer mode returns null when no layer values are supplied', () => {
+    const mesh = makeMesh([0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2]);
+    expect(computeMeshTriangleScalars(mesh, 'layer')).toBeNull();
+  });
 });
 
 describe('computeMeshTriangleScalars — scanner-oriented azimuth', () => {
@@ -247,6 +266,8 @@ describe('meshColorModeLabel', () => {
     expect(meshColorModeLabel('azimuth')).toMatch(/azimuth/i);
     expect(meshColorModeLabel('area')).toMatch(/area/i);
     expect(meshColorModeLabel('scan')).toMatch(/scan/i);
+    // 'layer' captions come from the layer's stored label, not this helper.
+    expect(meshColorModeLabel('layer')).toBe('');
     expect(meshColorModeLabel('solid')).toBe('');
   });
 });

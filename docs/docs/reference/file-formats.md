@@ -259,6 +259,12 @@ horizon (required for multibeam) — and takes its azimuth step count from
 (`<phiMin>`/`<phiMax>`) still applies. Scans exported from Phytograph round-trip:
 a multibeam scan saved as Helios XML re-imports as multibeam.
 
+**Livox rosette (Risley-prism) scans are not exported to this bundle.** A rosette
+has no zenith × azimuth grid — its circular field of view is emergent from the
+rotating-prism optics — so it cannot be represented in the grid-based Helios
+XML/ASCII format, and Phytograph skips such scans when exporting. (Their point
+data can still be exported as ordinary point-cloud files.)
+
 A Helios XML may also contain top-level `<grid>` blocks (siblings of `<scan>`),
 which describe the voxel grid Helios uses for leaf-area-density. On import,
 each `<grid>` becomes a **voxel grid** object named `Grid 1`, `Grid 2`, …:

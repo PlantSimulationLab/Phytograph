@@ -78,6 +78,44 @@
 //                      (only a footprint at range), so beam diameter is left at
 //                      the form default, as with the VZ-400i. Body 243 × 99 ×
 //                      85 mm, ~1.55 kg. RIEGL miniVUX-3UAV datasheet (2025-10-03).
+//
+// LIVOX NON-REPEATING ROSETTE INSTRUMENTS (Risley-prism deflectors). A single
+// beam is refracted through a stack of continuously rotating wedge prisms,
+// tracing a non-repetitive rosette that fills a circular field of view. Unlike
+// the raster/spinning units above, the FOV is an EMERGENT property of the wedge
+// angles + refractive indices — there is no angular-sweep preset; the preset
+// carries the prism stack (`risleyPrisms`) + air index instead. Wedge angles are
+// stored in DEGREES and rotor rates in Hz (the datasheet convention); the backend
+// converts to radians / rad-per-second at the pyhelios addScanRisley call site.
+// A Livox rosette is always trajectory-driven (a stationary tripod capture is a
+// trajectory of two identical poses one acquisition-duration apart).
+//   Prism parameters below are taken verbatim from the HELIOS++ scanner
+//   definitions (github.com/3dgeo-heidelberg/helios, data/scanners_tls.xml),
+//   corroborated for the Mid-40 by Wang et al., "A Rigorous Observation Model for
+//   the Risley Prism-Based Livox Mid-40 Lidar Sensor", Sensors 2021;21(14):4722.
+//   - Livox Mid-40:  two counter-rotating wedges 18.7481° / 17.9634° at n=1.51,
+//                    rotor rates −121.5657 Hz / +77.7430 Hz; air index 1.0; PRF
+//                    100 kHz; beam divergence 0.89 mrad (0.00089 rad, semi-minor
+//                    axis of the elliptical beam, at 1/e²); up to 2 returns; 905 nm;
+//                    ~38.4° circular FOV. Body ~88 mm tall.
+//   - Livox Mid-70:  two wedges −29.7° / 29.7° at n=1.5095, rotor rates
+//                    −77.7333 Hz / +121.5667 Hz; air 1.0; PRF 100 kHz; divergence
+//                    0.89 mrad; up to 2 returns; 70.4° circular FOV. The wedge
+//                    angles are HELIOS++ ESTIMATES back-derived from the datasheet
+//                    FOV (the manufacturer does not publish them). Body ~76 mm.
+//   - Livox Avia:    THREE wedges 30.8856° / 29.7735° / 3.1351° at n=1.51, rotor
+//                    rates −131.5463 / 40.8032 / 213.1611 Hz; air 1.0; PRF 40 kHz;
+//                    divergence 0.89 mrad; up to 3 returns (triple-echo); FOV
+//                    70.4°×77.2°. The real Avia fires 6 laser channels; pyhelios'
+//                    addScanRisley models a SINGLE beam through one prism stack, so
+//                    this is the faithful single-stack approximation of the rosette
+//                    (the multi-channel detail is not representable). Body ~52 mm,
+//                    498 g. This is the one Livox body mesh supplied
+//                    (livox_avia.obj); the Mid-40 and Mid-70 reuse it as their
+//                    marker (near-identical puck silhouette), scaled to their own
+//                    heights — the same reuse the BLK360-G2 makes of the G1 OBJ.
+//   The Livox Mid-100 is OMITTED: it is a 3-head device (three Mid-40 cones at
+//   azimuth −30°/0°/+30°), which a single prism stack cannot represent.
 
 import type { ScanParameters } from './scanParameters';
 
@@ -88,6 +126,7 @@ import leicaBlk360Url from '../assets/models/Leica_BLK360.obj?url';
 import velodyneHdlUrl from '../assets/models/Velodyn_HDL.obj?url';
 import rieglVzUrl from '../assets/models/riegl_vz.obj?url';
 import rieglMiniVuxUrl from '../assets/models/riegl_miniVUX.obj?url';
+import livoxAviaUrl from '../assets/models/livox_avia.obj?url';
 
 export type ScannerModelId =
   | 'generic'
@@ -97,7 +136,10 @@ export type ScannerModelId =
   | 'leica_blk360_g2'
   | 'faro_focus_s350'
   | 'velodyne_hdl32e'
-  | 'riegl_minivux3uav';
+  | 'riegl_minivux3uav'
+  | 'livox_mid40'
+  | 'livox_mid70'
+  | 'livox_avia';
 
 export type ScannerMeshFormat = 'ply' | 'obj';
 
@@ -122,6 +164,8 @@ export type ScannerModelPreset = Partial<
     | 'azimuthMaxDeg'
     | 'azimuthPoints'
     | 'pulseRateHz'
+    | 'risleyPrisms'
+    | 'refractiveIndexAir'
   >
 >;
 
@@ -358,6 +402,74 @@ export const SCANNER_MODELS: ScannerModel[] = [
       azimuthPoints: 3600,
       // Selectable PRR; the 100 kHz mode is the one that yields the 360° FOV.
       pulseRateHz: 100000,
+    },
+  },
+  {
+    id: 'livox_mid40',
+    label: 'Livox Mid-40',
+    meshUrl: livoxAviaUrl, // reuses the Avia body (near-identical puck silhouette)
+    meshFormat: 'obj',
+    heightMeters: 0.088,
+    preset: {
+      pattern: 'risley_prism',
+      // Non-repetitive rosette; up to 2 returns per pulse (waveform multi-echo).
+      returnMode: 'multi',
+      maxReturns: 2,
+      // 0.89 mrad (semi-minor axis of the elliptical beam @ 1/e²). No exit
+      // aperture published, so beam diameter is left at the form default.
+      beamDivergenceMrad: 0.89,
+      pulseRateHz: 100000, // 100 kHz PRF
+      refractiveIndexAir: 1.0,
+      // Two counter-rotating wedges (HELIOS++ data/scanners_tls.xml; Sensors
+      // 2021;21(14):4722). Degrees + Hz; converted to rad / rad-per-s backend-side.
+      risleyPrisms: [
+        { wedgeAngleDeg: 18.7481, refractiveIndex: 1.51, rotorRateHz: -121.5657 },
+        { wedgeAngleDeg: 17.9634, refractiveIndex: 1.51, rotorRateHz: 77.7430 },
+      ],
+    },
+  },
+  {
+    id: 'livox_mid70',
+    label: 'Livox Mid-70',
+    meshUrl: livoxAviaUrl, // reuses the Avia body
+    meshFormat: 'obj',
+    heightMeters: 0.076,
+    preset: {
+      pattern: 'risley_prism',
+      returnMode: 'multi',
+      maxReturns: 2,
+      beamDivergenceMrad: 0.89,
+      pulseRateHz: 100000,
+      refractiveIndexAir: 1.0,
+      // Wedge angles are HELIOS++ estimates from the datasheet 70.4° FOV
+      // (data/scanners_tls.xml); the manufacturer does not publish them.
+      risleyPrisms: [
+        { wedgeAngleDeg: -29.7, refractiveIndex: 1.5095, rotorRateHz: -77.733333333 },
+        { wedgeAngleDeg: 29.7, refractiveIndex: 1.5095, rotorRateHz: 121.566666666 },
+      ],
+    },
+  },
+  {
+    id: 'livox_avia',
+    label: 'Livox Avia',
+    meshUrl: livoxAviaUrl,
+    meshFormat: 'obj',
+    heightMeters: 0.052,
+    preset: {
+      pattern: 'risley_prism',
+      // Triple-echo: up to 3 returns per pulse.
+      returnMode: 'multi',
+      maxReturns: 3,
+      beamDivergenceMrad: 0.89,
+      pulseRateHz: 40000, // 40 kHz PRF (datasheet / HELIOS++)
+      refractiveIndexAir: 1.0,
+      // THREE wedges (HELIOS++ data/scanners_tls.xml). The real Avia fires 6 laser
+      // channels; a single prism stack is the faithful rosette approximation.
+      risleyPrisms: [
+        { wedgeAngleDeg: 30.8856, refractiveIndex: 1.51, rotorRateHz: -131.5463 },
+        { wedgeAngleDeg: 29.7735, refractiveIndex: 1.51, rotorRateHz: 40.8032 },
+        { wedgeAngleDeg: 3.1351, refractiveIndex: 1.51, rotorRateHz: 213.1611 },
+      ],
     },
   },
 ];

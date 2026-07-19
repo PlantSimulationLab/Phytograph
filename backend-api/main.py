@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.46.0"
+BACKEND_VERSION = "0.50.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2373,6 +2373,20 @@ _DEM_CELL_MAX = 5.0
 # an enormous grid; reject with a clear error instead (mirrors the TreeIso cap).
 _DEM_MAX_CELLS = 4_000_000
 
+# Surface products the DEM tool can build. DTM = bare-earth ground (the historical
+# behaviour); DSM = first-return / top-of-canopy surface; CHM = DSM − DTM (canopy
+# height model). DTM/DSM differ only in which points feed the grid and which per-cell
+# percentile is picked (near-min for ground vs near-max for canopy top); CHM
+# subtracts the two aligned grids. The DTM additionally carries a bundle of scalar
+# LAYERS (point/return density, intensity, hillshade, slope, aspect) — see
+# _compute_dem_layers — that the renderer colours the terrain by and exports as
+# rasters; they are NOT separate surfaces. See _do_dem / _do_session_dem.
+_DEM_SURFACE_TYPES = ("dtm", "dsm", "chm")
+# Per-cell z percentile for the DSM's first-return surface: near-max, so each cell
+# takes the top-of-canopy return rather than a low outlier. Mirrors how the DTM
+# uses a low percentile (default 5.0) for a robust near-minimum ground.
+_DSM_CELL_PERCENTILE = 95.0
+
 
 class DemRequest(BaseModel):
     """Generate a DEM from a flat cloud's inline `points` or a `source` descriptor.
@@ -2386,6 +2400,17 @@ class DemRequest(BaseModel):
     # Per-point ground labels (1=ground) aligned to the resolved point order. When
     # present, the DEM is built from ground points only (the "column" path).
     ground_labels: Optional[List[int]] = None
+    # Per-point return index (0 = first return) aligned to the resolved point order.
+    # Used only when surface_type == "dsm"/"chm" to build the first-return surface;
+    # absent ⇒ every point is treated as a first return (single-return clouds).
+    first_return_labels: Optional[List[int]] = None
+    # Per-point intensity aligned to the resolved point order. Used only when
+    # surface_type == "intensity" to grid a per-cell mean intensity raster.
+    intensity: Optional[List[float]] = None
+    # Which surface to build — one of _DEM_SURFACE_TYPES: elevation surfaces
+    # "dtm" (default) / "dsm" / "chm", or value rasters "point_density" /
+    # "return_density" / "intensity".
+    surface_type: str = "dtm"
     # Run CSF to derive ground when no labels are supplied. CSF tuning mirrors
     # GroundSegmentationRequest's close-range defaults.
     auto_segment_ground: bool = True
@@ -2424,6 +2449,7 @@ def _compute_dem(
     ground_percentile: float = 5.0,
     fill_voids: bool = False,
     sample_xy: Optional[np.ndarray] = None,
+    footprint_xy: Optional[np.ndarray] = None,
     progress=None,
 ) -> dict:
     """Grid ground elevation into a DEM and build its heightmap surface mesh.
@@ -2433,7 +2459,14 @@ def _compute_dem(
     vertices/triangles/normals, surface_area, counts, method_used, plus the
     regular grid (`grid_z` row-major (ny*nx), `grid_nx`, `grid_ny`, `grid_cell`,
     `grid_origin` = [minx, miny] lower-left corner) and `voids`. Raises
-    ValueError when the requested cell size would exceed the grid-cell cap."""
+    ValueError when the requested cell size would exceed the grid-cell cap.
+
+    `footprint_xy` (all returns' XY, not just ground) defines the SCANNED area for
+    `fill_voids`: under dense canopy the ground returns cluster in the centre, so
+    their hull is far smaller than the scan — filling only inside that hull leaves
+    big canopy-edge gaps. When given, fill extends (nearest-ground) to any cell that
+    holds a return, i.e. the true footprint. Without it, fill stays in the ground
+    hull (the old behaviour)."""
     def _report(frac, msg):
         if progress is not None:
             progress(frac, msg)
@@ -2503,6 +2536,19 @@ def _compute_dem(
     GX, GY = np.meshgrid(gx, gy)        # (ny, nx)
     grid_xy = np.column_stack([GX.ravel(), GY.ravel()])
 
+    # Convex hull of the ground points (in grid space): a DEM must NEVER invent
+    # terrain beyond the data footprint. The cloud's XY footprint is usually a
+    # rotated/irregular polygon inside the axis-aligned grid bbox; nearest/idw
+    # otherwise extrapolate all the way to the bbox corners (four fake triangle fans
+    # beyond the real scan — the reported ALS bug). TIN (linear) already returns NaN
+    # outside the hull; we apply the same mask to nearest/idw so all methods agree.
+    try:
+        from scipy.spatial import Delaunay
+        hull = Delaunay(rep_xy)
+        inside = (hull.find_simplex(grid_xy) >= 0).reshape(ny, nx)
+    except Exception:
+        inside = np.ones((ny, nx), dtype=bool)   # degenerate hull → no masking
+
     m = (method or "tin").lower()
     if m in ("tin", "linear"):
         zi = griddata(rep_xy, rep_z, grid_xy, method="linear")
@@ -2523,12 +2569,27 @@ def _compute_dem(
         return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
                 "num_vertices": 0, "error": f"Unknown DEM method {method!r}."}
     grid_z = zi.reshape(ny, nx).astype(np.float64)
+    # Blank anything outside the ground hull (nearest/idw fill everywhere by nature),
+    # so the un-filled DEM never invents terrain past where ground was measured.
+    grid_z[~inside] = np.nan
 
     if fill_voids:
-        nanmask = ~np.isfinite(grid_z)
-        if nanmask.any():
+        # The fill region: interior holes inside the ground hull ALWAYS, plus — when a
+        # scan footprint is supplied — every cell that holds a return (canopy incl.),
+        # so a dense-canopy DTM covers the whole scanned area instead of only the
+        # sparse ground-return hull. Cells with no return anywhere stay void (we never
+        # fabricate terrain past the actual scan). Fill value = nearest ground return.
+        if footprint_xy is not None and len(footprint_xy):
+            fci = np.clip(((footprint_xy[:, 0] - minx) / cell).astype(np.int64), 0, nx - 1)
+            fcj = np.clip(((footprint_xy[:, 1] - miny) / cell).astype(np.int64), 0, ny - 1)
+            footprint = np.zeros((ny, nx), dtype=bool)
+            footprint[fcj, fci] = True
+        else:
+            footprint = inside
+        fillable = (~np.isfinite(grid_z)) & (inside | footprint)
+        if fillable.any():
             znear = griddata(rep_xy, rep_z, grid_xy, method="nearest").reshape(ny, nx)
-            grid_z[nanmask] = znear[nanmask]
+            grid_z[fillable] = znear[fillable]
 
     voids = int((~np.isfinite(grid_z)).sum())
 
@@ -2605,6 +2666,9 @@ def _compute_dem(
         "grid_cell": cell,
         "grid_origin": [minx, miny],                    # lower-left corner
         "voids": voids,
+        # Flat grid-cell index per output vertex (mesh vertices are grid nodes), so
+        # _compute_dem_layers can sample per-cell layer grids at each vertex.
+        "vertex_cells": used.astype(np.int64),
         # Per-sample ground z aligned to `sample_xy` (caller pops this — it's not
         # framed). None when sample_xy wasn't supplied.
         "sample_ground_z": sample_ground_z,
@@ -2612,10 +2676,14 @@ def _compute_dem(
 
 
 def _pack_dem_frame(result: dict) -> bytes:
-    """Pack a `_compute_dem` result into a PHB1 frame: vertices/indices/normals as
-    buffers plus the regular `grid_z` grid (for raster export); everything else
-    (counts, grid params, ground_source, world_shift, cache info) rides in meta."""
-    array_keys = {"vertices", "triangles", "normals", "grid_z", "hag", "sample_ground_z"}
+    """Pack a `_compute_dem`/`_compute_dem_layers` result into a PHB1 frame:
+    vertices/indices/normals + the `grid_z` grid (for raster export); the DTM's
+    scalar LAYERS ride as `layer_grid_<name>` (ny*nx, for export) + `layer_vert_<name>`
+    (per-vertex, for colouring) buffers, with each layer's min/max/label in
+    `meta["layers"]`. Everything else (counts, grid params, ground_source,
+    world_shift, cache info) rides in meta."""
+    array_keys = {"vertices", "triangles", "normals", "grid_z", "hag",
+                  "sample_ground_z", "layers", "layer_vertex", "vertex_cells"}
     if not result.get("success"):
         return _bin_frame_bytes({k: v for k, v in result.items() if k not in array_keys}, [])
     meta = {k: v for k, v in result.items() if k not in array_keys}
@@ -2627,6 +2695,17 @@ def _pack_dem_frame(result: dict) -> bytes:
         buffers.append(("grid_z", result["grid_z"], "f32"))
     if result.get("hag") is not None:
         buffers.append(("hag", result["hag"], "f32"))
+    # DTM scalar layers: grids for export + per-vertex arrays for colouring. The
+    # min/max/label ride in meta["layers"]; the buffers carry the numeric arrays.
+    layers = result.get("layers")
+    layer_vertex = result.get("layer_vertex") or {}
+    if layers:
+        meta["layers"] = {name: {"min": info["min"], "max": info["max"], "label": info["label"]}
+                          for name, info in layers.items()}
+        for name, info in layers.items():
+            buffers.append((f"layer_grid_{name}", info["grid"], "f32"))
+            if name in layer_vertex:
+                buffers.append((f"layer_vert_{name}", layer_vertex[name], "f32"))
     return _bin_frame_bytes(meta, buffers)
 
 
@@ -2691,33 +2770,407 @@ def _dem_ground_mask(points: np.ndarray, request: "DemRequest") -> "tuple[Option
     return None, "all_points", "No ground classification; used all points (lowest returns)."
 
 
-def _do_dem(request: "DemRequest", progress=None) -> dict:
-    """Stateless DEM: resolve points, derive a ground mask, grid the surface."""
+# Miss sentinel in a target_index column (Helios tags sky/misses with this).
+_MISS_TARGET_INDEX = 99
+
+
+def _first_return_index_mask(ti: np.ndarray) -> np.ndarray:
+    """Boolean mask of the FIRST return of each pulse, from a target_index / return
+    index column. The first-return VALUE is convention-dependent — Helios synthetic
+    scans are 0-based (first = 0), LAS `return_number` is 1-based (first = 1) and is
+    carried verbatim on import — so take the minimum index actually present, ignoring
+    the miss sentinel (99). This makes both conventions Just Work instead of a hard
+    `== 0` that silently matches nothing on airborne LAS."""
+    ti = np.asarray(ti)
+    valid = ti != _MISS_TARGET_INDEX
+    if not np.any(valid):
+        return np.zeros(ti.shape, dtype=bool)
+    first_val = ti[valid].min()
+    return (ti == first_val)
+
+
+def _first_return_mask(n: int, labels: "Optional[List[int]]") -> "tuple[Optional[np.ndarray], str]":
+    """Resolve the first-return mask for a DSM. Returns (mask | None, source).
+    `labels` is a per-point return index aligned to the points (first return = the
+    minimum index present; see _first_return_index_mask). None or a length mismatch ⇒
+    every point is a first return (mask None), correct for single-return clouds."""
+    if labels is not None and len(labels) == n:
+        mask = _first_return_index_mask(np.asarray(labels, dtype=np.int64))
+        if int(mask.sum()) >= 3:
+            return mask, "first_return"
+        # Degenerate (e.g. all misses tagged 99): fall back to all points rather
+        # than build a DSM from <3 first returns.
+        return None, "all_points"
+    return None, "all_points"
+
+
+def _shared_dem_bbox(*subsets: np.ndarray) -> "Optional[List[float]]":
+    """Union XY AABB over one or more point subsets, so a DTM and a DSM gridded
+    from different subsets share an identical grid and can be subtracted cell-for-
+    cell (CHM). Returns [minx, miny, maxx, maxy], or None if no subset has points."""
+    xs_min, ys_min, xs_max, ys_max = [], [], [], []
+    for s in subsets:
+        if s is not None and len(s):
+            xs_min.append(float(s[:, 0].min())); xs_max.append(float(s[:, 0].max()))
+            ys_min.append(float(s[:, 1].min())); ys_max.append(float(s[:, 1].max()))
+    if not xs_min:
+        return None
+    return [min(xs_min), min(ys_min), max(xs_max), max(ys_max)]
+
+
+def _pit_fill_chm(chm: np.ndarray) -> np.ndarray:
+    """First-pass pit-free CHM smoothing: fill the 'pits' where a DSM cell dipped
+    because a pulse penetrated the canopy to a lower return. Runs a NaN-aware 3×3
+    grey-closing (dilation then erosion) over finite cells, which lifts isolated
+    low cells to their neighbourhood max without inflating the overall surface.
+    A full Khosravipour spiral pit-free CHM is a future refinement."""
+    from scipy.ndimage import maximum_filter, minimum_filter
+    finite = np.isfinite(chm)
+    if not finite.any():
+        return chm
+    # Grey-closing = max-filter then min-filter. Feed NaNs as -inf into the max
+    # pass (so real cells win) and +inf into the min pass, then restore voids.
+    filled = np.where(finite, chm, -np.inf)
+    filled = maximum_filter(filled, size=3, mode="nearest")
+    filled = np.where(np.isfinite(filled), filled, np.inf)
+    filled = minimum_filter(filled, size=3, mode="nearest")
+    out = np.where(finite, filled, np.nan)
+    return out
+
+
+def _compute_chm(ground_pts: np.ndarray, surface_pts: np.ndarray, *, request,
+                 sample_xy=None, progress=None) -> dict:
+    """Canopy height model = DSM − DTM. Grids the ground points (DTM, low
+    percentile) and the first-return points (DSM, high percentile) onto ONE shared,
+    cell-aligned grid, subtracts them, floors at 0, and pit-fills. Rebuilds the
+    heightmap mesh from the CHM grid. Returns a `_compute_dem`-shaped dict."""
+    bbox = request.bbox if (request.bbox and len(request.bbox) == 4) else \
+        _shared_dem_bbox(ground_pts, surface_pts)
+    if bbox is None:
+        return {"success": False, "method_used": "dem_chm", "num_triangles": 0,
+                "num_vertices": 0, "error": "No points to build a CHM."}
+
+    def _sub(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
+    _sub(0.15, "Gridding ground (DTM)")
+    # Fill the DTM to the CANOPY footprint (surface_pts) so the CHM has a ground
+    # reference under every canopy cell — not just the sparse ground-return hull.
+    dtm = _compute_dem(ground_pts, cell_size=request.cell_size, bbox=bbox,
+                       method=request.method, ground_percentile=request.ground_percentile,
+                       fill_voids=True, sample_xy=sample_xy,
+                       footprint_xy=surface_pts[:, :2] if len(surface_pts) else None)
+    if not dtm.get("success"):
+        return dtm
+    _sub(0.55, "Gridding surface (DSM)")
+    dsm = _compute_dem(surface_pts, cell_size=request.cell_size, bbox=bbox,
+                       method=request.method, ground_percentile=_DSM_CELL_PERCENTILE,
+                       fill_voids=request.fill_voids)
+    if not dsm.get("success"):
+        return dsm
+    if (dsm["grid_nx"], dsm["grid_ny"]) != (dtm["grid_nx"], dtm["grid_ny"]):
+        return {"success": False, "method_used": "dem_chm", "num_triangles": 0,
+                "num_vertices": 0, "error": "DTM/DSM grids did not align for CHM."}
+
+    _sub(0.8, "Subtracting DSM − DTM")
+    nx, ny, cell = dsm["grid_nx"], dsm["grid_ny"], dsm["grid_cell"]
+    minx, miny = dsm["grid_origin"]
+    dsm_g = np.asarray(dsm["grid_z"], dtype=np.float64).reshape(ny, nx)
+    dtm_g = np.asarray(dtm["grid_z"], dtype=np.float64).reshape(ny, nx)
+    chm = dsm_g - dtm_g
+    chm = np.where(chm < 0, 0.0, chm)        # canopy height is never negative
+    chm = _pit_fill_chm(chm)
+    # The CHM grid_z is the canopy HEIGHT (0..h, referenced to the ground) — that's
+    # what raster export writes. But the displayed mesh must sit where the canopy
+    # actually is, draped on the terrain: each vertex at DTM_z + canopy_height, not
+    # floating up from z=0. Pass the DTM grid as a per-cell mesh z-offset; the
+    # stored grid_z stays the height value.
+    result = _mesh_from_grid(chm, minx, miny, cell, method="chm", z_offset=dtm_g)
+    if not result.get("success"):
+        return result
+    result["ground_source"] = dtm.get("ground_source")   # provenance of the DTM half
+    return result
+
+
+def _mesh_from_grid(grid_z: np.ndarray, minx: float, miny: float, cell: float,
+                    *, method: str, z_offset: "Optional[np.ndarray]" = None) -> dict:
+    """Build a heightmap surface mesh from an already-computed cell-centred grid
+    (row 0 = min y, NaN voids). Mirrors the mesh section of _compute_dem so CHM —
+    which is a grid arithmetic result, not an interpolation — gets the same mesh
+    output shape (2 triangles per quad whose four corners are all finite).
+
+    `grid_z` is the value STORED in the result (for raster export). The MESH vertex
+    z is `grid_z` (a DTM/DSM, whose value IS the elevation), or `grid_z + z_offset`
+    when `z_offset` is given (CHM: canopy height ON the ground, so it sits at
+    DTM_z + height, not floating from z=0).
+
+    The result includes `vertex_cells`: for each output vertex, the flat grid-cell
+    index (row-major, `cj*nx + ci`) it came from — the mesh vertices ARE grid nodes.
+    Callers sample per-cell scalar LAYERS at these cells to build per-vertex layer
+    arrays aligned 1:1 with `vertices`."""
+    ny, nx = grid_z.shape
+    gx = minx + (np.arange(nx) + 0.5) * cell
+    gy = miny + (np.arange(ny) + 0.5) * cell
+    GX, GY = np.meshgrid(gx, gy)
+    finite = np.isfinite(grid_z)
+    if z_offset is not None:
+        mesh_z = grid_z + z_offset
+        finite = finite & np.isfinite(z_offset)
+    else:
+        mesh_z = grid_z
+    verts_full = np.column_stack([GX.ravel(), GY.ravel(), mesh_z.ravel()])
+    ii, jj = np.meshgrid(np.arange(nx - 1), np.arange(ny - 1))
+    v00 = (jj * nx + ii).ravel()
+    v10 = (jj * nx + ii + 1).ravel()
+    v01 = ((jj + 1) * nx + ii).ravel()
+    v11 = ((jj + 1) * nx + ii + 1).ravel()
+    ok = (finite[jj, ii] & finite[jj, ii + 1] &
+          finite[jj + 1, ii] & finite[jj + 1, ii + 1]).ravel()
+    v00, v10, v01, v11 = v00[ok], v10[ok], v01[ok], v11[ok]
+    if len(v00) == 0:
+        return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
+                "num_vertices": 0,
+                "error": "Produced no surface (too few populated cells; use a coarser cell size)."}
+    tris_full = np.vstack([np.column_stack([v00, v10, v11]),
+                           np.column_stack([v00, v11, v01])])
+    used = np.unique(tris_full)
+    remap = np.full(len(verts_full), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    verts = verts_full[used].astype(np.float64)
+    tris = remap[tris_full].astype(np.int64)
+    normals = None
+    surface_area = None
     try:
+        import open3d as o3d
+        mesh = o3d.geometry.TriangleMesh()
+        mesh.vertices = o3d.utility.Vector3dVector(verts)
+        mesh.triangles = o3d.utility.Vector3iVector(tris.astype(np.int32))
+        mesh.compute_vertex_normals()
+        normals = np.asarray(mesh.vertex_normals, dtype=np.float32)
+        surface_area = float(mesh.get_surface_area())
+    except Exception:
+        pass
+    return {
+        "success": True,
+        "vertices": verts.astype(np.float32),
+        "triangles": tris.astype(np.int64),
+        "normals": normals,
+        "surface_area": surface_area,
+        "num_vertices": int(len(verts)),
+        "num_triangles": int(len(tris)),
+        "method_used": f"dem_{method}",
+        "points_used": int(finite.sum()),
+        "grid_z": grid_z.astype(np.float32).ravel(),
+        "grid_nx": nx,
+        "grid_ny": ny,
+        "grid_cell": cell,
+        "grid_origin": [minx, miny],
+        "voids": int((~finite).sum()),
+        # Flat grid-cell index per output vertex (mesh vertices are grid nodes), so
+        # callers can sample per-cell layer grids at each vertex. Not framed.
+        "vertex_cells": used.astype(np.int64),
+    }
+
+
+# The scalar LAYERS a DTM surface carries. Each is a per-cell grid on the DTM's
+# grid; the renderer colours the terrain by whichever is selected and exports it as
+# a raster. `elevation` is the DTM itself; density/intensity are gridded from the
+# points; hillshade/slope/aspect are derived from the elevation grid.
+_DEM_LAYER_NAMES = ("elevation", "hillshade", "slope", "aspect",
+                    "point_density", "return_density", "intensity")
+_DEM_LAYER_LABELS = {
+    "elevation": "Elevation (m)", "hillshade": "Hillshade", "slope": "Slope (°)",
+    "aspect": "Aspect (°)", "point_density": "Point density",
+    "return_density": "Return density", "intensity": "Intensity",
+}
+
+
+def _grid_cell_density(xy: np.ndarray, minx: float, miny: float, cell: float,
+                       nx: int, ny: int, values: "Optional[np.ndarray]" = None) -> np.ndarray:
+    """Per-cell count (values None) or per-cell mean of `values`, scattered into a
+    (ny, nx) grid aligned to the DTM grid. Unpopulated cells stay NaN."""
+    ci = np.clip(((xy[:, 0] - minx) / cell).astype(np.int64), 0, nx - 1)
+    cj = np.clip(((xy[:, 1] - miny) / cell).astype(np.int64), 0, ny - 1)
+    flat = cj * nx + ci
+    counts = np.bincount(flat, minlength=nx * ny).astype(np.float64)
+    populated = counts > 0
+    grid = np.full(nx * ny, np.nan, dtype=np.float64)
+    if values is not None:
+        totals = np.bincount(flat, weights=np.asarray(values, dtype=np.float64), minlength=nx * ny)
+        grid[populated] = totals[populated] / counts[populated]
+    else:
+        grid[populated] = counts[populated]
+    return grid.reshape(ny, nx)
+
+
+def _terrain_derivatives(elev: np.ndarray, cell: float) -> "dict[str, np.ndarray]":
+    """Hillshade / slope / aspect from an elevation grid (row 0 = min y) via central
+    differences, matching GIS conventions. Slope in degrees from horizontal; aspect
+    in compass degrees (0=N, 90=E); hillshade in [0,1] with a fixed sun (az 315°,
+    alt 45°). Voids (NaN in elevation) propagate to NaN in the derivatives."""
+    # np.gradient returns d/d(row), d/d(col); row is +y (north), col is +x (east).
+    dzdy, dzdx = np.gradient(elev, cell)
+    slope_rad = np.arctan(np.hypot(dzdx, dzdy))
+    slope = np.degrees(slope_rad)
+    # Aspect: downslope direction = −gradient. atan2 in compass bearing (0=N, CW).
+    aspect = np.degrees(np.arctan2(-dzdx, dzdy))   # 0 = +y (north)
+    aspect = np.where(aspect < 0, aspect + 360.0, aspect)
+    aspect = np.where(slope < 1e-6, np.nan, aspect)   # flat cells have no aspect
+    # Hillshade: illumination of the surface normal by the sun. Standard formula.
+    az_rad = np.radians(315.0)
+    alt_rad = np.radians(45.0)
+    zenith = np.pi / 2 - alt_rad
+    # Aspect measured CCW from east for the hillshade formula.
+    aspect_e = np.radians(np.where(np.isfinite(aspect), aspect, 0.0))
+    hillshade = (np.cos(zenith) * np.cos(slope_rad) +
+                 np.sin(zenith) * np.sin(slope_rad) *
+                 np.cos(az_rad - aspect_e))
+    hillshade = np.clip(hillshade, 0.0, 1.0)
+    void = ~np.isfinite(elev)
+    for g in (slope, aspect, hillshade):
+        g[void] = np.nan
+    return {"slope": slope, "aspect": aspect, "hillshade": hillshade}
+
+
+def _compute_dem_layers(ground_pts: np.ndarray, all_pts: np.ndarray,
+                        first_pts: np.ndarray, intensity: "Optional[np.ndarray]", *,
+                        cell_size: "Optional[float]", bbox: "Optional[List[float]]",
+                        method: str, ground_percentile: float, fill_voids: bool,
+                        sample_xy: "Optional[np.ndarray]" = None,
+                        progress=None) -> dict:
+    """Build the DTM surface mesh PLUS every scalar layer it carries. Returns a
+    `_mesh_from_grid`-shaped result (the elevation surface) with two extras:
+      - `layers`: {name → {"grid": (ny*nx float32 ravel), "min", "max", "label"}}
+      - `layer_vertex`: {name → per-output-vertex float32 array (aligned to vertices)}
+    All layers share the DTM's grid (nx/ny/cell/origin), so the renderer colours one
+    mesh by any layer and exports any layer as a raster.
+
+    `all_pts` feeds point_density; `first_pts` feeds return_density; `intensity`
+    (per-point, aligned to `all_pts`) feeds the intensity layer (skipped if None).
+    `sample_xy` (when given) requests the gap-free per-sample ground z for the
+    per-point height-above-ground cloud scalar (popped as `sample_ground_z`)."""
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
+    _report(0.15, "Gridding terrain (DTM)")
+    # Elevation surface = the DTM. fill_voids fills to the full scan footprint
+    # (all_pts), so a dense-canopy DTM (sparse, clustered ground returns) still
+    # covers the whole scanned area via nearest-ground infill rather than leaving
+    # big canopy-edge gaps outside the small ground-return hull.
+    dtm = _compute_dem(ground_pts, cell_size=cell_size, bbox=bbox, method=method,
+                       ground_percentile=ground_percentile, fill_voids=fill_voids,
+                       sample_xy=sample_xy, footprint_xy=all_pts[:, :2])
+    if not dtm.get("success"):
+        return dtm
+    nx, ny, cell = dtm["grid_nx"], dtm["grid_ny"], dtm["grid_cell"]
+    minx, miny = dtm["grid_origin"]
+    elev = np.asarray(dtm["grid_z"], dtype=np.float64).reshape(ny, nx)
+
+    _report(0.55, "Computing layers")
+    layers_2d: "dict[str, np.ndarray]" = {"elevation": elev}
+    layers_2d["point_density"] = _grid_cell_density(all_pts[:, :2], minx, miny, cell, nx, ny)
+    layers_2d["return_density"] = _grid_cell_density(first_pts[:, :2], minx, miny, cell, nx, ny)
+    if intensity is not None and len(intensity) == len(all_pts):
+        layers_2d["intensity"] = _grid_cell_density(all_pts[:, :2], minx, miny, cell, nx, ny,
+                                                    values=np.asarray(intensity, dtype=np.float64))
+    layers_2d.update(_terrain_derivatives(elev, cell))
+
+    # Per-output-vertex sampling: dtm["vertex_cells"] is the flat cell index of each
+    # surviving vertex, so a layer's per-vertex array is grid.ravel()[vertex_cells].
+    vcells = np.asarray(dtm["vertex_cells"], dtype=np.int64)
+    layers = {}
+    layer_vertex = {}
+    for name in _DEM_LAYER_NAMES:
+        g = layers_2d.get(name)
+        if g is None:
+            continue   # e.g. intensity when the cloud has none
+        flat = g.astype(np.float32).ravel()
+        finite = flat[np.isfinite(flat)]
+        lo = float(finite.min()) if finite.size else 0.0
+        hi = float(finite.max()) if finite.size else 1.0
+        layers[name] = {"grid": flat, "min": lo, "max": hi, "label": _DEM_LAYER_LABELS[name]}
+        layer_vertex[name] = flat[vcells]
+
+    result = dtm
+    result["layers"] = layers
+    result["layer_vertex"] = layer_vertex
+    return result
+
+
+def _do_dem(request: "DemRequest", progress=None) -> dict:
+    """Stateless DEM/DSM/CHM: resolve points, derive the surface's point subset,
+    grid it (or, for CHM, grid the DTM and DSM and subtract)."""
+    try:
+        surface = (request.surface_type or "dtm").lower()
+        if surface not in _DEM_SURFACE_TYPES:
+            return {"success": False, "method_used": f"dem_{surface}", "num_triangles": 0,
+                    "num_vertices": 0, "error": f"Unknown surface type {request.surface_type!r}."}
         points = _resolve_dem_points(request)
         if len(points) < 3:
             return {"success": False, "method_used": f"dem_{request.method}",
                     "num_triangles": 0, "num_vertices": 0,
                     "error": "Need at least 3 points to build a DEM."}
+        # Ground subset (for DTM and the DTM half of a CHM).
         mask, ground_source, warning = _dem_ground_mask(points, request)
         ground_pts = points[mask] if mask is not None else points
-        result = _compute_dem(ground_pts, cell_size=request.cell_size, bbox=request.bbox,
-                              method=request.method, ground_percentile=request.ground_percentile,
-                              fill_voids=request.fill_voids,
-                              sample_xy=(points[:, :2] if request.compute_height_above_ground else None),
-                              progress=progress)
+        # First-return subset (for DSM and the DSM half of a CHM).
+        fr_mask, fr_source = _first_return_mask(len(points), request.first_return_labels)
+        surface_pts = points[fr_mask] if fr_mask is not None else points
+
+        if surface == "chm":
+            result = _compute_chm(ground_pts, surface_pts, request=request,
+                                  sample_xy=None, progress=progress)
+            if result.get("success"):
+                result["surface_type"] = "chm"
+                result["surface_source"] = fr_source
+                result["world_shift"] = [0.0, 0.0, 0.0]
+                if warning:
+                    result["warning"] = warning
+            return result
+
+        if surface == "dtm":
+            # A DTM is the elevation SURFACE plus a bundle of scalar LAYERS (density,
+            # intensity, hillshade, slope, aspect) the renderer colours/exports. The
+            # intensity layer needs a per-point intensity array (skipped if absent).
+            intensity = (np.asarray(request.intensity, dtype=np.float64)
+                         if request.intensity is not None and len(request.intensity) == len(points)
+                         else None)
+            result = _compute_dem_layers(ground_pts, points, surface_pts, intensity,
+                                         cell_size=request.cell_size, bbox=request.bbox,
+                                         method=request.method,
+                                         ground_percentile=request.ground_percentile,
+                                         fill_voids=request.fill_voids,
+                                         sample_xy=(points[:, :2] if request.compute_height_above_ground else None),
+                                         progress=progress)
+            if result.get("success"):
+                sample_ground_z = result.pop("sample_ground_z", None)
+                result["surface_type"] = "dtm"
+                result["ground_source"] = ground_source
+                result["world_shift"] = [0.0, 0.0, 0.0]
+                if warning:
+                    result["warning"] = warning
+                # Per-point height-above-ground buffer (gap-free ground under every
+                # point), framed for the flat-cloud CHM precursor scalar.
+                if request.compute_height_above_ground and sample_ground_z is not None:
+                    hag = points[:, 2] - sample_ground_z
+                    hag[~np.isfinite(hag)] = 0.0
+                    result["hag"] = hag.astype(np.float32)
+            else:
+                result.pop("sample_ground_z", None)
+            return result
+
+        # dsm (chm handled above)
+        grid_pts, pctile = surface_pts, _DSM_CELL_PERCENTILE
+        result = _compute_dem(grid_pts, cell_size=request.cell_size, bbox=request.bbox,
+                              method=request.method, ground_percentile=pctile,
+                              fill_voids=request.fill_voids, progress=progress)
         if result.get("success"):
-            sample_ground_z = result.pop("sample_ground_z", None)
-            result["ground_source"] = ground_source
+            result.pop("sample_ground_z", None)
+            result["surface_type"] = surface
+            result["surface_source"] = fr_source
             result["world_shift"] = [0.0, 0.0, 0.0]
-            if warning:
-                result["warning"] = warning
-            # Per-point height-above-ground buffer (gap-free ground under every
-            # point), framed for the flat-cloud CHM path.
-            if request.compute_height_above_ground and sample_ground_z is not None:
-                hag = points[:, 2] - sample_ground_z
-                hag[~np.isfinite(hag)] = 0.0
-                result["hag"] = hag.astype(np.float32)
         else:
             result.pop("sample_ground_z", None)
         return result
@@ -7338,6 +7791,15 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
     cloud.disableMessages()
     total_points = 0
     for scan_entry in request.scans:
+        # A Livox rosette (Risley) has no Ntheta x Nphi grid or angular sweep, so
+        # the grid-based Helios XML/ASCII export can't represent it. The renderer
+        # already excludes such scans from the bundle; guard here too so a stray
+        # entry fails clearly rather than exporting a meaningless grid.
+        if scan_entry.scan_pattern == "risley_prism":
+            return {"success": False,
+                    "error": "Risley (Livox rosette) scans cannot be exported to the "
+                             "Helios XML/ASCII bundle: their field of view is emergent "
+                             "(no Ntheta x Nphi grid)."}
         xyz, labels, vals = _resolve_scan_export_arrays(
             scan_entry, request.include_misses)
         origin = scan_entry.origin
@@ -7518,6 +7980,20 @@ class LidarScanMesh(BaseModel):
     organ_codes: Optional[List[int]] = None
 
 
+class RisleyPrismSpec(BaseModel):
+    """One rotating wedge prism of a Livox-style Risley-prism deflector.
+
+    Sent in datasheet units — wedge angle in DEGREES, rotor rate in Hz — and
+    converted to the radians / rad-per-second that pyhelios' RisleyPrism expects
+    at the addScanRisley call site below (mirroring the deg->rad conversion the
+    static/moving scan branches do for the angular sweep).
+    """
+    wedge_angle_deg: float            # wedge (inclination) angle, degrees
+    refractive_index: float           # prism glass refractive index (unitless)
+    rotor_rate_hz: float              # rotation rate, Hz (sign sets direction)
+    phase_deg: float = 0.0            # initial clocking angle at t=0, degrees
+
+
 class LidarScanScanner(BaseModel):
     """A single scanner position + acquisition geometry (mirrors ScanParameters)."""
     id: str                      # renderer scan id — results are returned keyed by this
@@ -7525,6 +8001,10 @@ class LidarScanScanner(BaseModel):
     # Acquisition pattern. "raster" = uniform Ntheta x Nphi grid (default).
     # "spinning_multibeam" = one fixed laser channel per beam_elevation_angles_deg
     # entry (rotating multi-channel sensor); n_theta / theta_*_deg are ignored.
+    # "risley_prism" = a Livox non-repeating rosette: a single beam through the
+    # rotating `risley_prisms` wedge stack. Its field of view is emergent from the
+    # prism optics, so n_theta / n_phi / theta_* / phi_* are all ignored; like a
+    # spinning sensor it is always trajectory-driven (routed to addScanRisley).
     scan_pattern: str = "raster"
     # Per-channel beam elevation angles, degrees above horizon (multibeam only).
     # Converted to zenith (zenith = 90 - elevation) before the pyhelios call.
@@ -7580,6 +8060,13 @@ class LidarScanScanner(BaseModel):
     # leave this None and behave exactly as before.
     trajectory: Optional[PoseStream] = None
     pulse_rate_hz: Optional[float] = None
+    # Risley-prism (Livox rosette) only. The rotating wedge prisms in beam-traversal
+    # order (two for Mid-40/Mid-70, three for Avia). Converted to pyhelios
+    # RisleyPrism (radians / rad-per-second) at the addScanRisley call site. A
+    # Risley scan is always trajectory-driven, so it also carries `trajectory` +
+    # `pulse_rate_hz` (a stationary tripod capture is two identical poses).
+    risley_prisms: Optional[List[RisleyPrismSpec]] = None
+    refractive_index_air: float = 1.0    # medium index around the prisms (typically 1.0)
 
 
 class LidarScanRequest(BaseModel):
@@ -7899,7 +8386,7 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
             return {"success": False, "error": "Geometry has no triangles"}
 
         from pyhelios import LiDARCloud, Context
-        from pyhelios.LiDARCloud import ReturnMode, SingleReturnSelection
+        from pyhelios.LiDARCloud import ReturnMode, SingleReturnSelection, RisleyPrism
 
         # Shared cancel flag the C++ ray loop polls. The stream loop flips it to
         # 1 the moment this run is cancelled (disconnect or /api/cancel), so the
@@ -7965,6 +8452,60 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 # Tilt (deg→rad) and noise (range in m verbatim, angle mrad→rad)
                 # are passed per-scan; 0 leaves them disabled.
                 for s in request.scanners:
+                    # Livox non-repeating rosette (Risley-prism) scanner. A single
+                    # beam is refracted through the rotating wedge stack, tracing a
+                    # rosette whose FOV is emergent — there is no Ntheta x Nphi grid,
+                    # so this must NOT fall through to addScanMoving even though it
+                    # carries a trajectory. Handled first for exactly that reason.
+                    if s.scan_pattern == "risley_prism":
+                        if not s.risley_prisms:
+                            return {"success": False,
+                                    "error": f"Risley scanner '{s.id}' has no prisms"}
+                        if s.trajectory is None or len(s.trajectory.poses) == 0:
+                            return {"success": False,
+                                    "error": f"Risley scanner '{s.id}' requires a trajectory "
+                                             "(a stationary capture is two identical poses "
+                                             "separated in time by the scan duration)."}
+                        prf = s.pulse_rate_hz or 0.0
+                        if prf <= 0.0:
+                            return {"success": False,
+                                    "error": f"Risley scanner '{s.id}' needs a positive pulse_rate_hz (PRF)"}
+                        # Datasheet units -> pyhelios RisleyPrism: wedge deg->rad,
+                        # rotor Hz->rad/s (rev/s * 2pi), phase deg->rad.
+                        prisms = [
+                            RisleyPrism(math.radians(pr.wedge_angle_deg),
+                                        float(pr.refractive_index),
+                                        float(pr.rotor_rate_hz) * 2.0 * math.pi,
+                                        math.radians(pr.phase_deg))
+                            for pr in s.risley_prisms
+                        ]
+                        poses = s.trajectory.poses
+                        # One pulse per PRF tick over the trajectory (Ntheta=1,
+                        # Nphi=Npulses); warn on very large budgets like the moving path.
+                        npulses = round(prf * (float(poses[-1].t) - float(poses[0].t)))
+                        if npulses > _MOVING_SCAN_PULSE_WARN:
+                            print(f"[lidar] risley scanner '{s.id}': {npulses:,} pulses "
+                                  f"over {float(poses[-1].t) - float(poses[0].t):.1f}s — "
+                                  "large scan, may be slow", flush=True)
+                        sid = lidar.addScanRisley(
+                            prisms=prisms,
+                            refractive_index_air=float(s.refractive_index_air),
+                            pulse_rate_hz=float(prf),
+                            traj_t=[float(p.t) for p in poses],
+                            traj_pos=[[float(p.x), float(p.y), float(p.z)] for p in poses],
+                            traj_rot=[[float(p.qx), float(p.qy), float(p.qz), float(p.qw)] for p in poses],
+                            rot_is_quaternion=True,
+                            exit_diameter=float(s.exit_diameter_m),
+                            beam_divergence=float(s.beam_divergence_mrad) * 1e-3,
+                            lever_arm=[float(v) for v in s.trajectory.lever_arm],
+                            boresight_rpy=[float(v) for v in s.trajectory.boresight_rpy],
+                            column_format=column_format,
+                            range_noise_stddev=float(s.range_noise_m),
+                            angle_noise_stddev=float(s.angle_noise_mrad) * 1e-3,
+                            t0=float(poses[0].t),
+                        )
+                        _apply_return_mode(lidar, sid, s, ReturnMode, _SELECTION_MAP)
+                        continue
                     # Moving-platform scanner: the pose walks the trajectory over
                     # the sweep. addScanMoving takes the raster grid (Ntheta x Nphi)
                     # plus the trajectory + pulse rate; it fires Ntheta*Nphi pulses
@@ -19191,10 +19732,19 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     # A LAS carrying per-pulse beam-origin ExtraBytes is a MOVING-platform scan:
     # reconstruct a decimated platform trajectory from the origins + timestamps so
     # the renderer auto-creates a moving scan (path drawn, LAD takes the per-beam
-    # path) instead of a plain static cloud. The origins were recentered by
-    # world_shift at read, so the trajectory is in the SAME frame as the points.
+    # path) instead of a plain static cloud. The `scan_params` a file surfaces are
+    # WORLD-frame by contract (matching the E57/PCD scan origin) — every renderer
+    # consumer (the trajectory marker at PointCloudViewer's ScanMarkerEntry, and
+    # buildLADRequest) subtracts worldShift itself to reach the stored frame. But
+    # `beam_origins` were recentered by world_shift at read (for the session's
+    # stored-frame beam-origin LAD path), so ADD it back here to emit the trajectory
+    # in the world frame. Skipping this double-shifted the path off-screen (and
+    # would double-shift the LAD trajectory join) for any globally-shifted cloud.
     if beam_origins is not None:
-        _traj_wire = _trajectory_wire_from_beam_origins(beam_origins, timestamps)
+        _traj_origins = beam_origins
+        if world_shift_arr is not None:
+            _traj_origins = beam_origins + world_shift_arr
+        _traj_wire = _trajectory_wire_from_beam_origins(_traj_origins, timestamps)
         if _traj_wire is not None:
             _first = _traj_wire["poses"][0]
             sp = miss_info.get("scan_params") or {}
@@ -19946,6 +20496,10 @@ class SessionDemRequest(BaseModel):
     `ground_class` column restricts gridding to ground points; else CSF is run
     when `auto_segment_ground` is set, else all points are used. Optionally write
     a `height_above_ground` (CHM) scalar back onto the cloud and rebuild."""
+    # Which surface to build: "dtm" (bare-earth ground, default), "dsm" (first-
+    # return / top-of-canopy surface), or "chm" (canopy height = DSM − DTM). The
+    # first-return subset is read from the session's `target_index` column.
+    surface_type: str = "dtm"
     auto_segment_ground: bool = True
     cloth_resolution: float = 0.05
     rigidness: int = 3
@@ -19959,12 +20513,16 @@ class SessionDemRequest(BaseModel):
 
 
 def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress=None) -> dict:
-    """Session DEM worker. The mesh is built in the session's (world_shift-
+    """Session DEM/DSM/CHM worker. The mesh is built in the session's (world_shift-
     subtracted) display coordinates so it aligns with the rendered octree; the
     `world_shift` rides in the result so raster export can recover true-world
-    coordinates. When `add_height_column`, samples the DEM at every survivor and
-    appends a `height_above_ground` column, then rebuilds the octree."""
+    coordinates. When `add_height_column` (DTM only), samples the DEM at every
+    survivor and appends a `height_above_ground` column, then rebuilds the octree."""
     try:
+        surface = (request.surface_type or "dtm").lower()
+        if surface not in _DEM_SURFACE_TYPES:
+            return {"success": False, "method_used": f"dem_{surface}", "num_triangles": 0,
+                    "num_vertices": 0, "error": f"Unknown surface type {request.surface_type!r}."}
         with _cloud_session_lock:
             surv = ~sess.deleted
             keep = surv.copy()
@@ -19985,6 +20543,20 @@ def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress
             ground_col = sess.extras.get(GROUND_CLASS_SLUG)
             is_ground = (ground_col[keep] == GROUND_CLASS_GROUND
                          if ground_col is not None else None)
+            # First-return subset (for DSM / return-density), read from the session's
+            # target_index column. First return = the minimum index present (0-based
+            # Helios or 1-based LAS return_number — see _first_return_index_mask).
+            # Misses are already dropped by `keep`.
+            ti_col = sess.extras.get("target_index")
+            is_first = (_first_return_index_mask(ti_col[keep]) if ti_col is not None else None)
+            # Per-hit intensity for the intensity raster: prefer the session's
+            # first-class uint16 field, fall back to an 'intensity' extra column.
+            if sess.intensity is not None and len(sess.intensity) == len(surv):
+                intensity_hits = sess.intensity[keep].astype(np.float64)
+            elif "intensity" in sess.extras and len(sess.extras["intensity"]) == len(surv):
+                intensity_hits = sess.extras["intensity"][keep].astype(np.float64)
+            else:
+                intensity_hits = None
             world_shift = sess.world_shift
             crs_epsg = sess.crs_epsg
         if len(pts) < 3:
@@ -20015,26 +20587,59 @@ def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress
             ground_source = "all_points"; ground_pts = pts
             warning = "No ground classification; used all points (lowest returns)."
 
-        # When writing height-above-ground, hand _compute_dem every survivor's XY
-        # so it returns a gap-free ground elevation under each point (linear in the
-        # ground hull, nearest-ground outside) — never a 0-height artifact for
-        # canopy past the ground footprint or over a ground gap.
-        result = _compute_dem(ground_pts, cell_size=request.cell_size, bbox=request.bbox,
-                              method=request.method, ground_percentile=request.ground_percentile,
-                              fill_voids=request.fill_voids,
-                              sample_xy=(pts[:, :2] if request.add_height_column else None),
-                              progress=progress)
+        # First-return subset for the top-of-canopy (DSM) surface. Absent column
+        # (single-return cloud) ⇒ every point is a first return.
+        if is_first is not None and int(is_first.sum()) >= 3:
+            surface_pts = pts[is_first]; surface_source = "first_return"
+        else:
+            surface_pts = pts; surface_source = "all_points"
+
+        def _finalize(result: dict) -> dict:
+            result["surface_type"] = surface
+            result["world_shift"] = [float(v) for v in (world_shift if world_shift is not None else (0.0, 0.0, 0.0))]
+            if crs_epsg is not None:
+                result["crs_epsg"] = int(crs_epsg)
+            return result
+
+        if surface == "chm":
+            result = _compute_chm(ground_pts, surface_pts, request=request,
+                                  sample_xy=None, progress=progress)
+            if not result.get("success"):
+                return result
+            result["surface_source"] = surface_source
+            if warning:
+                result["warning"] = warning
+            return _finalize(result)
+
+        if surface == "dsm":
+            result = _compute_dem(surface_pts, cell_size=request.cell_size, bbox=request.bbox,
+                                  method=request.method, ground_percentile=_DSM_CELL_PERCENTILE,
+                                  fill_voids=request.fill_voids, progress=progress)
+            if not result.get("success"):
+                return result
+            result.pop("sample_ground_z", None)
+            result["surface_source"] = surface_source
+            return _finalize(result)
+
+        # dtm: the elevation surface + its scalar LAYERS (density/intensity/hillshade/
+        # slope/aspect). The intensity layer reads the session's intensity field.
+        want_hag = request.add_height_column
+        result = _compute_dem_layers(ground_pts, pts, surface_pts, intensity_hits,
+                                     cell_size=request.cell_size, bbox=request.bbox,
+                                     method=request.method,
+                                     ground_percentile=request.ground_percentile,
+                                     fill_voids=request.fill_voids,
+                                     sample_xy=(pts[:, :2] if want_hag else None),
+                                     progress=progress)
         if not result.get("success"):
             return result
         sample_ground_z = result.pop("sample_ground_z", None)   # not framed
         result["ground_source"] = ground_source
-        result["world_shift"] = [float(v) for v in (world_shift if world_shift is not None else (0.0, 0.0, 0.0))]
-        if crs_epsg is not None:
-            result["crs_epsg"] = int(crs_epsg)
+        _finalize(result)
         if warning:
             result["warning"] = warning
 
-        if request.add_height_column and sample_ground_z is not None:
+        if want_hag and sample_ground_z is not None:
             hag_hits = pts[:, 2] - sample_ground_z
             hag_hits[~np.isfinite(hag_hits)] = 0.0
             # Scatter the hit-aligned HAG back over ALL survivors so it matches the

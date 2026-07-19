@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useMemo, useRef } from 'react';
-import { useLoader } from '@react-three/fiber';
+import { useLoader, useFrame } from '@react-three/fiber';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -9,6 +9,7 @@ import {
   type ScannerModel,
   type ScannerModelId,
 } from '../lib/scannerModels';
+import { OutlineSelect } from './viewer/outline/JFAOutline';
 
 interface ScannerMarkerProps {
   origin: { x: number; y: number; z: number };
@@ -52,7 +53,7 @@ interface ScannerMarkerProps {
 // A thin polyline through the platform trajectory positions. Drawn in world space
 // (NOT inside the posed body group), so it isn't translated/rotated by the scanner
 // pose. Uses the scan color so the path reads as belonging to this scan.
-function TrajectoryPath({ points, color }: {
+export function TrajectoryPath({ points, color }: {
   points: Array<[number, number, number]>;
   color: string;
 }) {
@@ -342,6 +343,359 @@ function TrajectoryPosesObj({ poses, model, color, selected, markerScale }: {
       frustumCulled={false}
     />
   );
+}
+
+// Build the fitted, body-centred merged geometry for a scanner OBJ, the same way
+// TrajectoryPosesObj does. Shared by TrajectoryPosesObj and the editable renderer.
+function useFittedObjGeometry(model: ScannerModel): THREE.BufferGeometry {
+  const obj = useLoader(OBJLoader, model.meshUrl);
+  const geometry = useMemo(() => {
+    const parts: THREE.BufferGeometry[] = [];
+    obj.updateMatrixWorld(true);
+    obj.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      let g = mesh.geometry.clone();
+      g.applyMatrix4(mesh.matrixWorld);
+      if (g.index) g = g.toNonIndexed();
+      if (!g.getAttribute('normal')) g.computeVertexNormals();
+      const trimmed = new THREE.BufferGeometry();
+      trimmed.setAttribute('position', g.getAttribute('position'));
+      trimmed.setAttribute('normal', g.getAttribute('normal'));
+      parts.push(trimmed);
+      g.dispose();
+    });
+    const merged =
+      parts.length === 0 ? null
+        : parts.length === 1 ? parts[0]
+          : mergeGeometries(parts, false);
+    if (!merged) return new THREE.SphereGeometry(0.05, 8, 6);
+    const box = new THREE.Box3().setFromObject(obj);
+    const { scale, offset } = fitTransform(box, model);
+    merged.scale(scale, scale, scale);
+    merged.translate(offset.x, offset.y, offset.z);
+    return merged;
+  }, [obj, model]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  return geometry;
+}
+
+// INTERACTIVE per-pose scanner bodies for the manual trajectory editor. Unlike
+// TrajectoryPosesObj (a passive, decimated display), this:
+//   - renders EVERY pose (no decimation) so what you edit is what you see,
+//   - is CLICKABLE: an onClick reading e.instanceId selects that pose (the
+//     LADVoxelGrid idiom), driving the shared selection state,
+//   - highlights the selected pose by drawing it a second time with the
+//     selection-glow material (the same emissive treatment the static marker and
+//     mesh selection use).
+// The insert-'+' affordance is NOT rendered here — the parent computes the
+// nearest path segment in screen space (no scene hover proxies, which flicker
+// and overlap the pose bodies) and draws the overlay in the HTML layer.
+// The generic (sphere) model falls back to an instanced sphere body so the
+// editor still works without a manufacturer mesh selected.
+function EditableTrajectoryPosesInner({
+  poses,
+  geometry,
+  color,
+  selectedIndex,
+  markerScale,
+  onSelectPose,
+}: {
+  poses: Array<[number, number, number, number, number, number, number]>;
+  geometry: THREE.BufferGeometry;
+  color: string;
+  selectedIndex: number | null;
+  markerScale: number;
+  onSelectPose: (index: number) => void;
+}) {
+  const meshRef = useRef<THREE.InstancedMesh | null>(null);
+  const selectedMeshRef = useRef<THREE.Mesh | null>(null);
+  // One shared body material for every pose. The selected pose is drawn as a
+  // SEPARATE non-instanced body with the SAME material (so it looks identical),
+  // wrapped in <OutlineSelect> so the app's JFA selection outline draws a
+  // uniform colored silhouette around it — the same outline meshes/clouds get.
+  // The selected instance is hidden in the instanced mesh (zero-scale) so the
+  // body isn't drawn twice (which would z-fight).
+  const material = useMemo(() => makeBodyMaterial(color, false), [color]);
+  useEffect(() => () => material.dispose(), [material]);
+
+  const composePose = (p: number[], out: THREE.Matrix4, scale = 1) => {
+    const f = (markerScale > 0 ? markerScale : 1) * scale;
+    out.compose(
+      new THREE.Vector3(p[0], p[1], p[2]),
+      new THREE.Quaternion(p[3], p[4], p[5], p[6]).normalize(),
+      new THREE.Vector3(f, f, f),
+    );
+  };
+
+  const writeMatrices = (inst: THREE.InstancedMesh | null) => {
+    if (!inst) return;
+    const m = new THREE.Matrix4();
+    poses.forEach((p, i) => {
+      // Hide the selected instance (drawn separately, outlined); scale 0 collapses
+      // it to a point so it doesn't render or double up on the outlined body.
+      composePose(p, m, i === selectedIndex ? 0 : 1);
+      inst.setMatrixAt(i, m);
+    });
+    inst.instanceMatrix.needsUpdate = true;
+    inst.computeBoundingSphere();
+    inst.computeBoundingBox();
+  };
+  const setMeshRef = (inst: THREE.InstancedMesh | null) => {
+    meshRef.current = inst;
+    writeMatrices(inst);
+  };
+  useEffect(() => {
+    writeMatrices(meshRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [poses, geometry, markerScale, selectedIndex]);
+
+  // Pose the outlined selected body onto the selected pose's transform.
+  const selected = selectedIndex != null ? poses[selectedIndex] : null;
+  useEffect(() => {
+    const mesh = selectedMeshRef.current;
+    if (!mesh || !selected) return;
+    const m = new THREE.Matrix4();
+    composePose(selected, m);
+    m.decompose(mesh.position, mesh.quaternion, mesh.scale);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, geometry, markerScale]);
+
+  if (poses.length === 0) return null;
+  return (
+    <>
+      <instancedMesh
+        ref={setMeshRef}
+        key={geometry.uuid + ':' + poses.length}
+        args={[geometry, material, poses.length]}
+        frustumCulled={false}
+        onClick={(e) => {
+          if (e.instanceId == null) return;
+          e.stopPropagation();
+          onSelectPose(e.instanceId);
+        }}
+      />
+      {selected && (
+        <OutlineSelect enabled>
+          <mesh
+            ref={selectedMeshRef}
+            key={`sel-${geometry.uuid}`}
+            geometry={geometry}
+            material={material}
+            frustumCulled={false}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (selectedIndex != null) onSelectPose(selectedIndex);
+            }}
+          />
+        </OutlineSelect>
+      )}
+    </>
+  );
+}
+
+// OBJ variant: resolves the fitted geometry then renders the interactive bodies.
+function EditableTrajectoryPosesObj(props: {
+  poses: Array<[number, number, number, number, number, number, number]>;
+  model: ScannerModel;
+  color: string;
+  selectedIndex: number | null;
+  markerScale: number;
+  onSelectPose: (index: number) => void;
+}) {
+  const geometry = useFittedObjGeometry(props.model);
+  return <EditableTrajectoryPosesInner {...props} geometry={geometry} />;
+}
+
+// Generic (sphere) variant: a sphere body PLUS a forward-pointing arrow (cone
+// along +Y, the body forward axis) merged into one glyph, so a generic pose shows
+// its heading just like the passive TrajectoryPoses glyph. Merging keeps it a
+// single instanced body per pose, so selection/outline treat it as one object.
+function EditableTrajectoryPosesSphere(props: {
+  poses: Array<[number, number, number, number, number, number, number]>;
+  color: string;
+  selectedIndex: number | null;
+  markerScale: number;
+  onSelectPose: (index: number) => void;
+}) {
+  const geometry = useMemo(() => {
+    const r = 0.15;
+    const sphere = new THREE.SphereGeometry(r, 16, 12);
+    const len = r * 3;
+    const arrow = new THREE.ConeGeometry(r * 0.6, len, 12);
+    // Cone authored apex-up along +Y; push its base to the sphere surface so it
+    // reads as an arrow growing out along the forward (heading) axis.
+    arrow.translate(0, r + len / 2, 0);
+    const merged = mergeGeometries([sphere, arrow], false);
+    sphere.dispose();
+    arrow.dispose();
+    return merged ?? new THREE.SphereGeometry(r, 16, 12);
+  }, []);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  return <EditableTrajectoryPosesInner {...props} geometry={geometry} />;
+}
+
+// Public interactive renderer: chooses the OBJ or sphere variant by model.
+export function EditableTrajectoryPoses({
+  poses,
+  model,
+  color,
+  selectedIndex,
+  markerScale,
+  onSelectPose,
+}: {
+  poses: Array<[number, number, number, number, number, number, number]>;
+  model?: ScannerModelId;
+  color: string;
+  selectedIndex: number | null;
+  markerScale: number;
+  onSelectPose: (index: number) => void;
+}) {
+  const resolved = getScannerModel(model);
+  const common = { poses, color, selectedIndex, markerScale, onSelectPose };
+  if (resolved.meshFormat === 'obj') {
+    return (
+      <Suspense fallback={null}>
+        <EditableTrajectoryPosesObj {...common} model={resolved} />
+      </Suspense>
+    );
+  }
+  return <EditableTrajectoryPosesSphere {...common} />;
+}
+
+// A single scanner body that ANIMATES smoothly along the trajectory for the
+// "Preview" playback: it maps wall-clock elapsed time (accumulated via useFrame)
+// onto the trajectory's [tStart, tEnd] over a fixed `durationS`, samples the
+// interpolated pose, and poses the body there. Calls onEnded once when the
+// playback reaches the end. Reuses the same fitted geometry as the static
+// bodies (OBJ) or the sphere+arrow glyph (generic).
+function PreviewScannerInner({
+  geometry,
+  color,
+  sampleAt,
+  tStart,
+  tEnd,
+  durationS,
+  markerScale,
+  onEnded,
+}: {
+  geometry: THREE.BufferGeometry;
+  color: string;
+  sampleAt: (t: number) => [number, number, number, number, number, number, number] | null;
+  tStart: number;
+  tEnd: number;
+  durationS: number;
+  markerScale: number;
+  onEnded: () => void;
+}) {
+  const meshRef = useRef<THREE.Mesh | null>(null);
+  const elapsedRef = useRef(0);
+  const endedRef = useRef(false);
+  const material = useMemo(() => makeBodyMaterial(color, true), [color]);
+  useEffect(() => () => material.dispose(), [material]);
+
+  // Reset the clock whenever a new playback starts (deps change on remount).
+  useEffect(() => { elapsedRef.current = 0; endedRef.current = false; }, []);
+
+  const applyAt = (traj_t: number) => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const s = sampleAt(traj_t);
+    if (!s) return;
+    const f = markerScale > 0 ? markerScale : 1;
+    mesh.position.set(s[0], s[1], s[2]);
+    mesh.quaternion.set(s[3], s[4], s[5], s[6]).normalize();
+    mesh.scale.set(f, f, f);
+  };
+
+  useFrame((_, delta) => {
+    if (endedRef.current) return;
+    elapsedRef.current += delta;
+    const u = durationS > 0 ? Math.min(elapsedRef.current / durationS, 1) : 1;
+    applyAt(tStart + (tEnd - tStart) * u);
+    if (u >= 1) {
+      endedRef.current = true;
+      onEnded();
+    }
+  });
+
+  // Pose at the start immediately so the body doesn't flash at the origin.
+  useEffect(() => { applyAt(tStart); });
+
+  return (
+    <mesh ref={meshRef} geometry={geometry} material={material} frustumCulled={false} />
+  );
+}
+
+function PreviewScannerObj(props: {
+  model: ScannerModel;
+  color: string;
+  sampleAt: (t: number) => [number, number, number, number, number, number, number] | null;
+  tStart: number;
+  tEnd: number;
+  durationS: number;
+  markerScale: number;
+  onEnded: () => void;
+}) {
+  const geometry = useFittedObjGeometry(props.model);
+  return <PreviewScannerInner {...props} geometry={geometry} />;
+}
+
+function PreviewScannerSphere(props: {
+  color: string;
+  sampleAt: (t: number) => [number, number, number, number, number, number, number] | null;
+  tStart: number;
+  tEnd: number;
+  durationS: number;
+  markerScale: number;
+  onEnded: () => void;
+}) {
+  const geometry = useMemo(() => {
+    const r = 0.15;
+    const sphere = new THREE.SphereGeometry(r, 16, 12);
+    const len = r * 3;
+    const arrow = new THREE.ConeGeometry(r * 0.6, len, 12);
+    arrow.translate(0, r + len / 2, 0);
+    const merged = mergeGeometries([sphere, arrow], false);
+    sphere.dispose();
+    arrow.dispose();
+    return merged ?? new THREE.SphereGeometry(r, 16, 12);
+  }, []);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  return <PreviewScannerInner {...props} geometry={geometry} />;
+}
+
+// Public preview glyph: an animated scanner body flown along the trajectory.
+// Mount it only while previewing (a key change / unmount resets the clock).
+export function TrajectoryPreviewScanner({
+  model,
+  color,
+  sampleAt,
+  tStart,
+  tEnd,
+  durationS,
+  markerScale,
+  onEnded,
+}: {
+  model?: ScannerModelId;
+  color: string;
+  sampleAt: (t: number) => [number, number, number, number, number, number, number] | null;
+  tStart: number;
+  tEnd: number;
+  durationS: number;
+  markerScale: number;
+  onEnded: () => void;
+}) {
+  const resolved = getScannerModel(model);
+  const common = { color, sampleAt, tStart, tEnd, durationS, markerScale, onEnded };
+  if (resolved.meshFormat === 'obj') {
+    return (
+      <Suspense fallback={null}>
+        <PreviewScannerObj {...common} model={resolved} />
+      </Suspense>
+    );
+  }
+  return <PreviewScannerSphere {...common} />;
 }
 
 // Tilt component of the marker orientation. With world +Z up and the body forward

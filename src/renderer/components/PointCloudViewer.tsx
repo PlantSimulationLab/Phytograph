@@ -5,7 +5,7 @@ import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -35,7 +35,24 @@ import { type HeliosXmlScan, type HeliosXmlGrid } from '../lib/heliosScanXml';
 import { SyntheticScanOptionsPopup } from './SyntheticScanOptionsPopup';
 import { type SyntheticScanOptions } from '../lib/syntheticScanOptions';
 import { SCAN_HIT_FIELDS, STANDARD_HIT_FIELD_SLUGS } from '../lib/scanHitFields';
-import { ScanMarkerEntry } from './ScannerMarker';
+import { ScanMarkerEntry, EditableTrajectoryPoses, TrajectoryPreviewScanner, TrajectoryPath as TrajectoryEditorPath } from './ScannerMarker';
+import { TrajectoryTablePanel } from './TrajectoryTablePanel';
+import {
+  type PoseDraft,
+  type TrajectoryTemplate,
+  DEFAULT_TRAJECTORY_TEMPLATE,
+  poseStreamToDrafts,
+  draftsToPoseStream,
+  draftsToPoseTuples,
+  makeStarterDrafts,
+  addPose as addPoseDraft,
+  insertPoseBetween as insertPoseDraft,
+  deletePose as deletePoseDraft,
+  updatePoseField as updatePoseDraftField,
+  sortDraftsByTime as sortTrajectoryDrafts,
+  sampleTrajectoryAt,
+  renumberTimestampsEven,
+} from '../lib/trajectoryEdit';
 import { ScanWireframeEntry } from './ScanPatternWireframe';
 import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
@@ -217,6 +234,16 @@ const MESH_DEFAULT_OPACITY = 0.7;
 // structure inside the box stay visible through its faces. A voxel box is a
 // mesh carrying `gridSubdivisions`.
 const GRID_MESH_DEFAULT_OPACITY = 0.4;
+
+// How long after the last keystroke in a trajectory pose's TIME field to wait
+// before re-sorting the rows by time. Long enough to type a full multi-digit /
+// decimal value without the row jumping out from under the cursor.
+const TRAJ_SORT_DELAY_MS = 700;
+
+// Wall-clock duration of the trajectory-editor "Preview" playback: the scanner
+// glyph flies the whole path smoothly over this many seconds regardless of the
+// trajectory's own time span.
+const PREVIEW_DURATION_S = 5;
 
 // Default opacity for a mesh with no explicit per-mesh override. Kept as a
 // single source of truth so the render path and the meshes-panel slider agree.
@@ -635,6 +662,9 @@ export default function PointCloudViewer({
   // Absent entry means 'solid'. The colormap is shared with point-cloud scalar
   // modes.
   const [meshColorModes, setMeshColorModes] = useState<Map<string, MeshColorMode>>(new Map());
+  // Which DTM scalar layer each DEM mesh is coloured by (name → layer key), when its
+  // color mode is 'layer'. Mirrors the cloud's colorMode='scalar' + selectedScalarField.
+  const [selectedMeshLayer, setSelectedMeshLayer] = useState<Map<string, string>>(new Map());
   // Which mesh rows have their inline "Color by" section expanded.
   const [expandedMeshIds, setExpandedMeshIds] = useState<Set<string>>(new Set());
   // Inline rename: which mesh row is being edited, and the in-progress text.
@@ -709,6 +739,10 @@ export default function PointCloudViewer({
   const [showDEMPanel, setShowDEMPanel] = useState(false);
   const [demInProgress, setDemInProgress] = useState(false);
   const [demError, setDemError] = useState<string | null>(null);
+  // Which surface products to build. One run generates each checked surface as its
+  // own mesh (DTM/DSM/CHM in one click). Defaults to just the terrain (DEM).
+  const [demSurfaces, setDemSurfaces] = useState<Set<DemSurfaceType>>(() => new Set<DemSurfaceType>(['dtm']));
+  const [demBatchLabel, setDemBatchLabel] = useState<string | null>(null);
   const [demCellSize, setDemCellSize] = useState(0.05);
   const [demMethod, setDemMethod] = useState<DemInterpMethod>('tin');
   const [demFillVoids, setDemFillVoids] = useState(false);
@@ -1165,6 +1199,9 @@ export default function PointCloudViewer({
   // QSMs) so App can dismiss the empty-state hint when e.g. a plant is generated
   // or a QSM is built — these outlive the source scan, so deleting the scan must
   // not bring the import overlay back while they're still rendered.
+  // Note: the manual trajectory editor also suppresses the empty-state import
+  // hint (it draws interactive content and can open before its scan exists) — see
+  // the companion effect right after the trajectoryEditor state is declared.
   useEffect(() => {
     onViewerContentChange?.(meshes.length > 0 || skeletons.length > 0 || qsms.length > 0);
   }, [onViewerContentChange, meshes.length, skeletons.length, qsms.length]);
@@ -1560,10 +1597,16 @@ export default function PointCloudViewer({
     axis: TransformAxis;
     startScreen: { x: number; y: number };
     pivot: { x: number; y: number; z: number };
-    target: 'mesh' | 'skeleton' | 'cloud';
+    target: 'mesh' | 'skeleton' | 'cloud' | 'pose';
     meshId?: string;
     skeletonId?: string;
     cloudIds?: string[];
+    // Manual trajectory editor: the pose (row) index being transformed, plus its
+    // original position + Euler orientation, so translate/rotate apply a delta
+    // onto the originals (and cancel restores them).
+    poseIndex?: number;
+    originalPosePos?: { x: number; y: number; z: number };
+    originalPoseRot?: { rollDeg: number; pitchDeg: number; yawDeg: number };
     originalMeshPos?: { x: number; y: number; z: number };
     originalMeshScale?: { x: number; y: number; z: number };
     originalMeshRot?: { x: number; y: number; z: number };
@@ -1574,6 +1617,85 @@ export default function PointCloudViewer({
   }
   const transformModalRef = useRef<TransformModalState | null>(null);
   const [transformModal, setTransformModal] = useState<TransformModalState | null>(null);
+
+  // ---- Manual trajectory editor session ----------------------------------
+  // When set, the right-docked pose table is open and the targeted scan's
+  // trajectory is being edited in-viewport (clickable per-pose scanner models +
+  // t/r transforms). `drafts` is the single source of truth while editing; the
+  // table and the 3D EditableTrajectoryPoses are both controlled views of it.
+  // A ref mirror lets the transform-modal effect's stable closure read/write the
+  // draft (the same pattern meshPositionsRef uses) without re-subscribing.
+  interface TrajectoryEditorSession {
+    // Scan whose trajectory is being edited. null = building a new trajectory
+    // for a scan that will be created on Save (from the params popup "create").
+    scanId: string | null;
+    // When creating, the label + params-so-far the popup collected, so Save can
+    // finalize a brand-new scan.
+    pendingLabel?: string;
+    pendingParams?: ScanParameters;
+    drafts: PoseDraft[];
+    template: TrajectoryTemplate;
+    selectedIndex: number | null;
+    // The edited scan's octree worldShift (drafts are WORLD-frame but the poses
+    // render in the scan's STORED frame at world − displayOffset − worldShift, so
+    // the transform pivot must subtract it too). [0,0,0] for a new scan.
+    worldShift: [number, number, number];
+    // Preview playback: when true, an animated scanner body flies along the
+    // trajectory over PREVIEW_DURATION_S. A monotonically increasing epoch keys
+    // the preview glyph so pressing Preview again restarts the clock.
+    previewPlaying: boolean;
+    previewEpoch: number;
+  }
+  const [trajectoryEditor, setTrajectoryEditor] =
+    useState<TrajectoryEditorSession | null>(null);
+  const trajectoryEditorRef = useRef<TrajectoryEditorSession | null>(null);
+  trajectoryEditorRef.current = trajectoryEditor;
+  // The manual trajectory editor draws interactive content in the viewport (and
+  // opens before its scan exists when building for a new scan), so it must
+  // suppress the empty-state import hint that would otherwise obscure it. Report
+  // "has content" while open; on close, re-report the real mesh/skeleton/QSM state
+  // (the base content effect above only fires when those counts change, which they
+  // don't on close, so it would otherwise leave the hint suppressed).
+  useEffect(() => {
+    if (trajectoryEditor) {
+      onViewerContentChange?.(true);
+    } else {
+      onViewerContentChange?.(meshes.length > 0 || skeletons.length > 0 || qsms.length > 0);
+    }
+  }, [trajectoryEditor, onViewerContentChange, meshes.length, skeletons.length, qsms.length]);
+  // The segment index whose insert-'+' overlay is currently revealed (pointer
+  // hovering the trajectory path between pose i and i+1), plus the screen point
+  // to anchor the overlay button at. null = nothing hovered.
+  const [trajInsertHover, setTrajInsertHover] = useState<
+    { index: number; x: number; y: number } | null
+  >(null);
+  const trajInsertHoverRef = useRef(trajInsertHover);
+  trajInsertHoverRef.current = trajInsertHover;
+  // Idle timer for the deferred re-sort after a pose TIME edit — the rows re-sort
+  // only once the value has settled, so a row never jumps mid-typing.
+  const trajSortTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (trajSortTimerRef.current) clearTimeout(trajSortTimerRef.current); }, []);
+
+  // Update the editor's draft list immutably, keeping the ref mirror in sync.
+  const updateTrajectoryDrafts = useCallback(
+    (fn: (drafts: PoseDraft[]) => PoseDraft[], nextSelected?: number | null) => {
+      setTrajectoryEditor(prev => {
+        if (!prev) return prev;
+        const drafts = fn(prev.drafts);
+        return {
+          ...prev,
+          drafts,
+          selectedIndex:
+            nextSelected !== undefined
+              ? nextSelected
+              : prev.selectedIndex != null && prev.selectedIndex < drafts.length
+                ? prev.selectedIndex
+                : null,
+        };
+      });
+    },
+    [],
+  );
 
   // Track previous cloud IDs to detect new additions
   const prevCloudIdsRef = useRef<Set<string>>(new Set());
@@ -3682,6 +3804,241 @@ export default function PointCloudViewer({
     setScanPopupState({ kind: 'add-params-to', id: scan.id });
   }, [combinedBounds]);
 
+  // ---- Manual trajectory editor entry points -----------------------------
+  // Open the editor for an EXISTING scan's trajectory (from the Scans panel or
+  // the params popup "Edit trajectory" affordance). Seeds the drafts from the
+  // stored PoseStream (or a starter pair when the scan has none yet).
+  const openTrajectoryEditorForScan = useCallback((scanId: string) => {
+    const scan = scans.find(s => s.id === scanId);
+    const traj = scan?.params?.trajectory;
+    const drafts = traj ? poseStreamToDrafts(traj) : makeStarterDrafts();
+    const template: TrajectoryTemplate = traj
+      ? { frame: traj.frame, leverArm: traj.leverArm, boresightRpy: traj.boresightRpy, label: traj.label ?? 'Manual trajectory' }
+      : DEFAULT_TRAJECTORY_TEMPLATE;
+    const worldShift = (scan?.data?.octree?.worldShift ?? [0, 0, 0]) as [number, number, number];
+    setScanPopupState({ kind: 'closed' });
+    setTrajectoryEditor({ scanId, drafts, template, selectedIndex: 0, worldShift, previewPlaying: false, previewEpoch: 0 });
+  }, [scans]);
+
+  // Open the editor while CREATING a new scan: the params popup hands over the
+  // label + params it collected so far; Save finalizes a brand-new scan with the
+  // built trajectory attached.
+  const openTrajectoryEditorForNew = useCallback(
+    (label: string, params: ScanParameters) => {
+      const existing = params.trajectory;
+      const drafts = existing ? poseStreamToDrafts(existing) : makeStarterDrafts();
+      const template: TrajectoryTemplate = existing
+        ? { frame: existing.frame, leverArm: existing.leverArm, boresightRpy: existing.boresightRpy, label: existing.label ?? label }
+        : { ...DEFAULT_TRAJECTORY_TEMPLATE, label };
+      setScanPopupState({ kind: 'closed' });
+      setTrajectoryEditor({
+        scanId: null,
+        pendingLabel: label,
+        pendingParams: params,
+        drafts,
+        template,
+        selectedIndex: 0,
+        // A brand-new scan has no cloud yet, so no worldShift.
+        worldShift: [0, 0, 0],
+        previewPlaying: false,
+        previewEpoch: 0,
+      });
+    },
+    [],
+  );
+
+  const closeTrajectoryEditor = useCallback(() => {
+    setTrajectoryEditor(null);
+    setTrajInsertHover(null);
+  }, []);
+
+  // Save the edited trajectory: convert drafts -> PoseStream, attach via the
+  // shared applyTrajectoryToParams (anchors origin to pose 0, zeros static tilt),
+  // then update the existing scan OR finalize the brand-new one.
+  const saveTrajectoryEditor = useCallback(() => {
+    const ed = trajectoryEditorRef.current;
+    if (!ed) return;
+    const stream = draftsToPoseStream(ed.drafts, ed.template);
+    if (ed.scanId) {
+      // Editing an EXISTING scan's trajectory: update it in place.
+      const scan = scans.find(s => s.id === ed.scanId);
+      const nextParams = applyTrajectoryToParams(scan?.params, stream);
+      onUpdateScanParams(ed.scanId, nextParams);
+      closeTrajectoryEditor();
+    } else {
+      // The editor was launched mid-CREATE from the Add Scan popup. Don't create
+      // the scan yet — hand the built trajectory back to the popup (attached to
+      // the params collected so far) so the user finishes the scan setup and
+      // submits there.
+      const label = ed.pendingLabel ?? 'Scan';
+      const nextParams = applyTrajectoryToParams(ed.pendingParams, stream);
+      closeTrajectoryEditor();
+      setScanDefaults({ label, params: nextParams });
+      setScanPopupState({ kind: 'add' });
+    }
+  }, [scans, onUpdateScanParams, closeTrajectoryEditor]);
+
+  // Table / 3D pose-list callbacks. The draft list is kept time-sorted, so an
+  // edit can move a row; selection is tracked by the pose's stable `id` (not its
+  // index) so it follows the pose across a re-sort.
+  const handleSelectPose = useCallback((index: number) => {
+    setTrajectoryEditor(prev => (prev ? { ...prev, selectedIndex: index } : prev));
+  }, []);
+  const handleEditPoseField = useCallback(
+    (index: number, field: keyof Omit<PoseDraft, 'id'>, value: number) => {
+      setTrajectoryEditor(prev => {
+        if (!prev) return prev;
+        // Apply the value in place — no re-sort here, so the row never jumps out
+        // from under the cursor while you're still typing a time.
+        const drafts = updatePoseDraftField(prev.drafts, index, field, value);
+        return { ...prev, drafts };
+      });
+      // A time edit changes the ordering; re-sort once the value has SETTLED
+      // (short idle delay), keeping the edited pose selected by its id.
+      if (field === 't') {
+        const editedId = trajectoryEditorRef.current?.drafts[index]?.id;
+        if (trajSortTimerRef.current) clearTimeout(trajSortTimerRef.current);
+        trajSortTimerRef.current = setTimeout(() => {
+          setTrajectoryEditor(prev => {
+            if (!prev) return prev;
+            const drafts = sortTrajectoryDrafts(prev.drafts);
+            const moved = editedId ? drafts.findIndex(d => d.id === editedId) : -1;
+            return { ...prev, drafts, selectedIndex: moved >= 0 ? moved : prev.selectedIndex };
+          });
+        }, TRAJ_SORT_DELAY_MS);
+      }
+    },
+    [],
+  );
+  const handleDeletePose = useCallback((index: number) => {
+    setTrajectoryEditor(prev => {
+      if (!prev) return prev;
+      const selectedId = prev.selectedIndex != null ? prev.drafts[prev.selectedIndex]?.id : null;
+      const drafts = deletePoseDraft(prev.drafts, index);
+      // Preserve selection by id; if the selected pose was the one deleted, clamp.
+      let selectedIndex = selectedId ? drafts.findIndex(d => d.id === selectedId) : -1;
+      if (selectedIndex < 0) {
+        selectedIndex = drafts.length ? Math.min(index, drafts.length - 1) : -1;
+      }
+      return { ...prev, drafts, selectedIndex: selectedIndex >= 0 ? selectedIndex : null };
+    });
+  }, []);
+  const handleInsertPose = useCallback((index: number) => {
+    setTrajectoryEditor(prev => {
+      if (!prev) return prev;
+      const drafts = insertPoseDraft(prev.drafts, index);
+      // insertPoseDraft returns the same ref when it's a no-op (bad index).
+      if (drafts === prev.drafts) return prev;
+      // The inserted pose is the one not present in the previous list; select it.
+      const prevIds = new Set(prev.drafts.map(d => d.id));
+      const newIdx = drafts.findIndex(d => !prevIds.has(d.id));
+      return { ...prev, drafts, selectedIndex: newIdx >= 0 ? newIdx : prev.selectedIndex };
+    });
+    setTrajInsertHover(null);
+  }, []);
+  const handleAddPose = useCallback(() => {
+    setTrajectoryEditor(prev => {
+      if (!prev) return prev;
+      const drafts = addPoseDraft(prev.drafts);
+      const prevIds = new Set(prev.drafts.map(d => d.id));
+      const newIdx = drafts.findIndex(d => !prevIds.has(d.id));
+      return { ...prev, drafts, selectedIndex: newIdx >= 0 ? newIdx : prev.selectedIndex };
+    });
+  }, []);
+  const handleRenumberPoses = useCallback(() => {
+    updateTrajectoryDrafts(renumberTimestampsEven);
+  }, [updateTrajectoryDrafts]);
+  // Toggle the preview playback. Starting bumps previewEpoch so the animated
+  // glyph remounts and its clock restarts even if a previous run just finished.
+  const handleTogglePreview = useCallback(() => {
+    setTrajectoryEditor(prev => {
+      if (!prev) return prev;
+      if (prev.drafts.length < 2) return prev; // nothing to fly along
+      const next = !prev.previewPlaying;
+      return {
+        ...prev,
+        previewPlaying: next,
+        previewEpoch: next ? prev.previewEpoch + 1 : prev.previewEpoch,
+      };
+    });
+  }, []);
+  const handlePreviewEnded = useCallback(() => {
+    setTrajectoryEditor(prev => (prev ? { ...prev, previewPlaying: false } : prev));
+  }, []);
+
+  // Insert-'+' hover for the trajectory editor, computed in SCREEN space (not via
+  // invisible scene proxies, which flicker as the pointer crosses geometry and
+  // overlap the pose bodies). While editing, on each pointer move we project every
+  // segment MIDPOINT to screen and, if the cursor is within a pixel threshold of
+  // the nearest one, anchor a '+' there. Because the anchor is the segment
+  // midpoint (not the moving cursor) and only changes when the nearest segment
+  // changes, the button is rock-steady and never disappears when the mouse stops.
+  useEffect(() => {
+    if (!trajectoryEditor) { setTrajInsertHover(null); return; }
+    const HOVER_PX = 28; // how close to a segment midpoint counts as a hover
+    const getCanvas = (): HTMLCanvasElement | null =>
+      (document.querySelector('canvas[data-engine]') as HTMLCanvasElement | null) ||
+      (document.querySelector('canvas') as HTMLCanvasElement | null);
+
+    const onMove = (e: MouseEvent) => {
+      const ed = trajectoryEditorRef.current;
+      const camera = mainCameraRef.current;
+      const canvas = getCanvas();
+      if (!ed || !camera || !canvas || ed.drafts.length < 2) {
+        setTrajInsertHover(null);
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      // Pointer outside the canvas → no hover.
+      if (e.clientX < rect.left || e.clientX > rect.right ||
+          e.clientY < rect.top || e.clientY > rect.bottom) {
+        setTrajInsertHover(null);
+        return;
+      }
+      // Pointer over the docked table pane → no hover, even though the pane sits
+      // ON the canvas (a segment occluded behind it must not surface a '+').
+      const panel = document.querySelector('[data-testid="trajectory-table-panel"]');
+      if (panel) {
+        const pr = panel.getBoundingClientRect();
+        if (e.clientX >= pr.left && e.clientX <= pr.right &&
+            e.clientY >= pr.top && e.clientY <= pr.bottom) {
+          setTrajInsertHover(null);
+          return;
+        }
+      }
+      const off = displayOffsetRef.current;
+      const ws = ed.worldShift;
+      const v = new THREE.Vector3();
+      let best: { index: number; x: number; y: number; d2: number } | null = null;
+      for (let i = 0; i < ed.drafts.length - 1; i++) {
+        const a = ed.drafts[i], b = ed.drafts[i + 1];
+        // Segment midpoint in DISPLAY frame (world − displayOffset − worldShift).
+        v.set(
+          (a.x + b.x) / 2 - off.x - ws[0],
+          (a.y + b.y) / 2 - off.y - ws[1],
+          (a.z + b.z) / 2 - off.z - ws[2],
+        );
+        v.project(camera);
+        if (v.z > 1) continue; // behind the camera
+        const sx = rect.left + ((v.x + 1) / 2) * rect.width;
+        const sy = rect.top + ((-v.y + 1) / 2) * rect.height;
+        const d2 = (sx - e.clientX) ** 2 + (sy - e.clientY) ** 2;
+        if (!best || d2 < best.d2) best = { index: i, x: sx, y: sy, d2 };
+      }
+      if (best && best.d2 <= HOVER_PX * HOVER_PX) {
+        setTrajInsertHover(prev =>
+          prev && prev.index === best!.index &&
+          Math.abs(prev.x - best!.x) < 0.5 && Math.abs(prev.y - best!.y) < 0.5
+            ? prev
+            : { index: best!.index, x: best!.x, y: best!.y });
+      } else {
+        setTrajInsertHover(null);
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    return () => window.removeEventListener('mousemove', onMove);
+  }, [trajectoryEditor]);
+
   // Stable static bounds for grid/axes - only updates when objects are added, not removed.
   // This prevents the grid and axes from jumping when objects are deleted.
   const prevStaticBoundsIdsRef = useRef<Set<string>>(new Set());
@@ -3940,7 +4297,7 @@ export default function PointCloudViewer({
       // current selection but not requiring one), so it stays clickable whenever
       // any cloud exists in the scene — like the other picker-driven tools.
       { id: 'cloud-triangulate', name: 'Triangulate', keywords: ['mesh', 'surface', 'reconstruct'], action: () => { closeAllToolPanels('triangulation'); setShowTriangulationPopup(true); }, category: 'Point Cloud', toolGroup: 'reconstruct', icon: Triangle, testId: 'tool-triangulate', multiInput: true, isActive: () => showTriangulationPopup },
-      { id: 'cloud-dem', name: 'Generate DEM', keywords: ['dem', 'dtm', 'terrain', 'elevation', 'ground', 'surface', 'heightmap', 'bare earth', 'digital elevation model'], action: () => { closeAllToolPanels('dem'); setShowDEMPanel(!showDEMPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Mountain, testId: 'tool-dem', isActive: () => showDEMPanel },
+      { id: 'cloud-dem', name: 'Generate DEM', keywords: ['dem', 'dtm', 'dsm', 'chm', 'terrain', 'elevation', 'ground', 'surface', 'heightmap', 'bare earth', 'digital elevation model', 'digital surface model', 'canopy height', 'canopy height model'], action: () => { closeAllToolPanels('dem'); setShowDEMPanel(!showDEMPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Mountain, testId: 'tool-dem', isActive: () => showDEMPanel },
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Dna, testId: 'tool-skeleton', isActive: () => showSkeletonPanel },
       { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: QsmIcon, testId: 'tool-qsm', multiInput: true, isActive: () => showQSMPopup },
       { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setLadReopenSelection(null); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
@@ -5007,6 +5364,10 @@ export default function PointCloudViewer({
     const cloud = clouds.find(c => c.id === cloudId);
     if (!cloud || !cloud.params) return null;
     const params = cloud.params;
+    // A Livox rosette has no Ntheta×Nphi grid or angular sweep — the grid-based
+    // Helios XML/ASCII export can't represent it, so skip it here (a prism-stack
+    // XML round-trip is a future extension). Excluded from the export bundle.
+    if (params.pattern === 'risley_prism') return null;
     const entry: ScanExportEntry = {
       origin: [params.origin.x, params.origin.y, params.origin.z],
       scan_pattern: params.pattern,
@@ -5247,46 +5608,74 @@ export default function PointCloudViewer({
     setShowExportPanel(false);
   }, [meshes, clouds, downloadFile]);
 
-  // Export a DEM surface mesh as a GIS raster (.asc / GeoTIFF). The triangulated
-  // surface has lost the grid structure, so this round-trips the regular grid
-  // (kept on mesh.demGrid) through the backend, which writes the raster bytes;
-  // the renderer saves them via the main-process fs bridge. The grid origin is
-  // shifted back to true-world coordinates (world_shift re-added) for georef.
-  const handleExportDEMRaster = useCallback(async (meshId: string, format: 'asc' | 'tif') => {
+  // Export a DEM surface's raster LAYERS as GIS files (.asc / GeoTIFF). A DTM
+  // carries several bands (elevation / density / intensity / hillshade / slope /
+  // aspect); the user picks which to write. Each selected layer's regular grid is
+  // round-tripped through the backend (which writes the bytes) and saved via the
+  // main-process fs bridge; the origin is shifted back to true-world coords for
+  // georef. `layerNames` defaults to the surface's single grid (DSM/CHM, or a DTM
+  // without a layer bundle).
+  const handleExportDEMRaster = useCallback(async (meshId: string, format: 'asc' | 'tif', layerNames?: string[]) => {
     const mesh = meshes.find(m => m.id === meshId);
-    if (!mesh?.demGrid) return;
-    const grid = mesh.demGrid;
+    if (!mesh) return;
     const NODATA = -9999;
-    const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
-    const baseName = (sourceCloud?.data.fileName?.replace(/\.[^.]+$/, '') || 'dem');
     const ext = format === 'tif' ? 'tif' : 'asc';
+    const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
+    const cloudBase = (sourceCloud?.data.fileName?.replace(/\.[^.]+$/, '') || 'dem');
 
-    const savePath = await window.electronAPI?.dialog.save({
-      defaultPath: `${baseName}_dem.${ext}`,
-      title: format === 'tif' ? 'Export DEM (GeoTIFF)' : 'Export DEM (ESRI ASCII grid)',
-      filters: [{ name: format === 'tif' ? 'GeoTIFF' : 'ESRI ASCII grid', extensions: [ext] }],
-    });
-    if (!savePath) return;
+    // Resolve the grids to write: named layers when given + present, else the
+    // surface's own grid (DSM/CHM). Suffix the filename with the layer name.
+    const names = (layerNames && layerNames.length) ? layerNames : ['__surface__'];
+    const jobs = names
+      .map(name => {
+        if (name === '__surface__') return mesh.demGrid ? { grid: mesh.demGrid, suffix: 'dem' } : null;
+        const layer = mesh.demLayers?.[name];
+        return layer ? { grid: layer.grid, suffix: name } : null;
+      })
+      .filter((j): j is { grid: NonNullable<MeshEntry['demGrid']>; suffix: string } => !!j);
+    if (!jobs.length) return;
+
+    // One file per layer. For a single job use a Save dialog; for several, ask for a
+    // directory once and write each as <cloud>_<layer>.<ext> inside it.
+    let targets: { grid: NonNullable<MeshEntry['demGrid']>; path: string }[] = [];
+    if (jobs.length === 1) {
+      const savePath = await window.electronAPI?.dialog.save({
+        defaultPath: `${cloudBase}_${jobs[0].suffix}.${ext}`,
+        title: format === 'tif' ? 'Export raster (GeoTIFF)' : 'Export raster (ESRI ASCII grid)',
+        filters: [{ name: format === 'tif' ? 'GeoTIFF' : 'ESRI ASCII grid', extensions: [ext] }],
+      });
+      if (!savePath) return;
+      targets = [{ grid: jobs[0].grid, path: savePath }];
+    } else {
+      // Multiple layers → one file each in a chosen folder (authorizes child writes).
+      const picked = await window.electronAPI?.dialog.open({ directory: true, title: 'Choose a folder for the raster layers' });
+      const dir = Array.isArray(picked) ? picked[0] : picked;
+      if (!dir) return;
+      targets = jobs.map(j => ({ grid: j.grid, path: `${dir}/${cloudBase}_${j.suffix}.${ext}` }));
+    }
 
     try {
-      // Encode voids as NODATA (JSON can't carry NaN); shift origin to world coords.
-      const z = Array.from(grid.z, v => (Number.isFinite(v) ? v : NODATA));
-      const resp = await exportDemRaster({
-        format,
-        grid_z: z,
-        nx: grid.nx,
-        ny: grid.ny,
-        cell_size: grid.cellSize,
-        origin: [grid.origin[0] + grid.worldShift[0], grid.origin[1] + grid.worldShift[1]],
-        nodata: NODATA,
-        crs_epsg: grid.crsEpsg ?? null,
-      });
-      if (!resp.success) throw new Error('DEM raster export failed');
-      const bin = atob(resp.data_base64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      await window.electronAPI?.fs.writeBinary(savePath, bytes.buffer.slice(0) as ArrayBuffer);
-      showToast({ title: 'DEM Exported', type: 'success', message: `Wrote ${ext.toUpperCase()} raster (${grid.nx}×${grid.ny}).` });
+      for (const { grid, path } of targets) {
+        // Encode voids as NODATA (JSON can't carry NaN); shift origin to world coords.
+        const z = Array.from(grid.z, v => (Number.isFinite(v) ? v : NODATA));
+        const resp = await exportDemRaster({
+          format,
+          grid_z: z,
+          nx: grid.nx,
+          ny: grid.ny,
+          cell_size: grid.cellSize,
+          origin: [grid.origin[0] + grid.worldShift[0], grid.origin[1] + grid.worldShift[1]],
+          nodata: NODATA,
+          crs_epsg: grid.crsEpsg ?? null,
+        });
+        if (!resp.success) throw new Error('DEM raster export failed');
+        const bin = atob(resp.data_base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        await window.electronAPI?.fs.writeBinary(path, bytes.buffer.slice(0) as ArrayBuffer);
+      }
+      showToast({ title: 'Raster Exported', type: 'success',
+        message: `Wrote ${targets.length} ${ext.toUpperCase()} raster${targets.length > 1 ? 's' : ''}.` });
     } catch (error) {
       showToast({ title: 'Export Failed', type: 'error',
         message: error instanceof Error ? error.message : 'Unknown error' });
@@ -5579,8 +5968,24 @@ export default function PointCloudViewer({
           scan_azimuth_offset_deg: p.azimuthOffsetDeg,
           range_noise_m: options.rangeNoiseMm / 1000,  // mm → m
           angle_noise_mrad: options.angleNoiseMrad,
+          // Livox rosette: forward the rotating-prism stack + air index. Wedge/rotor
+          // stay in datasheet units (deg / Hz); the backend converts to rad / rad-s
+          // at the addScanRisley call site. The trajectory + PRF ride the moving
+          // spread below (a rosette is always trajectory-driven).
+          ...(p.pattern === 'risley_prism'
+            ? {
+                risley_prisms: (p.risleyPrisms ?? []).map(pr => ({
+                  wedge_angle_deg: pr.wedgeAngleDeg,
+                  refractive_index: pr.refractiveIndex,
+                  rotor_rate_hz: pr.rotorRateHz,
+                  phase_deg: pr.phaseDeg ?? 0,
+                })),
+                refractive_index_air: p.refractiveIndexAir ?? 1.0,
+              }
+            : {}),
           // Moving-platform scan: forward the trajectory + pulse rate so the
-          // backend drives addScanMoving instead of a static scan from origin.
+          // backend drives addScanMoving (or addScanRisley) instead of a static
+          // scan from origin.
           ...(p.trajectory
             ? {
                 trajectory: poseStreamToWire(p.trajectory),
@@ -5622,6 +6027,14 @@ export default function PointCloudViewer({
       for (const s of activeScanners) {
         const p = s.params;
         if (!p) continue;
+        if (p.pattern === 'risley_prism') {
+          // A rosette fires one pulse per PRF tick over the trajectory (Ntheta=1),
+          // so its budget is simply PRF × duration — no Ntheta×Nphi grid.
+          totalPulses += p.trajectory
+            ? Math.round((p.pulseRateHz ?? 100000) * trajectoryDurationS(p.trajectory))
+            : 0;
+          continue;
+        }
         const nTheta = p.pattern === 'spinning_multibeam'
           ? Math.max(p.beamElevationAnglesDeg.length, 1)
           : p.zenithPoints;
@@ -6485,16 +6898,26 @@ export default function PointCloudViewer({
     const cloud = clouds.find(c => c.id === id);
     if (!cloud) return;
 
+    // The surfaces to build this run, in a stable bottom-up order (terrain, then
+    // top-of-canopy, then the canopy height derived from them). One run generates
+    // each as its own mesh. The DTM additionally carries scalar layers (density /
+    // intensity / hillshade / slope / aspect) — those are NOT separate surfaces.
+    const order: DemSurfaceType[] = (['dtm', 'dsm', 'chm'] as DemSurfaceType[])
+      .filter(s => demSurfaces.has(s));
+    if (order.length === 0) return;
+    const DEM_NAME_SUFFIX: Record<DemSurfaceType, string> = { dtm: 'DEM', dsm: 'DSM', chm: 'CHM' };
+    const labelFor = (s: DemSurfaceType) => DEM_NAME_SUFFIX[s];
+
     setDemInProgress(true);
     setDemError(null);
-    setDemProgress({ label: 'Generating DEM…', value: null });
     const abort = new AbortController();
     demAbortRef.current = abort;
-    const onDemProgress = (value: number | null, label: string) => setDemProgress({ label, value });
     const onDemRunId = (runId: string) => { demRunIdRef.current = runId; };
     const baseName = cloud.data.fileName ?? id;
 
-    const finishMesh = (result: Awaited<ReturnType<typeof generateDEM>>) => {
+    // Build a per-surface mesh from a generate result and register it.
+    const finishMesh = (result: Awaited<ReturnType<typeof generateDEM>>, surface: DemSurfaceType) => {
+      const productLabel = labelFor(surface);
       const meshData: MeshData = {
         vertices: result.vertices,
         indices: result.triangles,
@@ -6510,60 +6933,43 @@ export default function PointCloudViewer({
         visible: true,
         color: '#8c6643',
         method: 'dem',
-        name: `${baseName} DEM`,
+        name: `${baseName} ${productLabel}`,
+        demSurfaceType: surface,
         demGrid: result.grid
           ? { ...result.grid, crsEpsg: result.grid.crsEpsg ?? null }
           : undefined,
+        demLayers: result.layers,
       };
-      addMesh(meshEntry, undefined, 'Generate DEM');
-      // Default the DEM surface to elevation colouring.
-      setMeshColorModes(prev => new Map(prev).set(meshEntry.id, 'elevation'));
+      addMesh(meshEntry, undefined, `Generate ${productLabel}`);
+      // A DTM defaults to colouring by its elevation LAYER; DSM/CHM (no layers)
+      // fall back to solid (their geometry IS the value; a colorbar isn't needed).
+      if (result.layers?.elevation) {
+        setMeshColorModes(prev => new Map(prev).set(meshEntry.id, 'layer'));
+        setSelectedMeshLayer(prev => new Map(prev).set(meshEntry.id, 'elevation'));
+      } else {
+        setMeshColorModes(prev => new Map(prev).set(meshEntry.id, 'solid'));
+      }
       return meshEntry;
     };
 
-    try {
-      const ps = buildPointSource(cloud);
-
-      // --- Session-backed octree cloud: DEM from the in-RAM array (ground-aware
-      // via the ground_class column), optional height_above_ground + rebuild. ---
-      if (ps.kind === 'source') {
-        const octreeInfo = cloud.data.octree;
-        if (!octreeInfo?.sessionId) throw new Error('Octree cloud is missing its editable session.');
-        const result = await generateSessionDEM(octreeInfo.sessionId, {
-          cell_size: demCellSize,
-          method: demMethod,
-          fill_voids: demFillVoids,
-          add_height_column: demComputeHAG,
-        }, abort.signal, onDemProgress, onDemRunId);
-        if (!result.success) throw new Error(result.error || 'DEM generation failed');
-        finishMesh(result);
-
-        // The HAG column was baked into the rebuilt octree; refresh the cloud and
-        // recolour by the new continuous scalar.
-        if (demComputeHAG && result.cacheId && result.rawMeta) {
-          onUpdateCloud(id, buildSessionOctreeData(result.rawMeta as unknown as OctreeMetadata, octreeInfo, baseName));
-          registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
-          setColorMode('scalar');
-          setSelectedScalarField(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
-        }
-        setShowDEMPanel(false);
-        showToast({
-          type: 'success',
-          title: 'DEM Generated',
-          message: `${result.numTriangles.toLocaleString()} cells${result.warning ? ` — ${result.warning}` : ''}`,
-        });
-        return;
-      }
-
-      // --- Flat cloud: send inline points; pass ground_class labels when present
-      // so the DEM is ground-aware. HAG is written as a scalar field. ---
-      // EXCLUDE sky/miss points (is_miss != 0): a miss is a ray that hit nothing,
-      // projected ~1 km out, so it both has no place in a ground surface AND
-      // inflates the cloud extent by ~1000×. That blown-up extent makes the
-      // auto-CSF cloth (and the gridding) pathological — the DEM appears to hang.
-      // The session-octree DEM path already gets hits-only data; this flat-cloud
-      // path is the one place misses can leak in, so filter them here (mirroring
-      // the miss exclusion triangulate/skeleton/QSM apply).
+    // Precompute the flat-cloud point arrays ONCE (shared across every surface in
+    // the batch) — the miss/ground/first-return extraction is identical per run.
+    const ps = buildPointSource(cloud);
+    let flat: {
+      displayData: typeof cloud.data;
+      rawCount: number;
+      points: number[][];
+      groundLabels?: number[];
+      firstReturnLabels?: number[];
+      intensity?: number[];
+      hitIndices: number[];
+      count: number;
+    } | null = null;
+    if (ps.kind !== 'source') {
+      // --- Flat cloud: EXCLUDE sky/miss points (is_miss != 0): a miss is a ray
+      // that hit nothing, projected ~1 km out, so it both has no place in a ground
+      // surface AND inflates the extent by ~1000× (making auto-CSF/gridding
+      // pathological). Filter here (the session path already gets hits-only). ---
       const displayData = ps.data;
       const rawCount = displayData.pointCount;
       const missField = displayData.scalarFields?.[MISS_ATTRIBUTE];
@@ -6571,11 +6977,20 @@ export default function PointCloudViewer({
         !missField || missField.values.length !== rawCount || missField.values[i] === 0;
       const groundField = displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE];
       const hasGround = !!groundField && groundField.values.length === rawCount;
+      // First-return index (0 = first return) drives the DSM / CHM top-of-canopy
+      // surface AND the DTM's return-density layer, so collect it whenever the
+      // column exists (the DTM always attaches the layer bundle).
+      const targetIndexField = displayData.scalarFields?.['target_index'];
+      const hasFirstReturn = !!targetIndexField && targetIndexField.values.length === rawCount;
+      // Per-point intensity feeds the DTM's intensity layer. `displayData.intensities`
+      // is the renderer's intensity buffer (Float32Array), aligned to all points.
+      const intensityBuf = displayData.intensities;
+      const hasIntensity = demSurfaces.has('dtm') && !!intensityBuf && intensityBuf.length === rawCount;
 
       const points: number[][] = [];
       const groundLabels: number[] | undefined = hasGround ? [] : undefined;
-      // hitIndices[k] = the full-cloud index of the k-th hit point we send, so a
-      // per-resolved-point result (HAG) can be scattered back to full length.
+      const firstReturnLabels: number[] | undefined = hasFirstReturn ? [] : undefined;
+      const intensity: number[] | undefined = hasIntensity ? [] : undefined;
       const hitIndices: number[] = [];
       for (let i = 0; i < rawCount; i++) {
         if (!isHit(i)) continue;   // drop sky/miss points
@@ -6586,65 +7001,120 @@ export default function PointCloudViewer({
           displayData.positions[i * 3 + 2],
         ]);
         if (groundLabels) groundLabels.push(Math.round(groundField!.values[i]));
+        if (firstReturnLabels) firstReturnLabels.push(Math.round(targetIndexField!.values[i]));
+        if (intensity) intensity.push(intensityBuf![i]);
       }
-      const count = points.length;
-      if (count < 3) {
-        throw new Error('DEM needs at least 3 hit points (all points are sky/misses).');
+      flat = { displayData, rawCount, points, groundLabels, firstReturnLabels, intensity, hitIndices, count: points.length };
+      if (flat.count < 3) {
+        setDemInProgress(false);
+        setDemProgress(null);
+        demAbortRef.current = null;
+        setDemError('DEM needs at least 3 hit points (all points are sky/misses).');
+        showToast({ type: 'error', title: 'DEM Generation Failed', message: 'All points are sky/misses.' });
+        return;
+      }
+    }
+
+    // Generate ONE surface (session or flat). Returns its result (throws on
+    // failure / cancel). The HAG side-effect only applies to a DTM.
+    const generateOne = async (surface: DemSurfaceType): Promise<Awaited<ReturnType<typeof generateDEM>>> => {
+      const wantHAG = surface === 'dtm' && demComputeHAG;
+      const onDemProgress = (value: number | null, label: string) => setDemProgress({ label, value });
+
+      if (ps.kind === 'source') {
+        const octreeInfo = cloud.data.octree;
+        if (!octreeInfo?.sessionId) throw new Error('Octree cloud is missing its editable session.');
+        const result = await generateSessionDEM(octreeInfo.sessionId, {
+          surface_type: surface,
+          cell_size: demCellSize,
+          method: demMethod,
+          fill_voids: demFillVoids,
+          add_height_column: wantHAG,
+        }, abort.signal, onDemProgress, onDemRunId);
+        if (!result.success) throw new Error(result.error || `${labelFor(surface)} generation failed`);
+        finishMesh(result, surface);
+        // The HAG column was baked into the rebuilt octree; refresh + recolour.
+        if (wantHAG && result.cacheId && result.rawMeta) {
+          onUpdateCloud(id, buildSessionOctreeData(result.rawMeta as unknown as OctreeMetadata, octreeInfo, baseName));
+          registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+          setColorMode('scalar');
+          setSelectedScalarField(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+        }
+        return result;
       }
 
+      // Flat cloud: reuse the precomputed hits-only arrays.
+      const f = flat!;
       const result = await generateDEM({
-        points,
-        ground_labels: groundLabels,
-        auto_segment_ground: !groundLabels,
+        points: f.points,
+        ground_labels: f.groundLabels,
+        first_return_labels: f.firstReturnLabels,
+        intensity: f.intensity,
+        surface_type: surface,
+        auto_segment_ground: !f.groundLabels,
         cell_size: demCellSize,
         method: demMethod,
         fill_voids: demFillVoids,
-        compute_height_above_ground: demComputeHAG,
+        compute_height_above_ground: wantHAG,
       }, abort.signal, onDemProgress, onDemRunId);
-      if (!result.success) throw new Error(result.error || 'DEM generation failed');
-      finishMesh(result);
+      if (!result.success) throw new Error(result.error || `${labelFor(surface)} generation failed`);
+      finishMesh(result, surface);
 
-      // The backend returns a gap-free height-above-ground buffer (ground sampled
-      // under every point, extrapolated past the ground footprint) — so canopy
-      // beyond the ground extent isn't slammed to 0.
-      if (demComputeHAG && result.heightAboveGround && result.heightAboveGround.length === count) {
-        // The backend's HAG buffer is aligned to the HIT points we sent (`count`).
-        // Scatter it back to the FULL cloud (`rawCount`) so the scalar field lines
-        // up with every point's position; excluded misses get 0 (rendered as
-        // "ground level", which is the only sensible value for a sky point).
+      if (wantHAG && result.heightAboveGround && result.heightAboveGround.length === f.count) {
+        // Scatter the hit-aligned HAG buffer back to full cloud length (misses → 0).
         const hitHag = result.heightAboveGround;
-        const hag = new Float32Array(rawCount);
+        const hag = new Float32Array(f.rawCount);
         let hmin = Infinity, hmax = -Infinity;
-        for (let k = 0; k < count; k++) {
+        for (let k = 0; k < f.count; k++) {
           const h = hitHag[k];
-          hag[hitIndices[k]] = h;
+          hag[f.hitIndices[k]] = h;
           if (h < hmin) hmin = h;
           if (h > hmax) hmax = h;
         }
         if (!Number.isFinite(hmin)) { hmin = 0; hmax = 1; }
-        // Misses contribute 0; widen the range to include it so the colour scale
-        // doesn't clip them.
-        if (count < rawCount) { hmin = Math.min(hmin, 0); hmax = Math.max(hmax, 0); }
+        if (f.count < f.rawCount) { hmin = Math.min(hmin, 0); hmax = Math.max(hmax, 0); }
         registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
         onUpdateCloud(id, {
-          ...displayData,
+          ...f.displayData,
           scalarFields: {
-            ...(displayData.scalarFields ?? {}),
+            ...(f.displayData.scalarFields ?? {}),
             [HEIGHT_ABOVE_GROUND_ATTRIBUTE]: { values: hag, min: hmin, max: hmax },
           },
         });
         setColorMode('scalar');
         setSelectedScalarField(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
       }
+      return result;
+    };
+
+    try {
+      let totalCells = 0;
+      let lastWarning: string | undefined;
+      for (let i = 0; i < order.length; i++) {
+        const surface = order[i];
+        // Batch phase label ("Generating CHM (2/3)…") so the user sees progress
+        // across the whole run, not just within one surface.
+        const phase = order.length > 1
+          ? `Generating ${labelFor(surface)} (${i + 1}/${order.length})…`
+          : `Generating ${labelFor(surface)}…`;
+        setDemBatchLabel(phase);
+        setDemProgress({ label: phase, value: null });
+        demRunIdRef.current = null;
+        const result = await generateOne(surface);
+        totalCells += result.numTriangles;
+        if (result.warning) lastWarning = result.warning;
+      }
       setShowDEMPanel(false);
+      const title = order.length > 1 ? `${order.length} surfaces generated` : `${labelFor(order[0])} Generated`;
       showToast({
         type: 'success',
-        title: 'DEM Generated',
-        message: `${result.numTriangles.toLocaleString()} cells${result.warning ? ` — ${result.warning}` : ''}`,
+        title,
+        message: `${totalCells.toLocaleString()} cells${lastWarning ? ` — ${lastWarning}` : ''}`,
       });
     } catch (error) {
       // User cancelled (Cancel button → fetch abort or a terminal `cancelled`
-      // stream marker) — not a failure, no error toast/banner.
+      // stream marker) — not a failure, no error toast/banner. Surfaces produced
+      // before the cancel stay in the scene.
       if (abort.signal.aborted || error instanceof ScanCancelledError) return;
       console.error('DEM generation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'DEM generation failed';
@@ -6653,10 +7123,11 @@ export default function PointCloudViewer({
     } finally {
       setDemInProgress(false);
       setDemProgress(null);
+      setDemBatchLabel(null);
       demAbortRef.current = null;
       demRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, addMesh, onUpdateCloud, buildSessionOctreeData, demCellSize, demMethod, demFillVoids, demComputeHAG]);
+  }, [selectedIds, clouds, buildPointSource, addMesh, onUpdateCloud, buildSessionOctreeData, demSurfaces, demCellSize, demMethod, demFillVoids, demComputeHAG]);
 
   // "Snap to ground": displace a voxel grid's columns to follow a DEM. The backend
   // (/api/lad/snap-grid) computes the per-column offsets ONCE from the DEM; we
@@ -8444,6 +8915,21 @@ export default function PointCloudViewer({
       (document.querySelector('canvas') as HTMLCanvasElement | null);
 
     const computePivot = (): { x: number; y: number; z: number } | null => {
+      // Manual trajectory editor takes precedence: pivot on the selected pose.
+      // Drafts are WORLD-frame but the poses render in the scan's stored frame
+      // (world − worldShift); startModal further subtracts displayOffset, so
+      // account for worldShift here to keep the pivot's screen projection aligned
+      // with where the pose actually draws (matters when editing a scan that
+      // already has a point cloud with a non-zero shift).
+      const ed = trajectoryEditorRef.current;
+      if (ed && ed.selectedIndex != null) {
+        const d = ed.drafts[ed.selectedIndex];
+        if (d) {
+          const ws = ed.worldShift;
+          return { x: d.x - ws[0], y: d.y - ws[1], z: d.z - ws[2] };
+        }
+        return null;
+      }
       if (selectedMesh) {
         const pos = meshPositionsRef.current.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
         const scl = meshScalesRef.current.get(selectedMesh.id) || { x: 1, y: 1, z: 1 };
@@ -8613,6 +9099,27 @@ export default function PointCloudViewer({
     };
 
     const applyRotate = (modal: TransformModalState, angleDeg: number) => {
+      if (modal.target === 'pose') {
+        if (modal.poseIndex == null || !modal.originalPoseRot) return;
+        const orig = modal.originalPoseRot;
+        // World-axis rotation about the pose's world Euler components. Free (no
+        // axis locked) defaults to yaw (world +Z) — the most common heading edit.
+        let roll = orig.rollDeg, pitch = orig.pitchDeg, yaw = orig.yawDeg;
+        if (modal.axis === 'x') roll = orig.rollDeg + angleDeg;
+        else if (modal.axis === 'y') pitch = orig.pitchDeg + angleDeg;
+        else if (modal.axis === 'z' || modal.axis === 'free') yaw = orig.yawDeg + angleDeg;
+        else if (modal.axis === 'yz') { pitch = orig.pitchDeg + angleDeg; yaw = orig.yawDeg + angleDeg; }
+        else if (modal.axis === 'xz') { roll = orig.rollDeg + angleDeg; yaw = orig.yawDeg + angleDeg; }
+        else if (modal.axis === 'xy') { roll = orig.rollDeg + angleDeg; pitch = orig.pitchDeg + angleDeg; }
+        const idx = modal.poseIndex;
+        setTrajectoryEditor(prev => {
+          if (!prev) return prev;
+          const drafts = prev.drafts.map((d, i) =>
+            i === idx ? { ...d, rollDeg: roll, pitchDeg: pitch, yawDeg: yaw } : d);
+          return { ...prev, drafts };
+        });
+        return;
+      }
       if (modal.target !== 'mesh' || !modal.meshId || !modal.originalMeshRot) return;
       const orig = modal.originalMeshRot;
       // Free rotation has no meaningful single Euler component on screen; default
@@ -8629,6 +9136,19 @@ export default function PointCloudViewer({
     };
 
     const applyTranslate = (modal: TransformModalState, delta: THREE.Vector3) => {
+      if (modal.target === 'pose') {
+        if (modal.poseIndex == null || !modal.originalPosePos) return;
+        const orig = modal.originalPosePos;
+        const idx = modal.poseIndex;
+        const next = { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z };
+        setTrajectoryEditor(prev => {
+          if (!prev) return prev;
+          const drafts = prev.drafts.map((d, i) =>
+            i === idx ? { ...d, x: next.x, y: next.y, z: next.z } : d);
+          return { ...prev, drafts };
+        });
+        return;
+      }
       if (modal.target === 'mesh' && modal.meshId && modal.originalMeshPos) {
         const orig = modal.originalMeshPos;
         const newPos = { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z };
@@ -8732,6 +9252,26 @@ export default function PointCloudViewer({
     const cancelModal = () => {
       const modal = transformModalRef.current;
       if (!modal) return;
+      if (modal.target === 'pose') {
+        if (modal.poseIndex != null && modal.originalPosePos && modal.originalPoseRot) {
+          const idx = modal.poseIndex;
+          const p = modal.originalPosePos;
+          const r = modal.originalPoseRot;
+          setTrajectoryEditor(prev => {
+            if (!prev) return prev;
+            const drafts = prev.drafts.map((d, i) =>
+              i === idx
+                ? { ...d, x: p.x, y: p.y, z: p.z, rollDeg: r.rollDeg, pitchDeg: r.pitchDeg, yawDeg: r.yawDeg }
+                : d);
+            return { ...prev, drafts };
+          });
+        }
+        pendingHistoryRef.current = null;
+        transformModalRef.current = null;
+        setTransformModal(null);
+        setGizmoDragging(false);
+        return;
+      }
       if (modal.target === 'mesh' && modal.meshId) {
         if (modal.originalMeshPos) {
           const orig = modal.originalMeshPos;
@@ -8793,7 +9333,25 @@ export default function PointCloudViewer({
 
       let state: TransformModalState | null = null;
 
-      if (selectedMesh) {
+      const ed = trajectoryEditorRef.current;
+      if (ed && ed.selectedIndex != null) {
+        // Manual trajectory editor: only translate/rotate a pose (no scale — a
+        // pose has no size). A scanner pose is transformed in-place.
+        if (op === 'scale') return;
+        const d = ed.drafts[ed.selectedIndex];
+        if (!d) return;
+        state = {
+          op,
+          axis: 'free',
+          startScreen: { x: lastMouse.x, y: lastMouse.y },
+          pivot,
+          target: 'pose',
+          poseIndex: ed.selectedIndex,
+          originalPosePos: { x: d.x, y: d.y, z: d.z },
+          originalPoseRot: { rollDeg: d.rollDeg, pitchDeg: d.pitchDeg, yawDeg: d.yawDeg },
+          numericBuffer: '',
+        };
+      } else if (selectedMesh) {
         state = {
           op,
           axis: 'free',
@@ -9502,6 +10060,7 @@ export default function PointCloudViewer({
     data: MeshData;
     mode: MeshColorMode;
     colormap: ColormapName;
+    layer?: string;
     result: { positions: Float32Array; colors: Float32Array; min?: number; max?: number };
   }>>(new Map());
 
@@ -9519,17 +10078,19 @@ export default function PointCloudViewer({
       const mode = meshColorModes.get(mesh.id);
       if (!mode || mode === 'solid') continue;
       liveIds.add(mesh.id);
+      // For a DEM 'layer' mode, resolve the selected layer's per-vertex values.
+      const layerName = mode === 'layer' ? (selectedMeshLayer.get(mesh.id) ?? 'elevation') : undefined;
+      const layer = layerName ? mesh.demLayers?.[layerName] : undefined;
 
-      // Full cache hit: same geometry, mode, and colormap → return the exact
-      // same result object. No allocation, and downstream identity is stable so
-      // the geometry/color buffers are not rebuilt or re-uploaded.
+      // Full cache hit: same geometry, mode, colormap, and (for layers) layer.
       const cached = cache.get(mesh.id);
-      if (cached && cached.data === mesh.data && cached.mode === mode && cached.colormap === colormap) {
+      if (cached && cached.data === mesh.data && cached.mode === mode &&
+          cached.colormap === colormap && cached.layer === layerName) {
         out.set(mesh.id, cached.result);
         continue;
       }
 
-      // Reuse positions when only the mode/colormap changed (data unchanged).
+      // Reuse positions when only the mode/colormap/layer changed (data unchanged).
       const positions = cached && cached.data === mesh.data
         ? cached.result.positions
         : buildMeshNonIndexedPositions(mesh.data);
@@ -9539,12 +10100,12 @@ export default function PointCloudViewer({
         const colors = buildMeshScanColors(mesh.data);
         if (colors) result = { positions, colors };
       } else {
-        const built = buildMeshTriangleColors(mesh.data, mode, colormap);
+        const built = buildMeshTriangleColors(mesh.data, mode, colormap, undefined, layer?.vertexValues);
         if (built) result = { positions, colors: built.colors, min: built.min, max: built.max };
       }
 
       if (result) {
-        cache.set(mesh.id, { data: mesh.data, mode, colormap, result });
+        cache.set(mesh.id, { data: mesh.data, mode, colormap, layer: layerName, result });
         out.set(mesh.id, result);
       }
     }
@@ -9554,7 +10115,7 @@ export default function PointCloudViewer({
       if (!liveIds.has(id)) cache.delete(id);
     }
     return out;
-  }, [meshes, meshColorModes, colormap]);
+  }, [meshes, meshColorModes, selectedMeshLayer, colormap]);
 
   // Gradient colorbar range for the selected mesh's scalar pseudocolor mode
   // (inclination/azimuth/area). Null for 'solid' and the categorical 'scan'
@@ -9584,8 +10145,15 @@ export default function PointCloudViewer({
     // colorbar (a needless full pass that doubled the freeze on large meshes).
     const built = meshTriangleColors.get(activeColorMesh.id);
     if (!built || built.min === undefined || built.max === undefined) return null;
-    return { mode, min: built.min, max: built.max, label: meshColorModeLabel(mode) };
-  }, [activeColorMesh, meshColorModes, meshTriangleColors]);
+    // For a 'layer' mode the caption is the selected layer's stored label; else the
+    // geometric-mode label.
+    let label = meshColorModeLabel(mode);
+    if (mode === 'layer') {
+      const name = selectedMeshLayer.get(activeColorMesh.id) ?? 'elevation';
+      label = activeColorMesh.demLayers?.[name]?.label ?? name;
+    }
+    return { mode, min: built.min, max: built.max, label };
+  }, [activeColorMesh, meshColorModes, selectedMeshLayer, meshTriangleColors]);
 
   // The LAD result whose colorbar is shown: the explicitly-selected one, else
   // the most recent visible result. Its LAD range (override-aware) drives the
@@ -11104,7 +11672,7 @@ export default function PointCloudViewer({
   // when an edit tool owns the click (crop/erase/translate gizmo), tree-seed
   // placement is active, or a gizmo drag is in flight, those clicks belong to
   // the tool, not selection.
-  const meshSelectionEnabled = editMode === 'none' && !treeSeedMode && !gizmoDragging;
+  const meshSelectionEnabled = editMode === 'none' && !treeSeedMode && !gizmoDragging && !trajectoryEditor;
 
   // Color modes that benefit from a colormap + colorbar (continuous scalars).
   const isScalarColorMode = (
@@ -11704,6 +12272,10 @@ export default function PointCloudViewer({
             settings sizes every marker up or down together. */}
         {showScanMarkers && scansWithParams.map(scan => {
           if (!scan.visible) return null;
+          // The scan whose trajectory is open in the editor renders its
+          // interactive per-pose bodies instead of the passive marker (below),
+          // so skip the passive one to avoid a double-render on pose 0.
+          if (trajectoryEditor && trajectoryEditor.scanId === scan.id) return null;
           // Glow follows the Scans-pane selection — single source of truth, so
           // the marker can never drift out of sync with the row highlight.
           const isMarkerSelected = selectedScanIds.has(scan.id);
@@ -11728,6 +12300,62 @@ export default function PointCloudViewer({
             </group>
           );
         })}
+
+        {/* Manual trajectory editor: interactive per-pose scanner bodies for the
+            trajectory being edited. Clickable to select a pose; the path segments
+            are pointer targets that reveal the insert-'+' overlay. Drawn in the
+            same display-offset frame as the passive markers. A scan being CREATED
+            (scanId === null) has no cloud, so worldShift is 0. */}
+        {trajectoryEditor && (() => {
+          const editScan = trajectoryEditor.scanId
+            ? scansWithParams.find(s => s.id === trajectoryEditor.scanId)
+            : null;
+          const ws = editScan?.data?.octree?.worldShift ?? [0, 0, 0];
+          const model =
+            editScan?.params.scannerModel ??
+            trajectoryEditor.pendingParams?.scannerModel ??
+            'generic';
+          const color = editScan?.color ?? '#38bdf8';
+          const poses = draftsToPoseTuples(trajectoryEditor.drafts);
+          const pathPoints = trajectoryEditor.drafts.map(
+            d => [d.x, d.y, d.z] as [number, number, number]);
+          const drafts = trajectoryEditor.drafts;
+          const previewing = trajectoryEditor.previewPlaying && drafts.length >= 2;
+          const tStart = drafts[0]?.t ?? 0;
+          const tEnd = drafts[drafts.length - 1]?.t ?? 0;
+          return (
+            <group position={[-displayOffset.x - ws[0], -displayOffset.y - ws[1], -displayOffset.z - ws[2]]}>
+              {/* Hide the static per-pose bodies while previewing so the single
+                  animated glyph reads clearly; the path line stays for context. */}
+              {!previewing && (
+                <EditableTrajectoryPoses
+                  poses={poses}
+                  model={model}
+                  color={color}
+                  selectedIndex={trajectoryEditor.selectedIndex}
+                  markerScale={scanMarkerScale}
+                  onSelectPose={handleSelectPose}
+                />
+              )}
+              {pathPoints.length >= 2 && (
+                <TrajectoryEditorPath points={pathPoints} color={color} />
+              )}
+              {previewing && (
+                <TrajectoryPreviewScanner
+                  key={`preview-${trajectoryEditor.previewEpoch}`}
+                  model={model}
+                  color={color}
+                  sampleAt={(t) => sampleTrajectoryAt(drafts, t)}
+                  tStart={tStart}
+                  tEnd={tEnd}
+                  durationS={PREVIEW_DURATION_S}
+                  markerScale={scanMarkerScale}
+                  onEnded={handlePreviewEnded}
+                />
+              )}
+            </group>
+          );
+        })()}
 
         {/* Scan-pattern wireframe shells (View-menu toggle, off by default). Same
             display-offset wrapper as the markers; ScanWireframeEntry memoizes its
@@ -12113,7 +12741,11 @@ export default function PointCloudViewer({
             priority 1 (like the EffectComposer did) to render the scene then
             composite a uniform-width silhouette outline of the selected meshes.
             When nothing is selected it just renders the scene and returns. */}
-        <JFAOutline active={selectedMeshIds.size > 0} color="#a3e635" width={4} />
+        <JFAOutline
+          active={selectedMeshIds.size > 0 || (trajectoryEditor?.selectedIndex != null)}
+          color="#a3e635"
+          width={4}
+        />
       </Canvas>
 
       {/* Polygon lasso overlay — covers the canvas in screen space.
@@ -12521,6 +13153,38 @@ export default function PointCloudViewer({
           </div>
         );
       })()}
+
+      {/* Manual trajectory editor: the docked pose table + the insert-'+' overlay
+          that follows the pointer along a hovered path segment. */}
+      {trajectoryEditor && (
+        <>
+          <TrajectoryTablePanel
+            drafts={trajectoryEditor.drafts}
+            selectedIndex={trajectoryEditor.selectedIndex}
+            onSelectRow={handleSelectPose}
+            onEditField={handleEditPoseField}
+            onDeleteRow={handleDeletePose}
+            onAddPose={handleAddPose}
+            onRenumber={handleRenumberPoses}
+            onTogglePreview={handleTogglePreview}
+            previewPlaying={trajectoryEditor.previewPlaying}
+            onSave={saveTrajectoryEditor}
+            onCancel={closeTrajectoryEditor}
+          />
+          {trajInsertHover && (
+            <button
+              type="button"
+              data-testid="trajectory-insert-overlay"
+              onClick={() => handleInsertPose(trajInsertHover.index)}
+              style={{ left: trajInsertHover.x, top: trajInsertHover.y }}
+              className="fixed z-[60] -translate-x-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-full bg-lime-500 text-neutral-900 shadow-lg hover:bg-lime-400"
+              title={`Insert a pose between poses ${trajInsertHover.index} and ${trajInsertHover.index + 1}`}
+            >
+              <Plus size={14} />
+            </button>
+          )}
+        </>
+      )}
 
       {/* Mesh color popover, rendered at the viewport root as a fixed overlay so
           it escapes the Meshes panel's overflow clip and backdrop-blur stacking
@@ -12993,11 +13657,24 @@ export default function PointCloudViewer({
                       {isMovingScanRow ? (
                         // A moving scan has no single position — each return's beam
                         // origin comes from the trajectory. Show the path summary
-                        // instead of the (misleading) first-pose anchor coordinate.
-                        <div>
-                          trajectory: <span className="font-mono text-neutral-300">{scan.params.trajectory!.poses.length} poses</span>
-                          <span className="mx-1">·</span>
-                          <span className="font-mono text-neutral-300">{trajectoryDurationS(scan.params.trajectory!).toFixed(1)} s</span>
+                        // instead of the (misleading) first-pose anchor coordinate,
+                        // plus an "Edit trajectory" affordance (kept here, in the
+                        // expanded panel, rather than as another always-visible row
+                        // icon — the row's icon strip is already full).
+                        <div className="flex items-center gap-2">
+                          <span>
+                            trajectory: <span className="font-mono text-neutral-300">{scan.params.trajectory!.poses.length} poses</span>
+                            <span className="mx-1">·</span>
+                            <span className="font-mono text-neutral-300">{trajectoryDurationS(scan.params.trajectory!).toFixed(1)} s</span>
+                          </span>
+                          <button
+                            data-testid={`scan-edit-trajectory-${scan.id}`}
+                            onClick={(e) => { e.stopPropagation(); openTrajectoryEditorForScan(scan.id); }}
+                            className="inline-flex items-center gap-1 rounded border border-neutral-600 px-1.5 py-0.5 text-[10px] text-neutral-300 hover:bg-neutral-700 hover:text-white"
+                            title="Open the trajectory editor"
+                          >
+                            <Compass className="w-3 h-3" /> Edit
+                          </button>
                         </div>
                       ) : (
                         <div className="grid grid-cols-3 gap-x-2">
@@ -13065,6 +13742,7 @@ export default function PointCloudViewer({
             renamingMeshValue={renamingMeshValue}
             colorPopoverMeshId={colorPopoverMeshId}
             meshColorModes={meshColorModes}
+            selectedMeshLayer={selectedMeshLayer}
             meshOpacities={meshOpacities}
             meshRotations={meshRotations}
             meshPositions={meshPositions}
@@ -13104,12 +13782,23 @@ export default function PointCloudViewer({
             onRenamingChange={(id, value) => { setRenamingMeshId(id); setRenamingMeshValue(value); }}
             onOpenColorPopover={(id, anchor) => { setColorPopoverAnchor(anchor); setColorPopoverMeshId(id); }}
             onCloseColorPopover={() => setColorPopoverMeshId(null)}
-            onColorModeChange={(id, mode) => setMeshColorModes(prev => {
-              const next = new Map(prev);
-              if (mode === 'solid') next.delete(id);
-              else next.set(id, mode);
-              return next;
-            })}
+            onColorModeChange={(id, value) => {
+              // The select value is either a bare MeshColorMode or `layer:<name>`
+              // (a DTM band). Decode the layer form into mode='layer' + the layer name.
+              if (value.startsWith('layer:')) {
+                const layerName = value.slice(6);
+                setSelectedMeshLayer(prev => new Map(prev).set(id, layerName));
+                setMeshColorModes(prev => new Map(prev).set(id, 'layer'));
+                return;
+              }
+              const mode = value as MeshColorMode;
+              setMeshColorModes(prev => {
+                const next = new Map(prev);
+                if (mode === 'solid') next.delete(id);
+                else next.set(id, mode);
+                return next;
+              });
+            }}
             onColormapChange={setColormap}
             onOpacityChange={(id, value) => setMeshOpacities(prev => new Map(prev).set(id, value))}
             onWireframeChange={setMeshWireframe}
@@ -13913,6 +14602,7 @@ export default function PointCloudViewer({
         );
         return (
           <DEMPanel
+            selectedSurfaces={demSurfaces}
             cellSize={demCellSize}
             method={demMethod}
             fillVoids={demFillVoids}
@@ -13922,8 +14612,14 @@ export default function PointCloudViewer({
             extentY={sel?.data.bounds?.size?.y}
             inProgress={demInProgress}
             progress={demProgress?.value ?? null}
+            progressLabel={demBatchLabel}
             error={demError}
             onClose={() => setShowDEMPanel(false)}
+            onToggleSurface={(t, checked) => setDemSurfaces(prev => {
+              const next = new Set(prev);
+              if (checked) next.add(t); else next.delete(t);
+              return next;
+            })}
             onCellSizeChange={setDemCellSize}
             onMethodChange={setDemMethod}
             onFillVoidsChange={setDemFillVoids}
@@ -15006,6 +15702,28 @@ export default function PointCloudViewer({
               : 'create'
         }
         showBulkImport={scanPopupState.kind === 'add'}
+        onBuildTrajectory={(label, params) => {
+          // Edit/attach target an existing scan; create builds a new one on Save.
+          // Seed the editor from the params the popup collected (which may already
+          // carry an imported trajectory or unsaved edits).
+          if (scanPopupState.kind === 'edit' || scanPopupState.kind === 'add-params-to') {
+            const scanId = scanPopupState.id;
+            const traj = params.trajectory;
+            const drafts = traj ? poseStreamToDrafts(traj) : makeStarterDrafts();
+            const template: TrajectoryTemplate = traj
+              ? { frame: traj.frame, leverArm: traj.leverArm, boresightRpy: traj.boresightRpy, label: traj.label ?? label }
+              : { ...DEFAULT_TRAJECTORY_TEMPLATE, label };
+            // Persist the popup's other param edits before entering the editor so
+            // Save's applyTrajectoryToParams builds on the latest params.
+            onUpdateScanParams(scanId, params);
+            const editScan = scans.find(s => s.id === scanId);
+            const worldShift = (editScan?.data?.octree?.worldShift ?? [0, 0, 0]) as [number, number, number];
+            setScanPopupState({ kind: 'closed' });
+            setTrajectoryEditor({ scanId, drafts, template, selectedIndex: 0, worldShift, previewPlaying: false, previewEpoch: 0 });
+          } else {
+            openTrajectoryEditorForNew(label, params);
+          }
+        }}
         onSubmit={(label, params) => {
           if (scanPopupState.kind === 'edit') {
             const editingId = scanPopupState.id;

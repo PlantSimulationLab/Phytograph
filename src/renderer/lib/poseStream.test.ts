@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parsePoseStreamCsv,
   quatFromRpy,
+  quatToRpy,
   poseStreamToWire,
   poseStreamFromWire,
   PoseStreamParseError,
@@ -29,6 +30,47 @@ describe('quatFromRpy', () => {
     const q = quatFromRpy(0.3, -0.4, 1.1);
     const n = Math.hypot(...q);
     expect(n).toBeCloseTo(1, 12);
+  });
+});
+
+describe('quatToRpy', () => {
+  it('returns zero angles for the identity quaternion', () => {
+    expect(quatToRpy(0, 0, 0, 1)).toEqual([0, 0, 0]);
+  });
+
+  it('recovers a pure 90° yaw', () => {
+    const [qx, qy, qz, qw] = quatFromRpy(0, 0, Math.PI / 2);
+    const [r, p, y] = quatToRpy(qx, qy, qz, qw);
+    expect(r).toBeCloseTo(0, 12);
+    expect(p).toBeCloseTo(0, 12);
+    expect(y).toBeCloseTo(Math.PI / 2, 12);
+  });
+
+  it('round-trips quatFromRpy across a grid of angles', () => {
+    const angles = [-1.2, -0.5, -0.1, 0, 0.1, 0.5, 1.2];
+    for (const roll of angles) {
+      for (const pitch of angles) {
+        for (const yaw of angles) {
+          const [qx, qy, qz, qw] = quatFromRpy(roll, pitch, yaw);
+          const [r, p, y] = quatToRpy(qx, qy, qz, qw);
+          // Re-derive the quaternion from the recovered angles: the split may
+          // differ near singularities but the orientation must be identical.
+          const q2 = quatFromRpy(r, p, y);
+          // Quaternions q and -q are the same rotation.
+          const dot = Math.abs(qx * q2[0] + qy * q2[1] + qz * q2[2] + qw * q2[3]);
+          expect(dot).toBeCloseTo(1, 10);
+        }
+      }
+    }
+  });
+
+  it('clamps pitch and folds roll into yaw at the +90° gimbal-lock singularity', () => {
+    // A quaternion exactly at pitch = +90° (2*(qw*qy - qz*qx) == 1): a pure +90°
+    // rotation about +Y is q = (0, sin45, 0, cos45).
+    const s = Math.SQRT1_2;
+    const [r, p] = quatToRpy(0, s, 0, s);
+    expect(p).toBeCloseTo(Math.PI / 2, 9);
+    expect(r).toBe(0);
   });
 });
 

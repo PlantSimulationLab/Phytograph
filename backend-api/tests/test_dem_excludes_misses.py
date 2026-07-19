@@ -97,6 +97,27 @@ def test_session_dem_finishes_and_grids_hits_only(client, leafcube_session):
     assert body["grid_nx"] * body["grid_ny"] < 4_000_000
 
 
+@pytest.mark.parametrize("surface_type", ["dsm", "chm"])
+def test_session_dsm_chm_finish_and_grid_hits_only(client, leafcube_session, surface_type):
+    """DSM and CHM must exclude sky/misses exactly as the DTM does: a surface built
+    over the ~1 km far field would inflate the extent and either hang (CSF) or blow
+    past the cell cap. Both COMPLETE over the ~1 m cube. (The DTM's density/intensity
+    LAYERS grid the same hits-only points, covered by the DTM case above.)"""
+    res = client.post(
+        f"/api/cloud/session/{leafcube_session}/dem",
+        json={"cell_size": 0.1, "method": "tin", "auto_segment_ground": True,
+              "surface_type": surface_type},
+    )
+    assert res.status_code == 200
+    body, buffers = decode_bin_frame(res.content)
+    assert body["success"] is True, body.get("error")
+    assert body["surface_type"] == surface_type
+    verts = buffers["vertices"].reshape(-1, 3)
+    span = float(np.max(verts.max(axis=0)[:2] - verts.min(axis=0)[:2]))
+    assert span < 3.0, f"{surface_type} spans {span} m — misses leaked into the grid"
+    assert body["grid_nx"] * body["grid_ny"] < 4_000_000
+
+
 def test_session_dem_hag_aligns_to_full_survivors(client, leafcube_session):
     """With height-above-ground requested, the per-point HAG column is scattered
     back over ALL survivors (misses → 0), so the rebuilt octree's column length

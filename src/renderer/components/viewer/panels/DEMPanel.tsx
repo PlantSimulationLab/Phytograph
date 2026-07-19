@@ -3,6 +3,7 @@ import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 
 export type DemInterpMethod = 'tin' | 'idw' | 'nearest';
+export type DemSurfaceType = 'dtm' | 'dsm' | 'chm';
 
 // Presentational tool panel for DEM (Digital Elevation Model) generation. The
 // `onGenerate` handler and all state live in PointCloudViewer; the parent gates
@@ -13,6 +14,9 @@ export type DemInterpMethod = 'tin' | 'idw' | 'nearest';
 const DEM_MAX_CELLS = 4_000_000;
 
 interface DEMPanelProps {
+  // Which surface products to build. One run generates all of them (in order),
+  // each as its own mesh — so DTM, DSM and CHM can be produced in one click.
+  selectedSurfaces: Set<DemSurfaceType>;
   cellSize: number;
   method: DemInterpMethod;
   fillVoids: boolean;
@@ -26,8 +30,12 @@ interface DEMPanelProps {
   // Streaming progress fraction (0–1) while running, or null before the first
   // marker / when not running. Shown as a percentage on the spinner button.
   progress?: number | null;
+  // Human label for the running phase (e.g. "Generating CHM (2/3)…"), shown on
+  // the spinner button when a batch is running. Optional.
+  progressLabel?: string | null;
   error: string | null;
   onClose: () => void;
+  onToggleSurface: (t: DemSurfaceType, checked: boolean) => void;
   onCellSizeChange: (n: number) => void;
   onMethodChange: (m: DemInterpMethod) => void;
   onFillVoidsChange: (v: boolean) => void;
@@ -36,7 +44,33 @@ interface DEMPanelProps {
   onCancel: () => void;
 }
 
+// Per-surface labels + descriptions. DTM = bare-earth ground; DSM = first-return
+// / top-of-canopy surface; CHM = canopy height (DSM − DTM).
+const SURFACE_META: Record<DemSurfaceType, { title: string; blurb: string; needsGround: boolean }> = {
+  dtm: {
+    title: 'Terrain (DTM)',
+    blurb: "Bare-earth terrain surface from the cloud's ground points. Run Segment Ground first for control; otherwise ground is auto-detected.",
+    needsGround: true,
+  },
+  dsm: {
+    title: 'Surface (DSM)',
+    blurb: 'First-return / top-of-canopy surface — the highest return in each cell. Does not need ground classification.',
+    needsGround: false,
+  },
+  chm: {
+    title: 'Canopy height (CHM)',
+    blurb: 'Canopy height model = DSM − DTM: vegetation height above the bare earth. Run Segment Ground first for control over the ground.',
+    needsGround: true,
+  },
+};
+
+// Display order for the checkbox list (bottom-up: terrain, surface, canopy height).
+// The Terrain (DTM) also carries density / intensity / hillshade / slope / aspect
+// as colour-by layers — no separate checkboxes; pick them from the mesh's Color by.
+const SURFACE_ORDER: DemSurfaceType[] = ['dtm', 'dsm', 'chm'];
+
 export function DEMPanel({
+  selectedSurfaces,
   cellSize,
   method,
   fillVoids,
@@ -46,8 +80,10 @@ export function DEMPanel({
   extentY,
   inProgress,
   progress,
+  progressLabel,
   error,
   onClose,
+  onToggleSurface,
   onCellSizeChange,
   onMethodChange,
   onFillVoidsChange,
@@ -55,6 +91,16 @@ export function DEMPanel({
   onGenerate,
   onCancel,
 }: DEMPanelProps) {
+  const count = selectedSurfaces.size;
+  // Short run-button suffix per product ("DEM" is the historical DTM wording).
+  const RUN_SUFFIX: Record<DemSurfaceType, string> = { dtm: 'DEM', dsm: 'DSM', chm: 'CHM' };
+  const runLabel = count === 0
+    ? 'Select a surface'
+    : count === 1
+      ? `Generate ${RUN_SUFFIX[[...selectedSurfaces][0]]}`
+      : `Generate ${count} surfaces`;
+  // The no-ground notice applies when any CHECKED surface needs ground classification.
+  const anyNeedsGround = SURFACE_ORDER.some((s) => selectedSurfaces.has(s) && SURFACE_META[s].needsGround);
   // Estimated grid dimensions for the current cell size (ceil(extent / cell) per
   // axis), so the user can see the resolution/cost before running. The true DEM
   // is gridded over the ground points' extent, which is ≤ the whole cloud — hence
@@ -72,20 +118,51 @@ export function DEMPanel({
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <Mountain className="w-3 h-3" />
-          Generate DEM
+          Generate surfaces
         </div>
         <button onClick={onClose} className="p-1 hover:bg-neutral-700 rounded">
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
 
-      <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-        Builds a bare-earth terrain surface (DEM) from the cloud's ground points
-        by interpolating elevation onto a regular grid. Run Segment Ground first
-        for control; otherwise ground is auto-detected.
+      {/* Surface types — tick each product to build; one run generates them all. */}
+      <div className="mb-3">
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Surfaces
+          <InfoHint
+            data-testid="dem-surface-type-help"
+            label="Surface types"
+            text="Tick every product you want — one run generates them all, each as its own mesh. Terrain (DTM) is the bare-earth ground surface. Surface (DSM) is the first-return / top-of-canopy surface. Canopy height (CHM) is DSM minus DTM — vegetation height above the ground."
+          />
+        </label>
+        <div data-testid="dem-surface-list" className="space-y-1.5">
+          {SURFACE_ORDER.map((s) => {
+            const meta = SURFACE_META[s];
+            const checked = selectedSurfaces.has(s);
+            return (
+              <label
+                key={s}
+                className="flex items-start gap-2 text-[10px] text-neutral-300 p-1.5 rounded bg-neutral-900/40 hover:bg-neutral-900/70 cursor-pointer"
+              >
+                <input
+                  data-testid={`dem-surface-${s}`}
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(e) => onToggleSurface(s, e.target.checked)}
+                  className="mt-0.5 rounded bg-neutral-700 border-neutral-600 accent-green-500"
+                  disabled={inProgress}
+                />
+                <span className="flex-1">
+                  <span className="font-medium">{meta.title}</span>
+                  <span className="block text-neutral-500">{meta.blurb}</span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
       </div>
 
-      {!hasGroundClass && (
+      {anyNeedsGround && !hasGroundClass && (
         <div
           data-testid="dem-no-ground-warning"
           className="mb-3 p-2 bg-yellow-900/30 border border-yellow-600/50 rounded text-[10px] text-yellow-200 flex gap-1.5"
@@ -167,30 +244,32 @@ export function DEMPanel({
           data-testid="dem-fill-voids-help"
           label="Fill data gaps"
           align="right"
-          text="Extrapolate elevation into cells with no nearby ground (e.g. outside the data footprint) using the nearest measured value. Off by default — gaps stay empty so the DEM never invents terrain it didn't measure."
+          text="Fill cells that have returns but no ground (e.g. under dense canopy, where ground pulses are sparse) with the nearest measured ground elevation — so the DTM covers the whole scanned area instead of leaving holes where the canopy blocked the ground. Off by default: gaps stay empty. Either way the surface never extends past the scanned footprint."
         />
       </div>
 
-      {/* Height above ground */}
-      <div className="flex items-center gap-1 mb-3">
-        <label className="flex items-center gap-2 text-[10px] text-neutral-400">
-          <input
-            data-testid="dem-compute-hag"
-            type="checkbox"
-            checked={computeHeightAboveGround}
-            onChange={(e) => onComputeHeightAboveGroundChange(e.target.checked)}
-            className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
-            disabled={inProgress}
+      {/* Height above ground — DTM only (DSM/CHM don't produce a per-point HAG). */}
+      {selectedSurfaces.has('dtm') && (
+        <div className="flex items-center gap-1 mb-3">
+          <label className="flex items-center gap-2 text-[10px] text-neutral-400">
+            <input
+              data-testid="dem-compute-hag"
+              type="checkbox"
+              checked={computeHeightAboveGround}
+              onChange={(e) => onComputeHeightAboveGroundChange(e.target.checked)}
+              className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
+              disabled={inProgress}
+            />
+            Compute height above ground
+          </label>
+          <InfoHint
+            data-testid="dem-compute-hag-help"
+            label="Compute height above ground"
+            align="right"
+            text="Also subtract the DEM from each point to add a 'height above ground' scalar to the cloud (a canopy-height-model precursor). The cloud recolours by this height. Off by default. For a rasterised canopy height model use the Canopy height (CHM) surface instead."
           />
-          Compute height above ground
-        </label>
-        <InfoHint
-          data-testid="dem-compute-hag-help"
-          label="Compute height above ground"
-          align="right"
-          text="Also subtract the DEM from each point to add a 'height above ground' scalar to the cloud (a canopy-height-model precursor). The cloud recolours by this height. Off by default."
-        />
-      </div>
+        </div>
+      )}
 
       {error && (
         <div className="mb-3 p-2 bg-red-900/30 border border-red-600/50 rounded text-[10px] text-red-300">
@@ -206,7 +285,7 @@ export function DEMPanel({
             className="flex-1 px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-neutral-600 text-neutral-400 cursor-not-allowed"
           >
             <Loader2 className="w-3 h-3 animate-spin" />
-            {progress != null ? `Generating… ${Math.round(progress * 100)}%` : 'Generating…'}
+            {(progressLabel ?? 'Generating…')}{progress != null ? ` ${Math.round(progress * 100)}%` : ''}
           </button>
           <button
             data-testid="dem-cancel-button"
@@ -221,10 +300,15 @@ export function DEMPanel({
         <button
           data-testid="dem-run-button"
           onClick={onGenerate}
-          className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
+          disabled={count === 0 || tooFine}
+          className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 ${
+            count === 0 || tooFine
+              ? 'bg-neutral-600 text-neutral-400 cursor-not-allowed'
+              : 'bg-green-600 hover:bg-green-500 text-white'
+          }`}
         >
           <Mountain className="w-3 h-3" />
-          Generate DEM
+          {runLabel}
         </button>
       )}
     </div>

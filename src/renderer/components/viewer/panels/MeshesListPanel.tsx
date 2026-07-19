@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle, Maximize2, Download } from 'lucide-react';
 import type { MeshEntry, MeshColorMode, PointCloudEntry } from '../../../lib/pointCloudTypes';
-import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS } from '../../../lib/pointCloudTypes';
+import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS, DEM_SURFACE_LABELS, DEM_LAYER_ORDER } from '../../../lib/pointCloudTypes';
 import { meshHasScanColors } from '../../../lib/pointCloudHelpers';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
@@ -294,6 +294,86 @@ function formatAspect(v: number): string {
   return Number(v.toPrecision(4)).toString();
 }
 
+// Raster-export controls for a DEM mesh. A DTM carries several scalar layers
+// (elevation / density / intensity / hillshade / slope / aspect) — tick which to
+// export, then pick a format (one file per checked layer). DSM/CHM (no layers)
+// export their single surface grid. `activeLayer` (the mesh's current Color-by
+// band) is checked by default so "export what I'm looking at" is one click.
+function DemRasterExportControls({
+  mesh,
+  activeLayer,
+  onExport,
+}: {
+  mesh: MeshEntry;
+  activeLayer?: string;
+  onExport: (id: string, format: 'asc' | 'tif', layerNames?: string[]) => void;
+}) {
+  const layerNames = mesh.demLayers
+    ? DEM_LAYER_ORDER.filter((n) => mesh.demLayers?.[n])
+    : [];
+  const [checked, setChecked] = useState<Set<string>>(
+    () => new Set(activeLayer && mesh.demLayers?.[activeLayer] ? [activeLayer] : layerNames.slice(0, 1)),
+  );
+  const toggle = (name: string, on: boolean) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(name); else next.delete(name);
+      return next;
+    });
+  const selected = layerNames.filter((n) => checked.has(n));
+  const hasLayers = layerNames.length > 0;
+
+  return (
+    <div className="space-y-1" data-testid="mesh-dem-export">
+      <div className="text-[10px] text-neutral-500" data-testid="mesh-dem-detail">
+        {mesh.demGrid!.nx.toLocaleString()} × {mesh.demGrid!.ny.toLocaleString()} cells
+        {' · '}{mesh.demGrid!.cellSize.toFixed(2)} m
+        {' · '}{mesh.data.triangleCount.toLocaleString()} triangles
+      </div>
+      <div className="text-[10px] text-neutral-400 flex items-center gap-1">
+        <Download className="w-3 h-3" />
+        Export raster
+      </div>
+      {hasLayers && (
+        <div className="space-y-0.5" data-testid="mesh-dem-layer-picker">
+          {layerNames.map((name) => (
+            <label key={name} className="flex items-center gap-1.5 text-[10px] text-neutral-300 cursor-pointer">
+              <input
+                type="checkbox"
+                data-testid={`mesh-dem-layer-${name}`}
+                checked={checked.has(name)}
+                onChange={(e) => toggle(name, e.target.checked)}
+                className="rounded bg-neutral-700 border-neutral-600 accent-green-500"
+              />
+              {mesh.demLayers?.[name]?.label ?? name}
+            </label>
+          ))}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-1">
+        <button
+          data-testid="mesh-dem-export-tif"
+          disabled={hasLayers && selected.length === 0}
+          onClick={(e) => { e.stopPropagation(); onExport(mesh.id, 'tif', hasLayers ? selected : undefined); }}
+          title="Export as GeoTIFF (.tif) — georeferenced when the source CRS is known"
+          className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-200 rounded"
+        >
+          GeoTIFF
+        </button>
+        <button
+          data-testid="mesh-dem-export-asc"
+          disabled={hasLayers && selected.length === 0}
+          onClick={(e) => { e.stopPropagation(); onExport(mesh.id, 'asc', hasLayers ? selected : undefined); }}
+          title="Export as ESRI ASCII grid (.asc)"
+          className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-200 rounded"
+        >
+          ASCII grid
+        </button>
+      </div>
+    </div>
+  );
+}
+
 interface Vec3 { x: number; y: number; z: number }
 
 // Presentational right-side list of meshes with per-mesh inline options
@@ -311,6 +391,8 @@ interface MeshesListPanelProps {
   renamingMeshValue: string;
   colorPopoverMeshId: string | null;
   meshColorModes: Map<string, MeshColorMode>;
+  // Which DTM scalar layer each DEM mesh is coloured by (mode === 'layer').
+  selectedMeshLayer: Map<string, string>;
   meshOpacities: Map<string, number>;
   meshRotations: Map<string, Vec3>;
   meshPositions: Map<string, Vec3>;
@@ -346,14 +428,16 @@ interface MeshesListPanelProps {
   // Opens the color popover for a mesh, anchored to the swatch's screen rect.
   onOpenColorPopover: (id: string, anchor: { top: number; left: number }) => void;
   onCloseColorPopover: () => void;
-  onColorModeChange: (id: string, mode: MeshColorMode) => void;
+  // Receives the raw select value: a bare MeshColorMode, or `layer:<name>` for a
+  // DTM band. The parent decodes the layer form.
+  onColorModeChange: (id: string, value: string) => void;
   onColormapChange: (name: ColormapName) => void;
   onOpacityChange: (id: string, value: number) => void;
   onWireframeChange: (v: boolean) => void;
   // Open the leaf-angle distribution plot for a Helios mesh.
   onOpenLeafAngles: (id: string) => void;
   // Export a DEM surface mesh's elevation grid as a GIS raster (mesh.method === 'dem').
-  onExportDEMRaster: (id: string, format: 'asc' | 'tif') => void;
+  onExportDEMRaster: (id: string, format: 'asc' | 'tif', layerNames?: string[]) => void;
   // "Snap to ground": displace a voxel grid's columns to follow a DEM. The grid
   // then carries authoritative per-column offsets used by both the viewport and
   // the LAD inversion. Clearing removes the snap (grid returns to flat).
@@ -379,6 +463,7 @@ export function MeshesListPanel({
   renamingMeshId,
   renamingMeshValue,
   colorPopoverMeshId,
+  selectedMeshLayer,
   meshColorModes,
   meshOpacities,
   meshRotations,
@@ -454,7 +539,11 @@ export function MeshesListPanel({
           const isColorOpen = colorPopoverMeshId === mesh.id;
           const meshTextured = isTextured(mesh);
           const showColorSwatch = !mesh.isPlant && !meshTextured;
-          const canColorByTriangle = isTriangulated(mesh);
+          // DEM surfaces always carry intrinsic per-face color modes (elevation +
+          // the derived hillshade/slope/aspect), independent of whether the source
+          // cloud still exists — so offer the "Color by" dropdown for them even when
+          // isTriangulated flips off (e.g. after the source octree was rebuilt).
+          const canColorByTriangle = isTriangulated(mesh) || mesh.method === 'dem';
           const canSetOpacity = supportsOpacity(mesh);
           // Provenance is worth surfacing even when the source cloud is gone
           // (which flips isTriangulated off), so expandability includes it.
@@ -576,6 +665,14 @@ export function MeshesListPanel({
                   // options; the name already reads "Plane".
                   <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
                     Plane
+                  </div>
+                ) : mesh.method === 'dem' ? (
+                  // DEM surfaces (DTM/DSM/CHM) share a name and triangle count, so
+                  // the count alone doesn't say which product it is. Lead with the
+                  // surface-type badge; the triangle count moves to the expanded view.
+                  <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
+                    {DEM_SURFACE_LABELS[mesh.demSurfaceType ?? 'dtm']}
+                    {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
                   </div>
                 ) : (
                   <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
@@ -749,17 +846,29 @@ export function MeshesListPanel({
                 </div>
                 <select
                   data-testid="mesh-color-mode"
-                  value={colorMode}
-                  onChange={(e) => onColorModeChange(mesh.id, e.target.value as MeshColorMode)}
+                  // In 'layer' mode the value encodes the chosen band as `layer:<name>`
+                  // (mirrors the cloud's `scalar:<field>`); otherwise the bare mode.
+                  value={colorMode === 'layer'
+                    ? `layer:${selectedMeshLayer.get(mesh.id) ?? 'elevation'}`
+                    : colorMode}
+                  onChange={(e) => onColorModeChange(mesh.id, e.target.value)}
                   className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
                 >
                   <option value="solid">Solid color</option>
+                  {/* A DTM's scalar layers (elevation / density / intensity / hillshade
+                      / slope / aspect) — colour the terrain by any band. */}
+                  {mesh.demLayers && (
+                    <optgroup label="Layers">
+                      {DEM_LAYER_ORDER.filter((name) => mesh.demLayers?.[name]).map((name) => (
+                        <option key={name} value={`layer:${name}`}>
+                          {mesh.demLayers?.[name]?.label ?? name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                   <option value="inclination">Inclination (zenith of normal)</option>
                   <option value="azimuth">Azimuth (of normal)</option>
                   <option value="area">Triangle area</option>
-                  {mesh.method === 'dem' && (
-                    <option value="elevation">Elevation (height)</option>
-                  )}
                   {meshHasScanColors(mesh.data) && (
                     <option value="scan">Source scan</option>
                   )}
@@ -815,35 +924,22 @@ export function MeshesListPanel({
                     Leaf angles…
                   </button>
                 )}
-                {/* DEM raster export — write the elevation grid as a GIS raster,
-                    right where the DEM lives (the surface mesh exports as OBJ/PLY/
-                    STL via the Export panel like any mesh). */}
-                {mesh.method === 'dem' && mesh.demGrid && (
-                  <div className="space-y-1">
-                    <div className="text-[10px] text-neutral-400 flex items-center gap-1">
-                      <Download className="w-3 h-3" />
-                      Export raster
-                    </div>
-                    <div className="grid grid-cols-2 gap-1">
-                      <button
-                        data-testid="mesh-dem-export-tif"
-                        onClick={(e) => { e.stopPropagation(); onExportDEMRaster(mesh.id, 'tif'); }}
-                        title="Export as GeoTIFF (.tif) — georeferenced when the source CRS is known"
-                        className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
-                      >
-                        GeoTIFF
-                      </button>
-                      <button
-                        data-testid="mesh-dem-export-asc"
-                        onClick={(e) => { e.stopPropagation(); onExportDEMRaster(mesh.id, 'asc'); }}
-                        title="Export as ESRI ASCII grid (.asc)"
-                        className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
-                      >
-                        ASCII grid
-                      </button>
-                    </div>
-                  </div>
-                )}
+                {/* DEM raster export — write the surface's grid/layers as GIS
+                    rasters, right where the DEM lives (the surface mesh exports as
+                    OBJ/PLY/STL via the Export panel like any mesh). */}
+                {mesh.method === 'dem' && mesh.demGrid && (() => {
+                  const active = colorMode === 'layer' ? selectedMeshLayer.get(mesh.id) : undefined;
+                  return (
+                    // Remount when the active band changes so the picker re-seeds its
+                    // default check to "the layer you're currently viewing".
+                    <DemRasterExportControls
+                      key={active ?? '__surface__'}
+                      mesh={mesh}
+                      activeLayer={active}
+                      onExport={onExportDEMRaster}
+                    />
+                  );
+                })()}
               </div>
             )}
             </div>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { X, Radio, FileUp } from 'lucide-react';
+import { X, Radio, FileUp, Pencil } from 'lucide-react';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import {
   DEFAULT_SCAN_PARAMETERS,
@@ -53,6 +53,11 @@ interface ScanParametersPopupProps {
   // create voxel-grid meshes from any <grid> blocks.
   showBulkImport?: boolean;
   onBulkImport?: (scans: HeliosXmlScan[], grids: HeliosXmlGrid[], xmlPath: string, warnings: string[]) => void | Promise<void>;
+  // Open the manual trajectory editor with the current label + params. The popup
+  // closes and the parent drives the docked pose table + 3D pose editing; Save
+  // there finalizes the scan (create) or updates it (edit). When present, the
+  // trajectory section shows a "Build/Edit trajectory manually" affordance.
+  onBuildTrajectory?: (label: string, params: ScanParameters) => void;
 }
 
 export function ScanParametersPopup({
@@ -64,6 +69,7 @@ export function ScanParametersPopup({
   mode,
   showBulkImport,
   onBulkImport,
+  onBuildTrajectory,
 }: ScanParametersPopupProps) {
   // Resolve the active mode. `initial` implies 'edit'; otherwise default to
   // 'create' unless the caller explicitly asked for 'attach'.
@@ -300,34 +306,55 @@ export function ScanParametersPopup({
     if (submitError) setSubmitError(null);
   };
 
+  // A Livox rosette (Risley-prism) scan. Its field of view is emergent from the
+  // prism optics, so the zenith/azimuth sweep + point-count fields don't apply;
+  // it carries a prism stack instead and, like a spinning sensor, is always
+  // trajectory-driven.
+  const isRisley = params.pattern === 'risley_prism';
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (params.pattern === 'spinning_multibeam' && params.beamElevationAnglesDeg.length < 1) {
       setSubmitError('Enter at least one beam elevation angle for a spinning-multibeam scan.');
       return;
     }
-    // A spinning multibeam rotates continuously — it's a moving-platform pattern.
-    // Require a trajectory (a stationary capture is two coincident poses one
-    // revolution apart). The submit button is also disabled in this state.
-    if (params.pattern === 'spinning_multibeam' && !params.trajectory) {
-      setSubmitError('A spinning-multibeam scan needs a trajectory — import one above. '
-        + 'For a stationary capture, use a trajectory with two poses at the same '
-        + 'position one revolution apart.');
+    // A Livox rosette needs its prism stack — normally auto-filled by selecting a
+    // Livox model. Guard against a manual pattern pick on a generic scanner.
+    if (isRisley && (!params.risleyPrisms || params.risleyPrisms.length === 0)) {
+      setSubmitError('Select a Livox model to load its prism stack for a rosette scan.');
+      return;
+    }
+    // A spinning multibeam OR a Livox rosette rotates/traces continuously — both
+    // are moving-platform patterns. Require a trajectory (a stationary capture is
+    // two identical poses separated in time by the acquisition duration). The
+    // submit button is also disabled in this state.
+    if ((params.pattern === 'spinning_multibeam' || isRisley) && !params.trajectory) {
+      setSubmitError(isRisley
+        ? 'A Livox rosette scan needs a trajectory — import one above. For a '
+          + 'stationary capture, use a trajectory with two identical poses '
+          + 'separated in time by the scan duration.'
+        : 'A spinning-multibeam scan needs a trajectory — import one above. '
+          + 'For a stationary capture, use a trajectory with two poses at the same '
+          + 'position one revolution apart.');
       return;
     }
     onSubmit(label, params);
   };
 
-  // A spinning-multibeam scan is only valid with a trajectory (a rotating sensor
-  // is moving-only). Used to gate submit + show an inline prompt.
+  // A spinning-multibeam or Livox-rosette scan is only valid with a trajectory (a
+  // rotating/rosette sensor is moving-only). Used to gate submit + show an inline
+  // prompt.
   const multibeamNeedsTrajectory =
-    params.pattern === 'spinning_multibeam' && !params.trajectory;
+    (params.pattern === 'spinning_multibeam' || isRisley) && !params.trajectory;
 
   // Show the raster zenith grid + sweep fields for a raster scan OR any moving
   // scan: a moving-platform scan walks the trajectory over an Ntheta×Nphi raster
   // grid regardless of the instrument's static pattern, so it always needs the
-  // zenith point count + sweep (which the multibeam form otherwise hides).
-  const showRaster = params.pattern === 'raster' || params.trajectory != null;
+  // zenith point count + sweep (which the multibeam form otherwise hides). A
+  // Livox rosette is the exception — its FOV is emergent (no Ntheta×Nphi grid),
+  // so it never shows the sweep fields even though it carries a trajectory.
+  const showRaster =
+    !isRisley && (params.pattern === 'raster' || params.trajectory != null);
 
   // For a moving scan, derive what the backend will actually fire: the user sets
   // azimuth points PER REVOLUTION; with the PRF (a fixed laser spec) and the
@@ -335,7 +362,10 @@ export function ScanParametersPopup({
   // count for the WHOLE flight. Ntheta is the channel count for a multibeam
   // sensor, else the zenith point count. Shown read-only so the user sees the
   // cost (and that the sweep covers the flight) before running.
-  const movingGrid = params.trajectory
+  // The spinning/raster moving-grid derivation assumes a per-revolution azimuth
+  // resolution, which a rosette has no concept of — so it is computed only for the
+  // non-Risley moving case.
+  const movingGrid = params.trajectory && !isRisley
     ? deriveMovingScanGrid(
         params.pattern === 'spinning_multibeam'
           ? Math.max(params.beamElevationAnglesDeg.length, 1)
@@ -346,6 +376,13 @@ export function ScanParametersPopup({
       )
     : null;
   const MOVING_PULSE_WARN = 20_000_000;
+
+  // A rosette fires one pulse per PRF tick for the whole acquisition (Ntheta=1,
+  // Nphi=Npulses), so the pulse budget is simply PRF × trajectory duration — no
+  // revolutions. Shown read-only so the user sees the cost before running.
+  const risleyDurationS =
+    isRisley && params.trajectory ? trajectoryDurationS(params.trajectory) : 0;
+  const risleyPulseCount = Math.round((params.pulseRateHz ?? 100000) * risleyDurationS);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -435,11 +472,12 @@ export function ScanParametersPopup({
               {([
                 ['raster', 'Raster'],
                 ['spinning_multibeam', 'Spinning multibeam'],
+                ['risley_prism', 'Livox rosette'],
               ] as [ScanPattern, string][]).map(([value, text]) => (
                 <button
                   key={value}
                   type="button"
-                  data-testid={`scan-pattern-${value === 'spinning_multibeam' ? 'multibeam' : value}`}
+                  data-testid={`scan-pattern-${value === 'spinning_multibeam' ? 'multibeam' : value === 'risley_prism' ? 'risley' : value}`}
                   onClick={() => setPattern(value)}
                   className={`flex-1 px-3 py-2 rounded-lg text-sm transition-colors ${
                     params.pattern === value
@@ -501,38 +539,100 @@ export function ScanParametersPopup({
                     {params.trajectory.poses[params.trajectory.poses.length - 1].t.toFixed(2)} s
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={clearTrajectory}
-                  data-testid="scan-trajectory-clear"
-                  className="shrink-0 px-2 py-1 text-xs text-neutral-300 hover:text-white border border-neutral-600 rounded-md hover:bg-neutral-600"
-                >
-                  Clear
-                </button>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {onBuildTrajectory && (
+                    <button
+                      type="button"
+                      onClick={() => onBuildTrajectory(label, params)}
+                      data-testid="scan-trajectory-edit"
+                      className="px-2 py-1 text-xs text-neutral-300 hover:text-white border border-neutral-600 rounded-md hover:bg-neutral-600"
+                    >
+                      Edit
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={clearTrajectory}
+                    data-testid="scan-trajectory-clear"
+                    className="px-2 py-1 text-xs text-neutral-300 hover:text-white border border-neutral-600 rounded-md hover:bg-neutral-600"
+                  >
+                    Clear
+                  </button>
+                </div>
               </div>
             ) : (
-              <button
-                type="button"
-                onClick={handleImportTrajectory}
-                data-testid="scan-trajectory-import"
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm text-neutral-300 hover:text-white border border-dashed border-neutral-600 rounded-lg hover:bg-neutral-700/60"
-              >
-                <FileUp size={14} /> Import trajectory file…
-              </button>
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={handleImportTrajectory}
+                  data-testid="scan-trajectory-import"
+                  className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm text-neutral-300 hover:text-white border border-dashed border-neutral-600 rounded-lg hover:bg-neutral-700/60"
+                >
+                  <FileUp size={14} /> Import trajectory file…
+                </button>
+                {onBuildTrajectory && (
+                  <button
+                    type="button"
+                    onClick={() => onBuildTrajectory(label, params)}
+                    data-testid="scan-trajectory-build"
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm text-neutral-300 hover:text-white border border-dashed border-neutral-600 rounded-lg hover:bg-neutral-700/60"
+                  >
+                    <Pencil size={14} /> Build trajectory manually…
+                  </button>
+                )}
+              </div>
             )}
             <p className="mt-1 text-xs text-neutral-500">
-              Optional. A CSV/text file of <code>t x y z</code> + orientation
-              (quaternion or roll/pitch/yaw) turns this into a moving-platform scan;
-              leaf-area inversion then reconstructs a per-beam origin per return.
+              Optional. Import a CSV/text file of <code>t x y z</code> + orientation
+              (quaternion or roll/pitch/yaw), or build one by hand in the editor —
+              either turns this into a moving-platform scan; leaf-area inversion then
+              reconstructs a per-beam origin per return.
             </p>
           </div>
+
+          {/* Livox rosette (Risley-prism) panel. The prism stack is a fixed
+              instrument property loaded from the model preset (read-only); the FOV
+              it produces is emergent, so there is no angular sweep to edit. */}
+          {isRisley && (
+            <div>
+              <label className="block text-sm font-medium text-neutral-300 mb-1.5">
+                Rosette prisms (rotating wedges)
+              </label>
+              {params.risleyPrisms && params.risleyPrisms.length > 0 ? (
+                <div data-testid="scan-risley-prisms"
+                  className="rounded-md border border-neutral-700 bg-neutral-800/60 px-3 py-2 text-xs text-neutral-400 space-y-0.5">
+                  {params.risleyPrisms.map((pr, i) => (
+                    <div key={i}>
+                      Prism {i + 1}:{' '}
+                      <span className="text-neutral-200">
+                        wedge {pr.wedgeAngleDeg.toFixed(2)}°, n={pr.refractiveIndex},
+                        {' '}rotor {pr.rotorRateHz.toFixed(1)} Hz
+                      </span>
+                    </div>
+                  ))}
+                  <div className="pt-0.5">Medium index (air):{' '}
+                    <span className="text-neutral-200">{params.refractiveIndexAir ?? 1.0}</span>
+                  </div>
+                  <div className="pt-0.5 text-neutral-500">
+                    Field of view is emergent from the prism optics — no angular
+                    sweep applies. A trajectory is required (a stationary capture is
+                    two identical poses separated by the scan duration).
+                  </div>
+                </div>
+              ) : (
+                <p data-testid="scan-risley-prisms" className="text-xs text-amber-400">
+                  Select a Livox model above to load its prism stack.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Pulse rate (PRF) — a fixed laser spec for a real instrument, set by
               the scanner model. The scan fires continuously at this rate for the
               whole flight; the rotation rate + total pulses below are DERIVED from
               it, the per-revolution resolution, and the trajectory duration. PRF
               stays editable so a generic/custom scanner can be configured. */}
-          {params.trajectory && movingGrid && (
+          {params.trajectory && (movingGrid || isRisley) && (
             <div>
               <label className="block text-sm font-medium text-neutral-300 mb-1.5">
                 Pulse rate / PRF (Hz)
@@ -541,42 +641,66 @@ export function ScanParametersPopup({
                 data-testid="scan-pulse-rate"
                 step="any"
                 debounceMs={0}
-                value={params.pulseRateHz ?? 300000}
+                value={params.pulseRateHz ?? (isRisley ? 100000 : 300000)}
                 onCommit={(v) => setParams(p => ({ ...p, pulseRateHz: Math.max(1, v) }))}
                 className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
               />
               <p className="mt-1 text-xs text-neutral-500">
                 Laser pulses per second (an instrument property; set by the scanner
-                model). Azimuth points below are <em>per revolution</em>.
+                model).{!isRisley && <> Azimuth points below are <em>per revolution</em>.</>}
               </p>
-              {/* Derived, read-only: the sensor spins at PRF ÷ (channels × az/rev),
-                  for the trajectory's duration, firing PRF × duration pulses. */}
-              <div data-testid="scan-moving-derived"
-                className="mt-2 rounded-md border border-neutral-700 bg-neutral-800/60 px-3 py-2 text-xs text-neutral-400 space-y-0.5">
-                <div>Flight duration:{' '}
-                  <span className="text-neutral-200">{movingGrid.durationS.toFixed(2)} s</span>
-                </div>
-                <div>Rotation rate:{' '}
-                  <span className="text-neutral-200">{movingGrid.rotationRateHz.toFixed(1)} Hz</span>
-                  {' '}({(movingGrid.rotationRateHz * 60).toFixed(0)} RPM),{' '}
-                  {movingGrid.nRevolutions.toFixed(0)} revolutions
-                </div>
-                <div>Total pulses:{' '}
-                  <span className="text-neutral-200" data-testid="scan-moving-total-pulses">
-                    {movingGrid.totalPulses.toLocaleString()}
-                  </span>
-                </div>
-                {movingGrid.totalPulses > MOVING_PULSE_WARN && (
-                  <div data-testid="scan-moving-warn" className="text-amber-400">
-                    ⚠ Very large scan ({(movingGrid.totalPulses / 1e6).toFixed(0)}M pulses) —
-                    may be slow. Lower the azimuth points or use a shorter trajectory
-                    for a quicker test.
+              {isRisley ? (
+                // A rosette fires PRF × duration pulses over the trajectory (Ntheta=1).
+                <div data-testid="scan-risley-derived"
+                  className="mt-2 rounded-md border border-neutral-700 bg-neutral-800/60 px-3 py-2 text-xs text-neutral-400 space-y-0.5">
+                  <div>Acquisition duration:{' '}
+                    <span className="text-neutral-200">{risleyDurationS.toFixed(2)} s</span>
                   </div>
-                )}
-              </div>
+                  <div>Total pulses:{' '}
+                    <span className="text-neutral-200" data-testid="scan-risley-pulses">
+                      {risleyPulseCount.toLocaleString()}
+                    </span>
+                  </div>
+                  {risleyPulseCount > MOVING_PULSE_WARN && (
+                    <div data-testid="scan-risley-warn" className="text-amber-400">
+                      ⚠ Very large scan ({(risleyPulseCount / 1e6).toFixed(0)}M pulses) —
+                      may be slow. Use a shorter trajectory duration for a quicker test.
+                    </div>
+                  )}
+                </div>
+              ) : movingGrid && (
+                // Derived, read-only: the sensor spins at PRF ÷ (channels × az/rev),
+                // for the trajectory's duration, firing PRF × duration pulses.
+                <div data-testid="scan-moving-derived"
+                  className="mt-2 rounded-md border border-neutral-700 bg-neutral-800/60 px-3 py-2 text-xs text-neutral-400 space-y-0.5">
+                  <div>Flight duration:{' '}
+                    <span className="text-neutral-200">{movingGrid.durationS.toFixed(2)} s</span>
+                  </div>
+                  <div>Rotation rate:{' '}
+                    <span className="text-neutral-200">{movingGrid.rotationRateHz.toFixed(1)} Hz</span>
+                    {' '}({(movingGrid.rotationRateHz * 60).toFixed(0)} RPM),{' '}
+                    {movingGrid.nRevolutions.toFixed(0)} revolutions
+                  </div>
+                  <div>Total pulses:{' '}
+                    <span className="text-neutral-200" data-testid="scan-moving-total-pulses">
+                      {movingGrid.totalPulses.toLocaleString()}
+                    </span>
+                  </div>
+                  {movingGrid.totalPulses > MOVING_PULSE_WARN && (
+                    <div data-testid="scan-moving-warn" className="text-amber-400">
+                      ⚠ Very large scan ({(movingGrid.totalPulses / 1e6).toFixed(0)}M pulses) —
+                      may be slow. Lower the azimuth points or use a shorter trajectory
+                      for a quicker test.
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
+          {/* A Livox rosette has no Ntheta×Nphi grid (its coverage is the emergent
+              rosette), so the point-count fields don't apply — hidden for Risley. */}
+          {!isRisley && (
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Scan size (# points)</label>
             <div className={`grid gap-2 ${showRaster && !(params.trajectory && params.pattern === 'spinning_multibeam') ? 'grid-cols-2' : 'grid-cols-1'}`}>
@@ -679,7 +803,9 @@ export function ScanParametersPopup({
               </div>
             </div>
           </div>
+          )}
 
+          {!isRisley && (
           <div>
             <label className="block text-sm font-medium text-neutral-300 mb-1.5">Angular sweep (degrees)</label>
             <div className="space-y-2">
@@ -743,6 +869,7 @@ export function ScanParametersPopup({
               )}
             </div>
           </div>
+          )}
 
           {params.pattern === 'spinning_multibeam' && (
             <div>
@@ -919,10 +1046,17 @@ export function ScanParametersPopup({
 
           {multibeamNeedsTrajectory && (
             <p data-testid="scan-multibeam-needs-trajectory" className="text-xs text-amber-300">
-              A spinning-multibeam sensor rotates continuously, so it needs a
-              trajectory (it&apos;s a moving-platform scan). Import a trajectory
-              file above. For a stationary capture, use a trajectory with two poses
-              at the same position one revolution apart.
+              {isRisley ? (
+                <>A Livox rosette traces its pattern over time, so it needs a
+                trajectory (it&apos;s a moving-platform scan). Import a trajectory
+                file above. For a stationary capture, use a trajectory with two
+                identical poses separated in time by the scan duration.</>
+              ) : (
+                <>A spinning-multibeam sensor rotates continuously, so it needs a
+                trajectory (it&apos;s a moving-platform scan). Import a trajectory
+                file above. For a stationary capture, use a trajectory with two poses
+                at the same position one revolution apart.</>
+              )}
             </p>
           )}
 

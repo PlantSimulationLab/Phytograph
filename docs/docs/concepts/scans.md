@@ -78,12 +78,20 @@ them silently.
 ## What's in the parameters
 
 - **Origin** — (x, y, z) position of the scanner head in metres
-- **Scan pattern** — **raster** (a uniform zenith × azimuth grid, the
-  classic terrestrial-scanner dome sweep) or **spinning multibeam** (a
-  rotating multi-channel sensor like a Velodyne/Ouster/Hesai, where each
-  channel fires at a fixed elevation as the head spins). A spinning sensor
-  rotates continuously, so it is a **moving-platform pattern** and requires
-  a [trajectory](#moving-platform-scans) — see the note below.
+- **Scan pattern** — one of:
+    - **raster** — a uniform zenith × azimuth grid, the classic
+      terrestrial-scanner dome sweep.
+    - **spinning multibeam** — a rotating multi-channel sensor like a
+      Velodyne/Ouster/Hesai, where each channel fires at a fixed elevation as
+      the head spins.
+    - **Livox rosette** — a Livox non-repeating rosette (a rotating
+      Risley-prism deflector); see
+      [Livox non-repeating rosette](#livox-non-repeating-rosette-risley-prism)
+      below.
+
+    Both the spinning multibeam and the Livox rosette rotate/trace
+    continuously, so they are **moving-platform patterns** and require a
+    [trajectory](#moving-platform-scans) — see the note below.
 - **Zenith (θ) min / max, points** — vertical sweep bounds (degrees) and
   number of rays (raster only)
 - **Beam elevation angles** (spinning multibeam only) — per-channel
@@ -130,7 +138,8 @@ platform pose at the moment that pulse was fired — rather than a single
 scanner position. This is what leaf-area inversion needs to trace beam
 paths correctly for a sensor that was moving through the scene.
 
-Attach one with **Import trajectory file…** in the Add Scan popup. A
+Attach one either by **importing a trajectory file** or by **building one by
+hand**. In the Add Scan popup, **Import trajectory file…** reads a
 CSV / whitespace-delimited table, one pose per row:
 
 - `t x y z qx qy qz qw` — time (seconds), position (metres), and a
@@ -143,6 +152,14 @@ on the backend, with latitude/longitude projected to UTM and the NED attitude
 converted to Phytograph's ENU frame. See
 [File formats → Platform trajectory files](../reference/file-formats.md#platform-trajectory-files)
 for the full list, GPS-time clock handling, and LAS per-beam-origin ExtraBytes.
+
+Alternatively, **Build trajectory manually…** opens an editor to author the
+poses with no file: a docked table of poses (position + roll/pitch/yaw) plus
+clickable scanner models in the 3D view that you can translate/rotate with the
+`t`/`r` shortcuts, and **+** affordances to insert poses between or beyond the
+existing ones. The same editor opens from the **Edit trajectory** button on a
+moving scan's row, so an imported trajectory can be tweaked afterwards. See
+[the walkthrough](../workflows/simulate-scan.md#building-and-editing-a-trajectory-by-hand).
 
 Times must strictly increase. A header row and `#` / `//` comment lines
 are ignored. Once attached, the scan's origin is anchored to the first
@@ -172,6 +189,44 @@ revolution's duration. That produces exactly one full 360° revolution from
 the fixed origin. (The revolution duration is `points-per-revolution ÷
 pulse rate` — but in practice any small time gap that yields one revolution
 works; the scan covers the whole 360° regardless.)
+
+### Livox non-repeating rosette (Risley prism)
+
+A **Livox rosette** models a Livox-style sensor (Mid-40, Mid-70, Avia),
+whose beam is steered not by a mirror but by a stack of continuously
+rotating **wedge prisms** (a Risley-prism deflector). A single beam is
+refracted through the wedges, and because the wedges spin at different,
+incommensurate rates it traces a dense **non-repetitive rosette** that fills
+a **circular** field of view.
+
+Two things make this pattern different from the raster and spinning
+patterns:
+
+- **The field of view is *emergent*.** It is a property of the wedge angles
+  and refractive indices, computed by ray-tracing the beam through the
+  prisms — not something you set. So the rosette has **no zenith/azimuth
+  sweep and no zenith/azimuth point counts**; those fields are hidden. Its
+  coverage is a fixed circular cone (≈38° for the Mid-40, ≈70° for the
+  Mid-70 and Avia).
+- **It is always trajectory-driven**, exactly like a spinning multibeam. A
+  stationary tripod capture is a trajectory with **two identical poses**
+  (same position *and* attitude) separated in time by the acquisition
+  duration; the pulse count is `pulse rate × duration`.
+
+Selecting a Livox model (in the scanner-model dropdown) loads that
+instrument's verified prism stack — wedge angles, refractive indices, and
+rotor rates — from the manufacturer / HELIOS++ reference values, and
+switches the pattern to the rosette automatically. The prism stack is shown
+read-only in the popup.
+
+!!! note "Single-stack approximation for the Avia"
+    The real Livox Avia fires several laser channels; the simulator models a
+    single beam through one prism stack, which is the faithful approximation
+    of the rosette footprint. As with any trajectory-driven scan, a rosette
+    scan **cannot be triangulated or gap-filled** row/column-wise — leaf-area
+    density uses the per-beam origins reconstructed from the trajectory
+    instead. Rosette scans are also **not** exported to the Helios XML/ASCII
+    bundle (that format assumes a zenith × azimuth grid).
 
 ## Importing scans
 

@@ -295,10 +295,23 @@ export async function segmentGround(
 
 export type DemInterpMethod = 'tin' | 'idw' | 'nearest';
 
+// Which surface product to build: DTM (bare-earth ground), DSM (first-return /
+// top-of-canopy), CHM (canopy height = DSM − DTM). A DTM additionally carries a
+// bundle of scalar LAYERS (density/intensity/hillshade/slope/aspect) — see
+// DemLayer — that the renderer colours the terrain by and exports as rasters.
+export type DemSurfaceType = 'dtm' | 'dsm' | 'chm';
+
 export interface DemGenerateRequest {
   points?: number[][];          // flat clouds — omit when `source` is set
   source?: BackendPointSource;  // octree-backed clouds read from disk
   ground_labels?: number[];     // 1=ground; restricts gridding to ground points
+  // Per-point return index (0 = first return) aligned to `points`; feeds the DSM /
+  // CHM first-return surface. Omit for single-return clouds (all treated as first).
+  first_return_labels?: number[];
+  // Per-point intensity aligned to `points`; feeds the intensity raster. Omit when
+  // not building an intensity surface (or when the cloud carries no intensity).
+  intensity?: number[];
+  surface_type?: DemSurfaceType;
   auto_segment_ground?: boolean;
   cloth_resolution?: number;
   rigidness?: number;
@@ -314,6 +327,7 @@ export interface DemGenerateRequest {
 }
 
 export interface DemSessionRequest {
+  surface_type?: DemSurfaceType;  // 'dtm' (default) | 'dsm' | 'chm'
   auto_segment_ground?: boolean;
   cloth_resolution?: number;
   rigidness?: number;
@@ -343,6 +357,19 @@ export interface DemGrid {
   crsEpsg?: number | null;
 }
 
+// One scalar layer of a DTM surface (elevation / point density / return density /
+// intensity / hillshade / slope / aspect). `grid` is the per-cell raster (for
+// export); `vertexValues` is one value per mesh vertex (for colouring the surface,
+// aligned 1:1 with `vertices`); `min`/`max` bound the colorbar; `label` is the
+// human-readable caption.
+export interface DemLayer {
+  grid: DemGrid;
+  vertexValues: Float32Array;
+  min: number;
+  max: number;
+  label: string;
+}
+
 export interface DemResult {
   success: boolean;
   error?: string;
@@ -352,9 +379,14 @@ export interface DemResult {
   surfaceArea?: number;
   numVertices: number;
   numTriangles: number;
+  surfaceType?: DemSurfaceType;  // which product was built ('dtm'|'dsm'|'chm')
   groundSource?: string;   // "column" | "csf_auto" | "all_points"
+  surfaceSource?: string;  // DSM/CHM first-return provenance ("first_return"|"all_points")
   warning?: string;
   grid?: DemGrid;
+  // DTM scalar layers (name → layer). The renderer colours the terrain by the
+  // selected layer and exports any of them as a raster. Present only for a DTM.
+  layers?: Record<string, DemLayer>;
   // Per-point height-above-ground (point z − gap-free ground), aligned to the
   // resolved points. Present when compute_height_above_ground was set (flat path).
   heightAboveGround?: Float32Array;
@@ -379,6 +411,36 @@ function decodeDemFrame(meta: Record<string, unknown>, buffers: Record<string, A
   const gridZ = buffers.grid_z as Float32Array | undefined;
   const origin = (meta.grid_origin as number[]) ?? [0, 0];
   const ws = (meta.world_shift as number[]) ?? [0, 0, 0];
+  // Shared grid geometry for the surface grid + every layer grid (they align).
+  const gridGeom = {
+    nx: meta.grid_nx as number,
+    ny: meta.grid_ny as number,
+    cellSize: meta.grid_cell as number,
+    origin: [origin[0], origin[1]] as [number, number],
+    worldShift: [ws[0], ws[1], ws[2]] as [number, number, number],
+    crsEpsg: (meta.crs_epsg as number | undefined) ?? null,
+  };
+
+  // Decode the DTM scalar layers (meta.layers lists min/max/label per name; the
+  // per-cell grid + per-vertex arrays ride as layer_grid_<name> / layer_vert_<name>).
+  const layerMeta = meta.layers as Record<string, { min: number; max: number; label: string }> | undefined;
+  let layers: Record<string, DemLayer> | undefined;
+  if (layerMeta) {
+    layers = {};
+    for (const [name, info] of Object.entries(layerMeta)) {
+      const grid = buffers[`layer_grid_${name}`] as Float32Array | undefined;
+      const vertexValues = buffers[`layer_vert_${name}`] as Float32Array | undefined;
+      if (!grid || !vertexValues) continue;
+      layers[name] = {
+        grid: { z: grid, ...gridGeom },
+        vertexValues,
+        min: info.min,
+        max: info.max,
+        label: info.label,
+      };
+    }
+  }
+
   return {
     success: true,
     vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
@@ -387,20 +449,13 @@ function decodeDemFrame(meta: Record<string, unknown>, buffers: Record<string, A
     surfaceArea: meta.surface_area as number | undefined,
     numVertices: meta.num_vertices as number,
     numTriangles: meta.num_triangles as number,
+    surfaceType: meta.surface_type as DemSurfaceType | undefined,
     groundSource: meta.ground_source as string | undefined,
+    surfaceSource: meta.surface_source as string | undefined,
     warning: meta.warning as string | undefined,
     heightAboveGround: buffers.hag as Float32Array | undefined,
-    grid: gridZ
-      ? {
-          z: gridZ,
-          nx: meta.grid_nx as number,
-          ny: meta.grid_ny as number,
-          cellSize: meta.grid_cell as number,
-          origin: [origin[0], origin[1]],
-          worldShift: [ws[0], ws[1], ws[2]],
-          crsEpsg: (meta.crs_epsg as number | undefined) ?? null,
-        }
-      : undefined,
+    grid: gridZ ? { z: gridZ, ...gridGeom } : undefined,
+    layers,
     cacheId: meta.cache_id as string | undefined,
     pointCount: meta.point_count as number | undefined,
     rawMeta: meta,
@@ -1717,9 +1772,12 @@ export interface LidarScanMesh {
 export interface LidarScanScanner {
   id: string;
   origin: number[];  // [x, y, z]
-  // 'raster' (uniform Ntheta x Nphi grid) or 'spinning_multibeam' (one channel
-  // per beam_elevation_angles_deg entry; n_theta/theta_* are ignored).
-  scan_pattern: 'raster' | 'spinning_multibeam';
+  // 'raster' (uniform Ntheta x Nphi grid), 'spinning_multibeam' (one channel per
+  // beam_elevation_angles_deg entry; n_theta/theta_* are ignored), or
+  // 'risley_prism' (Livox non-repeating rosette: a single beam through the
+  // rotating `risley_prisms` wedge stack; n_theta/n_phi/theta_*/phi_* are ignored
+  // — the FOV is emergent, and the scan is always trajectory-driven).
+  scan_pattern: 'raster' | 'spinning_multibeam' | 'risley_prism';
   // Per-channel beam elevation angles, degrees above horizon (multibeam only).
   // The backend converts each to a zenith angle (zenith = 90 - elevation).
   beam_elevation_angles_deg?: number[];
@@ -1756,6 +1814,17 @@ export interface LidarScanScanner {
   // Build the trajectory via poseStreamToWire(). Omit both for a static scan.
   trajectory?: unknown;
   pulse_rate_hz?: number;
+  // Risley-prism (Livox rosette) only. The rotating wedge prisms in beam-traversal
+  // order. Wedge angle is in DEGREES and rotor rate in Hz (datasheet units); the
+  // backend converts to radians / rad-per-second at the addScanRisley call site.
+  // A Risley scan always carries a trajectory (moving-only).
+  risley_prisms?: {
+    wedge_angle_deg: number;
+    refractive_index: number;
+    rotor_rate_hz: number;
+    phase_deg?: number;
+  }[];
+  refractive_index_air?: number;  // medium index around the prisms (typically 1.0)
 }
 
 export interface LidarScanRequest {

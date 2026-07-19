@@ -4,7 +4,7 @@
 // import them without a components → lib cycle. Pure types only — no runtime
 // code, so importing this module has zero side effects.
 import * as THREE from 'three';
-import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationMethod } from '../utils/backendApi';
+import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationMethod, DemLayer } from '../utils/backendApi';
 import type { ScanParameters } from './scanParameters';
 
 // potree-core's RequestManager interface isn't re-exported from the package
@@ -246,15 +246,19 @@ export interface MeshData {
 }
 
 // Per-triangle pseudocolor modes for a triangulated mesh. 'solid' uses the
-// mesh's label color (or its baked vertex colors); the others color each
-// triangle by a geometric scalar derived from its face normal / area.
+// mesh's label color (or its baked vertex colors); the geometric modes color each
+// triangle by a scalar derived from its face normal / area.
 //   inclination — zenith of the face normal (0deg = horizontal, 90deg = vertical)
 //   azimuth     — compass direction the face normal points (0..360deg)
 //   area        — triangle surface area
 //   scan        — the source scan each triangle came from, in that scan's color
 //                 (Helios multi-scan meshes only)
-//   elevation   — the triangle's centroid height (Z), for DEM surfaces
-export type MeshColorMode = 'solid' | 'inclination' | 'azimuth' | 'area' | 'scan' | 'elevation';
+//   layer       — colour by one of a DTM's stored scalar layers (elevation /
+//                 density / intensity / hillshade / slope / aspect). Which layer is
+//                 held in `selectedMeshLayer` (mirrors the cloud's 'scalar' mode +
+//                 selectedScalarField). The per-vertex layer values are on the mesh.
+export type MeshColorMode =
+  | 'solid' | 'inclination' | 'azimuth' | 'area' | 'scan' | 'layer';
 
 // Material definition for textured meshes
 export interface PlantMaterialDef {
@@ -399,7 +403,30 @@ export interface MeshEntry {
     worldShift: [number, number, number];
     crsEpsg?: number | null;
   };
+  // DEM-only (method === 'dem'): which surface product this is. Shown as the
+  // mesh-row badge. Absent on older/legacy DEM meshes → 'dtm'.
+  demSurfaceType?: 'dtm' | 'dsm' | 'chm';
+  // DTM-only: the scalar LAYERS this surface carries (name → layer grid + per-vertex
+  // values + range + label). The user colours the terrain by the selected layer
+  // (see selectedMeshLayer) and exports any of them as a raster. Includes
+  // 'elevation' so every band is handled uniformly.
+  demLayers?: Record<string, DemLayer>;
 }
+
+// Short human-readable label for each DEM surface product, shown as the mesh-row
+// badge so DTM / DSM / CHM are distinguishable at a glance.
+export const DEM_SURFACE_LABELS: Record<NonNullable<MeshEntry['demSurfaceType']>, string> = {
+  dtm: 'Terrain (DTM)',
+  dsm: 'Surface (DSM)',
+  chm: 'Canopy height (CHM)',
+};
+
+// Order the DTM's scalar layers appear in the "Color by" dropdown and export
+// picker. Names must match the backend `_DEM_LAYER_NAMES`.
+export const DEM_LAYER_ORDER = [
+  'elevation', 'hillshade', 'slope', 'aspect',
+  'point_density', 'return_density', 'intensity',
+] as const;
 
 // Human-readable label for a triangulation method, used in the default mesh
 // name and the provenance readout.

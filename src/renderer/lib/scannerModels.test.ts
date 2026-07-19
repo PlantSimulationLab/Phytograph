@@ -7,7 +7,7 @@ import {
 } from './scannerModels';
 
 describe('scannerModels catalog', () => {
-  it('exposes generic plus the seven bundled instruments', () => {
+  it('exposes generic plus the bundled instruments (incl. the Livox rosettes)', () => {
     const ids = SCANNER_MODELS.map(m => m.id);
     expect(ids).toEqual([
       'generic',
@@ -18,6 +18,9 @@ describe('scannerModels catalog', () => {
       'faro_focus_s350',
       'velodyne_hdl32e',
       'riegl_minivux3uav',
+      'livox_mid40',
+      'livox_mid70',
+      'livox_avia',
     ]);
   });
 
@@ -151,5 +154,59 @@ describe('scannerModels catalog', () => {
     // The terrestrial rasters leave resolution to the user — no azimuthPoints.
     expect(getScannerModel('riegl_vz400i').preset.azimuthPoints).toBeUndefined();
     expect(getScannerModel('leica_p40').preset.azimuthPoints).toBeUndefined();
+  });
+
+  it('models the Livox rosettes as risley_prism with verified prism stacks', () => {
+    // Parameters are verbatim from HELIOS++ data/scanners_tls.xml (Mid-40
+    // corroborated by Sensors 2021;21(14):4722). Wedge angle in degrees, rotor
+    // rate in Hz — the backend converts to rad / rad-per-second.
+
+    // Mid-40: two counter-rotating wedges, up to 2 returns, 100 kHz PRF.
+    const mid40 = getScannerModel('livox_mid40').preset;
+    expect(mid40.pattern).toBe('risley_prism');
+    expect(mid40.returnMode).toBe('multi');
+    expect(mid40.maxReturns).toBe(2);
+    expect(mid40.beamDivergenceMrad).toBeCloseTo(0.89);
+    expect(mid40.pulseRateHz).toBe(100000);
+    expect(mid40.refractiveIndexAir).toBe(1.0);
+    expect(mid40.risleyPrisms).toEqual([
+      { wedgeAngleDeg: 18.7481, refractiveIndex: 1.51, rotorRateHz: -121.5657 },
+      { wedgeAngleDeg: 17.9634, refractiveIndex: 1.51, rotorRateHz: 77.7430 },
+    ]);
+    // A rosette's FOV is emergent from the prisms — no angular sweep is preset.
+    expect(mid40.zenithMinDeg).toBeUndefined();
+    expect(mid40.azimuthMaxDeg).toBeUndefined();
+
+    // Mid-70: two wedges at n=1.5095 (HELIOS++ estimates from the 70.4° FOV).
+    const mid70 = getScannerModel('livox_mid70').preset;
+    expect(mid70.pattern).toBe('risley_prism');
+    expect(mid70.maxReturns).toBe(2);
+    expect(mid70.pulseRateHz).toBe(100000);
+    expect(mid70.risleyPrisms).toEqual([
+      { wedgeAngleDeg: -29.7, refractiveIndex: 1.5095, rotorRateHz: -77.733333333 },
+      { wedgeAngleDeg: 29.7, refractiveIndex: 1.5095, rotorRateHz: 121.566666666 },
+    ]);
+
+    // Avia: THREE wedges, triple-echo (3 returns), 40 kHz PRF.
+    const avia = getScannerModel('livox_avia').preset;
+    expect(avia.pattern).toBe('risley_prism');
+    expect(avia.maxReturns).toBe(3);
+    expect(avia.pulseRateHz).toBe(40000);
+    expect(avia.risleyPrisms).toHaveLength(3);
+    expect(avia.risleyPrisms).toEqual([
+      { wedgeAngleDeg: 30.8856, refractiveIndex: 1.51, rotorRateHz: -131.5463 },
+      { wedgeAngleDeg: 29.7735, refractiveIndex: 1.51, rotorRateHz: 40.8032 },
+      { wedgeAngleDeg: 3.1351, refractiveIndex: 1.51, rotorRateHz: 213.1611 },
+    ]);
+  });
+
+  it('reuses the Avia OBJ marker for all three Livox rosettes', () => {
+    const urls = ['livox_mid40', 'livox_mid70', 'livox_avia']
+      .map(id => getScannerModel(id as ScannerModelId).meshUrl);
+    // All three point at the same (Avia) mesh, and each is an OBJ.
+    expect(new Set(urls).size).toBe(1);
+    for (const id of ['livox_mid40', 'livox_mid70', 'livox_avia'] as ScannerModelId[]) {
+      expect(getScannerModel(id).meshFormat).toBe('obj');
+    }
   });
 });

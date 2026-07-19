@@ -234,3 +234,91 @@ def test_reconstruct_trajectory_single_pose_returns_none():
     """One distinct time is a static scan, not a trajectory."""
     assert main._trajectory_wire_from_beam_origins(
         np.array([[1.0, 2.0, 3.0]]), np.array([5.0])) is None
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: the create-session response's scan_params.trajectory frame.
+#
+# `beam_origins` are recentered by world_shift at read (they're stored in the
+# session's STORED frame for the beam-origin LAD path). But the trajectory the
+# response surfaces in scan_params must be WORLD-frame, because every renderer
+# consumer — the trajectory marker (ScanMarkerEntry) and buildLADRequest —
+# subtracts worldShift ITSELF to reach the stored frame. Emitting a stored-frame
+# trajectory double-shifted the path ~worldShift metres off-screen (and would
+# double-shift the LAD trajectory join). This is the regression guard for that.
+# ---------------------------------------------------------------------------
+
+def _converter_available() -> bool:
+    try:
+        main._resolve_potree_converter_path()
+        return True
+    except Exception:
+        return False
+
+
+def _write_las_with_origins_and_time(path, origins, times):
+    """LAS with ox/oy/oz beam-origin ExtraBytes AND a varying gps_time, so
+    create_cloud_session reconstructs a moving-platform trajectory from them."""
+    n = origins.shape[0]
+    header = laspy.LasHeader(point_format=6, version="1.4")  # fmt 6+ has gps_time
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.floor(origins.min(axis=0))
+    for nm in ("ox", "oy", "oz"):
+        header.add_extra_dim(laspy.ExtraBytesParams(name=nm, type=np.float64))
+    las = laspy.LasData(header)
+    # Ground hits offset a few hundred metres below the aerial platform origins.
+    las.x = origins[:, 0]
+    las.y = origins[:, 1]
+    las.z = origins[:, 2] - 700.0
+    las.gps_time = times
+    las["ox"], las["oy"], las["oz"] = origins[:, 0], origins[:, 1], origins[:, 2]
+    las.write(str(path))
+
+
+@pytest.mark.skipif(not _converter_available(),
+                    reason="PotreeConverter binary not found")
+def test_create_session_trajectory_is_world_frame_under_shift(client, tmp_path, monkeypatch):
+    """A UTM cloud with beam origins + a global shift surfaces a WORLD-frame
+    trajectory in scan_params — the raw origins, NOT the shifted ones — so the
+    renderer's own worldShift subtraction lands the path on the cloud."""
+    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "cache"))
+    # UTM-scale aerial platform origins (Z ~955 m), one per pulse.
+    n = 200
+    base = np.array([476850.0, 5429104.0, 955.0])
+    origins = base + np.column_stack([
+        np.linspace(0.0, 120.0, n), np.linspace(0.0, 90.0, n), np.zeros(n)])
+    times = np.linspace(469934.0, 471223.0, n)
+    las_path = tmp_path / "als_origins.las"
+    _write_las_with_origins_and_time(las_path, origins, times)
+
+    # Global shift matching the wizard's UTM auto-suggest (floor of X/Y mins, Z=0).
+    ws = [float(np.floor(origins[:, 0].min())), float(np.floor(origins[:, 1].min())), 0.0]
+    res = client.post("/api/cloud/session/create",
+                      json={"source_path": str(las_path), "world_shift": ws})
+    assert res.status_code == 200, res.text
+    body = res.json()
+
+    sp = body.get("scan_params")
+    assert sp is not None, "beam-origin LAS must surface scan_params"
+    traj = sp.get("trajectory")
+    assert traj is not None, "beam origins + gps_time must reconstruct a trajectory"
+    poses = traj["poses"]
+    assert len(poses) >= 2
+
+    px = np.array([p["x"] for p in poses])
+    py = np.array([p["y"] for p in poses])
+    pz = np.array([p["z"] for p in poses])
+    # WORLD frame: poses span the raw UTM origins, NOT the shifted (~0-relative) ones.
+    assert px.min() == pytest.approx(origins[:, 0].min(), abs=1e-3)
+    assert px.max() == pytest.approx(origins[:, 0].max(), abs=1e-3)
+    assert py.min() == pytest.approx(origins[:, 1].min(), abs=1e-3)
+    assert pz.min() == pytest.approx(955.0, abs=1e-3)
+    # The seeded scan origin is the first (world-frame) pose.
+    assert sp["origin"][0] == pytest.approx(origins[0, 0], abs=1e-3)
+
+    # And the renderer's own worldShift subtraction lands the path ON the stored
+    # cloud (X/Y near 0), not ~worldShift metres away — the actual bug symptom.
+    assert (px - ws[0]).min() == pytest.approx(0.0, abs=1e-3)
+    assert (py - ws[1]).min() == pytest.approx(0.0, abs=1e-3)
+
+    main._cloud_sessions.pop(body["session_id"], None)

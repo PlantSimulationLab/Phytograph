@@ -40,7 +40,38 @@ export type SingleReturnSelection = 'strongest' | 'first' | 'last';
 //                           is the number of channels and there is no zenith
 //                           sweep. Azimuth (azimuthPoints = Nphi, azimuth
 //                           sweep = phi range) is shared with raster.
-export type ScanPattern = 'raster' | 'spinning_multibeam';
+//   - 'risley_prism'      : a Livox-style non-repeating rosette. A single beam is
+//                           refracted through a stack of continuously rotating
+//                           wedge prisms (`risleyPrisms`), tracing a non-repetitive
+//                           rosette that fills a CIRCULAR field of view whose extent
+//                           is an EMERGENT property of the wedge angles + refractive
+//                           indices — so the zenith/azimuth sweep and the
+//                           zenith/azimuth point counts do NOT apply. Like a spinning
+//                           sensor it is always trajectory-driven (a stationary
+//                           tripod capture is a trajectory of two identical poses
+//                           separated in time by the acquisition duration); the
+//                           per-pulse spacing comes from `pulseRateHz`.
+export type ScanPattern = 'raster' | 'spinning_multibeam' | 'risley_prism';
+
+// One rotating wedge prism in a Livox-style Risley-prism beam deflector. A pair
+// (Mid-40/Mid-70) or triple (Avia) of counter-rotating wedges traces the
+// characteristic non-repetitive rosette. Stored in datasheet/human units (wedge
+// degrees, rotor Hz); the backend converts to the radians / rad-per-second that
+// pyhelios' RisleyPrism expects at the addScanRisley call site (mirroring how the
+// angular sweep is converted). See ./scannerModels for the verified per-instrument
+// prism stacks and their sources.
+export interface RisleyPrismSpec {
+  // Wedge (inclination) angle of the prism, in degrees.
+  wedgeAngleDeg: number;
+  // Refractive index of the prism glass (unitless, e.g. 1.51).
+  refractiveIndex: number;
+  // Rotation rate about the optical axis, in Hz. The sign sets the rotation
+  // direction; a counter-rotating pair is what traces a rosette.
+  rotorRateHz: number;
+  // Initial clocking angle of the wedge at scan time t=0, in degrees. Optional
+  // (defaults to 0); the presets leave it unset.
+  phaseDeg?: number;
+}
 
 export interface ScanParameters {
   origin: { x: number; y: number; z: number };
@@ -99,6 +130,16 @@ export interface ScanParameters {
   // Length sets Ntheta. Maps to Helios <beamElevationAngles>; the backend
   // converts each to a zenith angle (zenith = 90 - elevation) for pyhelios.
   beamElevationAnglesDeg: number[];
+  // Risley-prism only. The stack of rotating wedge prisms (in beam-traversal
+  // order) that produces the Livox non-repeating rosette. A Livox sensor uses two
+  // (Mid-40/Mid-70) or three (Avia) counter-rotating wedges. Auto-filled from the
+  // scanner-model preset when a Livox instrument is selected; the field of view is
+  // an emergent property of these wedges, so the zenith/azimuth sweep is unused.
+  // Undefined for non-Risley patterns.
+  risleyPrisms?: RisleyPrismSpec[];
+  // Risley-prism only. Refractive index of the medium surrounding the prisms —
+  // typically 1.0 (air). Undefined for non-Risley patterns.
+  refractiveIndexAir?: number;
   // Moving-platform trajectory. When set, this scan is a moving-platform
   // acquisition (drone / robot / tractor): `origin` is only a fallback anchor
   // (it should equal the first pose's position), and leaf-area inversion uses a
@@ -140,6 +181,10 @@ export const DEFAULT_SCAN_PARAMETERS: ScanParameters = {
   azimuthOffsetDeg: 0,
   // A generic 8-channel elevation spread; only used when pattern is multibeam.
   beamElevationAnglesDeg: [15, 10, 5, 0, -5, -10, -15, -20],
+  // Risley-prism fields: no prism stack by default (only a Livox model preset
+  // supplies one); air index 1.0. Both ignored unless pattern is 'risley_prism'.
+  risleyPrisms: undefined,
+  refractiveIndexAir: 1.0,
   // Generic moving-scan pulse rate (300 kHz); model presets override it. Only
   // used by a synthetic moving scan.
   pulseRateHz: 300000,

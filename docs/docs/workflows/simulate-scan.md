@@ -22,8 +22,9 @@ You need geometry in the scene to scan: typically a generated
 
 3. **Scanner model** — pick the instrument the scan represents. Choosing
    a specific model (RIEGL VZ-400i, Leica ScanStation P40, Leica BLK360
-   (G1), Leica BLK360 (G2), FARO Focus S350, Velodyne HDL-32E, or RIEGL
-   miniVUX-3UAV) does two things:
+   (G1), Leica BLK360 (G2), FARO Focus S350, Velodyne HDL-32E, RIEGL
+   miniVUX-3UAV, or a Livox rosette — **Mid-40**, **Mid-70**, **Avia**)
+   does two things:
 
     - **Marks the position with that instrument's shape**, drawn to its
       real-world size (a Velodyne puck is ~14 cm; a Leica P40 ~40 cm).
@@ -45,6 +46,13 @@ You need geometry in the scene to scan: typically a generated
     terrestrial scanners it also presets a points-per-revolution starting
     value (~3,600 ≈ 0.1°). Like the Velodyne, it is a moving-platform
     sensor and so requires a trajectory.
+
+    The three **Livox** models are non-repeating rosettes (Risley-prism
+    sensors). Selecting one loads its verified rotating-prism stack (wedge
+    angles, refractive indices, rotor rates) from the manufacturer /
+    HELIOS++ reference values and switches the pattern to the **Livox
+    rosette** — see the pattern tab below. All three share the Avia body
+    marker.
 
     Leave it on **Generic / custom** for an unknown or hand-tuned
     scanner; the position is marked with a plain sphere and no values are
@@ -74,6 +82,25 @@ You need geometry in the scene to scan: typically a generated
         [Moving-platform scans](#moving-platform-drone-robot-tractor-scans)
         below; for a stationary capture, use a trajectory with two poses at
         the same position one revolution apart.
+
+    === "Livox rosette"
+
+        A Livox non-repeating rosette (Risley-prism sensor). A single beam
+        is steered by a stack of rotating wedge prisms, tracing a dense
+        non-repetitive pattern that fills a **circular** field of view. Pick
+        a Livox model (Mid-40 / Mid-70 / Avia) to load its prism stack — the
+        popup shows it read-only.
+
+        Because the field of view is **emergent** from the prism optics,
+        this pattern has **no zenith/azimuth sweep or point counts** (those
+        fields are hidden). Like a spinning sensor, it rotates continuously
+        and so **requires a trajectory**; for a stationary tripod capture,
+        use a trajectory with **two identical poses** separated in time by
+        the acquisition duration. The pulse count is `pulse rate × duration`,
+        shown in the popup. See
+        [Livox non-repeating rosette](../concepts/scans.md#livox-non-repeating-rosette-risley-prism)
+        for the details and limitations (no triangulation / gap-fill / XML
+        export).
 
 5. **Origin** — (X, Y, Z) in meters of the scanner head. A typical TLS
    campaign places scanners 1.5–2 m above ground, 3–5 m from the
@@ -220,13 +247,50 @@ you can attach it later from the row's paperclip button.
 ## Moving-platform (drone / robot / tractor) scans
 
 A static scanner fires from one fixed position. To simulate a **moving
-platform**, attach a *trajectory* to the scan: in the Add Scan popup,
-click **Import trajectory file…** and pick a CSV/text file of poses, or a
-binary Applanix **SBET** (`.sbet` / `.out`) — see
-[Scans → Moving-platform scans](../concepts/scans.md#moving-platform-scans)
-and [File formats → Platform trajectory files](../reference/file-formats.md#platform-trajectory-files)
-for the formats (`t x y z` plus a quaternion or roll/pitch/yaw per row, or a
-binary SBET projected to UTM).
+platform**, attach a *trajectory* to the scan. In the Add Scan popup you can
+either:
+
+- **Import trajectory file…** — pick a CSV/text file of poses, or a binary
+  Applanix **SBET** (`.sbet` / `.out`) — see
+  [Scans → Moving-platform scans](../concepts/scans.md#moving-platform-scans)
+  and [File formats → Platform trajectory files](../reference/file-formats.md#platform-trajectory-files)
+  for the formats (`t x y z` plus a quaternion or roll/pitch/yaw per row, or a
+  binary SBET projected to UTM).
+- **Build trajectory manually…** — open the [trajectory
+  editor](#building-and-editing-a-trajectory-by-hand) and author the poses in a
+  table + the 3D view, with no file needed.
+
+### Building and editing a trajectory by hand
+
+Clicking **Build trajectory manually…** (or the **Edit trajectory** button —
+the compass icon — on a moving scan's row in the Scans panel) opens the
+**trajectory editor**: a docked pose table on the right, with the scanner model
+drawn at every pose in the 3D view.
+
+- **Table** — one row per pose, kept **ordered by time**, with columns for time
+  `t`, position (`X`/`Y`/`Z`, metres) and orientation (`Roll`/`Pitch`/`Yaw`,
+  degrees). Edit a cell to move or re-orient that pose; the scanner model updates
+  live. Editing a pose's time re-sorts the rows automatically so the list always
+  reads top-to-bottom along the flight.
+- **Add / remove poses** — **Add pose** appends a pose after the last one.
+  Hovering the path line in the 3D view reveals a **+** that inserts an
+  interpolated pose (position and orientation half-way between its neighbours) at
+  that point. The trash icon on a row deletes that pose.
+- **Move / rotate in 3D** — click a scanner model in the view to select that
+  pose (its row highlights and the model glows), then press **`t`** to translate
+  or **`r`** to rotate it, exactly like editing a mesh: move the mouse (or type
+  an exact value), lock an axis with `x`/`y`/`z`, and click or press `Enter` to
+  confirm (`Esc` cancels).
+- **Preview** flies the scanner smoothly along the whole path as a ~5-second
+  animation (position interpolated, orientation SLERPed between poses), so you
+  can sanity-check the motion before committing. Click **Stop** to end it early;
+  it stops on its own when the run finishes.
+- **Times must strictly increase.** Because the rows stay time-sorted, the only
+  way to break this is two poses sharing a time; if that happens **Save** is
+  disabled and the offending row is flagged, and **Renumber t** reassigns an
+  even, increasing sequence in one click.
+- **Save trajectory** attaches the result to the scan (creating the scan if you
+  started from the Add Scan popup); **Cancel** discards the edits.
 
 Once a trajectory is attached:
 
