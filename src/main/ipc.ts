@@ -85,7 +85,17 @@ export function registerIpc(): void {
     async (_e, destPath: string | null): Promise<LogExportResult> => {
       if (!destPath) return { savedPath: null };
       await copySessionLogTo(destPath);
-      shell.showItemInFolder(destPath);
+      // Reveal the written file in the OS file manager so the user can drag it
+      // into a GitHub issue / email. SKIP under E2E: on a headless CI runner
+      // (Linux + xvfb, no desktop session) showItemInFolder blocks on a
+      // D-Bus/xdg file-manager launch that never returns, wedging the main
+      // process so the app can't quit — the "Attach session logs" E2E test then
+      // hung its whole 180s teardown. This reveal is a convenience, not part of
+      // the export's correctness (the file is already written above), so
+      // dropping it in tests changes nothing the test asserts.
+      if (process.env.PHYTOGRAPH_E2E !== '1') {
+        shell.showItemInFolder(destPath);
+      }
       return { savedPath: destPath };
     },
   );
