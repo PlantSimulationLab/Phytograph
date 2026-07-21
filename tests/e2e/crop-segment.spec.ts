@@ -54,13 +54,23 @@ test('crop Segment splits a scan in two without losing points', async () => {
     await expect(page.getByTestId('crop-apply')).toContainText('Segment');
 
     // ── Shape the box: keep z∈[0.3, 1.0] (size 0.7, center 0.65). ──────────
-    // X/Y left at the cylinder's full extent so only Z selects the layers.
+    // X/Y are set WIDER than the cylinder (r=0.3) so every point is strictly
+    // interior on those axes and only Z selects the layers. Leaving X/Y at the
+    // auto-fit extent (±0.3) put the 4 cardinal points of each layer exactly on
+    // the box faces, where inclusion flips with sub-mm float rounding that
+    // differs across platforms (macOS kept all 24; Linux CI dropped 2-4 → 20/22).
+    // Widening removes that boundary ambiguity without weakening the 24/36/60
+    // assertion.
     async function setNumber(testId: string, value: number) {
       const input = page.getByTestId(testId);
       await input.click();
       await input.fill(String(value));
       await input.press('Tab');
     }
+    await setNumber('crop-dim-x', 1.0);
+    await setNumber('crop-center-x', 0);
+    await setNumber('crop-dim-y', 1.0);
+    await setNumber('crop-center-y', 0);
     await setNumber('crop-dim-z', 0.7);
     await setNumber('crop-center-z', 0.65);
     await expect(panel).toHaveAttribute('data-crop-max', /,1\.000$/);
@@ -120,6 +130,12 @@ test('crop without Segment discards cropped-out points (no new cloud)', async ()
       await input.fill(String(value));
       await input.press('Tab');
     }
+    // Widen X/Y beyond the cylinder (r=0.3) so no point sits exactly on a box
+    // face — see the note in the Segment test above. Only Z selects the layers.
+    await setNumber('crop-dim-x', 1.0);
+    await setNumber('crop-center-x', 0);
+    await setNumber('crop-dim-y', 1.0);
+    await setNumber('crop-center-y', 0);
     await setNumber('crop-dim-z', 0.7);
     await setNumber('crop-center-z', 0.65);
     await expect(panel).toHaveAttribute('data-crop-max', /,1\.000$/);

@@ -17,7 +17,7 @@ test('A data-less moving-platform scan imports, is flagged moving, and keeps the
   const { app, page, close } = await launchApp();
 
   try {
-    const traj = join(repoRoot, 'example-datasets', 'drone_pass_trajectory.csv');
+    const traj = join(repoRoot, 'tests', 'e2e', 'fixtures', 'drone_pass_trajectory.csv');
     await stubOpenDialog(app, traj);
 
     // --- Add Scan -> pick Velodyne -> import the trajectory ----------------

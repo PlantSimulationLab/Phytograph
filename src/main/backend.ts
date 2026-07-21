@@ -261,6 +261,13 @@ function spawnChild(binPath: string, port: number): void {
   child = spawn(binPath, [], {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
+    // Detach on POSIX so the child leads its own process group. The bundled
+    // backend is a PyInstaller --onedir bootloader that forks the real Python
+    // (uvicorn) server as a *grandchild*; killing only child.pid leaves that
+    // grandchild orphaned, holding the port and file handles. With a dedicated
+    // group we can `process.kill(-pid)` the whole tree in stopBackend(). Windows
+    // has no process groups here — we fall back to taskkill /T in stopBackend().
+    detached: process.platform !== 'win32',
     env: { ...process.env, PHYTOGRAPH_RESOURCES: resourcesRoot(), PHYTOGRAPH_BACKEND_PORT: String(port) },
   });
 
@@ -347,6 +354,54 @@ async function confirmHealthy(port: number): Promise<string | null> {
   return null;
 }
 
+// Signal every process in the backend's tree. On POSIX the child leads its own
+// group (spawn `detached`), so a negative PID targets the whole group — the
+// PyInstaller bootloader AND the uvicorn Python grandchild it forked. Falls back
+// to a plain single-PID kill if the group send fails (e.g. the group is already
+// gone, or `detached` was somehow not honored). On Windows there's no group; we
+// use taskkill /T /F to take down the child and all descendants forcefully.
+function signalBackendTree(proc: ChildProcess, signal: NodeJS.Signals): void {
+  const pid = proc.pid;
+  if (pid === undefined) return;
+  if (process.platform === 'win32') {
+    // /T kills the child and all descendants; /F forces it. (Windows has no
+    // graceful group SIGTERM equivalent here — Node's kill() is already a
+    // forceful TerminateProcess — so we go straight to the whole-tree force.)
+    try { execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'ignore' }); } catch { /* already gone */ }
+    return;
+  }
+  try {
+    process.kill(-pid, signal); // negative pid → the whole process group
+  } catch {
+    try { proc.kill(signal); } catch { /* already gone */ }
+  }
+}
+
+// Block the calling thread for `ms` without spawning a subprocess. Node permits
+// Atomics.wait on the main thread (unlike browsers); wrapped defensively so a
+// surprise throw degrades to "no wait" rather than breaking quit.
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch { /* fall through — caller tolerates a shorter/absent wait */ }
+}
+
+// Synchronously wait (up to timeoutMs) for a POSIX process to disappear, polling
+// liveness with signal 0 (throws ESRCH once gone) and breaking as soon as it
+// exits. We can't observe the async 'exit' event here: stopBackend runs on the
+// synchronous signal-shutdown path (postMortem.ts calls process.exit(0) the
+// instant we return), so the event loop never turns to deliver it. Returns true
+// if the process exited within the window.
+function waitForExitSync(pid: number, timeoutMs: number): boolean {
+  const stepMs = 50;
+  for (let waited = 0; waited < timeoutMs; waited += stepMs) {
+    try { process.kill(pid, 0); } catch { return true; } // ESRCH → gone
+    sleepSync(stepMs);
+  }
+  try { process.kill(pid, 0); } catch { return true; }
+  return false;
+}
+
 export function stopBackend(): void {
   intentionalStop = true;
   if (restartTimer) {
@@ -362,20 +417,25 @@ export function stopBackend(): void {
   // and would orphan, holding its port and RAM.
   let exited = dying.exitCode !== null || dying.signalCode !== null;
   dying.once('exit', () => { exited = true; });
-  try {
-    dying.kill();  // SIGTERM — let uvicorn shut down gracefully if it can.
-  } catch (e) {
-    console.error('Failed to terminate backend:', e);
-  }
-  // Escalate to SIGKILL if SIGTERM is ignored. The timer is unref'd so it never
-  // by itself keeps the Electron process alive during quit.
-  const killTimer = setTimeout(() => {
-    if (!exited) {
-      console.warn('[Backend] did not exit on SIGTERM; sending SIGKILL.');
-      try { dying.kill('SIGKILL'); } catch { /* already gone */ }
+  // SIGTERM the whole tree — let uvicorn shut down gracefully if it can.
+  signalBackendTree(dying, 'SIGTERM');
+  // Then escalate to SIGKILL if it doesn't go, *synchronously*. This must finish
+  // before we return, because the signal-shutdown path (postMortem.ts) calls
+  // process.exit(0) the instant stopBackend() returns — an async timer would
+  // never fire, which is exactly what previously left the backend tree orphaned
+  // on every SIGTERM-driven quit (Playwright's _electron teardown, Ctrl-C). An
+  // orphaned uvicorn (often mid native open3d/Helios call, deaf to SIGTERM) held
+  // its port and file handles and, under CI's slower runner, wedged the next
+  // launch / the Playwright worker teardown into the 180s timeout. Windows
+  // already force-killed the whole tree above (taskkill /T /F), so it needs no
+  // grace; on POSIX, block briefly for a clean group exit, then hard-kill.
+  if (process.platform !== 'win32' && dying.pid !== undefined && !exited) {
+    const stillAlive = !waitForExitSync(dying.pid, 1500);
+    if (stillAlive) {
+      console.warn('[Backend] did not exit on SIGTERM within grace; SIGKILL to the tree.');
+      signalBackendTree(dying, 'SIGKILL');
     }
-  }, 3000);
-  if (typeof killTimer.unref === 'function') killTimer.unref();
+  }
   child = null;
   console.log('Backend terminated');
 }

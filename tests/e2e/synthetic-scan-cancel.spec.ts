@@ -62,11 +62,16 @@ test('cancelling a heavy synthetic scan abandons the run and leaves the UI usabl
     await expect(statusPill).toBeVisible({ timeout: 30_000 });
     const cancelBtn = page.getByTestId('synthetic-scan-status-cancel');
     await expect(cancelBtn).toBeVisible();
-    await cancelBtn.click();
-
-    // The pill clears (the run is over) and the scanner never gained data — the
-    // cancelled scan produced no cloud.
-    await expect(statusPill).not.toBeVisible({ timeout: 30_000 });
+    // The pill re-renders on every progress tick, so the cancel button node can
+    // detach out from under a normal click ("element was detached from the DOM"
+    // → click times out on the slower CI runner). Retry the click until the pill
+    // actually clears: dispatchEvent fires synchronously on the currently-live
+    // node without Playwright's stability wait, so a mid-flight re-render can't
+    // race it. `force`-free would re-introduce the stability wait we're avoiding.
+    await expect(async () => {
+      await cancelBtn.dispatchEvent('click');
+      await expect(statusPill).not.toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 30_000 });
     await expect(scannerRow).toHaveAttribute('data-has-data', 'false');
 
     // ── The UI is still responsive: a second, small scan completes ───────

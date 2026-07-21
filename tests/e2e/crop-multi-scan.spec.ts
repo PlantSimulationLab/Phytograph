@@ -95,11 +95,19 @@ test('multi-scan crop applies one world-space box across two selected scans', as
     // X dimension second: size 2.0, center 0.5 → x∈[-0.5, 1.5].
     await setNumber('crop-dim-x', 2.0);
     await setNumber('crop-center-x', 0.5);
+    // Y dimension third: size 1.0, center 0 → y∈[-0.5, 0.5]. WIDER than the
+    // cylinder (r=0.3) on purpose: leaving Y at the auto-fit extent (±0.3) put
+    // each layer's y=±0.3 cardinal points exactly on the box faces, where
+    // inclusion flips with sub-mm float rounding that differs across platforms
+    // (macOS kept 24; Linux CI dropped 2-4 → 20/22). Widening makes only Z
+    // select the layers, deterministically.
+    await setNumber('crop-dim-y', 1.0);
+    await setNumber('crop-center-y', 0);
 
-    // Wait for all four commits to land in the cropBox state. Anchored on
-    // the live data-crop-min/max attributes — beats arbitrary sleeps.
-    await expect(panel).toHaveAttribute('data-crop-min', '-0.500,-0.300,0.300');
-    await expect(panel).toHaveAttribute('data-crop-max', '1.500,0.300,1.000');
+    // Wait for all commits to land in the cropBox state. Anchored on the live
+    // data-crop-min/max attributes — beats arbitrary sleeps.
+    await expect(panel).toHaveAttribute('data-crop-min', '-0.500,-0.500,0.300');
+    await expect(panel).toHaveAttribute('data-crop-max', '1.500,0.500,1.000');
 
     // ── Apply ──────────────────────────────────────────────────────────────
     // Enter inside an input only commits the input's value — applying is
@@ -121,10 +129,8 @@ test('multi-scan crop applies one world-space box across two selected scans', as
 
     // ── Assertions: both scans are cropped to their exact expected count ──
     // Each cylinder has 5 z-layers of 12 pts each. The crop keeps z=0.375
-    // and z=0.75 only → 2 × 12 = 24 pts per scan. The X-widening step is a
-    // no-op for either cylinder (both fit inside [-0.5, 1.5] either way),
-    // which is exactly the point: we asserted the predicate doesn't crash
-    // or drop points based on an irrelevant axis.
+    // and z=0.75 only → 2 × 12 = 24 pts per scan. X/Y are widened past both
+    // cylinders so only Z selects layers — no point sits on an X/Y face.
     await expect(tinyRow).toHaveAttribute('data-point-count', '24', { timeout: 5_000 });
     await expect(offsetRow).toHaveAttribute('data-point-count', '24', { timeout: 5_000 });
   } finally {

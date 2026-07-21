@@ -29,7 +29,7 @@ test('spinning-multibeam scan requires a trajectory before it can be added', asy
     await expect(page.getByTestId('scan-azimuth-max')).toHaveCount(0);
 
     // Import a trajectory → the requirement is satisfied, submit becomes enabled.
-    const traj = join(repoRoot, 'example-datasets', 'drone_pass_trajectory.csv');
+    const traj = join(repoRoot, 'tests', 'e2e', 'fixtures', 'drone_pass_trajectory.csv');
     await stubOpenDialog(app, traj);
     await page.getByTestId('scan-trajectory-import').click();
     await expect(page.getByTestId('scan-trajectory-label')).toBeVisible();
