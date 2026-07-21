@@ -11,6 +11,16 @@ phytorch-lib
 prosail>=2.0.0
 # Pin llvmlite to version with x86_64 wheels (0.46+ dropped Intel Mac support)
 llvmlite<0.46
+# Pin setuptools + PyInstaller to the known-good pair the packaged build is
+# tested against. Newer setuptools removed `pkg_resources.NullProvider`, which
+# PyInstaller 6.20.0's `pyi_rth_pkgres` runtime hook still references — a fresh
+# unpinned `pip install pyinstaller` on the CI runner picked up that newer
+# setuptools and the packaged backend crashed on startup with
+# `AttributeError: module 'pkg_resources' has no attribute 'NullProvider'`
+# (macOS release build, v0.50.0). 81.0.0 still ships NullProvider. Bump both
+# together only after re-verifying `build:backend` produces a runnable binary.
+setuptools==81.0.0
+pyinstaller==6.20.0
 pytexit>=0.3.4
 # PyHelios is NOT a pip dependency — it's vendored as a git submodule at
 # <repo>/pyhelios and installed editable from source by scripts/build-pyhelios.mjs
