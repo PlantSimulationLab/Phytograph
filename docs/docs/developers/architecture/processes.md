@@ -65,6 +65,10 @@ tested as a normal HTTP server.
 - **Crash → respawn.** If the Python process dies and we didn't ask it to
   (a native open3d/PyHelios crash, an OOM kill), the supervisor respawns it
   on the **same port** with a capped backoff (3 attempts: 500 ms → 2 s → 5 s).
+  Spawn *failures* take the same path — both the async `'error'` event
+  (EACCES, missing dyld) and a synchronous `spawn()` throw (EBADARCH `-86`,
+  a wrong-architecture binary) — so a backend that can't even start still
+  ends in the `failed` dialog rather than a windowless, dialogless app.
   The same port matters because the renderer fetches the backend URL once at
   startup (`initBackendUrl`) and never re-fetches it. On a healthy respawn
   the attempt counter resets; on exhaustion the supervisor gives up.

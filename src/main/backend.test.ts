@@ -174,3 +174,49 @@ describe('restart budget (Bug B: healthy /version must not reset it)', () => {
     expect(onFailed).not.toHaveBeenCalled();
   });
 });
+
+describe('synchronous spawn throw (wrong-arch backend: EBADARCH on Intel Macs)', () => {
+  // The v0.50.0 x64 dmg shipped an arm64 backend; on an Intel Mac spawn()
+  // THROWS synchronously (`spawn Unknown system error -86`) instead of
+  // emitting the async 'error' event. That throw used to reject startBackend(),
+  // which killed main.ts's startup chain before createWindow() — the app sat
+  // in the Dock with no window. The contract now: startBackend() RESOLVES, the
+  // recovery retries burn out, and onBackendFailed fires (→ crash dialog).
+  let startBackend: typeof import('./backend.js').startBackend;
+  let setBackendFailedHandler: typeof import('./backend.js').setBackendFailedHandler;
+  const onFailed = vi.fn();
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    spawnMock.mockReset();
+    onFailed.mockReset();
+    spawnMock.mockImplementation(() => {
+      throw Object.assign(new Error('spawn Unknown system error -86'), { errno: -86 });
+    });
+    // Nothing ever answers /version: the pre-start probe fails (so the
+    // supervisor decides to spawn) and no respawn ever reports healthy.
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('nothing on port'); }));
+    process.env.PHYTOGRAPH_BACKEND_PORT = '52998';
+    ({ startBackend, setBackendFailedHandler } = await import('./backend.js'));
+    setBackendFailedHandler(onFailed);
+  });
+
+  afterEach(() => {
+    delete process.env.PHYTOGRAPH_BACKEND_PORT;
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('startBackend resolves (never rejects) and gives up into onBackendFailed', async () => {
+    await expect(startBackend()).resolves.toBeUndefined();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(onFailed).not.toHaveBeenCalled(); // budget not yet exhausted
+
+    // Each retry (backoffs 500/2000/5000ms) throws the same way; after
+    // MAX_RESTART_ATTEMPTS the supervisor must give up and pop the dialog.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(spawnMock).toHaveBeenCalledTimes(1 + 3);
+    expect(onFailed).toHaveBeenCalledTimes(1);
+  });
+});

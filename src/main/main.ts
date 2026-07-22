@@ -9,7 +9,7 @@ import { setupAutoUpdater } from './updater.js';
 import { IPC, type FileDropPayload } from '../shared/ipc.js';
 import { RENDERER_DEV_PORT, IMPORTABLE_EXTENSIONS } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
-import { initLogging, getLogDir, getLogSessionTag, setFatalErrorHandler } from './logger.js';
+import { initLogging, getLogDir, getLogSessionTag, setFatalErrorHandler, log } from './logger.js';
 import { installCrashHandlers, showBackendFailedDialog, showFatalMainErrorDialog } from './crashDialog.js';
 import {
   initCrashReporter,
@@ -119,8 +119,31 @@ let mainWindow: BrowserWindow | null = null;
 if (!isE2E) {
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
-    // Another instance owns the lock; it will receive our argv via
-    // 'second-instance'. Quit this one immediately.
+    // Another Phytograph instance already owns the lock (both share the same
+    // userData dir). It will receive our argv via 'second-instance' and import
+    // any files we were launched with, so quitting here is the intended
+    // behavior for a genuine double-launch. But the most common way to hit
+    // this is *accidental*: running `npm run dev` while the installed
+    // /Applications/Phytograph.app (or another dev instance) is still open —
+    // in which case the dev instance quits before showing a window, which
+    // looks like an opaque crash. Explain it loudly before exiting so the
+    // developer knows exactly what happened and how to fix it, instead of
+    // staring at a terminal that just stopped.
+    const other = app.isPackaged ? 'another Phytograph instance' : 'the installed Phytograph.app (or another dev instance)';
+    const msg =
+      `Phytograph is already running — ${other} owns the single-instance lock, ` +
+      `so this instance is exiting without opening a window.\n\n` +
+      `Both share the same userData directory, so only one can run at a time. ` +
+      `To launch this one, quit the other instance first:\n` +
+      `  • Quit Phytograph from the menu / Dock, or\n` +
+      `  • pkill -f '/Applications/Phytograph.app/Contents/MacOS/Phytograph'\n` +
+      `then relaunch.`;
+    // initLogging() already ran at module load, and it routes console.* through
+    // electron-log — so this one line is visible in the `npm run dev` terminal
+    // AND written to the main log file. An explicit warn adds a clean structured
+    // entry at the right level.
+    console.error(`\n[phytograph] ${msg}\n`);
+    log.warn(`Single-instance lock not acquired: ${msg}`);
     app.quit();
   }
 }
@@ -348,7 +371,17 @@ app.whenReady().then(async () => {
   // modal would hang the Playwright driver).
   if (!isE2E) setFatalErrorHandler(showFatalMainErrorDialog);
 
-  await backendStarting;
+  // The window must open even when backend startup fails — a dead backend
+  // surfaces through the renderer's status UI and the supervisor's failure
+  // dialog, both of which need a window to be useful. Before this guard, a
+  // rejection here (Intel Macs + the v0.50.0 x64 dmg's arm64 backend: spawn
+  // threw EBADARCH synchronously) died as an unhandled rejection BEFORE
+  // createWindow(), leaving the app in the Dock with no window at all.
+  try {
+    await backendStarting;
+  } catch (e) {
+    console.error('[main] backend startup threw; opening the window anyway:', e);
+  }
   createWindow();
   setupAutoUpdater(() => mainWindow);
 
@@ -365,7 +398,13 @@ app.whenReady().then(async () => {
       // window-all-closed cleared the marker, so re-arm it to catch a crash in
       // this new session.
       markSessionStarted();
-      await startBackend();
+      // Same guard as the cold-start path: never let a backend startup
+      // failure prevent the window from opening.
+      try {
+        await startBackend();
+      } catch (e) {
+        console.error('[main] backend restart on activate threw; opening the window anyway:', e);
+      }
       createWindow();
     }
   });

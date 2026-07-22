@@ -283,18 +283,34 @@ function spawnChild(binPath: string, port: number): void {
   // packaged app, so it can locate the bundled PotreeConverter binary at
   // <resourcesRoot>/potree_converter/<platform>/PotreeConverter.
   // PHYTOGRAPH_BACKEND_PORT tells backend_wrapper.py which port to bind.
-  child = spawn(binPath, [], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-    // Detach on POSIX so the child leads its own process group. The bundled
-    // backend is a PyInstaller --onedir bootloader that forks the real Python
-    // (uvicorn) server as a *grandchild*; killing only child.pid leaves that
-    // grandchild orphaned, holding the port and file handles. With a dedicated
-    // group we can `process.kill(-pid)` the whole tree in stopBackend(). Windows
-    // has no process groups here — we fall back to taskkill /T in stopBackend().
-    detached: process.platform !== 'win32',
-    env: { ...process.env, PHYTOGRAPH_RESOURCES: resourcesRoot(), PHYTOGRAPH_BACKEND_PORT: String(port) },
-  });
+  try {
+    child = spawn(binPath, [], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      // Detach on POSIX so the child leads its own process group. The bundled
+      // backend is a PyInstaller --onedir bootloader that forks the real Python
+      // (uvicorn) server as a *grandchild*; killing only child.pid leaves that
+      // grandchild orphaned, holding the port and file handles. With a dedicated
+      // group we can `process.kill(-pid)` the whole tree in stopBackend(). Windows
+      // has no process groups here — we fall back to taskkill /T in stopBackend().
+      detached: process.platform !== 'win32',
+      env: { ...process.env, PHYTOGRAPH_RESOURCES: resourcesRoot(), PHYTOGRAPH_BACKEND_PORT: String(port) },
+    });
+  } catch (err) {
+    // spawn() can THROW synchronously instead of emitting an async 'error' —
+    // seen in the field as `Error: spawn Unknown system error -86` (EBADARCH)
+    // when the v0.50.0 x64 dmg shipped an arm64 backend and an Intel Mac tried
+    // to exec it. Without this catch the throw rejected startBackend(), and
+    // main.ts's `await backendStarting` then died as an unhandled rejection
+    // BEFORE createWindow() — the app sat in the Dock with no window and no
+    // dialog. Route it into the normal crash-recovery path instead: the
+    // retries fail the same way in milliseconds, the budget exhausts, and the
+    // user gets the window plus the backend-failed dialog.
+    console.error('[Backend] spawn threw synchronously:', err);
+    child = null;
+    if (!intentionalStop) handleUnexpectedExit(binPath, port, null, null);
+    return;
+  }
 
   console.log(`Backend started with PID: ${child.pid}`);
   // Python's `logging` writes to stderr by default, so most lines here
@@ -313,14 +329,16 @@ function spawnChild(binPath: string, port: number): void {
     process.stderr.write(`[Backend stderr]: ${buf}`);
     errTee(buf);
   });
-  // Without this, spawn failures (EACCES, missing dyld, etc.) become uncaught
-  // 'error' events on the ChildProcess and disappear silently.
-  child.on('error', (err) => {
-    console.error('[Backend] spawn failed:', err);
-    child = null;
-  });
-  child.on('exit', (code, signal) => {
-    console.log(`Backend exited (code=${code}, signal=${signal})`);
+  // One recovery per child, whichever of 'error'/'exit' fires first. An async
+  // spawn failure (EACCES, missing dyld) emits 'error' and may never emit
+  // 'exit' — it must reach handleUnexpectedExit too, or the app strands with
+  // no respawn, no 'failed' status, and no dialog (it previously only logged).
+  // And when a failure emits BOTH events, recovery must not run twice — that
+  // would double-count the restart budget and stack respawn timers.
+  let settled = false;
+  const recoverOnce = (code: number | null, signal: NodeJS.Signals | null): void => {
+    if (settled) return;
+    settled = true;
     child = null;
     // This backend is gone, so any pending "it's been stable long enough" reset
     // must not fire against the next one — a churn where each respawn dies just
@@ -330,6 +348,14 @@ function spawnChild(binPath: string, port: number): void {
       healthyResetTimer = null;
     }
     if (!intentionalStop) handleUnexpectedExit(binPath, port, code, signal);
+  };
+  child.on('error', (err) => {
+    console.error('[Backend] spawn failed:', err);
+    recoverOnce(null, null);
+  });
+  child.on('exit', (code, signal) => {
+    console.log(`Backend exited (code=${code}, signal=${signal})`);
+    recoverOnce(code, signal);
   });
 }
 
