@@ -61,22 +61,27 @@ describe('buildIssueBody', () => {
 });
 
 describe('buildGithubUrl', () => {
-  it('builds a new-issue URL with title, body, labels and template params', () => {
+  it('builds a new-issue URL with title, body and labels params', () => {
     const body = buildIssueBody('bug', 'desc', DIAG);
     const url = buildGithubUrl('bug', 'Crash on import', body);
     expect(url.startsWith(`${REPO_URL}/issues/new?`)).toBe(true);
     const params = new URL(url).searchParams;
     expect(params.get('title')).toBe('Crash on import');
     expect(params.get('labels')).toBe('bug');
-    expect(params.get('template')).toBe('bug.yml');
+    // The description must survive to the GitHub path. It only does when we
+    // pass `body` WITHOUT `template=`: an Issue Form (.yml) template ignores
+    // the free-form body param, which silently dropped the description.
+    expect(params.get('template')).toBeNull();
+    expect(params.get('body')).toContain('desc');
     expect(params.get('body')).toContain('- OS: darwin');
   });
 
-  it('uses enhancement label and feature template for feature mode', () => {
+  it('uses the enhancement label for feature mode and still omits template', () => {
     const url = buildGithubUrl('feature', 'Dark mode', 'body');
     const params = new URL(url).searchParams;
     expect(params.get('labels')).toBe('enhancement');
-    expect(params.get('template')).toBe('feature.yml');
+    expect(params.get('template')).toBeNull();
+    expect(params.get('body')).toBe('body');
   });
 
   it('trims the title', () => {

@@ -61,15 +61,18 @@ export function buildIssueBody(
 }
 
 /**
- * Pre-filled GitHub new-issue URL. `template`/`labels` map to the Issue Forms
- * in .github/ISSUE_TEMPLATE/ so the report lands structured and pre-labelled.
+ * Pre-filled GitHub new-issue URL. We deliberately do NOT pass `template=`:
+ * GitHub's Issue Forms (`.yml` templates) render their structured fields and
+ * IGNORE the free-form `body` query param, which silently dropped the user's
+ * description. Passing `body` (and no template) opens the plain new-issue page
+ * pre-filled with the same description + environment block used for email. The
+ * `labels` param still applies our label (it already exists in the repo).
  */
 export function buildGithubUrl(mode: FeedbackMode, title: string, body: string): string {
   const params = new URLSearchParams({
     title: title.trim(),
     body,
     labels: mode === 'bug' ? 'bug' : 'enhancement',
-    template: mode === 'bug' ? 'bug.yml' : 'feature.yml',
   });
   return `${REPO_URL}/issues/new?${params.toString()}`;
 }

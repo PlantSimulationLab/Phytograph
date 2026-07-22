@@ -16,7 +16,8 @@ import { stubSaveDialog } from './helpers/stubSaveDialog';
 //
 // Capturing the handoff URL and decoding its params is the real output under
 // test: it proves the typed text and the auto-attached environment block reach
-// GitHub/email with the right labels and template.
+// GitHub/email with the right label (and, for GitHub, that the description is
+// carried in `body` — not lost to an Issue Form template).
 
 // Replace the `shell:openExternal` IPC handler so it records URLs instead of
 // launching a browser/mail client. Same approach as stubOpenDialog.ts.
@@ -76,7 +77,11 @@ test('feedback: bug report hands off to a pre-filled GitHub issue URL', async ()
     const params = new URL(url).searchParams;
     expect(params.get('title')).toBe('Crash when importing sphere.xml');
     expect(params.get('labels')).toBe('bug');
-    expect(params.get('template')).toBe('bug.yml');
+    // No `template=`: an Issue Form (.yml) template makes GitHub ignore the
+    // free-form `body` param, which silently dropped the user's description on
+    // the GitHub path. The description must actually reach GitHub (asserted
+    // below), so we pre-fill via `body` without a template.
+    expect(params.get('template')).toBeNull();
 
     const body = params.get('body') ?? '';
     expect(body).toContain('The viewer freezes right after the import wizard closes.');
