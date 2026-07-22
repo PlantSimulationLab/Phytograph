@@ -68,5 +68,5 @@ Phytograph is developed at the
 <a href="https://baileylab.ucdavis.edu/">Bailey Lab</a> at UC Davis as the
 desktop interface to the <a href="https://baileylab.ucdavis.edu/software/helios/">Helios</a>
 plant-modeling framework. Source code at
-<a href="https://github.com/PlantSimulationLab/phytograph">github.com/PlantSimulationLab/phytograph</a>.
+<a href="https://github.com/PlantSimulationLab/Phytograph">github.com/PlantSimulationLab/Phytograph</a>.
 </p>

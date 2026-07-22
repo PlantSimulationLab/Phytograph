@@ -4,7 +4,7 @@ A desktop application for measuring, comparing, and modeling plant
 architecture from LiDAR scans — built for plant scientists who work with
 point clouds, meshes, and procedural plant models.
 
-📖 **Full documentation & user guide**: <https://plantsimulationlab.github.io/phytograph/>
+📖 **Full documentation & user guide**: <https://plantsimulationlab.github.io/Phytograph/>
 
 Phytograph runs on **macOS** (Apple Silicon and Intel), **Windows 10/11**,
 and **Linux** (x64). It ships as a single self-contained app with its own
@@ -37,12 +37,13 @@ The first launch takes about 30 seconds while the bundled Python environment
 unpacks itself; subsequent launches are instant.
 
 Full step-by-step install instructions (including first-launch notes for each
-OS) are in the **[Install guide](https://plantsimulationlab.github.io/phytograph/guide/install/)**.
+OS) are in the **[Install guide](https://plantsimulationlab.github.io/Phytograph/guide/install/)**.
 
 ### Updates
 
 Phytograph checks for updates on launch and can also be updated on demand via
-**Help → Check for Updates…**. When a newer release is available it downloads
+**Check for Updates…** — in the **Phytograph** app menu on macOS, or under
+**Help** on Windows and Linux. When a newer release is available it downloads
 and installs in place — no need to return here to re-download.
 
 ---
@@ -60,6 +61,10 @@ and installs in place — no need to return here to re-download.
   radii, segment continuous shoots, and classify them by shoot rank, with woody
   volume, trunk diameter, and per-rank metrics.
 - **Segment** ground, leaf/wood, and individual trees.
+- **Generate terrain surfaces** — rasterize a DEM/DTM (bare earth), DSM
+  (top-of-canopy), and CHM (canopy height model) from a point cloud.
+- **Measure leaf angle distribution** — plot the area-weighted leaf inclination
+  and azimuth of a reconstructed canopy, with canonical de Wit distribution fits.
 - **Estimate leaf area density** from single- or multi-return scans.
 - **Generate procedural plants** — grow Helios plant models (trees, vines,
   cereals, vegetables) to a target age, then morph their parameters interactively.
@@ -68,8 +73,8 @@ and installs in place — no need to return here to re-download.
 - **Simulate a scan** — place virtual scanners (static or moving-platform) around
   a plant and synthesize the point cloud they would produce.
 
-See the **[User Guide](https://plantsimulationlab.github.io/phytograph/guide/)**
-and **[Workflows](https://plantsimulationlab.github.io/phytograph/workflows/)**
+See the **[User Guide](https://plantsimulationlab.github.io/Phytograph/guide/)**
+and **[Workflows](https://plantsimulationlab.github.io/Phytograph/workflows/)**
 for task-by-task walkthroughs.
 
 ---
@@ -78,9 +83,9 @@ for task-by-task walkthroughs.
 
 The instructions above are for **using** Phytograph. If you want to build it
 from source, run a development instance, or contribute, see the
-**[Developer documentation](https://plantsimulationlab.github.io/phytograph/developers/)**,
-which covers the [setup and dev loop](https://plantsimulationlab.github.io/phytograph/developers/getting-started/installation/),
-the [architecture](https://plantsimulationlab.github.io/phytograph/developers/architecture/),
+**[Developer documentation](https://plantsimulationlab.github.io/Phytograph/developers/)**,
+which covers the [setup and dev loop](https://plantsimulationlab.github.io/Phytograph/developers/getting-started/installation/),
+the [architecture](https://plantsimulationlab.github.io/Phytograph/developers/architecture/),
 and the release process.
 
 ---

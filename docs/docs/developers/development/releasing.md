@@ -1,25 +1,36 @@
 # Releasing
 
 Tag a version and push; the workflow at `.github/workflows/release.yml`
-builds the backend and packages the app on three runners in parallel —
-macOS (signed + notarized), Windows, and Linux — and uploads every
-artifact to a single **draft** GitHub Release.
+builds the backend and packages the app on four runners in parallel —
+macOS Apple Silicon and macOS Intel (both signed + notarized), Windows,
+and Linux — and uploads every artifact to a single GitHub Release.
 
 ```bash
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
+The two macOS runners exist because the Python backend (PyInstaller +
+libhelios) must be compiled **natively on each architecture** — an
+arm64-built backend inside an x64 app is dead on arrival on Intel Macs.
+Each macOS job packages only its own architecture, and a final
+`merge-latest-mac` job merges the two `latest-mac.yml` auto-updater
+manifests so in-app updates work on both. The Intel job runs on
+`macos-15-intel`, GitHub's last x86_64 image — it retires in August
+2027, at which point Intel macOS builds end.
+
 ## Publishing and download links
 
-The workflow leaves the release as a **draft**. Review it (all five
-artifacts attached: two macOS `.dmg`, one Windows `.exe`, one Linux
-`.AppImage`, one `.deb`), then click **Publish**.
+The release is **published directly** (not left as a draft):
+`build.publish.releaseType` in `package.json` is `release`, which is
+required for the in-app "Check for Updates" (electron-updater) to detect
+it. Expect these artifacts: two macOS `.dmg` + `.zip` pairs (arm64 and
+x64), one Windows `.exe`, one Linux `.AppImage`, plus updater metadata
+(`latest*.yml`, `.blockmap`).
 
 Publishing flags the release "Latest" — which is what makes
 `https://github.com/PlantSimulationLab/Phytograph/releases/latest` (the
-link the lab website points at) resolve to it. Drafts are never "Latest",
-so the download links don't move until you publish.
+link the lab website points at) resolve to it.
 
 ## Required GitHub Secrets
 

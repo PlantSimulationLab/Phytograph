@@ -39,8 +39,8 @@ Windows with no extra packages; on Linux you'd also need `libgl1-mesa-dev`,
 
 ```bash
 # 1. Clone the repo (recursively, to pull the PyHelios + helios-core submodules)
-git clone --recursive https://github.com/PlantSimulationLab/phytograph.git
-cd phytograph
+git clone --recursive https://github.com/PlantSimulationLab/Phytograph.git
+cd Phytograph
 # (already cloned non-recursively? run: git submodule update --init --recursive)
 
 # 2. Python backend — create venv and install deps

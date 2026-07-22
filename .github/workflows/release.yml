@@ -24,6 +24,19 @@ jobs:
           - platform: macos-14
             arch: arm64
             backend_name: phytograph_backend
+          # Intel macOS. This job exists because the PyInstaller backend (and
+          # libhelios) must be compiled NATIVELY per architecture: v0.50.0
+          # packaged both mac dmgs from the single arm64 runner, which put an
+          # arm64 backend inside the x64 dmg — dead on arrival on Intel Macs
+          # (arm64 binaries can't run there at all). Each macOS job now builds
+          # its own backend and packages ONLY its own arch (see the --arch
+          # flags on "Build & publish app"). `macos-15-intel` is GitHub's last
+          # x86_64 image and is scheduled to retire in August 2027, after which
+          # Intel macs can no longer be supported on hosted runners — drop this
+          # entry (and the x64 rows in docs/docs/guide/install.md) then.
+          - platform: macos-15-intel
+            arch: x64
+            backend_name: phytograph_backend
           # Pinned to windows-2022 (not windows-latest): PyHelios's CMake build
           # detects the "Visual Studio 17 2022" generator, but windows-latest
           # now ships VS 18, so the generator can't find a matching install and
@@ -117,6 +130,19 @@ jobs:
           # that should force a fresh backend) invalidates pre-GPU CPU-only
           # caches so the next build actually recompiles with CUDA.
           key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}-cuda
+
+      # Intel macOS: several backend deps publish NO macOS x86_64 wheels —
+      # cut_pursuit_py and pye57 never have, and cloth-simulation-filter's
+      # last x86_64 wheel is 1.1.5 (< our >=1.1.7 pin) — so on this runner pip
+      # falls back to building their sdists. Install the native build deps
+      # those sdists need: xerces-c (pye57 links it for libE57Format's XML
+      # layer) and swig (cloth-simulation-filter regenerates its wrapper).
+      # cmake + clang for cut_pursuit_py's pybind11/CMake build are already on
+      # the image. The arm64 runner gets prebuilt wheels for all three and
+      # needs none of this.
+      - name: Install sdist build deps (macOS Intel)
+        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true'
+        run: brew install xerces-c swig
 
       - name: Install Python dependencies
         if: steps.backend-cache.outputs.cache-hit != 'true'
@@ -563,7 +589,30 @@ jobs:
           # makes it COPY the icon instead, sidestepping the double-link. Harmless
           # on Windows/Linux (they weren't hard-link-failing).
           USE_HARD_LINKS: 'false'
-        run: npm run release
+        # macOS: pin electron-builder to THIS job's architecture. package.json
+        # deliberately lists no arch for the mac targets (defaulting to the host
+        # arch), and the explicit flag makes it impossible for the arm64 job to
+        # cross-package an x64 dmg again — cross-packaging is exactly what
+        # shipped an arm64 backend inside the x64 dmg in v0.50.0 (extraResources
+        # copies resources/phytograph_backend verbatim; it is not arch-aware).
+        run: npm run release ${{ startsWith(matrix.platform, 'macos') && format('-- --mac --{0}', matrix.arch) || '' }}
+
+      # Each macOS job's electron-builder publish writes a `latest-mac.yml`
+      # updater manifest listing ONLY that job's arch files, and both jobs
+      # upload it to the SAME release asset name — so whichever job finishes
+      # last clobbers the other's, and electron-updater on the losing arch can
+      # no longer find its files. Stash each job's manifest as a workflow
+      # artifact; the merge-latest-mac job below combines them and re-uploads
+      # the union. (Placed before the smoke tests on purpose: the release
+      # assets are already uploaded by this point, so the merge must happen
+      # even if a later step in this job fails.)
+      - name: Stash latest-mac.yml for merge (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-mac-${{ matrix.arch }}
+          path: release/latest-mac.yml
+          if-no-files-found: error
 
       # ---------------- Smoke-test the PACKAGED app ----------------
       # The steps above verify the backend BINARY boots and the .app is
@@ -665,3 +714,67 @@ jobs:
           done
 
           echo "PASS: macOS build is signed and notarized; the .app is stapled."
+
+  # ---------------- Merge the two macOS updater manifests ----------------
+  # The arm64 and x64 macOS jobs each published a latest-mac.yml naming only
+  # their own arch's dmg/zip; the release ends up holding whichever uploaded
+  # last, which breaks electron-updater ("Check for Updates…") for the other
+  # architecture. This job unions the `files` lists from both stashed
+  # manifests and re-uploads the merged latest-mac.yml to the release.
+  #
+  # `if: always()` + the guard below: if only ONE mac job succeeded, its own
+  # manifest is already on the release and is correct for the only mac
+  # artifacts that exist — nothing to merge, exit cleanly. Never fail the
+  # release for a missing half.
+  merge-latest-mac:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download stashed manifests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: latest-mac-*
+          path: manifests
+
+      - name: Merge and upload latest-mac.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          arm64=manifests/latest-mac-arm64/latest-mac.yml
+          x64=manifests/latest-mac-x64/latest-mac.yml
+          if [ ! -f "$arm64" ] || [ ! -f "$x64" ]; then
+            echo "Fewer than two macOS manifests present — nothing to merge."
+            ls -laR manifests || true
+            exit 0
+          fi
+
+          pip install --quiet pyyaml
+          # arm64 first: its zip stays the top-level `path`/`sha512` legacy
+          # fallback; modern electron-updater picks per-arch from `files`.
+          python3 - "$arm64" "$x64" <<'EOF'
+          import sys, yaml
+          a = yaml.safe_load(open(sys.argv[1]))
+          b = yaml.safe_load(open(sys.argv[2]))
+          if a["version"] != b["version"]:
+              sys.exit(f"FAIL: manifest version mismatch: {a['version']} != {b['version']}")
+          merged = dict(a)
+          seen = {f["url"] for f in a["files"]}
+          merged["files"] = a["files"] + [f for f in b["files"] if f["url"] not in seen]
+          with open("latest-mac.yml", "w") as out:
+              yaml.safe_dump(merged, out, sort_keys=False)
+          EOF
+
+          echo "== merged latest-mac.yml =="
+          cat latest-mac.yml
+
+          # Works for both triggers: the tag push uses v<version>, and a
+          # workflow_dispatch publish creates the release under the same tag
+          # (electron-builder derives it from package.json's version).
+          tag="v$(node -p "require('./package.json').version")"
+          echo "Uploading to release $tag"
+          gh release upload "$tag" latest-mac.yml --clobber

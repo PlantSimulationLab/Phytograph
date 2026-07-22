@@ -1,8 +1,8 @@
 site_name: Phytograph
 site_description: A desktop application for working with LiDAR point clouds, plant meshes, skeletons, and procedural plant models.
-site_url: https://plantsimulationlab.github.io/phytograph/
-repo_url: https://github.com/PlantSimulationLab/phytograph
-repo_name: PlantSimulationLab/phytograph
+site_url: https://plantsimulationlab.github.io/Phytograph/
+repo_url: https://github.com/PlantSimulationLab/Phytograph
+repo_name: PlantSimulationLab/Phytograph
 edit_uri: edit/main/docs/docs/
 
 docs_dir: docs

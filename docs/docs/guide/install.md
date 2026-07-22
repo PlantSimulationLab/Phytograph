@@ -6,7 +6,7 @@ Linux (x64).
 ## Download
 
 Get the latest installer from the
-[GitHub Releases page](https://github.com/PlantSimulationLab/phytograph/releases/latest).
+[GitHub Releases page](https://github.com/PlantSimulationLab/Phytograph/releases/latest).
 
 | Platform | File |
 |---|---|
