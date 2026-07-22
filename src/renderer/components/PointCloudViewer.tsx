@@ -5,7 +5,7 @@ import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionSplit, sessionExtract, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -1700,13 +1700,23 @@ export default function PointCloudViewer({
   // Track previous cloud IDs to detect new additions
   const prevCloudIdsRef = useRef<Set<string>>(new Set());
 
+  // Cloud IDs that should NOT reframe the camera when they appear (e.g. the
+  // per-tree child clouds from a "split into one cloud per tree" — dozens of
+  // them arriving at once would jump the viewport around for each). The split
+  // loop adds ids here BEFORE calling onAddCloud; the frame effect below skips
+  // them (but still records them in prevCloudIdsRef so they never frame later).
+  const suppressFrameCloudIdsRef = useRef<Set<string>>(new Set());
+
   // Snap to isometric view when a new cloud is added
   useEffect(() => {
     const currentIds = new Set(clouds.map(c => c.id));
     const prevIds = prevCloudIdsRef.current;
 
-    // Find newly added clouds
-    const newCloudIds = [...currentIds].filter(id => !prevIds.has(id));
+    // Find newly added clouds, excluding any explicitly flagged to not reframe.
+    const suppress = suppressFrameCloudIdsRef.current;
+    const newCloudIds = [...currentIds].filter(id => !prevIds.has(id) && !suppress.has(id));
+    // Once observed, drop suppressed ids from the set (they're now in prevIds).
+    for (const id of currentIds) suppress.delete(id);
 
     if (newCloudIds.length > 0) {
       // Frame *all* newly added clouds, not just the first — importing several
@@ -7608,19 +7618,51 @@ export default function PointCloudViewer({
           throw new Error('Octree cloud is missing its editable session.');
         }
         const baseName = cloud.data.fileName ?? id;
-        const meta = await sessionSegmentTrees(octreeInfo.sessionId, {
+        const sessionId = octreeInfo.sessionId;
+        const meta = await sessionSegmentTrees(sessionId, {
           ...tiParams,
           ...(seeds ? { seed_points: seeds } : {}),
         }, abort.signal);
+        // The parent keeps ALL points, coloured by tree_instance.
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
         setColorMode('scalar');
         setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
         setShowTreeSegmentPanel(false);
         setTreeSeedMode(false);
+
+        // Optional split: fan `tree_instance` out into one child session per tree
+        // in a SINGLE backend call (parent untouched). The server slices every
+        // subset under one lock and builds their octrees concurrently, so ~100
+        // trees don't cost ~100 serial octree builds. Ground/miss points stay
+        // tree id 0 and are excluded by default.
+        const numTrees = meta.num_trees ?? 0;
+        let splitCount = 0;
+        if (treeSplitClouds && onAddCloud && numTrees > 0) {
+          const { children } = await sessionExtractByColumn(sessionId, 'tree_instance', {
+            signal: abort.signal,
+          });
+          splitCount = children.length;
+          // Don't reframe the camera for any of these — dozens of child clouds
+          // arriving would jump the viewport around once per add. Flag them all
+          // BEFORE adding so the frame-on-add effect skips them.
+          const childEntries = children.map((c) => ({
+            id: crypto.randomUUID(),
+            data: buildSessionOctreeData(
+              c, octreeInfo, `${baseName} (tree ${c.value})`, c.session_id,
+            ),
+            visible: true,
+            color: '#4caf50',
+          }));
+          for (const e of childEntries) suppressFrameCloudIdsRef.current.add(e.id);
+          for (const e of childEntries) onAddCloud(e);
+        }
+
         showToast({
           type: 'success',
           title: 'Tree Segmentation Complete',
-          message: `Segmented ${meta.point_count.toLocaleString()} points into individual trees.`,
+          message: treeSplitClouds && splitCount > 0
+            ? `Segmented ${meta.point_count.toLocaleString()} points into ${splitCount} tree cloud${splitCount === 1 ? '' : 's'}.`
+            : `Segmented ${meta.point_count.toLocaleString()} points into individual trees.`,
         });
         return;
       }

@@ -3211,6 +3211,9 @@ export interface CloudSessionBakeResult extends OctreeMetadata {
   // Non-fatal advisories from the operation (e.g. wood/leaf connectivity warning
   // that the base looks like un-removed ground). Surfaced as a warning toast.
   warnings?: string[];
+  // Tree segmentation only: number of distinct trees found (max tree id; 0 =
+  // ground/miss). Drives the "split into one cloud per tree" fan-out.
+  num_trees?: number;
 }
 
 /**
@@ -3463,6 +3466,52 @@ export async function sessionExtract(
     clearTimeout(timeoutId);
     console.error('session_extract failed:', error);
     throw error;
+  }
+}
+
+/** Metadata for one child session produced by {@link sessionExtractByColumn}. */
+export type SessionExtractChild = OctreeMetadata & {
+  value: number;         // the distinct column value this child was sliced for (e.g. tree id)
+  session_id: string;
+  point_count: number;
+  cache_id: string;
+};
+
+/** Split a categorical column into ONE child session per distinct value (parent
+ * untouched) in a SINGLE backend call — the server slices every subset under one
+ * lock and builds their octrees concurrently. This is the batch form of
+ * {@link sessionExtract}: for a per-tree split of ~100 trees it replaces ~100
+ * serial round-trips (one octree build each) with one call whose builds run in
+ * parallel. `excludeValues` defaults to [0] (ground/miss/unassigned). */
+export async function sessionExtractByColumn(
+  sessionId: string,
+  slug: string,
+  options?: { excludeValues?: number[]; signal?: AbortSignal },
+): Promise<{ session_id: string; children: SessionExtractChild[] }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 600000);
+  const onAbort = () => controller.abort();
+  options?.signal?.addEventListener('abort', onAbort);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/extract_by_column`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug, exclude_values: options?.excludeValues ?? null }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('session_extract_by_column failed:', error);
+    throw error;
+  } finally {
+    options?.signal?.removeEventListener('abort', onAbort);
   }
 }
 

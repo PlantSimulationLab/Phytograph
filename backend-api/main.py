@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.50.0"
+BACKEND_VERSION = "0.51.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -20412,6 +20412,75 @@ async def session_extract(session_id: str, request: SessionExtractRequest):
     }
 
 
+class SessionExtractByColumnRequest(BaseModel):
+    """Split a session into ONE child session per distinct integer value of a
+    categorical column (e.g. `tree_instance` → one cloud per tree), leaving the
+    parent UNCHANGED. Operates on the in-RAM arrays — no source file read. This
+    is the batch form of `extract`: instead of the renderer looping N HTTP calls
+    (one full octree build each, serial), the server slices all subsets under a
+    single lock and builds their octrees CONCURRENTLY."""
+    slug: str
+    exclude_values: Optional[List[int]] = None  # ids to skip (default: [0] = ground/miss/unassigned)
+
+
+# Concurrency cap for the batch octree builds. PotreeConverter is itself
+# multithreaded and the per-build cost is dominated by process spin-up for the
+# small per-tree clouds, so a modest pool wins big without oversubscribing.
+_EXTRACT_BUILD_POOL = min(8, max(2, (_os.cpu_count() or 4)))
+
+
+@app.post("/api/cloud/session/{session_id}/extract_by_column")
+async def session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest):
+    """Fan a categorical column out into one child session per distinct value
+    (parent untouched). Returns {session_id, children: [{value, ...octree}]}
+    ordered by value. Empty selections are skipped. No source file read.
+
+    All subsets are sliced up front under a single `_cloud_session_lock`
+    acquisition (cheap NumPy fancy-indexing); the expensive per-child octree
+    builds then run CONCURRENTLY in a bounded thread pool. Distinct values hash
+    to distinct octree cache keys, so `_octree_build_lock` never serializes them
+    and the global session lock is already released before PotreeConverter runs
+    (see `_session_rebuild`)."""
+    import asyncio
+    sess = _get_cloud_session(session_id)
+
+    # Slice every subset under ONE lock: read the column on survivors, enumerate
+    # the distinct values, and register a child session per value. No octree yet.
+    exclude = set(int(v) for v in (request.exclude_values if request.exclude_values is not None else [0]))
+    with _cloud_session_lock:
+        if request.slug not in sess.extras:
+            raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {request.slug!r}.")
+        surv = ~sess.deleted
+        col = np.rint(sess.extras[request.slug][surv]).astype(np.int64)
+        values = [int(v) for v in np.unique(col) if int(v) not in exclude]
+        # value -> registered (but not-yet-built) child session
+        children: list[tuple[int, "CloudSession"]] = []
+        for v in values:
+            keep = col == v
+            if not bool(keep.any()):
+                continue
+            children.append((v, _session_subset_locked(sess, keep)))
+
+    if not children:
+        return {"session_id": session_id, "children": []}
+
+    # Build the child octrees concurrently (each release the lock before its slow
+    # PotreeConverter run, so the pool actually parallelizes).
+    loop = asyncio.get_event_loop()
+    sem = asyncio.Semaphore(_EXTRACT_BUILD_POOL)
+
+    async def _build(value: int, child: "CloudSession"):
+        async with sem:
+            ck, ccd, cmeta = await loop.run_in_executor(None, _session_rebuild, child)
+        return {"value": value, "session_id": child.session_id,
+                "point_count": int(len(child.positions)), "cache_id": ck,
+                "cache_dir": str(ccd), **cmeta}
+
+    built = await asyncio.gather(*[_build(v, c) for v, c in children])
+    built.sort(key=lambda r: r["value"])
+    return {"session_id": session_id, "children": built}
+
+
 @app.post("/api/cloud/session/{session_id}/duplicate")
 async def session_duplicate(session_id: str):
     """Copy a session's SURVIVING points into a NEW independent session (parent
@@ -20832,7 +20901,11 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     with _cloud_session_lock:
         _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
     cache_key, cache_dir, meta = _session_rebuild(sess)
-    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+    # Number of distinct trees (max tree id; ground/misses are 0). The renderer
+    # uses this to iterate ids 1..num_trees when "split into one cloud per tree"
+    # is enabled, extracting each into its own child session.
+    num_trees = int(labels.max()) if labels.size else 0
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "num_trees": num_trees, **meta}
 
 
 class SessionFilterRequest(BaseModel):

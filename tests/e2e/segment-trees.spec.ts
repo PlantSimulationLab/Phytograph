@@ -55,3 +55,58 @@ test('segments individual trees and colours by the tree_instance attribute', asy
     await close();
   }
 });
+
+test('"split into one cloud per tree" adds a separate cloud per detected tree', async () => {
+  const { app, page, close } = await launchApp();
+
+  try {
+    await importFiles(app, page, 'import-point-cloud', FIXTURE);
+    await completeImportWizard(page);
+
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]');
+    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+
+    await page.getByTestId('tool-tree-segment').click();
+    await expect(page.getByTestId('tree-segment-panel')).toBeVisible();
+
+    // Enable the split option BEFORE running. This is the regression under test:
+    // the octree-backed (session) path used to ignore this flag entirely, so the
+    // scan list ended up with only the recoloured parent — no child clouds.
+    await page.getByTestId('tree-split-clouds').check();
+    await expect(page.getByTestId('tree-split-clouds')).toBeChecked();
+
+    await page.getByTestId('tree-segment-run-button').click();
+
+    // The parent is still recoloured by tree_instance …
+    const overlay = page.getByTestId('scalar-overlay');
+    await expect(overlay).toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 120_000 });
+
+    // … AND one "… (tree N)" child cloud is added per detected tree. The split
+    // fans out a `sessionExtract` per tree id, so the children arrive after the
+    // parent recolour — wait for at least one to appear.
+    const childRows = page.locator('[data-testid="scan-row"][data-scan-name*="(tree "]');
+    await expect(async () => {
+      expect(await childRows.count()).toBeGreaterThan(0);
+    }).toPass({ timeout: 120_000 });
+
+    // Each child is a real, non-empty cloud (proof the extract selected points,
+    // not an empty recolour of the parent), and each holds strictly fewer points
+    // than the parent (a per-tree subset, not a copy of the whole cloud).
+    const childCount = await childRows.count();
+    for (let i = 0; i < childCount; i++) {
+      const pts = parseInt((await childRows.nth(i).getAttribute('data-point-count')) ?? '0', 10);
+      expect(pts).toBeGreaterThan(0);
+      expect(pts).toBeLessThan(EXPECTED_POINTS);
+    }
+    // The per-tree subsets partition the plant points, so their sum cannot exceed
+    // the parent's total (ground/miss points at tree id 0 are never extracted).
+    let sum = 0;
+    for (let i = 0; i < childCount; i++) {
+      sum += parseInt((await childRows.nth(i).getAttribute('data-point-count')) ?? '0', 10);
+    }
+    expect(sum).toBeLessThanOrEqual(EXPECTED_POINTS);
+  } finally {
+    await close();
+  }
+});
