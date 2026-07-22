@@ -32,6 +32,11 @@ def _configure_logging():
     the OS temp dir for standalone `python backend_wrapper.py` runs. This is the
     durable, full-fidelity backend log that gets concatenated into a bug report's
     attachment even if a streamed line was missed by the tee.
+
+    When the supervisor passes PHYTOGRAPH_LOG_SESSION, the file is named
+    phytograph-backend-<session>.log so it pairs with this launch's
+    main-<session>.log (one main + one backend file per session). Without it
+    (standalone launch), the legacy phytograph-backend.log name is used.
     """
     log_dir = os.environ.get("PHYTOGRAPH_LOG_DIR") or os.path.join(
         tempfile.gettempdir(), "phytograph-logs"
@@ -40,6 +45,9 @@ def _configure_logging():
         os.makedirs(log_dir, exist_ok=True)
     except OSError:
         log_dir = tempfile.gettempdir()
+
+    session = os.environ.get("PHYTOGRAPH_LOG_SESSION")
+    log_name = f"phytograph-backend-{session}.log" if session else "phytograph-backend.log"
 
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"
@@ -58,7 +66,7 @@ def _configure_logging():
 
     try:
         file_handler = RotatingFileHandler(
-            os.path.join(log_dir, "phytograph-backend.log"),
+            os.path.join(log_dir, log_name),
             maxBytes=5 * 1024 * 1024,
             backupCount=2,
             encoding="utf-8",

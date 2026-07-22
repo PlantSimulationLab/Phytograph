@@ -22,12 +22,30 @@ import electronLog from 'electron-log/main.js';
 import { app } from 'electron';
 import { dirname, join } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { isBrokenPipe, pipeErrCode } from './brokenPipe.js';
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'verbose' | 'debug';
 
 let initialized = false;
+
+// A per-launch tag (sortable timestamp + pid) that names THIS session's log
+// files. Timestamp so files sort chronologically and are human-scannable; pid so
+// two instances launched in the same second (or an E2E run spawning several
+// apps) never collide on one file. Computed once in initLogging() and reused for
+// both the electron-log main file and the Python sidecar's file (via env), so an
+// exported bug report pairs exactly one main + one backend file per session
+// instead of the old single ever-growing main.log.
+let sessionTag = '';
+
+// How many past sessions' log files to keep. Older ones are pruned on launch so
+// the logs dir stays bounded without the user managing it.
+const KEEP_SESSIONS = 10;
+
+/** The current session's log tag (e.g. 2026-07-22T14-32-08-123Z-pid59049). */
+export function getLogSessionTag(): string {
+  return sessionTag;
+}
 
 /**
  * Configure electron-log once. Idempotent — safe to call from multiple entry
@@ -37,7 +55,19 @@ export function initLogging(): void {
   if (initialized) return;
   initialized = true;
 
-  // File transport: rotate at 5 MB, archive the previous file alongside.
+  // Per-session file naming. Each launch writes its own main-<tag>.log instead of
+  // appending forever to one main.log (which grew to weeks of interleaved
+  // sessions and made bug reports unreadable). The tag is a filesystem-safe
+  // ISO timestamp + pid. resolvePathFn is electron-log 5.x's supported hook for
+  // this; getFile().path still returns whatever it yields, so getLogFilePath()
+  // and everything downstream keep working. Must be set before the first log
+  // write (initLogging runs at the very top of main.ts, before anything logs).
+  sessionTag = `${new Date().toISOString().replace(/[:.]/g, '-')}-pid${process.pid}`;
+  electronLog.transports.file.resolvePathFn = (vars) =>
+    join(vars.libraryDefaultDir, `main-${sessionTag}.log`);
+
+  // File transport: still rotate a single (very long) session at 5 MB into its
+  // own main-<tag>.old.log via electron-log's default archiveLogFn.
   electronLog.transports.file.level = 'info';
   electronLog.transports.file.maxSize = 5 * 1024 * 1024;
   electronLog.transports.file.format = '[{y}-{m}-{d} {h}:{i}:{s}.{ms}] [{level}]{scope} {text}';
@@ -116,6 +146,60 @@ export function initLogging(): void {
       return false;
     },
   });
+
+  // Prune old sessions' log files so the dir stays bounded. Runs after the
+  // transport path is resolved (so getLogDir() is valid) and never touches this
+  // session's own files. See pruneOldSessionLogs for why it's skipped under E2E.
+  pruneOldSessionLogs();
+}
+
+/**
+ * Delete all but the KEEP_SESSIONS newest session log groups (main-<tag>.log,
+ * its .old.log, and the Python phytograph-backend-<tag>.log). Grouped by tag so
+ * a session's main + backend files are kept or dropped together.
+ *
+ * SKIPPED under E2E: the Playwright suite launches many apps concurrently
+ * against the shared logs dir, and unlinking a file another live worker's
+ * backend still holds open (or that copySessionLogTo is mid-read on) could wedge
+ * teardown. Real user sessions are sequential, so pruning there is safe.
+ *
+ * Best-effort throughout — a readdir/stat/unlink failure (a locked file on
+ * Windows, a permissions quirk) must never break app startup.
+ */
+function pruneOldSessionLogs(): void {
+  if (process.env.PHYTOGRAPH_E2E === '1') return;
+  try {
+    const dir = getLogDir();
+    const current = sessionTag;
+    // Map each session tag → the files belonging to it, plus the newest mtime
+    // seen for that tag (used to rank which sessions to keep).
+    const groups = new Map<string, { files: string[]; mtime: number }>();
+    for (const name of readdirSync(dir)) {
+      const m =
+        /^main-(.+?)(?:\.old)?\.log$/.exec(name) ??
+        /^phytograph-backend-(.+?)(?:\.\d+)?\.log$/.exec(name);
+      if (!m) continue;
+      const tag = m[1];
+      if (tag === current) continue; // never prune the live session
+      const full = join(dir, name);
+      let mtime = 0;
+      try { mtime = statSync(full).mtimeMs; } catch { /* skip unstatable */ continue; }
+      const g = groups.get(tag) ?? { files: [], mtime: 0 };
+      g.files.push(full);
+      g.mtime = Math.max(g.mtime, mtime);
+      groups.set(tag, g);
+    }
+    const stale = [...groups.values()]
+      .sort((a, b) => b.mtime - a.mtime) // newest first
+      .slice(KEEP_SESSIONS);             // everything past the keep window
+    for (const g of stale) {
+      for (const f of g.files) {
+        try { unlinkSync(f); } catch { /* locked/gone — leave it */ }
+      }
+    }
+  } catch {
+    // Dir missing on first ever launch, or unreadable — nothing to prune.
+  }
 }
 
 /**
@@ -173,7 +257,13 @@ export function logFromRenderer(level: LogLevel, message: string): void {
  */
 export async function copySessionLogTo(destPath: string): Promise<void> {
   const mainPath = getLogFilePath();
-  const backendPath = join(getLogDir(), 'phytograph-backend.log');
+  // Prefer THIS session's Python log (matched to the main file by tag) so an
+  // export contains only the current run, not adjacent sessions. Fall back to
+  // the legacy single-file name for a standalone backend launch that never got a
+  // session tag; readOrNote() handles a missing file gracefully either way.
+  const backendPath = sessionTag
+    ? join(getLogDir(), `phytograph-backend-${sessionTag}.log`)
+    : join(getLogDir(), 'phytograph-backend.log');
 
   const sections: string[] = [];
 

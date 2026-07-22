@@ -35,6 +35,22 @@ function makeLineTee(emit: (line: string) => void): (buf: Buffer) => void {
 const BACKEND_BINARY_NAME = process.platform === 'win32' ? 'phytograph_backend.exe' : 'phytograph_backend';
 const BACKEND_DIR_NAME = 'phytograph_backend';
 
+/**
+ * Turn a child 'exit' (code, signal) into a human phrase for the supervisor log.
+ * Only the wording differs — recovery is identical — but the distinction matters:
+ * a graceful uvicorn shutdown (code 0) or an external kill (signal, no code) is
+ * NOT a crash, and logging every unexpected exit as "crashed" made clean/external
+ * shutdowns look like faults when diagnosing incidents. Exported for unit tests.
+ *   - code 0                 → "exited cleanly"        (not a crash)
+ *   - signal, code null      → "was terminated (…)"    (killed from outside)
+ *   - any other (non-zero)   → "crashed (code=…)"      (genuine fault)
+ */
+export function describeExit(code: number | null, signal: NodeJS.Signals | null): string {
+  if (code === 0) return 'exited cleanly';
+  if (signal != null && code == null) return `was terminated (signal=${signal})`;
+  return `crashed (code=${code})`;
+}
+
 let child: ChildProcess | null = null;
 
 // The port this app instance's backend lives on. Resolved once in
@@ -53,8 +69,17 @@ let resolvedPort: number | null = null;
 let intentionalStop = false;        // true while stopBackend() is tearing down
 let restartAttempts = 0;
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
+// A respawn that answers /version is "ready", but NOT yet proof of stability: a
+// backend that dies again seconds later (an external kill/respawn churn, a
+// native crash right after binding) would otherwise reset the restart budget on
+// every cycle and defeat MAX_RESTART_ATTEMPTS entirely — the give-up guard would
+// never trip. So we only zero restartAttempts after the respawn has stayed alive
+// for HEALTHY_RESET_MS; this timer is armed on a healthy respawn and cleared the
+// instant the child exits or we intentionally stop.
+let healthyResetTimer: ReturnType<typeof setTimeout> | null = null;
 const MAX_RESTART_ATTEMPTS = 3;
 const RESTART_BACKOFF_MS = [500, 2000, 5000];
+const HEALTHY_RESET_MS = 45_000;
 
 // How main reaches the renderer to push status. Set by setBackendWindowGetter()
 // from main.ts (same pattern as installApplicationMenu / setupAutoUpdater).
@@ -297,7 +322,14 @@ function spawnChild(binPath: string, port: number): void {
   child.on('exit', (code, signal) => {
     console.log(`Backend exited (code=${code}, signal=${signal})`);
     child = null;
-    if (!intentionalStop) handleUnexpectedExit(binPath, port);
+    // This backend is gone, so any pending "it's been stable long enough" reset
+    // must not fire against the next one — a churn where each respawn dies just
+    // before HEALTHY_RESET_MS would otherwise keep zeroing the budget.
+    if (healthyResetTimer) {
+      clearTimeout(healthyResetTimer);
+      healthyResetTimer = null;
+    }
+    if (!intentionalStop) handleUnexpectedExit(binPath, port, code, signal);
   });
 }
 
@@ -305,17 +337,29 @@ function spawnChild(binPath: string, port: number): void {
  * The sidecar died and we didn't ask it to. Respawn it on the same port with a
  * capped backoff; notify the renderer along the way so the user learns their
  * in-RAM sessions are gone and a re-import is needed.
+ *
+ * `code`/`signal` come from the child's 'exit' event and only shape the *log
+ * wording* — the recovery is identical either way. A `code === 0` (a graceful
+ * uvicorn shutdown) or a bare external signal is not a crash; calling it one in
+ * the logs made a clean shutdown look like a fault when diagnosing incidents.
  */
-function handleUnexpectedExit(binPath: string, port: number): void {
+function handleUnexpectedExit(
+  binPath: string,
+  port: number,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): void {
+  const how = describeExit(code, signal);
+
   if (restartAttempts >= MAX_RESTART_ATTEMPTS) {
-    console.error(`[Backend] crashed and exhausted ${MAX_RESTART_ATTEMPTS} restart attempts; giving up.`);
+    console.error(`[Backend] ${how} and exhausted ${MAX_RESTART_ATTEMPTS} restart attempts; giving up.`);
     emitBackendStatus({ status: 'failed', port });
     onBackendFailed();
     return;
   }
   const delay = RESTART_BACKOFF_MS[Math.min(restartAttempts, RESTART_BACKOFF_MS.length - 1)];
   restartAttempts += 1;
-  console.warn(`[Backend] crashed; respawning (attempt ${restartAttempts}/${MAX_RESTART_ATTEMPTS}) in ${delay}ms on port ${port}.`);
+  console.warn(`[Backend] ${how}; respawning to keep compute available (attempt ${restartAttempts}/${MAX_RESTART_ATTEMPTS}) in ${delay}ms on port ${port}.`);
   emitBackendStatus({ status: 'restarting', port });
   if (restartTimer) clearTimeout(restartTimer);
   restartTimer = setTimeout(() => {
@@ -331,13 +375,25 @@ function handleUnexpectedExit(binPath: string, port: number): void {
     // Confirm the respawn actually bound the port before declaring success, so
     // the renderer's `ready` toast is reliable. The bundled backend takes a
     // moment to import + bind, so poll /version a few times. If it never
-    // answers, the child's own 'exit' drives the next attempt; a success resets
-    // the attempt counter so later, unrelated crashes get a fresh budget.
+    // answers, the child's own 'exit' drives the next attempt.
     void confirmHealthy(port).then((v) => {
       if (v && !intentionalStop) {
-        restartAttempts = 0;
         console.log(`[Backend] respawned and healthy (v${v}) on port ${port}.`);
         emitBackendStatus({ status: 'ready', port });
+        // DON'T reset the restart budget yet. Answering /version once only proves
+        // the port is bound, not that the backend is stable — a churn where each
+        // respawn dies seconds later would reset the budget every cycle and loop
+        // forever. Only zero it after the respawn survives HEALTHY_RESET_MS; the
+        // exit handler clears this timer if the child dies first, so an unstable
+        // backend keeps counting toward the give-up guard.
+        if (healthyResetTimer) clearTimeout(healthyResetTimer);
+        healthyResetTimer = setTimeout(() => {
+          healthyResetTimer = null;
+          if (child !== null && !intentionalStop) {
+            restartAttempts = 0;
+            console.log(`[Backend] stable for ${HEALTHY_RESET_MS / 1000}s on port ${port}; restart budget reset.`);
+          }
+        }, HEALTHY_RESET_MS);
       }
     });
   }, delay);
@@ -407,6 +463,10 @@ export function stopBackend(): void {
   if (restartTimer) {
     clearTimeout(restartTimer);
     restartTimer = null;
+  }
+  if (healthyResetTimer) {
+    clearTimeout(healthyResetTimer);
+    healthyResetTimer = null;
   }
   const dying = child;
   if (!dying) return;

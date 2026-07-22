@@ -143,7 +143,7 @@ than a per-point Python loop). All are environment-overridable.
 
 ## Logging
 
-All three processes feed **one rotating session log file** owned by the main
+All three processes feed **one log file per app session** owned by the main
 process via [`electron-log`](https://github.com/megahertz/electron-log)
 (configured in `src/main/logger.ts`):
 
@@ -153,16 +153,24 @@ process via [`electron-log`](https://github.com/megahertz/electron-log)
 | Windows | `%APPDATA%\Phytograph\logs\` |
 | Linux | `~/.config/Phytograph/logs/` |
 
+Each launch writes to its own `main-<timestamp>-pid<n>.log` (via the file
+transport's `resolvePathFn`), so a bug report carries just that session instead
+of weeks of interleaved runs. On startup `initLogging()` prunes all but the 10
+newest sessions (skipped under E2E, where many app instances share the dir).
+A single very long session still rotates at 5 MB into `…​.old.log`.
+
 Each line is scope-tagged by origin:
 
 - **`[main]`** — main-process `console.*` (patched onto the file transport in
   `logger.ts`), plus an `uncaughtException`/`unhandledRejection` handler.
 - **`[backend]`** — the Python sidecar's stdout/stderr, teed line-by-line into
   the file by `backend.ts` (the passthrough to the terminal is kept too). The
-  backend **also** writes its own `phytograph-backend.log` in the same directory
-  (`backend_wrapper.py` adds a `RotatingFileHandler` at `PHYTOGRAPH_LOG_DIR`,
-  which `main.ts` sets to the log dir). `main.py` registers an
-  `@app.exception_handler` that logs unhandled 500s structurally.
+  backend **also** writes its own `phytograph-backend-<session>.log` in the same
+  directory (`backend_wrapper.py` adds a `RotatingFileHandler` at
+  `PHYTOGRAPH_LOG_DIR`, which `main.ts` sets to the log dir; the `<session>` tag
+  comes from `PHYTOGRAPH_LOG_SESSION`, matching the main file's tag so the pair
+  is exported together). `main.py` registers an `@app.exception_handler` that
+  logs unhandled 500s structurally.
 - **`[renderer]`** — `console.error`/`console.warn` and `ErrorBoundary` catches,
   forwarded over the `log:write` IPC channel (`src/renderer/lib/logger.ts`).
 - **`[updater]`** — auto-update events.

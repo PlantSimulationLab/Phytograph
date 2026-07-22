@@ -9,7 +9,7 @@ import { setupAutoUpdater } from './updater.js';
 import { IPC, type FileDropPayload } from '../shared/ipc.js';
 import { RENDERER_DEV_PORT, IMPORTABLE_EXTENSIONS } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
-import { initLogging, getLogDir, setFatalErrorHandler } from './logger.js';
+import { initLogging, getLogDir, getLogSessionTag, setFatalErrorHandler } from './logger.js';
 import { installCrashHandlers, showBackendFailedDialog, showFatalMainErrorDialog } from './crashDialog.js';
 import {
   initCrashReporter,
@@ -26,6 +26,10 @@ initLogging();
 // Tell the spawned Python sidecar where to write its own rotating log file, so
 // it lands next to the electron-log file and can be concatenated on export.
 process.env.PHYTOGRAPH_LOG_DIR = getLogDir();
+// And which session it belongs to, so the sidecar names its file
+// phytograph-backend-<tag>.log — matching this launch's main-<tag>.log so an
+// exported bug report pairs one main + one backend file per session.
+process.env.PHYTOGRAPH_LOG_SESSION = getLogSessionTag();
 
 // Arm native crash capture as early as possible — Crashpad runs in a separate
 // OS process and captures a minidump even if the MAIN process dies natively
