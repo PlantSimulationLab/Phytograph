@@ -96,5 +96,6 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
 ## See also
 
 - [Segment ground points](segment-ground.md)
+- [Fit a crown & metrics](fit-crown.md) — fits one crown per tree once trees are labelled.
 - [Concepts: Point clouds](../concepts/point-clouds.md)
 - [Reference: Color modes](../reference/color-modes.md)

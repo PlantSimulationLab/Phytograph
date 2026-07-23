@@ -63,7 +63,7 @@ async function postSegment<T>(path: string, request: unknown, signal?: AbortSign
 
 // ==================== TRIANGULATION API ====================
 
-export type TriangulationMethod = 'ball_pivoting' | 'poisson' | 'alpha_shape' | 'delaunay' | 'helios' | 'dem';
+export type TriangulationMethod = 'ball_pivoting' | 'poisson' | 'alpha_shape' | 'delaunay' | 'helios' | 'dem' | 'crown';
 
 export interface TriangulationRequest {
   points?: number[][];  // [[x, y, z], ...] — omit when `source` is set
@@ -3687,6 +3687,67 @@ export async function buildQSM(
     signal,
     300000, // 5 minutes
     onProgress,
+  );
+}
+
+// ==================== CROWN FITTING ====================
+
+// Per-crown metrics computed by /api/fit/crown. Coordinates are WORLD-frame
+// (the renderer re-applies the source cloud's worldShift like other meshes).
+export interface CrownMetrics {
+  tree_height_m: number;      // crown top minus the ground baseline
+  crown_volume_m3: number;
+  crown_center: [number, number, number];
+  crown_dims_m: [number, number, number];  // world-axis-aligned width/depth/height
+  crown_base_z: number;
+  crown_top_z: number;
+  surface_area_m2: number;
+  num_points_used: number;
+}
+
+export interface CrownFitCrown {
+  tree_instance_id: number;   // 0 when the whole cloud was treated as one tree
+  shape: string;              // 'ellipsoid' | 'prism' | 'cone' | 'alpha'
+  vertices: number[];         // flat xyz
+  triangles: number[];        // flat indices
+  normals: number[];          // flat per-vertex xyz
+  metrics: CrownMetrics;
+}
+
+export interface CrownFitRequest {
+  source: BackendPointSource;
+  shape: string;              // 'ellipsoid' | 'prism' | 'cone' | 'alpha'
+  strictness: number;         // 0..1 fuzzy trim
+  use_leaf_only: boolean;
+  tree_instance_ids?: number[] | null;
+  ground_baseline: 'ground_class' | 'min_z';
+  alpha?: number | null;
+}
+
+export interface CrownFitResponse {
+  success: boolean;
+  crowns: CrownFitCrown[];
+  warnings: string[];
+  error?: string;
+}
+
+// Fit crown shapes + metrics for one scan's points (one crown per tree). The
+// endpoint streams PHP1 progress markers then a JSON tail; fetchJsonWithProgress
+// drains the markers (firing onProgress + onRunId) and parses the JSON, owning
+// the abort/timeout so a heavy alpha fit can't wedge the UI.
+export async function fitCrown(
+  request: CrownFitRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<CrownFitResponse> {
+  return await fetchJsonWithProgress<CrownFitResponse>(
+    '/api/fit/crown',
+    request,
+    signal,
+    300000, // 5 minutes
+    onProgress,
+    onRunId,
   );
 }
 

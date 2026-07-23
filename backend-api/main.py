@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.51.0"
+BACKEND_VERSION = "0.52.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2241,6 +2241,162 @@ async def triangulate_point_cloud(request: TriangulationRequest, http_request: R
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: _pack_mesh_frame(_do_open3d_triangulation(request, progress=progress)),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+# ==================== CROWN FITTING ====================
+
+class CrownFitRequest(BaseModel):
+    """Fit a geometric shape to a tree crown and compute per-crown metrics.
+
+    Points come from a cloud session (`source.session_id`) so the per-point
+    classification labels (tree_instance / wood_class / ground_class) can be read
+    back from `sess.extras` — the same authoritative store the segmentation tools
+    write. A file/inline source is accepted for a single unlabelled tree, but
+    then no labels are available (whole cloud = one tree, all points = crown).
+    """
+    source: PointSource
+    shape: str  # 'ellipsoid' | 'prism' | 'cone' | 'alpha'
+    strictness: float = 0.5  # 0..1 fuzzy trim
+    # Resolved on the renderer from the labels present.
+    use_leaf_only: bool = False
+    tree_instance_ids: Optional[List[int]] = None  # None/[] => whole cloud is one tree
+    ground_baseline: str = "min_z"  # 'ground_class' | 'min_z'
+    alpha: Optional[float] = None  # alpha-shape radius override (m)
+
+
+def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
+    """Read the session's world-frame points + labels, fit one crown per tree,
+    return {success, crowns:[{tree_instance_id, shape, vertices, triangles,
+    normals, metrics}], warnings}. Runs off-thread under the streaming wrapper."""
+    import crown_fit as cf
+
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
+    # Cancellation is cooperative (this runs off-thread; a Python thread can't be
+    # force-killed). We poll the run's cancel Event at stage boundaries — before
+    # reading points and around each per-tree fit — and raise ScanCancelled, which
+    # unwinds to the streaming wrapper and stops the work promptly rather than
+    # letting the whole batch run on silently after the user cancels. The worst-
+    # case latency is one tree's fit (a single open3d/alpha call is monolithic).
+    _cancel_checkpoint(progress)
+    _report(0.05, "Reading points")
+    shape = request.shape
+    if shape not in ("ellipsoid", "prism", "cone", "alpha"):
+        return {"success": False, "crowns": [], "warnings": [],
+                "error": f"Unknown crown shape: {shape!r}"}
+
+    src = request.source
+    warnings: list = []
+
+    # Assemble world-frame HIT positions aligned with the label columns we need.
+    if src.session_id is not None:
+        sess = _get_cloud_session(src.session_id)
+        with _cloud_session_lock:
+            surv = ~sess.deleted
+            hit = _session_survivor_hit_mask(sess)  # survivor-aligned, drops misses
+            pos = sess.positions[surv][hit].copy()
+            world_shift = sess.world_shift
+            tree_col = sess.extras.get(TREE_INSTANCE_SLUG)
+            wood_col = sess.extras.get(WOOD_CLASS_SLUG)
+            ground_col = sess.extras.get(GROUND_CLASS_SLUG)
+            tree_vals = tree_col[surv][hit] if tree_col is not None else None
+            wood_vals = wood_col[surv][hit] if wood_col is not None else None
+            ground_vals = ground_col[surv][hit] if ground_col is not None else None
+        if world_shift is not None:
+            pos = pos.astype(np.float64, copy=False) + world_shift
+    else:
+        # File/inline source: no labels. Whole cloud is one tree; misses are NOT
+        # dropped by _read_points_from_source for a file path, so filter here is
+        # unnecessary because that path can't carry an is_miss column anyway — but
+        # we still guard against a runaway extent below.
+        pos, _c, _i = _read_points_from_source(src)
+        tree_vals = wood_vals = ground_vals = None
+
+    if len(pos) < 4:
+        return {"success": False, "crowns": [], "warnings": warnings,
+                "error": "Not enough points to fit a crown."}
+
+    # Ground baseline: min-Z of labelled ground when requested + available, else
+    # the per-tree lowest point (resolved inside the loop).
+    global_ground_z = None
+    if request.ground_baseline == "ground_class" and ground_vals is not None:
+        gmask = ground_vals == GROUND_CLASS_GROUND
+        if gmask.any():
+            global_ground_z = float(pos[gmask, 2].min())
+
+    # Which points are eligible crown points overall: leaf-only when asked +
+    # available, else all non-ground points.
+    crown_eligible = np.ones(len(pos), dtype=bool)
+    if request.use_leaf_only and wood_vals is not None:
+        crown_eligible = wood_vals == WOOD_CLASS_LEAF
+    elif ground_vals is not None:
+        crown_eligible = ground_vals != GROUND_CLASS_GROUND
+
+    # Build the per-tree work list.
+    if request.tree_instance_ids and tree_vals is not None:
+        tree_ids = [int(t) for t in request.tree_instance_ids if int(t) > 0]
+    else:
+        tree_ids = [0]  # sentinel: whole cloud is a single tree
+
+    crowns: list = []
+    n_trees = max(1, len(tree_ids))
+    # Progress spans [0.1, 0.95] across the trees; each tree gets its own slice so
+    # a multi-tree cloud fills smoothly, and a single tree still advances into its
+    # slice (mid-fraction below) rather than sitting at the start while it fits.
+    for i, tid in enumerate(tree_ids):
+        _cancel_checkpoint(progress)  # bail between trees the instant Cancel fires
+        base_frac = 0.1 + 0.85 * (i / n_trees)
+        _report(base_frac, f"Fitting crown {i + 1}/{len(tree_ids)}")
+        if tid == 0 or tree_vals is None:
+            tree_mask = np.ones(len(pos), dtype=bool)
+        else:
+            tree_mask = tree_vals == tid
+        crown_mask = tree_mask & crown_eligible
+        crown_pts = pos[crown_mask]
+        if len(crown_pts) < 4:
+            warnings.append(f"Tree {tid}: too few crown points ({len(crown_pts)}); skipped.")
+            continue
+        # Baseline for THIS tree: labelled global ground, else this tree's own
+        # lowest point (which uses all tree points, incl. trunk, not just crown).
+        if global_ground_z is not None:
+            baseline_z = global_ground_z
+        else:
+            baseline_z = float(pos[tree_mask, 2].min())
+        # Advance to the middle of this tree's slice before the (blocking) fit, so
+        # the bar moves even for a single tree while the fit runs.
+        _report(0.1 + 0.85 * ((i + 0.5) / n_trees), f"Fitting crown {i + 1}/{len(tree_ids)}")
+        try:
+            res = cf.fit_crown(crown_pts, shape, request.strictness, baseline_z,
+                               alpha=request.alpha)
+        except Exception as e:  # noqa: BLE001 — surface per-tree, keep others
+            warnings.append(f"Tree {tid}: {e}")
+            continue
+        crowns.append({
+            "tree_instance_id": int(tid),
+            "shape": shape,
+            "vertices": res["vertices"].reshape(-1).tolist(),
+            "triangles": res["triangles"].reshape(-1).tolist(),
+            "normals": res["normals"].reshape(-1).tolist(),
+            "metrics": res["metrics"],
+        })
+
+    _report(1.0, "Finalizing")
+    if not crowns:
+        return {"success": False, "crowns": [], "warnings": warnings,
+                "error": "No crown could be fit. " + (" ".join(warnings) or "")}
+    return {"success": True, "crowns": crowns, "warnings": warnings}
+
+
+@app.post("/api/fit/crown")
+async def fit_crown_endpoint(request: CrownFitRequest, http_request: Request):
+    """Fit crown shapes + metrics. Streams progress then a JSON tail (one entry
+    per fitted crown), cancelable via the run-id token."""
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_crown_fit(request, progress=progress)).encode("utf-8"),
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 

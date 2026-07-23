@@ -190,6 +190,24 @@ otherwise it imports as a **point cloud**. You can override this with the
 this way keeps its geometry, normals, and per-vertex color, but (unlike PLY
 point clouds) does not carry arbitrary per-vertex scalar fields.
 
+### Crown metrics CSV
+
+[Fit a crown & metrics](../workflows/fit-crown.md) can export a CSV with
+**one row per fitted crown**. The columns are:
+
+| Column | Meaning |
+|---|---|
+| `scan_name` | The source scan the crown was fit from. |
+| `tree_instance_id` | The tree id (0 when the whole cloud was one tree). |
+| `shape` | `ellipsoid`, `prism`, `cone`, or `alpha`. |
+| `tree_height_m` | Crown top minus the ground baseline. |
+| `crown_volume_m3` | Fitted-shape volume. |
+| `crown_center_x/y/z` | Crown centroid, world coordinates. |
+| `crown_dim_x/y/z_m` | Fitted-shape width × depth × height. |
+| `crown_surface_area_m2` | Fitted-mesh surface area. |
+| `num_points_used` | Points used after fuzzy trimming. |
+| `strictness` | The fuzziness value used for the fit. |
+
 ## Skeletons
 
 | Format | Import | Export | Notes |

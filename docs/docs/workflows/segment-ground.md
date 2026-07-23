@@ -81,3 +81,7 @@ skeleton extraction / triangulation on the non-ground cloud alone.
     Clouds imported from XYZ files stream from disk as an octree. Ground
     segmentation re-reads the original file at full resolution, so the
     classification covers every point — not a downsampled subset.
+
+## See also
+
+- [Fit a crown & metrics](fit-crown.md) — uses the ground labels for the tree-height baseline.

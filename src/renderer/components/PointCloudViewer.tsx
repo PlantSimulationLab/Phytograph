@@ -3,9 +3,9 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -20,6 +20,9 @@ import type { GridOption } from '../lib/gridOption';
 import { LADPopup, type LADTriangulationOption } from './LADPopup';
 import { BackfillMissesPopup } from './BackfillMissesPopup';
 import { QSMPopup, type QSMStartOptions } from './QSMPopup';
+import { CrownFitPopup, type CrownFitStartArgs } from './CrownFitPopup';
+import { CROWN_SHAPE_LABELS, crownColorForTreeId, allocateCrownColor, type CrownFitScanEligibility } from '../lib/crownFit';
+import { downloadFile as saveToFile } from '../utils/fileDownload';
 import { Toolbar } from './Toolbar';
 import { StitchDialog } from './StitchDialog';
 import { AlignDialog } from './AlignDialog';
@@ -1304,6 +1307,12 @@ export default function PointCloudViewer({
   // Multi-input tool dialogs (pick their own inputs; always launchable).
   const [showAlignDialog, setShowAlignDialog] = useState(false);
   const [showStitchDialog, setShowStitchDialog] = useState(false);
+  // Crown fitting popup + background task state.
+  const [showCrownFitPopup, setShowCrownFitPopup] = useState(false);
+  const [crownFitRunning, setCrownFitRunning] = useState(false);
+  const [crownFitProgress, setCrownFitProgress] = useState<{ label: string; value: number | null } | null>(null);
+  const crownFitAbortRef = useRef<AbortController | null>(null);
+  const crownFitRunIdRef = useRef<string | null>(null);
   // Leaf area density popup + results + background task state
   const [showLADPopup, setShowLADPopup] = useState(false);
   // When the LAD modal launches a backfill (a selected scan lacked misses), it
@@ -1751,6 +1760,13 @@ export default function PointCloudViewer({
   // Track previous mesh IDs to detect new additions
   const prevMeshIdsRef = useRef<Set<string>>(new Set());
 
+  // Mesh IDs that should NOT reframe the camera when they appear (e.g. fitted
+  // crowns — the user is comparing them against the scan in the current view and
+  // a per-crown zoom would jump the viewport around). The producing handler adds
+  // ids here BEFORE calling addMeshes; the frame effect skips them (but still
+  // records them in prevMeshIdsRef so they never frame later).
+  const suppressFrameMeshIdsRef = useRef<Set<string>>(new Set());
+
   // Frame a newly added mesh WITHOUT changing the viewing angle. We deliberately
   // use __frameSelection (preserves the current camera→target direction and up
   // vector, only re-centers + re-zooms) rather than __snapToView('iso', …),
@@ -1762,7 +1778,10 @@ export default function PointCloudViewer({
     const currentIds = new Set(meshes.map(m => m.id));
     const prevIds = prevMeshIdsRef.current;
 
-    const newMeshIds = [...currentIds].filter(id => !prevIds.has(id));
+    const suppress = suppressFrameMeshIdsRef.current;
+    const newMeshIds = [...currentIds].filter(id => !prevIds.has(id) && !suppress.has(id));
+    // Once observed, drop suppressed ids (they're now in prevIds anyway).
+    for (const id of currentIds) suppress.delete(id);
 
     if (newMeshIds.length > 0) {
       const newMesh = meshes.find(m => m.id === newMeshIds[0]);
@@ -4311,6 +4330,7 @@ export default function PointCloudViewer({
       { id: 'cloud-skeleton', name: 'Extract Skeleton', keywords: ['branch', 'structure'], action: () => { closeAllToolPanels('skeleton'); setShowSkeletonPanel(!showSkeletonPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: Dna, testId: 'tool-skeleton', isActive: () => showSkeletonPanel },
       { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: QsmIcon, testId: 'tool-qsm', multiInput: true, isActive: () => showQSMPopup },
       { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setLadReopenSelection(null); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
+      { id: 'fit-crown', name: 'Fit Crown & Metrics', keywords: ['crown', 'canopy', 'shape', 'ellipsoid', 'prism', 'cone', 'alpha', 'volume', 'height', 'metrics', 'tree'], action: () => { closeAllToolPanels(); setShowCrownFitPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: TreeDeciduous, testId: 'tool-fit-crown', multiInput: true, isActive: () => showCrownFitPopup },
 
       // ── Create (geometry + scanner placement — scene-building, not analysis) ──
       { id: 'create-plant', name: 'Generate Plant', keywords: ['helios', 'leaf', 'vegetation', 'build', 'geometry'], action: () => setShowPlantPopup(true), category: 'Create', requires: null, toolGroup: 'create', icon: Sprout, testId: 'tool-plant-generate' },
@@ -4359,7 +4379,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showExportPanel, showPlantGrowthPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
 
   // Bridge for the native Tools menu (src/main/menu.ts → App.tsx) to run a tool
   // by id. A ref keeps the latest `commands` (with fresh action closures) so the
@@ -10759,6 +10779,185 @@ export default function PointCloudViewer({
     }
   }, [isLadRunning, handleHeliosTriangulate, handleHeliosFilterChange]);
 
+  // Build one MeshData from a returned crown's flat vertex/index/normal arrays.
+  const crownToMeshData = useCallback((crown: CrownFitCrown): MeshData => {
+    const vertices = Float32Array.from(crown.vertices);
+    const indices = Uint32Array.from(crown.triangles);
+    const normals = crown.normals.length === crown.vertices.length
+      ? Float32Array.from(crown.normals) : undefined;
+    return {
+      vertices,
+      indices,
+      normals,
+      vertexCount: vertices.length / 3,
+      triangleCount: indices.length / 3,
+      surfaceArea: crown.metrics.surface_area_m2,
+    };
+  }, []);
+
+  // Fit crown shapes to one or more scans (one crown per tree), add each as a
+  // mesh with per-crown metrics, and optionally export a metrics CSV. Mirrors the
+  // triangulation/LAD multi-scan flow: buildPointSource per scan (session_id
+  // preferred → no OOM), fitCrown, then a single undoable addMeshes.
+  const handleFitCrown = useCallback(async (args: CrownFitStartArgs) => {
+    if (crownFitRunning) return;
+    setCrownFitRunning(true);
+    setCrownFitProgress({ label: 'Fitting crowns…', value: null });
+    const abort = new AbortController();
+    crownFitAbortRef.current = abort;
+    crownFitRunIdRef.current = null;
+    const allMeshes: MeshEntry[] = [];
+    // Colours already in use (existing meshes + the scans being fit + crowns
+    // assigned this run), so the auto-assigned no-tree-id crowns stay distinct
+    // from each other, from existing meshes, and from their own source scans.
+    const usedCrownColors = new Set<string>([
+      ...meshes.map(m => m.color),
+      ...args.scanIds.map(id => scans.find(s => s.id === id)?.color).filter((c): c is string => !!c),
+    ]);
+    // Rows for the CSV: one per fitted crown, across every scan.
+    const csvRows: { scanName: string; crown: CrownFitCrown }[] = [];
+    const allWarnings: string[] = [];
+    // Overall progress = (scans finished + current scan's own fraction) / total.
+    // Advances smoothly across scans, and within a scan the backend's per-tree
+    // markers advance the bar (so a multi-tree cloud fills as each tree is fit).
+    const totalScans = args.scanIds.length;
+    try {
+      for (let scanIdx = 0; scanIdx < args.scanIds.length; scanIdx++) {
+        const scanId = args.scanIds[scanIdx];
+        const cloud = clouds.find(c => c.id === scanId);
+        const elig: CrownFitScanEligibility | undefined = args.eligibility.get(scanId);
+        if (!cloud || !elig) continue;
+        const scanName = scans.find(s => s.id === scanId)?.label
+          ?? cloud.data.fileName ?? 'scan';
+
+        const payload = buildPointSource(cloud);
+        if (payload.kind !== 'source') {
+          allWarnings.push(`${scanName}: no backing data source; skipped.`);
+          continue;
+        }
+
+        const scanLabel = totalScans > 1
+          ? `Fitting crowns — ${scanName} (${scanIdx + 1}/${totalScans})`
+          : `Fitting crowns — ${scanName}`;
+        setCrownFitProgress({ label: scanLabel, value: scanIdx / totalScans });
+        const response = await fitCrown({
+          source: payload.source as BackendPointSource,
+          shape: args.shape,
+          strictness: args.strictness,
+          use_leaf_only: elig.useLeafOnly,
+          tree_instance_ids: elig.mode === 'multiTree' ? (elig.treeInstanceIds ?? null) : null,
+          ground_baseline: elig.groundBaseline,
+          alpha: args.alpha,
+        }, abort.signal, (p, msg) => {
+          // Fold the scan's own 0..1 fraction into the global bar.
+          const frac = p == null ? null : (scanIdx + p) / totalScans;
+          setCrownFitProgress({ label: totalScans > 1 ? `${scanLabel}: ${msg}` : `${scanName}: ${msg}`, value: frac });
+        }, (runId) => { crownFitRunIdRef.current = runId; });
+
+        if (abort.signal.aborted) return;
+        for (const w of response.warnings ?? []) allWarnings.push(`${scanName}: ${w}`);
+        if (!response.success) {
+          allWarnings.push(`${scanName}: ${response.error ?? 'crown fit failed'}`);
+          continue;
+        }
+
+        for (const crown of response.crowns) {
+          const treeSuffix = crown.tree_instance_id > 0 ? ` [tree ${crown.tree_instance_id}]` : '';
+          const shapeLabel = CROWN_SHAPE_LABELS[args.shape] ?? args.shape;
+          // Colour: match the tree_instance colormap when the crown came from a
+          // segmented tree (a) so the crown reads with the same colour as its
+          // tree; otherwise auto-assign a distinct colour per crown (b), tracking
+          // the ones already used across this whole run + existing meshes.
+          const treeColor = crownColorForTreeId(crown.tree_instance_id);
+          const color = treeColor ?? allocateCrownColor(usedCrownColors);
+          usedCrownColors.add(color);
+          const mesh: MeshEntry = {
+            id: crypto.randomUUID(),
+            sourceCloudId: scanId,
+            data: crownToMeshData(crown),
+            visible: true,
+            color,
+            method: 'crown',
+            name: `${scanName} crown (${shapeLabel})${treeSuffix}`,
+            crownMetrics: crown.metrics,
+            crownShape: crown.shape,
+            crownTreeId: crown.tree_instance_id,
+          };
+          allMeshes.push(mesh);
+          csvRows.push({ scanName, crown });
+        }
+      }
+
+      if (allMeshes.length > 0) {
+        // Suppress the per-mesh camera reframe: fitted crowns are compared against
+        // the scan in the CURRENT view, so keep the user's viewport unchanged.
+        for (const m of allMeshes) suppressFrameMeshIdsRef.current.add(m.id);
+        addMeshes(allMeshes, 'Fit crowns');
+        // Hide the source scans so the fitted crowns are visible (mirrors QSM /
+        // triangulation). Scans stay in the list and can be re-shown.
+        for (const id of new Set(args.scanIds)) onHideScan(id);
+      }
+
+      for (const w of allWarnings) {
+        showToast({ type: 'warning', title: 'Crown Fit', message: w });
+      }
+      if (allMeshes.length > 0) {
+        showToast({
+          type: 'success',
+          title: 'Crown Fit Complete',
+          message: `Fitted ${allMeshes.length} crown${allMeshes.length === 1 ? '' : 's'}.`,
+        });
+        if (args.exportCsv) {
+          const esc = (v: string) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
+          const header = [
+            'scan_name', 'tree_instance_id', 'shape', 'tree_height_m', 'crown_volume_m3',
+            'crown_center_x', 'crown_center_y', 'crown_center_z',
+            'crown_dim_x_m', 'crown_dim_y_m', 'crown_dim_z_m',
+            'crown_surface_area_m2', 'num_points_used', 'strictness',
+          ];
+          const rows = csvRows.map(({ scanName, crown }) => {
+            const m = crown.metrics;
+            return [
+              scanName, String(crown.tree_instance_id), crown.shape,
+              m.tree_height_m.toFixed(4), m.crown_volume_m3.toFixed(4),
+              m.crown_center[0].toFixed(4), m.crown_center[1].toFixed(4), m.crown_center[2].toFixed(4),
+              m.crown_dims_m[0].toFixed(4), m.crown_dims_m[1].toFixed(4), m.crown_dims_m[2].toFixed(4),
+              m.surface_area_m2.toFixed(4), String(m.num_points_used), String(args.strictness),
+            ];
+          });
+          const csv = [header, ...rows].map(r => r.map(esc).join(',')).join('\n') + '\n';
+          await saveToFile(csv, 'crown_metrics.csv');
+        }
+      } else {
+        showToast({ type: 'error', title: 'Crown Fit', message: 'No crowns were fitted.' });
+      }
+    } catch (err) {
+      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      showToast({
+        type: 'error',
+        title: 'Crown Fit Failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setCrownFitRunning(false);
+      setCrownFitProgress(null);
+      crownFitAbortRef.current = null;
+      crownFitRunIdRef.current = null;
+    }
+  }, [crownFitRunning, clouds, scans, meshes, buildPointSource, crownToMeshData, addMeshes, onHideScan]);
+
+  // Cancel an in-flight crown fit: stop the backend worker (frees its memory) if
+  // a run-id arrived, then abort the fetch (the streaming disconnect also kills
+  // the worker). Mirrors cancelDEM / cancelLAD.
+  const cancelCrownFit = useCallback(() => {
+    if (crownFitRunIdRef.current) void cancelRun(crownFitRunIdRef.current);
+    crownFitAbortRef.current?.abort();
+    setCrownFitRunning(false);
+    setCrownFitProgress(null);
+    crownFitAbortRef.current = null;
+    crownFitRunIdRef.current = null;
+  }, []);
+
   const cancelDEM = useCallback(() => {
     // Stop the backend gridding (frees the scipy/numpy memory), then abort the
     // fetch. DEM streams, so this mirrors triangulation/LAD cancel.
@@ -11808,7 +12007,12 @@ export default function PointCloudViewer({
 
   return (
     <div
-      className={`relative bg-neutral-900 ${className}`}
+      // min-h-0/min-w-0: as a flex item this root must be allowed to shrink
+      // below the R3F canvas's current pixel size, or the canvas's intrinsic
+      // height makes the viewer ratchet to its largest-ever size and window
+      // shrinks crop the bottom-anchored overlays instead of resizing the
+      // canvas. See the matching classes on the wrappers in App.tsx.
+      className={`relative min-h-0 min-w-0 bg-neutral-900 ${className}`}
       // Debug/test hook: the diagonal extent of the scene bounds the camera
       // frames. Lets tests assert a scans-only scene (e.g. a moving-platform
       // trajectory) actually expands the bounds instead of falling back to the
@@ -13135,6 +13339,15 @@ export default function PointCloudViewer({
         />
       )}
 
+      {crownFitRunning && (
+        <StatusPill
+          testId="crown-fit-running"
+          label={crownFitProgress?.label ?? 'Fitting crowns…'}
+          progress={crownFitProgress?.value ?? null}
+          onCancel={cancelCrownFit}
+        />
+      )}
+
       {isBackfillRunning && (
         <StatusPill
           testId="backfill-running"
@@ -14060,12 +14273,11 @@ export default function PointCloudViewer({
           full height for scrolling) doesn't swallow clicks meant for the
           viewport — notably the bottom-left axes gizmo, which sits inside this
           box's footprint. Each interactive child re-enables pointer events. */}
-      <div className="absolute top-4 left-4 bottom-16 flex flex-col gap-2 overflow-y-auto overflow-x-hidden pr-1 pointer-events-none [&>*]:pointer-events-auto">
+      {/* data-testid doubles as the anchor ViewportAxesGizmo measures to keep
+          the axes gizmo out from under this column (see useGizmoMargin). */}
+      <div data-testid="left-toolbar-column" className="absolute top-4 left-4 bottom-16 flex flex-col gap-2 overflow-y-auto overflow-x-hidden pr-1 pointer-events-none [&>*]:pointer-events-auto">
         {/* View Controls */}
         <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg flex gap-1">
-          <button onClick={() => (window as any).__resetPointCloudCamera?.()} className="p-2 hover:bg-neutral-700 rounded transition-colors flex items-center justify-center" title="Reset View — frame all content from the default isometric angle">
-            <Home className="w-4 h-4 text-neutral-300" />
-          </button>
           <button onClick={() => { setShowCommandPalette(true); setCommandSearch(''); setCommandSelectedIndex(0); }} className="p-2 hover:bg-neutral-700 rounded transition-colors flex items-center justify-center" title="Search Commands (Cmd+K)">
             <Search className="w-4 h-4 text-neutral-300" />
           </button>
@@ -14076,11 +14288,11 @@ export default function PointCloudViewer({
           <div className="text-[10px] text-neutral-500 mb-1.5 text-center">Snap View</div>
           {/* Named-view buttons REORIENT only — they rotate the camera to look down
               the requested axis while preserving the current orbit target and zoom
-              (CAD/DCC convention). Use the Reset View (Home) button above or Zoom to
-              Selection below to reframe. Axes are the camera-to-target direction in
+              (CAD/DCC convention). Use the Reset View (Home) button (top-left slot)
+              or Zoom to Selection below to reframe. Axes are the camera-to-target direction in
               world space (Z-up): top +z, front −y, right +x, iso the default 3/4 view. */}
           <div className="grid grid-cols-3 gap-0.5">
-            <div />
+            <button onClick={() => (window as any).__resetPointCloudCamera?.()} className="p-1.5 hover:bg-neutral-700 rounded" title="Reset View — frame all content from the default isometric angle"><Home className="w-3 h-3 text-neutral-300" /></button>
             <button onClick={() => (window as any).__orientToAxis?.({ x: 0, y: 1, z: 0 })} className="p-1.5 hover:bg-neutral-700 rounded" title="Back View"><ArrowUp className="w-3 h-3 text-neutral-300" /></button>
             <div />
             <button onClick={() => (window as any).__orientToAxis?.({ x: -1, y: 0, z: 0 })} className="p-1.5 hover:bg-neutral-700 rounded" title="Left View"><ArrowLeft className="w-3 h-3 text-neutral-300" /></button>
@@ -14773,6 +14985,13 @@ export default function PointCloudViewer({
         inProgress={qsmInProgress}
         error={qsmError}
         onStart={(ids, opts) => { setShowQSMPopup(false); void handleBuildQSM(ids, opts); }}
+      />
+      <CrownFitPopup
+        isOpen={showCrownFitPopup}
+        onClose={() => setShowCrownFitPopup(false)}
+        scans={scans}
+        initialSelectedIds={selectedIds}
+        onStartFit={(fitArgs) => { void handleFitCrown(fitArgs); }}
       />
 
       {/* Transform Panel - shows when a mesh is selected and the Transform button is toggled */}

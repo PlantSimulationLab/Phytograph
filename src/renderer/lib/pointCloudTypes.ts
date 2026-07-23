@@ -411,6 +411,13 @@ export interface MeshEntry {
   // (see selectedMeshLayer) and exports any of them as a raster. Includes
   // 'elevation' so every band is handled uniformly.
   demLayers?: Record<string, DemLayer>;
+  // Crown-fit-only (method === 'crown'): the per-crown metrics from /api/fit/crown
+  // (tree height, crown volume, center, dimensions, …). Present iff this mesh is a
+  // fitted crown; drives the metrics block in the Meshes panel and the CSV export.
+  // `crownShape` / `crownTreeId` are provenance shown in the row.
+  crownMetrics?: import('../utils/backendApi').CrownMetrics;
+  crownShape?: string;
+  crownTreeId?: number;
 }
 
 // Short human-readable label for each DEM surface product, shown as the mesh-row
@@ -437,6 +444,7 @@ export const TRIANGULATION_METHOD_LABELS: Record<TriangulationMethod, string> = 
   delaunay: 'Delaunay',
   helios: 'Helios',
   dem: 'DEM',
+  crown: 'Crown',
 };
 
 // The label shown for a mesh in the scene list, delete confirm, and export panel.

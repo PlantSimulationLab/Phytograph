@@ -53,7 +53,7 @@ type WithData = { data?: PointCloudData };
 // import produced: an octree cloud exposes them on `octree.attributeLabels` /
 // `attributeRanges`; a flat in-RAM cloud on `data.scalarFields`. Keyed by slug
 // in all three, so we union their keys.
-function columnSlugs(scan: WithData): Set<string> {
+export function columnSlugs(scan: WithData): Set<string> {
   const slugs = new Set<string>();
   const oct = scan.data?.octree;
   for (const k of Object.keys(oct?.attributeLabels ?? {})) slugs.add(k);

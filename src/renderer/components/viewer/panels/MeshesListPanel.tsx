@@ -3,6 +3,7 @@ import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, Cha
 import type { MeshEntry, MeshColorMode, PointCloudEntry } from '../../../lib/pointCloudTypes';
 import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS, DEM_SURFACE_LABELS, DEM_LAYER_ORDER } from '../../../lib/pointCloudTypes';
 import { meshHasScanColors } from '../../../lib/pointCloudHelpers';
+import { CROWN_SHAPE_LABELS, type CrownShape } from '../../../lib/crownFit';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 import type { TriangleFilterEstimate } from '../../../lib/triangleFilter';
@@ -543,13 +544,19 @@ export function MeshesListPanel({
           // the derived hillshade/slope/aspect), independent of whether the source
           // cloud still exists — so offer the "Color by" dropdown for them even when
           // isTriangulated flips off (e.g. after the source octree was rebuilt).
-          const canColorByTriangle = isTriangulated(mesh) || mesh.method === 'dem';
+          // A fitted crown is an analytic solid, NOT a reconstructed surface: the
+          // per-face geometric color modes (inclination/azimuth/area) and the
+          // leaf-angle plot are meaningless for it, so exclude it here (its expand
+          // shows the crown metrics instead — see canExpand below).
+          const canColorByTriangle = mesh.method !== 'crown'
+            && (isTriangulated(mesh) || mesh.method === 'dem');
           const canSetOpacity = supportsOpacity(mesh);
           // Provenance is worth surfacing even when the source cloud is gone
           // (which flips isTriangulated off), so expandability includes it.
-          // Grids and planes expand to show their geometry (center/size/…).
+          // Grids and planes expand to show their geometry (center/size/…); a
+          // crown expands to show its metrics block.
           const canExpand = canColorByTriangle || canSetOpacity || !!mesh.triangulationParams
-            || !!mesh.gridSubdivisions || !!mesh.isPlane;
+            || !!mesh.gridSubdivisions || !!mesh.isPlane || !!mesh.crownMetrics;
           const isExpanded = expandedMeshIds.has(mesh.id);
           const colorMode = meshColorModes.get(mesh.id) ?? 'solid';
           const meshOpacity = meshOpacities.get(mesh.id) ?? defaultOpacityFor(mesh);
@@ -673,6 +680,12 @@ export function MeshesListPanel({
                   <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
                     {DEM_SURFACE_LABELS[mesh.demSurfaceType ?? 'dtm']}
                     {mesh.data.surfaceArea && ` · ${mesh.data.surfaceArea.toFixed(2)} m²`}
+                  </div>
+                ) : mesh.method === 'crown' && mesh.crownMetrics ? (
+                  // Fitted crown: lead with the two headline metrics (height +
+                  // volume); the full set lives in the expanded view below.
+                  <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
+                    {`H ${mesh.crownMetrics.tree_height_m.toFixed(2)} m · Vol ${mesh.crownMetrics.crown_volume_m3.toFixed(2)} m³`}
                   </div>
                 ) : (
                   <div className="text-[10px] text-neutral-500" data-testid="mesh-row-count">
@@ -799,6 +812,26 @@ export function MeshesListPanel({
                     )}
                   </div>
                 )}
+                {/* Crown-fit metrics: the per-crown stats from /api/fit/crown
+                    (tree height from ground, crown volume, center, dimensions).
+                    Present only on fitted-crown meshes. */}
+                {mesh.method === 'crown' && mesh.crownMetrics && (() => {
+                  const m = mesh.crownMetrics;
+                  return (
+                    <div className="text-[10px] text-neutral-400 space-y-0.5" data-testid="mesh-crown-metrics">
+                      <div className="text-neutral-300">
+                        {(CROWN_SHAPE_LABELS[mesh.crownShape as CrownShape] ?? mesh.crownShape ?? 'Crown')} crown fit
+                        {mesh.crownTreeId ? ` · tree ${mesh.crownTreeId}` : ''}
+                      </div>
+                      <div>Tree height: {m.tree_height_m.toFixed(2)} m</div>
+                      <div>Crown volume: {m.crown_volume_m3.toFixed(2)} m³</div>
+                      <div>Center: {m.crown_center[0].toFixed(2)}, {m.crown_center[1].toFixed(2)}, {m.crown_center[2].toFixed(2)}</div>
+                      <div>Dimensions: {m.crown_dims_m[0].toFixed(2)} × {m.crown_dims_m[1].toFixed(2)} × {m.crown_dims_m[2].toFixed(2)} m</div>
+                      <div>Surface area: {m.surface_area_m2.toFixed(2)} m²</div>
+                      <div>Points used: {m.num_points_used.toLocaleString()}</div>
+                    </div>
+                  );
+                })()}
                 {/* Leaf-area (LAD) reusability note for a ball-pivot mesh. Eligible
                     meshes (pinned per-scan, scan has a position) say so; ineligible
                     ones explain why and how to fix it — visible here on the mesh, not
@@ -912,8 +945,9 @@ export function MeshesListPanel({
                     or the Open3D methods). The plot is pure triangle geometry; it
                     reads per-voxel cells when the mesh carries a grid, else falls
                     back to a single whole-mesh distribution. Not meaningful for a
-                    DEM (terrain, not foliage), so it's hidden there. */}
-                {isTriangulated(mesh) && mesh.method !== 'dem' && (
+                    DEM (terrain, not foliage) or a fitted crown (an analytic solid,
+                    not a leaf surface), so it's hidden for those. */}
+                {isTriangulated(mesh) && mesh.method !== 'dem' && mesh.method !== 'crown' && (
                   <button
                     data-testid="mesh-leaf-angles"
                     onClick={(e) => { e.stopPropagation(); onOpenLeafAngles(mesh.id); }}

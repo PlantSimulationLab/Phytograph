@@ -104,6 +104,7 @@ nav:
       - QSM (Quantitative Structure Model): concepts/qsm.md
       - Plant models: concepts/plant-models.md
       - Leaf area density: concepts/leaf-area-density.md
+      - Crown metrics: concepts/crown-metrics.md
   - Workflows:
       - workflows/index.md
       - Getting around:
@@ -120,6 +121,7 @@ nav:
           - Segment individual trees: workflows/segment-trees.md
       - 3. Reconstruction & analysis:
           - Triangulate a mesh: workflows/triangulate.md
+          - Fit a crown & metrics: workflows/fit-crown.md
           - Generate a DEM: workflows/generate-dem.md
           - Extract a skeleton: workflows/extract-skeleton.md
           - Build a QSM: workflows/build-qsm.md

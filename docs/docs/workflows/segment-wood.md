@@ -128,3 +128,7 @@ leaves, ready for leaf-area analysis.
     reduced set, so on very heavily downsampled clouds the traced backbone is
     coarser; for the finest twig recovery, segment before any aggressive
     decimation.
+
+## See also
+
+- [Fit a crown & metrics](fit-crown.md) — fits the crown to the leaf points once wood/leaf is labelled.
