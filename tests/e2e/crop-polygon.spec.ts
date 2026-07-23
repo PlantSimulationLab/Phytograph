@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { launchApp, repoRoot } from './helpers/launchApp';
+import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
+import { resetToFreshScene } from './helpers/resetApp';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -23,91 +24,100 @@ const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 //   3. Enter closes the polygon (≥3 verts), which enables the Apply button.
 //   4. Apply runs the real screen-space predicate against the live camera.
 //
+// Shared session: one app + backend for the whole file; File → New resets the
+// scene between tests (see helpers/resetApp.ts).
+
+let session: LaunchedApp;
+test.beforeAll(async () => {
+  session = await launchApp();
+});
+test.afterAll(async () => {
+  await session?.close();
+});
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
+
 // Correctness, not error-absence: we draw a polygon covering essentially
 // the whole viewport, so a Keep-Inside crop must retain all 60 points
 // (every point projects inside), and the panel must close. A regression
 // that silently dropped the projection or the predicate would change the
 // surviving count and fail here.
 test('polygon lasso crop: clicks add vertices, Enter closes, Apply keeps enclosed points', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
+  // ── Import tiny.xyz ────────────────────────────────────────────────────
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
 
-    // ── Import tiny.xyz ────────────────────────────────────────────────────
-    await importFiles(app, page, 'import-auto', TINY);
-    await completeImportWizard(page);
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await expect(row).toHaveAttribute('data-point-count', '60');
 
-    const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-    await expect(row).toBeVisible({ timeout: 20_000 });
-    await expect(row).toHaveAttribute('data-point-count', '60');
+  // ── Enter crop mode (single-cloud) ─────────────────────────────────────
+  // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+  await expect(row).toHaveAttribute('data-selected', 'true');
+  await page.getByTestId('tool-crop').click();
 
-    // ── Enter crop mode (single-cloud) ─────────────────────────────────────
-    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
-    await expect(row).toHaveAttribute('data-selected', 'true');
-    await page.getByTestId('tool-crop').click();
+  const panel = page.getByTestId('crop-panel');
+  await expect(panel).toBeVisible();
+  // Crop defaults to box.
+  await expect(panel).toHaveAttribute('data-crop-mode', 'box');
 
-    const panel = page.getByTestId('crop-panel');
-    await expect(panel).toBeVisible();
-    // Crop defaults to box.
-    await expect(panel).toHaveAttribute('data-crop-mode', 'box');
+  // ── Switch to Polygon shape ────────────────────────────────────────────
+  await page.getByTestId('crop-shape-polygon').click();
+  await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
 
-    // ── Switch to Polygon shape ────────────────────────────────────────────
-    await page.getByTestId('crop-shape-polygon').click();
-    await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
+  // The lasso overlay mounts and — critically for the reported bug — must
+  // accept pointer events while drawing. If pointer-events were 'none'
+  // (or the overlay never mounted), clicks would fall through and "do
+  // nothing", which is exactly the symptom we're guarding against.
+  const overlay = page.getByTestId('crop-polygon-overlay');
+  await expect(overlay).toBeVisible();
+  await expect(overlay).toHaveCSS('pointer-events', 'auto');
 
-    // The lasso overlay mounts and — critically for the reported bug — must
-    // accept pointer events while drawing. If pointer-events were 'none'
-    // (or the overlay never mounted), clicks would fall through and "do
-    // nothing", which is exactly the symptom we're guarding against.
-    const overlay = page.getByTestId('crop-polygon-overlay');
-    await expect(overlay).toBeVisible();
-    await expect(overlay).toHaveCSS('pointer-events', 'auto');
+  const box = await overlay.boundingBox();
+  if (!box) throw new Error('crop-polygon-overlay has no bounding box');
 
-    const box = await overlay.boundingBox();
-    if (!box) throw new Error('crop-polygon-overlay has no bounding box');
+  // Four vertices near the corners → a near-full-viewport quad. Inset by
+  // a few px so clicks land inside the SVG, not on its edge.
+  const inset = 8;
+  const corners = [
+    { x: box.x + inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + box.height - inset },
+    { x: box.x + inset, y: box.y + box.height - inset },
+  ];
 
-    // Four vertices near the corners → a near-full-viewport quad. Inset by
-    // a few px so clicks land inside the SVG, not on its edge.
-    const inset = 8;
-    const corners = [
-      { x: box.x + inset, y: box.y + inset },
-      { x: box.x + box.width - inset, y: box.y + inset },
-      { x: box.x + box.width - inset, y: box.y + box.height - inset },
-      { x: box.x + inset, y: box.y + box.height - inset },
-    ];
-
-    // ── Click to add vertices ──────────────────────────────────────────────
-    // After each click a <circle> vertex marker must appear. This is the
-    // direct assertion that "clicking in the viewport" registers.
-    for (let i = 0; i < corners.length; i++) {
-      await page.mouse.click(corners[i].x, corners[i].y);
-      await expect(overlay.locator('circle')).toHaveCount(i + 1);
-    }
-
-    // ── Close the polygon ──────────────────────────────────────────────────
-    // Apply is disabled until the polygon is closed (≥3 verts + Enter).
-    const applyBtn = page.getByTestId('crop-apply');
-    await expect(applyBtn).toBeDisabled();
-
-    await page.keyboard.press('Enter');
-
-    // Closing the polygon enables Apply.
-    await expect(applyBtn).toBeEnabled();
-
-    // ── Apply (Keep Inside) ────────────────────────────────────────────────
-    // Default mode is Keep Inside. The quad covers the whole viewport, so
-    // every projected point is enclosed → all 60 survive. We assert the
-    // real predicate ran (panel closed, no crash) AND produced the correct
-    // count — not merely that nothing threw.
-    await applyBtn.click();
-
-    await expect(panel).toHaveCount(0, { timeout: 10_000 });
-    await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
-
-    await expect(row).toHaveAttribute('data-point-count', '60', { timeout: 5_000 });
-  } finally {
-    await close();
+  // ── Click to add vertices ──────────────────────────────────────────────
+  // After each click a <circle> vertex marker must appear. This is the
+  // direct assertion that "clicking in the viewport" registers.
+  for (let i = 0; i < corners.length; i++) {
+    await page.mouse.click(corners[i].x, corners[i].y);
+    await expect(overlay.locator('circle')).toHaveCount(i + 1);
   }
+
+  // ── Close the polygon ──────────────────────────────────────────────────
+  // Apply is disabled until the polygon is closed (≥3 verts + Enter).
+  const applyBtn = page.getByTestId('crop-apply');
+  await expect(applyBtn).toBeDisabled();
+
+  await page.keyboard.press('Enter');
+
+  // Closing the polygon enables Apply.
+  await expect(applyBtn).toBeEnabled();
+
+  // ── Apply (Keep Inside) ────────────────────────────────────────────────
+  // Default mode is Keep Inside. The quad covers the whole viewport, so
+  // every projected point is enclosed → all 60 survive. We assert the
+  // real predicate ran (panel closed, no crash) AND produced the correct
+  // count — not merely that nothing threw.
+  await applyBtn.click();
+
+  await expect(panel).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
+
+  await expect(row).toHaveAttribute('data-point-count', '60', { timeout: 5_000 });
 });
 
 // Companion: a full-viewport polygon with Keep Outside encloses every
@@ -117,66 +127,61 @@ test('polygon lasso crop: clicks add vertices, Enter closes, Apply keeps enclose
 // This proves the invert path + projection predicate actually discriminate
 // (the Keep-Inside test alone could pass for a trivial keep-all reason).
 test('polygon lasso crop: Keep Outside enclosing all points empties the cloud (delete-confirm)', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
 
-    await importFiles(app, page, 'import-auto', TINY);
-    await completeImportWizard(page);
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await expect(row).toHaveAttribute('data-point-count', '60');
 
-    const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-    await expect(row).toBeVisible({ timeout: 20_000 });
-    await expect(row).toHaveAttribute('data-point-count', '60');
+  // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+  await expect(row).toHaveAttribute('data-selected', 'true');
+  await page.getByTestId('tool-crop').click();
 
-    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
-    await expect(row).toHaveAttribute('data-selected', 'true');
-    await page.getByTestId('tool-crop').click();
+  const panel = page.getByTestId('crop-panel');
+  await expect(panel).toBeVisible();
 
-    const panel = page.getByTestId('crop-panel');
-    await expect(panel).toBeVisible();
+  await page.getByTestId('crop-shape-polygon').click();
+  await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
 
-    await page.getByTestId('crop-shape-polygon').click();
-    await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
+  // Keep Outside — exclude everything inside the lasso.
+  await panel.getByText('Keep Outside', { exact: true }).click();
 
-    // Keep Outside — exclude everything inside the lasso.
-    await panel.getByText('Keep Outside', { exact: true }).click();
+  const overlay = page.getByTestId('crop-polygon-overlay');
+  await expect(overlay).toBeVisible();
+  const box = await overlay.boundingBox();
+  if (!box) throw new Error('crop-polygon-overlay has no bounding box');
 
-    const overlay = page.getByTestId('crop-polygon-overlay');
-    await expect(overlay).toBeVisible();
-    const box = await overlay.boundingBox();
-    if (!box) throw new Error('crop-polygon-overlay has no bounding box');
-
-    const inset = 8;
-    const corners = [
-      { x: box.x + inset, y: box.y + inset },
-      { x: box.x + box.width - inset, y: box.y + inset },
-      { x: box.x + box.width - inset, y: box.y + box.height - inset },
-      { x: box.x + inset, y: box.y + box.height - inset },
-    ];
-    for (let i = 0; i < corners.length; i++) {
-      await page.mouse.click(corners[i].x, corners[i].y);
-      await expect(overlay.locator('circle')).toHaveCount(i + 1);
-    }
-
-    await page.keyboard.press('Enter');
-    const applyBtn = page.getByTestId('crop-apply');
-    await expect(applyBtn).toBeEnabled();
-    await applyBtn.click();
-
-    await expect(panel).toHaveCount(0, { timeout: 10_000 });
-    await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
-
-    // Every point was inside the quad → Keep Outside excludes all of them,
-    // which would empty the cloud. That surfaces a delete-confirm dialog
-    // (an emptying crop == a delete, confirmed first) rather than a 0-point
-    // cloud. Confirm it and assert the row is removed.
-    const confirm = page.getByTestId('confirm-delete');
-    await expect(confirm).toBeVisible({ timeout: 10_000 });
-    await confirm.click();
-    await expect(row).toHaveCount(0, { timeout: 5_000 });
-  } finally {
-    await close();
+  const inset = 8;
+  const corners = [
+    { x: box.x + inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + box.height - inset },
+    { x: box.x + inset, y: box.y + box.height - inset },
+  ];
+  for (let i = 0; i < corners.length; i++) {
+    await page.mouse.click(corners[i].x, corners[i].y);
+    await expect(overlay.locator('circle')).toHaveCount(i + 1);
   }
+
+  await page.keyboard.press('Enter');
+  const applyBtn = page.getByTestId('crop-apply');
+  await expect(applyBtn).toBeEnabled();
+  await applyBtn.click();
+
+  await expect(panel).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
+
+  // Every point was inside the quad → Keep Outside excludes all of them,
+  // which would empty the cloud. That surfaces a delete-confirm dialog
+  // (an emptying crop == a delete, confirmed first) rather than a 0-point
+  // cloud. Confirm it and assert the row is removed.
+  const confirm = page.getByTestId('confirm-delete');
+  await expect(confirm).toBeVisible({ timeout: 10_000 });
+  await confirm.click();
+  await expect(row).toHaveCount(0, { timeout: 5_000 });
 });
 
 // The strongest of the three: a lasso over only the LEFT half of the
@@ -186,67 +191,62 @@ test('polygon lasso crop: Keep Outside enclosing all points empties the cloud (d
 // space diverged again (the original bug): the surviving count would jump
 // to 0 or 60 instead of landing in between.
 test('polygon lasso crop: half-viewport lasso keeps a strict subset of points', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
 
-    await importFiles(app, page, 'import-auto', TINY);
-    await completeImportWizard(page);
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await expect(row).toHaveAttribute('data-point-count', '60');
 
-    const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-    await expect(row).toBeVisible({ timeout: 20_000 });
-    await expect(row).toHaveAttribute('data-point-count', '60');
+  // Freshly imported scan is auto-selected (no re-click — that would toggle off).
+  await expect(row).toHaveAttribute('data-selected', 'true');
+  await page.getByTestId('tool-crop').click();
 
-    // Freshly imported scan is auto-selected (no re-click — that would toggle off).
-    await expect(row).toHaveAttribute('data-selected', 'true');
-    await page.getByTestId('tool-crop').click();
+  const panel = page.getByTestId('crop-panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('crop-shape-polygon').click();
+  await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
 
-    const panel = page.getByTestId('crop-panel');
-    await expect(panel).toBeVisible();
-    await page.getByTestId('crop-shape-polygon').click();
-    await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
+  const overlay = page.getByTestId('crop-polygon-overlay');
+  await expect(overlay).toBeVisible();
+  const box = await overlay.boundingBox();
+  if (!box) throw new Error('crop-polygon-overlay has no bounding box');
 
-    const overlay = page.getByTestId('crop-polygon-overlay');
-    await expect(overlay).toBeVisible();
-    const box = await overlay.boundingBox();
-    if (!box) throw new Error('crop-polygon-overlay has no bounding box');
-
-    // Left half of the viewport, full height. The crop panel floats over
-    // the right edge (z-20, above the overlay), so cutting the LEFT half
-    // keeps clicks well clear of it.
-    const inset = 8;
-    const midX = box.x + box.width / 2;
-    const corners = [
-      { x: box.x + inset, y: box.y + inset },
-      { x: midX, y: box.y + inset },
-      { x: midX, y: box.y + box.height - inset },
-      { x: box.x + inset, y: box.y + box.height - inset },
-    ];
-    for (let i = 0; i < corners.length; i++) {
-      await page.mouse.click(corners[i].x, corners[i].y);
-      await expect(overlay.locator('circle')).toHaveCount(i + 1);
-    }
-
-    await page.keyboard.press('Enter');
-    const applyBtn = page.getByTestId('crop-apply');
-    await expect(applyBtn).toBeEnabled();
-    await applyBtn.click();
-
-    await expect(panel).toHaveCount(0, { timeout: 10_000 });
-    await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
-
-    // Strict subset: 0 < kept < 60. A half-plane through a centred cloud
-    // can't keep everything or nothing unless projection broke.
-    await expect
-      .poll(async () => {
-        if ((await row.count()) === 0) return -1; // emptied → treated as failure
-        return Number(await row.getAttribute('data-point-count'));
-      }, { timeout: 8_000 })
-      .toBeGreaterThan(0);
-    const kept = Number(await row.getAttribute('data-point-count'));
-    expect(kept).toBeGreaterThan(0);
-    expect(kept).toBeLessThan(60);
-  } finally {
-    await close();
+  // Left half of the viewport, full height. The crop panel floats over
+  // the right edge (z-20, above the overlay), so cutting the LEFT half
+  // keeps clicks well clear of it.
+  const inset = 8;
+  const midX = box.x + box.width / 2;
+  const corners = [
+    { x: box.x + inset, y: box.y + inset },
+    { x: midX, y: box.y + inset },
+    { x: midX, y: box.y + box.height - inset },
+    { x: box.x + inset, y: box.y + box.height - inset },
+  ];
+  for (let i = 0; i < corners.length; i++) {
+    await page.mouse.click(corners[i].x, corners[i].y);
+    await expect(overlay.locator('circle')).toHaveCount(i + 1);
   }
+
+  await page.keyboard.press('Enter');
+  const applyBtn = page.getByTestId('crop-apply');
+  await expect(applyBtn).toBeEnabled();
+  await applyBtn.click();
+
+  await expect(panel).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
+
+  // Strict subset: 0 < kept < 60. A half-plane through a centred cloud
+  // can't keep everything or nothing unless projection broke.
+  await expect
+    .poll(async () => {
+      if ((await row.count()) === 0) return -1; // emptied → treated as failure
+      return Number(await row.getAttribute('data-point-count'));
+    }, { timeout: 8_000 })
+    .toBeGreaterThan(0);
+  const kept = Number(await row.getAttribute('data-point-count'));
+  expect(kept).toBeGreaterThan(0);
+  expect(kept).toBeLessThan(60);
 });

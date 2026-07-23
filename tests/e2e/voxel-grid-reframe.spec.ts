@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
-import { launchApp } from './helpers/launchApp';
+import { launchApp, type LaunchedApp } from './helpers/launchApp';
+import { resetToFreshScene } from './helpers/resetApp';
 
 // When a Create Voxel Grid box is added it starts as a unit cube at the origin
 // and the Transform panel opens so the user can dial in a real-world origin and
@@ -12,6 +13,11 @@ import { launchApp } from './helpers/launchApp';
 //
 // Per CLAUDE.md E2E rules: live backend, drive the real UI (toolbar button,
 // transform-panel inputs), assert concrete numbers (camera target follows).
+//
+// Shared session: one app + backend for the whole file; File → New resets the
+// scene between tests (see helpers/resetApp.ts). Each test polls the camera
+// into a known frame after creating its own voxel box, so no test depends on
+// launch-default camera state.
 
 const dist = (p: number[], t: number[]) =>
   Math.hypot(p[0] - t[0], p[1] - t[1], p[2] - t[2]);
@@ -33,75 +39,78 @@ async function setField(page: Page, testId: string, value: string) {
   await input.press('Enter');
 }
 
+let session: LaunchedApp;
+test.beforeAll(async () => {
+  session = await launchApp();
+});
+test.afterAll(async () => {
+  await session?.close();
+});
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
+
 test('Editing a voxel grid origin re-frames the viewport on the new location', async () => {
-  const { app, page, close } = await launchApp();
+  const { page } = session;
 
-  try {
-    // Create the voxel grid via the real toolbar command. It auto-selects the new
-    // box and opens the Transform panel (handleCreateShape).
-    await page.getByTestId('tool-create-voxel').click();
-    await expect(page.getByTestId('mesh-pos-x')).toBeVisible({ timeout: 20_000 });
-    await waitForCameraHooks(page);
+  // Create the voxel grid via the real toolbar command. It auto-selects the new
+  // box and opens the Transform panel (handleCreateShape).
+  await page.getByTestId('tool-create-voxel').click();
+  await expect(page.getByTestId('mesh-pos-x')).toBeVisible({ timeout: 20_000 });
+  await waitForCameraHooks(page);
 
-    // Initial frame: a unit cube at the origin → camera target ~origin, tight zoom.
-    // Give the create-time auto-frame a beat to settle.
-    await expect.poll(async () => {
-      const cam = await page.evaluate(() => (window as any).__getCameraState());
-      return Math.hypot(...cam.target);
-    }, { timeout: 5_000 }).toBeLessThan(5);
+  // Initial frame: a unit cube at the origin → camera target ~origin, tight zoom.
+  // Give the create-time auto-frame a beat to settle.
+  await expect.poll(async () => {
+    const cam = await page.evaluate(() => (window as any).__getCameraState());
+    return Math.hypot(...cam.target);
+  }, { timeout: 5_000 }).toBeLessThan(5);
 
-    const before = await page.evaluate(() => (window as any).__getCameraState());
-    // Small coords → no display offset, target is world space directly.
-    expect(before.displayOffset).toEqual([0, 0, 0]);
+  const before = await page.evaluate(() => (window as any).__getCameraState());
+  // Small coords → no display offset, target is world space directly.
+  expect(before.displayOffset).toEqual([0, 0, 0]);
 
-    // Move the grid origin far from the start (40,40,40). Each commit is on Enter.
-    await setField(page, 'mesh-pos-x', '40');
-    await setField(page, 'mesh-pos-y', '40');
-    await setField(page, 'mesh-pos-z', '40');
+  // Move the grid origin far from the start (40,40,40). Each commit is on Enter.
+  await setField(page, 'mesh-pos-x', '40');
+  await setField(page, 'mesh-pos-y', '40');
+  await setField(page, 'mesh-pos-z', '40');
 
-    // The camera target must follow the box out to ~(40,40,40), not stay at origin.
-    await expect.poll(async () => {
-      const cam = await page.evaluate(() => (window as any).__getCameraState());
-      return cam.target[0];
-    }, { timeout: 5_000 }).toBeGreaterThan(30);
+  // The camera target must follow the box out to ~(40,40,40), not stay at origin.
+  await expect.poll(async () => {
+    const cam = await page.evaluate(() => (window as any).__getCameraState());
+    return cam.target[0];
+  }, { timeout: 5_000 }).toBeGreaterThan(30);
 
-    const after = await page.evaluate(() => (window as any).__getCameraState());
-    expect(after.target[1]).toBeGreaterThan(30);
-    expect(after.target[2]).toBeGreaterThan(30);
-    // It really moved — far from where it started.
-    expect(dist(after.target, before.target)).toBeGreaterThan(30);
-  } finally {
-    await close();
-  }
+  const after = await page.evaluate(() => (window as any).__getCameraState());
+  expect(after.target[1]).toBeGreaterThan(30);
+  expect(after.target[2]).toBeGreaterThan(30);
+  // It really moved — far from where it started.
+  expect(dist(after.target, before.target)).toBeGreaterThan(30);
 });
 
 test('Editing a voxel grid scale re-frames so the larger box stays in view', async () => {
-  const { app, page, close } = await launchApp();
+  const { page } = session;
 
-  try {
-    await page.getByTestId('tool-create-voxel').click();
-    await expect(page.getByTestId('mesh-scale-x')).toBeVisible({ timeout: 20_000 });
-    await waitForCameraHooks(page);
+  await page.getByTestId('tool-create-voxel').click();
+  await expect(page.getByTestId('mesh-scale-x')).toBeVisible({ timeout: 20_000 });
+  await waitForCameraHooks(page);
 
-    await expect.poll(async () => {
-      const cam = await page.evaluate(() => (window as any).__getCameraState());
-      return dist(cam.position, cam.target);
-    }, { timeout: 5_000 }).toBeLessThan(10);
+  await expect.poll(async () => {
+    const cam = await page.evaluate(() => (window as any).__getCameraState());
+    return dist(cam.position, cam.target);
+  }, { timeout: 5_000 }).toBeLessThan(10);
 
-    const before = await page.evaluate(() => (window as any).__getCameraState());
-    const radiusBefore = dist(before.position, before.target);
+  const before = await page.evaluate(() => (window as any).__getCameraState());
+  const radiusBefore = dist(before.position, before.target);
 
-    // Grow the box to 30 m on each axis. The frame distance must grow with it
-    // (framing uses maxDim × 2), proving the scale commit re-framed.
-    await setField(page, 'mesh-scale-x', '30');
-    await setField(page, 'mesh-scale-y', '30');
-    await setField(page, 'mesh-scale-z', '30');
+  // Grow the box to 30 m on each axis. The frame distance must grow with it
+  // (framing uses maxDim × 2), proving the scale commit re-framed.
+  await setField(page, 'mesh-scale-x', '30');
+  await setField(page, 'mesh-scale-y', '30');
+  await setField(page, 'mesh-scale-z', '30');
 
-    await expect.poll(async () => {
-      const cam = await page.evaluate(() => (window as any).__getCameraState());
-      return dist(cam.position, cam.target);
-    }, { timeout: 5_000 }).toBeGreaterThan(radiusBefore * 3);
-  } finally {
-    await close();
-  }
+  await expect.poll(async () => {
+    const cam = await page.evaluate(() => (window as any).__getCameraState());
+    return dist(cam.position, cam.target);
+  }, { timeout: 5_000 }).toBeGreaterThan(radiusBefore * 3);
 });

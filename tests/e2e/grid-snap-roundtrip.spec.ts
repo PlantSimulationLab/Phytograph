@@ -2,10 +2,28 @@ import { test, expect, type ElectronApplication, type Page } from '@playwright/t
 import { join } from 'node:path';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { launchApp, repoRoot } from './helpers/launchApp';
+import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
 import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
 import { completeImportWizard } from './helpers/importWizard';
+import { resetToFreshScene } from './helpers/resetApp';
+
+// Shared session: one app + backend for the whole file; File → New resets the
+// scene between tests (see helpers/resetApp.ts). The mid-test "fresh window"
+// the round-trip needs is the same File → New reset — it remounts the
+// App+SceneProvider subtree, so no renderer-side grid state can leak into the
+// re-import phase.
+
+let session: LaunchedApp;
+test.beforeAll(async () => {
+  session = await launchApp();
+});
+test.afterAll(async () => {
+  await session?.close();
+});
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
 
 // Terrain-following ("snapped") voxel grid round-trip through the Helios XML
 // bundle, against the live backend.
@@ -46,63 +64,57 @@ async function expectGridSnapped(page: Page) {
 }
 
 test('round-trips a terrain-following voxel grid through XML export and re-import', async () => {
+  const { app, page } = session;
   const fixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'snapped-grid.xml');
   const outDir = mkdtempSync(join(tmpdir(), 'phytograph-gridsnap-'));
   const xmlPath = join(outDir, 'snapped.xml');
 
   // ── 1. Import the snapped-grid fixture; the grid must come back SNAPPED ──────
-  const { app, page, close } = await launchApp();
-  try {
-    await stubSaveDialog(app, xmlPath);
-    await importSnappedGrid(app, page, fixture);
+  await stubSaveDialog(app, xmlPath);
+  await importSnappedGrid(app, page, fixture);
 
-    await expect(page.getByTestId('scans-panel').locator('[data-testid="scan-row"]'))
-      .toHaveCount(1, { timeout: 20_000 });
-    await expectGridSnapped(page);
+  await expect(page.getByTestId('scans-panel').locator('[data-testid="scan-row"]'))
+    .toHaveCount(1, { timeout: 20_000 });
+  await expectGridSnapped(page);
 
-    // ── 2. Re-export the bundle with the grid ticked ──────────────────────────
-    await page.evaluate(() => (window as unknown as { __openExportPanel: () => void }).__openExportPanel());
-    await expect(page.getByTestId('export-modal')).toBeVisible();
-    await expect(page.getByTestId('export-scan-mode-xml')).toHaveAttribute('data-active', 'true');
-    const gridToggle = page.getByTestId('export-grid-toggle');
-    await expect(gridToggle).toBeVisible();
-    await gridToggle.check();
-    const gridRows = page.getByTestId('export-grid-row');
-    await expect(gridRows).toHaveCount(1);
-    await gridRows.first().getByRole('checkbox').check();
-    await expect(gridRows.first()).toHaveAttribute('data-checked', 'true');
+  // ── 2. Re-export the bundle with the grid ticked ──────────────────────────
+  await page.evaluate(() => (window as unknown as { __openExportPanel: () => void }).__openExportPanel());
+  await expect(page.getByTestId('export-modal')).toBeVisible();
+  await expect(page.getByTestId('export-scan-mode-xml')).toHaveAttribute('data-active', 'true');
+  const gridToggle = page.getByTestId('export-grid-toggle');
+  await expect(gridToggle).toBeVisible();
+  await gridToggle.check();
+  const gridRows = page.getByTestId('export-grid-row');
+  await expect(gridRows).toHaveCount(1);
+  await gridRows.first().getByRole('checkbox').check();
+  await expect(gridRows.first()).toHaveAttribute('data-checked', 'true');
 
-    await page.getByTestId('export-scan-xml').click();
-    await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
-      .toBeGreaterThan(0);
-    await expect.poll(() => existsSync(xmlPath), { timeout: 30_000, intervals: [200, 500, 1000] }).toBe(true);
+  await page.getByTestId('export-scan-xml').click();
+  await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
+    .toBeGreaterThan(0);
+  await expect.poll(() => existsSync(xmlPath), { timeout: 30_000, intervals: [200, 500, 1000] }).toBe(true);
 
-    // The exported XML regained the per-column offsets and the dropped-column mask.
-    const xml = readFileSync(xmlPath, 'utf-8');
-    const grid = xml.match(/<grid>([\s\S]*?)<\/grid>/);
-    expect(grid, xml).not.toBeNull();
-    const body = grid![1];
-    const offsets = body.match(/<columnOffsets>([^<]*)<\/columnOffsets>/);
-    expect(offsets, body).not.toBeNull();
-    const vals = offsets![1].trim().split(/\s+/).map(Number);
-    expect(vals).toHaveLength(4); // nx*ny == 4
-    expect(vals[0]).toBeCloseTo(0.0, 5);
-    expect(vals[3]).toBeCloseTo(0.3, 5);
-    // One column was dropped outside the footprint → keptColumns is written.
-    expect(body).toMatch(/<keptColumns>\s*1\s+1\s+0\s+1\s*<\/keptColumns>/);
-  } finally {
-    await close();
-  }
+  // The exported XML regained the per-column offsets and the dropped-column mask.
+  const xml = readFileSync(xmlPath, 'utf-8');
+  const grid = xml.match(/<grid>([\s\S]*?)<\/grid>/);
+  expect(grid, xml).not.toBeNull();
+  const body = grid![1];
+  const offsets = body.match(/<columnOffsets>([^<]*)<\/columnOffsets>/);
+  expect(offsets, body).not.toBeNull();
+  const vals = offsets![1].trim().split(/\s+/).map(Number);
+  expect(vals).toHaveLength(4); // nx*ny == 4
+  expect(vals[0]).toBeCloseTo(0.0, 5);
+  expect(vals[3]).toBeCloseTo(0.3, 5);
+  // One column was dropped outside the footprint → keptColumns is written.
+  expect(body).toMatch(/<keptColumns>\s*1\s+1\s+0\s+1\s*<\/keptColumns>/);
 
-  // ── 3. Re-import the EXPORTED file into a fresh window: still snapped ────────
-  const { app: app2, page: page2, close: close2 } = await launchApp();
-  try {
-    await importSnappedGrid(app2, page2, xmlPath);
-    await expect(page2.getByTestId('scans-panel').locator('[data-testid="scan-row"]'))
-      .toHaveCount(1, { timeout: 20_000 });
-    // The grid Phytograph wrote itself re-imports snapped — the full write→read loop.
-    await expectGridSnapped(page2);
-  } finally {
-    await close2();
-  }
+  // ── 3. Re-import the EXPORTED file into a fresh scene: still snapped ────────
+  // File → New stands in for the old fresh-window relaunch: it remounts the App
+  // subtree, so nothing renderer-side survives into the re-import.
+  await resetToFreshScene(app, page);
+  await importSnappedGrid(app, page, xmlPath);
+  await expect(page.getByTestId('scans-panel').locator('[data-testid="scan-row"]'))
+    .toHaveCount(1, { timeout: 20_000 });
+  // The grid Phytograph wrote itself re-imports snapped — the full write→read loop.
+  await expectGridSnapped(page);
 });

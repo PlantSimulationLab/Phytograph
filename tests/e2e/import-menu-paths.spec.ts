@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { launchApp, repoRoot } from './helpers/launchApp';
+import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
+import { resetToFreshScene } from './helpers/resetApp';
 
 // Regression coverage for two import bugs:
 //
@@ -19,73 +20,77 @@ import { importFiles } from './helpers/importFiles';
 //
 // Per CLAUDE.md: live backend, real UI, assert concrete outputs, no mocking the
 // backend (the native OS chooser is stubbed to a fixture path — allowed).
+//
+// Shared session: one app + backend for the whole file; File → New resets the
+// scene between tests (see helpers/resetApp.ts).
 const MESH_PLY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'cube-mesh.ply');
 const SKELETON_JSON = join(repoRoot, 'tests', 'e2e', 'fixtures', 'skeleton.json');
 
+let session: LaunchedApp;
+test.beforeAll(async () => {
+  session = await launchApp();
+});
+test.afterAll(async () => {
+  await session?.close();
+});
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
+
 test('File → Import → Mesh imports a mesh through the native dialog', async () => {
-  const { app, page, close } = await launchApp();
-  try {
-    await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
+  const { app, page } = session;
+  await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    await importFiles(app, page, 'import-mesh', MESH_PLY);
+  await importFiles(app, page, 'import-mesh', MESH_PLY);
 
-    const meshRow = page.getByTestId('mesh-row').first();
-    await expect(meshRow).toBeVisible({ timeout: 30_000 });
-    await expect(meshRow).toHaveAttribute('data-triangle-count', '12');
-    await expect(meshRow).toHaveAttribute('data-mesh-name', 'cube-mesh');
-    await expect(page.getByTestId('scan-row')).toHaveCount(0);
-  } finally {
-    await close();
-  }
+  const meshRow = page.getByTestId('mesh-row').first();
+  await expect(meshRow).toBeVisible({ timeout: 30_000 });
+  await expect(meshRow).toHaveAttribute('data-triangle-count', '12');
+  await expect(meshRow).toHaveAttribute('data-mesh-name', 'cube-mesh');
+  await expect(page.getByTestId('scan-row')).toHaveCount(0);
 });
 
 test('File → Import → Skeleton imports a skeleton through the native dialog', async () => {
-  const { app, page, close } = await launchApp();
-  try {
-    await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
+  const { app, page } = session;
+  await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    await importFiles(app, page, 'import-skeleton', SKELETON_JSON);
+  await importFiles(app, page, 'import-skeleton', SKELETON_JSON);
 
-    const skelRow = page.getByTestId('skeleton-row').first();
-    await expect(skelRow).toBeVisible({ timeout: 30_000 });
-    await expect(skelRow).toHaveAttribute('data-point-count', '3');
-    await expect(page.getByTestId('mesh-row')).toHaveCount(0);
-    await expect(page.getByTestId('scan-row')).toHaveCount(0);
-  } finally {
-    await close();
-  }
+  const skelRow = page.getByTestId('skeleton-row').first();
+  await expect(skelRow).toBeVisible({ timeout: 30_000 });
+  await expect(skelRow).toHaveAttribute('data-point-count', '3');
+  await expect(page.getByTestId('mesh-row')).toHaveCount(0);
+  await expect(page.getByTestId('scan-row')).toHaveCount(0);
 });
 
 test('a dropped mesh .ply still auto-detects after a cancelled skeleton import', async () => {
-  const { app, page, close } = await launchApp();
-  try {
-    await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
+  const { app, page } = session;
+  await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    // User picks File → Import → Skeleton, then cancels the native dialog.
-    await app.evaluate(async ({ ipcMain }) => {
-      ipcMain.removeHandler('dialog:open');
-      ipcMain.handle('dialog:open', async () => null); // cancel
-    });
-    await app.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: 'import-skeleton' });
-    });
-    await page.waitForTimeout(200);
-    // Nothing imported, no error, still empty.
-    await expect(page.getByTestId('skeleton-row')).toHaveCount(0);
-    await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
+  // User picks File → Import → Skeleton, then cancels the native dialog.
+  // (Safe in the shared session: importFiles re-stubs dialog:open on every
+  // call, so this cancel stub can't leak into a later test's import.)
+  await app.evaluate(async ({ ipcMain }) => {
+    ipcMain.removeHandler('dialog:open');
+    ipcMain.handle('dialog:open', async () => null); // cancel
+  });
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: 'import-skeleton' });
+  });
+  await page.waitForTimeout(200);
+  // Nothing imported, no error, still empty.
+  await expect(page.getByTestId('skeleton-row')).toHaveCount(0);
+  await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    // Now the user drags a face-bearing .ply into the viewport. It must be
-    // auto-detected as a mesh — NOT routed to the skeleton parser (the old bug
-    // produced "Unsupported skeleton format: .ply"). A drop is the dropzone
-    // input's change event (noClick), which onDrop handles with auto-detect.
-    await page.getByTestId('app-dropzone-input').setInputFiles(MESH_PLY);
+  // Now the user drags a face-bearing .ply into the viewport. It must be
+  // auto-detected as a mesh — NOT routed to the skeleton parser (the old bug
+  // produced "Unsupported skeleton format: .ply"). A drop is the dropzone
+  // input's change event (noClick), which onDrop handles with auto-detect.
+  await page.getByTestId('app-dropzone-input').setInputFiles(MESH_PLY);
 
-    const meshRow = page.getByTestId('mesh-row').first();
-    await expect(meshRow).toBeVisible({ timeout: 30_000 });
-    await expect(meshRow).toHaveAttribute('data-triangle-count', '12');
-    // The skeleton-format error toast must never appear.
-    await expect(page.getByText(/Unsupported skeleton format/i)).toHaveCount(0);
-  } finally {
-    await close();
-  }
+  const meshRow = page.getByTestId('mesh-row').first();
+  await expect(meshRow).toBeVisible({ timeout: 30_000 });
+  await expect(meshRow).toHaveAttribute('data-triangle-count', '12');
+  // The skeleton-format error toast must never appear.
+  await expect(page.getByText(/Unsupported skeleton format/i)).toHaveCount(0);
 });

@@ -1,131 +1,135 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { launchApp, repoRoot } from './helpers/launchApp';
+import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
+import { resetToFreshScene } from './helpers/resetApp';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 const TREE_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
+
+// Shared session: one app + backend for the whole file; File → New resets the
+// scene between tests (see helpers/resetApp.ts). The unified history is
+// scene-scoped, so the reset also clears the undo/redo stacks — no history
+// entry from one test can leak into the next.
+let session: LaunchedApp;
+test.beforeAll(async () => {
+  session = await launchApp();
+});
+test.afterAll(async () => {
+  await session?.close();
+});
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
 
 // Generalized undo/redo (Phase B): a mesh ADD is undoable, and undo/redo are
 // reversible. Drives the real UI against the live backend per CLAUDE.md rules:
 // import a cloud, triangulate (Open3D Ball Pivoting — the default), confirm the
 // mesh row appears, then Cmd+Z removes it and Cmd+Shift+Z brings it back.
 test('mesh add is undoable; undo removes it and redo restores it', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    await importFiles(app, page, 'import-auto', FIXTURE);
-    await completeImportWizard(page);
+  await importFiles(app, page, 'import-auto', FIXTURE);
+  await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
-    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+  await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
-    // Triangulate with the default Open3D method (reliable, fast on 60 pts).
-    await page.getByTestId('tool-triangulate').click();
-    const modal = page.getByTestId('triangulation-popup');
-    await expect(modal).toBeVisible();
-    await modal.getByTestId('triangulation-run-button').click();
+  // Triangulate with the default Open3D method (reliable, fast on 60 pts).
+  await page.getByTestId('tool-triangulate').click();
+  const modal = page.getByTestId('triangulation-popup');
+  await expect(modal).toBeVisible();
+  await modal.getByTestId('triangulation-run-button').click();
 
-    // The mesh row appears once the backend returns.
-    const meshRow = page.getByTestId('mesh-row');
-    await expect(meshRow.first()).toBeVisible({ timeout: 60_000 });
-    await expect(meshRow).toHaveCount(1);
+  // The mesh row appears once the backend returns.
+  const meshRow = page.getByTestId('mesh-row');
+  await expect(meshRow.first()).toBeVisible({ timeout: 60_000 });
+  await expect(meshRow).toHaveCount(1);
 
-    // Close the triangulation modal so the keyboard reaches the viewer's window
-    // keydown listener (Cmd+Z). Wait for it to actually be gone — pressing Cmd+Z
-    // while it's still mounted is the race that intermittently swallowed the undo.
-    await page.keyboard.press('Escape');
-    await expect(page.getByTestId('triangulation-popup')).toHaveCount(0);
+  // Close the triangulation modal so the keyboard reaches the viewer's window
+  // keydown listener (Cmd+Z). Wait for it to actually be gone — pressing Cmd+Z
+  // while it's still mounted is the race that intermittently swallowed the undo.
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('triangulation-popup')).toHaveCount(0);
 
-    // Undo: the mesh add is reverted → no mesh rows.
-    await page.keyboard.press('ControlOrMeta+z');
-    await expect(meshRow).toHaveCount(0, { timeout: 10_000 });
+  // Undo: the mesh add is reverted → no mesh rows.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(meshRow).toHaveCount(0, { timeout: 10_000 });
 
-    // Redo (Cmd+Shift+Z): the mesh comes back.
-    await page.keyboard.press('ControlOrMeta+Shift+z');
-    await expect(meshRow).toHaveCount(1, { timeout: 10_000 });
-    await expect(meshRow.first().getByTestId('mesh-row-count')).toContainText('triangles');
-  } finally {
-    await close();
-  }
+  // Redo (Cmd+Shift+Z): the mesh comes back.
+  await page.keyboard.press('ControlOrMeta+Shift+z');
+  await expect(meshRow).toHaveCount(1, { timeout: 10_000 });
+  await expect(meshRow.first().getByTestId('mesh-row-count')).toContainText('triangles');
 });
 
 // Deleting a mesh is undoable: after deletion, one undo restores the row.
 test('mesh delete is undoable', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    await importFiles(app, page, 'import-auto', FIXTURE);
-    await completeImportWizard(page);
+  await importFiles(app, page, 'import-auto', FIXTURE);
+  await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
-    await page.getByTestId('tool-triangulate').click();
-    const modal = page.getByTestId('triangulation-popup');
-    await expect(modal).toBeVisible();
-    await modal.getByTestId('triangulation-run-button').click();
+  await page.getByTestId('tool-triangulate').click();
+  const modal = page.getByTestId('triangulation-popup');
+  await expect(modal).toBeVisible();
+  await modal.getByTestId('triangulation-run-button').click();
 
-    const meshRow = page.getByTestId('mesh-row');
-    await expect(meshRow.first()).toBeVisible({ timeout: 60_000 });
-    await page.keyboard.press('Escape');
-    await expect(page.getByTestId('triangulation-popup')).toHaveCount(0);
+  const meshRow = page.getByTestId('mesh-row');
+  await expect(meshRow.first()).toBeVisible({ timeout: 60_000 });
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('triangulation-popup')).toHaveCount(0);
 
-    // Select the mesh, then delete via the Meshes panel header (one confirm).
-    await meshRow.first().click();
-    await page.getByTestId('meshes-bulk-delete').click();
-    await page.getByTestId('confirm-delete').click();
-    await expect(meshRow).toHaveCount(0, { timeout: 10_000 });
-    // Confirm dialog gone before the keyboard undo (avoids the focus race).
-    await expect(page.getByTestId('confirm-delete')).toHaveCount(0);
+  // Select the mesh, then delete via the Meshes panel header (one confirm).
+  await meshRow.first().click();
+  await page.getByTestId('meshes-bulk-delete').click();
+  await page.getByTestId('confirm-delete').click();
+  await expect(meshRow).toHaveCount(0, { timeout: 10_000 });
+  // Confirm dialog gone before the keyboard undo (avoids the focus race).
+  await expect(page.getByTestId('confirm-delete')).toHaveCount(0);
 
-    // Undo restores the deleted mesh.
-    await page.keyboard.press('ControlOrMeta+z');
-    await expect(meshRow).toHaveCount(1, { timeout: 10_000 });
-  } finally {
-    await close();
-  }
+  // Undo restores the deleted mesh.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(meshRow).toHaveCount(1, { timeout: 10_000 });
 });
 
 // Phase C: skeleton extraction is undoable. Uses the Y-shaped tree fixture and
 // non-default extraction params (matching skeleton-extract.spec) so the BFS
 // actually produces a skeleton, then Cmd+Z removes it and redo restores it.
 test('skeleton extraction is undoable', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    await importFiles(app, page, 'import-point-cloud', TREE_FIXTURE);
-    await completeImportWizard(page);
+  await importFiles(app, page, 'import-point-cloud', TREE_FIXTURE);
+  await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
-    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
-    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+  await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+  await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
-    await page.getByTestId('tool-skeleton').click();
-    const panel = page.getByTestId('skeleton-panel');
-    await expect(panel).toBeVisible();
-    await page.getByTestId('skeleton-search-radius').fill('0.04');
-    await page.getByTestId('skeleton-min-points').fill('1');
-    await page.getByTestId('skeleton-extract-button').click();
+  await page.getByTestId('tool-skeleton').click();
+  const panel = page.getByTestId('skeleton-panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('skeleton-search-radius').fill('0.04');
+  await page.getByTestId('skeleton-min-points').fill('1');
+  await page.getByTestId('skeleton-extract-button').click();
 
-    const skelRow = page.getByTestId('skeleton-row');
-    await expect(skelRow.first()).toBeVisible({ timeout: 60_000 });
-    await expect(skelRow).toHaveCount(1);
+  const skelRow = page.getByTestId('skeleton-row');
+  await expect(skelRow.first()).toBeVisible({ timeout: 60_000 });
+  await expect(skelRow).toHaveCount(1);
 
-    // The skeleton panel auto-closes on successful extraction; wait for it to be
-    // gone so the keyboard undo reaches the viewer's window listener.
-    await expect(panel).toHaveCount(0);
+  // The skeleton panel auto-closes on successful extraction; wait for it to be
+  // gone so the keyboard undo reaches the viewer's window listener.
+  await expect(panel).toHaveCount(0);
 
-    // Undo removes the skeleton; redo restores it.
-    await page.keyboard.press('ControlOrMeta+z');
-    await expect(skelRow).toHaveCount(0, { timeout: 10_000 });
-    await page.keyboard.press('ControlOrMeta+Shift+z');
-    await expect(skelRow).toHaveCount(1, { timeout: 10_000 });
-  } finally {
-    await close();
-  }
+  // Undo removes the skeleton; redo restores it.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(skelRow).toHaveCount(0, { timeout: 10_000 });
+  await page.keyboard.press('ControlOrMeta+Shift+z');
+  await expect(skelRow).toHaveCount(1, { timeout: 10_000 });
 });
 
 // Phase D: deleting a scan (octree-backed cloud) is undoable. This is the
@@ -133,66 +137,58 @@ test('skeleton extraction is undoable', async () => {
 // delete, so undo can resurrect the scan with its data intact. We assert the
 // row returns with the same point count after undo.
 test('scan delete is undoable (octree cloud survives undo)', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    await importFiles(app, page, 'import-auto', FIXTURE);
-    await completeImportWizard(page);
+  await importFiles(app, page, 'import-auto', FIXTURE);
+  await completeImportWizard(page);
 
-    const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-    await expect(row).toBeVisible({ timeout: 20_000 });
-    await expect(row).toHaveAttribute('data-point-count', '60');
-    await expect(row).toHaveAttribute('data-selected', 'true');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await expect(row).toHaveAttribute('data-point-count', '60');
+  await expect(row).toHaveAttribute('data-selected', 'true');
 
-    // Delete via the Scans panel header (one confirm).
-    await page.getByTestId('scans-bulk-delete').click();
-    await page.getByTestId('confirm-delete').click();
-    await expect(page.locator('[data-testid="scan-row"]')).toHaveCount(0, { timeout: 10_000 });
-    await expect(page.getByTestId('confirm-delete')).toHaveCount(0);
+  // Delete via the Scans panel header (one confirm).
+  await page.getByTestId('scans-bulk-delete').click();
+  await page.getByTestId('confirm-delete').click();
+  await expect(page.locator('[data-testid="scan-row"]')).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.getByTestId('confirm-delete')).toHaveCount(0);
 
-    // Undo restores the scan with its original point count — proving the octree
-    // session was kept alive (deferred-free), not torn down on delete.
-    await page.keyboard.press('ControlOrMeta+z');
-    await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(row).toHaveAttribute('data-point-count', '60');
-  } finally {
-    await close();
-  }
+  // Undo restores the scan with its original point count — proving the octree
+  // session was kept alive (deferred-free), not torn down on delete.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(row).toBeVisible({ timeout: 10_000 });
+  await expect(row).toHaveAttribute('data-point-count', '60');
 });
 
 // Phase D: stitching two scans, then undo restores the two originals and removes
 // the stitched scan — proving the old separate stitch stack was folded into the
 // unified history (one Cmd+Z reverses the stitch).
 test('stitch is undoable via the unified history', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    // Import two clouds (the multi-pointcloud fixture path). Reuse tiny.xyz twice
-    // by importing the two-file set if available; otherwise import tiny then tree.
-    await importFiles(app, page, 'import-auto', [FIXTURE, TREE_FIXTURE]);
-    await completeImportWizard(page);
+  // Import two clouds (the multi-pointcloud fixture path). Reuse tiny.xyz twice
+  // by importing the two-file set if available; otherwise import tiny then tree.
+  await importFiles(app, page, 'import-auto', [FIXTURE, TREE_FIXTURE]);
+  await completeImportWizard(page);
 
-    const rows = page.locator('[data-testid="scan-row"]');
-    await expect(rows).toHaveCount(2, { timeout: 20_000 });
+  const rows = page.locator('[data-testid="scan-row"]');
+  await expect(rows).toHaveCount(2, { timeout: 20_000 });
 
-    // Select both, open the stitch dialog, run it.
-    await rows.nth(0).click();
-    await rows.nth(1).click({ modifiers: ['ControlOrMeta'] });
-    await expect(page.locator('[data-testid="scan-row"][data-selected="true"]')).toHaveCount(2);
+  // Select both, open the stitch dialog, run it.
+  await rows.nth(0).click();
+  await rows.nth(1).click({ modifiers: ['ControlOrMeta'] });
+  await expect(page.locator('[data-testid="scan-row"][data-selected="true"]')).toHaveCount(2);
 
-    await page.getByTestId('tool-cloud-stitch').click();
-    const dialog = page.getByTestId('stitch-dialog');
-    await expect(dialog).toBeVisible();
-    await dialog.getByTestId('stitch-run').click();
+  await page.getByTestId('tool-cloud-stitch').click();
+  const dialog = page.getByTestId('stitch-dialog');
+  await expect(dialog).toBeVisible();
+  await dialog.getByTestId('stitch-run').click();
 
-    // One stitched scan replaces the two originals.
-    await expect(rows).toHaveCount(1, { timeout: 20_000 });
-    await expect(dialog).toHaveCount(0);
+  // One stitched scan replaces the two originals.
+  await expect(rows).toHaveCount(1, { timeout: 20_000 });
+  await expect(dialog).toHaveCount(0);
 
-    // Undo the stitch → the two originals return, stitched gone.
-    await page.keyboard.press('ControlOrMeta+z');
-    await expect(rows).toHaveCount(2, { timeout: 10_000 });
-  } finally {
-    await close();
-  }
+  // Undo the stitch → the two originals return, stitched gone.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(rows).toHaveCount(2, { timeout: 10_000 });
 });

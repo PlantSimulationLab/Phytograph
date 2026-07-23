@@ -1,115 +1,125 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { launchApp, repoRoot } from './helpers/launchApp';
+import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { stubOpenDialog, getOpenDialogCalls } from './helpers/stubOpenDialog';
 import { completeImportWizard } from './helpers/importWizard';
+import { resetToFreshScene } from './helpers/resetApp';
+
+// Shared session: one app + backend for the whole file; File → New resets the
+// scene between tests (see helpers/resetApp.ts).
+
+let session: LaunchedApp;
+test.beforeAll(async () => {
+  session = await launchApp();
+});
+test.afterAll(async () => {
+  await session?.close();
+});
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
 
 // Exercises the scan creation/edit/delete flow end-to-end via the unified
 // Scans panel. A "scan" can be created with no point data attached; the
 // scanner marker still renders at the configured origin.
 test('add, edit, and delete a params-only scan through the UI', async () => {
-  const { page, close } = await launchApp();
+  const { page } = session;
 
-  try {
+  const panel = page.getByTestId('scans-panel');
+  await expect(panel).toBeVisible();
 
-    const panel = page.getByTestId('scans-panel');
-    await expect(panel).toBeVisible();
+  // No scans yet → no rows.
+  await expect(panel.locator('[data-testid="scan-row"]')).toHaveCount(0);
 
-    // No scans yet → no rows.
-    await expect(panel.locator('[data-testid="scan-row"]')).toHaveCount(0);
+  // Toolbar Radio button opens the add popup directly.
+  await page.getByTestId('tool-add-scan').click();
+  const popup = page.getByTestId('scan-parameters-popup');
+  await expect(popup).toBeVisible();
 
-    // Toolbar Radio button opens the add popup directly.
-    await page.getByTestId('tool-add-scan').click();
-    const popup = page.getByTestId('scan-parameters-popup');
-    await expect(popup).toBeVisible();
+  // Non-default label + origin + sweep + multi-return beam params.
+  await page.getByTestId('scan-label-input').fill('North Tripod');
 
-    // Non-default label + origin + sweep + multi-return beam params.
-    await page.getByTestId('scan-label-input').fill('North Tripod');
+  // Regression guard: typing a negative origin one keystroke at a time must
+  // work. Previously the field was a controlled type="number" that reset any
+  // non-finite parse (including "" and a lone "-") back to 0, so you could
+  // neither erase the default zero nor type a leading minus. Clear the field
+  // and type "-2" character by character, asserting the minus survives.
+  const originX = page.getByTestId('scan-origin-x');
+  await originX.click();
+  await originX.fill('');
+  await originX.pressSequentially('-2', { delay: 30 });
+  await expect(originX).toHaveValue('-2');
+  await originX.fill('1.5');
+  await page.getByTestId('scan-origin-y').fill('-2');
+  await page.getByTestId('scan-origin-z').fill('0.75');
+  await page.getByTestId('scan-zenith-points').fill('50');
+  await page.getByTestId('scan-azimuth-points').fill('180');
+  await page.getByTestId('scan-zenith-min').fill('30');
 
-    // Regression guard: typing a negative origin one keystroke at a time must
-    // work. Previously the field was a controlled type="number" that reset any
-    // non-finite parse (including "" and a lone "-") back to 0, so you could
-    // neither erase the default zero nor type a leading minus. Clear the field
-    // and type "-2" character by character, asserting the minus survives.
-    const originX = page.getByTestId('scan-origin-x');
-    await originX.click();
-    await originX.fill('');
-    await originX.pressSequentially('-2', { delay: 30 });
-    await expect(originX).toHaveValue('-2');
-    await originX.fill('1.5');
-    await page.getByTestId('scan-origin-y').fill('-2');
-    await page.getByTestId('scan-origin-z').fill('0.75');
-    await page.getByTestId('scan-zenith-points').fill('50');
-    await page.getByTestId('scan-azimuth-points').fill('180');
-    await page.getByTestId('scan-zenith-min').fill('30');
+  // Regression guard: typing a multi-digit max one keystroke at a time must NOT
+  // be clamped against the min mid-typing. Previously, with min=30, typing "130"
+  // got clamped to 30 the instant "13" was parsed (13 < 30). Type it char by char
+  // and confirm the field ends at 130, not snapped to the min.
+  const zenithMax = page.getByTestId('scan-zenith-max');
+  await zenithMax.click();
+  await zenithMax.fill('');
+  await zenithMax.pressSequentially('130', { delay: 30 });
+  await zenithMax.blur();
+  await expect(zenithMax).toHaveValue('130');
 
-    // Regression guard: typing a multi-digit max one keystroke at a time must NOT
-    // be clamped against the min mid-typing. Previously, with min=30, typing "130"
-    // got clamped to 30 the instant "13" was parsed (13 < 30). Type it char by char
-    // and confirm the field ends at 130, not snapped to the min.
-    const zenithMax = page.getByTestId('scan-zenith-max');
-    await zenithMax.click();
-    await zenithMax.fill('');
-    await zenithMax.pressSequentially('130', { delay: 30 });
-    await zenithMax.blur();
-    await expect(zenithMax).toHaveValue('130');
+  await page.getByTestId('scan-azimuth-min').fill('45');
+  await page.getByTestId('scan-azimuth-max').fill('315');
 
-    await page.getByTestId('scan-azimuth-min').fill('45');
-    await page.getByTestId('scan-azimuth-max').fill('315');
+  await page.getByTestId('scan-return-multi').click();
+  const beamFields = page.getByTestId('scan-beam-fields');
+  await expect(beamFields).toBeVisible();
+  await page.getByTestId('scan-beam-diameter').fill('0.02');
+  await page.getByTestId('scan-beam-divergence').fill('1.2');
 
-    await page.getByTestId('scan-return-multi').click();
-    const beamFields = page.getByTestId('scan-beam-fields');
-    await expect(beamFields).toBeVisible();
-    await page.getByTestId('scan-beam-diameter').fill('0.02');
-    await page.getByTestId('scan-beam-divergence').fill('1.2');
+  await page.getByTestId('scan-submit').click();
+  await expect(popup).not.toBeVisible();
 
-    await page.getByTestId('scan-submit').click();
-    await expect(popup).not.toBeVisible();
+  // One row in the unified panel.
+  const rows = panel.locator('[data-testid="scan-row"]');
+  await expect(rows).toHaveCount(1);
+  const firstRow = rows.first();
+  await expect(firstRow).toContainText('North Tripod');
+  await expect(firstRow).toContainText('origin (1.50, -2.00, 0.75)');
+  // Params-only scan: data is missing, so the paperclip attach button is present.
+  await expect(firstRow.locator('[data-testid^="scan-attach-data-"]')).toBeVisible();
 
-    // One row in the unified panel.
-    const rows = panel.locator('[data-testid="scan-row"]');
-    await expect(rows).toHaveCount(1);
-    const firstRow = rows.first();
-    await expect(firstRow).toContainText('North Tripod');
-    await expect(firstRow).toContainText('origin (1.50, -2.00, 0.75)');
-    // Params-only scan: data is missing, so the paperclip attach button is present.
-    await expect(firstRow.locator('[data-testid^="scan-attach-data-"]')).toBeVisible();
+  // Expand the row and verify the params block.
+  const scanId = await firstRow.getAttribute('data-scan-id');
+  expect(scanId).not.toBeNull();
+  await page.getByTestId(`scan-expand-${scanId}`).click();
+  const expanded = page.getByTestId(`scan-expanded-${scanId}`);
+  await expect(expanded).toBeVisible();
+  await expect(expanded).toContainText('50 × 180');
+  await expect(expanded).toContainText('multi');
 
-    // Expand the row and verify the params block.
-    const scanId = await firstRow.getAttribute('data-scan-id');
-    expect(scanId).not.toBeNull();
-    await page.getByTestId(`scan-expand-${scanId}`).click();
-    const expanded = page.getByTestId(`scan-expanded-${scanId}`);
-    await expect(expanded).toBeVisible();
-    await expect(expanded).toContainText('50 × 180');
-    await expect(expanded).toContainText('multi');
+  // Edit via the row's edit button.
+  await page.getByTestId(`scan-edit-${scanId}`).click();
+  await expect(popup).toBeVisible();
+  const label = page.getByTestId('scan-label-input');
+  await expect(label).toHaveValue('North Tripod');
+  // Multi-return state should round-trip and beam fields stay visible.
+  await expect(beamFields).toBeVisible();
+  await expect(page.getByTestId('scan-beam-diameter')).toHaveValue('0.02');
+  await label.fill('North Tripod (renamed)');
+  await page.getByTestId('scan-submit').click();
+  await expect(popup).not.toBeVisible();
+  await expect(rows.first()).toContainText('North Tripod (renamed)');
 
-    // Edit via the row's edit button.
-    await page.getByTestId(`scan-edit-${scanId}`).click();
-    await expect(popup).toBeVisible();
-    const label = page.getByTestId('scan-label-input');
-    await expect(label).toHaveValue('North Tripod');
-    // Multi-return state should round-trip and beam fields stay visible.
-    await expect(beamFields).toBeVisible();
-    await expect(page.getByTestId('scan-beam-diameter')).toHaveValue('0.02');
-    await label.fill('North Tripod (renamed)');
-    await page.getByTestId('scan-submit').click();
-    await expect(popup).not.toBeVisible();
-    await expect(rows.first()).toContainText('North Tripod (renamed)');
-
-    // Delete the scan. The panel stays visible (always rendered) but the
-    // rows count drops back to zero.
-    await page.getByTestId(`scan-delete-${scanId}`).click();
-    // Confirm dialog may appear — best-effort accept via the existing
-    // confirm-delete button if shown.
-    const confirm = page.getByTestId('confirm-delete');
-    if (await confirm.isVisible().catch(() => false)) {
-      await confirm.click();
-    }
-    await expect(rows).toHaveCount(0);
-  } finally {
-    await close();
+  // Delete the scan. The panel stays visible (always rendered) but the
+  // rows count drops back to zero.
+  await page.getByTestId(`scan-delete-${scanId}`).click();
+  // Confirm dialog may appear — best-effort accept via the existing
+  // confirm-delete button if shown.
+  const confirm = page.getByTestId('confirm-delete');
+  if (await confirm.isVisible().catch(() => false)) {
+    await confirm.click();
   }
+  await expect(rows).toHaveCount(0);
 });
 
 // The ray-count inputs can be toggled between "# points" and "angular
@@ -120,61 +130,57 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
 // 90 points ⇄ 2°/ray; with a 0–360° azimuth sweep, 180 points ⇄ 2°/ray.
 // Committing 0.5°/ray converts zenith→360 and azimuth→720.
 test('ray-count toggle converts both zenith and azimuth between points and degrees per ray', async () => {
-  const { page, close } = await launchApp();
+  const { page } = session;
 
-  try {
-    await page.getByTestId('tool-add-scan').click();
-    const popup = page.getByTestId('scan-parameters-popup');
-    await expect(popup).toBeVisible();
+  await page.getByTestId('tool-add-scan').click();
+  const popup = page.getByTestId('scan-parameters-popup');
+  await expect(popup).toBeVisible();
 
-    // Default raster pattern: 0–180° zenith sweep, 0–360° azimuth sweep.
-    const zenithPoints = page.getByTestId('scan-zenith-points');
-    await zenithPoints.fill('90');
-    await zenithPoints.blur();
-    const points = page.getByTestId('scan-azimuth-points');
-    await points.fill('180');
-    await points.blur();
+  // Default raster pattern: 0–180° zenith sweep, 0–360° azimuth sweep.
+  const zenithPoints = page.getByTestId('scan-zenith-points');
+  await zenithPoints.fill('90');
+  await zenithPoints.blur();
+  const points = page.getByTestId('scan-azimuth-points');
+  await points.fill('180');
+  await points.blur();
 
-    // Toggle to °/ray: zenith 180°/90 = 2°/ray, azimuth 360°/180 = 2°/ray.
-    await page.getByTestId('scan-azimuth-mode-toggle').click();
-    const zenithResolution = page.getByTestId('scan-zenith-resolution');
-    const resolution = page.getByTestId('scan-azimuth-resolution');
-    await expect(zenithResolution).toBeVisible();
-    await expect(resolution).toBeVisible();
-    expect(parseFloat(await zenithResolution.inputValue())).toBeCloseTo(2, 5);
-    expect(parseFloat(await resolution.inputValue())).toBeCloseTo(2, 5);
-    // Both points fields are hidden in resolution mode; helper lines show the
-    // equivalent ray counts over each sweep.
-    await expect(page.getByTestId('scan-zenith-points')).toHaveCount(0);
-    await expect(page.getByTestId('scan-azimuth-points')).toHaveCount(0);
+  // Toggle to °/ray: zenith 180°/90 = 2°/ray, azimuth 360°/180 = 2°/ray.
+  await page.getByTestId('scan-azimuth-mode-toggle').click();
+  const zenithResolution = page.getByTestId('scan-zenith-resolution');
+  const resolution = page.getByTestId('scan-azimuth-resolution');
+  await expect(zenithResolution).toBeVisible();
+  await expect(resolution).toBeVisible();
+  expect(parseFloat(await zenithResolution.inputValue())).toBeCloseTo(2, 5);
+  expect(parseFloat(await resolution.inputValue())).toBeCloseTo(2, 5);
+  // Both points fields are hidden in resolution mode; helper lines show the
+  // equivalent ray counts over each sweep.
+  await expect(page.getByTestId('scan-zenith-points')).toHaveCount(0);
+  await expect(page.getByTestId('scan-azimuth-points')).toHaveCount(0);
 
-    // Type a finer resolution on each: 0.5°/ray over 180° ⇒ 360 zenith points,
-    // 0.5°/ray over 360° ⇒ 720 azimuth points.
-    await zenithResolution.fill('0.5');
-    await zenithResolution.blur();
-    await resolution.fill('0.5');
-    await resolution.blur();
+  // Type a finer resolution on each: 0.5°/ray over 180° ⇒ 360 zenith points,
+  // 0.5°/ray over 360° ⇒ 720 azimuth points.
+  await zenithResolution.fill('0.5');
+  await zenithResolution.blur();
+  await resolution.fill('0.5');
+  await resolution.blur();
 
-    // Toggle back to points and confirm both converted counts.
-    await page.getByTestId('scan-azimuth-mode-toggle').click();
-    await expect(zenithPoints).toBeVisible();
-    await expect(points).toBeVisible();
-    expect(parseInt(await zenithPoints.inputValue(), 10)).toBe(360);
-    expect(parseInt(await points.inputValue(), 10)).toBe(720);
+  // Toggle back to points and confirm both converted counts.
+  await page.getByTestId('scan-azimuth-mode-toggle').click();
+  await expect(zenithPoints).toBeVisible();
+  await expect(points).toBeVisible();
+  expect(parseInt(await zenithPoints.inputValue(), 10)).toBe(360);
+  expect(parseInt(await points.inputValue(), 10)).toBe(720);
 
-    // Submit and confirm the scan persisted both converted counts
-    // (360 zenith × 720 azimuth shows in the expanded row).
-    await page.getByTestId('scan-label-input').fill('Resolution Scan');
-    await page.getByTestId('scan-submit').click();
-    await expect(popup).not.toBeVisible();
+  // Submit and confirm the scan persisted both converted counts
+  // (360 zenith × 720 azimuth shows in the expanded row).
+  await page.getByTestId('scan-label-input').fill('Resolution Scan');
+  await page.getByTestId('scan-submit').click();
+  await expect(popup).not.toBeVisible();
 
-    const row = page.getByTestId('scans-panel').locator('[data-testid="scan-row"]').first();
-    const scanId = await row.getAttribute('data-scan-id');
-    await page.getByTestId(`scan-expand-${scanId}`).click();
-    await expect(page.getByTestId(`scan-expanded-${scanId}`)).toContainText('360 × 720');
-  } finally {
-    await close();
-  }
+  const row = page.getByTestId('scans-panel').locator('[data-testid="scan-row"]').first();
+  const scanId = await row.getAttribute('data-scan-id');
+  await page.getByTestId(`scan-expand-${scanId}`).click();
+  await expect(page.getByTestId(`scan-expanded-${scanId}`)).toContainText('360 × 720');
 });
 
 // A plain click on the row that is *already the sole selection* toggles it
@@ -183,51 +189,47 @@ test('ray-count toggle converts both zenith and azimuth between points and degre
 // repeated clicks flipped the marker while the row stayed highlighted. Both now
 // derive from the single selection set (data-selected), so they move together.
 test('plain-clicking a selected scan row toggles its selection on and off', async () => {
-  const { page, close } = await launchApp();
+  const { page } = session;
 
-  try {
-    const panel = page.getByTestId('scans-panel');
-    await expect(panel).toBeVisible();
+  const panel = page.getByTestId('scans-panel');
+  await expect(panel).toBeVisible();
 
-    // Create a params-only scan; it carries an origin, so it renders a scanner
-    // marker whose glow follows the row selection.
-    await page.getByTestId('tool-add-scan').click();
-    const popup = page.getByTestId('scan-parameters-popup');
-    await expect(popup).toBeVisible();
-    await page.getByTestId('scan-label-input').fill('Toggle Tripod');
-    await page.getByTestId('scan-origin-x').fill('1');
-    await page.getByTestId('scan-origin-y').fill('1');
-    await page.getByTestId('scan-origin-z').fill('0.5');
-    await page.getByTestId('scan-submit').click();
-    await expect(popup).not.toBeVisible();
+  // Create a params-only scan; it carries an origin, so it renders a scanner
+  // marker whose glow follows the row selection.
+  await page.getByTestId('tool-add-scan').click();
+  const popup = page.getByTestId('scan-parameters-popup');
+  await expect(popup).toBeVisible();
+  await page.getByTestId('scan-label-input').fill('Toggle Tripod');
+  await page.getByTestId('scan-origin-x').fill('1');
+  await page.getByTestId('scan-origin-y').fill('1');
+  await page.getByTestId('scan-origin-z').fill('0.5');
+  await page.getByTestId('scan-submit').click();
+  await expect(popup).not.toBeVisible();
 
-    const rows = panel.locator('[data-testid="scan-row"]');
-    await expect(rows).toHaveCount(1);
-    const row = rows.first();
-    await expect(row).toHaveAttribute('data-has-params', 'true');
+  const rows = panel.locator('[data-testid="scan-row"]');
+  await expect(rows).toHaveCount(1);
+  const row = rows.first();
+  await expect(row).toHaveAttribute('data-has-params', 'true');
 
-    // Newly created scan is auto-selected.
-    await expect(row).toHaveAttribute('data-selected', 'true');
+  // Newly created scan is auto-selected.
+  await expect(row).toHaveAttribute('data-selected', 'true');
 
-    // Click the row's name label — a handler-free spot that bubbles to the
-    // row's selection handler (the row center can sit over an action button).
-    const rowName = row.getByTestId('scan-row-name');
+  // Click the row's name label — a handler-free spot that bubbles to the
+  // row's selection handler (the row center can sit over an action button).
+  const rowName = row.getByTestId('scan-row-name');
 
-    // Plain click deselects (it is the sole selection).
-    await rowName.click();
-    await expect(row).toHaveAttribute('data-selected', 'false');
+  // Plain click deselects (it is the sole selection).
+  await rowName.click();
+  await expect(row).toHaveAttribute('data-selected', 'false');
 
-    // Plain click again re-selects.
-    await rowName.click();
-    await expect(row).toHaveAttribute('data-selected', 'true');
+  // Plain click again re-selects.
+  await rowName.click();
+  await expect(row).toHaveAttribute('data-selected', 'true');
 
-    // And toggles off once more — proving it is a stable two-state toggle, not
-    // a one-way latch.
-    await rowName.click();
-    await expect(row).toHaveAttribute('data-selected', 'false');
-  } finally {
-    await close();
-  }
+  // And toggles off once more — proving it is a stable two-state toggle, not
+  // a one-way latch.
+  await rowName.click();
+  await expect(row).toHaveAttribute('data-selected', 'false');
 });
 
 // Bulk-import from Helios XML, then round-trip a scan's parsed parameters
@@ -237,61 +239,57 @@ test('plain-clicking a selected scan row toggles its selection on and off', asyn
 // (The companion import-failure-aborts.spec.ts covers the all-or-nothing abort
 // when referenced files can't be located.)
 test('bulk-import scans from a Helios XML file and round-trips angular bounds', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    const fixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere.xml');
-    await stubOpenDialog(app, fixture);
+  const fixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere.xml');
+  await stubOpenDialog(app, fixture);
 
-    const panel = page.getByTestId('scans-panel');
-    await expect(panel).toBeVisible();
-    const rows = panel.locator('[data-testid="scan-row"]');
-    await expect(rows).toHaveCount(0);
+  const panel = page.getByTestId('scans-panel');
+  await expect(panel).toBeVisible();
+  const rows = panel.locator('[data-testid="scan-row"]');
+  await expect(rows).toHaveCount(0);
 
-    await page.getByTestId('tool-add-scan').click();
-    const popup = page.getByTestId('scan-parameters-popup');
-    await expect(popup).toBeVisible();
+  await page.getByTestId('tool-add-scan').click();
+  const popup = page.getByTestId('scan-parameters-popup');
+  await expect(popup).toBeVisible();
 
-    await page.getByTestId('scan-import-xml').click();
-    // Popup closes once the XML is parsed and files are resolved; the four
-    // resolved scans then run through the import wizard.
-    await expect(popup).not.toBeVisible({ timeout: 15_000 });
-    await completeImportWizard(page);
-    await expect(page.getByTestId('scan-import-error')).toHaveCount(0);
+  await page.getByTestId('scan-import-xml').click();
+  // Popup closes once the XML is parsed and files are resolved; the four
+  // resolved scans then run through the import wizard.
+  await expect(popup).not.toBeVisible({ timeout: 15_000 });
+  await completeImportWizard(page);
+  await expect(page.getByTestId('scan-import-error')).toHaveCount(0);
 
-    const calls = await getOpenDialogCalls(app);
-    expect(calls.length).toBeGreaterThanOrEqual(1);
+  const calls = await getOpenDialogCalls(app);
+  expect(calls.length).toBeGreaterThanOrEqual(1);
 
-    // Four scans, one per <scan>. Origins are (-2,0,0.5), (0,-2,0.5),
-    // (2,0,0.5), (0,2,0.5). Each resolved its sibling .xyz → has data + params.
-    await expect(rows).toHaveCount(4);
-    await expect(rows.nth(0)).toContainText('(-2.00, 0.00, 0.50)');
-    await expect(rows.nth(1)).toContainText('(0.00, -2.00, 0.50)');
-    await expect(rows.nth(2)).toContainText('(2.00, 0.00, 0.50)');
-    await expect(rows.nth(3)).toContainText('(0.00, 2.00, 0.50)');
-    for (let i = 0; i < 4; i++) {
-      await expect(rows.nth(i)).toHaveAttribute('data-has-data', 'true');
-      await expect(rows.nth(i)).toHaveAttribute('data-has-params', 'true');
-    }
-
-    // Open scan 0 for edit and verify its angular bounds round-trip into the
-    // form. sphere-scan/sphere.xml sets no theta/phi bounds, so the scan
-    // covers the full sweep: zenith 0–180°, azimuth 0–360°.
-    const firstId = await rows.nth(0).getAttribute('data-scan-id');
-    await page.getByTestId(`scan-edit-${firstId}`).click();
-    await expect(popup).toBeVisible();
-    const zenithMin = await page.getByTestId('scan-zenith-min').inputValue();
-    expect(Math.round(parseFloat(zenithMin))).toBe(0);
-    const zenithMax = await page.getByTestId('scan-zenith-max').inputValue();
-    expect(Math.round(parseFloat(zenithMax))).toBe(180);
-    const azimuthMin = await page.getByTestId('scan-azimuth-min').inputValue();
-    expect(Math.round(parseFloat(azimuthMin))).toBe(0);
-    const azimuthMax = await page.getByTestId('scan-azimuth-max').inputValue();
-    expect(Math.round(parseFloat(azimuthMax))).toBe(360);
-    // The XML import button is hidden in edit mode (showBulkImport is only
-    // true when creating a brand-new scan).
-    await expect(page.getByTestId('scan-import-xml')).toHaveCount(0);
-  } finally {
-    await close();
+  // Four scans, one per <scan>. Origins are (-2,0,0.5), (0,-2,0.5),
+  // (2,0,0.5), (0,2,0.5). Each resolved its sibling .xyz → has data + params.
+  await expect(rows).toHaveCount(4);
+  await expect(rows.nth(0)).toContainText('(-2.00, 0.00, 0.50)');
+  await expect(rows.nth(1)).toContainText('(0.00, -2.00, 0.50)');
+  await expect(rows.nth(2)).toContainText('(2.00, 0.00, 0.50)');
+  await expect(rows.nth(3)).toContainText('(0.00, 2.00, 0.50)');
+  for (let i = 0; i < 4; i++) {
+    await expect(rows.nth(i)).toHaveAttribute('data-has-data', 'true');
+    await expect(rows.nth(i)).toHaveAttribute('data-has-params', 'true');
   }
+
+  // Open scan 0 for edit and verify its angular bounds round-trip into the
+  // form. sphere-scan/sphere.xml sets no theta/phi bounds, so the scan
+  // covers the full sweep: zenith 0–180°, azimuth 0–360°.
+  const firstId = await rows.nth(0).getAttribute('data-scan-id');
+  await page.getByTestId(`scan-edit-${firstId}`).click();
+  await expect(popup).toBeVisible();
+  const zenithMin = await page.getByTestId('scan-zenith-min').inputValue();
+  expect(Math.round(parseFloat(zenithMin))).toBe(0);
+  const zenithMax = await page.getByTestId('scan-zenith-max').inputValue();
+  expect(Math.round(parseFloat(zenithMax))).toBe(180);
+  const azimuthMin = await page.getByTestId('scan-azimuth-min').inputValue();
+  expect(Math.round(parseFloat(azimuthMin))).toBe(0);
+  const azimuthMax = await page.getByTestId('scan-azimuth-max').inputValue();
+  expect(Math.round(parseFloat(azimuthMax))).toBe(360);
+  // The XML import button is hidden in edit mode (showBulkImport is only
+  // true when creating a brand-new scan).
+  await expect(page.getByTestId('scan-import-xml')).toHaveCount(0);
 });

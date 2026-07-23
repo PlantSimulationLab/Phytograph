@@ -64,3 +64,20 @@ Fabricate minimal text fixtures (small CSV / XYZ point clouds, tiny OBJ
 meshes) that are safe to commit. If a workflow needs real LiDAR data too
 large to commit, ask the maintainer — don't invent a synthetic substitute
 that won't exercise the real code paths.
+
+### 6. Share one app per spec file
+
+Booting the Electron app + PyInstaller backend takes ~5–40 s, so a spec
+file with several tests launches **one** app in `beforeAll` and resets to
+a fresh scene between tests with `resetToFreshScene`
+(`tests/e2e/helpers/resetApp.ts`) — it drives the real File → New flow,
+which remounts the renderer scene and frees all backend sessions. See
+`bulk-actions.spec.ts` for the reference pattern. Keep a per-test
+`launchApp()` only when the test is about launch lifecycle itself
+(fresh-boot splash, octree cache recovery, app close semantics), with a
+comment saying why.
+
+The suite runs **2 Playwright workers**: parallel spec files each get
+their own app instance, backend port, and octree cache directory, so a
+test must never assume a fixed port or that it is the only running
+instance.

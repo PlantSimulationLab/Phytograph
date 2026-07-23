@@ -1,9 +1,10 @@
 import { test, expect } from '@playwright/test';
-import type { ElectronApplication, Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import { join } from 'node:path';
-import { launchApp, repoRoot } from './helpers/launchApp';
+import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
+import { resetToFreshScene } from './helpers/resetApp';
 
 // Two viewer-camera behaviors, both regressions we fixed:
 //
@@ -43,175 +44,175 @@ async function waitForCameraHooks(page: Page) {
   );
 }
 
+// Shared session: one app + backend for the whole file; File → New resets the
+// scene between tests (see helpers/resetApp.ts). Camera assertions here read
+// __getCameraState AFTER an explicit zoom-to-selection / snap-view action, so
+// none depend on launch-default framing.
+
+let session: LaunchedApp;
+test.beforeAll(async () => {
+  session = await launchApp();
+});
+test.afterAll(async () => {
+  await session?.close();
+});
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
+
 test('Zoom to Selection frames the UNION of multiple selected meshes, not just the first', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    // Import the small cube, then the big far cube. Both land as mesh rows (PLY
-    // with faces routes straight to a mesh — no wizard).
-    await importFiles(app, page, 'import-auto', SMALL_MESH);
-    const smallRow = page.locator('[data-testid="mesh-row"][data-mesh-name="cube-mesh"]');
-    await expect(smallRow).toBeVisible({ timeout: 30_000 });
+  // Import the small cube, then the big far cube. Both land as mesh rows (PLY
+  // with faces routes straight to a mesh — no wizard).
+  await importFiles(app, page, 'import-auto', SMALL_MESH);
+  const smallRow = page.locator('[data-testid="mesh-row"][data-mesh-name="cube-mesh"]');
+  await expect(smallRow).toBeVisible({ timeout: 30_000 });
 
-    await importFiles(app, page, 'import-auto', BIG_MESH);
-    const bigRow = page.locator('[data-testid="mesh-row"][data-mesh-name="big-cube-mesh"]');
-    await expect(bigRow).toBeVisible({ timeout: 30_000 });
-    await waitForCameraHooks(page);
+  await importFiles(app, page, 'import-auto', BIG_MESH);
+  const bigRow = page.locator('[data-testid="mesh-row"][data-mesh-name="big-cube-mesh"]');
+  await expect(bigRow).toBeVisible({ timeout: 30_000 });
+  await waitForCameraHooks(page);
 
-    // Select the small cube, then ADD the big one (Ctrl/Cmd-click is additive for
-    // meshes — see handleSelectMesh). Both must end selected.
-    await smallRow.click();
-    await expect(smallRow).toHaveAttribute('data-selected', 'true');
-    await bigRow.click({ modifiers: ['ControlOrMeta'] });
-    await expect(smallRow).toHaveAttribute('data-selected', 'true');
-    await expect(bigRow).toHaveAttribute('data-selected', 'true');
+  // Select the small cube, then ADD the big one (Ctrl/Cmd-click is additive for
+  // meshes — see handleSelectMesh). Both must end selected.
+  await smallRow.click();
+  await expect(smallRow).toHaveAttribute('data-selected', 'true');
+  await bigRow.click({ modifiers: ['ControlOrMeta'] });
+  await expect(smallRow).toHaveAttribute('data-selected', 'true');
+  await expect(bigRow).toHaveAttribute('data-selected', 'true');
 
-    // Frame the selection through the real toolbar button.
-    await page.getByTestId('zoom-to-selection').click();
+  // Frame the selection through the real toolbar button.
+  await page.getByTestId('zoom-to-selection').click();
 
-    const cam = await page.evaluate(() => (window as any).__getCameraState());
-    // Small/local coords → displayOffset is zero → target is the world center.
-    expect(cam.displayOffset).toEqual([0, 0, 0]);
+  const cam = await page.evaluate(() => (window as any).__getCameraState());
+  // Small/local coords → displayOffset is zero → target is the world center.
+  expect(cam.displayOffset).toEqual([0, 0, 0]);
 
-    // Target must be the UNION center (15,15,15) — NOT either single cube's center
-    // (~0.5 or ~25). If the old "first mesh only" bug returned, target would be at
-    // one cube and the distance would collapse onto that cube.
-    expect(cam.target[0]).toBeGreaterThan(10);
-    expect(cam.target[0]).toBeLessThan(20);
-    expect(cam.target[1]).toBeGreaterThan(10);
-    expect(cam.target[2]).toBeGreaterThan(10);
+  // Target must be the UNION center (15,15,15) — NOT either single cube's center
+  // (~0.5 or ~25). If the old "first mesh only" bug returned, target would be at
+  // one cube and the distance would collapse onto that cube.
+  expect(cam.target[0]).toBeGreaterThan(10);
+  expect(cam.target[0]).toBeLessThan(20);
+  expect(cam.target[1]).toBeGreaterThan(10);
+  expect(cam.target[2]).toBeGreaterThan(10);
 
-    // Distance reflects the 30 m union extent (≈ maxDim 30 × 2 = 60), far past the
-    // ≈2 of framing only the 1 m cube.
-    expect(dist(cam.position, cam.target)).toBeGreaterThan(30);
-  } finally {
-    await close();
-  }
+  // Distance reflects the 30 m union extent (≈ maxDim 30 × 2 = 60), far past the
+  // ≈2 of framing only the 1 m cube.
+  expect(dist(cam.position, cam.target)).toBeGreaterThan(30);
 });
 
 test('Zoom to Selection frames the UNION of multiple selected clouds', async () => {
   // The cloud branch of getSnapViewTarget already unioned within a single type;
   // this guards that the loop-everything rewrite didn't regress it.
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    await importFiles(app, page, 'import-auto', CLOUD);
-    await completeImportWizard(page);
-    const nearRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-    await expect(nearRow).toBeVisible({ timeout: 30_000 });
+  await importFiles(app, page, 'import-auto', CLOUD);
+  await completeImportWizard(page);
+  const nearRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  await expect(nearRow).toBeVisible({ timeout: 30_000 });
 
-    await importFiles(app, page, 'import-auto', FAR_CLOUD);
-    await completeImportWizard(page);
-    const farRow = page.locator('[data-testid="scan-row"][data-scan-name="large-extent.xyz"]');
-    await expect(farRow).toBeVisible({ timeout: 30_000 });
-    await expect(farRow).toHaveAttribute('data-point-count', '64');
-    await waitForCameraHooks(page);
+  await importFiles(app, page, 'import-auto', FAR_CLOUD);
+  await completeImportWizard(page);
+  const farRow = page.locator('[data-testid="scan-row"][data-scan-name="large-extent.xyz"]');
+  await expect(farRow).toBeVisible({ timeout: 30_000 });
+  await expect(farRow).toHaveAttribute('data-point-count', '64');
+  await waitForCameraHooks(page);
 
-    // Select the near cloud, then ADD the far one (Ctrl/Cmd-click is additive).
-    await nearRow.click();
-    await expect(nearRow).toHaveAttribute('data-selected', 'true');
-    await farRow.click({ modifiers: ['ControlOrMeta'] });
-    await expect(nearRow).toHaveAttribute('data-selected', 'true');
-    await expect(farRow).toHaveAttribute('data-selected', 'true');
+  // Select the near cloud, then ADD the far one (Ctrl/Cmd-click is additive).
+  await nearRow.click();
+  await expect(nearRow).toHaveAttribute('data-selected', 'true');
+  await farRow.click({ modifiers: ['ControlOrMeta'] });
+  await expect(nearRow).toHaveAttribute('data-selected', 'true');
+  await expect(farRow).toHaveAttribute('data-selected', 'true');
 
-    await page.getByTestId('zoom-to-selection').click();
+  await page.getByTestId('zoom-to-selection').click();
 
-    const cam = await page.evaluate(() => (window as any).__getCameraState());
-    // tiny.xyz sits near the origin; large-extent spans (10..40). The union must
-    // reach out to ~40, so the camera sits well back from the origin.
-    expect(cam.target[0]).toBeGreaterThan(5);
-    expect(dist(cam.position, cam.target)).toBeGreaterThan(20);
-  } finally {
-    await close();
-  }
+  const cam = await page.evaluate(() => (window as any).__getCameraState());
+  // tiny.xyz sits near the origin; large-extent spans (10..40). The union must
+  // reach out to ~40, so the camera sits well back from the origin.
+  expect(cam.target[0]).toBeGreaterThan(5);
+  expect(dist(cam.position, cam.target)).toBeGreaterThan(20);
 });
 
 test('Zoom to Selection of only the small mesh frames it tightly (control)', async () => {
   // Counterpart to the union test: with ONLY the small cube selected, the frame
   // really is tight — so the union test's large distance is the union working,
   // not the framing math always zooming out.
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    await importFiles(app, page, 'import-auto', SMALL_MESH);
-    const smallRow = page.locator('[data-testid="mesh-row"][data-mesh-name="cube-mesh"]');
-    await expect(smallRow).toBeVisible({ timeout: 30_000 });
-    await importFiles(app, page, 'import-auto', BIG_MESH);
-    const bigRow = page.locator('[data-testid="mesh-row"][data-mesh-name="big-cube-mesh"]');
-    await expect(bigRow).toBeVisible({ timeout: 30_000 });
-    await waitForCameraHooks(page);
+  await importFiles(app, page, 'import-auto', SMALL_MESH);
+  const smallRow = page.locator('[data-testid="mesh-row"][data-mesh-name="cube-mesh"]');
+  await expect(smallRow).toBeVisible({ timeout: 30_000 });
+  await importFiles(app, page, 'import-auto', BIG_MESH);
+  const bigRow = page.locator('[data-testid="mesh-row"][data-mesh-name="big-cube-mesh"]');
+  await expect(bigRow).toBeVisible({ timeout: 30_000 });
+  await waitForCameraHooks(page);
 
-    // Select only the small cube (plain click — no modifier).
-    await smallRow.click();
-    await expect(smallRow).toHaveAttribute('data-selected', 'true');
-    await expect(bigRow).toHaveAttribute('data-selected', 'false');
+  // Select only the small cube (plain click — no modifier).
+  await smallRow.click();
+  await expect(smallRow).toHaveAttribute('data-selected', 'true');
+  await expect(bigRow).toHaveAttribute('data-selected', 'false');
 
-    await page.getByTestId('zoom-to-selection').click();
+  await page.getByTestId('zoom-to-selection').click();
 
-    const cam = await page.evaluate(() => (window as any).__getCameraState());
-    // Target is the small cube's center (~0.5,0.5,0.5); frame is tight (≈2 m).
-    expect(cam.target[0]).toBeLessThan(5);
-    expect(cam.target[1]).toBeLessThan(5);
-    expect(dist(cam.position, cam.target)).toBeLessThan(10);
-  } finally {
-    await close();
-  }
+  const cam = await page.evaluate(() => (window as any).__getCameraState());
+  // Target is the small cube's center (~0.5,0.5,0.5); frame is tight (≈2 m).
+  expect(cam.target[0]).toBeLessThan(5);
+  expect(cam.target[1]).toBeLessThan(5);
+  expect(dist(cam.position, cam.target)).toBeLessThan(10);
 });
 
 test('Snap View buttons reorient without changing target or zoom', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
 
-  try {
-    await importFiles(app, page, 'import-auto', SMALL_MESH);
-    const smallRow = page.locator('[data-testid="mesh-row"][data-mesh-name="cube-mesh"]');
-    await expect(smallRow).toBeVisible({ timeout: 30_000 });
-    await importFiles(app, page, 'import-auto', BIG_MESH);
-    const bigRow = page.locator('[data-testid="mesh-row"][data-mesh-name="big-cube-mesh"]');
-    await expect(bigRow).toBeVisible({ timeout: 30_000 });
-    await waitForCameraHooks(page);
+  await importFiles(app, page, 'import-auto', SMALL_MESH);
+  const smallRow = page.locator('[data-testid="mesh-row"][data-mesh-name="cube-mesh"]');
+  await expect(smallRow).toBeVisible({ timeout: 30_000 });
+  await importFiles(app, page, 'import-auto', BIG_MESH);
+  const bigRow = page.locator('[data-testid="mesh-row"][data-mesh-name="big-cube-mesh"]');
+  await expect(bigRow).toBeVisible({ timeout: 30_000 });
+  await waitForCameraHooks(page);
 
-    // Select ONLY the small cube. The Snap View buttons must IGNORE this selection
-    // — they reorient around wherever the camera currently looks, not reframe the
-    // 1 m cube (which is the regression we're guarding against).
-    await smallRow.click();
-    await expect(smallRow).toHaveAttribute('data-selected', 'true');
+  // Select ONLY the small cube. The Snap View buttons must IGNORE this selection
+  // — they reorient around wherever the camera currently looks, not reframe the
+  // 1 m cube (which is the regression we're guarding against).
+  await smallRow.click();
+  await expect(smallRow).toHaveAttribute('data-selected', 'true');
 
-    const before = await page.evaluate(() => (window as any).__getCameraState());
-    const radiusBefore = dist(before.position, before.target);
-    const targetBefore = [...before.target];
-    expect(radiusBefore).toBeGreaterThan(0);
+  const before = await page.evaluate(() => (window as any).__getCameraState());
+  const radiusBefore = dist(before.position, before.target);
+  const targetBefore = [...before.target];
+  expect(radiusBefore).toBeGreaterThan(0);
 
-    const check = async (title: string, expectSide: (cam: any) => void) => {
-      await page.locator(`button[title="${title}"]`).click();
-      const cam = await page.evaluate(() => (window as any).__getCameraState());
-      // Target preserved (NOT snapped onto the cube center).
-      expect(Math.abs(cam.target[0] - targetBefore[0])).toBeLessThan(1e-3);
-      expect(Math.abs(cam.target[1] - targetBefore[1])).toBeLessThan(1e-3);
-      expect(Math.abs(cam.target[2] - targetBefore[2])).toBeLessThan(1e-3);
-      // Zoom (camera→target distance) preserved.
-      expect(dist(cam.position, cam.target)).toBeCloseTo(radiusBefore, 3);
-      expectSide(cam);
-    };
+  const check = async (title: string, expectSide: (cam: any) => void) => {
+    await page.locator(`button[title="${title}"]`).click();
+    const cam = await page.evaluate(() => (window as any).__getCameraState());
+    // Target preserved (NOT snapped onto the cube center).
+    expect(Math.abs(cam.target[0] - targetBefore[0])).toBeLessThan(1e-3);
+    expect(Math.abs(cam.target[1] - targetBefore[1])).toBeLessThan(1e-3);
+    expect(Math.abs(cam.target[2] - targetBefore[2])).toBeLessThan(1e-3);
+    // Zoom (camera→target distance) preserved.
+    expect(dist(cam.position, cam.target)).toBeCloseTo(radiusBefore, 3);
+    expectSide(cam);
+  };
 
-    await check('Top View', (cam) => {
-      // Looking down +Z: camera above the target, X/Y aligned.
-      expect(cam.position[2]).toBeGreaterThan(cam.target[2]);
-      expect(Math.abs(cam.position[0] - cam.target[0])).toBeLessThan(1e-2);
-      expect(Math.abs(cam.position[1] - cam.target[1])).toBeLessThan(1e-2);
-    });
+  await check('Top View', (cam) => {
+    // Looking down +Z: camera above the target, X/Y aligned.
+    expect(cam.position[2]).toBeGreaterThan(cam.target[2]);
+    expect(Math.abs(cam.position[0] - cam.target[0])).toBeLessThan(1e-2);
+    expect(Math.abs(cam.position[1] - cam.target[1])).toBeLessThan(1e-2);
+  });
 
-    await check('Front View', (cam) => {
-      // Looking along -Y: camera on the -Y side, Z-up.
-      expect(cam.position[1]).toBeLessThan(cam.target[1]);
-      expect(cam.up[2]).toBeCloseTo(1, 4);
-    });
+  await check('Front View', (cam) => {
+    // Looking along -Y: camera on the -Y side, Z-up.
+    expect(cam.position[1]).toBeLessThan(cam.target[1]);
+    expect(cam.up[2]).toBeCloseTo(1, 4);
+  });
 
-    await check('Right View', (cam) => {
-      // Looking along +X: camera on the +X side.
-      expect(cam.position[0]).toBeGreaterThan(cam.target[0]);
-      expect(cam.up[2]).toBeCloseTo(1, 4);
-    });
-  } finally {
-    await close();
-  }
+  await check('Right View', (cam) => {
+    // Looking along +X: camera on the +X side.
+    expect(cam.position[0]).toBeGreaterThan(cam.target[0]);
+    expect(cam.up[2]).toBeCloseTo(1, 4);
+  });
 });

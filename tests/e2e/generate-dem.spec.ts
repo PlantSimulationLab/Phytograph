@@ -2,12 +2,26 @@ import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
-import { launchApp, repoRoot } from './helpers/launchApp';
+import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
+import { resetToFreshScene } from './helpers/resetApp';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants.xyz');
+
+// Shared session: one app + backend for the whole file; File → New resets the
+// scene between tests (see helpers/resetApp.ts).
+let session: LaunchedApp;
+test.beforeAll(async () => {
+  session = await launchApp();
+});
+test.afterAll(async () => {
+  await session?.close();
+});
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
 
 // ground_plants.xyz: a flat 40×40 ground grid (1600 pts at z≈0) plus a raised
 // plant blob (600 pts, z 0.12–0.8). Drives the real DOM against the live
@@ -15,7 +29,7 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants.xyz');
 // height-above-ground) → assert a DEM surface mesh appears, then export the
 // underlying grid as an ESRI ASCII grid and a GeoTIFF and assert the real bytes.
 test('generates a DEM from ground points and exports raster grids', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
   const ascPath = join(tmpdir(), `phytograph_dem_e2e_${Date.now()}.asc`);
   const tifPath = join(tmpdir(), `phytograph_dem_e2e_${Date.now()}.tif`);
   for (const p of [ascPath, tifPath]) if (existsSync(p)) rmSync(p);
@@ -113,7 +127,6 @@ test('generates a DEM from ground points and exports raster grids', async () => 
     expect(isII || isMM).toBe(true);
   } finally {
     for (const p of [ascPath, tifPath]) if (existsSync(p)) rmSync(p);
-    await close();
   }
 });
 
@@ -123,7 +136,7 @@ test('generates a DEM from ground points and exports raster grids', async () => 
 // (~0.8) over the blob and 0 on bare ground — never negative. Drives the real
 // surface-type selector and asserts the exported grid's value range.
 test('generates a CHM (DSM − DTM) with canopy heights, never negative', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
   const ascPath = join(tmpdir(), `phytograph_chm_e2e_${Date.now()}.asc`);
   if (existsSync(ascPath)) rmSync(ascPath);
 
@@ -179,7 +192,6 @@ test('generates a CHM (DSM − DTM) with canopy heights, never negative', async 
     expect(Math.max(...finiteVals)).toBeGreaterThan(0.5);
   } finally {
     if (existsSync(ascPath)) rmSync(ascPath);
-    await close();
   }
 });
 
@@ -187,48 +199,44 @@ test('generates a CHM (DSM − DTM) with canopy heights, never negative', async 
 // distinct meshes (DEM, DSM, CHM), each with real triangles. Proves the batch
 // multi-select generates every checked product in one run.
 test('generates DTM, DSM and CHM together in one run', async () => {
-  const { app, page, close } = await launchApp();
-  try {
-    await importFiles(app, page, 'import-point-cloud', FIXTURE);
-    await completeImportWizard(page);
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
-    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+  await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
-    await page.getByTestId('tool-ground-segment').click();
-    await page.getByTestId('ground-cloth-resolution').fill('0.1');
-    await page.getByTestId('ground-class-threshold').fill('0.05');
-    await page.getByTestId('ground-segment-run-button').click();
-    await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+  await page.getByTestId('tool-ground-segment').click();
+  await page.getByTestId('ground-cloth-resolution').fill('0.1');
+  await page.getByTestId('ground-class-threshold').fill('0.05');
+  await page.getByTestId('ground-segment-run-button').click();
+  await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
 
-    // Tick all three surfaces (DTM is on by default; add DSM + CHM).
-    await page.getByTestId('tool-dem').click();
-    await expect(page.getByTestId('dem-panel')).toBeVisible();
-    await page.getByTestId('dem-surface-dtm').check();
-    await page.getByTestId('dem-surface-dsm').check();
-    await page.getByTestId('dem-surface-chm').check();
-    await page.getByTestId('dem-cell-size').fill('0.5');
-    // The run button reflects the batch count.
-    await expect(page.getByTestId('dem-run-button')).toContainText('3 surfaces');
-    await page.getByTestId('dem-run-button').click();
+  // Tick all three surfaces (DTM is on by default; add DSM + CHM).
+  await page.getByTestId('tool-dem').click();
+  await expect(page.getByTestId('dem-panel')).toBeVisible();
+  await page.getByTestId('dem-surface-dtm').check();
+  await page.getByTestId('dem-surface-dsm').check();
+  await page.getByTestId('dem-surface-chm').check();
+  await page.getByTestId('dem-cell-size').fill('0.5');
+  // The run button reflects the batch count.
+  await expect(page.getByTestId('dem-run-button')).toContainText('3 surfaces');
+  await page.getByTestId('dem-run-button').click();
 
-    // All three meshes appear from the single run, each with real triangles, and
-    // each collapsed row leads with its surface-type badge (DTM/DSM/CHM) so they're
-    // distinguishable at a glance rather than all showing an identical triangle count.
-    const badgeFor: Record<string, string> = {
-      DEM: 'Terrain (DTM)', DSM: 'Surface (DSM)', CHM: 'Canopy height (CHM)',
-    };
-    for (const suffix of ['DEM', 'DSM', 'CHM']) {
-      const row = page.locator(`[data-testid="mesh-row"][data-mesh-name="ground_plants.xyz ${suffix}"]`);
-      await expect(row).toBeVisible({ timeout: 90_000 });
-      expect(parseInt((await row.getAttribute('data-triangle-count')) ?? '0', 10)).toBeGreaterThan(0);
-      // The row subtitle shows the product badge, not a bare triangle count.
-      const badge = row.getByTestId('mesh-row-count');
-      await expect(badge).toContainText(badgeFor[suffix]);
-      await expect(badge).not.toContainText('triangles');
-    }
-  } finally {
-    await close();
+  // All three meshes appear from the single run, each with real triangles, and
+  // each collapsed row leads with its surface-type badge (DTM/DSM/CHM) so they're
+  // distinguishable at a glance rather than all showing an identical triangle count.
+  const badgeFor: Record<string, string> = {
+    DEM: 'Terrain (DTM)', DSM: 'Surface (DSM)', CHM: 'Canopy height (CHM)',
+  };
+  for (const suffix of ['DEM', 'DSM', 'CHM']) {
+    const row = page.locator(`[data-testid="mesh-row"][data-mesh-name="ground_plants.xyz ${suffix}"]`);
+    await expect(row).toBeVisible({ timeout: 90_000 });
+    expect(parseInt((await row.getAttribute('data-triangle-count')) ?? '0', 10)).toBeGreaterThan(0);
+    // The row subtitle shows the product badge, not a bare triangle count.
+    const badge = row.getByTestId('mesh-row-count');
+    await expect(badge).toContainText(badgeFor[suffix]);
+    await expect(badge).not.toContainText('triangles');
   }
 });
 
@@ -237,7 +245,7 @@ test('generates DTM, DSM and CHM together in one run', async () => {
 // via "Color by", and exports the selected band as a raster. This replaces the old
 // "separate mesh per product" model.
 test('a DTM carries colour-by layers and exports the selected one as a raster', async () => {
-  const { app, page, close } = await launchApp();
+  const { app, page } = session;
   const ascPath = join(tmpdir(), `phytograph_pd_e2e_${Date.now()}.asc`);
   if (existsSync(ascPath)) rmSync(ascPath);
   try {
@@ -298,6 +306,5 @@ test('a DTM carries colour-by layers and exports the selected one as a raster', 
     expect(vals.every((v) => Number.isInteger(v))).toBe(true);
   } finally {
     if (existsSync(ascPath)) rmSync(ascPath);
-    await close();
   }
 });
