@@ -204,12 +204,22 @@ function createWindow(): void {
     }
   }
 
+  // The left toolbar column (View / Snap / Create / Tools cards) needs ~772px
+  // of inner height to render uncropped: 49px top bar + 16px top pad + ~643px
+  // of cards + 64px bottom reserve — an 800px outer window on macOS. Below
+  // that the column scroll-crops its lower cards, which reads as broken.
+  // Capped to the display's work area so small screens (e.g. 1366x768
+  // laptops) still get a window that fits on screen; the column falls back to
+  // scrolling there. E2E's fixed 1200x800 window equals this minimum, so the
+  // suite's stable-size assumption is unaffected.
+  const minHeight = Math.min(800, screen.getPrimaryDisplay().workAreaSize.height);
+
   mainWindow = new BrowserWindow({
     title: 'Phytograph',
     width: winWidth,
     height: winHeight,
     minWidth: 900,
-    minHeight: 600,
+    minHeight,
     center: true,
     icon: resolveIconPath(),
     // E2E invisibility stack:

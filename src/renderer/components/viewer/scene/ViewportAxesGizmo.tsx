@@ -272,18 +272,69 @@ export function ViewportAxesGizmo() {
   // axis-head clicks never fired. GizmoPicker (inside GizmoAxes) hit-tests the
   // heads itself against the Hud's ortho camera and routes hits to
   // __orientToAxis — see the comments there.
-  // Left margin centers the gizmo under the left toolbar column (a full-height,
-  // left-anchored scroll panel anchored at left-4 ≈ 16px, ~150px wide, so its
-  // horizontal center sits ~90px from the viewport edge). The gizmo lives at the
-  // bottom of the viewport where the toolbar's top-anchored cards don't reach on
-  // a tall window; on a short window (min height 600) the bottom margin (120px)
-  // keeps it below the lowest card, so it stays clickable while aligned with the
-  // palette lane. (An earlier 200px value pushed it clear to the right of the
-  // toolbar, which read as misaligned.)
   const groupRef = useRef<Object3D | null>(null);
+  const margin = useGizmoMargin();
   return (
-    <GizmoHelper alignment="bottom-left" margin={[90, 120]} renderPriority={2}>
+    <GizmoHelper alignment="bottom-left" margin={margin} renderPriority={2}>
       <GizmoAxes groupRef={groupRef} />
     </GizmoHelper>
   );
+}
+
+// Preferred placement: centered under the left toolbar column (the column is
+// anchored at left-4 ≈ 16px and ~136px wide, so its horizontal center sits
+// ~90px from the viewport edge), 120px up from the bottom — above the
+// bottom-left status readout, below the column's lowest card on a tall window.
+const LANE_MARGIN: [number, number] = [90, 120];
+// How far the gizmo visually extends from its anchor point: axis heads sit at
+// ±~49px (GizmoAxes scale 40 × head offset 1 × hover scale 1.2) plus ~15px of
+// sprite radius.
+const GIZMO_HALF_EXTENT = 64;
+
+// The under-column lane only exists on tall windows: the toolbar column's
+// cards end ~660px below the canvas top, so on shorter viewports the
+// bottom-anchored gizmo would sit BEHIND the (translucent) Tools card, where
+// the card's pointer-events swallow its clicks. Measure the column's real
+// content extent and, when the lane is too short, slide the gizmo right of
+// the column instead — visible and clickable beats lane-aligned. Measured
+// live (not hardcoded) so future toolbar growth keeps the threshold honest.
+function useGizmoMargin(): [number, number] {
+  const size = useThree((s) => s.size);
+  const gl = useThree((s) => s.gl);
+  const [column, setColumn] = useState<{ contentBottom: number; right: number } | null>(null);
+
+  useEffect(() => {
+    const el = document.querySelector('[data-testid="left-toolbar-column"]');
+    if (!el) return;
+    const measure = () => {
+      const canvasRect = gl.domElement.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      // Where the card stack actually ends = the lowest child bottom (NOT
+      // scrollHeight, which is clamped up to clientHeight on tall windows and
+      // would report the whole column box). Canvas-relative coordinates.
+      let cardsBottom = r.top;
+      for (const child of el.children) {
+        cardsBottom = Math.max(cardsBottom, child.getBoundingClientRect().bottom);
+      }
+      setColumn({
+        contentBottom: cardsBottom - canvasRect.top,
+        right: r.right - canvasRect.left,
+      });
+    };
+    measure();
+    // The column's box tracks the viewport (top/bottom anchored), so a resize
+    // of it covers window resizes; card additions/removals change scrollHeight
+    // without a box resize, so watch the children too.
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    for (const child of el.children) ro.observe(child);
+    return () => ro.disconnect();
+  }, [gl]);
+
+  return useMemo<[number, number]>(() => {
+    if (!column) return LANE_MARGIN;
+    const gizmoTop = size.height - LANE_MARGIN[1] - GIZMO_HALF_EXTENT;
+    if (gizmoTop >= column.contentBottom + 8) return LANE_MARGIN;
+    return [Math.round(column.right + GIZMO_HALF_EXTENT + 8), LANE_MARGIN[1]];
+  }, [column, size.height]);
 }
