@@ -74,14 +74,31 @@ dropdowns in; you correct anything that's wrong before importing:
 - **Column roles** — for ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`,
   `.asc`), each column's dropdown sets its role: **X / Y / Z**,
   **Red / Green / Blue**, **Intensity**, **Reflectance**,
+  **Timestamp**, **Target Index**, **Target Count**,
   **Scan Row Index**, **Scan Column Index**, **Miss Flag**,
   **Beam Origin X / Y / Z**, **Scalar**, **Label**, or **Skip**. X, Y, and Z
-  must be assigned before you can import.
+  must be assigned before you can import. Every role except **Scalar**,
+  **Label**, and **Skip** is a *singleton* — a cloud has exactly one of each —
+  so assigning one to a column removes it from whichever column previously held
+  it (that column drops to **Skip**).
 - **Scalar vs Label** — a **Scalar** column is a continuous measurement
   (intensity, height, timestamp) and colors as a smooth gradient; a
   **Label** column holds class ids (tree id, segment, classification) and
   colors as discrete classes with a legend. The wizard flags columns whose
   values look like class labels with a one-click *"use Label?"* suggestion.
+- **Timestamp / Target Index / Target Count** — the per-pulse multi-return
+  fields: each return's acquisition time, its index within its laser pulse
+  (1st / 2nd / … return), and the pulse's total return count. Mapping all three
+  lets the gap-filling / miss-reconstruction and leaf-area-density tools group
+  returns back into their originating pulses. LAS/LAZ files fill these in
+  automatically (from `gps_time` / `return_number` / `number_of_returns`); for
+  ASCII they auto-detect from headers like `Timestamp` / `Target Index` /
+  `Target Count` (and aliases such as `gps_time`, `return_number`,
+  `number_of_returns`). If a column is unlabeled or named something the
+  auto-detect doesn't recognize, pick the matching role from its dropdown — you
+  no longer have to map it as **Scalar** and type the exact field name. They
+  carry through under the canonical `timestamp` / `target_index` / `target_count`
+  slugs the tools look them up by.
 - **Scan Row / Column Index** — integer positions of each point within the
   scanner's rectangular acquisition grid. Mapping these preserves the scan's
   raster layout, which the gap-filling / miss-reconstruction tools use to

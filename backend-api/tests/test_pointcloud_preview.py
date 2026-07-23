@@ -53,15 +53,16 @@ def test_preview_headered_xyz_with_extra_scalars(client, tmp_path: Path):
     cols = body["columns"]
     assert [c["detected_role"] for c in cols[:3]] == ["x", "y", "z"]
     # Reflectance maps to the reflectance role (reserved). "Target Index" is a
-    # per-pulse multi-return column, so it's carried as an extra pinned to its
-    # CANONICAL slug (target_index) and label — not a header-derived slug — so
-    # the full-waveform LAD path can recover it by name. (Carrying it as
-    # 'Target_Index' would silently break multi-return LAD: the accessor looks
-    # up the three canonical slugs only.)
+    # per-pulse multi-return column, so it's reported under its dedicated role
+    # token (target_index) — which pre-selects the wizard's first-class "Target
+    # Index" dropdown role — and pinned to its CANONICAL slug (target_index) and
+    # label, not a header-derived slug, so the full-waveform LAD path can recover
+    # it by name. (Carrying it as 'Target_Index' would silently break multi-return
+    # LAD: the accessor looks up the three canonical slugs only.)
     refl = cols[3]
     assert refl["detected_role"] == "reflectance"
     ti = cols[4]
-    assert ti["detected_role"] == "extra"
+    assert ti["detected_role"] == "target_index"
     assert ti["suggested_slug"] == "target_index"
     assert ti["suggested_label"] == "Target Index"
     assert ti["type_hint"] == "categorical"

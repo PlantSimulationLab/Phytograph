@@ -14721,6 +14721,33 @@ def _normalise_origin_alias(name: str) -> Optional[str]:
     `_normalise_miss_alias`, but maps to one of three axis-specific slugs."""
     base = re.sub(r'[^a-z0-9]+', '', name.strip().lower())
     return _ORIGIN_ALIAS_TO_SLUG.get(base)
+
+
+# Singleton roles: a cloud carries exactly one column of each, so a wizard column
+# plan must never assign the same one twice. The renderer enforces this too (it
+# demotes a prior holder — see EXCLUSIVE_ROLES in PointCloudImportWizard.tsx);
+# this is the backend backstop for a plan built by an older/other client, which
+# would otherwise silently orphan the duplicate under a deduped `<slug>_2` extra
+# that no algorithm looks up. 'extra'/'label' (many distinct named scalars) and
+# 'skip' are deliberately excluded. The r/g/b channels appear here without their
+# 255 variants because `_canonicalise_exclusive_role` folds r255->r etc., so a
+# plan can't carry both a 0-255 and a 0-1 red.
+_EXCLUSIVE_PLAN_ROLES = frozenset(
+    {'x', 'y', 'z', 'r', 'g', 'b', 'intensity', 'reflectance'}
+    | set(_MULTI_RETURN_SLUGS) | set(_GRID_INDEX_SLUGS)
+    | {_MISS_SLUG} | set(_ORIGIN_SLUGS)
+)
+
+
+def _canonicalise_exclusive_role(role: str) -> Optional[str]:
+    """Fold a plan entry's role token to the singleton key it competes for, or
+    None if the role isn't a singleton. Collapses the 0-255 RGB variants onto the
+    plain channel (r255->r) so 'red as 0-255' and 'red as 0-1' count as the same
+    claim; leaves every other exclusive token as-is."""
+    r = (role or '').lower()
+    if r in ('r255', 'g255', 'b255'):
+        r = r[0]
+    return r if r in _EXCLUSIVE_PLAN_ROLES else None
 # Distance (metres) at which a miss point is placed from the scanner origin along
 # its pulse direction. Matches Helios's gap_distance (LiDAR.cpp gapfillMisses).
 _MISS_GAP_DISTANCE = 20000.0
@@ -14843,6 +14870,30 @@ class ColumnPlan(BaseModel):
     """
     columns: List[ColumnPlanEntry]
     rgb_is_255: bool = True
+
+    @model_validator(mode="after")
+    def _reject_duplicate_singleton_roles(self):
+        # A singleton role (x/y/z, rgb, intensity/reflectance, the multi-return
+        # trio, grid indices, is_miss, beam origins) may appear on at most one
+        # column. Two columns claiming the same one would silently orphan the
+        # second under a deduped slug the algorithms never read, so refuse the
+        # plan outright. See `_EXCLUSIVE_PLAN_ROLES`; the wizard prevents this in
+        # the UI, this guards against any other/older client.
+        seen: dict[str, int] = {}
+        for entry in self.columns:
+            key = _canonicalise_exclusive_role(entry.role)
+            if key is None:
+                continue
+            if key in seen:
+                raise ValueError(
+                    f"role '{key}' assigned to multiple columns "
+                    f"(indices {seen[key]} and {entry.index}); each of "
+                    f"x/y/z, r/g/b, intensity, reflectance, timestamp, "
+                    f"target_index, target_count, row_index, column_index, "
+                    f"is_miss, and origin_x/y/z may map to only one column"
+                )
+            seen[key] = entry.index
+        return self
 
 
 class ImportPointCloudByPathRequest(BaseModel):
@@ -18050,13 +18101,14 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
                                and header_names[i] else role)
         elif role in _MULTI_RETURN_SLUGS:
             # A per-pulse multi-return column (timestamp/target_index/
-            # target_count): pin the canonical slug/label regardless of header
-            # text, exactly as `_plan_columns` does, so the wizard's column plan
-            # carries it under the name the LAD accessor recovers it by. Without
-            # this the column defaulted to a positional 'col_N' slug, the LAD
-            # path failed to find the three multi-return columns, and the
-            # full-waveform inversion ran on zeroed data.
-            detected_role = 'extra'
+            # target_count): the wizard exposes these as dedicated dropdown roles,
+            # so report the canonical role token directly (not 'extra') to
+            # pre-select the matching option — mirroring the grid-index/miss roles
+            # below. The slug is pinned to the canonical name regardless of header
+            # text so the LAD accessor recovers the three columns by name (without
+            # it the column defaulted to a positional 'col_N' slug and the
+            # full-waveform inversion ran on zeroed data).
+            detected_role = role
             suggested_slug = role
             suggested_label = _MULTI_RETURN_LABELS[role]
         elif role in _GRID_INDEX_SLUGS:

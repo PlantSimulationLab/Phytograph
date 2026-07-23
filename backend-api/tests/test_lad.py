@@ -846,9 +846,13 @@ class TestMultiReturnImportColumnMapping:
         assert by_index[0].detected_role == "x"
         assert by_index[1].detected_role == "y"
         assert by_index[2].detected_role == "z"
-        # The three per-pulse columns are carried as extras under their CANONICAL
+        # The three per-pulse columns are reported under their dedicated role
+        # tokens (which pre-select the wizard's first-class Timestamp / Target
+        # Index / Target Count dropdown roles) and pinned to their CANONICAL
         # slugs, not a positional fallback like 'col_4'.
-        assert by_index[3].detected_role == "extra"
+        assert by_index[3].detected_role == "timestamp"
+        assert by_index[4].detected_role == "target_index"
+        assert by_index[5].detected_role == "target_count"
         assert by_index[3].suggested_slug == "timestamp"
         assert by_index[4].suggested_slug == "target_index"
         assert by_index[5].suggested_slug == "target_count"
@@ -873,6 +877,49 @@ class TestMultiReturnImportColumnMapping:
         _, extra_dims = main._plan_columns_from_column_plan(plan)
         slugs = {e["slug"] for e in extra_dims}
         assert {"timestamp", "target_index", "target_count"} <= slugs, slugs
+
+    def test_duplicate_singleton_role_is_rejected(self):
+        """The backend backstop: a column plan that assigns the same singleton
+        role to two columns (which would silently orphan the second under a
+        deduped slug no algorithm reads) is refused at model validation, so a
+        malformed plan from an older/other client can't slip through. The wizard
+        already prevents this in the UI."""
+        from pydantic import ValidationError
+
+        def entry(i, role, **kw):
+            return main.ColumnPlanEntry(index=i, role=role, **kw)
+
+        # Two Timestamp columns -> rejected, with a message naming the role.
+        with pytest.raises(ValidationError, match="timestamp"):
+            main.ColumnPlan(columns=[
+                entry(0, "x"), entry(1, "y"), entry(2, "z"),
+                entry(3, "timestamp"), entry(4, "timestamp"),
+            ])
+
+        # r (0-1) and r255 (0-255) are the same channel -> also a collision.
+        with pytest.raises(ValidationError):
+            main.ColumnPlan(columns=[entry(0, "r"), entry(1, "r255")])
+
+    def test_distinct_singleton_and_repeated_scalar_roles_are_allowed(self):
+        """The validator only rejects a REPEATED singleton. A full plan of
+        distinct singletons, and any number of 'extra'/'skip' columns, validate
+        fine — so it never blocks a legitimate multi-return import."""
+        def entry(i, role, **kw):
+            return main.ColumnPlanEntry(index=i, role=role, **kw)
+
+        # All singletons distinct -> allowed.
+        main.ColumnPlan(columns=[
+            entry(0, "x"), entry(1, "y"), entry(2, "z"),
+            entry(3, "timestamp"), entry(4, "target_index"),
+            entry(5, "target_count"), entry(6, "is_miss"),
+            entry(7, "origin_x"), entry(8, "origin_y"), entry(9, "origin_z"),
+        ])
+        # Repeated non-singletons -> allowed (many distinct scalars, many skips).
+        main.ColumnPlan(columns=[
+            entry(0, "extra", slug="a", label="A"),
+            entry(1, "extra", slug="b", label="B"),
+            entry(2, "skip"), entry(3, "skip"),
+        ])
 
     def test_session_path_recovers_multireturn_lad(self, tmp_path):
         """End-to-end through the SESSION feed (the real UI path): import the

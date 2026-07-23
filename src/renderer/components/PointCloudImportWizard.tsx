@@ -73,6 +73,9 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'b', label: 'Blue' },
   { value: 'intensity', label: 'Intensity' },
   { value: 'reflectance', label: 'Reflectance' },
+  { value: 'timestamp', label: 'Timestamp' },
+  { value: 'target_index', label: 'Target Index' },
+  { value: 'target_count', label: 'Target Count' },
   { value: 'row_index', label: 'Scan Row Index' },
   { value: 'column_index', label: 'Scan Column Index' },
   { value: 'is_miss', label: 'Miss Flag' },
@@ -83,6 +86,19 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'label', label: 'Label' },
   { value: 'skip', label: 'Skip' },
 ];
+// 'timestamp'/'target_index'/'target_count' are the per-pulse multi-return
+// columns: the GPS/scan time of each return, its 1-based index within its pulse
+// (1st/2nd/… return), and the pulse's total return count. LAS auto-maps these
+// from return_number/number_of_returns/gps_time, but a header-less or oddly
+// labelled ASCII column won't auto-detect (the backend only recognises exact
+// aliases like Timestamp/TargetIndex/ReturnNumber/NumberOfReturns), so these
+// dropdown roles let the user assign them explicitly. Like the grid/miss roles
+// they pass straight through buildColumnPlan as their own role token; the backend
+// pins the canonical 'timestamp'/'target_index'/'target_count' slug (regardless
+// of source spelling) so gap-filling / LAD / multi-return triangulation find them
+// by name. They are per-pulse numeric fields, never categorical class fields —
+// so no rename box (not in SCALAR_ROLES).
+//
 // 'row_index'/'column_index' are structured-scan raster indices: integer (row,
 // column) positions within the scanner's rectangular acquisition grid. They
 // pass straight through buildColumnPlan as their own role token — the backend
@@ -111,6 +127,22 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
 // Roles that carry a named scalar field (and so get a rename box). 'label' is
 // the categorical variant of 'extra'.
 const SCALAR_ROLES = new Set(['extra', 'label']);
+
+// Roles that are singletons within a scan: a cloud has exactly one of each. The
+// backend keys every algorithm off a canonical slug (one 'timestamp', one 'x',
+// …), so assigning a singleton role to two columns silently orphans the second
+// (it lands under a deduped 'timestamp_2' slug that nothing looks up) while both
+// show the same label. To make the role exclusive we DEMOTE the previous holder
+// when the user assigns one of these elsewhere. Excludes the scalar roles
+// (extra/label — many columns can each be a distinct named scalar) and 'skip'.
+const EXCLUSIVE_ROLES = new Set([
+  'x', 'y', 'z',
+  'r', 'g', 'b',
+  'intensity', 'reflectance',
+  'timestamp', 'target_index', 'target_count',
+  'row_index', 'column_index', 'is_miss',
+  'origin_x', 'origin_y', 'origin_z',
+]);
 
 // Per-column editable state in the wizard.
 interface ColumnConfig {
@@ -182,6 +214,22 @@ function configFromColumn(c: PreviewColumn): ColumnConfig {
     typeHint: c.type_hint,
     remappable: c.remappable,
   };
+}
+
+// Enforce exclusive-role uniqueness on the initial config built from a preview:
+// if two columns arrive with the same exclusive role (a header the backend
+// mapped to, say, 'timestamp' twice), keep the FIRST and demote the rest to
+// 'skip' — the same first-wins rule the backend's slug dedup would apply, but
+// made visible in the wizard instead of silently orphaning the loser. Runs once
+// at load; user edits are kept exclusive by updateColumn.
+function dedupeExclusiveRoles(columns: ColumnConfig[]): ColumnConfig[] {
+  const seen = new Set<string>();
+  return columns.map((col) => {
+    if (!EXCLUSIVE_ROLES.has(col.role)) return col;
+    if (seen.has(col.role)) return { ...col, role: 'skip' };
+    seen.add(col.role);
+    return col;
+  });
 }
 
 function blankScanConfig(): ScanConfig {
@@ -292,7 +340,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         try {
           const preview = await previewPointCloud(input.path, input.asciiFormatHint ?? null);
           if (cancelled) return;
-          const columns = preview.columns.map(configFromColumn);
+          const columns = dedupeExclusiveRoles(preview.columns.map(configFromColumn));
           // Seed the global shift from the backend's suggestion (present only for
           // large/UTM coords). Default Z to keep (0) — elevation is rarely huge —
           // even when a Z suggestion is offered, matching CloudCompare's default.
@@ -321,10 +369,22 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   }, [inputs]);
 
   const updateColumn = useCallback((colIndex: number, patch: Partial<ColumnConfig>) => {
-    setConfigs((prev) => prev.map((c, i) => i === stepIdx ? {
-      ...c,
-      columns: c.columns.map((col) => col.index === colIndex ? { ...col, ...patch } : col),
-    } : c));
+    setConfigs((prev) => prev.map((c, i) => {
+      if (i !== stepIdx) return c;
+      // Assigning an exclusive (singleton) role demotes any OTHER column that
+      // already holds it to 'skip' — the role can only live on one column, and a
+      // silent duplicate would orphan the loser under a deduped slug. Only kicks
+      // in when the patch actually changes the role to an exclusive one.
+      const claims = patch.role !== undefined && EXCLUSIVE_ROLES.has(patch.role);
+      return {
+        ...c,
+        columns: c.columns.map((col) => {
+          if (col.index === colIndex) return { ...col, ...patch };
+          if (claims && col.role === patch.role) return { ...col, role: 'skip' };
+          return col;
+        }),
+      };
+    }));
   }, [stepIdx]);
 
   const setRgbIs255 = useCallback((v: boolean) => {
