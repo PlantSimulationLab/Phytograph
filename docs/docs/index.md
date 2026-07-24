@@ -45,8 +45,9 @@ point clouds, meshes, and procedural plant models.
 
 - :material-compare: **Register and compare**
 
-    Cloud-to-cloud, mesh-to-mesh, and cloud-to-mesh ICP with RMSE and
-    distance heatmaps.
+    Cloud-to-cloud, mesh-to-mesh, and cloud-to-mesh ICP with RMSE, plus
+    cloud-to-mesh distance statistics (mean / median / percentiles and
+    coverage within 1 / 5 / 10 mm).
 
 - :material-radar: **Simulate a scan**
 

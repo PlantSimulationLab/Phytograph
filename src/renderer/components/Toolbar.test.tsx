@@ -15,6 +15,7 @@ const EMPTY: SelectionState = {
   cloudCount: 0,
   meshCount: 0,
   totalScanCount: 0,
+  totalMeshCount: 0,
 };
 
 // A scene that holds one scan, but with nothing selected.

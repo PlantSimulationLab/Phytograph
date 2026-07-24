@@ -205,7 +205,6 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
             { label: 'Move to Origin', click: () => send({ kind: 'tool', toolId: 'cloud-move-origin' }) },
             { label: 'Backfill Misses', click: () => send({ kind: 'tool', toolId: 'cloud-backfill-misses' }) },
             { type: 'separator' },
-            { label: 'Align Clouds (ICP)…', click: () => send({ kind: 'tool', toolId: 'cloud-align' }) },
             { label: 'Stitch Clouds…', click: () => send({ kind: 'tool', toolId: 'cloud-stitch' }) },
           ],
         },
@@ -224,6 +223,15 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
             { label: 'Extract Skeleton', click: () => send({ kind: 'tool', toolId: 'cloud-skeleton' }) },
             { label: 'Build QSM', click: () => send({ kind: 'tool', toolId: 'cloud-qsm' }) },
             { label: 'Compute Leaf Area Density…', click: () => send({ kind: 'tool', toolId: 'compute-lad' }) },
+          ],
+        },
+        {
+          label: 'Registration',
+          submenu: [
+            { label: 'Align Clouds (ICP)…', click: () => send({ kind: 'tool', toolId: 'cloud-align' }) },
+            { label: 'Align Mesh to Mesh (ICP)…', click: () => send({ kind: 'tool', toolId: 'mesh-mesh-align' }) },
+            { label: 'Align Mesh to Cloud (ICP)…', click: () => send({ kind: 'tool', toolId: 'mesh-cloud-icp' }) },
+            { label: 'Cloud-to-Mesh Distance…', click: () => send({ kind: 'tool', toolId: 'mesh-cloud-align' }) },
           ],
         },
       ],

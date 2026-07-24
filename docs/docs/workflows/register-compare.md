@@ -32,10 +32,11 @@ Align one cloud to another by iteratively minimizing point-to-point
 distance.
 
 1. Open **Align Clouds (ICP)** from the **Pre-processing** toolbar group
-   (globe icon) or **Tools → Pre-processing → Align Clouds (ICP)**.
+   (globe icon) or **Tools → Registration → Align Clouds (ICP)**.
 2. In the dialog, pick the **target** (stays fixed) and the **source**
-   (moves onto the target). Streamed (large/octree) clouds can only be the
-   target — the source must be a regular cloud, since ICP transforms it.
+   (moves onto the target). Either can be any cloud — a large streamed cloud
+   can be the source too; its transform is applied on the backend and its
+   octree rebuilt.
 3. Click **Align**.
 
 ICP runs and reports:
@@ -51,36 +52,53 @@ revert.
 
 Same idea as cloud-to-cloud but on surfaces.
 
-1. Select exactly two meshes in the scene panel.
-2. Run **Align Mesh to Mesh (ICP)** from the **Tools** menu or the command
-   palette (<kbd>⌘/Ctrl</kbd>+<kbd>K</kbd>). Mesh-to-mesh is typically more
-   accurate than cloud-to-cloud because surface normals provide an extra
-   constraint.
+1. Run **Align Mesh to Mesh (ICP)** from **Tools → Registration** or the
+   command palette (<kbd>⌘/Ctrl</kbd>+<kbd>K</kbd>).
+2. In the dialog, pick the **target** (stays fixed) and the **source** (moves
+   onto the target). If you had meshes selected in the scene, they're
+   pre-picked — you can change the choice here.
+3. Click **Align**. The source mesh is transformed to best fit the target;
+   the toast reports the fit. Undo to revert.
 
-## Cloud-to-mesh
+Mesh-to-mesh is typically more accurate than cloud-to-cloud because surface
+normals provide an extra constraint.
 
-For comparing a real scan against a procedural model (or any
-cloud-versus-mesh ground truth):
+## Cloud-to-mesh distance
 
-1. Select one cloud and one mesh in the scene panel.
-2. Run **Align Mesh to Cloud** from the **Tools** menu or the command
+Measure how well a mesh fits a point cloud — e.g., comparing a real scan
+against a procedural model or any cloud-versus-mesh ground truth — without
+moving anything.
+
+1. Run **Cloud-to-Mesh Distance** from **Tools → Registration** or the command
    palette.
+2. In the dialog, pick the **point cloud** and the **mesh**. (Pre-picked from
+   the scene selection when available.)
+3. Click **Compute Distance**.
 
-The mesh is transformed to best fit the cloud, and the result includes a
-**distance heatmap** — each point colored by its distance to the nearest
-mesh face. Use this to identify where your scan diverges from the model.
+The **Alignment** panel opens with point-to-mesh distance statistics:
 
-## Reading the heatmap
+- **Mean / Median / RMSE** and **standard deviation**
+- **Min / Max** distance and the **90th / 95th / 99th percentiles**
+- **Coverage** — the share of cloud points lying within 1 mm, 5 mm, and 10 mm
+  of the mesh surface
+- The **point count** the statistics were computed from
 
-After any C2M or M2M run, the moving dataset is colored by per-point
-or per-vertex distance:
+## Cloud-to-mesh ICP (snap to fit)
 
-- **Deep green** — distance ≈ 0 (excellent fit)
-- **Lime / mustard** — moderate distance
-- **Bright yellow / cream** — large distance (poor fit)
+To actually *move* a mesh onto a cloud:
 
-Switch back to a regular color mode (Height, RGB, …) via the entry's
-**Color By** dropdown when you're done inspecting.
+1. Run **Align Mesh to Cloud (ICP)** from **Tools → Registration** or the
+   command palette.
+2. In the dialog, pick the **point cloud** (stays fixed) and the **mesh**
+   (moves onto it). Click **Snap to Fit (ICP)**.
+
+The mesh is transformed to best fit the cloud, and the toast reports the
+fitness and RMSE. Undo to revert.
+
+!!! tip "Distance then snap"
+    The **Alignment** panel from a Cloud-to-Mesh Distance run also has a
+    **Snap to Fit (ICP)** button that registers the same cloud + mesh you just
+    measured — so you can check the fit, then snap, in one place.
 
 ## When ICP fails
 

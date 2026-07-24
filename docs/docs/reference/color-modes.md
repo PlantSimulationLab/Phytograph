@@ -110,7 +110,6 @@ gradient.
 |---|---|---|
 | **Single Color** | Flat color | Default. |
 | **Height** | Color by vertex Z | Inspecting elevation in terrain meshes or plant verticality. |
-| **Distance** | Color by per-vertex distance (set automatically after C2M / M2M) | Reading registration heatmaps. |
 | **Vertex Color** | Per-vertex colors from the file | If the mesh has them. |
 | **Branch Order** | Color by branch order (Helios-generated plants) | Comparing trunk vs. side branches in procedural plants. |
 | **Inclination** | Per-triangle zenith of the face normal, folded to 0–90° | Reading surface tilt — flat vs. steep facets on a reconstruction. |

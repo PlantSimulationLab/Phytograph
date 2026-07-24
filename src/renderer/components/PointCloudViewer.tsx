@@ -5,7 +5,7 @@ import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -26,6 +26,9 @@ import { downloadFile as saveToFile } from '../utils/fileDownload';
 import { Toolbar } from './Toolbar';
 import { StitchDialog } from './StitchDialog';
 import { AlignDialog } from './AlignDialog';
+import { MeshAlignDialog } from './MeshAlignDialog';
+import { MeshCloudDistanceDialog } from './MeshCloudDistanceDialog';
+import { MeshCloudAlignDialog } from './MeshCloudAlignDialog';
 import { type ToolCommand, type SelectionState, isCommandAvailable, requiresText as toolRequiresText, CREATE_GROUPS } from '../lib/toolCommands';
 import { LeafAnglePlotPopup } from './LeafAnglePlotPopup';
 import { QSMResultsPopup } from './QSMResultsPopup';
@@ -1263,10 +1266,10 @@ export default function PointCloudViewer({
   const [showAlignmentPanel, setShowAlignmentPanel] = useState(false);
   const [alignmentResults, setAlignmentResults] = useState<AlignmentDistanceResponse | null>(null);
   const [isComputingAlignment, setIsComputingAlignment] = useState(false);
-  // Live alignment mode - automatically computes alignment when mesh is moved
-  const [liveAlignmentEnabled] = useState(true); // Auto-enabled by default in mixed mode
-  const alignmentDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastMeshPositionRef = useRef<string>(''); // Track mesh position for debounced updates
+  // The cloud + mesh that produced the current alignmentResults. Lets the
+  // results panel's "Snap to Fit (ICP)" run against exactly those inputs,
+  // independent of the current viewport selection.
+  const [alignmentInputs, setAlignmentInputs] = useState<{ cloudId: string; meshId: string } | null>(null);
   // ICP (Iterative Closest Point) snap-to-fit state
   const [isRunningICP, setIsRunningICP] = useState(false);
   // Backfill Misses: a setup modal (scan picker) + a streamed StatusPill progress
@@ -1307,6 +1310,9 @@ export default function PointCloudViewer({
   // Multi-input tool dialogs (pick their own inputs; always launchable).
   const [showAlignDialog, setShowAlignDialog] = useState(false);
   const [showStitchDialog, setShowStitchDialog] = useState(false);
+  const [showMeshAlignDialog, setShowMeshAlignDialog] = useState(false);
+  const [showMeshCloudDistanceDialog, setShowMeshCloudDistanceDialog] = useState(false);
+  const [showMeshCloudAlignDialog, setShowMeshCloudAlignDialog] = useState(false);
   // Crown fitting popup + background task state.
   const [showCrownFitPopup, setShowCrownFitPopup] = useState(false);
   const [crownFitRunning, setCrownFitRunning] = useState(false);
@@ -2239,6 +2245,12 @@ export default function PointCloudViewer({
   cloudsRef.current = clouds;
   const editStatesRef = useRef(editStates);
   editStatesRef.current = editStates;
+  // Live handle for `bakeSelectedTranslations`, declared here (early) so callers
+  // defined ABOVE its useCallback (handleMoveToOrigin) and effects that must not
+  // re-subscribe on every render (the T-modal keyboard listener) can reach the
+  // latest closure without a TDZ on the const binding or a stale-deps hazard.
+  // Assigned just after the callback is defined, below.
+  const bakeSelectedTranslationsRef = useRef<(ids?: Iterable<string>) => Promise<void>>(async () => {});
 
   // Build a session-backed octree PointCloudData from a session endpoint result
   // (bake / filter / segment / split / extract) that carries octree metadata + a
@@ -4348,10 +4360,13 @@ export default function PointCloudViewer({
 
       // Mesh tools — the per-mesh Transform (move / rotate / scale) is reached
       // from the double-arrow button on each row in the Meshes list panel, not
-      // from the toolbar. The alignment variants are palette/menu only since
-      // they're selection-driven multi-object operations.
-      { id: 'mesh-cloud-align', name: 'Align Mesh to Cloud', keywords: ['icp', 'register', 'fit', 'compare', 'distance'], action: () => { void handleAlignmentCompute(); }, category: 'Mesh' },
-      { id: 'mesh-mesh-align', name: 'Align Mesh to Mesh (ICP)', keywords: ['icp', 'register', 'fit'], action: () => { void handleMeshToMeshICP(); }, category: 'Mesh', requires: 'multiple-meshes' },
+      // from the toolbar. The alignment variants are palette/menu only (no
+      // toolbar icon) and modal-driven: each opens a dialog that picks its own
+      // inputs (multiInput: true, no `requires`), so they're always discoverable
+      // regardless of the current viewport selection.
+      { id: 'mesh-cloud-align', name: 'Cloud-to-Mesh Distance', keywords: ['icp', 'register', 'fit', 'compare', 'distance', 'rmse'], action: () => setShowMeshCloudDistanceDialog(true), category: 'Mesh', multiInput: true, multiInputKind: 'mesh-and-cloud' },
+      { id: 'mesh-cloud-icp', name: 'Align Mesh to Cloud (ICP)', keywords: ['icp', 'register', 'fit', 'snap'], action: () => setShowMeshCloudAlignDialog(true), category: 'Mesh', multiInput: true, multiInputKind: 'mesh-and-cloud' },
+      { id: 'mesh-mesh-align', name: 'Align Mesh to Mesh (ICP)', keywords: ['icp', 'register', 'fit'], action: () => setShowMeshAlignDialog(true), category: 'Mesh', multiInput: true, multiInputKind: 'mesh' },
 
       // Plant-specific (palette/menu only)
       { id: 'plant-growth', name: 'Plant Growth Panel', keywords: ['age', 'time', 'animate'], action: () => setShowPlantGrowthPanel(!showPlantGrowthPanel), category: 'Plant', requires: 'plant' },
@@ -4417,7 +4432,8 @@ export default function PointCloudViewer({
     // scan XML (e.g. almond.xml) creates param-only scans with no point data;
     // those still count, so the tools' own modals can take over from there.
     totalScanCount: scans.length,
-  }), [hasCloudSelected, hasMeshSelected, hasSkeletonSelected, hasPlantMeshSelected, selectedCloudCount, selectedMeshIds.size, scans.length]);
+    totalMeshCount: meshes.length,
+  }), [hasCloudSelected, hasMeshSelected, hasSkeletonSelected, hasPlantMeshSelected, selectedCloudCount, selectedMeshIds.size, scans.length, meshes.length]);
   toolSelectionRef.current = toolSelection;
 
   // Filter and sort commands based on search
@@ -4571,14 +4587,16 @@ export default function PointCloudViewer({
         commitHistoryEntry();
       }
     } else if (selectedIds.size > 0) {
-      // For point clouds, calculate translation to move center to origin
-      for (const id of selectedIds) {
-        startHistoryEntry('cloud', id);
-      }
-
+      // For point clouds, move each cloud's center to the origin, then BAKE the
+      // offset into geometry — exactly like the Translate tool. Move-to-Origin is
+      // just a canned translation, so it must NOT leave a render-only offset that
+      // the Helios compute path (triangulate / LAD) would silently ignore. The
+      // bake is non-undoable (scene.boundary), so we don't record undo history
+      // for it here (same rationale as the Translate commit points).
+      const ids = [...selectedIds];
       setEditStates(prev => {
         const next = new Map(prev);
-        for (const id of selectedIds) {
+        for (const id of ids) {
           const cloud = clouds.find(c => c.id === id);
           if (cloud) {
             const currentState = next.get(id);
@@ -4597,7 +4615,10 @@ export default function PointCloudViewer({
         }
         return next;
       });
-      setTimeout(commitHistoryEntry, 0);
+      // Bake after the state write flushes (bakeCloudTranslation reads the live
+      // editStatesRef, which the setEditStates above will have populated). Via
+      // the ref because bakeSelectedTranslations is defined below this callback.
+      setTimeout(() => { void bakeSelectedTranslationsRef.current(ids); }, 0);
     }
   }, [selectedIds, selectedMeshId, selectedSkeletonId, meshes, skeletons, clouds, meshPositions, startHistoryEntry, commitHistoryEntry]);
 
@@ -4961,6 +4982,184 @@ export default function PointCloudViewer({
 
     return { positions, colors, intensities, pointCount, bounds: { min, max, center, size }, fileName: data.fileName };
   }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox]);
+
+  // BAKE a cloud's pending Translate-tool offset into its real geometry, then
+  // reset the local (render-only) translation to zero.
+  //
+  // Why this exists: `editStates[id].translation` is a RENDER offset — the
+  // octree/point group is drawn at base+translation while the backend session
+  // still holds the untranslated points. Every consumer therefore had to
+  // remember to forward that offset, and the Helios path (triangulate + LAD)
+  // never did: `HeliosScanEntry` carries no translation field, so a translated
+  // cloud was computed against untranslated points while the scan origin and
+  // voxel grid were in translated world space. That fails SILENTLY (empty /
+  // misplaced voxels), which is the worst possible failure mode. Baking at the
+  // commit boundary makes the whole class of bug structurally impossible
+  // instead of requiring every future tool to opt in.
+  //
+  // Session-backed clouds go through /api/cloud/session/{id}/transform, which
+  // moves the points AND everything else that must travel with them — the
+  // interleaved sky/miss rows, per-pulse beam_origins, the separate
+  // backfilled-miss buffer, and the miss-octree projection origin (it also
+  // flags the miss buffer stale, since its LAD beam directions are pre-move).
+  // Flat clouds are baked in-RAM here, mirroring the ICP flat path.
+  //
+  // Permanent + non-undoable, exactly like a filter/erase commit: it drops the
+  // derived octree and the erase-undo history. Returns a status: `ok` when a
+  // bake succeeded (or was correctly a no-op), `{ok:false, reason}` when the
+  // backend transform failed (caller aggregates into one toast), `{ok:false,
+  // gone}` when the cloud vanished mid-rebuild. `noop` marks "nothing to do"
+  // (no cloud / zero translation / already baking) — distinct from a failure.
+  const bakingTranslationRef = useRef<Set<string>>(new Set());
+  const bakeCloudTranslation = useCallback(async (
+    cloudId: string,
+  ): Promise<{ ok: true } | { ok: false; reason?: string; gone?: boolean } | { ok: 'noop' }> => {
+    const cloud = clouds.find(c => c.id === cloudId);
+    if (!cloud) return { ok: 'noop' };
+    // Read the LIVE edit state, not the render-time closure: the gizmo's final
+    // onDrag → setEditStates lands in the same React batch as onDragEnd, so the
+    // captured `editStates` can still hold the pre-drag translation. Baking that
+    // would move the cloud by a stale offset and strand the remainder.
+    const t = (editStatesRef.current.get(cloudId) ?? getEditState(cloudId)).translation;
+    if (t.x === 0 && t.y === 0 && t.z === 0) return { ok: 'noop' };
+    // Re-entrancy guard. Two commit points can fire for one user action (gizmo
+    // drag-end, then the leave-translate-mode effect), and the session transform
+    // is slow enough that the second call would read the still-unbaked
+    // translation from edit-state and move the cloud TWICE. The in-flight set is
+    // keyed by cloud id and cleared in `finally`.
+    if (bakingTranslationRef.current.has(cloudId)) return { ok: 'noop' };
+    bakingTranslationRef.current.add(cloudId);
+    try {
+      const clearTranslation = () => {
+        setEditStates(prev => {
+          const next = new Map(prev);
+          const state = next.get(cloudId);
+          if (state) next.set(cloudId, { ...state, translation: { x: 0, y: 0, z: 0 } });
+          return next;
+        });
+      };
+
+      const octreeInfo = cloud.data.octree;
+      if (octreeInfo?.sessionId) {
+        // Row-major flat 4x4 pure translation (the layout the endpoint expects —
+        // the same one ICP's transformation_matrix uses).
+        const rowMajor = [
+          1, 0, 0, t.x,
+          0, 1, 0, t.y,
+          0, 0, 1, t.z,
+          0, 0, 0, 1,
+        ];
+        let result: Awaited<ReturnType<typeof sessionTransform>>;
+        try {
+          result = await sessionTransform(octreeInfo.sessionId, rowMajor);
+        } catch (err) {
+          // Leave the translation in edit-state so the user still sees the cloud
+          // where they put it and can retry — silently dropping it would move
+          // the cloud back under them. The caller aggregates failures into ONE
+          // toast (a per-cloud toast would stack N-high on a multi-cloud bake).
+          return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+        }
+        // The rebuild took seconds; the cloud may have been deleted meanwhile.
+        // Skip the state write for a vanished cloud (onUpdateCloud on a missing
+        // id could otherwise resurrect a ghost row / orphan its octree).
+        if (!clouds.some(c => c.id === cloudId)) return { ok: false, gone: true };
+        onUpdateCloud(cloudId, buildSessionOctreeData(
+          result, octreeInfo, cloud.data.fileName ?? cloudId,
+        ));
+        clearTranslation();
+        // Destructive boundary: the session geometry moved permanently, so an
+        // erase-undo must not reach back across it (the backend cleared its
+        // own deleted_history for the same reason).
+        scene.boundary([cloudId]);
+        return { ok: true };
+      }
+
+      // Flat cloud: bake into the in-RAM positions and recompute bounds.
+      const src = cloud.data;
+      if (src.positions.length === 0) {
+        clearTranslation();
+        return { ok: true };
+      }
+      const positions = new Float32Array(src.positions.length);
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let i = 0; i < src.positions.length; i += 3) {
+        const x = src.positions[i] + t.x;
+        const y = src.positions[i + 1] + t.y;
+        const z = src.positions[i + 2] + t.z;
+        positions[i] = x; positions[i + 1] = y; positions[i + 2] = z;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      }
+      onUpdateCloud(cloudId, {
+        ...src,
+        positions,
+        bounds: {
+          min: new THREE.Vector3(minX, minY, minZ),
+          max: new THREE.Vector3(maxX, maxY, maxZ),
+          center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
+          size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
+        },
+      });
+      clearTranslation();
+      scene.boundary([cloudId]);
+      return { ok: true };
+    } finally {
+      bakingTranslationRef.current.delete(cloudId);
+    }
+  }, [clouds, getEditState, onUpdateCloud, buildSessionOctreeData, scene]);
+
+  // Bake every selected cloud's pending translation (see bakeCloudTranslation).
+  // Called at the Translate-tool commit boundaries: T-modal confirm, gizmo
+  // drag-end, and leaving translate mode (which covers the numeric panel).
+  //
+  // Sequential, not concurrent: each session bake triggers a PotreeConverter
+  // rebuild, and running N in parallel would contend on the converter and
+  // multiply peak memory (see the OOM notes in CLAUDE.md). One cloud's failure
+  // does NOT abort the rest — the clouds that CAN move should move — but every
+  // failure is collected and surfaced in a SINGLE toast rather than one per
+  // cloud. A failed cloud keeps its render offset, so the user can retry (and
+  // the leave-translate-mode safety net will).
+  const bakeSelectedTranslations = useCallback(async (ids?: Iterable<string>) => {
+    const idList = [...(ids ?? selectedIds)];
+    const failures: string[] = [];
+    for (const id of idList) {
+      const r = await bakeCloudTranslation(id);
+      if (r.ok === false && !r.gone) failures.push(id);
+    }
+    if (failures.length > 0) {
+      const names = failures
+        .map(id => clouds.find(c => c.id === id)?.data.fileName ?? id)
+        .slice(0, 3)
+        .join(', ');
+      const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
+      showToast({
+        title: failures.length === 1 ? 'Could not apply translation' : `Could not apply translation to ${failures.length} clouds`,
+        message: `${names}${more}. The cloud stayed where you placed it — try again once the backend responds.`,
+        type: 'error',
+      });
+    }
+  }, [selectedIds, bakeCloudTranslation, clouds]);
+
+  // Keep the early-declared ref pointing at the latest closure (see its
+  // declaration near editStatesRef for why it lives up there).
+  bakeSelectedTranslationsRef.current = bakeSelectedTranslations;
+
+  // Safety net: leaving Translate mode by ANY route (switching tools, pressing
+  // Escape, deselecting) bakes whatever is still pending. The explicit commit
+  // points above cover the common paths, but this guarantees the invariant that
+  // matters — no cloud can reach a compute tool with an unbaked render offset.
+  // Baking is a no-op when the translation is already zero, so this is free on
+  // every other mode change.
+  const prevEditModeRef = useRef(editMode);
+  useEffect(() => {
+    const prev = prevEditModeRef.current;
+    prevEditModeRef.current = editMode;
+    if (prev === 'translate' && editMode !== 'translate') {
+      void bakeSelectedTranslationsRef.current();
+    }
+  }, [editMode]);
 
   // Resolve a cloud to either its in-memory display data (flat clouds) or a
   // backend point-source descriptor (octree clouds, whose positions buffer is
@@ -7836,19 +8035,14 @@ export default function PointCloudViewer({
   }, [refineTreeLabels, treeSplitId, treeMaxGap]);
 
   // Compute Alignment distance statistics
-  const handleAlignmentCompute = useCallback(async () => {
-    // Need exactly 1 point cloud and 1 mesh selected
-    if (selectedIds.size !== 1 || !selectedMeshId) {
-      showToast({ type: 'error', title: 'Selection Required', message: 'Select exactly 1 point cloud and 1 mesh for alignment comparison' });
-      return;
-    }
-
-    const cloudId = Array.from(selectedIds)[0];
+  // Cloud-to-mesh distance. Inputs are picked in the MeshCloudDistanceDialog and
+  // passed in explicitly (no dependence on the viewport selection).
+  const handleAlignmentCompute = useCallback(async (cloudId: string, meshId: string) => {
     const cloud = clouds.find(c => c.id === cloudId);
-    const mesh = meshes.find(m => m.id === selectedMeshId);
+    const mesh = meshes.find(m => m.id === meshId);
 
     if (!cloud || !mesh) {
-      showToast({ type: 'error', title: 'Not Found', message: 'Could not find selected point cloud or mesh' });
+      showToast({ type: 'error', title: 'Not Found', message: 'Could not find the selected point cloud or mesh' });
       return;
     }
 
@@ -7857,9 +8051,18 @@ export default function PointCloudViewer({
 
     try {
       // Resolve the cloud to inline points (flat clouds) or a source descriptor
-      // (octree clouds). Mesh vertices/indices are always inline.
+      // (octree clouds). Mesh vertices/indices are always inline — offset by the
+      // mesh's current display transform so the distance reflects where the mesh
+      // actually sits in the viewport (a user may have moved it), not its
+      // untransformed base vertices. Mirrors handleICPSnapToFit.
       const ps = buildPointSource(cloud);
-      const meshVertices: number[] = Array.from(mesh.data.vertices);
+      const meshPos = meshPositions.get(meshId) || { x: 0, y: 0, z: 0 };
+      const meshVertices: number[] = [];
+      for (let i = 0; i < mesh.data.vertexCount; i++) {
+        meshVertices.push(mesh.data.vertices[i * 3] + meshPos.x);
+        meshVertices.push(mesh.data.vertices[i * 3 + 1] + meshPos.y);
+        meshVertices.push(mesh.data.vertices[i * 3 + 2] + meshPos.z);
+      }
       const meshIndices: number[] = Array.from(mesh.data.indices);
 
       const response = await computeAlignmentDistance(
@@ -7873,6 +8076,7 @@ export default function PointCloudViewer({
       }
 
       setAlignmentResults(response);
+      setAlignmentInputs({ cloudId, meshId });
       setShowAlignmentPanel(true);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -7881,22 +8085,16 @@ export default function PointCloudViewer({
     } finally {
       setIsComputingAlignment(false);
     }
-  }, [selectedIds, selectedMeshId, clouds, meshes, buildPointSource]);
+  }, [clouds, meshes, meshPositions, buildPointSource]);
 
-  // ICP (Iterative Closest Point) snap-to-fit - align mesh to point cloud
-  const handleICPSnapToFit = useCallback(async () => {
-    // Need exactly 1 point cloud and 1 mesh selected
-    if (selectedIds.size !== 1 || !selectedMeshId) {
-      showToast({ type: 'error', title: 'Selection Required', message: 'Select exactly 1 point cloud and 1 mesh for ICP alignment' });
-      return;
-    }
-
-    const cloudId = Array.from(selectedIds)[0];
+  // ICP (Iterative Closest Point) snap-to-fit - align mesh to point cloud.
+  // Inputs are picked in the MeshCloudAlignDialog and passed in explicitly.
+  const handleICPSnapToFit = useCallback(async (cloudId: string, meshId: string) => {
     const cloud = clouds.find(c => c.id === cloudId);
-    const mesh = meshes.find(m => m.id === selectedMeshId);
+    const mesh = meshes.find(m => m.id === meshId);
 
     if (!cloud || !mesh) {
-      showToast({ type: 'error', title: 'Not Found', message: 'Could not find selected point cloud or mesh' });
+      showToast({ type: 'error', title: 'Not Found', message: 'Could not find the selected point cloud or mesh' });
       return;
     }
 
@@ -7908,7 +8106,7 @@ export default function PointCloudViewer({
       const ps = buildPointSource(cloud);
 
       // Get current mesh position
-      const currentPos = meshPositions.get(selectedMeshId) || { x: 0, y: 0, z: 0 };
+      const currentPos = meshPositions.get(meshId) || { x: 0, y: 0, z: 0 };
 
       // Get mesh vertices and apply current position offset (SOURCE - to be moved)
       const meshVertices: number[] = [];
@@ -7972,10 +8170,10 @@ export default function PointCloudViewer({
           z: euler.z * 180 / Math.PI,
         };
 
-        meshPositionsRef.current.set(selectedMeshId, newPos);
-        setMeshPositions(prev => new Map(prev).set(selectedMeshId, newPos));
-        meshRotationsRef.current.set(selectedMeshId, newRot);
-        setMeshRotations(prev => new Map(prev).set(selectedMeshId, newRot));
+        meshPositionsRef.current.set(meshId, newPos);
+        setMeshPositions(prev => new Map(prev).set(meshId, newPos));
+        meshRotationsRef.current.set(meshId, newRot);
+        setMeshRotations(prev => new Map(prev).set(meshId, newRot));
 
         console.log(`ICP result - position: [${newPos.x.toFixed(4)}, ${newPos.y.toFixed(4)}, ${newPos.z.toFixed(4)}], rotation: [${newRot.x.toFixed(2)}°, ${newRot.y.toFixed(2)}°, ${newRot.z.toFixed(2)}°], fitness: ${response.fitness?.toFixed(4)}, rmse: ${response.rmse?.toFixed(6)}`);
 
@@ -7992,7 +8190,7 @@ export default function PointCloudViewer({
     } finally {
       setIsRunningICP(false);
     }
-  }, [selectedIds, selectedMeshId, clouds, meshes, buildPointSource, meshPositions, setMeshPositions, setMeshRotations]);
+  }, [clouds, meshes, buildPointSource, meshPositions, setMeshPositions, setMeshRotations]);
 
   // Handle Cloud-to-Cloud ICP alignment
   const handleCloudToCloudICP = useCallback(async (targetId?: string, sourceId?: string) => {
@@ -8018,26 +8216,14 @@ export default function PointCloudViewer({
       return;
     }
 
-    // The ICP transform is baked into the SOURCE cloud's positions in the
-    // renderer. Octree clouds keep no positions (geometry lives on disk), and a
-    // rotation+translation can't be folded into a cached octree the way an AABB
-    // crop can — so we can't move a streamed source cloud. The TARGET may be an
-    // octree (it's only read). Block when the source is an octree.
-    if (sourceCloud.data.octree) {
-      showToast({
-        type: 'error',
-        title: 'Can’t align a streamed cloud',
-        message: 'Cloud-to-cloud ICP moves the second-selected cloud, which isn’t supported for large (streamed) clouds. Select it first so it becomes the fixed target instead.',
-      });
-      return;
-    }
-
     setIsRunningICP(true);
 
     try {
-      // Resolve each cloud independently — the target can be flat (inline
-      // points) or octree (source descriptor, read from disk); the source is
-      // always flat (guarded above) so its transform can be baked locally.
+      // Resolve each cloud independently — either side can be flat (inline
+      // points) or octree (source descriptor, read from disk/session). ICP reads
+      // both in WORLD frame and returns a world-frame matrix; how the SOURCE is
+      // MOVED then depends on whether it's flat (bake into in-RAM positions) or
+      // octree (apply on the backend session, below).
       const targetPs = buildPointSource(targetCloud);
       const sourcePs = buildPointSource(sourceCloud);
 
@@ -8077,61 +8263,91 @@ export default function PointCloudViewer({
         matrix.decompose(position, quaternion, scale);
         const euler = new THREE.Euler().setFromQuaternion(quaternion, 'XYZ');
 
-        // Transform all source cloud positions using the full matrix
-        // The source cloud's positions were sent with current translation already baked in
-        // So we need to apply the transform to the original positions + current translation
-        const sourceState = getEditState(sourceCloud.id);
-        const newPositions = new Float32Array(sourceCloud.data.positions.length);
-        const point = new THREE.Vector3();
-
-        for (let i = 0; i < sourceCloud.data.positions.length; i += 3) {
-          // Get original position + current translation (to match what was sent to ICP)
-          point.set(
-            sourceCloud.data.positions[i] + sourceState.translation.x,
-            sourceCloud.data.positions[i + 1] + sourceState.translation.y,
-            sourceCloud.data.positions[i + 2] + sourceState.translation.z
+        const sourceOctree = sourceCloud.data.octree;
+        if (sourceOctree?.sessionId) {
+          // Octree-backed source: geometry lives in the backend session (in-RAM
+          // `positions` is empty), so bake the world-frame matrix into the session
+          // and adopt the rebuilt octree. ICP saw the source at (world +
+          // edit-translation) — buildPointSource sent that translation — so the
+          // matrix M satisfies M·(world + tr) ≈ target. The backend session
+          // transform operates on the world points alone, so fold the same
+          // pre-translation into the matrix before sending: M' = M · T(tr). Then
+          // reset the local translation to 0 (it's now baked into the session).
+          const tr = getEditState(sourceCloud.id).translation;
+          const sessionMatrix = matrix.clone().multiply(
+            new THREE.Matrix4().makeTranslation(tr.x, tr.y, tr.z),
           );
-          // Apply the ICP transformation
-          point.applyMatrix4(matrix);
-          // Store as new absolute position (translation will be reset to 0)
-          newPositions[i] = point.x;
-          newPositions[i + 1] = point.y;
-          newPositions[i + 2] = point.z;
+          // The backend reads a ROW-MAJOR flat 4x4. THREE.Matrix4.elements /
+          // toArray() are COLUMN-major, so transpose before flattening (matches
+          // the row-major layout the ICP response used).
+          const rowMajor = sessionMatrix.clone().transpose().toArray();
+          const result = await sessionTransform(sourceOctree.sessionId, rowMajor);
+          onUpdateCloud(sourceCloud.id, buildSessionOctreeData(
+            result, sourceOctree, sourceCloud.data.fileName ?? sourceCloud.id,
+          ));
+          setEditStates(prev => {
+            const next = new Map(prev);
+            const state = next.get(sourceCloud.id) || getEditState(sourceCloud.id);
+            next.set(sourceCloud.id, { ...state, translation: { x: 0, y: 0, z: 0 } });
+            return next;
+          });
+        } else {
+          // Flat source: bake the transform into the in-RAM positions.
+          // The source cloud's positions were sent with current translation
+          // already baked in, so apply the transform to positions + translation.
+          const sourceState = getEditState(sourceCloud.id);
+          const newPositions = new Float32Array(sourceCloud.data.positions.length);
+          const point = new THREE.Vector3();
+
+          for (let i = 0; i < sourceCloud.data.positions.length; i += 3) {
+            // Get original position + current translation (to match what was sent to ICP)
+            point.set(
+              sourceCloud.data.positions[i] + sourceState.translation.x,
+              sourceCloud.data.positions[i + 1] + sourceState.translation.y,
+              sourceCloud.data.positions[i + 2] + sourceState.translation.z
+            );
+            // Apply the ICP transformation
+            point.applyMatrix4(matrix);
+            // Store as new absolute position (translation will be reset to 0)
+            newPositions[i] = point.x;
+            newPositions[i + 1] = point.y;
+            newPositions[i + 2] = point.z;
+          }
+
+          // Recompute bounds for the transformed positions
+          let minX = Infinity, minY = Infinity, minZ = Infinity;
+          let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+          for (let i = 0; i < newPositions.length; i += 3) {
+            minX = Math.min(minX, newPositions[i]);
+            minY = Math.min(minY, newPositions[i + 1]);
+            minZ = Math.min(minZ, newPositions[i + 2]);
+            maxX = Math.max(maxX, newPositions[i]);
+            maxY = Math.max(maxY, newPositions[i + 1]);
+            maxZ = Math.max(maxZ, newPositions[i + 2]);
+          }
+
+          // Update the cloud with transformed positions using onUpdateCloud
+          const newBounds = {
+            min: new THREE.Vector3(minX, minY, minZ),
+            max: new THREE.Vector3(maxX, maxY, maxZ),
+            center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
+            size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
+          };
+
+          onUpdateCloud(sourceCloud.id, {
+            ...sourceCloud.data,
+            positions: newPositions,
+            bounds: newBounds,
+          });
+
+          // Reset translation since positions are now absolute
+          setEditStates(prev => {
+            const next = new Map(prev);
+            const state = next.get(sourceCloud.id) || getEditState(sourceCloud.id);
+            next.set(sourceCloud.id, { ...state, translation: { x: 0, y: 0, z: 0 } });
+            return next;
+          });
         }
-
-        // Recompute bounds for the transformed positions
-        let minX = Infinity, minY = Infinity, minZ = Infinity;
-        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-        for (let i = 0; i < newPositions.length; i += 3) {
-          minX = Math.min(minX, newPositions[i]);
-          minY = Math.min(minY, newPositions[i + 1]);
-          minZ = Math.min(minZ, newPositions[i + 2]);
-          maxX = Math.max(maxX, newPositions[i]);
-          maxY = Math.max(maxY, newPositions[i + 1]);
-          maxZ = Math.max(maxZ, newPositions[i + 2]);
-        }
-
-        // Update the cloud with transformed positions using onUpdateCloud
-        const newBounds = {
-          min: new THREE.Vector3(minX, minY, minZ),
-          max: new THREE.Vector3(maxX, maxY, maxZ),
-          center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
-          size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
-        };
-
-        onUpdateCloud(sourceCloud.id, {
-          ...sourceCloud.data,
-          positions: newPositions,
-          bounds: newBounds,
-        });
-
-        // Reset translation since positions are now absolute
-        setEditStates(prev => {
-          const next = new Map(prev);
-          const state = next.get(sourceCloud.id) || getEditState(sourceCloud.id);
-          next.set(sourceCloud.id, { ...state, translation: { x: 0, y: 0, z: 0 } });
-          return next;
-        });
 
         console.log(`Cloud-to-cloud ICP result - position: [${position.x.toFixed(4)}, ${position.y.toFixed(4)}, ${position.z.toFixed(4)}], rotation: [${(euler.x * 180/Math.PI).toFixed(2)}°, ${(euler.y * 180/Math.PI).toFixed(2)}°, ${(euler.z * 180/Math.PI).toFixed(2)}°], fitness: ${response.fitness?.toFixed(4)}, rmse: ${response.rmse?.toFixed(6)}`);
 
@@ -8148,22 +8364,17 @@ export default function PointCloudViewer({
     } finally {
       setIsRunningICP(false);
     }
-  }, [selectedIds, clouds, onUpdateCloud, buildPointSource, getEditState, setEditStates]);
+  }, [selectedIds, clouds, onUpdateCloud, buildPointSource, getEditState, setEditStates, buildSessionOctreeData]);
 
   // Mesh-to-mesh ICP alignment
-  const handleMeshToMeshICP = useCallback(async () => {
-    // Need exactly 2 meshes selected
-    if (selectedMeshIds.size !== 2) {
-      showToast({ type: 'error', title: 'Selection Required', message: 'Select exactly 2 meshes for mesh-to-mesh alignment' });
-      return;
-    }
-
-    const meshIdArray = Array.from(selectedMeshIds);
-    const targetMesh = meshes.find(m => m.id === meshIdArray[0]);
-    const sourceMesh = meshes.find(m => m.id === meshIdArray[1]);
+  // Mesh-to-mesh ICP. Inputs are picked in the MeshAlignDialog and passed in
+  // explicitly (target stays fixed, source is moved onto it).
+  const handleMeshToMeshICP = useCallback(async (targetMeshId: string, sourceMeshId: string) => {
+    const targetMesh = meshes.find(m => m.id === targetMeshId);
+    const sourceMesh = meshes.find(m => m.id === sourceMeshId);
 
     if (!targetMesh || !sourceMesh) {
-      showToast({ type: 'error', title: 'Not Found', message: 'Could not find selected meshes' });
+      showToast({ type: 'error', title: 'Not Found', message: 'Could not find the selected meshes' });
       return;
     }
 
@@ -8274,7 +8485,7 @@ export default function PointCloudViewer({
     } finally {
       setIsRunningICP(false);
     }
-  }, [selectedMeshIds, meshes, meshPositions, setMeshPositions]);
+  }, [meshes, meshPositions, setMeshPositions, setMeshRotations]);
 
 
   // Toggle mesh visibility
@@ -9373,8 +9584,26 @@ export default function PointCloudViewer({
     };
 
     const commitModal = () => {
-      if (!transformModalRef.current) return;
-      commitHistoryEntry();
+      const modal = transformModalRef.current;
+      if (!modal) return;
+      const isCloudTranslate = modal.target === 'cloud' && modal.op === 'translate' && modal.cloudIds;
+      // A cloud translate is BAKED into real geometry on confirm, which is a
+      // permanent, non-undoable commit (`scene.boundary` in bakeCloudTranslation
+      // purges any history touching the cloud). Recording a `maskEdit` undo entry
+      // here would be actively wrong: its `after` captures the not-yet-baked
+      // render offset, which the bake then zeroes — leaving a stale entry that a
+      // pre-bake undo could restore, or that a later unrelated commit could pair
+      // with the post-bake zero. So skip history for this path and let the bake's
+      // boundary be the record. Meshes/skeletons keep their render-only transform
+      // and DO record history as before.
+      if (isCloudTranslate) {
+        // Drop the BEFORE captured at drag/modal start so it can't dangle into a
+        // later commitHistoryEntry (see startModal's startHistoryEntry).
+        pendingHistoryRef.current = null;
+        void bakeSelectedTranslationsRef.current(modal.cloudIds!);
+      } else {
+        commitHistoryEntry();
+      }
       transformModalRef.current = null;
       setTransformModal(null);
       setGizmoDragging(false);
@@ -9582,78 +9811,6 @@ export default function PointCloudViewer({
     if (hasSkeleton) return 'skeleton';
     return 'none';
   }, [selectedIds, selectedMeshIds, selectedSkeletonId]);
-
-  // Live alignment computation - automatically compute when mesh moves in mixed mode
-  useEffect(() => {
-    // Only run in mixed selection mode with live alignment enabled
-    if (selectionType !== 'mixed' || !liveAlignmentEnabled || selectedIds.size !== 1 || !selectedMeshId) {
-      return;
-    }
-
-    const cloudId = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === cloudId);
-    const mesh = meshes.find(m => m.id === selectedMeshId);
-
-    if (!cloud || !mesh) return;
-
-    // Get current mesh position
-    const meshPos = meshPositions.get(selectedMeshId) || { x: 0, y: 0, z: 0 };
-    const posKey = `${meshPos.x.toFixed(3)},${meshPos.y.toFixed(3)},${meshPos.z.toFixed(3)}`;
-
-    // Skip if position hasn't changed
-    if (posKey === lastMeshPositionRef.current) return;
-    lastMeshPositionRef.current = posKey;
-
-    // Clear previous timer
-    if (alignmentDebounceTimerRef.current) {
-      clearTimeout(alignmentDebounceTimerRef.current);
-    }
-
-    // Debounce the alignment computation (300ms delay)
-    alignmentDebounceTimerRef.current = setTimeout(async () => {
-      // Don't start if already computing
-      if (isComputingAlignment) return;
-
-      setIsComputingAlignment(true);
-      try {
-        // Get the display data for the cloud (with edits applied)
-        const displayData = getDisplayData(cloud);
-
-        // Prepare point cloud positions as flat array
-        const points: number[] = Array.from(displayData.positions);
-
-        // Get mesh vertices and apply current position offset
-        const meshVertices: number[] = [];
-        for (let i = 0; i < mesh.data.vertexCount; i++) {
-          meshVertices.push(mesh.data.vertices[i * 3] + meshPos.x);
-          meshVertices.push(mesh.data.vertices[i * 3 + 1] + meshPos.y);
-          meshVertices.push(mesh.data.vertices[i * 3 + 2] + meshPos.z);
-        }
-        const meshIndices: number[] = Array.from(mesh.data.indices);
-
-        const response = await computeAlignmentDistance({
-          points,
-          mesh_vertices: meshVertices,
-          mesh_indices: meshIndices,
-        });
-
-        if (response.success) {
-          setAlignmentResults(response);
-        }
-      } catch (error) {
-        console.error('Live alignment computation error:', error);
-      } finally {
-        setIsComputingAlignment(false);
-      }
-    }, 300);
-
-    // Cleanup timer on unmount
-    return () => {
-      if (alignmentDebounceTimerRef.current) {
-        clearTimeout(alignmentDebounceTimerRef.current);
-      }
-    };
-  }, [selectionType, liveAlignmentEnabled, selectedIds, selectedMeshId, meshPositions, clouds, meshes, getDisplayData, isComputingAlignment]);
 
   // Compute selected object's center coordinates for the info panel
   const selectedObjectCenter = useMemo(() => {
@@ -12661,7 +12818,19 @@ export default function PointCloudViewer({
             size={firstSelectedCloud.data.bounds.size.length() / 3}
             onTranslate={handleGizmoTranslate}
             onDragStart={() => setGizmoDragging(true)}
-            onDragEnd={() => { setGizmoDragging(false); saveToHistory(); }}
+            onDragEnd={() => {
+              setGizmoDragging(false);
+              // Bake the drag into real geometry so downstream compute (Helios
+              // triangulate / LAD especially) sees the moved points. This is a
+              // non-undoable commit (bakeCloudTranslation calls scene.boundary),
+              // so — unlike the mesh/skeleton gizmos — we do NOT record undo
+              // history here. The old saveToHistory() only captured a BEFORE and
+              // never committed it, so post-bake (translation zeroed) it would
+              // dangle into the next unrelated commitHistoryEntry as a bogus
+              // {before:{x:5}, after:{x:0}} entry. Clear any stale pending entry.
+              pendingHistoryRef.current = null;
+              void bakeSelectedTranslations();
+            }}
           />
         )}
 
@@ -13711,6 +13880,7 @@ export default function PointCloudViewer({
                     data-has-params={scanHasParams ? 'true' : 'false'}
                     data-moving={isMovingScanRow ? 'true' : 'false'}
                     data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
+                    data-octree-cache-id={scan.data?.octree?.cacheId ?? ''}
                     data-selected={isSelected ? 'true' : 'false'}
                     data-visible={scan.visible ? 'true' : 'false'}
                     onClick={(e) => {
@@ -15139,6 +15309,10 @@ export default function PointCloudViewer({
                 });
               }
             }}
+            // Closing exits translate mode, and the leave-translate-mode effect
+            // bakes any pending offset — so the numeric panel needs no bake of
+            // its own. Baking on close rather than per-keystroke also keeps
+            // dialing in x/y/z interactive (no octree rebuild per axis commit).
             onClose={() => setEditMode('none')}
           />
         );
@@ -15179,10 +15353,10 @@ export default function PointCloudViewer({
       {showAlignmentPanel && alignmentResults && (
         <AlignmentPanel
           results={alignmentResults}
-          snapEnabled={selectionType === 'mixed'}
+          snapEnabled={!!alignmentInputs}
           isRunningICP={isRunningICP}
           onClose={() => setShowAlignmentPanel(false)}
-          onSnapToFit={handleICPSnapToFit}
+          onSnapToFit={() => { if (alignmentInputs) void handleICPSnapToFit(alignmentInputs.cloudId, alignmentInputs.meshId); }}
         />
       )}
 
@@ -15918,10 +16092,38 @@ export default function PointCloudViewer({
       <AlignDialog
         isOpen={showAlignDialog}
         onClose={() => setShowAlignDialog(false)}
-        clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color, isOctree: !!c.data.octree }))}
+        clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color }))}
         initialSelectedIds={selectedIds}
         isRunning={isRunningICP}
         onAlign={(targetId, sourceId) => { void handleCloudToCloudICP(targetId, sourceId); }}
+      />
+      <MeshAlignDialog
+        isOpen={showMeshAlignDialog}
+        onClose={() => setShowMeshAlignDialog(false)}
+        meshes={meshes.map(m => ({ id: m.id, label: displayNameOfMesh(m), color: m.color }))}
+        initialSelectedIds={selectedMeshIds}
+        isRunning={isRunningICP}
+        onAlign={(targetId, sourceId) => { void handleMeshToMeshICP(targetId, sourceId); }}
+      />
+      <MeshCloudDistanceDialog
+        isOpen={showMeshCloudDistanceDialog}
+        onClose={() => setShowMeshCloudDistanceDialog(false)}
+        clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color }))}
+        meshes={meshes.map(m => ({ id: m.id, label: displayNameOfMesh(m), color: m.color }))}
+        initialCloudId={[...selectedIds][0]}
+        initialMeshId={selectedMeshId ?? undefined}
+        isRunning={isComputingAlignment}
+        onCompute={(cloudId, meshId) => { void handleAlignmentCompute(cloudId, meshId); }}
+      />
+      <MeshCloudAlignDialog
+        isOpen={showMeshCloudAlignDialog}
+        onClose={() => setShowMeshCloudAlignDialog(false)}
+        clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color }))}
+        meshes={meshes.map(m => ({ id: m.id, label: displayNameOfMesh(m), color: m.color }))}
+        initialCloudId={[...selectedIds][0]}
+        initialMeshId={selectedMeshId ?? undefined}
+        isRunning={isRunningICP}
+        onAlign={(cloudId, meshId) => { void handleICPSnapToFit(cloudId, meshId); }}
       />
 
       {/* Morph Plant Popup */}

@@ -22,6 +22,7 @@ export function AlignmentPanel({
 }: AlignmentPanelProps) {
   return (
     <div
+      data-testid="alignment-panel"
       className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto"
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') onClose(); }}
@@ -33,6 +34,7 @@ export function AlignmentPanel({
           Alignment
         </div>
         <button
+          data-testid="alignment-panel-close"
           onClick={onClose}
           className="p-1 hover:bg-neutral-700 rounded"
         >
@@ -51,7 +53,7 @@ export function AlignmentPanel({
           </div>
           <div className="bg-neutral-700/50 rounded p-2">
             <div className="text-[10px] text-neutral-400">RMSE</div>
-            <div className="text-sm font-medium text-cyan-400">
+            <div data-testid="alignment-rmse" className="text-sm font-medium text-cyan-400">
               {results.rmse !== undefined ? `${(results.rmse * 1000).toFixed(2)} mm` : 'N/A'}
             </div>
           </div>
@@ -142,6 +144,7 @@ export function AlignmentPanel({
 
         {/* Snap to Fit Button */}
         <button
+          data-testid="alignment-snap-to-fit"
           onClick={onSnapToFit}
           disabled={isRunningICP || !snapEnabled}
           className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 ${

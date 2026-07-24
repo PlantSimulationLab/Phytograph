@@ -69,7 +69,8 @@ and installs in place — no need to return here to re-download.
 - **Generate procedural plants** — grow Helios plant models (trees, vines,
   cereals, vegetables) to a target age, then morph their parameters interactively.
 - **Register and compare** — cloud-to-cloud, mesh-to-mesh, and cloud-to-mesh
-  ICP with RMSE and distance heatmaps.
+  ICP with RMSE, plus cloud-to-mesh distance statistics (mean / median /
+  percentiles and the share of points within 1 / 5 / 10 mm).
 - **Simulate a scan** — place virtual scanners (static or moving-platform) around
   a plant and synthesize the point cloud they would produce.
 

@@ -24,6 +24,7 @@ const EMPTY: SelectionState = {
   cloudCount: 0,
   meshCount: 0,
   totalScanCount: 0,
+  totalMeshCount: 0,
 };
 
 describe('isCommandAvailable', () => {
@@ -64,6 +65,23 @@ describe('isCommandAvailable', () => {
     expect(isCommandAvailable(c, EMPTY)).toBe(false);                          // 0 scans → disabled
     expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 1 })).toBe(true); // 1 scan, none selected → enabled
     expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 3 })).toBe(true);
+  });
+
+  it('gates a mesh-input multi tool on a mesh existing, not a scan', () => {
+    // Mesh-to-mesh align picks meshes in its dialog; it must stay enabled when
+    // meshes exist even with zero scans, and disabled in an all-scan/no-mesh scene.
+    const c = cmd({ multiInput: true, multiInputKind: 'mesh' });
+    expect(isCommandAvailable(c, EMPTY)).toBe(false);                           // nothing → disabled
+    expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 5 })).toBe(false); // scans only, no mesh → disabled
+    expect(isCommandAvailable(c, { ...EMPTY, totalMeshCount: 1 })).toBe(true);  // a mesh exists → enabled
+  });
+
+  it('gates a mesh-and-cloud multi tool on BOTH a mesh and a scan existing', () => {
+    // Cloud↔mesh distance / ICP need one of each to have anything to compare.
+    const c = cmd({ multiInput: true, multiInputKind: 'mesh-and-cloud' });
+    expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 1 })).toBe(false);                      // cloud only
+    expect(isCommandAvailable(c, { ...EMPTY, totalMeshCount: 1 })).toBe(false);                      // mesh only
+    expect(isCommandAvailable(c, { ...EMPTY, totalScanCount: 1, totalMeshCount: 1 })).toBe(true);    // both → enabled
   });
 });
 

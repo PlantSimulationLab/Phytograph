@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.52.0"
+BACKEND_VERSION = "0.53.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -21114,6 +21114,89 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     # is enabled, extracting each into its own child session.
     num_trees = int(labels.max()) if labels.size else 0
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "num_trees": num_trees, **meta}
+
+
+class SessionTransformRequest(BaseModel):
+    """Apply a rigid 4x4 transform (rotation + translation) to a session's
+    geometry in place, then rebuild the octree. Used by cloud-to-cloud ICP to
+    MOVE an octree-backed source cloud onto the target: ICP computes the matrix
+    on world-frame points and this bakes it into the session so the streamed
+    octree follows. `matrix` is 16 floats, ROW-MAJOR world-frame (the same
+    layout `ICPRegistrationResponse.transformation_matrix` returns)."""
+    matrix: List[float]
+
+
+@app.post("/api/cloud/session/{session_id}/transform")
+async def session_transform(session_id: str, request: SessionTransformRequest):
+    """Bake a rigid 4x4 transform into the session's in-RAM geometry and rebuild
+    the octree. The matrix acts in WORLD coordinates; the session stores points
+    with `world_shift` subtracted, so we conjugate by the shift:
+    stored_new = R·(stored + shift) + t − shift. A permanent (non-undoable)
+    geometry change, like a filter commit."""
+    if len(request.matrix) != 16:
+        raise HTTPException(status_code=400, detail=f"matrix must be 16 floats (row-major 4x4); got {len(request.matrix)}")
+
+    sess = _get_cloud_session(session_id)
+    M = np.asarray(request.matrix, dtype=np.float64).reshape(4, 4)
+    R = M[:3, :3]
+    t = M[:3, 3]
+
+    def _apply(pts: np.ndarray, shift: np.ndarray) -> np.ndarray:
+        # world = stored + shift; stored_new = (R·world + t) − shift
+        world = pts.astype(np.float64, copy=False) + shift
+        return (world @ R.T + t) - shift
+
+    had_miss_octree = False
+    with _cloud_session_lock:
+        shift = sess.world_shift if sess.world_shift is not None else np.zeros(3, dtype=np.float64)
+        shift = np.asarray(shift, dtype=np.float64)
+
+        # Hits + interleaved misses: real coordinates, all move with the cloud.
+        # (The hits octree rebuild still excludes is_miss rows via exclude_misses.)
+        sess.positions = _apply(sess.positions, shift)
+
+        # Session-level per-pulse emission points (moving-platform scans), stored
+        # in the session frame — same conjugation as positions.
+        if sess.beam_origins is not None:
+            sess.beam_origins = _apply(sess.beam_origins, shift)
+
+        # Separate backfilled-miss buffer (session frame). Its `positions` and
+        # per-pulse `origins` are geometry and move; `directions` are LAD beam
+        # data not consumed by the miss octree — leave them but flag the buffer
+        # stale so a later LAD warns (same signal a crop sets).
+        bf = sess.backfilled_misses
+        if bf is not None:
+            if bf.get("positions") is not None and np.asarray(bf["positions"]).shape[0] > 0:
+                bf["positions"] = _apply(np.asarray(bf["positions"], dtype=np.float64), shift)
+            if bf.get("origins") is not None and np.asarray(bf["origins"]).shape[0] > 0:
+                bf["origins"] = _apply(np.asarray(bf["origins"], dtype=np.float64), shift)
+            sess.backfilled_misses_stale = True
+
+        # Miss-octree projection origin (session frame): move it with the cloud so
+        # the reprojected shell keeps the same hit-distance/angle geometry.
+        if sess.miss_octree_origin is not None:
+            moved = _apply(np.asarray(sess.miss_octree_origin, dtype=np.float64).reshape(1, 3), shift)
+            sess.miss_octree_origin = moved.reshape(3).tolist()
+
+        had_miss_octree = sess.miss_octree_cache_id is not None
+        # Permanent geometry change: drop the derived octree and the erase-undo
+        # history so a later erase-undo can't reach across the transform.
+        sess.octree_cache_id = None
+        sess.deleted_history = []
+        remaining = int((~sess.deleted).sum())
+        total = int(len(sess.positions))
+
+    # Rebuild derived octrees OUTSIDE the lock (PotreeConverter is slow).
+    cache_key, cache_dir, meta = _session_rebuild(sess)
+    miss_id = None
+    if had_miss_octree:
+        miss_id = _build_miss_octree(sess, sess.miss_octree_origin)
+        with _cloud_session_lock:
+            sess.miss_octree_cache_id = miss_id
+
+    return {"session_id": session_id, "point_count": remaining, "total_count": total,
+            "cache_id": cache_key, "cache_dir": str(cache_dir),
+            "miss_octree_cache_id": miss_id, **meta}
 
 
 class SessionFilterRequest(BaseModel):

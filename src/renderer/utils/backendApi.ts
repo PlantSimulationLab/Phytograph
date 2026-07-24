@@ -3395,6 +3395,40 @@ export async function sessionFilter(
   }
 }
 
+/**
+ * Apply a rigid 4x4 transform (ROW-MAJOR, world-frame — the layout an ICP
+ * registration returns) to a session's geometry in place and rebuild its octree
+ * (+ miss octree). Moves an octree-backed cloud whose points live in the backend
+ * session, not in the renderer's (empty) in-RAM array — used by cloud-to-cloud
+ * ICP to move a streamed SOURCE cloud onto the target.
+ */
+export async function sessionTransform(
+  sessionId: string,
+  matrix: number[],
+): Promise<CloudSessionBakeResult> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/transform`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ matrix }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionBakeResult;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('session_transform failed:', error);
+    throw error;
+  }
+}
+
 /** Result of a session split: the kept side (this session) + an optional new
  * leftover session, both with fresh octree metadata. Built entirely from the
  * in-RAM arrays (no source file read). */

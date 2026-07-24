@@ -40,6 +40,13 @@ export interface ToolCommand {
    * Single-input/gizmo tools grey out via `requires` until a target exists.
    */
   multiInput?: boolean;
+  /**
+   * What a `multiInput` tool needs at least one of in the scene to have anything
+   * to pick. 'scan' (default) → gated on a scan existing (stitch, triangulate,
+   * align-clouds …). 'mesh' → a mesh existing (mesh-to-mesh align). 'mesh-and-cloud'
+   * → both (cloud↔mesh distance / ICP). Ignored when `multiInput` is false.
+   */
+  multiInputKind?: 'scan' | 'mesh' | 'mesh-and-cloud';
   /** Toggled-state predicate so the toolbar can highlight an open panel/mode. */
   isActive?: () => boolean;
   /**
@@ -61,9 +68,12 @@ export interface SelectionState {
   meshCount: number;
   /**
    * Scans present in the scene (data-bearing clouds AND param-only scanner
-   * markers), regardless of selection. Gates multi-input tools.
+   * markers), regardless of selection. Gates scan-input multi-input tools.
    */
   totalScanCount: number;
+  /** Meshes present in the scene, regardless of selection. Gates mesh-input
+   * multi-input tools (mesh-to-mesh / cloud-to-mesh align). */
+  totalMeshCount: number;
 }
 
 /**
@@ -75,7 +85,13 @@ export interface SelectionState {
  * against the selection.
  */
 export function isCommandAvailable(cmd: ToolCommand, sel: SelectionState): boolean {
-  if (cmd.multiInput) return sel.totalScanCount >= 1;
+  if (cmd.multiInput) {
+    switch (cmd.multiInputKind) {
+      case 'mesh': return sel.totalMeshCount >= 1;
+      case 'mesh-and-cloud': return sel.totalScanCount >= 1 && sel.totalMeshCount >= 1;
+      default: return sel.totalScanCount >= 1;  // 'scan'
+    }
+  }
   switch (cmd.requires) {
     case 'cloud': return sel.hasCloud;
     case 'mesh': return sel.hasMesh;
