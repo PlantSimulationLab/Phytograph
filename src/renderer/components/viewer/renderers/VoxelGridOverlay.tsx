@@ -87,8 +87,19 @@ export function VoxelGridOverlay({ subdivisions, color = '#94a3b8', columnLocalO
   // renderOrder 2 keeps the grid lines drawing after the translucent voxel-box
   // faces (renderOrder 1) and the surface mesh (0), so the wireframe stays
   // crisply on top in the transparent pass.
+  // NOT a pick target. three.js raycasts lines within `raycaster.params.Line
+  // .threshold` — a WORLD-space distance that defaults to 1 (metre) and is
+  // never configured here — so every wireframe line carried a ~1 m hit halo.
+  // Worse, Line.raycast divides that threshold by the object's mean scale, and
+  // this overlay is a child of the group scaled to the grid's SIZE, so on a
+  // small grid the halo is inflated further. On the 0.5 m grid in
+  // example-datasets/sphere.xml that made the box pickable roughly one grid
+  // width out in every direction — clicks well outside the visible box still
+  // selected it. The solid voxel box behind this overlay already handles
+  // picking (and correctly yields to whatever it encloses), so the decoration
+  // takes itself out of hit testing entirely.
   return (
-    <lineSegments geometry={geometry} renderOrder={2}>
+    <lineSegments geometry={geometry} renderOrder={2} raycast={() => null}>
       <lineBasicMaterial color={color} transparent opacity={0.85} depthTest={false} depthWrite={false} />
     </lineSegments>
   );

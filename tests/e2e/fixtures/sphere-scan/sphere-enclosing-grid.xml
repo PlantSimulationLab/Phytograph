@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+
+<!--
+  Mirrors example-datasets/sphere.xml: four scans around a small sphere PLUS a
+  <grid> that ENCLOSES that sphere (same 0.5^3 box at the sphere's centre,
+  rotated 45 deg).
+
+  This enclosing geometry is the regression case. The grid's near faces sit
+  between the camera and the scanned sphere, so a solid-picking grid box
+  swallowed every viewport click on its contents — clicking the sphere (or a
+  scan marker behind the box) selected the grid instead. See
+  tests/e2e/viewport-pick.spec.ts.
+-->
+
+<helios>
+
+<scan>
+  <filename> sphere_scan0.xyz </filename>
+  <ASCII_format> row column x y z r g b reflectance </ASCII_format>
+  <origin> -2.000000 0.000000 0.500000 </origin>
+  <size> 100 200 </size>
+</scan>
+
+<scan>
+  <filename> sphere_scan1.xyz </filename>
+  <ASCII_format> row column x y z r g b reflectance </ASCII_format>
+  <origin> 0.000000 -2.000000 0.500000 </origin>
+  <size> 100 200 </size>
+</scan>
+
+<grid>
+  <center> 0 0 0.5 </center>
+  <size> 0.5 0.5 0.5 </size>
+  <Nx> 2 </Nx>
+  <Ny> 2 </Ny>
+  <Nz> 2 </Nz>
+  <rotation> 45 </rotation>
+</grid>
+
+</helios>

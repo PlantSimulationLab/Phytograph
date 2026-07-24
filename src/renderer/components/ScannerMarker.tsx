@@ -48,6 +48,10 @@ interface ScannerMarkerProps {
   // present the marker body is oriented by this instead of the static tilt/
   // heading (which don't apply to a moving scan). Undefined → use tilt/heading.
   bodyQuaternion?: [number, number, number, number];
+  // Viewport pick handler for the static marker body. Lets a click on the
+  // instrument in the 3D view select its scan, the same as clicking the row in
+  // the Scans pane. Undefined → the marker is display-only (not pickable).
+  onSelect?: (additive: boolean, range: boolean) => void;
 }
 
 // A thin polyline through the platform trajectory positions. Drawn in world space
@@ -82,7 +86,11 @@ export function TrajectoryPath({ points, color }: {
   useEffect(() => () => geometry.dispose(), [geometry]);
   if (points.length < 2) return null;
   return (
-    <lineSegments frustumCulled={false}>
+    // Decoration only — never a pick target. three.js raycasts lines within
+    // `raycaster.params.Line.threshold`, a WORLD-space distance defaulting to
+    // 1 m, so an unguarded path would put a metre-wide hit halo along its whole
+    // length and shadow the geometry behind it.
+    <lineSegments frustumCulled={false} raycast={() => null}>
       <primitive object={geometry} attach="geometry" />
       <lineBasicMaterial color={color} linewidth={2} transparent opacity={0.9} depthTest={false} />
     </lineSegments>
@@ -918,6 +926,7 @@ export function ScannerMarker({
   trajectory,
   poses,
   bodyQuaternion,
+  onSelect,
 }: ScannerMarkerProps) {
   const resolved = useMemo(() => getScannerModel(model), [model]);
   // Orientation: for a moving scan, use the platform's first-pose attitude
@@ -962,7 +971,21 @@ export function ScannerMarker({
           per-pose OBJ instances — those already draw the instrument at every pose
           (including the first), so the static body would just double up on pose 0. */}
       {!(useObjPoses && poses && poses.length >= 1) && (
-        <group position={[origin.x, origin.y, origin.z]} quaternion={quaternion} scale={markerScale}>
+        <group
+          position={[origin.x, origin.y, origin.z]}
+          quaternion={quaternion}
+          scale={markerScale}
+          // Click the instrument in the viewport to select its scan. Mirrors the
+          // mesh picking path: e.delta filters an orbit-drag that happened to
+          // start over the marker, and stopPropagation keeps the click from
+          // reaching the Canvas onPointerMissed (which would clear the
+          // selection we just made). Clicks bubble up from the body mesh.
+          onClick={onSelect ? (e) => {
+            if (e.delta > 4) return;
+            e.stopPropagation();
+            onSelect(e.ctrlKey || e.metaKey, e.shiftKey);
+          } : undefined}
+        >
           <Suspense fallback={null}>
             {resolved.meshFormat === 'ply' ? (
               <PlyBody model={resolved} color={color} selected={selected} />
@@ -1009,11 +1032,13 @@ export function ScanMarkerEntry({
   color,
   selected,
   markerScale,
+  onSelect,
 }: {
   params: import('../lib/scanParameters').ScanParameters;
   color: string;
   selected: boolean;
   markerScale: number;
+  onSelect?: (additive: boolean, range: boolean) => void;
 }) {
   const traj = params.trajectory;
   const trajectory = useMemo(
@@ -1049,6 +1074,7 @@ export function ScanMarkerEntry({
       trajectory={trajectory}
       poses={poses}
       bodyQuaternion={bodyQuaternion}
+      onSelect={onSelect}
     />
   );
 }

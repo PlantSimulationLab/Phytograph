@@ -136,6 +136,16 @@ export function GroundGrid({
     <Grid
       ref={ref}
       args={[100, 100]}
+      // The grid is a REFERENCE OVERLAY, never a pick target. drei's <Grid> is a
+      // plain 100×100 planeGeometry mesh with frustumCulled={false}: the
+      // "infinite" look is a vertex-shader scale (localPosition *= 1 +
+      // fadeDistance) and the gaps between lines are punched out by a fragment
+      // `discard`. Neither is visible to the CPU-side raycaster, which still
+      // tests the raw solid quad — so the ground plane can report a hit far
+      // outside the visibly lit area and through its transparent gaps, and that
+      // hit shadows anything behind it. Nothing wants to select the ground
+      // reference, so take it out of hit testing entirely.
+      raycast={() => null}
       cellSize={cellSize}
       cellThickness={0.5}
       cellColor="#404040"
