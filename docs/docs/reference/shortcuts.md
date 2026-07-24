@@ -91,11 +91,16 @@ When the Translate tool is active:
 | <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> | Lock to axis |
 | <kbd>Shift</kbd> + <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> | Lock to the perpendicular plane |
 | Type a number | Exact amount (degrees for rotate) — e.g. <kbd>R</kbd> <kbd>X</kbd> `45` |
-| <kbd>Enter</kbd> / click | Commit |
-| <kbd>Esc</kbd> / right-click | Cancel |
+| <kbd>Enter</kbd> / click | Set the value |
+| <kbd>Esc</kbd> / right-click | Cancel this entry |
 
 Translate works on point clouds, skeletons, and meshes; scale and rotate
 apply to the selected mesh.
+
+For a **point cloud**, this gesture only sets the pending position in the
+Translate panel — it does not apply the move. Click **OK** in the panel to
+apply it (or **Cancel** to discard). See
+[Clean a point cloud → Translate](../workflows/clean-point-cloud.md#translate-and-level).
 
 ## Selection (Scene panel)
 

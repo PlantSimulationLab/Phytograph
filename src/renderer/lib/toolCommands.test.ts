@@ -39,6 +39,20 @@ describe('isCommandAvailable', () => {
     expect(isCommandAvailable(c, { ...EMPTY, hasCloud: true })).toBe(true);
   });
 
+  it('isDisabled hard-locks a command regardless of selection or requires', () => {
+    // Used to lock every other tool while the Translate panel has a pending
+    // draft. It must win even over an otherwise-available command...
+    const alwaysOk = cmd({ requires: null, isDisabled: () => true });
+    expect(isCommandAvailable(alwaysOk, { ...EMPTY, hasCloud: true })).toBe(false);
+    // ...and over a multi-input tool (which bypasses `requires`).
+    const multi = cmd({ multiInput: true, multiInputKind: 'scan', isDisabled: () => true });
+    expect(isCommandAvailable(multi, { ...EMPTY, totalScanCount: 5 })).toBe(false);
+    // isDisabled=false leaves normal gating intact.
+    const gated = cmd({ requires: 'cloud', isDisabled: () => false });
+    expect(isCommandAvailable(gated, EMPTY)).toBe(false);
+    expect(isCommandAvailable(gated, { ...EMPTY, hasCloud: true })).toBe(true);
+  });
+
   it('gates mesh / skeleton / plant tools independently', () => {
     expect(isCommandAvailable(cmd({ requires: 'mesh' }), { ...EMPTY, hasMesh: true })).toBe(true);
     expect(isCommandAvailable(cmd({ requires: 'skeleton' }), { ...EMPTY, hasSkeleton: true })).toBe(true);

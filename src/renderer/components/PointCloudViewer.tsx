@@ -1459,6 +1459,16 @@ export default function PointCloudViewer({
   // Edit mode and per-cloud edit states
   const [editMode, setEditMode] = useState<EditMode>('none');
 
+  // Translate tool (draft-with-OK/Cancel model). The Translate panel edits a
+  // pending render offset LIVE (viewport follows) but bakes ONLY on OK. To make
+  // Cancel/X-discard revert cleanly, we snapshot the translation each selected
+  // object had when translate mode opened — the BASELINE — so we can restore it.
+  // Keyed by object id (cloud id or skeleton id). Empty when not translating.
+  const translateBaselineRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
+  // True while an OK-triggered bake is in flight (drives the panel's "Applying…"
+  // state and blocks a second commit).
+  const [isApplyingTranslate, setIsApplyingTranslate] = useState(false);
+
   // Lower the octree point budget while a crop box is being previewed, restore
   // when it ends. potree clips with a fragment `discard` (no early-Z), so the
   // GPU can't cull occluded points during preview and overdraw goes quadratic
@@ -2250,7 +2260,7 @@ export default function PointCloudViewer({
   // re-subscribe on every render (the T-modal keyboard listener) can reach the
   // latest closure without a TDZ on the const binding or a stale-deps hazard.
   // Assigned just after the callback is defined, below.
-  const bakeSelectedTranslationsRef = useRef<(ids?: Iterable<string>) => Promise<void>>(async () => {});
+  const bakeSelectedTranslationsRef = useRef<(ids?: Iterable<string>) => Promise<boolean>>(async () => true);
 
   // Build a session-backed octree PointCloudData from a session endpoint result
   // (bake / filter / segment / split / extract) that carries octree metadata + a
@@ -4396,12 +4406,35 @@ export default function PointCloudViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
 
+  // While the Translate tool is open it owns an unbaked draft that must be
+  // resolved (OK/Cancel/X) before anything else runs — otherwise a compute tool
+  // could act on a half-applied offset, or the draft could be silently lost.
+  // So guard EVERY other command: mark it unavailable and no-op its action for
+  // as long as translate mode is active. The translate toggle itself stays live
+  // so its toolbar button can close the tool (routing through the exit-revert
+  // safety net), and View commands stay live so the camera still moves. Scene
+  // rows stay clickable (the chosen "non-modal, tools guarded" behavior). This
+  // single derived list feeds the menu bridge, the palette, and both Toolbars,
+  // so all four entry points gate identically.
+  const guardedCommands = useMemo<ToolCommand[]>(() => {
+    if (editMode !== 'translate') return commands;
+    return commands.map(cmd => {
+      if (cmd.id === 'cloud-translate' || cmd.id === 'skeleton-translate' || cmd.category === 'View') {
+        return cmd;
+      }
+      // isDisabled greys the button out (Toolbar reads isCommandAvailable) AND
+      // suppresses the palette/Cmd+K/menu paths (they guard on isCommandAvailable
+      // before firing). The action is neutered too as belt-and-suspenders.
+      return { ...cmd, action: () => {}, isDisabled: () => true };
+    });
+  }, [commands, editMode]);
+
   // Bridge for the native Tools menu (src/main/menu.ts → App.tsx) to run a tool
-  // by id. A ref keeps the latest `commands` (with fresh action closures) so the
-  // menu always invokes the current handler, never a stale one. One global,
-  // matching the __handleUndo / __snapToView pattern.
-  const commandsRef = useRef(commands);
-  commandsRef.current = commands;
+  // by id. A ref keeps the latest guarded `commands` (fresh action closures +
+  // the translate lock) so the menu always invokes the current handler, never a
+  // stale one. One global, matching the __handleUndo / __snapToView pattern.
+  const commandsRef = useRef(guardedCommands);
+  commandsRef.current = guardedCommands;
   // Latest selection so the menu bridge gates on availability identically to the
   // toolbar/palette — otherwise a menu click with an unmet prerequisite would
   // still fire the action (e.g. toggle a panel that never renders).
@@ -4436,9 +4469,10 @@ export default function PointCloudViewer({
   }), [hasCloudSelected, hasMeshSelected, hasSkeletonSelected, hasPlantMeshSelected, selectedCloudCount, selectedMeshIds.size, scans.length, meshes.length]);
   toolSelectionRef.current = toolSelection;
 
-  // Filter and sort commands based on search
+  // Filter and sort commands based on search (guarded list, so the palette
+  // reflects the translate lock too).
   const filteredCommands = useMemo(() => {
-    return commands
+    return guardedCommands
       .map(cmd => {
         const nameScore = fuzzyMatch(commandSearch, cmd.name);
         const keywordScore = cmd.keywords?.reduce((max, kw) => Math.max(max, fuzzyMatch(commandSearch, kw)), 0) || 0;
@@ -4454,7 +4488,7 @@ export default function PointCloudViewer({
         // Then by score
         return b.score - a.score;
       });
-  }, [commands, commandSearch, toolSelection]);
+  }, [guardedCommands, commandSearch, toolSelection]);
 
   // Reset selection when search changes
   useEffect(() => {
@@ -5121,7 +5155,7 @@ export default function PointCloudViewer({
   // failure is collected and surfaced in a SINGLE toast rather than one per
   // cloud. A failed cloud keeps its render offset, so the user can retry (and
   // the leave-translate-mode safety net will).
-  const bakeSelectedTranslations = useCallback(async (ids?: Iterable<string>) => {
+  const bakeSelectedTranslations = useCallback(async (ids?: Iterable<string>): Promise<boolean> => {
     const idList = [...(ids ?? selectedIds)];
     const failures: string[] = [];
     for (const id of idList) {
@@ -5140,26 +5174,112 @@ export default function PointCloudViewer({
         type: 'error',
       });
     }
+    return failures.length === 0;
   }, [selectedIds, bakeCloudTranslation, clouds]);
 
   // Keep the early-declared ref pointing at the latest closure (see its
   // declaration near editStatesRef for why it lives up there).
   bakeSelectedTranslationsRef.current = bakeSelectedTranslations;
 
-  // Safety net: leaving Translate mode by ANY route (switching tools, pressing
-  // Escape, deselecting) bakes whatever is still pending. The explicit commit
-  // points above cover the common paths, but this guarantees the invariant that
-  // matters — no cloud can reach a compute tool with an unbaked render offset.
-  // Baking is a no-op when the translation is already zero, so this is free on
-  // every other mode change.
+  // Revert the translate DRAFT back to the baseline captured when the tool
+  // opened. For clouds this rewrites the render-only `translation` in editStates;
+  // for a skeleton it rewrites skeletonPositions. Clears the baseline map. Used
+  // by Cancel, X→Discard, and the exit-without-OK safety net.
+  const revertTranslateDraftToBaseline = useCallback(() => {
+    const base = translateBaselineRef.current;
+    if (base.size === 0) return;
+    if (selectedSkeletonId && base.has(selectedSkeletonId)) {
+      const p = base.get(selectedSkeletonId)!;
+      setSkeletonPositions(prev => new Map(prev).set(selectedSkeletonId, { ...p }));
+    } else {
+      setEditStates(prev => {
+        const next = new Map(prev);
+        for (const [id, t] of base) {
+          const state = next.get(id);
+          if (state) next.set(id, { ...state, translation: { ...t } });
+        }
+        return next;
+      });
+    }
+    translateBaselineRef.current = new Map();
+  }, [selectedSkeletonId]);
+
+  // OK: commit the pending translate. Skeletons keep their render-only offset
+  // (nothing to bake) so OK just closes; clouds bake into geometry. Clears the
+  // baseline FIRST so the exit-revert safety net becomes a no-op for this path,
+  // then flips the "Applying…" state until the bake resolves and closes. On a
+  // bake failure the panel stays open (isApplying back to false) so the user can
+  // retry — the offset is still in edit-state.
+  const handleApplyTranslate = useCallback(async () => {
+    // Clearing the baseline BEFORE the async bake means a mode change mid-bake
+    // won't double-revert; the bake itself resets translation to 0 on success.
+    translateBaselineRef.current = new Map();
+    if (selectedSkeletonId) {
+      setEditMode('none');  // skeleton translate is render-only; just close
+      return;
+    }
+    setIsApplyingTranslate(true);
+    let ok = false;
+    try {
+      ok = await bakeSelectedTranslations();
+    } finally {
+      setIsApplyingTranslate(false);
+    }
+    if (ok) {
+      setEditMode('none');
+    } else {
+      // Bake failed: re-arm the baseline so a later Cancel/exit can still revert
+      // the offset the user is still seeing (bakeSelectedTranslations left it in
+      // edit-state). Recapture from the CURRENT (pre-bake) selection state.
+      const rearmed = new Map<string, { x: number; y: number; z: number }>();
+      for (const id of selectedIds) {
+        // Baseline is the ORIGINAL position (translation 0 unless it was already
+        // baked-in); since a failed bake didn't move geometry, reverting to zero
+        // offset restores the visible pre-translate state.
+        rearmed.set(id, { x: 0, y: 0, z: 0 });
+      }
+      translateBaselineRef.current = rearmed;
+    }
+  }, [selectedSkeletonId, bakeSelectedTranslations, selectedIds]);
+
+  // Cancel / Discard: revert to baseline and close.
+  const handleCancelTranslate = useCallback(() => {
+    revertTranslateDraftToBaseline();
+    setEditMode('none');
+  }, [revertTranslateDraftToBaseline]);
+
+  // Translate mode is a DRAFT session with explicit OK/Cancel — it does NOT
+  // auto-bake. On ENTER we snapshot each selected object's current translation
+  // as the baseline (so Cancel/X-discard can revert to it). On EXIT we restore
+  // any object still holding a non-baseline offset — this is the safety net for
+  // exits that bypass the panel buttons (e.g. the tool is toggled off via its
+  // toolbar button or Cmd+K): leaving without OK means the pending translate is
+  // DISCARDED, never silently baked. OK bakes explicitly (handleApplyTranslate)
+  // and clears the baseline first so this exit-revert is a no-op for it.
   const prevEditModeRef = useRef(editMode);
   useEffect(() => {
     const prev = prevEditModeRef.current;
     prevEditModeRef.current = editMode;
-    if (prev === 'translate' && editMode !== 'translate') {
-      void bakeSelectedTranslationsRef.current();
+
+    if (prev !== 'translate' && editMode === 'translate') {
+      // ENTER: capture baselines for the current selection.
+      const base = new Map<string, { x: number; y: number; z: number }>();
+      if (selectedSkeletonId) {
+        const p = skeletonPositionsRef.current.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
+        base.set(selectedSkeletonId, { ...p });
+      } else {
+        for (const id of selectedIds) {
+          const t = (editStatesRef.current.get(id) ?? { translation: { x: 0, y: 0, z: 0 } }).translation;
+          base.set(id, { ...t });
+        }
+      }
+      translateBaselineRef.current = base;
+    } else if (prev === 'translate' && editMode !== 'translate') {
+      // EXIT: revert anything still off its baseline (discard the draft). If OK
+      // baked, it already cleared the baseline map, so this loop finds nothing.
+      revertTranslateDraftToBaseline();
     }
-  }, [editMode]);
+  }, [editMode, selectedSkeletonId, selectedIds, revertTranslateDraftToBaseline]);
 
   // Resolve a cloud to either its in-memory display data (flat clouds) or a
   // backend point-source descriptor (octree clouds, whose positions buffer is
@@ -9587,20 +9707,16 @@ export default function PointCloudViewer({
       const modal = transformModalRef.current;
       if (!modal) return;
       const isCloudTranslate = modal.target === 'cloud' && modal.op === 'translate' && modal.cloudIds;
-      // A cloud translate is BAKED into real geometry on confirm, which is a
-      // permanent, non-undoable commit (`scene.boundary` in bakeCloudTranslation
-      // purges any history touching the cloud). Recording a `maskEdit` undo entry
-      // here would be actively wrong: its `after` captures the not-yet-baked
-      // render offset, which the bake then zeroes — leaving a stale entry that a
-      // pre-bake undo could restore, or that a later unrelated commit could pair
-      // with the post-bake zero. So skip history for this path and let the bake's
-      // boundary be the record. Meshes/skeletons keep their render-only transform
-      // and DO record history as before.
+      // A cloud translate via the Blender-style T-modal does NOT bake on Enter.
+      // It only updates the pending DRAFT (already written into editStates by
+      // applyTranslate), exactly like dragging the gizmo or typing in the panel.
+      // The Translate panel's OK button is the single commit point, so all three
+      // input methods (T-modal, gizmo, numeric panel) share one apply/cancel
+      // path and can't disagree. No undo history is recorded for the draft (the
+      // eventual bake is non-undoable). Meshes/skeletons keep their render-only
+      // transform and DO record history as before.
       if (isCloudTranslate) {
-        // Drop the BEFORE captured at drag/modal start so it can't dangle into a
-        // later commitHistoryEntry (see startModal's startHistoryEntry).
-        pendingHistoryRef.current = null;
-        void bakeSelectedTranslationsRef.current(modal.cloudIds!);
+        pendingHistoryRef.current = null;  // drop the BEFORE from startModal
       } else {
         commitHistoryEntry();
       }
@@ -9705,6 +9821,16 @@ export default function PointCloudViewer({
       if (!modal) {
         if (isInputFocused()) return;
         if (e.ctrlKey || e.metaKey || e.altKey) return;
+        // For a CLOUD, the Blender-style translate gesture only runs while the
+        // Translate tool (and its panel) is open, so the panel's OK/Cancel is
+        // always the commit surface — pressing `t` can't create an orphaned
+        // draft with nowhere to apply it. Mesh/skeleton transforms (s/r, and t
+        // on a selected mesh/skeleton) are unaffected: they still commit their
+        // own render-only transform directly and don't use the panel.
+        const cloudTranslateBlocked =
+          k === 't' && editMode !== 'translate' &&
+          selectedIds.size > 0 && !selectedMesh && !selectedSkeleton;
+        if (cloudTranslateBlocked) return;
         if (k === 't') { e.preventDefault(); startModal('translate'); }
         else if (k === 's') { e.preventDefault(); startModal('scale'); }
         else if (k === 'r') { e.preventDefault(); startModal('rotate'); }
@@ -9788,6 +9914,7 @@ export default function PointCloudViewer({
     selectedIds,
     clouds,
     editStates,
+    editMode,
     startHistoryEntry,
     commitHistoryEntry,
   ]);
@@ -12820,16 +12947,12 @@ export default function PointCloudViewer({
             onDragStart={() => setGizmoDragging(true)}
             onDragEnd={() => {
               setGizmoDragging(false);
-              // Bake the drag into real geometry so downstream compute (Helios
-              // triangulate / LAD especially) sees the moved points. This is a
-              // non-undoable commit (bakeCloudTranslation calls scene.boundary),
-              // so — unlike the mesh/skeleton gizmos — we do NOT record undo
-              // history here. The old saveToHistory() only captured a BEFORE and
-              // never committed it, so post-bake (translation zeroed) it would
-              // dangle into the next unrelated commitHistoryEntry as a bogus
-              // {before:{x:5}, after:{x:0}} entry. Clear any stale pending entry.
+              // Dragging a cloud axis handle only updates the DRAFT translation
+              // (handleGizmoTranslate → setEditStates); it does NOT bake. The
+              // Translate panel's OK button is the single commit point, so a drag
+              // and a typed value flow through the exact same apply/cancel path.
+              // No history is recorded here (the eventual bake is non-undoable).
               pendingHistoryRef.current = null;
-              void bakeSelectedTranslations();
             }}
           />
         )}
@@ -14484,7 +14607,7 @@ export default function PointCloudViewer({
         </div>
 
         {/* Create — geometry generation (scene-building, not analysis). */}
-        <Toolbar commands={commands} selection={toolSelection} title="Create" groups={CREATE_GROUPS} />
+        <Toolbar commands={guardedCommands} selection={toolSelection} title="Create" groups={CREATE_GROUPS} />
 
         {/* Tools — analysis operations on existing data. Renders from the single
             command registry; unavailable single-input tools grey out, multi-input
@@ -14493,7 +14616,7 @@ export default function PointCloudViewer({
             and the Scans panel, so it has no dedicated left-toolbar block.
             Undo/redo are Ctrl+Z / Ctrl+Y and the Edit menu; per-item delete lives
             in the Meshes / Skeletons list panels. */}
-        <Toolbar commands={commands} selection={toolSelection} />
+        <Toolbar commands={guardedCommands} selection={toolSelection} />
       </div>
 
       {/* Crop Panel — single panel handles Box, Rect, and Polygon modes
@@ -15272,10 +15395,23 @@ export default function PointCloudViewer({
           objectName = clouds.find(c => c.id === firstCloudId)?.data.fileName || 'Point Cloud';
         }
 
+        // Dirty = the live draft differs from the baseline captured when the
+        // tool opened. Drives the X-close confirm and the OK enabled state.
+        // Compare against the first selected object's baseline (the panel edits
+        // all selected clouds by the same delta, so one representative suffices).
+        const baselineId = selectedSkeletonId ?? Array.from(selectedIds)[0];
+        const baseline = (baselineId && translateBaselineRef.current.get(baselineId)) || { x: 0, y: 0, z: 0 };
+        const isDirty =
+          Math.abs(currentPos.x - baseline.x) > 1e-9 ||
+          Math.abs(currentPos.y - baseline.y) > 1e-9 ||
+          Math.abs(currentPos.z - baseline.z) > 1e-9;
+
         return (
           <TranslatePanel
             position={currentPos}
             objectName={objectName}
+            isDirty={isDirty}
+            isApplying={isApplyingTranslate}
             onCoordChange={(axis, numValue) => {
               if (selectedSkeletonId) {
                 setSkeletonPositions(prev => {
@@ -15296,6 +15432,9 @@ export default function PointCloudViewer({
               }
             }}
             onReset={() => {
+              // Zero the DRAFT (not a bake). Note: this makes the draft differ
+              // from a non-zero baseline, so isDirty stays true and OK/Cancel
+              // still resolve it — Reset is just "set the pending offset to 0".
               if (selectedSkeletonId) {
                 setSkeletonPositions(prev => new Map(prev).set(selectedSkeletonId, { x: 0, y: 0, z: 0 }));
               } else if (selectedIds.size > 0) {
@@ -15309,11 +15448,8 @@ export default function PointCloudViewer({
                 });
               }
             }}
-            // Closing exits translate mode, and the leave-translate-mode effect
-            // bakes any pending offset — so the numeric panel needs no bake of
-            // its own. Baking on close rather than per-keystroke also keeps
-            // dialing in x/y/z interactive (no octree rebuild per axis commit).
-            onClose={() => setEditMode('none')}
+            onApply={() => { void handleApplyTranslate(); }}
+            onCancel={handleCancelTranslate}
           />
         );
       })()}

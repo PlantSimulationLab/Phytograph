@@ -7,21 +7,53 @@ roughly that order.
 
 ## Translate and level
 
-Use **Translate** (pencil icon in the tool column, or right-click the
-cloud → Translate) to:
+Use **Translate** (in the tool column, or right-click the cloud →
+Translate) to move a cloud in world space — most often to bring it to the
+origin, or to line it up with another cloud before registration.
 
-- Move the cloud to the world origin
-- Rotate it so Z points up (common with airborne scans)
-- Scale it (rare, but useful if units are wrong)
+Opening the tool shows a **Position** panel and a translation gizmo at the
+cloud's center. Set the move any of three ways — all update the viewport
+**live** so you can see the result before committing:
 
-A 3D gizmo appears at the cloud's center. Drag the gizmo's:
+- Type exact **X / Y / Z** values in the panel.
+- Drag the gizmo's **arrows** along an axis.
+- Use the Blender-style shortcut: press <kbd>T</kbd>, optionally lock an
+  axis with <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd>, type a distance,
+  then click (or <kbd>Enter</kbd>) to set it. See
+  [Keyboard shortcuts](../reference/shortcuts.md).
 
-- **Arrows** to translate along an axis
-- **Rings** to rotate around an axis
-- **Cubes** to scale along an axis
+Nothing is applied until you decide:
 
-Or type exact values in the panel that opens on the right. Click
-**Apply** to commit, **Cancel** to discard.
+- **OK** applies the translation (see the note below) and closes the panel.
+- **Cancel** discards it — the cloud snaps back to where it started.
+- **Reset Position** zeroes the pending values without closing, so you can
+  start over.
+- Closing with the **✕** while you have unsaved changes asks whether to
+  **Apply** or **Discard** first.
+
+While the panel is open the other tools are locked, so you always finish
+(or cancel) a move before doing anything else — a half-entered position
+can never leak into a later step.
+
+!!! note "OK bakes the move into the geometry"
+
+    Clicking **OK** writes the translation into the cloud's actual point
+    coordinates rather than keeping a display-only offset. This is what
+    guarantees that every later tool — triangulation, leaf area density,
+    skeletons, QSM, export — operates on the cloud *where you put it*.
+
+    Two consequences worth knowing:
+
+    - Sky/miss points, per-pulse beam origins, and the miss overlay all
+      move with the cloud, so a translated scan stays internally
+      consistent for LAD.
+    - Like applying a crop or a filter, an applied translation is a
+      permanent edit to the working copy — it is not on the undo stack.
+      Your source file on disk is never modified.
+
+Rotation and scaling apply to *meshes*, not point clouds. To rotate a
+cloud so Z points up, use **Align (ICP)** against a reference, or rotate
+at export time in your downstream tool.
 
 The toolbar also has a one-click **Move to Origin** that centers the
 cloud's bounding box at (0, 0, 0) without rotating it.

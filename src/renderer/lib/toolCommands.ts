@@ -50,6 +50,13 @@ export interface ToolCommand {
   /** Toggled-state predicate so the toolbar can highlight an open panel/mode. */
   isActive?: () => boolean;
   /**
+   * Hard override that forces the command unavailable regardless of selection,
+   * checked BEFORE `requires`/`multiInput`. Used to lock every other tool while
+   * a modal-ish tool (e.g. Translate with a pending draft) must be resolved
+   * first. Returns true → the command greys out and its action is suppressed.
+   */
+  isDisabled?: () => boolean;
+  /**
    * Running-state predicate for a long async action. When true the toolbar shows
    * the icon spinning and ignores clicks, mirroring the synthetic-scan run
    * button's inline busy state (no toast). Distinct from `isActive`, which is a
@@ -85,6 +92,10 @@ export interface SelectionState {
  * against the selection.
  */
 export function isCommandAvailable(cmd: ToolCommand, sel: SelectionState): boolean {
+  // Hard lock wins over every selection-based rule (e.g. tools disabled while a
+  // Translate draft is pending). Checked first so even always-available
+  // (`requires: null`) and multi-input tools are gated.
+  if (cmd.isDisabled?.()) return false;
   if (cmd.multiInput) {
     switch (cmd.multiInputKind) {
       case 'mesh': return sel.totalMeshCount >= 1;
