@@ -34,6 +34,22 @@ def decode_bin_frame(content: bytes):
     return header["meta"], buffers
 
 
+def decode_streamed_json(content: bytes):
+    """Decode a streaming endpoint whose payload is plain JSON (not a PHB1
+    frame) preceded by PHP1 progress markers — e.g. /api/c2m/distance and the
+    icp-register endpoints, which stream a cancellable progress pill ahead of
+    their JSON result. Plain `response.json()` chokes on the markers."""
+    i = 0
+    while True:
+        while i < len(content) and content[i] in (0x20, 0x09, 0x0A, 0x0D):
+            i += 1
+        if content[i:i + 4] != b"PHP1":
+            break
+        marker_len = struct.unpack_from("<I", content, i + 4)[0]
+        i += 8 + marker_len
+    return json.loads(content[i:].decode("utf-8"))
+
+
 def decode_progress_markers(content: bytes):
     """Return the list of PHP1 progress markers ({"progress","message"}) that
     precede the PHB1 frame in a streaming response body."""

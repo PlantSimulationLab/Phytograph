@@ -18,7 +18,7 @@ import math
 import numpy as np
 import pytest
 
-from tests.binframe import decode_bin_frame
+from tests.binframe import decode_bin_frame, decode_streamed_json
 
 
 GRID_FORMAT = "x y z r255 g255 b255 reflectance"
@@ -165,14 +165,16 @@ def _box_mesh():
 
 def test_c2m_distance_source_matches_inline(client, tree_xyz, tree_points):
     v, idx = _box_mesh()
-    inline = client.post("/api/c2m/distance", json={
+    # These endpoints stream PHP1 progress markers ahead of their JSON result,
+    # so the body needs the marker-skipping decoder rather than .json().
+    inline = decode_streamed_json(client.post("/api/c2m/distance", json={
         "points": tree_points.flatten().tolist(),
         "mesh_vertices": v, "mesh_indices": idx,
-    }).json()
-    src = client.post("/api/c2m/distance", json={
+    }).content)
+    src = decode_streamed_json(client.post("/api/c2m/distance", json={
         "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
         "mesh_vertices": v, "mesh_indices": idx,
-    }).json()
+    }).content)
     assert inline["success"] and src["success"]
     assert src["point_count"] == inline["point_count"] == len(tree_points)
     assert math.isclose(src["mean_distance"], inline["mean_distance"], rel_tol=1e-6)
@@ -184,10 +186,10 @@ def test_c2m_distance_source_matches_inline(client, tree_xyz, tree_points):
 
 def test_icp_mesh_to_cloud_source_runs(client, tree_xyz):
     v, idx = _box_mesh()
-    src = client.post("/api/c2m/icp-register", json={
+    src = decode_streamed_json(client.post("/api/c2m/icp-register", json={
         "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
         "mesh_vertices": v, "mesh_indices": idx,
-    }).json()
+    }).content)
     assert src["success"]
     assert src["translation"] is not None and len(src["translation"]) == 3
     assert all(math.isfinite(t) for t in src["translation"])
@@ -201,10 +203,10 @@ def test_c2c_icp_mixed_source_and_inline(client, tree_xyz, tree_points):
     # Target read from disk (octree), source inline (flat). Source is the same
     # points shifted, so ICP should recover roughly the inverse shift.
     shifted = (tree_points + np.array([0.1, 0.0, 0.0])).flatten().tolist()
-    res = client.post("/api/c2c/icp-register", json={
+    res = decode_streamed_json(client.post("/api/c2c/icp-register", json={
         "target_source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
         "source_points": shifted,
-    }).json()
+    }).content)
     assert res["success"]
     assert res["transformation_matrix"] is not None
     assert all(math.isfinite(x) for x in res["transformation_matrix"])

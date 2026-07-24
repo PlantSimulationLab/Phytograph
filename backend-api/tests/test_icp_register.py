@@ -35,6 +35,17 @@ def _cube_cloud(n_side: int = 8) -> np.ndarray:
     return np.column_stack([xs.ravel(), ys.ravel(), zs.ravel()]).astype(np.float64)
 
 
+def _seed_open3d(seed: int) -> None:
+    """Pin Open3D's global RNG so mesh-surface sampling is reproducible.
+    A no-op on builds without the seed API (the test then keeps its old,
+    slightly flaky behaviour rather than erroring)."""
+    try:
+        import open3d as o3d
+        o3d.utility.random.seed(seed)
+    except Exception:
+        pass
+
+
 def _cube_mesh():
     """An asymmetric box (2×1×0.5) as (vertices flat, indices flat) for the
     mesh-side workers. Asymmetry removes the rotational ambiguity a perfect cube
@@ -80,6 +91,13 @@ def test_c2c_worker_recovers_known_offset():
 
 
 def test_m2m_worker_recovers_known_offset():
+    # Seed Open3D's RNG: the m2m worker samples the mesh surface with
+    # `sample_points_uniformly`, and on this deliberately coarse 8-vertex box it
+    # draws only 80 points (10x the vertex count). An unseeded draw that clumps
+    # leaves ICP a genuinely ambiguous correspondence, so this test failed ~30%
+    # of runs independent of any production change. Seeding pins the sample so a
+    # failure here means a real registration regression.
+    _seed_open3d(0)
     verts, tris = _cube_mesh()
     offset = np.array([0.3, 0.2, -0.2])
     src_verts = (np.array(verts).reshape(-1, 3) + offset).ravel().tolist()

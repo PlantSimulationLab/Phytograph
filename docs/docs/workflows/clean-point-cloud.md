@@ -177,6 +177,16 @@ cloud.
     nothing touches the original file on disk — your edits live in the session
     until you **Export**.
 
+!!! warning "Export edited clouds you want to keep"
+    Because edits live in the session and never touch the source file, an
+    **edited cloud cannot be rebuilt from that file**. Phytograph caches the
+    displayed octree on disk, but that cache can be cleared (by the OS, by an
+    app update, or when the backend restarts). If it goes missing for a cloud
+    you have edited, Phytograph tells you the cloud is unavailable rather than
+    silently rebuilding it from the original file — which would restore points
+    you deleted and undo transforms you applied. **Export** any edited cloud
+    you need to keep.
+
 ## Erase
 
 Use **Erase Brush** (eraser icon) for irregular regions a box can't

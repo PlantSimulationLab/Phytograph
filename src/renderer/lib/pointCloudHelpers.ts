@@ -7,6 +7,7 @@ import type { Scan } from './scan';
 import { poseStreamToWire, shiftPoseStream } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
 import { applyTriangleFilter } from './triangleFilter';
+import { MISS_ATTRIBUTE } from './classification';
 
 // Format a numeric range tick so the colorbar labels stay readable across
 // many orders of magnitude.
@@ -150,6 +151,73 @@ export function computeBoundsFromPositions(positions: Float32Array, count: numbe
   const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
   const size = new THREE.Vector3().subVectors(max, min);
   return { center, size };
+}
+
+// Collect a flat cloud's HIT points as the `number[][]` the compute endpoints
+// take, dropping sky/miss points (`is_miss != 0`).
+//
+// A miss is a ray that hit nothing, projected ~1 km out along the beam. Feeding
+// misses to any gridding / KD-tree / CSF / triangulation tool inflates the XY/Z
+// extent ~1000x, which makes the algorithm HANG rather than error — the single
+// most recurring bug class in this codebase. LAD is the one legitimate exception
+// (it needs misses for the Beer's-law transmission denominator) and reads them
+// on its own path, not through here.
+//
+// Returns `hitIndices` alongside the points so a caller can scatter a per-point
+// result (labels, height-above-ground) back to FULL cloud length — the filtered
+// arrays are shorter than `pointCount`, so writing them back directly would
+// misalign every scalar field. Pass any per-point arrays that must stay in
+// lockstep via `aligned`; each is filtered with the same mask.
+export function collectHitPoints(
+  data: PointCloudData,
+  aligned?: Record<string, ArrayLike<number> | undefined>,
+): {
+  points: number[][];
+  hitIndices: number[];
+  aligned: Record<string, number[]>;
+  droppedMisses: number;
+} {
+  const count = data.pointCount;
+  const missField = data.scalarFields?.[MISS_ATTRIBUTE];
+  // Only trust the miss column when it is aligned to the cloud; a stale or
+  // partial column must not silently drop real points.
+  const hasMiss = !!missField && missField.values.length === count;
+
+  const points: number[][] = [];
+  const hitIndices: number[] = [];
+  const out: Record<string, number[]> = {};
+  const alignedEntries = Object.entries(aligned ?? {}).filter(
+    ([, arr]) => !!arr && arr.length === count,
+  ) as [string, ArrayLike<number>][];
+  for (const [key] of alignedEntries) out[key] = [];
+
+  for (let i = 0; i < count; i++) {
+    if (hasMiss && missField!.values[i] !== 0) continue;
+    hitIndices.push(i);
+    points.push([
+      data.positions[i * 3],
+      data.positions[i * 3 + 1],
+      data.positions[i * 3 + 2],
+    ]);
+    for (const [key, arr] of alignedEntries) out[key].push(arr[i]);
+  }
+
+  return { points, hitIndices, aligned: out, droppedMisses: count - points.length };
+}
+
+// Scatter a per-hit-point result back to full cloud length, filling non-hit
+// (miss) slots with `fill`. Inverse of `collectHitPoints`'s `hitIndices`.
+export function scatterToFullLength(
+  values: ArrayLike<number>,
+  hitIndices: number[],
+  fullLength: number,
+  fill = 0,
+): Float32Array {
+  const out = new Float32Array(fullLength);
+  if (fill !== 0) out.fill(fill);
+  const n = Math.min(values.length, hitIndices.length);
+  for (let i = 0; i < n; i++) out[hitIndices[i]] = values[i];
+  return out;
 }
 
 // Deep-copy a FLAT (in-RAM) point cloud so the copy shares no typed-array

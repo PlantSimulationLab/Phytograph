@@ -30,6 +30,18 @@ export interface ScalarField {
 export interface OctreeRef {
   cacheId: string;            // sha1 hex; also the cache dir name
   sourceXyzPath: string;       // original on-disk source — needed for re-crop
+  // True once this cloud's geometry has DIVERGED from `sourceXyzPath` — a baked
+  // translation/transform, an applied crop/erase, a filter, a split, or a
+  // segmentation rebuild. The source file is never rewritten, so after any of
+  // those the on-disk file no longer describes this cloud.
+  //
+  // Load-bearing for octree recovery: when a cached octree goes missing (temp
+  // sweep, cacheVersion bump, session evicted on backend restart) the recovery
+  // path rebuilds the session FROM `sourceXyzPath`. Doing that on a diverged
+  // cloud silently restores deleted points and undoes baked transforms — the
+  // user's edits vanish with a success-path toast. When this is set, recovery
+  // must refuse and tell the user instead of quietly reverting their work.
+  divergedFromSource?: boolean;
   // Backend cloud-session id (Family-1 mutable model). When set, this cloud's
   // points live in an in-RAM backend array that is the source of truth: crop /
   // erase route through delete_region (instant mask, no rebuild), downstream

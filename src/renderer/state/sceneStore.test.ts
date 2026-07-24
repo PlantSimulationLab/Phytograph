@@ -382,6 +382,111 @@ describe('history cap + session eviction', () => {
     s = sceneReducer(s, { c: 'boundary', ids: ['s1'] }, { freeSession });
     expect(freeSession).toHaveBeenCalledWith('sess-x');
   });
+
+  // ── undone imports ────────────────────────────────────────────────────────
+  // An UNDONE add still owns a live backend session, but undo pushes the
+  // original `add` onto `future` — so the transaction that eventually becomes
+  // unreachable is an add, not a remove. The free check used to match `remove`
+  // only, so importing a multi-GB cloud and pressing Cmd+Z leaked that cloud in
+  // the Python sidecar for the life of the process.
+  //
+  // The guard that makes freeing an `add` safe is the liveness check: an add is
+  // normally evicted while its scan is still on screen, and freeing then would
+  // yank the session out from under a rendered cloud.
+
+  const scanWithSession = (id: string, sessionId: string): Scan =>
+    makeScan(id, { data: { octree: { sessionId } } } as unknown as Partial<Scan>);
+
+  const importTx = (id: string, sessionId: string) =>
+    tx(`import ${id}`, [
+      { t: 'add', kind: 'scan', id, object: scanWithSession(id, sessionId), sessionId },
+    ]);
+
+  it('frees the session of an undone import once a boundary purges it', () => {
+    const freeSession = vi.fn();
+    let s = makeInitialSceneState();
+    s = sceneReducer(s, { c: 'commit', tx: importTx('s1', 'sess-1') }, { freeSession });
+    s = sceneReducer(s, { c: 'undo' }, { freeSession });
+    expect(s.scans).toHaveLength(0);
+
+    s = sceneReducer(s, { c: 'boundary', ids: ['s1'] }, { freeSession });
+    expect(freeSession).toHaveBeenCalledWith('sess-1');
+  });
+
+  it('frees the session of an undone import dropped with the redo stack', () => {
+    const freeSession = vi.fn();
+    let s = makeInitialSceneState();
+    s = sceneReducer(s, { c: 'commit', tx: importTx('s1', 'sess-9') }, { freeSession });
+    s = sceneReducer(s, { c: 'undo' }, { freeSession });
+    // Any new commit discards `future`, so the add can never be redone.
+    s = sceneReducer(
+      s,
+      { c: 'commit', tx: tx('other', [{ t: 'add', kind: 'mesh', id: 'm1', object: makeMesh('m1') }]) },
+      { freeSession },
+    );
+    expect(freeSession).toHaveBeenCalledWith('sess-9');
+  });
+
+  it('frees the session of an undone import evicted off the history tail', () => {
+    const freeSession = vi.fn();
+    let s = makeInitialSceneState();
+    s = sceneReducer(s, { c: 'commit', tx: importTx('s1', 'sess-t') }, { freeSession });
+    s = sceneReducer(s, { c: 'undo' }, { freeSession });
+    // The undone add now sits in `future`; the first new commit drops it.
+    s = sceneReducer(
+      s,
+      { c: 'commit', tx: tx('n', [{ t: 'add', kind: 'mesh', id: 'm0', object: makeMesh('m0') }]) },
+      { freeSession },
+    );
+    expect(freeSession).toHaveBeenCalledWith('sess-t');
+  });
+
+  it('NEVER frees the session of a scan that is still in the scene', () => {
+    // The add scrolls off the history tail while the cloud is still displayed —
+    // freeing here would break a live cloud.
+    const freeSession = vi.fn();
+    let s = makeInitialSceneState();
+    s = sceneReducer(s, { c: 'commit', tx: importTx('s1', 'sess-live') }, { freeSession });
+    for (let i = 0; i < MAX_HISTORY + 2; i++) {
+      s = sceneReducer(
+        s,
+        { c: 'commit', tx: tx(`n${i}`, [{ t: 'add', kind: 'mesh', id: `m${i}`, object: makeMesh(`m${i}`) }]) },
+        { freeSession },
+      );
+    }
+    expect(s.scans.map((x) => x.id)).toContain('s1');
+    expect(freeSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the session alive when an undone import is redone', () => {
+    const freeSession = vi.fn();
+    let s = makeInitialSceneState();
+    s = sceneReducer(s, { c: 'commit', tx: importTx('s1', 'sess-2') }, { freeSession });
+    s = sceneReducer(s, { c: 'undo' }, { freeSession });
+    s = sceneReducer(s, { c: 'redo' }, { freeSession });
+
+    expect(s.scans.map((x) => x.id)).toContain('s1');
+    expect(freeSession).not.toHaveBeenCalled();
+  });
+
+  it('frees a session only once even when several evicted txs reference it', () => {
+    const freeSession = vi.fn();
+    let s = makeInitialSceneState();
+    s = sceneReducer(s, { c: 'commit', tx: importTx('s1', 'sess-d') }, { freeSession });
+    s = sceneReducer(
+      s,
+      { c: 'commit', tx: tx('del s1', [{
+        t: 'remove', kind: 'scan', id: 's1', index: 0,
+        object: scanWithSession('s1', 'sess-d'), sessionId: 'sess-d',
+      }]) },
+      { freeSession },
+    );
+    // Both the add and the remove touch s1 and carry the same session.
+    s = sceneReducer(s, { c: 'boundary', ids: ['s1'] }, { freeSession });
+
+    expect(freeSession).toHaveBeenCalledTimes(1);
+    expect(freeSession).toHaveBeenCalledWith('sess-d');
+  });
 });
 
 // ── empty-stack guards ───────────────────────────────────────────────────────

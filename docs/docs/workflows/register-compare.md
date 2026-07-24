@@ -125,7 +125,16 @@ To actually *move* a mesh onto a cloud:
    (moves onto it). Click **Snap to Fit (ICP)**.
 
 The mesh is transformed to best fit the cloud, and the toast reports the
-fitness and RMSE. Undo to revert.
+**RMSE** (the average residual distance after alignment) alongside the overlap
+percentage. Undo to revert.
+
+!!! warning "Read the RMSE, not the overlap percentage"
+    Overlap (ICP's "fitness") is the *share of points that found a match* — it
+    reaches 100% whenever the search radius is generous relative to the object,
+    including for a visibly wrong alignment. **RMSE is the honest number**: a
+    good registration lands well under 1% of the cloud's size. When the residual
+    is large relative to the scene, the toast turns into a warning telling you
+    to review the result before keeping it, rather than reporting success.
 
 !!! tip "Distance then snap"
     The **Alignment** panel from a Cloud-to-Mesh Distance run also has a

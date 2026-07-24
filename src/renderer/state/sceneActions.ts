@@ -62,6 +62,16 @@ export type SceneAction =
       object: SceneObject;
       transform?: TransformState;
       index?: number;
+      // Same role as on `remove` (octree clouds only): the backend session to
+      // free when this action is EVICTED or purged — never when it is applied.
+      //
+      // Needed because an UNDONE add still owns a live session. Undo pushes the
+      // original `add` transaction onto `future`, so the tx that eventually gets
+      // evicted/purged is the add, not a remove. Without this field the store's
+      // `remove`-only free check never matched it and the session leaked for the
+      // life of the process: import a multi-GB cloud, press Cmd+Z, and the
+      // Python sidecar held that RAM until quit.
+      sessionId?: string | null;
     }
   // Object removed. Undo re-inserts `object` at `index` and restores its
   // transform / editState / filters. `sessionId` (octree clouds only) is held so
@@ -170,6 +180,9 @@ export function invert(action: SceneAction): SceneAction {
         index: action.index ?? 0,
         object: action.object,
         transform: action.transform,
+        // Carry the session both ways so whichever direction the transaction is
+        // sitting in when it gets evicted, the store can still free it.
+        sessionId: action.sessionId,
       };
     case 'remove':
       return {
@@ -180,6 +193,7 @@ export function invert(action: SceneAction): SceneAction {
         transform: action.transform,
         // Re-insert at the original position on undo of a delete.
         index: action.index,
+        sessionId: action.sessionId,
       };
     case 'transform':
       return { ...action, before: action.after, after: action.before };

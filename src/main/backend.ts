@@ -189,10 +189,20 @@ function killPort(port: number): void {
     }
   } else {
     try {
-      const pid = execSync(`lsof -ti :${port}`, { encoding: 'utf8' }).trim();
-      if (pid) {
+      // `-sTCP:LISTEN` so we only ever target the process OWNING the port, not
+      // anything merely connected to it (an in-flight fetch from this very app
+      // would otherwise match and get killed).
+      const out = execSync(`lsof -ti :${port} -sTCP:LISTEN`, { encoding: 'utf8' });
+      // lsof prints one PID per line. Killing them individually matters: passing
+      // the raw multi-line string to `kill -9` sent it through /bin/sh, which
+      // treated the newline as a command separator — so only the FIRST pid was
+      // killed and every subsequent line was executed as a shell command
+      // ("222222: command not found"). The stale backend then survived, kept the
+      // port, and the respawn failed.
+      const pids = out.split(/\r?\n/).map((s) => s.trim()).filter((s) => /^\d+$/.test(s));
+      for (const pid of pids) {
         console.log(`Killing old backend process (PID: ${pid})`);
-        execSync(`kill -9 ${pid}`);
+        try { execSync(`kill -9 ${pid}`); } catch { /* already gone */ }
       }
     } catch {
       // No process on port, fine.

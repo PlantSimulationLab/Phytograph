@@ -143,17 +143,31 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     },
     [scene],
   );
-  // Undoable scan add/remove. A removed scan's octree session is NOT freed here
-  // — it carries `sessionId` on the remove action and the store frees it only
-  // when that action is EVICTED off the history tail or purged by a boundary
-  // (see freeSession wiring in main.tsx / the SceneProvider). This lets undo
-  // resurrect the scan with its backend session (and unbaked edits) intact.
+  // Undoable scan add/remove. A scan's octree session is NOT freed here — both
+  // actions carry `sessionId` and the store frees it only when the action is
+  // EVICTED off the history tail, dropped with the redo stack, or purged by a
+  // boundary, AND the scan is no longer in the scene (see freeSession wiring in
+  // main.tsx / the SceneProvider). This lets undo resurrect the scan with its
+  // backend session (and unbaked edits) intact.
+  // `sessionId` rides on the add for the same reason it rides on the remove: so
+  // the store can free the backend session once the action is unreachable. An
+  // UNDONE add owns a live session that nothing on screen references — without
+  // this the store's free check (which matched `remove` only) never saw it and a
+  // multi-GB cloud stayed resident in the sidecar until quit. The store frees it
+  // only when the scan is also absent from the scene, so an add that merely
+  // scrolls off the history tail while its cloud is still displayed is untouched.
   const addScanTx = useCallback((scan: Scan, label = 'Add scan') => {
-    scene.commit({ label, actions: [{ t: 'add', kind: 'scan', id: scan.id, object: scan }] });
+    scene.commit({ label, actions: [{
+      t: 'add', kind: 'scan', id: scan.id, object: scan,
+      sessionId: scan.data?.octree?.sessionId ?? null,
+    }] });
   }, [scene]);
   const addScansTx = useCallback((newScans: Scan[], label = 'Add scans') => {
     if (newScans.length === 0) return;
-    scene.commit({ label, actions: newScans.map(s => ({ t: 'add' as const, kind: 'scan' as const, id: s.id, object: s })) });
+    scene.commit({ label, actions: newScans.map(s => ({
+      t: 'add' as const, kind: 'scan' as const, id: s.id, object: s,
+      sessionId: s.data?.octree?.sessionId ?? null,
+    })) });
   }, [scene]);
   const removeScanTx = useCallback((id: string) => {
     const s = scene.state;
@@ -1031,8 +1045,15 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // would still triangulate the coarse on-disk points. The new `data` is the
     // source of truth, so drop the path (and its column hint) and let consumers
     // send points in-RAM.
+    // Same reasoning for the OCTREE's own `sourceXyzPath`: octree recovery
+    // rebuilds a missing cache from that file, which after an overwrite holds
+    // entirely different points. Mark the replacement as diverged so recovery
+    // refuses rather than resurrecting the pre-overwrite cloud.
+    const next: PointCloudData = data.octree
+      ? { ...data, octree: { ...data.octree, divergedFromSource: true } }
+      : data;
     setScans(prev => prev.map(s =>
-      s.id === id ? { ...s, data, sourcePath: undefined, asciiFormat: undefined } : s
+      s.id === id ? { ...s, data: next, sourcePath: undefined, asciiFormat: undefined } : s
     ));
   }, []);
 
@@ -1162,6 +1183,17 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         if (octree.sessionId) {
           sessionIds.push(octree.sessionId);
         } else {
+          // No live session: the only way to get points is to re-read the source
+          // file. That is only valid while the cloud still matches that file —
+          // an edited cloud (baked transform, applied crop, filter, split) would
+          // silently merge its PRE-EDIT geometry. Refuse instead.
+          if (octree.divergedFromSource) {
+            throw new Error(
+              `"${s.data!.fileName ?? s.label}" has been edited since import and its cached data ` +
+              `is no longer loaded, so stitching it would use the original unedited file. ` +
+              `Re-import and redo the edits, then stitch.`,
+            );
+          }
           const rebuilt = await createCloudSession(
             octree.sourceXyzPath,
             octree.asciiFormat ?? null,
@@ -1193,6 +1225,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       if (newData.octree) {
         newData.octree.hasMisses = merged.has_misses;
         newData.octree.missOctreeCacheId = merged.miss_octree_cache_id ?? null;
+        // A merged cloud is many clouds' points; `sourceXyzPath` (carried from
+        // the first input for provenance) does NOT describe it, so it must never
+        // be rebuilt from that file.
+        newData.octree.divergedFromSource = true;
       }
       commitStitch(newData);
     } catch (err) {

@@ -111,6 +111,8 @@ import {
   triangulationGridEnvelope,
   ladReuseGrid,
   extractReuseMeshPayload,
+  collectHitPoints,
+  scatterToFullLength,
   type Vec3Like,
   type ReuseMeshPayload,
 } from '../lib/pointCloudHelpers';
@@ -2277,11 +2279,19 @@ export default function PointCloudViewer({
   // categoricals. By default keeps the SAME sessionId (the array is unchanged;
   // only the derived octree was rebuilt). Pass `sessionIdOverride` for a NEW
   // child cloud (split leftover / extracted class) so it routes its own edits.
+  // `opts.diverged` marks the rebuilt cloud as no longer matching its source
+  // file on disk. Every caller that CHANGES geometry (bake, transform, filter,
+  // split, segment, crop-apply) must pass `{ diverged: true }` so a later octree
+  // recovery refuses to rebuild from the stale source instead of silently
+  // reverting the user's edits — see `handleOctreeMissing`. The default is
+  // false so the recovery path itself (a faithful rebuild of an UNEDITED cloud)
+  // doesn't mark divergence.
   const buildSessionOctreeData = useCallback((
     result: OctreeMetadata & { cache_id: string; point_count: number; miss_octree_cache_id?: string | null },
     octreeInfo: NonNullable<PointCloudData['octree']>,
     fileName: string,
     sessionIdOverride?: string | null,
+    opts?: { diverged?: boolean },
   ): PointCloudData => {
     const data = buildPointCloudFromOctree(
       { ...result, cache_dir: result.cache_dir ?? '', cached: false },
@@ -2306,6 +2316,10 @@ export default function PointCloudViewer({
       data.octree.missOctreeCacheId = 'miss_octree_cache_id' in result
         ? (result.miss_octree_cache_id ?? null)
         : octreeInfo.missOctreeCacheId;
+      // Sticky: once diverged, always diverged (a later rebuild of an
+      // already-edited cloud must not clear the flag).
+      data.octree.divergedFromSource =
+        octreeInfo.divergedFromSource || !!opts?.diverged;
     }
     return data;
   }, []);
@@ -2325,11 +2339,32 @@ export default function PointCloudViewer({
   // sessionId) AND bump a retry tick so the loader re-fires even when the cacheId
   // didn't change. If the source is gone (moved/deleted) or this is a synthetic
   // cloud with no on-disk source, we can't rebuild — surface an actionable toast.
+  //
+  // CRITICAL: "an unchanged source rebuilds to the same cloud" only holds while
+  // the cloud still MATCHES its source file. Every edit (baked translate/ICP,
+  // applied crop/erase, filter, split, segment-extract) changes the cloud
+  // WITHOUT rewriting the file, so rebuilding a diverged cloud silently restores
+  // deleted points and undoes baked transforms — the user's work vanishes on
+  // what looks like a success path. `divergedFromSource` marks those clouds and
+  // we refuse rather than revert.
   const handleOctreeMissing = useCallback(async (cloudId: string) => {
     const cloud = clouds.find(c => c.id === cloudId);
     const octreeInfo = cloud?.data.octree;
     if (!cloud || !octreeInfo) return;
     const fileName = cloud.data.fileName ?? cloud.id;
+    if (octreeInfo.divergedFromSource) {
+      showToast({
+        title: 'Edited point cloud unavailable',
+        message:
+          `The cached data for ${fileName} is missing, and this cloud has been edited since ` +
+          `import — rebuilding it from ${octreeInfo.sourceXyzPath || 'its source file'} would ` +
+          `silently undo those edits. Re-import the file and redo the edits, or restore the ` +
+          `cache directory if it was cleared.`,
+        type: 'error',
+        duration: 0,
+      });
+      return;
+    }
     if (!octreeInfo.sourceXyzPath) {
       showToast({
         title: 'Point cloud unavailable',
@@ -2617,13 +2652,13 @@ export default function PointCloudViewer({
                 emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
                 return;
               }
-              onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, src.fileName ?? cloud.id));
+              onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, src.fileName ?? cloud.id, undefined, { diverged: true }));
               if (result.leftover) {
                 onAddCloud({
                   id: crypto.randomUUID(),
                   data: buildSessionOctreeData(
                     result.leftover, octreeInfo, `${src.fileName ?? cloud.id} (segment)`,
-                    result.leftover.session_id,
+                    result.leftover.session_id, { diverged: true },
                   ),
                   visible: true,
                   color: SEGMENT_COLOR,
@@ -2656,7 +2691,7 @@ export default function PointCloudViewer({
               });
             }
             const baked = await bakeCloudSession(sessionId);
-            onUpdateCloud(cloud.id, buildSessionOctreeData(baked, octreeInfo, src.fileName ?? cloud.id));
+            onUpdateCloud(cloud.id, buildSessionOctreeData(baked, octreeInfo, src.fileName ?? cloud.id, undefined, { diverged: true }));
             touchedCloudIds.push(cloud.id);
             keptCounts.push(result.remaining_count);
             return;
@@ -3479,7 +3514,7 @@ export default function PointCloudViewer({
           setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
           return;
         }
-        onUpdateCloud(cloud.id, buildSessionOctreeData(result, octreeInfo, cloud.data.fileName ?? cloud.id));
+        onUpdateCloud(cloud.id, buildSessionOctreeData(result, octreeInfo, cloud.data.fileName ?? cloud.id, undefined, { diverged: true }));
       } catch (err) {
         console.error('[handleApplyFilterPermanently] session filter failed:', err);
         showToast({ title: `Filter failed for ${cloud.data.fileName || 'cloud'}`, type: 'error' });
@@ -3543,13 +3578,13 @@ export default function PointCloudViewer({
           setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
           return;
         }
-        onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, cloud.data.fileName ?? cloud.id));
+        onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, cloud.data.fileName ?? cloud.id, undefined, { diverged: true }));
         if (result.leftover) {
           // The leftover is its OWN session — carry its new sessionId (not the
           // parent's) so its later edits route correctly.
           onAddCloud({
             id: crypto.randomUUID(),
-            data: buildSessionOctreeData(result.leftover, octreeInfo, leftoverName, result.leftover.session_id),
+            data: buildSessionOctreeData(result.leftover, octreeInfo, leftoverName, result.leftover.session_id, { diverged: true }),
             visible: true,
             color: cloud.color,
           });
@@ -5140,6 +5175,9 @@ export default function PointCloudViewer({
         const movedOctreeInfo = { ...octreeInfo, scanOrigin: translatedScanOrigin(octreeInfo.scanOrigin) };
         onUpdateCloud(cloudId, buildSessionOctreeData(
           result, movedOctreeInfo, cloud.data.fileName ?? cloudId,
+          // Geometry moved permanently; the source file still holds the
+          // ORIGINAL position, so it can no longer be rebuilt from.
+          undefined, { diverged: true },
         ));
         translateScanParams();
         clearTranslation();
@@ -7171,6 +7209,7 @@ export default function PointCloudViewer({
                 id: crypto.randomUUID(),
                 data: buildSessionOctreeData(
                   r.extracted, octreeInfo, `${baseName} (${suffix})`, r.extracted.session_id,
+                  { diverged: true },
                 ),
                 visible: true,
                 color,
@@ -7820,7 +7859,7 @@ export default function PointCloudViewer({
             scalarFilters: [{ slug: WOOD_CLASS_ATTRIBUTE, min: LEAF, max: LEAF, values: [LEAF] }],
             rebuild: true,
           });
-          onUpdateCloud(id, buildSessionOctreeData(r, octreeInfo, baseName));
+          onUpdateCloud(id, buildSessionOctreeData(r, octreeInfo, baseName, undefined, { diverged: true }));
         } else {
           // Label in place; the parent keeps ALL points, coloured by wood_class.
           onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
@@ -7840,6 +7879,7 @@ export default function PointCloudViewer({
                 id: crypto.randomUUID(),
                 data: buildSessionOctreeData(
                   r.extracted, octreeInfo, `${baseName} (${suffix})`, r.extracted.session_id,
+                  { diverged: true },
                 ),
                 visible: true,
                 color,
@@ -7861,31 +7901,36 @@ export default function PointCloudViewer({
       }
 
       // --- Flat cloud: classify in memory, write scalarFields. ---
+      // Sky/miss points are excluded before the PCA/connectivity pass — they sit
+      // ~1 km out and hang the neighbour graph. Labels come back indexed against
+      // the hit subset and are scattered to full length below.
       const displayData = ps.data;
       const count = displayData.pointCount;
-      const points: number[][] = new Array(count);
-      for (let i = 0; i < count; i++) {
-        points[i] = [
-          displayData.positions[i * 3],
-          displayData.positions[i * 3 + 1],
-          displayData.positions[i * 3 + 2],
-        ];
-      }
-
       // Reflectance assist (inline path): send the per-point scalar when present
       // and the assist is on. The backend self-limits its effect, so passing it
-      // is safe even on low-contrast clouds.
-      const refl = (woodParams.reflectance_weight_max ?? 0) > 0
+      // is safe even on low-contrast clouds. Filtered in lockstep with positions.
+      const reflSrc = (woodParams.reflectance_weight_max ?? 0) > 0
         ? inlineReflectance(displayData)
         : null;
+      const { points, hitIndices, aligned, droppedMisses } = collectHitPoints(displayData, {
+        reflectance: reflSrc ?? undefined,
+      });
+      const refl = aligned.reflectance?.length ? aligned.reflectance : null;
+      if (droppedMisses > 0) {
+        console.log(`Wood/leaf segmentation: excluded ${droppedMisses} sky/miss points`);
+      }
+
       const response = await segmentWood({
         points,
         ...woodParams,
-        ...(refl && refl.length === count ? { reflectance: refl } : {}),
+        ...(refl && refl.length === points.length ? { reflectance: refl } : {}),
       }, signal);
       if (!response.success) {
         throw new Error(response.error || 'Wood/leaf segmentation failed');
       }
+      // Full-length labels so every index below (makeChild, scalar fields)
+      // refers to cloud position i, not hit-subset position i.
+      const woodLabels = scatterToFullLength(response.labels, hitIndices, count);
       if (response.warnings && response.warnings.length > 0) {
         showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: response.warnings.join(' ') });
       }
@@ -7895,7 +7940,7 @@ export default function PointCloudViewer({
       const makeChild = (classValue: number, suffix: string, color: string, replaceParent: boolean) => {
         const idxs: number[] = [];
         for (let i = 0; i < count; i++) {
-          if (Math.round(response.labels[i]) === classValue) idxs.push(i);
+          if (Math.round(woodLabels[i]) === classValue) idxs.push(i);
         }
         if (idxs.length === 0) return;
         const pos = new Float32Array(idxs.length * 3);
@@ -7940,10 +7985,11 @@ export default function PointCloudViewer({
         // Replace the cloud in place with just the leaf points.
         makeChild(LEAF, 'leaf', '#4caf50', true);
       } else {
-        const labels = Float32Array.from(response.labels);
+        // Full-length (misses = 0, outside the 1..2 wood/leaf range) so the
+        // scalar field stays aligned to positions.
         const newScalarFields = {
           ...(displayData.scalarFields ?? {}),
-          [WOOD_CLASS_ATTRIBUTE]: { values: labels, min: 1, max: 2 },
+          [WOOD_CLASS_ATTRIBUTE]: { values: woodLabels, min: 1, max: 2 },
         };
         onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
         setColorMode('scalar');
@@ -8035,6 +8081,7 @@ export default function PointCloudViewer({
             id: crypto.randomUUID(),
             data: buildSessionOctreeData(
               c, octreeInfo, `${baseName} (tree ${c.value})`, c.session_id,
+              { diverged: true },
             ),
             visible: true,
             color: '#4caf50',
@@ -8054,31 +8101,32 @@ export default function PointCloudViewer({
       }
 
       // --- Flat cloud: segment in memory, write scalarFields. ---
+      // Drop sky/miss points before computing: they sit ~1 km out and make
+      // TreeIso's KD-tree/cut-pursuit hang rather than error. `hitIndices`
+      // scatters the per-point labels back to full cloud length so every
+      // downstream index (scalar fields, the split loop below) still lines up.
       const displayData = ps.data;
       const count = displayData.pointCount;
-      const points: number[][] = new Array(count);
-      for (let i = 0; i < count; i++) {
-        points[i] = [
-          displayData.positions[i * 3],
-          displayData.positions[i * 3 + 1],
-          displayData.positions[i * 3 + 2],
-        ];
-      }
-
-      // If a prior ground segmentation labelled (but didn't delete) the ground,
-      // pass those labels so TreeIso excludes ground instead of clustering it.
       const groundField = displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE];
-      const groundClass =
-        groundField && groundField.values.length === count
-          ? Array.from(groundField.values)
-          : undefined;
+      const { points, hitIndices, aligned, droppedMisses } = collectHitPoints(displayData, {
+        // If a prior ground segmentation labelled (but didn't delete) the
+        // ground, pass those labels so TreeIso excludes ground instead of
+        // clustering it — filtered in lockstep with the positions.
+        ground: groundField?.values,
+      });
+      const groundClass = aligned.ground?.length ? aligned.ground : undefined;
+      if (droppedMisses > 0) {
+        console.log(`Tree segmentation: excluded ${droppedMisses} sky/miss points`);
+      }
 
       const response = await segmentTrees({ points, seed_points: seeds, ground_class: groundClass, ...tiParams }, abort.signal);
       if (!response.success) {
         throw new Error(response.error || 'Tree segmentation failed');
       }
 
-      const labels = Float32Array.from(response.labels);
+      // Backend labels are indexed against the HIT subset — scatter to full
+      // length (misses get 0 = unassigned) before anything indexes by cloud i.
+      const labels = scatterToFullLength(response.labels, hitIndices, count);
       const newScalarFields = {
         ...(displayData.scalarFields ?? {}),
         [TREE_INSTANCE_ATTRIBUTE]: { values: labels, min: 0, max: response.num_trees },
@@ -8093,7 +8141,9 @@ export default function PointCloudViewer({
       if (treeSplitClouds && onAddCloud) {
         const byTree = new Map<number, number[]>();
         for (let i = 0; i < count; i++) {
-          const t = Math.round(response.labels[i]);
+          // `labels` (scattered to full length), NOT response.labels — the
+          // latter is indexed against the hits-only subset.
+          const t = Math.round(labels[i]);
           if (t <= 0) continue;
           (byTree.get(t) ?? byTree.set(t, []).get(t)!).push(i);
         }
@@ -8365,9 +8415,12 @@ export default function PointCloudViewer({
         console.log(`ICP result - position: [${newPos.x.toFixed(4)}, ${newPos.y.toFixed(4)}, ${newPos.z.toFixed(4)}], rotation: [${newRot.x.toFixed(2)}°, ${newRot.y.toFixed(2)}°, ${newRot.z.toFixed(2)}°], fitness: ${response.fitness?.toFixed(4)}, rmse: ${response.rmse?.toFixed(6)}`);
 
         showToast({
-          type: 'success',
-          title: 'Snap to Fit Complete',
-          message: `Fitness: ${((response.fitness || 0) * 100).toFixed(1)}%, RMSE: ${response.rmse?.toFixed(4) || 'N/A'}`,
+          type: response.quality_warning ? 'warning' : 'success',
+          title: response.quality_warning ? 'Snap to Fit — Check Result' : 'Snap to Fit Complete',
+          message: response.quality_warning
+            ? response.quality_warning
+            : `RMSE: ${response.rmse?.toFixed(4) || 'N/A'} m (${((response.fitness || 0) * 100).toFixed(1)}% overlap)`,
+          duration: response.quality_warning ? 0 : undefined,
         });
       }
     } catch (error) {
@@ -8530,6 +8583,8 @@ export default function PointCloudViewer({
           const movedOctree = { ...sourceOctree, scanOrigin: moveScanOrigin(sourceOctree.scanOrigin) };
           onUpdateCloud(sourceCloud.id, buildSessionOctreeData(
             result, movedOctree, sourceCloud.data.fileName ?? sourceCloud.id,
+            // ICP moved the cloud permanently — the source file is stale.
+            undefined, { diverged: true },
           ));
           setEditStates(prev => {
             const next = new Map(prev);
@@ -8610,10 +8665,20 @@ export default function PointCloudViewer({
 
         console.log(`Cloud-to-cloud ICP result - position: [${position.x.toFixed(4)}, ${position.y.toFixed(4)}, ${position.z.toFixed(4)}], rotation: [${(euler.x * 180/Math.PI).toFixed(2)}°, ${(euler.y * 180/Math.PI).toFixed(2)}°, ${(euler.z * 180/Math.PI).toFixed(2)}°], fitness: ${response.fitness?.toFixed(4)}, rmse: ${response.rmse?.toFixed(6)}`);
 
+        // Report RMSE, not just fitness: fitness saturates at 100% whenever the
+        // correspondence distance is generous relative to the clouds, so a
+        // "Fitness: 100%" toast on a visibly-wrong alignment was the norm. When
+        // the backend flags the fit as untrustworthy, say so instead of
+        // reporting success.
         showToast({
-          type: 'success',
-          title: 'Cloud Alignment Complete',
-          message: `Aligned "${sourceCloud.data.fileName || 'Cloud'}" to "${targetCloud.data.fileName || 'Cloud'}". Fitness: ${((response.fitness || 0) * 100).toFixed(1)}%`,
+          type: response.quality_warning ? 'warning' : 'success',
+          title: response.quality_warning
+            ? 'Cloud Alignment — Check Result'
+            : 'Cloud Alignment Complete',
+          message: response.quality_warning
+            ? `Aligned "${sourceCloud.data.fileName || 'Cloud'}" to "${targetCloud.data.fileName || 'Cloud'}". ${response.quality_warning}`
+            : `Aligned "${sourceCloud.data.fileName || 'Cloud'}" to "${targetCloud.data.fileName || 'Cloud'}". RMSE: ${response.rmse?.toFixed(4) ?? 'N/A'} m (${((response.fitness || 0) * 100).toFixed(1)}% overlap)`,
+          duration: response.quality_warning ? 0 : undefined,
         });
       }
     } catch (error) {
@@ -8744,9 +8809,12 @@ export default function PointCloudViewer({
         const sourceName = sourceMesh.isPlant ? `${sourceMesh.plantType} (${sourceMesh.plantAge}d)` : 'Mesh 2';
 
         showToast({
-          type: 'success',
-          title: 'Mesh Alignment Complete',
-          message: `Aligned "${sourceName}" to "${targetName}". Fitness: ${((response.fitness || 0) * 100).toFixed(1)}%`,
+          type: response.quality_warning ? 'warning' : 'success',
+          title: response.quality_warning ? 'Mesh Alignment — Check Result' : 'Mesh Alignment Complete',
+          message: response.quality_warning
+            ? `Aligned "${sourceName}" to "${targetName}". ${response.quality_warning}`
+            : `Aligned "${sourceName}" to "${targetName}". RMSE: ${response.rmse?.toFixed(4) ?? 'N/A'} m (${((response.fitness || 0) * 100).toFixed(1)}% overlap)`,
+          duration: response.quality_warning ? 0 : undefined,
         });
       }
     } catch (error) {
@@ -8813,18 +8881,23 @@ export default function PointCloudViewer({
         // search_radius left as-is — the backend computes it when < 0.001.
       } else {
         const displayData = ps.data;
-        const totalPoints = displayData.pointCount;
+        // Exclude sky/miss points BEFORE decimating: they sit ~1 km out, so they
+        // would both hang the graph build and skew the NN-distance estimate that
+        // auto-sets search_radius below. The skeleton result is a graph (not
+        // per-point labels), so no scatter-back is needed here.
+        const hits = collectHitPoints(displayData);
+        const hitPoints = hits.points;
+        const totalPoints = hitPoints.length;
+        if (hits.droppedMisses > 0) {
+          console.log(`Skeleton: excluded ${hits.droppedMisses} sky/miss points`);
+        }
         const skipRate = totalPoints > MAX_SKELETON_POINTS
           ? Math.ceil(totalPoints / MAX_SKELETON_POINTS)
           : 1;
 
         points = [];
         for (let i = 0; i < totalPoints; i += skipRate) {
-          points.push([
-            displayData.positions[i * 3],
-            displayData.positions[i * 3 + 1],
-            displayData.positions[i * 3 + 2],
-          ]);
+          points.push(hitPoints[i]);
         }
         if (skipRate > 1) {
           console.log(`Downsampled from ${totalPoints} to ${points.length} points (skip rate: ${skipRate})`);

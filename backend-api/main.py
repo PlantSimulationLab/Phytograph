@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.55.0"
+BACKEND_VERSION = "0.56.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -1596,13 +1596,16 @@ class PointSource(BaseModel):
     # (`positions[i*3] + tx`) and the in-RAM `_region_mask` translation path.
     translation: Optional[List[float]] = None
     want_colors: bool = False
-    # Sky/miss points (`is_miss != 0`) are dropped by default for a session
-    # source: a miss is a ray that hit nothing, projected ~1 km out, so the
-    # surface-reconstruction consumers (triangulate, skeleton, segment, QSM) must
-    # never see it — exactly as the hits-only octree excludes it. Set True to
-    # keep misses (the only caller that does is export, which preserves whatever
-    # the user imported). Has no effect on a file-path source (those recover
-    # misses downstream via LAD's own readers, not this chokepoint).
+    # Sky/miss points (`is_miss != 0`) are dropped by default: a miss is a ray
+    # that hit nothing, projected ~1 km out, so the surface-reconstruction
+    # consumers (triangulate, skeleton, segment, QSM) must never see it — exactly
+    # as the hits-only octree excludes it. Set True to keep misses (the only
+    # caller that does is export, which preserves whatever the user imported).
+    # Honored on BOTH branches: the session source reads `extras[is_miss]`, and a
+    # file source probes the file's own miss column via `_file_miss_mask`. (It
+    # used to apply to sessions only, on the false premise that a file path could
+    # not carry the column — this app exports `is_miss` by default, so re-imported
+    # clouds silently poisoned every downstream compute.)
     include_misses: bool = False
     # When set, points come from a live cloud session's in-RAM array (the
     # Family-1 source of truth) with its per-point deletions already applied —
@@ -2308,10 +2311,10 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
         if world_shift is not None:
             pos = pos.astype(np.float64, copy=False) + world_shift
     else:
-        # File/inline source: no labels. Whole cloud is one tree; misses are NOT
-        # dropped by _read_points_from_source for a file path, so filter here is
-        # unnecessary because that path can't carry an is_miss column anyway — but
-        # we still guard against a runaway extent below.
+        # File/inline source: no labels, so the whole cloud is one tree.
+        # `_read_points_from_source` drops sky/miss points on this branch too
+        # (it probes the file's own is_miss column — see `_file_miss_mask`), so
+        # an alpha-shape crown fit never sees the ~1 km shell.
         pos, _c, _i = _read_points_from_source(src)
         tree_vals = wood_vals = ground_vals = None
 
@@ -16251,10 +16254,13 @@ def _load_xyz_arrays(
 ) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
     """Parse an ASCII xyz-family file via pandas and return numpy arrays.
 
-    Returns (positions[N,3] float32, colors[N,3] float32 | None,
+    Returns (positions[N,3] float64, colors[N,3] float32 | None,
     intensity[N] float32 | None). Separated from the response-packing step
     so the crop endpoint can reuse the loader and apply a boolean mask
     before responding.
+
+    Positions are float64 because projected (UTM) coordinates lose centimetre
+    detail in float32 — see the dtype note on the read below.
 
     When `column_plan` is supplied (import wizard) it determines the column
     roles and whether r/g/b are 0-255 ints or 0-1 floats; otherwise roles come
@@ -16291,11 +16297,19 @@ def _load_xyz_arrays(
     sep = _ascii_pandas_sep(file_path)
 
     try:
+        # float64, NOT float32: projected coordinates (UTM eastings ~5e5,
+        # northings ~5.4e6) have a float32 spacing of 0.03-0.5 m, so parsing as
+        # float32 quantises the cloud onto a coarse lattice BEFORE anything can
+        # recentre it — on a real UTM tile that collapsed ~99% of distinct
+        # northings and destroyed centimetre-scale branch geometry. The cost is
+        # 2x transient parse memory; positions are returned as float64 (what
+        # every compute consumer wants anyway) and only colour/intensity are
+        # narrowed back to float32 below.
         df = pd.read_csv(
             file_path,
             sep=sep, header=None, comment='#',
             usecols=usecols, names=names,
-            dtype=np.float32, engine='c', skip_blank_lines=True,
+            dtype=np.float64, engine='c', skip_blank_lines=True,
             skiprows=skiprows, on_bad_lines='skip',
         )
     except Exception as e:
@@ -16311,10 +16325,10 @@ def _load_xyz_arrays(
         raise HTTPException(status_code=400, detail=f"No valid xyz rows in {file_path}")
 
     positions = np.column_stack([
-        df['x'].to_numpy(dtype=np.float32, copy=False),
-        df['y'].to_numpy(dtype=np.float32, copy=False),
-        df['z'].to_numpy(dtype=np.float32, copy=False),
-    ]).astype(np.float32, copy=False)
+        df['x'].to_numpy(dtype=np.float64, copy=False),
+        df['y'].to_numpy(dtype=np.float64, copy=False),
+        df['z'].to_numpy(dtype=np.float64, copy=False),
+    ]).astype(np.float64, copy=False)
 
     colors = None
     if all(c in df.columns for c in ('r255', 'g255', 'b255')):
@@ -16368,7 +16382,10 @@ def _load_ply_pcd_arrays(
     if points.size == 0:
         raise HTTPException(status_code=400, detail=f"No points found in {file_path}")
 
-    positions = points.astype(np.float32, copy=False)
+    # float64 for the same reason as the ASCII loader: a projected PLY/PCD
+    # would otherwise be quantised onto a decimetre lattice at parse time.
+    # (open3d already reads points as float64 internally.)
+    positions = points.astype(np.float64, copy=False)
     colors = np.asarray(cloud.colors).astype(np.float32, copy=False) if cloud.has_colors() else None
     intensity = None
     return positions, colors, intensity
@@ -16407,6 +16424,55 @@ def _load_pointcloud_arrays(
             f"Supported: {sorted(_PANDAS_EXTENSIONS | _OPEN3D_EXTENSIONS | _LAS_EXTENSIONS)}"
         ),
     )
+
+
+def _file_miss_mask(file_path: str, ascii_format: Optional[str]) -> Optional[np.ndarray]:
+    """Best-effort per-point sky/miss flags for a FILE source, as a bool array
+    (True = miss) aligned to what `_load_pointcloud_arrays` returns, or None when
+    the file carries no miss information.
+
+    This exists because `_read_points_from_source`'s `include_misses` filter used
+    to apply ONLY to the session branch, on the premise that "a file path can't
+    carry an is_miss column anyway". That premise was false: this app writes
+    `is_miss` as a first-class LAS extra dim (`_session_to_las`, `_ply_to_las`,
+    `_e57_to_las`) and as an ASCII column, and export defaults to include_misses
+    =True. So a user who exported a scan with misses and re-imported it by path
+    fed ~1 km-out points straight into ICP / C2M / skeleton / segmentation —
+    silently wrong answers (an ICP bbox diagonal inflates ~170x, which blows up
+    max_correspondence_distance) rather than an error.
+
+    Kept deliberately cheap and total: any read problem returns None (treated as
+    "no miss info"), never an exception — a miss probe must not break a load.
+    """
+    try:
+        ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+        if ext in _LAS_EXTENSIONS:
+            import laspy
+            las = laspy.read(file_path)
+            if _MISS_SLUG in set(las.point_format.dimension_names):
+                return np.asarray(las[_MISS_SLUG]).astype(np.float64) != 0
+            return None
+        if ext in _PANDAS_EXTENSIONS:
+            # Only an explicit is_miss column counts; roles come from the same
+            # tokenizer the loader uses, so the column index matches the file.
+            columns = (_tokenize_ascii_format(ascii_format)
+                       if ascii_format
+                       else _autodetect_xyz_columns(file_path))
+            if _MISS_SLUG not in columns:
+                return None
+            idx = columns.index(_MISS_SLUG)
+            df = pd.read_csv(
+                file_path, sep=_ascii_pandas_sep(file_path), header=None,
+                comment='#', usecols=[idx], names=[_MISS_SLUG],
+                dtype=np.float64, engine='c', skip_blank_lines=True,
+                skiprows=_ascii_skiprows(file_path), on_bad_lines='skip',
+            )
+            return df[_MISS_SLUG].to_numpy() != 0
+        # PLY/PCD: open3d drops scalar fields on read, so the positions we get
+        # back carry no miss column to align against.
+        return None
+    except Exception:
+        return None
 
 
 def _load_las_arrays(
@@ -16474,14 +16540,17 @@ def _read_points_from_source(
     and intensity resolve to None here (the session DOES hold them — see
     `_read_las_into_arrays` — they're simply not surfaced for these ops).
 
-    Sky/miss points (`is_miss != 0`) are also dropped here, exactly as the
-    hits-only octree does (see `_session_to_las(exclude_misses=True)`). A miss is
-    a ray that hit nothing, projected ~1 km out — it is not a surface point, so
-    every compute consumer of this chokepoint (triangulate, skeleton, hits-only
-    LAD, export) must skip it. Leaving them in not only meshes a phantom shell a
-    kilometre away but, for ball-pivoting, makes BPA explode combinatorially and
-    hang. The misses-overlay endpoint reads `sess.extras` directly, not through
-    this function, so it still sees them.
+    Sky/miss points (`is_miss != 0`) are dropped here on BOTH branches, exactly
+    as the hits-only octree does (see `_session_to_las(exclude_misses=True)`). A
+    miss is a ray that hit nothing, projected ~1 km out — it is not a surface
+    point, so every compute consumer of this chokepoint (triangulate, skeleton,
+    hits-only LAD, export) must skip it. Leaving them in not only meshes a
+    phantom shell a kilometre away but, for ball-pivoting, makes BPA explode
+    combinatorially and hang; for ICP it inflates the bbox diagonal ~170x, which
+    scales max_correspondence_distance into a confidently-wrong alignment. The
+    session branch reads `sess.extras`; the file branch probes the file's own
+    miss column (`_file_miss_mask`). The misses-overlay endpoint reads
+    `sess.extras` directly, not through this function, so it still sees them.
     """
     if src.session_id is not None:
         sess = _get_cloud_session(src.session_id)
@@ -16511,6 +16580,19 @@ def _read_points_from_source(
         positions, colors, intensity = _load_pointcloud_arrays(
             src.source_path, src.ascii_format
         )
+        # Drop sky/miss points for a FILE source too. Previously this filter
+        # existed only on the session branch, so a cloud re-imported by path
+        # carried its ~1 km-out misses into every compute tool (see
+        # `_file_miss_mask`). Length-checked before use: a probe that disagrees
+        # with the loaded row count (e.g. the loader dropped NaN rows) is not
+        # alignable, so we ignore it rather than mis-filter.
+        if not src.include_misses:
+            miss = _file_miss_mask(src.source_path, src.ascii_format)
+            if miss is not None and miss.shape == (len(positions),):
+                keep = ~miss
+                positions = positions[keep]
+                colors = colors[keep] if colors is not None else None
+                intensity = intensity[keep] if intensity is not None else None
 
     if src.max_points is not None and src.max_points > 0 and len(positions) > src.max_points:
         stride = int(math.ceil(len(positions) / src.max_points))
@@ -21794,6 +21876,106 @@ class ICPRegistrationResponse(BaseModel):
     rmse: Optional[float] = None
     # Number of ICP iterations performed
     iterations: Optional[int] = None
+    # RMSE as a fraction of the cloud's robust extent. `fitness` alone is a
+    # misleading quality signal: it is the FRACTION of points that found a
+    # correspondence within max_correspondence_distance, so when that distance
+    # is large relative to the object, fitness saturates at 1.0 even for a
+    # badly wrong alignment. This ratio stays honest (small = tight fit), and
+    # drives `quality_warning` below.
+    rmse_ratio: Optional[float] = None
+    # Human-readable caution when the alignment converged but looks untrustworthy
+    # (high RMSE relative to scale). None when the fit is good. The renderer
+    # surfaces this instead of a bare "Fitness: 100%" success toast.
+    quality_warning: Optional[str] = None
+
+
+def _robust_cloud_diagonal(points: np.ndarray) -> float:
+    """Outlier-resistant stand-in for the AABB diagonal, used to scale ICP's
+    normal-estimation radius and max_correspondence_distance.
+
+    The raw AABB diagonal is decided by the two most extreme points, so a
+    handful of far-field strays (sky/miss rays ~1 km out, a stray scan artifact)
+    inflate it by orders of magnitude. That does not merely slow ICP down: it
+    scales max_correspondence_distance past the size of the object, so every
+    point matches every other point and ICP converges to a confidently WRONG
+    transform while still reporting fitness ~1.0. Using the 1-99 percentile
+    span per axis keeps the scale tied to where the data actually is.
+
+    Implemented as a median-centred radial trim rather than a per-axis
+    percentile: sky/miss rays form a THICK far-field shell (a Helios scan is
+    routinely ~10% misses), so a 99th-percentile cut still lands inside the
+    shell and barely dents the diagonal. Distance from the median point
+    separates the two populations cleanly no matter how many strays there are —
+    we keep points within 3x the median radius, which leaves a compact,
+    genuinely-populated core.
+
+    Falls back to the true AABB when the trim degenerates (e.g. a tiny or
+    highly-clustered cloud), so behaviour is unchanged for clean input.
+
+    Small clouds are returned UNTRIMMED. Outlier rejection is only meaningful
+    once there is a population to reject from: on a coarse mesh sample (a
+    mesh-to-mesh ICP may sample as few as 8 points off a box) the trim's own
+    median is dominated by sampling noise, so it returned a diagonal that
+    varied run to run and made ICP's max_correspondence_distance — and hence the
+    registration — nondeterministic. Below the threshold the AABB IS the honest
+    extent: with that few points there is no far-field shell to hide.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) == 0:
+        return 0.0
+
+    def _aabb_diag(a: np.ndarray) -> float:
+        return float(np.linalg.norm(a.max(axis=0) - a.min(axis=0)))
+
+    # Below this the trim is noise, not statistics — see the docstring.
+    _MIN_PTS_FOR_TRIM = 64
+
+    if len(pts) >= _MIN_PTS_FOR_TRIM:
+        centre = np.median(pts, axis=0)
+        radii = np.linalg.norm(pts - centre, axis=1)
+        med_r = float(np.median(radii))
+        if med_r > 0:
+            keep = radii <= 3.0 * med_r
+            # Require the core to still be a real cloud, not a handful of points.
+            if keep.sum() >= max(_MIN_PTS_FOR_TRIM, int(0.5 * len(pts))):
+                diag = _aabb_diag(pts[keep])
+                if np.isfinite(diag) and diag > 0:
+                    return diag
+
+    diag = _aabb_diag(pts)
+    return diag if np.isfinite(diag) else 0.0
+
+
+def _icp_quality(rmse: float, diagonal: float) -> tuple[Optional[float], Optional[str]]:
+    """Return (rmse_ratio, quality_warning) for an ICP result.
+
+    ICP's `fitness` is the fraction of source points that found a correspondence
+    within max_correspondence_distance — it saturates at 1.0 whenever that
+    distance is generous, so a wildly wrong alignment still reports "100%".
+    RMSE relative to the object's own extent is the signal that stays honest.
+
+    `diagonal` MUST be the robust extent (`_robust_cloud_diagonal`), not the raw
+    AABB: dividing by an outlier-inflated diagonal shrinks the ratio and hides
+    exactly the bad fits this is meant to catch.
+
+    The 2% threshold is deliberately permissive: a good tree-scan registration
+    lands well under 1% of extent, so this only fires on fits that are visibly
+    off rather than second-guessing normal results.
+    """
+    if not diagonal or not np.isfinite(diagonal) or diagonal <= 0:
+        return None, None
+    ratio = float(rmse) / float(diagonal)
+    if not np.isfinite(ratio):
+        return None, None
+    warning = None
+    if ratio > 0.02:
+        warning = (
+            f"Alignment converged but residual error is high "
+            f"({rmse:.3g} m ≈ {ratio * 100:.1f}% of the cloud's size). "
+            f"The clouds may not overlap enough, or may need a rough manual "
+            f"pre-alignment before registering. Review before keeping."
+        )
+    return ratio, warning
 
 
 def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transform, max_iterations=100, rmse_threshold=1e-6, progress=None):
@@ -21917,9 +22099,11 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
             progress(0.15, "Estimating normals")
 
         # Estimate normals for point-to-plane ICP (more robust)
-        # Use adaptive radius based on point cloud density
-        bbox = target_pcd.get_axis_aligned_bounding_box()
-        diagonal = np.linalg.norm(bbox.max_bound - bbox.min_bound)
+        # Use adaptive radius based on point cloud density. Scale off the robust
+        # (1-99 percentile) extent, NOT the raw AABB diagonal — see
+        # `_robust_cloud_diagonal`: far-field strays otherwise inflate the
+        # diagonal and silently corrupt the alignment.
+        diagonal = _robust_cloud_diagonal(np.asarray(target_pcd.points))
         normal_radius = diagonal * 0.02  # 2% of diagonal
 
         target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
@@ -21963,6 +22147,9 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
         if progress is not None:
             progress(1.0, "Done")
 
+        rmse_ratio, quality_warning = _icp_quality(
+            float(reg_result.inlier_rmse), diagonal)
+
         return dict(
             success=True,
             translation=translation,
@@ -21970,6 +22157,8 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
             fitness=float(reg_result.fitness),
             rmse=float(reg_result.inlier_rmse),
             iterations=iterations,
+            rmse_ratio=rmse_ratio,
+            quality_warning=quality_warning,
         )
 
     except ScanCancelled:
@@ -22074,9 +22263,9 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
         if progress is not None:
             progress(0.15, "Estimating normals")
 
-        # Estimate normals for point-to-plane ICP (more robust)
-        bbox = target_pcd.get_axis_aligned_bounding_box()
-        diagonal = np.linalg.norm(bbox.max_bound - bbox.min_bound)
+        # Estimate normals for point-to-plane ICP (more robust). Robust extent,
+        # not the raw AABB diagonal — see `_robust_cloud_diagonal`.
+        diagonal = _robust_cloud_diagonal(np.asarray(target_pcd.points))
         normal_radius = diagonal * 0.02
 
         target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
@@ -22120,6 +22309,9 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
         if progress is not None:
             progress(1.0, "Done")
 
+        rmse_ratio, quality_warning = _icp_quality(
+            float(reg_result.inlier_rmse), diagonal)
+
         return dict(
             success=True,
             translation=translation,
@@ -22127,6 +22319,8 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
             fitness=float(reg_result.fitness),
             rmse=float(reg_result.inlier_rmse),
             iterations=iterations,
+            rmse_ratio=rmse_ratio,
+            quality_warning=quality_warning,
         )
 
     except ScanCancelled:
@@ -22225,9 +22419,9 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         if progress is not None:
             progress(0.15, "Estimating normals")
 
-        # Estimate normals for point-to-plane ICP (more robust)
-        bbox = target_pcd.get_axis_aligned_bounding_box()
-        diagonal = np.linalg.norm(bbox.max_bound - bbox.min_bound)
+        # Estimate normals for point-to-plane ICP (more robust). Robust extent,
+        # not the raw AABB diagonal — see `_robust_cloud_diagonal`.
+        diagonal = _robust_cloud_diagonal(np.asarray(target_pcd.points))
         normal_radius = diagonal * 0.02
 
         target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
@@ -22271,6 +22465,9 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         if progress is not None:
             progress(1.0, "Done")
 
+        rmse_ratio, quality_warning = _icp_quality(
+            float(reg_result.inlier_rmse), diagonal)
+
         return dict(
             success=True,
             translation=translation,
@@ -22278,6 +22475,8 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
             fitness=float(reg_result.fitness),
             rmse=float(reg_result.inlier_rmse),
             iterations=iterations,
+            rmse_ratio=rmse_ratio,
+            quality_warning=quality_warning,
         )
 
     except ScanCancelled:

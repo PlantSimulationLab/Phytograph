@@ -2809,6 +2809,14 @@ export interface ICPRegistrationResponse {
   transformation_matrix?: number[]; // Full 4x4 transformation matrix (row-major)
   fitness?: number;               // Fitness score (0-1, higher is better)
   rmse?: number;                  // RMSE after alignment
+  // RMSE as a fraction of the cloud's robust extent. Prefer this over `fitness`
+  // when judging a result: fitness is the FRACTION of points that found a
+  // correspondence within max_correspondence_distance, so it pins to 1.0 for a
+  // badly wrong alignment whenever that distance is generous.
+  rmse_ratio?: number;
+  // Set when the fit converged but looks untrustworthy — show it instead of a
+  // "Fitness: 100%" success message.
+  quality_warning?: string | null;
 }
 
 /**

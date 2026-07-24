@@ -317,14 +317,40 @@ function restoreSidecarsForUndo(state: SceneState, action: SceneAction): SceneSt
   return next;
 }
 
-// Free backend sessions for any 'remove' actions in the evicted transactions.
-function freeEvictedSessions(evicted: HistoryTransaction[], freeSession?: SessionFreeFn) {
+// Free backend sessions owned by evicted/purged transactions — but ONLY for
+// scans that are no longer in the scene.
+//
+// Both directions leak without this. A `remove` that is evicted means the delete
+// can no longer be undone, so its session is unreachable. An `add` that is
+// evicted while its scan is ABSENT means the user undid an import and the undo
+// can no longer be redone — equally unreachable, and previously never freed
+// (the check matched `remove` only), so a multi-GB cloud stayed resident in the
+// Python sidecar until the app quit.
+//
+// The liveness check is what makes handling `add` safe: an add is normally
+// evicted while its scan is still on screen (history simply scrolled past the
+// import), and freeing then would pull the session out from under a live cloud.
+// Keying on "is this id still in state.scans" collapses both cases to the real
+// question — can anything still reach this session?
+function freeEvictedSessions(
+  evicted: HistoryTransaction[],
+  freeSession: SessionFreeFn | undefined,
+  liveScanIds: Set<string>,
+) {
   if (!freeSession) return;
+  const freed = new Set<string>();
   for (const tx of evicted) {
     for (const action of tx.actions) {
-      if (action.t === 'remove' && action.kind === 'scan' && action.sessionId) {
-        freeSession(action.sessionId);
-      }
+      // Narrow on `t` first — only add/remove carry `kind` and `sessionId`.
+      if (action.t !== 'add' && action.t !== 'remove') continue;
+      if (action.kind !== 'scan') continue;
+      const sessionId = action.sessionId;
+      // Still on screen → the live cloud owns it; never free.
+      if (!sessionId || liveScanIds.has(action.id)) continue;
+      // De-dupe: an id can appear in several evicted transactions.
+      if (freed.has(sessionId)) continue;
+      freed.add(sessionId);
+      freeSession(sessionId);
     }
   }
 }
@@ -354,7 +380,18 @@ export function sceneReducer(
       if (past.length > MAX_HISTORY) {
         evicted = past.splice(0, past.length - MAX_HISTORY);
       }
-      freeEvictedSessions(evicted, ctx?.freeSession);
+      // A new commit also DISCARDS the redo stack, so anything sitting in
+      // `future` becomes just as unreachable as a tail eviction — e.g. undo an
+      // import, then do anything else, and that add can never be redone. Treat
+      // the dropped future as evicted too or its session leaks.
+      //
+      // Liveness is judged against the POST-commit scene (`next`): this very
+      // transaction may have just added or removed the scan in question.
+      freeEvictedSessions(
+        [...evicted, ...state.future],
+        ctx?.freeSession,
+        new Set(next.scans.map((s) => s.id)),
+      );
       return { ...next, past, future: [] };
     }
     case 'undo': {
@@ -398,7 +435,7 @@ export function sceneReducer(
       const idset = new Set(command.ids);
       const touches = (tx: HistoryTransaction) => tx.actions.some((a) => idset.has(a.id));
       const evicted = [...state.past.filter(touches), ...state.future.filter(touches)];
-      freeEvictedSessions(evicted, ctx?.freeSession);
+      freeEvictedSessions(evicted, ctx?.freeSession, new Set(state.scans.map((s) => s.id)));
       return {
         ...state,
         past: state.past.filter((tx) => !touches(tx)),
