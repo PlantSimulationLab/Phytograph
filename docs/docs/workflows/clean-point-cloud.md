@@ -44,9 +44,12 @@ can never leak into a later step.
 
     Two consequences worth knowing:
 
-    - Sky/miss points, per-pulse beam origins, and the miss overlay all
-      move with the cloud, so a translated scan stays internally
-      consistent for LAD.
+    - Everything tied to the scan's world position moves with it: the
+      recorded **scanner origin** (and, for a moving-platform scan, the
+      whole trajectory), the sky/miss points, per-pulse beam origins, and
+      the miss overlay. So a translated scan stays internally consistent —
+      the scanner still sits in the right place relative to its points,
+      which is what LAD and triangulation depend on.
     - Like applying a crop or a filter, an applied translation is a
       permanent edit to the working copy — it is not on the undo stack.
       Your source file on disk is never modified.

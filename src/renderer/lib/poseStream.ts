@@ -325,6 +325,50 @@ export function shiftPoseStream(
   };
 }
 
+// Apply a rigid transform (rotation R + translation, given as a ROW-MAJOR flat
+// 4x4 `matrix`) to a pose stream: every pose POSITION is mapped through the full
+// matrix (R·pos + t), and every pose ATTITUDE quaternion is pre-multiplied by
+// the transform's rotation quaternion `q` (the two rotations compose:
+// q_new = q · q_pose). Used when a whole moving-platform scan is rigidly moved —
+// e.g. cloud-to-cloud ICP — so the trajectory tracks the points AND the per-pose
+// orientation stays consistent (a bare position shift would leave attitudes
+// pointing the pre-rotation way, corrupting the LAD beam-direction join). The
+// lever arm and boresight are body-frame constants and are unaffected. Kept free
+// of any three.js dependency so this lib stays pure/unit-testable; `matrix` is
+// the same row-major layout the ICP response and session-transform endpoint use.
+export function transformPoseStream(
+  stream: PoseStream,
+  matrix: number[],
+  q: { x: number; y: number; z: number; w: number },
+): PoseStream {
+  if (matrix.length !== 16) throw new Error(`transformPoseStream: matrix must be 16 floats, got ${matrix.length}`);
+  const m = matrix;
+  // Row-major: row r, col c is m[r*4 + c].
+  const applyPoint = (x: number, y: number, z: number) => ({
+    x: m[0] * x + m[1] * y + m[2] * z + m[3],
+    y: m[4] * x + m[5] * y + m[6] * z + m[7],
+    z: m[8] * x + m[9] * y + m[10] * z + m[11],
+  });
+  // Hamilton product q · p (both [x,y,z,w]).
+  const mulQuat = (
+    a: { x: number; y: number; z: number; w: number },
+    b: { x: number; y: number; z: number; w: number },
+  ) => ({
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  });
+  return {
+    ...stream,
+    poses: stream.poses.map((p) => {
+      const pos = applyPoint(p.x, p.y, p.z);
+      const att = mulQuat(q, { x: p.qx, y: p.qy, z: p.qz, w: p.qw });
+      return { ...p, x: pos.x, y: pos.y, z: pos.z, qx: att.x, qy: att.y, qz: att.z, qw: att.w };
+    }),
+  };
+}
+
 // Axis-aligned bounds of a pose stream's positions (attitude ignored). Returns
 // null for an empty stream so callers can distinguish "no anchor" from a zero
 // box at the origin. Used to derive a trajectory's representative anchor for

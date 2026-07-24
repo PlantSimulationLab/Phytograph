@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import * as THREE from 'three';
 import {
   parsePoseStreamCsv,
   quatFromRpy,
@@ -9,6 +10,7 @@ import {
   trajectoryDurationS,
   deriveMovingScanGrid,
   shiftPoseStream,
+  transformPoseStream,
   poseStreamBounds,
 } from './poseStream';
 import { recenterShiftFor, boundsCenterDiagonal } from './frameMismatch';
@@ -331,6 +333,79 @@ describe('shiftPoseStream', () => {
     const before = utm.poses[0].x;
     shiftPoseStream(utm, [476000, 5428000, 0]);
     expect(utm.poses[0].x).toBe(before);
+  });
+});
+
+describe('transformPoseStream', () => {
+  // Validate against three.js as the oracle: build the same rigid transform two
+  // ways and check the pure-math helper agrees with THREE's Matrix4/Quaternion.
+  const stream = parsePoseStreamCsv([
+    '0 1 2 3 0 0 0 1',                 // identity attitude
+    '1 -4 5 -6 0.1 0.2 0.3 0.9273',    // arbitrary (near-unit) attitude
+  ].join('\n'), { label: 'traj.txt' });
+
+  // Compose a rigid transform: rotate 37° about a tilted axis, then translate.
+  const q = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0.3, -0.5, 0.81).normalize(),
+    (37 * Math.PI) / 180,
+  );
+  const t = new THREE.Vector3(10, -20, 5);
+  const mat = new THREE.Matrix4().compose(t, q, new THREE.Vector3(1, 1, 1));
+  const rowMajor = mat.clone().transpose().toArray();  // THREE is column-major
+  const plainQ = { x: q.x, y: q.y, z: q.z, w: q.w };
+
+  it('maps each pose POSITION through the full matrix (R·pos + t)', () => {
+    const out = transformPoseStream(stream, rowMajor, plainQ);
+    for (let i = 0; i < stream.poses.length; i++) {
+      const p = stream.poses[i];
+      const expected = new THREE.Vector3(p.x, p.y, p.z).applyMatrix4(mat);
+      expect(out.poses[i].x).toBeCloseTo(expected.x, 9);
+      expect(out.poses[i].y).toBeCloseTo(expected.y, 9);
+      expect(out.poses[i].z).toBeCloseTo(expected.z, 9);
+    }
+  });
+
+  it('composes the transform rotation onto each pose ATTITUDE (q · q_pose)', () => {
+    const out = transformPoseStream(stream, rowMajor, plainQ);
+    for (let i = 0; i < stream.poses.length; i++) {
+      const p = stream.poses[i];
+      const expected = q.clone().multiply(
+        new THREE.Quaternion(p.qx, p.qy, p.qz, p.qw),
+      );
+      // Quaternion and its negation are the same rotation; compare via dot ≈ ±1.
+      const dot = out.poses[i].qx * expected.x + out.poses[i].qy * expected.y +
+        out.poses[i].qz * expected.z + out.poses[i].qw * expected.w;
+      expect(Math.abs(dot)).toBeCloseTo(1, 9);
+    }
+  });
+
+  it('leaves lever arm, boresight, time, and frame metadata untouched', () => {
+    const out = transformPoseStream(stream, rowMajor, plainQ);
+    expect(out.leverArm).toEqual(stream.leverArm);
+    expect(out.boresightRpy).toEqual(stream.boresightRpy);
+    expect(out.poses[0].t).toBe(stream.poses[0].t);
+    expect(out.frame).toEqual(stream.frame);
+  });
+
+  it('a pure translation leaves attitudes unchanged', () => {
+    const pureT = new THREE.Matrix4().makeTranslation(7, 8, 9);
+    const out = transformPoseStream(
+      stream, pureT.clone().transpose().toArray(), { x: 0, y: 0, z: 0, w: 1 },
+    );
+    expect(out.poses[0].x).toBeCloseTo(stream.poses[0].x + 7, 9);
+    expect(out.poses[1].qx).toBeCloseTo(stream.poses[1].qx, 12);
+    expect(out.poses[1].qw).toBeCloseTo(stream.poses[1].qw, 12);
+  });
+
+  it('throws on a non-16-element matrix', () => {
+    expect(() => transformPoseStream(stream, [1, 0, 0], plainQ)).toThrow();
+  });
+
+  it('does not mutate the input stream', () => {
+    const bx = stream.poses[0].x, bqw = stream.poses[1].qw;
+    transformPoseStream(stream, rowMajor, plainQ);
+    expect(stream.poses[0].x).toBe(bx);
+    expect(stream.poses[1].qw).toBe(bqw);
   });
 });
 

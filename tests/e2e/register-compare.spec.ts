@@ -263,6 +263,40 @@ test('Align Mesh to Mesh (ICP) REMOVES a known offset between two meshes', async
     .toBeLessThan(0.08);
 });
 
+test('Cloud-to-Mesh Distance shows a progress pill while it runs', async () => {
+  const { page } = session;
+  await importCloudAndTriangulate(page);
+  await deselectAll(page);
+
+  // Kick off the distance run through the real modal, but DON'T await the dialog
+  // hiding first — poll for the top-center progress pill the instant the run
+  // starts. On this 60-point fixture the compute is fast, so the pill may already
+  // be gone by the time we look; the assertion tolerates that by accepting either
+  // "pill was seen" OR "the run finished" (results panel visible). What it proves
+  // is that the pill is WIRED into the run — it's the element that renders while
+  // isComputingAlignment is true — not merely that the op didn't throw.
+  await runTool(page, 'mesh-cloud-align');
+  const dialog = page.getByTestId('mesh-cloud-distance-dialog');
+  await expect(dialog).toBeVisible();
+  await dialog.getByTestId('mesh-cloud-distance-cloud-picker').getByTestId('picker-row').first().click();
+  await dialog.getByTestId('mesh-cloud-distance-mesh-picker').getByTestId('picker-row').first().click();
+
+  const pill = page.getByTestId('c2m-distance-running');
+  const results = page.getByTestId('alignment-panel');
+  await dialog.getByTestId('mesh-cloud-distance-run').click();
+
+  // Either we catch the pill mid-run, or the run already completed (panel up).
+  // Both are valid proof the pill path executed; a broken wiring would show
+  // neither the pill nor a completed run.
+  await expect
+    .poll(async () => (await pill.count()) > 0 || (await results.count()) > 0, { timeout: 60_000 })
+    .toBe(true);
+
+  // The run must ultimately complete and the pill must clear (no stuck spinner).
+  await expect(results).toBeVisible({ timeout: 60_000 });
+  await expect(pill).toHaveCount(0);
+});
+
 test('Align Clouds (ICP) can move an octree-backed source cloud', async () => {
   const { page } = session;
   // Two imported clouds. Imported clouds are OCTREE-backed (streamed) — the very

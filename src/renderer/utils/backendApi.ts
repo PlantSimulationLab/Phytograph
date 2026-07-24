@@ -2773,35 +2773,19 @@ export interface AlignmentDistanceResponse {
  * Uses Open3D's RaycastingScene for efficient distance queries.
  */
 export async function computeAlignmentDistance(
-  request: AlignmentDistanceRequest
+  request: AlignmentDistanceRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<AlignmentDistanceResponse> {
-  const baseUrl = getBackendUrl();
   console.log('Alignment distance - points:', request.points ? request.points.length / 3 : `source:${request.source?.source_path}`, 'vertices:', request.mesh_vertices.length / 3);
-
-  // Use AbortController for timeout (can be slow for large clouds)
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
-
+  // The response streams PHP1 progress markers ahead of the JSON result so the
+  // renderer shows a cancellable pill; fetchJsonWithProgress owns its own
+  // per-chunk-refreshed timeout. See computeLAD for the template.
   try {
-    const response = await fetch(`${baseUrl}/api/c2m/distance`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
+    return await fetchJsonWithProgress<AlignmentDistanceResponse>(
+      '/api/c2m/distance', request, signal, 120000, onProgress, onRunId);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('Alignment distance computation failed:', error);
     throw error;
   }
@@ -2835,35 +2819,17 @@ export interface ICPRegistrationResponse {
  * Uses Open3D's point-to-plane ICP for robust registration.
  */
 export async function icpRegisterMeshToCloud(
-  request: ICPRegistrationRequest
+  request: ICPRegistrationRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<ICPRegistrationResponse> {
-  const baseUrl = getBackendUrl();
   console.log('ICP registration - points:', request.points ? request.points.length / 3 : `source:${request.source?.source_path}`, 'mesh vertices:', request.mesh_vertices.length / 3);
-
-  // Use AbortController for timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
-
+  // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
   try {
-    const response = await fetch(`${baseUrl}/api/c2m/icp-register`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
+    return await fetchJsonWithProgress<ICPRegistrationResponse>(
+      '/api/c2m/icp-register', request, signal, 120000, onProgress, onRunId);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('ICP registration failed:', error);
     throw error;
   }
@@ -2890,35 +2856,17 @@ export interface CloudToCloudICPRequest {
  * Returns the transformation needed to align the source to the target.
  */
 export async function icpRegisterCloudToCloud(
-  request: CloudToCloudICPRequest
+  request: CloudToCloudICPRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<ICPRegistrationResponse> {
-  const baseUrl = getBackendUrl();
   console.log('Cloud-to-cloud ICP - target:', request.target_points ? `${request.target_points.length / 3} pts` : `source:${request.target_source?.source_path}`, 'source:', request.source_points ? `${request.source_points.length / 3} pts` : `source:${request.source_source?.source_path}`);
-
-  // Use AbortController for timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
-
+  // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
   try {
-    const response = await fetch(`${baseUrl}/api/c2c/icp-register`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
+    return await fetchJsonWithProgress<ICPRegistrationResponse>(
+      '/api/c2c/icp-register', request, signal, 120000, onProgress, onRunId);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('Cloud-to-cloud ICP registration failed:', error);
     throw error;
   }
@@ -2943,35 +2891,19 @@ export interface MeshToMeshICPRequest {
  * Returns the transformation needed to align the source to the target.
  */
 export async function icpRegisterMeshToMesh(
-  request: MeshToMeshICPRequest
+  request: MeshToMeshICPRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<ICPRegistrationResponse> {
-  const baseUrl = getBackendUrl();
   console.log('Mesh-to-mesh ICP - target vertices:', request.target_vertices.length / 3, 'source vertices:', request.source_vertices.length / 3);
-
-  // Use AbortController for timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes (mesh sampling + ICP)
-
+  // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+  // 3-minute timeout (mesh sampling + ICP); fetchJsonWithProgress refreshes it
+  // per streamed chunk so an actively-progressing run is never aborted.
   try {
-    const response = await fetch(`${baseUrl}/api/m2m/icp-register`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
+    return await fetchJsonWithProgress<ICPRegistrationResponse>(
+      '/api/m2m/icp-register', request, signal, 180000, onProgress, onRunId);
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('Mesh-to-mesh ICP registration failed:', error);
     throw error;
   }

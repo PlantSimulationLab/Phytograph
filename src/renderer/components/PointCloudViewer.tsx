@@ -68,7 +68,7 @@ import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams } 
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
 import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
-import { poseStreamToWire, shiftPoseStream, trajectoryDurationS, deriveMovingScanGrid, poseStreamBounds } from '../lib/poseStream';
+import { poseStreamToWire, shiftPoseStream, transformPoseStream, trajectoryDurationS, deriveMovingScanGrid, poseStreamBounds } from '../lib/poseStream';
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin } from '../lib/scan';
@@ -1272,6 +1272,15 @@ export default function PointCloudViewer({
   const [alignmentInputs, setAlignmentInputs] = useState<{ cloudId: string; meshId: string } | null>(null);
   // ICP (Iterative Closest Point) snap-to-fit state
   const [isRunningICP, setIsRunningICP] = useState(false);
+  // Cancellable progress-pill state for the alignment tools (mirrors LAD/backfill).
+  // The three ICP tools (c2c / m2m / c2m snap-to-fit) share one pill; the c2m
+  // distance compare gets its own (the tools never overlap in time).
+  const [icpProgress, setIcpProgress] = useState<{ label: string; value: number | null } | null>(null);
+  const icpAbortRef = useRef<AbortController | null>(null);
+  const icpRunIdRef = useRef<string | null>(null);
+  const [alignDistProgress, setAlignDistProgress] = useState<{ label: string; value: number | null } | null>(null);
+  const alignDistAbortRef = useRef<AbortController | null>(null);
+  const alignDistRunIdRef = useRef<string | null>(null);
   // Backfill Misses: a setup modal (scan picker) + a streamed StatusPill progress
   // bar, mirroring the Triangulation / LAD pattern.
   const [showBackfillPopup, setShowBackfillPopup] = useState(false);
@@ -5073,6 +5082,35 @@ export default function PointCloudViewer({
         });
       };
 
+      // The scanner ORIGIN (and, for a moving-platform scan, the whole
+      // trajectory of per-pose emission points) is WORLD-frame geometry that
+      // must move WITH the points — otherwise the recorded scanner position no
+      // longer matches where the cloud sits, and every origin-dependent op
+      // (LAD beam directions, triangulation crop, the Scans-panel readout)
+      // becomes wrong. `params.origin` is the primary copy; `octree.scanOrigin`
+      // is a fallback copy for clouds imported without scan params (e.g. E57
+      // pose). Translate whichever exist. Called on both the session and flat
+      // paths so the origin can never drift from the geometry.
+      const translateScanParams = () => {
+        const p = cloud.params;
+        if (!p) return;
+        const nextParams: ScanParameters = {
+          ...p,
+          origin: { x: p.origin.x + t.x, y: p.origin.y + t.y, z: p.origin.z + t.z },
+          // Moving-platform trajectory: shift every pose position by +t (a pure
+          // translation leaves attitude/quaternions and the lever arm unchanged).
+          // shiftPoseStream SUBTRACTS its arg, so negate to add.
+          trajectory: p.trajectory
+            ? shiftPoseStream(p.trajectory, [-t.x, -t.y, -t.z])
+            : p.trajectory,
+        };
+        onUpdateScanParams(cloudId, nextParams);
+      };
+      // Translate the octree's fallback scanOrigin copy in place on the ref we
+      // forward to buildSessionOctreeData (it copies scanOrigin verbatim).
+      const translatedScanOrigin = (o: [number, number, number] | null | undefined) =>
+        o ? ([o[0] + t.x, o[1] + t.y, o[2] + t.z] as [number, number, number]) : o;
+
       const octreeInfo = cloud.data.octree;
       if (octreeInfo?.sessionId) {
         // Row-major flat 4x4 pure translation (the layout the endpoint expects —
@@ -5097,9 +5135,13 @@ export default function PointCloudViewer({
         // Skip the state write for a vanished cloud (onUpdateCloud on a missing
         // id could otherwise resurrect a ghost row / orphan its octree).
         if (!clouds.some(c => c.id === cloudId)) return { ok: false, gone: true };
+        // Forward a scanOrigin already moved by +t so the rebuilt OctreeRef
+        // carries the translated origin (buildSessionOctreeData copies it as-is).
+        const movedOctreeInfo = { ...octreeInfo, scanOrigin: translatedScanOrigin(octreeInfo.scanOrigin) };
         onUpdateCloud(cloudId, buildSessionOctreeData(
-          result, octreeInfo, cloud.data.fileName ?? cloudId,
+          result, movedOctreeInfo, cloud.data.fileName ?? cloudId,
         ));
+        translateScanParams();
         clearTranslation();
         // Destructive boundary: the session geometry moved permanently, so an
         // erase-undo must not reach back across it (the backend cleared its
@@ -5135,14 +5177,19 @@ export default function PointCloudViewer({
           center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
           size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
         },
+        // Move a flat cloud's embedded octree.scanOrigin fallback with the points.
+        octree: src.octree
+          ? { ...src.octree, scanOrigin: translatedScanOrigin(src.octree.scanOrigin) }
+          : src.octree,
       });
+      translateScanParams();
       clearTranslation();
       scene.boundary([cloudId]);
       return { ok: true };
     } finally {
       bakingTranslationRef.current.delete(cloudId);
     }
-  }, [clouds, getEditState, onUpdateCloud, buildSessionOctreeData, scene]);
+  }, [clouds, getEditState, onUpdateCloud, onUpdateScanParams, buildSessionOctreeData, scene]);
 
   // Bake every selected cloud's pending translation (see bakeCloudTranslation).
   // Called at the Translate-tool commit boundaries: T-modal confirm, gizmo
@@ -8166,7 +8213,11 @@ export default function PointCloudViewer({
       return;
     }
 
+    const ctrl = new AbortController();
+    alignDistAbortRef.current = ctrl;
+    alignDistRunIdRef.current = null;
     setIsComputingAlignment(true);
+    setAlignDistProgress(null);
     setAlignmentResults(null);
 
     try {
@@ -8189,6 +8240,9 @@ export default function PointCloudViewer({
         ps.kind === 'source'
           ? { source: ps.source, mesh_vertices: meshVertices, mesh_indices: meshIndices }
           : { points: Array.from(ps.data.positions), mesh_vertices: meshVertices, mesh_indices: meshIndices },
+        ctrl.signal,
+        (p, msg) => setAlignDistProgress({ label: msg, value: p }),
+        (runId) => { alignDistRunIdRef.current = runId; },
       );
 
       if (!response.success) {
@@ -8199,11 +8253,17 @@ export default function PointCloudViewer({
       setAlignmentInputs({ cloudId, meshId });
       setShowAlignmentPanel(true);
     } catch (error) {
+      // A cancel (X on the pill, or the fetch abort) surfaces as a neutral
+      // no-op — the user asked to stop, not an error.
+      if (ctrl.signal.aborted || error instanceof ScanCancelledError) return;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       showToast({ type: 'error', title: 'Alignment Failed', message: errorMessage });
       console.error('Alignment computation error:', error);
     } finally {
       setIsComputingAlignment(false);
+      setAlignDistProgress(null);
+      alignDistAbortRef.current = null;
+      alignDistRunIdRef.current = null;
     }
   }, [clouds, meshes, meshPositions, buildPointSource]);
 
@@ -8218,7 +8278,11 @@ export default function PointCloudViewer({
       return;
     }
 
+    const ctrl = new AbortController();
+    icpAbortRef.current = ctrl;
+    icpRunIdRef.current = null;
     setIsRunningICP(true);
+    setIcpProgress(null);
 
     try {
       // Resolve the TARGET cloud to inline points (flat) or a source descriptor
@@ -8241,6 +8305,9 @@ export default function PointCloudViewer({
         ps.kind === 'source'
           ? { source: ps.source, mesh_vertices: meshVertices, mesh_indices: meshIndices }
           : { points: Array.from(ps.data.positions), mesh_vertices: meshVertices, mesh_indices: meshIndices },
+        ctrl.signal,
+        (p, msg) => setIcpProgress({ label: msg, value: p }),
+        (runId) => { icpRunIdRef.current = runId; },
       );
 
       if (!response.success) {
@@ -8304,11 +8371,15 @@ export default function PointCloudViewer({
         });
       }
     } catch (error) {
+      if (ctrl.signal.aborted || error instanceof ScanCancelledError) return;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       showToast({ type: 'error', title: 'ICP Failed', message: errorMessage });
       console.error('ICP registration error:', error);
     } finally {
       setIsRunningICP(false);
+      setIcpProgress(null);
+      icpAbortRef.current = null;
+      icpRunIdRef.current = null;
     }
   }, [clouds, meshes, buildPointSource, meshPositions, setMeshPositions, setMeshRotations]);
 
@@ -8336,7 +8407,11 @@ export default function PointCloudViewer({
       return;
     }
 
+    const ctrl = new AbortController();
+    icpAbortRef.current = ctrl;
+    icpRunIdRef.current = null;
     setIsRunningICP(true);
+    setIcpProgress(null);
 
     try {
       // Resolve each cloud independently — either side can be flat (inline
@@ -8354,7 +8429,11 @@ export default function PointCloudViewer({
         ...(sourcePs.kind === 'source'
           ? { source_source: sourcePs.source }
           : { source_points: Array.from(sourcePs.data.positions) }),
-      });
+      },
+        ctrl.signal,
+        (p, msg) => setIcpProgress({ label: msg, value: p }),
+        (runId) => { icpRunIdRef.current = runId; },
+      );
 
       if (!response.success) {
         throw new Error(response.error || 'Cloud-to-cloud ICP registration failed');
@@ -8383,6 +8462,47 @@ export default function PointCloudViewer({
         matrix.decompose(position, quaternion, scale);
         const euler = new THREE.Euler().setFromQuaternion(quaternion, 'XYZ');
 
+        // ICP moves the whole cloud, so the scanner ORIGIN (and, for a moving
+        // scan, the trajectory) must ride the SAME rigid transform — otherwise
+        // the recorded scanner position is stranded and every origin-dependent
+        // op (LAD, triangulation crop, the panel readout) is wrong. Unlike the
+        // Translate tool's pure +t, ICP applies rotation+translation, so an
+        // origin point is transformed by the full matrix (M·origin) and a pose
+        // attitude by the rotation part (q_icp · q_pose). `applyMatrix` is the
+        // world-frame 4x4 to push origins/positions through, `applyQuat` its
+        // rotation for pose attitudes. Both branches build these to match how
+        // they transform the POINTS, then call this. `worldShift` is subtracted
+        // by the backend for session points but origins in `params`/`scanOrigin`
+        // are stored WORLD-frame here, so no shift bookkeeping is needed — the
+        // matrix acts directly on world coordinates.
+        const transformSourceOrigin = (applyMatrix: THREE.Matrix4, applyQuat: THREE.Quaternion) => {
+          const p = sourceCloud.params;
+          const movePoint = (o: { x: number; y: number; z: number }) => {
+            const v = new THREE.Vector3(o.x, o.y, o.z).applyMatrix4(applyMatrix);
+            return { x: v.x, y: v.y, z: v.z };
+          };
+          if (p) {
+            // transformPoseStream is three.js-free: hand it the ROW-MAJOR flat
+            // 4x4 (THREE.Matrix4 stores COLUMN-major, so transpose) and a plain
+            // quaternion object.
+            const rowMajorMatrix = applyMatrix.clone().transpose().toArray();
+            const plainQuat = { x: applyQuat.x, y: applyQuat.y, z: applyQuat.z, w: applyQuat.w };
+            const nextParams: ScanParameters = {
+              ...p,
+              origin: movePoint(p.origin),
+              trajectory: p.trajectory
+                ? transformPoseStream(p.trajectory, rowMajorMatrix, plainQuat)
+                : p.trajectory,
+            };
+            onUpdateScanParams(sourceCloud.id, nextParams);
+          }
+          return (o: [number, number, number] | null | undefined) => {
+            if (!o) return o;
+            const v = new THREE.Vector3(o[0], o[1], o[2]).applyMatrix4(applyMatrix);
+            return [v.x, v.y, v.z] as [number, number, number];
+          };
+        };
+
         const sourceOctree = sourceCloud.data.octree;
         if (sourceOctree?.sessionId) {
           // Octree-backed source: geometry lives in the backend session (in-RAM
@@ -8402,8 +8522,14 @@ export default function PointCloudViewer({
           // the row-major layout the ICP response used).
           const rowMajor = sessionMatrix.clone().transpose().toArray();
           const result = await sessionTransform(sourceOctree.sessionId, rowMajor);
+          // The scan origin lives in world coordinates and the session points
+          // were moved by `sessionMatrix` (= M · T(tr)) in world frame, so push
+          // the origin through the SAME matrix (rotation part is `quaternion`;
+          // the T(tr) prefix is a pure translation and doesn't change it).
+          const moveScanOrigin = transformSourceOrigin(sessionMatrix, quaternion);
+          const movedOctree = { ...sourceOctree, scanOrigin: moveScanOrigin(sourceOctree.scanOrigin) };
           onUpdateCloud(sourceCloud.id, buildSessionOctreeData(
-            result, sourceOctree, sourceCloud.data.fileName ?? sourceCloud.id,
+            result, movedOctree, sourceCloud.data.fileName ?? sourceCloud.id,
           ));
           setEditStates(prev => {
             const next = new Map(prev);
@@ -8454,10 +8580,23 @@ export default function PointCloudViewer({
             size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
           };
 
+          // The flat points were transformed as matrix·(pos + tr), so push the
+          // scan origin through the SAME composite: matrix · T(tr). Rotation part
+          // is still `quaternion` (the T(tr) prefix is pure translation).
+          const flatMatrix = matrix.clone().multiply(
+            new THREE.Matrix4().makeTranslation(
+              sourceState.translation.x, sourceState.translation.y, sourceState.translation.z,
+            ),
+          );
+          const moveScanOrigin = transformSourceOrigin(flatMatrix, quaternion);
           onUpdateCloud(sourceCloud.id, {
             ...sourceCloud.data,
             positions: newPositions,
             bounds: newBounds,
+            // Move a flat cloud's embedded octree.scanOrigin fallback too.
+            octree: sourceCloud.data.octree
+              ? { ...sourceCloud.data.octree, scanOrigin: moveScanOrigin(sourceCloud.data.octree.scanOrigin) }
+              : sourceCloud.data.octree,
           });
 
           // Reset translation since positions are now absolute
@@ -8478,13 +8617,17 @@ export default function PointCloudViewer({
         });
       }
     } catch (error) {
+      if (ctrl.signal.aborted || error instanceof ScanCancelledError) return;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       showToast({ type: 'error', title: 'Cloud-to-Cloud ICP Failed', message: errorMessage });
       console.error('Cloud-to-cloud ICP error:', error);
     } finally {
       setIsRunningICP(false);
+      setIcpProgress(null);
+      icpAbortRef.current = null;
+      icpRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, onUpdateCloud, buildPointSource, getEditState, setEditStates, buildSessionOctreeData]);
+  }, [selectedIds, clouds, onUpdateCloud, onUpdateScanParams, buildPointSource, getEditState, setEditStates, buildSessionOctreeData]);
 
   // Mesh-to-mesh ICP alignment
   // Mesh-to-mesh ICP. Inputs are picked in the MeshAlignDialog and passed in
@@ -8498,7 +8641,11 @@ export default function PointCloudViewer({
       return;
     }
 
+    const ctrl = new AbortController();
+    icpAbortRef.current = ctrl;
+    icpRunIdRef.current = null;
     setIsRunningICP(true);
+    setIcpProgress(null);
 
     try {
       // Get current positions for both meshes
@@ -8532,7 +8679,11 @@ export default function PointCloudViewer({
         target_indices: Array.from(targetMesh.data.indices),
         source_vertices: sourceVertices,
         source_indices: Array.from(sourceMesh.data.indices),
-      });
+      },
+        ctrl.signal,
+        (p, msg) => setIcpProgress({ label: msg, value: p }),
+        (runId) => { icpRunIdRef.current = runId; },
+      );
 
       if (!response.success) {
         throw new Error(response.error || 'Mesh-to-mesh ICP registration failed');
@@ -8599,11 +8750,15 @@ export default function PointCloudViewer({
         });
       }
     } catch (error) {
+      if (ctrl.signal.aborted || error instanceof ScanCancelledError) return;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       showToast({ type: 'error', title: 'Mesh-to-Mesh ICP Failed', message: errorMessage });
       console.error('Mesh-to-mesh ICP error:', error);
     } finally {
       setIsRunningICP(false);
+      setIcpProgress(null);
+      icpAbortRef.current = null;
+      icpRunIdRef.current = null;
     }
   }, [meshes, meshPositions, setMeshPositions, setMeshRotations]);
 
@@ -11253,6 +11408,28 @@ export default function PointCloudViewer({
     demRunIdRef.current = null;
   }, []);
 
+  // Cancel an in-flight ICP registration (c2c / m2m / c2m snap-to-fit). The
+  // backend polls its cancel Event between 20-iteration ICP batches, so the stop
+  // lands within one batch (sub-second to ~2s); the fetch abort also disconnects
+  // the stream, which flips the same Event. Mirrors cancelLAD.
+  const cancelICP = useCallback(() => {
+    if (icpRunIdRef.current) void cancelRun(icpRunIdRef.current);
+    icpAbortRef.current?.abort();
+    setIsRunningICP(false);
+    setIcpProgress(null);
+    icpAbortRef.current = null;
+    icpRunIdRef.current = null;
+  }, []);
+
+  const cancelAlignDist = useCallback(() => {
+    if (alignDistRunIdRef.current) void cancelRun(alignDistRunIdRef.current);
+    alignDistAbortRef.current?.abort();
+    setIsComputingAlignment(false);
+    setAlignDistProgress(null);
+    alignDistAbortRef.current = null;
+    alignDistRunIdRef.current = null;
+  }, []);
+
   const cancelLAD = useCallback(() => {
     // Stop the backend (frees the inversion's C++/numpy memory), then abort.
     if (ladRunIdRef.current) void cancelRun(ladRunIdRef.current);
@@ -13631,6 +13808,28 @@ export default function PointCloudViewer({
         />
       )}
 
+      {/* Alignment (ICP) status — shared by cloud-to-cloud, mesh-to-mesh, and
+          cloud-to-mesh snap-to-fit. The setup dialog closes on submit, so this
+          top-center pill is what the user watches; cancel lands between ICP
+          batches. */}
+      {isRunningICP && (
+        <StatusPill
+          testId="icp-running"
+          label={icpProgress?.label ?? 'Aligning…'}
+          progress={icpProgress?.value ?? null}
+          onCancel={cancelICP}
+        />
+      )}
+
+      {isComputingAlignment && (
+        <StatusPill
+          testId="c2m-distance-running"
+          label={alignDistProgress?.label ?? 'Comparing cloud to mesh…'}
+          progress={alignDistProgress?.value ?? null}
+          onCancel={cancelAlignDist}
+        />
+      )}
+
       {crownFitRunning && (
         <StatusPill
           testId="crown-fit-running"
@@ -14004,6 +14203,15 @@ export default function PointCloudViewer({
                     data-moving={isMovingScanRow ? 'true' : 'false'}
                     data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
                     data-octree-cache-id={scan.data?.octree?.cacheId ?? ''}
+                    // Effective world-frame scanner origin (params.origin primary,
+                    // octree.scanOrigin fallback) as "x,y,z" for E2E — must move
+                    // with the cloud when a translate is baked. Empty when none.
+                    data-scan-origin={(() => {
+                      const o = scan.params?.origin
+                        ? [scan.params.origin.x, scan.params.origin.y, scan.params.origin.z]
+                        : scan.data?.octree?.scanOrigin ?? null;
+                      return o ? o.map(v => v.toFixed(3)).join(',') : '';
+                    })()}
                     data-selected={isSelected ? 'true' : 'false'}
                     data-visible={scan.visible ? 'true' : 'false'}
                     onClick={(e) => {

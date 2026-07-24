@@ -4,8 +4,12 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { stubOpenDialog } from './helpers/stubOpenDialog';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
+// A Helios scan XML that carries a defined scanner origin (0.5, -1.0, 0.25) and
+// references tiny.xyz alongside it, so the import attaches both params and data.
+const SCAN_XML = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-scan.xml');
 
 // Translate tool on an octree-backed cloud. The tool is a DRAFT editor with an
 // explicit OK/Cancel flow (the pop-up the user drives):
@@ -468,5 +472,118 @@ test.describe('translate cloud', () => {
     await session.page.getByTestId('translate-cancel').click();
     await expect(session.page.getByTestId('translate-panel')).toBeHidden();
     await expect(triBtn).toBeEnabled();
+  });
+
+  // Import the Helios scan XML (params + attached tiny.xyz data), returning its
+  // row. The scan carries a defined scanner origin (0.5, -1.0, 0.25).
+  async function importScanWithOrigin() {
+    const { app, page } = session;
+    await stubOpenDialog(app, SCAN_XML);
+    await page.getByTestId('tool-add-scan').click();
+    const popup = page.getByTestId('scan-parameters-popup');
+    await expect(popup).toBeVisible();
+    await page.getByTestId('scan-import-xml').click();
+    await expect(popup).not.toBeVisible({ timeout: 15_000 });
+    await completeImportWizard(page);
+
+    // Find the origin-bearing row (the only one with a non-empty data-scan-origin
+    // — works whether or not a plain target cloud was imported first), then
+    // re-bind by its STABLE data-scan-id: the origin/cacheId attributes change
+    // when a translate bakes, so a selector keyed on origin would go stale.
+    const originRow = page.locator('[data-testid="scan-row"][data-scan-origin="0.500,-1.000,0.250"]');
+    await expect(originRow).toBeVisible({ timeout: 20_000 });
+    const scanId = await originRow.getAttribute('data-scan-id');
+    const row = page.locator(`[data-testid="scan-row"][data-scan-id="${scanId}"]`);
+    await expect(row).toHaveAttribute('data-has-params', 'true');
+    // A freshly imported scan is auto-selected.
+    await expect(row).toHaveAttribute('data-selected', 'true');
+    // Wait for this row's octree to be registered (its cacheId keys the entry).
+    await expect.poll(async () => {
+      const cacheId = await row.getAttribute('data-octree-cache-id');
+      if (!cacheId) return false;
+      return page.evaluate((id) => {
+        const reg = (window as any).__octreePositions;
+        return !!(reg && reg[id]);
+      }, cacheId);
+    }, { timeout: 20_000, intervals: [100, 250, 500] }).toBe(true);
+    return row;
+  }
+
+  // The scanner ORIGIN must travel WITH the cloud when a translate is baked —
+  // otherwise the recorded scanner position no longer matches the points and
+  // every origin-dependent op (LAD, triangulation crop, the panel readout) is
+  // wrong. Translate +5 in X and assert the origin moves 0.5 → 5.5.
+  test('a baked translate moves the scan origin with the cloud', async () => {
+    const row = await importScanWithOrigin();
+
+    // Capture the octree's pre-bake cacheId so we can prove the geometry bake
+    // actually ran (a fresh cacheId) — not just that the origin metadata changed.
+    const cacheBefore = await row.getAttribute('data-octree-cache-id');
+
+    await openTranslateTool();
+    await typeTranslate('x', '5');
+    await clickOK();
+
+    // The origin must shift by +5 in X: 0.5 → 5.5, Y/Z unchanged.
+    await expect(row).toHaveAttribute('data-scan-origin', '5.500,-1.000,0.250', { timeout: 60_000 });
+
+    // Sanity: the geometry bake actually happened (octree rebuilt → new cacheId),
+    // so the origin moved WITH a real geometry change, not on its own.
+    await expect(async () => {
+      const cacheAfter = await row.getAttribute('data-octree-cache-id');
+      expect(cacheAfter).toBeTruthy();
+      expect(cacheAfter).not.toBe(cacheBefore);
+    }).toPass({ timeout: 60_000 });
+  });
+
+  // Cloud-to-cloud ICP moves the whole source cloud by a rigid transform, so the
+  // scanner origin must ride the SAME transform (not just a translation — ICP can
+  // rotate). Setup: import the origin-bearing scan (source) AND a plain copy
+  // (target) at the SAME place, then translate+bake the SOURCE +5 in X so it is
+  // genuinely misaligned (origin now at 5.5). ICP should pull it back onto the
+  // target (~ -5), returning the origin to ~0.5. Asserting the origin tracked the
+  // recovered transform is what proves the ICP origin fix.
+  test('cloud-to-cloud ICP moves the scan origin with the source cloud', async () => {
+    const { app, page } = session;
+
+    // Target: a plain copy of tiny.xyz (no origin needed), imported first.
+    await importFiles(app, page, 'import-auto', FIXTURE);
+    await completeImportWizard(page);
+    // Source: the origin-bearing scan XML (origin 0.5,-1.0,0.25 + tiny.xyz data).
+    const sourceRow = await importScanWithOrigin();
+
+    // Misalign the SOURCE: translate +5 in X and bake. Origin → 5.5.
+    await openTranslateTool();
+    await typeTranslate('x', '5');
+    await clickOK();
+    await expect(sourceRow).toHaveAttribute('data-scan-origin', '5.500,-1.000,0.250', { timeout: 60_000 });
+
+    // Deselect so the multi-input Align dialog opens cleanly, then run ICP.
+    await page.evaluate(() => (window as any).__runToolCommand?.('deselect-all'));
+    await page.evaluate(() => (window as any).__runToolCommand?.('cloud-align'));
+    const dialog = page.getByTestId('align-dialog');
+    await expect(dialog).toBeVisible();
+
+    // target = the plain copy (row 0), source = the origin-bearing scan (row 1).
+    await dialog.getByTestId('align-target-picker').getByTestId('picker-row').nth(0).click();
+    await dialog.getByTestId('align-source-picker').getByTestId('picker-row').nth(1).click();
+    await dialog.getByTestId('align-run').click();
+    await expect(dialog).toBeHidden();
+
+    // Alignment completes.
+    const toast = page.locator('[data-testid="toast-success"]').last();
+    await expect(toast.getByTestId('toast-title')).toContainText(/Cloud Alignment Complete/i, { timeout: 60_000 });
+
+    // The origin rode the recovered transform back toward its original
+    // (0.5, -1.0, 0.25). ICP on identical (offset) geometry recovers ~exactly
+    // -5, so assert with a tolerance. The KEY assertion vs. the bug: the origin
+    // is NOT still stranded at 5.5 — it followed the cloud.
+    await expect.poll(async () => {
+      const attr = await sourceRow.getAttribute('data-scan-origin');
+      if (!attr) return null;
+      const [x, y, z] = attr.split(',').map(Number);
+      // "close to original AND far from the stranded 5.5" as a single boolean.
+      return Math.abs(x - 0.5) < 0.5 && Math.abs(y + 1.0) < 0.5 && Math.abs(z - 0.25) < 0.5;
+    }, { timeout: 60_000, intervals: [500, 1000] }).toBe(true);
   });
 });

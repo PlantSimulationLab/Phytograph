@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.54.0"
+BACKEND_VERSION = "0.55.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -21642,17 +21642,20 @@ class C2MDistanceResponse(BaseModel):
     point_count: Optional[int] = None
 
 
-@app.post("/api/c2m/distance", response_model=C2MDistanceResponse)
-async def compute_c2m_distance(request: C2MDistanceRequest):
-    """
-    Compute Cloud-to-Mesh (C2M) distance statistics.
+def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
+    """Worker for /api/c2m/distance. Returns the C2MDistanceResponse field dict.
 
-    Uses Open3D's RaycastingScene for efficient point-to-mesh distance computation.
-    Returns comprehensive statistics about how well the mesh fits the point cloud.
-    """
+    Runs off-thread under _bin_frame_streaming_response; reports coarse stages and
+    honors cancellation between them. Errors are caught and returned as
+    {success: False, error} (preserving the endpoint's HTTP-200 error contract);
+    only ScanCancelled propagates so the stream emits its terminal marker."""
     try:
         import open3d as o3d
         import numpy as np
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.10, "Reading points")
 
         # Convert flat arrays to numpy arrays. The source reader already returns
         # (N,3) — only the inline flat array needs reshaping.
@@ -21664,16 +21667,14 @@ async def compute_c2m_distance(request: C2MDistanceRequest):
         triangles = np.array(request.mesh_indices, dtype=np.int32).reshape(-1, 3)
 
         if len(points) == 0:
-            return C2MDistanceResponse(
-                success=False,
-                error="No points provided"
-            )
+            return dict(success=False, error="No points provided")
 
         if len(vertices) == 0 or len(triangles) == 0:
-            return C2MDistanceResponse(
-                success=False,
-                error="No mesh data provided"
-            )
+            return dict(success=False, error="No mesh data provided")
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.50, "Building raycasting scene")
 
         # Create Open3D triangle mesh
         mesh = o3d.t.geometry.TriangleMesh()
@@ -21683,6 +21684,10 @@ async def compute_c2m_distance(request: C2MDistanceRequest):
         # Create raycasting scene for efficient distance queries
         scene = o3d.t.geometry.RaycastingScene()
         scene.add_triangles(mesh)
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.90, "Computing distances")
 
         # Compute unsigned distances from each point to the mesh
         query_points = o3d.core.Tensor(points, dtype=o3d.core.float32)
@@ -21710,7 +21715,10 @@ async def compute_c2m_distance(request: C2MDistanceRequest):
         within_5mm = float(np.sum(distances <= thresh_5mm) / len(distances) * 100)
         within_10mm = float(np.sum(distances <= thresh_10mm) / len(distances) * 100)
 
-        return C2MDistanceResponse(
+        if progress is not None:
+            progress(1.0, "Done")
+
+        return dict(
             success=True,
             mean_distance=mean_dist,
             rmse=rmse,
@@ -21724,16 +21732,31 @@ async def compute_c2m_distance(request: C2MDistanceRequest):
             points_within_1mm=within_1mm,
             points_within_5mm=within_5mm,
             points_within_10mm=within_10mm,
-            point_count=len(points)
+            point_count=len(points),
         )
 
+    except ScanCancelled:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return C2MDistanceResponse(
-            success=False,
-            error=f"C2M distance computation failed: {str(e)}"
-        )
+        return dict(success=False, error=f"C2M distance computation failed: {str(e)}")
+
+
+@app.post("/api/c2m/distance")
+async def compute_c2m_distance(request: C2MDistanceRequest, http_request: Request):
+    """
+    Compute Cloud-to-Mesh (C2M) distance statistics.
+
+    Uses Open3D's RaycastingScene for efficient point-to-mesh distance computation.
+    Returns comprehensive statistics about how well the mesh fits the point cloud.
+    Streams PHP1 progress markers (see _bin_frame_streaming_response) ahead of the
+    JSON result so the renderer shows a cancellable progress pill.
+    """
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_c2m_distance(request, progress=progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 # ==================== ICP Registration (Snap to Fit) ====================
@@ -21773,10 +21796,16 @@ class ICPRegistrationResponse(BaseModel):
     iterations: Optional[int] = None
 
 
-def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transform, max_iterations=100, rmse_threshold=1e-6):
+def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transform, max_iterations=100, rmse_threshold=1e-6, progress=None):
     """
     Run ICP iteratively until RMSE plateaus (convergence).
     Returns the final transformation and metrics.
+
+    `progress`, when supplied, is a _ProgressReporter: after each 20-iteration
+    batch we poll it for cancellation (raising ScanCancelled between batches — a
+    running C++ batch can't be interrupted mid-call) and report a monotonic
+    0.15→0.95 fraction so the renderer's pill advances per batch. A no-op when
+    progress is None (e.g. direct unit-test callers).
     """
     import open3d as o3d
     import numpy as np
@@ -21789,6 +21818,13 @@ def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transf
     batch_size = 20  # iterations per batch
     max_batches = max_iterations // batch_size
 
+    # Report the ICP loop across a fixed 0.15→0.95 band. Because a run can
+    # converge early, drive the fraction off the batch index (a definite upper
+    # bound) so it never regresses and never claims done before the frame.
+    loop_lo, loop_hi = 0.15, 0.95
+    span = max(1, max_batches)
+
+    last_fraction = loop_lo
     for batch in range(max_batches):
         reg_result = o3d.pipelines.registration.registration_icp(
             source_pcd,
@@ -21803,6 +21839,14 @@ def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transf
         current_rmse = reg_result.inlier_rmse
         total_iterations += batch_size
 
+        # Cancel between batches (the just-finished C++ batch was the smallest
+        # interruptible unit), then advance the pill.
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            fraction = loop_lo + (loop_hi - loop_lo) * ((batch + 1) / span)
+            last_fraction = max(last_fraction, fraction)
+            progress(last_fraction, f"ICP iteration {total_iterations} (RMSE {current_rmse:.4g})")
+
         # Check for convergence (RMSE plateau)
         rmse_improvement = prev_rmse - current_rmse
         if rmse_improvement < rmse_threshold and rmse_improvement >= 0:
@@ -21814,17 +21858,17 @@ def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transf
     return reg_result, total_iterations
 
 
-@app.post("/api/c2m/icp-register", response_model=ICPRegistrationResponse)
-async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest):
-    """
-    Perform ICP (Iterative Closest Point) registration to align a mesh to a point cloud.
+def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
+    """Worker for /api/c2m/icp-register. Returns the ICPRegistrationResponse dict.
 
-    The point cloud is the TARGET (stays fixed), the mesh is the SOURCE (will be transformed).
-    Pre-aligns by moving source center to target center, then runs ICP until convergence.
-    """
+    See _do_c2m_distance for the streaming/cancel/error contract."""
     try:
         import open3d as o3d
         import numpy as np
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.05, "Reading points")
 
         # Convert flat arrays to numpy arrays. The source reader already returns
         # (N,3) — only the inline flat array needs reshaping.
@@ -21836,16 +21880,10 @@ async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest):
         triangles = np.array(request.mesh_indices, dtype=np.int32).reshape(-1, 3)
 
         if len(points) == 0:
-            return ICPRegistrationResponse(
-                success=False,
-                error="No points provided"
-            )
+            return dict(success=False, error="No points provided")
 
         if len(vertices) == 0 or len(triangles) == 0:
-            return ICPRegistrationResponse(
-                success=False,
-                error="No mesh data provided"
-            )
+            return dict(success=False, error="No mesh data provided")
 
         # Create point cloud (TARGET - stays fixed)
         target_pcd = o3d.geometry.PointCloud()
@@ -21855,6 +21893,10 @@ async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest):
         mesh = o3d.geometry.TriangleMesh()
         mesh.vertices = o3d.utility.Vector3dVector(vertices)
         mesh.triangles = o3d.utility.Vector3iVector(triangles)
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.10, "Sampling mesh")
 
         # Sample points from mesh surface for ICP
         num_samples = min(len(points), 50000)
@@ -21869,6 +21911,10 @@ async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest):
         source_pcd.translate(center_offset)
 
         print(f"Center alignment: moved source by [{center_offset[0]:.4f}, {center_offset[1]:.4f}, {center_offset[2]:.4f}]")
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.15, "Estimating normals")
 
         # Estimate normals for point-to-plane ICP (more robust)
         # Use adaptive radius based on point cloud density
@@ -21889,7 +21935,8 @@ async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest):
         init_transform = np.eye(4)
         reg_result, iterations = run_icp_until_convergence(
             source_pcd, target_pcd, max_corr_dist, init_transform,
-            max_iterations=request.max_iterations, rmse_threshold=request.rmse_threshold
+            max_iterations=request.max_iterations, rmse_threshold=request.rmse_threshold,
+            progress=progress
         )
 
         # Combine center alignment with ICP transformation using proper matrix composition
@@ -21913,22 +21960,39 @@ async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest):
 
         print(f"ICP complete - fitness: {reg_result.fitness:.4f}, RMSE: {reg_result.inlier_rmse:.6f}, iterations: {iterations}")
 
-        return ICPRegistrationResponse(
+        if progress is not None:
+            progress(1.0, "Done")
+
+        return dict(
             success=True,
             translation=translation,
             transformation_matrix=transform_flat,
             fitness=float(reg_result.fitness),
             rmse=float(reg_result.inlier_rmse),
-            iterations=iterations
+            iterations=iterations,
         )
 
+    except ScanCancelled:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return ICPRegistrationResponse(
-            success=False,
-            error=f"ICP registration failed: {str(e)}"
-        )
+        return dict(success=False, error=f"ICP registration failed: {str(e)}")
+
+
+@app.post("/api/c2m/icp-register")
+async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest, http_request: Request):
+    """
+    Perform ICP (Iterative Closest Point) registration to align a mesh to a point cloud.
+
+    The point cloud is the TARGET (stays fixed), the mesh is the SOURCE (will be transformed).
+    Pre-aligns by moving source center to target center, then runs ICP until convergence.
+    Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+    """
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_c2m_icp(request, progress=progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 class CloudToCloudICPRequest(BaseModel):
@@ -21951,17 +22015,17 @@ class CloudToCloudICPRequest(BaseModel):
     rmse_threshold: float = 1e-6
 
 
-@app.post("/api/c2c/icp-register", response_model=ICPRegistrationResponse)
-async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest):
-    """
-    Perform ICP (Iterative Closest Point) registration to align one point cloud to another.
+def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
+    """Worker for /api/c2c/icp-register. Returns the ICPRegistrationResponse dict.
 
-    The target cloud stays fixed, the source cloud will be transformed.
-    Pre-aligns by moving source center to target center, then runs ICP until convergence.
-    """
+    See _do_c2m_distance for the streaming/cancel/error contract."""
     try:
         import open3d as o3d
         import numpy as np
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.05, "Reading points")
 
         # Resolve each side independently — either may be a flat inline array
         # or an octree source descriptor. The source reader returns (N,3);
@@ -21976,16 +22040,10 @@ async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest):
             source_points = np.array(request.source_points or [], dtype=np.float64).reshape(-1, 3)
 
         if len(target_points) == 0:
-            return ICPRegistrationResponse(
-                success=False,
-                error="No target points provided"
-            )
+            return dict(success=False, error="No target points provided")
 
         if len(source_points) == 0:
-            return ICPRegistrationResponse(
-                success=False,
-                error="No source points provided"
-            )
+            return dict(success=False, error="No source points provided")
 
         # Create target point cloud (stays fixed)
         target_pcd = o3d.geometry.PointCloud()
@@ -22012,6 +22070,10 @@ async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest):
 
         print(f"Center alignment: moved source by [{center_offset[0]:.4f}, {center_offset[1]:.4f}, {center_offset[2]:.4f}]")
 
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.15, "Estimating normals")
+
         # Estimate normals for point-to-plane ICP (more robust)
         bbox = target_pcd.get_axis_aligned_bounding_box()
         diagonal = np.linalg.norm(bbox.max_bound - bbox.min_bound)
@@ -22030,7 +22092,8 @@ async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest):
         init_transform = np.eye(4)
         reg_result, iterations = run_icp_until_convergence(
             source_pcd, target_pcd, max_corr_dist, init_transform,
-            max_iterations=request.max_iterations, rmse_threshold=request.rmse_threshold
+            max_iterations=request.max_iterations, rmse_threshold=request.rmse_threshold,
+            progress=progress
         )
 
         # Combine center alignment with ICP transformation using proper matrix composition
@@ -22054,22 +22117,39 @@ async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest):
 
         print(f"Cloud-to-cloud ICP complete - fitness: {reg_result.fitness:.4f}, RMSE: {reg_result.inlier_rmse:.6f}, iterations: {iterations}")
 
-        return ICPRegistrationResponse(
+        if progress is not None:
+            progress(1.0, "Done")
+
+        return dict(
             success=True,
             translation=translation,
             transformation_matrix=transform_flat,
             fitness=float(reg_result.fitness),
             rmse=float(reg_result.inlier_rmse),
-            iterations=iterations
+            iterations=iterations,
         )
 
+    except ScanCancelled:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return ICPRegistrationResponse(
-            success=False,
-            error=f"Cloud-to-cloud ICP registration failed: {str(e)}"
-        )
+        return dict(success=False, error=f"Cloud-to-cloud ICP registration failed: {str(e)}")
+
+
+@app.post("/api/c2c/icp-register")
+async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_request: Request):
+    """
+    Perform ICP (Iterative Closest Point) registration to align one point cloud to another.
+
+    The target cloud stays fixed, the source cloud will be transformed.
+    Pre-aligns by moving source center to target center, then runs ICP until convergence.
+    Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+    """
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_c2c_icp(request, progress=progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 class MeshToMeshICPRequest(BaseModel):
@@ -22088,17 +22168,17 @@ class MeshToMeshICPRequest(BaseModel):
     rmse_threshold: float = 1e-6
 
 
-@app.post("/api/m2m/icp-register", response_model=ICPRegistrationResponse)
-async def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest):
-    """
-    Perform ICP (Iterative Closest Point) registration to align one mesh to another.
+def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
+    """Worker for /api/m2m/icp-register. Returns the ICPRegistrationResponse dict.
 
-    The target mesh stays fixed, the source mesh will be transformed.
-    Pre-aligns by moving source center to target center, then runs ICP until convergence.
-    """
+    See _do_c2m_distance for the streaming/cancel/error contract."""
     try:
         import open3d as o3d
         import numpy as np
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.05, "Reading meshes")
 
         # Convert flat arrays to numpy arrays
         target_verts = np.array(request.target_vertices, dtype=np.float64).reshape(-1, 3)
@@ -22107,16 +22187,10 @@ async def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest):
         source_tris = np.array(request.source_indices, dtype=np.int32).reshape(-1, 3)
 
         if len(target_verts) == 0 or len(target_tris) == 0:
-            return ICPRegistrationResponse(
-                success=False,
-                error="No target mesh data provided"
-            )
+            return dict(success=False, error="No target mesh data provided")
 
         if len(source_verts) == 0 or len(source_tris) == 0:
-            return ICPRegistrationResponse(
-                success=False,
-                error="No source mesh data provided"
-            )
+            return dict(success=False, error="No source mesh data provided")
 
         # Create target mesh and sample points
         target_mesh = o3d.geometry.TriangleMesh()
@@ -22127,6 +22201,10 @@ async def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest):
         source_mesh = o3d.geometry.TriangleMesh()
         source_mesh.vertices = o3d.utility.Vector3dVector(source_verts)
         source_mesh.triangles = o3d.utility.Vector3iVector(source_tris)
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.10, "Sampling meshes")
 
         # Sample points from mesh surfaces for ICP
         num_samples = min(50000, max(len(target_verts), len(source_verts)) * 10)
@@ -22142,6 +22220,10 @@ async def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest):
         source_pcd.translate(center_offset)
 
         print(f"Mesh-to-mesh center alignment: moved source by [{center_offset[0]:.4f}, {center_offset[1]:.4f}, {center_offset[2]:.4f}]")
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.15, "Estimating normals")
 
         # Estimate normals for point-to-plane ICP (more robust)
         bbox = target_pcd.get_axis_aligned_bounding_box()
@@ -22161,7 +22243,8 @@ async def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest):
         init_transform = np.eye(4)
         reg_result, iterations = run_icp_until_convergence(
             source_pcd, target_pcd, max_corr_dist, init_transform,
-            max_iterations=request.max_iterations, rmse_threshold=request.rmse_threshold
+            max_iterations=request.max_iterations, rmse_threshold=request.rmse_threshold,
+            progress=progress
         )
 
         # Combine center alignment with ICP transformation using proper matrix composition
@@ -22185,19 +22268,36 @@ async def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest):
 
         print(f"Mesh-to-mesh ICP complete - fitness: {reg_result.fitness:.4f}, RMSE: {reg_result.inlier_rmse:.6f}, iterations: {iterations}")
 
-        return ICPRegistrationResponse(
+        if progress is not None:
+            progress(1.0, "Done")
+
+        return dict(
             success=True,
             translation=translation,
             transformation_matrix=transform_flat,
             fitness=float(reg_result.fitness),
             rmse=float(reg_result.inlier_rmse),
-            iterations=iterations
+            iterations=iterations,
         )
 
+    except ScanCancelled:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return ICPRegistrationResponse(
-            success=False,
-            error=f"Mesh-to-mesh ICP registration failed: {str(e)}"
-        )
+        return dict(success=False, error=f"Mesh-to-mesh ICP registration failed: {str(e)}")
+
+
+@app.post("/api/m2m/icp-register")
+async def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest, http_request: Request):
+    """
+    Perform ICP (Iterative Closest Point) registration to align one mesh to another.
+
+    The target mesh stays fixed, the source mesh will be transformed.
+    Pre-aligns by moving source center to target center, then runs ICP until convergence.
+    Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+    """
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_m2m_icp(request, progress=progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)

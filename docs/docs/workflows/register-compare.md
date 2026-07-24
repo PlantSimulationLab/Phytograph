@@ -74,6 +74,12 @@ ICP runs and reports:
 The source cloud is updated in place with the transformation. Undo to
 revert.
 
+Unlike stitching, ICP **preserves** the source's scan parameters: the
+scanner **origin** (and, for a moving-platform scan, the whole trajectory)
+is moved by the same rigid transform as the points, so it stays consistent
+with the aligned cloud. Origin-dependent analyses (LAD, triangulation)
+therefore keep working on a registered source scan.
+
 ## Mesh-to-mesh ICP
 
 Same idea as cloud-to-cloud but on surfaces.
@@ -125,6 +131,13 @@ fitness and RMSE. Undo to revert.
     The **Alignment** panel from a Cloud-to-Mesh Distance run also has a
     **Snap to Fit (ICP)** button that registers the same cloud + mesh you just
     measured — so you can check the fit, then snap, in one place.
+
+!!! note "Progress and cancelling"
+    Every registration and the cloud-to-mesh distance run shows a progress pill
+    at the top of the viewport while it works — the ICP tools advance it per
+    iteration batch with the current RMSE. Click the **✕** on the pill to
+    cancel; the alignment stops (within one iteration batch) and nothing is
+    moved, exactly as if it hadn't been run.
 
 ## When ICP fails
 
