@@ -71,7 +71,7 @@ import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
 import { poseStreamToWire, shiftPoseStream, trajectoryDurationS, deriveMovingScanGrid, poseStreamBounds } from '../lib/poseStream';
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
-import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible } from '../lib/scan';
+import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -16221,7 +16221,10 @@ export default function PointCloudViewer({
       <StitchDialog
         isOpen={showStitchDialog}
         onClose={() => setShowStitchDialog(false)}
-        clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color, pointCount: c.data.pointCount }))}
+        clouds={clouds.map(c => {
+          const scan = scans.find(s => s.id === c.id)!;
+          return { id: c.id, label: scanDisplayName(scan), color: c.color, pointCount: c.data.pointCount, hasOrigin: scanHasKnownOrigin(scan) };
+        })}
         initialSelectedIds={selectedIds}
         onStitch={(ids) => { if (ids.length >= 2) onStitchClouds?.(ids); }}
       />

@@ -14,17 +14,43 @@ in world coordinates, and you want a single combined cloud.
 2. In the dialog, check the two or more clouds to merge. (If you had clouds
    selected in the scene, they're pre-checked — you can change the choice
    here.)
-3. Click **Stitch**. A new cloud appears containing all points. The
-   originals stay in the scene; hide them if you want.
+3. Click **Stitch**. The clouds are combined in the backend (a brief
+   progress indicator shows while the merged cloud's octree is built), and a
+   single new cloud replaces the originals in the scene.
 
-Stitching is reversible via undo, and the originals aren't deleted —
-you can re-stitch with a different subset.
+Stitching is reversible: a single **Undo** removes the merged cloud and
+restores the original clouds exactly as they were, so you can re-stitch with
+a different subset.
 
 !!! note "Stitch ≠ register"
-    Stitch is a simple concatenation. It assumes the clouds are
-    already in the same coordinate frame. If you need to register them
-    first, use **Cloud-to-cloud ICP** (below) on each pair before
-    stitching.
+    Stitch **concatenates** the clouds' points into one cloud. Clouds
+    imported with different global shifts are lined up in true world
+    coordinates automatically, so a stitch never mis-places a shifted cloud.
+    What it does **not** do is *register* — it won't correct clouds that are
+    genuinely mis-aligned in the world. For that, use **Cloud-to-cloud ICP**
+    (below) on each pair first, then stitch.
+
+!!! warning "Stitching discards scanner origins"
+    A stitched cloud has no single scanner origin, so scan parameters
+    (origin, trajectory) from the source clouds are dropped on the merge. That
+    means **origin-dependent analyses are unavailable on the merged cloud**:
+
+    - **Backfill Misses** — recovered sky/miss points can't be placed for the
+      viewer overlay (they'd still be computed for LAD *directions*, but LAD
+      itself is unavailable — see below).
+    - **Helios triangulation** (the *Helios method*, which projects to per-pulse
+      spherical angles from the scanner origin).
+    - **Leaf Area Density** (needs the beam origin for the Beer's-law inversion).
+
+    If any cloud you're stitching carries an origin, the Stitch dialog shows a
+    warning and the button reads **Stitch anyway** so the loss is a deliberate
+    choice. Run these analyses on the individual scans *before* stitching, or —
+    if the clouds are mis-aligned — **register** them with Cloud-to-cloud ICP
+    first (that preserves each scan's own origin) rather than stitching.
+
+    The underlying points, colors, intensity, and scalar attributes are all
+    preserved (attributes present on only some inputs are carried through and
+    filled with zeros for the clouds that lacked them).
 
 ## Cloud-to-cloud ICP
 

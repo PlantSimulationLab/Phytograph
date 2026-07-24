@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.53.0"
+BACKEND_VERSION = "0.54.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -20709,6 +20709,221 @@ async def session_duplicate(session_id: str):
         "session_id": session_id,
         "duplicate": {"session_id": child.session_id, "point_count": int(len(child.positions)),
                       "cache_id": ck, "cache_dir": str(ccd), **cmeta},
+    }
+
+
+class SessionMergeRequest(BaseModel):
+    """Concatenate the SURVIVING points of two or more sessions into one NEW
+    session (stitch). Operates entirely on the in-RAM arrays — no source file
+    read. The inputs are left untouched (the renderer removes them from the
+    scene, carrying each session id for deferred-free so undo can restore them)."""
+    session_ids: List[str]
+
+
+def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
+    """Concatenate several sessions' SURVIVING points into one new registered
+    session. The CALLER MUST HOLD `_cloud_session_lock`. The octree is NOT built
+    here (caller rebuilds, outside the lock).
+
+    Reconciliation (the whole point of a correct stitch — see issue #3):
+      - world_shift: every session stores `stored = world - shift`. We pick the
+        first input's shift as the common output frame and re-express each source
+        into it (`stored_out = stored_i + (shift_i - shift_out)`), so points that
+        live at different global shifts line up in true world space. This is the
+        same conjugation the transform endpoint uses (there for a rigid matrix,
+        here for a pure translation between two shift origins).
+      - extras / extra_dims_meta: take the UNION of scalar extra-dim slugs across
+        inputs; a source missing a slug contributes zeros for its rows, so the
+        concatenated column stays point-aligned (a source with no `is_miss`, say,
+        merges as all-hits). Slug order/labels follow first appearance.
+      - colors / intensity / timestamps / beam_origins: all-or-nothing per input.
+        If ANY input carries the attribute, the merged cloud carries it and the
+        inputs lacking it contribute a neutral fill (white / 0), so the column
+        never falls out of alignment with positions.
+
+    Intentionally DROPPED (not carried onto the merged cloud):
+      - `backfilled_misses`: the separate recovered-miss buffer. Interleaved
+        `is_miss` misses ARE unioned (they ride in `extras`), but this buffer is
+        per-scan and tied to a single scanner origin. A merged multi-scan cloud
+        has no single origin, so its miss overlay is rebuilt from the interleaved
+        is_miss survivors only (`_build_miss_octree(..., origin=None)`), and LAD —
+        which needs a single beam apex — is not meaningful on a stitched cloud
+        anyway. `miss_octree_origin` is likewise reset to None for the same reason.
+    """
+    import time
+
+    # Per-input surviving slices (snapshot once; caller holds the lock).
+    survs = [~s.deleted for s in sessions]
+    counts = [int(m.sum()) for m in survs]
+    total = int(sum(counts))
+
+    # Common output frame = first input's shift (None → true world coords).
+    shift_out = sessions[0].world_shift
+    shift_out_arr = (np.asarray(shift_out, dtype=np.float64)
+                     if shift_out is not None else np.zeros(3, dtype=np.float64))
+
+    def _reshift(pts: np.ndarray, sess: "CloudSession") -> np.ndarray:
+        # stored_out = stored_i + (shift_i - shift_out); both None → no-op.
+        shift_i = (np.asarray(sess.world_shift, dtype=np.float64)
+                   if sess.world_shift is not None else np.zeros(3, dtype=np.float64))
+        delta = shift_i - shift_out_arr
+        out = pts.astype(np.float64, copy=False)
+        if np.any(delta != 0.0):
+            out = out + delta
+        return out
+
+    positions = np.vstack([_reshift(s.positions[m], s) for s, m in zip(sessions, survs)])
+
+    # colors / intensity: all-or-nothing. Present iff any input has it; missing
+    # inputs fill neutral (white for colour, 0 for intensity), matching the LAS
+    # scale the session stores (uint16 0-65535).
+    any_colors = any(s.colors is not None for s in sessions)
+    if any_colors:
+        color_parts = []
+        for s, m, c in zip(sessions, survs, counts):
+            if s.colors is not None:
+                color_parts.append(s.colors[m])
+            else:
+                color_parts.append(np.full((c, 3), 65535, dtype=np.uint16))
+        colors = np.vstack(color_parts)
+    else:
+        colors = None
+
+    any_intensity = any(s.intensity is not None for s in sessions)
+    if any_intensity:
+        intensity = np.concatenate([
+            s.intensity[m] if s.intensity is not None else np.zeros(c, dtype=np.uint16)
+            for s, m, c in zip(sessions, survs, counts)
+        ])
+    else:
+        intensity = None
+
+    any_timestamps = any(s.timestamps is not None for s in sessions)
+    if any_timestamps:
+        timestamps = np.concatenate([
+            np.asarray(s.timestamps, dtype=np.float64)[m] if s.timestamps is not None
+            else np.zeros(c, dtype=np.float64)
+            for s, m, c in zip(sessions, survs, counts)
+        ])
+    else:
+        timestamps = None
+
+    any_beam = any(s.beam_origins is not None for s in sessions)
+    if any_beam:
+        beam_parts = []
+        for s, m, c in zip(sessions, survs, counts):
+            if s.beam_origins is not None:
+                beam_parts.append(_reshift(np.asarray(s.beam_origins, dtype=np.float64)[m], s))
+            else:
+                beam_parts.append(np.zeros((c, 3), dtype=np.float64))
+        beam_origins = np.vstack(beam_parts)
+    else:
+        beam_origins = None
+
+    # Union of extra-dim slugs, ordered by first appearance; carry labels.
+    merged_meta: List[dict] = []
+    seen_slugs: set = set()
+    for s in sessions:
+        for entry in s.extra_dims_meta:
+            slug = entry.get("slug")
+            if slug is not None and slug not in seen_slugs:
+                seen_slugs.add(slug)
+                merged_meta.append({"slug": slug, "label": entry.get("label", slug)})
+    # Any slug that exists in `extras` but not in extra_dims_meta (defensive).
+    for s in sessions:
+        for slug in s.extras.keys():
+            if slug not in seen_slugs:
+                seen_slugs.add(slug)
+                merged_meta.append({"slug": slug, "label": slug})
+
+    extras: Dict[str, np.ndarray] = {}
+    for entry in merged_meta:
+        slug = entry["slug"]
+        parts = []
+        for s, m, c in zip(sessions, survs, counts):
+            col = s.extras.get(slug)
+            if col is not None:
+                parts.append(np.asarray(col, dtype=np.float32)[m])
+            else:
+                parts.append(np.zeros(c, dtype=np.float32))
+        extras[slug] = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+
+    # CRS: keep it only if every input agrees (else the merged cloud has no single CRS).
+    epsgs = {s.crs_epsg for s in sessions if s.crs_epsg is not None}
+    crs_epsg = next(iter(epsgs)) if len(epsgs) == 1 and all(s.crs_epsg is not None for s in sessions) else None
+
+    new_id = uuid.uuid4().hex[:8]
+    new_sess = CloudSession(
+        session_id=new_id,
+        source_path=sessions[0].source_path,  # provenance label only
+        ascii_format=sessions[0].ascii_format,
+        column_plan=sessions[0].column_plan,
+        positions=positions,
+        colors=colors,
+        intensity=intensity,
+        extras=extras,
+        extra_dims_meta=merged_meta,
+        timestamps=timestamps,
+        beam_origins=beam_origins,
+        world_shift=(shift_out_arr.copy() if shift_out is not None else None),
+        crs_epsg=crs_epsg,
+        deleted=np.zeros(total, dtype=bool),
+        deleted_history=[],
+        octree_cache_id=None,
+        created_at=time.time(),
+        last_accessed=time.time(),
+        # A merged multi-scan cloud has no single beam apex → project misses at
+        # true far-field coords (origin=None). Set by the endpoint after rebuild.
+        miss_octree_origin=None,
+    )
+    _cloud_sessions[new_id] = new_sess
+    return new_sess
+
+
+@app.post("/api/cloud/session/merge")
+async def session_merge(request: SessionMergeRequest):
+    """Concatenate the surviving points of >=2 sessions into one new session and
+    build its octree (+ a projected-miss octree when any input carried misses).
+    Reconciles differing global shifts and unions scalar extra-dim columns. No
+    source file read. Returns {merged: {session_id, point_count, ...octree}}."""
+    ids = list(request.session_ids or [])
+    if len(ids) < 2:
+        raise HTTPException(status_code=400, detail="merge requires at least 2 session ids.")
+
+    sessions = [_get_cloud_session(sid) for sid in ids]  # 404 propagates per id
+
+    with _cloud_session_lock:
+        # Refuse an all-empty merge (nothing survives) — PotreeConverter can't
+        # ingest 0 points, and there's nothing to stitch.
+        if sum(int((~s.deleted).sum()) for s in sessions) == 0:
+            raise HTTPException(status_code=400, detail="merge inputs have no surviving points.")
+        merged = _merge_sessions_locked(sessions)
+
+    _sweep_cloud_sessions()
+    cache_key, cache_dir, meta = _session_rebuild(merged)
+
+    # Misses: any interleaved is_miss survivors on the merged cloud → build the
+    # projected-miss octree at true far-field coords (no single origin).
+    miss_arr = merged.extras.get(_MISS_SLUG)
+    has_misses = bool(miss_arr is not None and np.any(miss_arr != 0))
+    miss_octree_cache_id = None
+    if has_misses:
+        miss_octree_cache_id = _build_miss_octree(merged, None)
+        with _cloud_session_lock:
+            merged.miss_octree_cache_id = miss_octree_cache_id
+
+    world_shift_out = merged.world_shift.tolist() if merged.world_shift is not None else None
+    return {
+        "merged": {
+            "session_id": merged.session_id,
+            "point_count": int(len(merged.positions)),
+            "world_shift": world_shift_out,
+            "cache_id": cache_key,
+            "cache_dir": str(cache_dir),
+            "has_misses": has_misses,
+            "miss_octree_cache_id": miss_octree_cache_id,
+            **meta,
+        },
     }
 
 

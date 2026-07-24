@@ -3578,6 +3578,37 @@ export async function duplicateCloudSession(
   }
 }
 
+/** Concatenate the surviving points of >=2 cloud sessions into one NEW session
+ * and build its octree (the "Stitch Clouds" merge). Reconciles differing global
+ * shifts and unions scalar extra-dim columns server-side — no source file read,
+ * and (critically) no reliance on the renderer's flat `positions`, which is empty
+ * for octree-backed clouds. Returns the merged octree metadata. */
+export async function sessionMerge(
+  sessionIds: string[],
+): Promise<{ merged: OctreeMetadata & { session_id: string; point_count: number; cache_id: string; world_shift?: [number, number, number] | null; has_misses?: boolean; miss_octree_cache_id?: string | null } }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/merge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_ids: sessionIds }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('session_merge failed:', error);
+    throw error;
+  }
+}
+
 /** Run CSF ground segmentation on the session's in-RAM points, append a
  * `ground_class` column, and rebuild the octree from the arrays (no file read). */
 export async function sessionSegmentGround(
