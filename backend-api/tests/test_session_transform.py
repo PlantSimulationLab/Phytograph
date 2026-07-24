@@ -116,6 +116,36 @@ def _rot_z(deg: float) -> np.ndarray:
     return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
+def _rot_x(deg: float) -> np.ndarray:
+    a = np.deg2rad(deg)
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+def _rot_y(deg: float) -> np.ndarray:
+    a = np.deg2rad(deg)
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
+def _euler_xyz(rx: float, ry: float, rz: float) -> np.ndarray:
+    """Composed rotation about world X then Y then Z (degrees). This is the exact
+    convention the frontend Transformation tool emits: it builds a THREE.Euler in
+    'XYZ' order and applies it as a world-frame rotation, i.e. R = Rz·Ry·Rx."""
+    return _rot_z(rz) @ _rot_y(ry) @ _rot_x(rx)
+
+
+def _pivot_matrix(R: np.ndarray, pivot: np.ndarray, t: np.ndarray) -> list:
+    """Row-major flat 4x4 for 'rotate about world pivot P, then translate by t':
+        world_new = R·(world − P) + P + t
+    Expanded to the endpoint's `world_new = R·world + t_eff` form, the effective
+    translation folded into the last column is  t_eff = P − R·P + t. This is the
+    matrix the renderer's bakeCloudTransform must POST; these tests pin it so a
+    convention drift on either side fails here first."""
+    t_eff = pivot - R @ pivot + t
+    return _matrix(R, t_eff)
+
+
 def _create(base: str, grid_xyz: Path, world_shift=None) -> tuple[str, dict]:
     body = {"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT}
     if world_shift is not None:
@@ -169,6 +199,57 @@ def test_transform_rotation_rotates_octree_bounds(server, grid_xyz):
     exp_min, exp_max = _expected_bounds(_grid_corners(), R, np.zeros(3))
     np.testing.assert_allclose(tb["min"], exp_min, atol=1e-3)
     np.testing.assert_allclose(tb["max"], exp_max, atol=1e-3)
+
+
+def test_transform_rotation_about_pivot_bounds(server, grid_xyz):
+    """Rotate the grid about a NON-origin pivot (its own center 0.45^3) and assert
+    the octree bounds match rotating the corners about that pivot — not about the
+    world origin. This is the exact matrix the Transformation tool sends when a
+    scene origin (or the cloud's bbox center) is the rotation pivot."""
+    sid, _ = _create(server, grid_xyz)
+    R = _rot_z(90.0)
+    pivot = np.array([0.45, 0.45, 0.45])
+    r = _transform(server, sid, _pivot_matrix(R, pivot, np.zeros(3)))
+    assert r.status_code == 200, r.text
+    tb = r.json()["tight_bounds"]
+    # Corners rotated about the pivot: world_new = R·(world − P) + P.
+    moved = (_grid_corners() - pivot) @ R.T + pivot
+    np.testing.assert_allclose(tb["min"], moved.min(axis=0), atol=1e-3)
+    np.testing.assert_allclose(tb["max"], moved.max(axis=0), atol=1e-3)
+
+
+def test_transform_euler_xyz_about_pivot_readback(tmp_path, monkeypatch):
+    """Full rigid transform matching the renderer's contract end-to-end: a combined
+    X/Y/Z Euler rotation about a non-origin pivot plus a translation. Asserts the
+    world-frame read-back equals R·(world − P) + P + t, pinning both the XYZ Euler
+    order (R = Rz·Ry·Rx) and the pivot-conjugation the frontend bake composes.
+    In-process so we can read the session back (the rebuild runs in the main
+    thread — stable, unlike TestClient's worker thread on macOS)."""
+    import asyncio
+
+    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "cache"))
+    grid = tmp_path / "grid.xyz"
+    grid.write_text("\n".join(
+        f"{i*0.1:.4f} {j*0.1:.4f} {k*0.1:.4f} 10 20 30 0.5"
+        for i in range(10) for j in range(10) for k in range(10)
+    ) + "\n")
+
+    create_req = main.CloudSessionCreateRequest(source_path=str(grid), ascii_format=GRID_FORMAT)
+    sid = asyncio.new_event_loop().run_until_complete(
+        main.create_cloud_session(create_req))["session_id"]
+
+    src = main.PointSource(source_path="", session_id=sid)
+    before = main._read_points_from_source(src)[0].copy()  # world frame
+
+    R = _euler_xyz(30.0, -20.0, 45.0)
+    pivot = np.array([0.45, 0.45, 0.45])
+    t = np.array([2.0, -1.0, 0.5])
+    req = main.SessionTransformRequest(matrix=_pivot_matrix(R, pivot, t))
+    asyncio.new_event_loop().run_until_complete(main.session_transform(sid, req))
+
+    after = main._read_points_from_source(src)[0]  # world frame
+    expected = (before - pivot) @ R.T + pivot + t
+    np.testing.assert_allclose(after, expected, atol=1e-6)
 
 
 def test_transform_conjugates_world_shift(tmp_path, monkeypatch):

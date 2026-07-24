@@ -161,6 +161,31 @@ test.describe('translate cloud', () => {
     await expect(page.getByTestId('translate-panel')).toBeVisible();
   }
 
+  // Type an exact rotation value (degrees) into the panel. Updates the DRAFT +
+  // viewport live; does NOT bake. Requires the panel to be open.
+  async function typeRotate(axis: 'x' | 'y' | 'z', value: string) {
+    const input = session.page.getByTestId(`rotation-input-${axis}`);
+    await input.fill(value);
+    await input.press('Enter');
+  }
+
+  // Open the Scene Origin panel and set an exact world origin via the numeric
+  // inputs. Leaves the panel open; caller closes it (or opens Transform next).
+  async function setSceneOrigin(x: string, y: string, z: string) {
+    const { page } = session;
+    await page.getByTestId('tool-set-scene-origin').click();
+    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
+    for (const [axis, v] of [['x', x], ['y', y], ['z', z]] as const) {
+      const input = page.getByTestId(`scene-origin-input-${axis}`);
+      await input.fill(v);
+      await input.press('Enter');
+    }
+    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-has-origin', 'true');
+    // Close the origin panel so the Transform tool can open (panels are exclusive).
+    await page.getByTestId('scene-origin-close').click();
+    await expect(page.getByTestId('scene-origin-panel')).toBeHidden();
+  }
+
   // Click OK and wait for the bake to finish (panel closes).
   async function clickOK() {
     const { page } = session;
@@ -472,6 +497,194 @@ test.describe('translate cloud', () => {
     await session.page.getByTestId('translate-cancel').click();
     await expect(session.page.getByTestId('translate-panel')).toBeHidden();
     await expect(triBtn).toBeEnabled();
+  });
+
+  // A typed rotation is a DRAFT: the viewport rotates live but geometry is not
+  // baked until OK. Cancel must revert it (net offset back to baseline, world
+  // position unchanged) exactly like a translation draft.
+  test('Cancel discards a pending rotation (nothing baked)', async () => {
+    await importTiny();
+    const before = await readEntryWhenReady();
+
+    await openTranslateTool();
+    // Rotate 90° about Z. The fixture cylinder is centered at (x,y)=(0,0), so a
+    // rotation about its own bbox center leaves the octree object's WORLD position
+    // essentially unchanged — the guard here is the Cancel/no-bake contract, which
+    // the rotation-bakes test complements with a real geometry assertion.
+    await typeRotate('z', '90');
+    await expect(session.page.getByTestId('translate-panel')).toHaveAttribute('data-dirty', 'true');
+
+    await session.page.getByTestId('translate-cancel').click();
+    await expect(session.page.getByTestId('translate-panel')).toBeHidden();
+    const after = await readEntryWhenReady();
+    // Nothing baked: net offset ~0 and world position within a hair of baseline.
+    expect(Math.abs(after.net.x)).toBeLessThan(1e-3);
+    expect(Math.abs(after.world.x - before.world.x)).toBeLessThan(1e-2);
+    expect(Math.abs(after.world.y - before.world.y)).toBeLessThan(1e-2);
+  });
+
+  // The motivating correctness property for rotation: a rotated cloud fed to a
+  // COMPUTE tool must be computed at its rotated pose (same silent-offset class
+  // of bug the translate test guards). We rotate 90° about Z around a scene
+  // origin OFF the cloud center, bake, triangulate, and assert on real exported
+  // OBJ vertex coordinates — which a render-only rotation could never produce.
+  test('a rotated cloud (about a scene origin) triangulates at its rotated pose', async () => {
+    const { page } = session;
+
+    // Capture the mesh OBJ export blob (same interception as the translate test).
+    await page.evaluate(() => {
+      const textByUrl = new Map<string, Promise<string>>();
+      const captured: { name: string; text: string }[] = [];
+      (window as unknown as { __exportedBlobs: typeof captured }).__exportedBlobs = captured;
+      const origCreate = URL.createObjectURL;
+      URL.createObjectURL = function (obj: Blob | MediaSource): string {
+        const url = origCreate.call(URL, obj);
+        if (obj instanceof Blob) textByUrl.set(url, obj.text());
+        return url;
+      };
+      const origAnchorClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+        if (this.download) {
+          const textPromise = textByUrl.get(this.href);
+          if (textPromise) textPromise.then((text) => { captured.push({ name: this.download, text }); });
+          return;
+        }
+        return origAnchorClick.call(this);
+      };
+    });
+
+    const cloudRow = await importTiny();
+
+    // Set a scene origin at (2, 0, 0) — well off the cylinder (centered at origin,
+    // x,y ∈ [-0.3, 0.3]). A +90° Z-rotation about (2,0,0) maps a world point
+    // (x, y) → (2 − y, x − 2): new X ∈ [1.7, 2.3] (centered ~2) and new Y ∈
+    // [-2.3, -1.7] (centered ~−2). That off-origin fingerprint is what we assert.
+    await setSceneOrigin('2', '0', '0');
+
+    await openTranslateTool();
+    await typeRotate('z', '90');
+    await clickOK();
+    // Wait for the bake: the rotated octree rebuild lands (net back to ~0).
+    await expect.poll(async () => {
+      const e = await readEntry();
+      return e ? Math.round(e.net.x * 1000) / 1000 : null;
+    }, { timeout: 60_000, intervals: [250, 500, 1000] }).toBe(0);
+
+    // Triangulate (Poisson depth 7, matching the other specs on this fixture).
+    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+    await page.getByTestId('tool-triangulate').click();
+    const triModal = page.getByTestId('triangulation-popup');
+    await expect(triModal).toBeVisible();
+    await triModal.getByTestId('triangulation-method').selectOption('poisson');
+    await triModal.getByTestId('triangulation-poisson-depth').fill('7');
+    await triModal.getByTestId('triangulation-run-button').click();
+
+    const meshRow = page.getByTestId('mesh-row').first();
+    await expect(meshRow).toBeVisible({ timeout: 60_000 });
+
+    await meshRow.click();
+    await expect(meshRow).toHaveAttribute('data-selected', 'true');
+    await page.evaluate(() => (window as any).__openExportPanel?.());
+    await expect(page.getByTestId('export-modal')).toBeVisible();
+    await page.getByTestId('export-mesh-obj').click();
+
+    await expect.poll(async () => page.evaluate(
+      () => ((window as unknown as { __exportedBlobs?: unknown[] }).__exportedBlobs ?? []).length,
+    ), { timeout: 15_000, intervals: [100, 250, 500] }).toBeGreaterThan(0);
+
+    const obj = await page.evaluate(
+      () => (window as unknown as { __exportedBlobs: { name: string; text: string }[] })
+        .__exportedBlobs[0].text,
+    );
+    const verts = obj.split('\n')
+      .filter((l) => l.startsWith('v '))
+      .map((l) => l.slice(2).trim().split(/\s+/).map(Number))
+      .filter((c) => c.length >= 2 && c.every((n) => Number.isFinite(n)));
+    expect(verts.length).toBeGreaterThan(0);
+    const xs = verts.map((c) => c[0]);
+    const ys = verts.map((c) => c[1]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+
+    // After the +90°-about-(2,0,0) rotation the mesh's X sits around 2 and its Y
+    // around −2 (analytic centers; Poisson's surface extraction overshoots, so we
+    // assert the band CENTERS rather than tight min/max) — decisively NOT the
+    // original span (x,y ∈ [-0.3, 0.3], both centered ~0). Together these prove a
+    // real rotation about the off-center origin was baked into geometry (a
+    // render-only rotation would export the ORIGINAL coordinates).
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    expect(cx).toBeGreaterThan(1.5);
+    expect(cx).toBeLessThan(2.5);
+    expect(cy).toBeGreaterThan(-2.5);
+    expect(cy).toBeLessThan(-1.5);
+  });
+
+  // The scene origin is viewport-level (rotation pivot + orbit center), NOT tied
+  // to a selected scan — so its tool must be available on an EMPTY scene, and you
+  // can set it by typing coordinates with nothing loaded. Guards against the tool
+  // being (re)gated on a cloud selection.
+  test('Set Scene Origin is available with no scan and accepts typed coordinates', async () => {
+    const { page } = session;
+    // beforeEach reset to a fresh (empty) scene; do NOT import anything.
+    const btn = page.getByTestId('tool-set-scene-origin');
+    await expect(btn).toBeEnabled();
+
+    await btn.click();
+    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
+    // Type an origin with no geometry present.
+    for (const [axis, v] of [['x', '3'], ['y', '-2'], ['z', '1']] as const) {
+      const input = page.getByTestId(`scene-origin-input-${axis}`);
+      await input.fill(v);
+      await input.press('Enter');
+    }
+    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-has-origin', 'true');
+    expect(parseFloat(await page.getByTestId('scene-origin-input-x').inputValue())).toBeCloseTo(3, 3);
+    expect(parseFloat(await page.getByTestId('scene-origin-input-y').inputValue())).toBeCloseTo(-2, 3);
+    // Clean up so the shared-app next test starts without a lingering origin/panel.
+    await page.getByTestId('scene-origin-clear').click();
+    await page.getByTestId('scene-origin-close').click();
+    await expect(page.getByTestId('scene-origin-panel')).toBeHidden();
+  });
+
+  // Click-to-place: arming pick mode and clicking the viewport sets the origin
+  // and populates the panel's X/Y/Z fields (surface-snap or ground-plane).
+  test('Set Scene Origin — click-to-place sets the origin from a viewport click', async () => {
+    const { page } = session;
+    await importTiny();
+
+    await page.getByTestId('tool-set-scene-origin').click();
+    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
+    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-has-origin', 'false');
+
+    // Snapshot the camera BEFORE picking: placing an origin must NOT move the
+    // view (it's the rotation pivot only, not an orbit re-target).
+    const camState = () => page.evaluate(() => (window as any).__getCameraState?.());
+    const camBefore = await camState();
+
+    // Arm pick mode, then click OFF-center (so a would-be orbit re-target would be
+    // clearly visible) — the cylinder still fills enough of the view to hit it.
+    await page.getByTestId('scene-origin-pick').click();
+    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-place-mode', 'true');
+    const canvas = page.locator('canvas').first();
+    const box = await canvas.boundingBox();
+    if (!box) throw new Error('canvas has no bounding box');
+    await page.mouse.click(box.x + box.width * 0.42, box.y + box.height * 0.45);
+
+    // The pick set an origin (marker + fields populated) and disarmed place mode.
+    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-has-origin', 'true');
+    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-place-mode', 'false');
+    // The X field now holds a finite number (the picked world X). The cylinder is
+    // near the origin, so it should be within a small window of 0.
+    const xVal = await page.getByTestId('scene-origin-input-x').inputValue();
+    expect(Number.isFinite(parseFloat(xVal))).toBe(true);
+    expect(Math.abs(parseFloat(xVal))).toBeLessThan(2);
+
+    // The camera did NOT move: both its position and orbit target are unchanged.
+    const camAfter = await camState();
+    const dist = (a: number[], b: number[]) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+    expect(dist(camBefore.position, camAfter.position)).toBeLessThan(1e-3);
+    expect(dist(camBefore.target, camAfter.target)).toBeLessThan(1e-3);
   });
 
   // Import the Helios scan XML (params + attached tiny.xyz data), returning its

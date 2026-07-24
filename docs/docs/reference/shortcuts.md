@@ -26,6 +26,13 @@ start typing, press <kbd>Enter</kbd> to run, <kbd>Esc</kbd> to close.
 | Select a mesh | Left-click the mesh (draws a highlight outline) |
 | Add/remove a mesh from the selection | <kbd>⌘/Ctrl</kbd> + left-click the mesh |
 | Clear the mesh selection | Left-click empty space |
+| Select a scan | Left-click its scanner marker (same as clicking its row in the **Scans** panel) |
+| Add/remove a scan from the selection | <kbd>⌘/Ctrl</kbd> + left-click its scanner marker |
+
+A voxel **grid** box is deliberately "click-through": because it usually
+encloses the very geometry it measures, clicking it selects whatever is
+inside or behind it instead. The grid itself is selected by clicking a part
+of the box with nothing behind it, or from its row in the **Meshes** panel.
 
 ## Tool modes
 
@@ -81,7 +88,7 @@ tool. Apply with the panel's **Apply Erase** button or discard with
 
 ## Transform mode (Blender-style)
 
-When the Translate tool is active:
+When the Transform tool is active:
 
 | Shortcut | Action |
 |---|---|
@@ -94,13 +101,15 @@ When the Translate tool is active:
 | <kbd>Enter</kbd> / click | Set the value |
 | <kbd>Esc</kbd> / right-click | Cancel this entry |
 
-Translate works on point clouds, skeletons, and meshes; scale and rotate
-apply to the selected mesh.
+The <kbd>T</kbd> translate gesture works on point clouds, skeletons, and
+meshes; the <kbd>S</kbd>/<kbd>R</kbd> scale and rotate gestures apply to
+the selected mesh. To **rotate a point cloud**, use the Transform panel's
+Rotation fields or its rotation rings (see below).
 
 For a **point cloud**, this gesture only sets the pending position in the
-Translate panel — it does not apply the move. Click **OK** in the panel to
+Transform panel — it does not apply the move. Click **OK** in the panel to
 apply it (or **Cancel** to discard). See
-[Clean a point cloud → Translate](../workflows/clean-point-cloud.md#translate-and-level).
+[Clean a point cloud → Transform](../workflows/clean-point-cloud.md#transform-translate-and-rotate).
 
 ## Selection (Scene panel)
 

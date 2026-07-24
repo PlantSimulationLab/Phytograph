@@ -28,13 +28,14 @@ confirmation first because it can&rsquo;t be undone.
 ## Left tool column
 
 A vertical column down the left side. At the top are the **view** controls
-(reset camera, command-palette search) and the **snap-view** gizmo. Below
-those are two always-visible blocks — **Create** and **Tools**:
+(command-palette search and **Set Scene Origin** — the rotation pivot) and
+the **snap-view** gizmo. Below those are two always-visible blocks —
+**Create** and **Tools**:
 
 | Block | Buttons |
 |---|---|
 | **Create** (build the scene) | Generate Plant, Import Model, Create Voxel Grid, Create Plane, Add Scan |
-| **Tools** › Pre-processing | Translate, Crop, Erase, Filter, Resample, Move to Origin, Align (ICP), Stitch |
+| **Tools** › Pre-processing | Transform, Crop, Erase, Filter, Resample, Move to Origin, Align (ICP), Stitch |
 | **Tools** › Segmentation | Segment Ground, Segment Wood / Leaf, Segment Trees |
 | **Tools** › Reconstruction | Triangulate, Extract Skeleton, Build QSM, Leaf Area Density |
 
@@ -127,7 +128,7 @@ multi-selection. Selecting a mesh — whether in the viewport or in the
 **Meshes** panel — draws a bright highlight outline around it in the 3D
 view and highlights its row in the panel, so the two stay in sync. Click
 an empty area to clear the selection. (Viewport mesh selection pauses
-while an edit tool such as Crop, Erase, or Translate is active, since
+while an edit tool such as Crop, Erase, or Transform is active, since
 those clicks belong to the tool.)
 
 ### Bulk show/hide and delete

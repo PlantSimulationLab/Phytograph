@@ -6,6 +6,7 @@ import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForRange, buildCategoricalGradientStops } from '../../../lib/classification';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import { getPotreeManager, OctreeRequestManager } from '../potreeManager';
+import { applyOctreePose } from './octreePose';
 
 // =====================================================================
 // Octree streaming (0.3.0+)
@@ -87,6 +88,14 @@ export interface OctreePointCloudProps {
   // parent's React `<group position>`), so the group transform does NOT reach it
   // — we have to set the offset on the octree object itself. Defaults to origin.
   translation?: { x: number; y: number; z: number };
+  // World-space draft ROTATION (Euler XYZ, DEGREES) from the Transformation tool,
+  // applied about `pivot`. Like `translation` it's a render-only preview baked on
+  // OK. Because the octree lives on the scene root we compose it into the object's
+  // matrix (position alone can't carry a pivot rotation). Defaults to no rotation.
+  rotation?: { x: number; y: number; z: number };
+  // World-space pivot the rotation turns about (scene origin, or the cloud's bbox
+  // center when none is set). Ignored when rotation is zero. Defaults to origin.
+  pivot?: { x: number; y: number; z: number };
   // Render-only display offset (Layer 2 precision safety net). The whole scene
   // renders at (world − displayOffset) so large UTM coordinates land near the
   // origin. The octree attaches to the scene root, so — like `translation` — the
@@ -200,6 +209,8 @@ export function OctreePointCloud({
   clipBox = null,
   clipBoxes = null,
   translation,
+  rotation,
+  pivot,
   displayOffset,
   onFirstTilesReady,
   onOctreeReady,
@@ -240,6 +251,13 @@ export function OctreePointCloud({
   const translationRef = useRef(translation);
   translationRef.current = translation;
 
+  // Same ref pattern for the draft rotation + pivot, so the loader effect seeds
+  // the initial matrix without reloading the octree on every rotation tick.
+  const rotationRef = useRef(rotation);
+  rotationRef.current = rotation;
+  const pivotRef = useRef(pivot);
+  pivotRef.current = pivot;
+
   // Same pattern for the render-only display offset, so the cacheId-keyed loader
   // seeds the initial position with the offset already applied (no streaming jump)
   // without reloading the octree when the offset recomputes.
@@ -271,20 +289,15 @@ export function OctreePointCloud({
           pco.dispose();
           return;
         }
-        // Snapshot the loader's base offset, then seed our translation on top of
-        // it before the first frame so the cloud streams in at its translated
-        // position (no visible jump). Kept live by the effect below as the user
-        // drags the gizmo / types a value.
+        // Snapshot the loader's base offset, then seed our transform (translation
+        // + rotation about the pivot) on top of it before the first frame so the
+        // cloud streams in at its transformed pose (no visible jump). Kept live by
+        // the effect below as the user drags a gizmo / types a value.
         basePositionRef.current.copy(pco.position);
-        const t = translationRef.current;
-        const o = displayOffsetRef.current;
-        if (t || o) {
-          pco.position.set(
-            basePositionRef.current.x + (t?.x ?? 0) - (o?.x ?? 0),
-            basePositionRef.current.y + (t?.y ?? 0) - (o?.y ?? 0),
-            basePositionRef.current.z + (t?.z ?? 0) - (o?.z ?? 0),
-          );
-        }
+        applyOctreePose(
+          pco, basePositionRef.current,
+          translationRef.current, rotationRef.current, pivotRef.current, displayOffsetRef.current,
+        );
         scene.add(pco);
         pcoForCleanup = pco;
         setOctree(pco);
@@ -315,51 +328,42 @@ export function OctreePointCloud({
     };
   }, [data.octree?.cacheId, manager, scene]);
 
-  // Keep the octree's world offset in sync with the Translate tool. The cloud is
-  // attached to the scene root, so the parent's `<group position>` doesn't reach
-  // it — we set the offset on the octree object directly. Runs at frame rate via
-  // React state, which is plenty for a gizmo drag.
+  // Keep the octree's world pose in sync with the Transformation tool. The cloud
+  // is attached to the scene root, so the parent's `<group position>` doesn't
+  // reach it — we set position (pure translation) or the full matrix (rotation
+  // about the pivot) on the octree object directly. Runs at frame rate via React
+  // state, which is plenty for a gizmo drag.
   useEffect(() => {
     if (!octree) return;
-    // Add the Translate offset on top of the loader's base position — never
-    // replace it (see basePositionRef).
     const base = basePositionRef.current;
-    octree.position.set(
-      base.x + (translation?.x ?? 0) - (displayOffset?.x ?? 0),
-      base.y + (translation?.y ?? 0) - (displayOffset?.y ?? 0),
-      base.z + (translation?.z ?? 0) - (displayOffset?.z ?? 0),
-    );
+    applyOctreePose(octree, base, translation, rotation, pivot, displayOffset);
     // E2E hook: expose the live octree's net translation (offset from its base
     // load position) keyed by cacheId. Tests assert on THIS (the three.js object
     // state) rather than React state, because the translate bug was precisely
-    // that React state was correct while the rendered object ignored it. Cleaned
-    // up on unmount.
+    // that React state was correct while the rendered object ignored it. For a
+    // pure translation `octree.position` equals base + t − offset, so net/world
+    // read exactly as before; with a rotation active `position` also carries the
+    // rotation's translation term (no existing test reads net mid-rotation).
+    // Cleaned up on unmount.
     const cacheId = data.octree?.cacheId;
     if (cacheId) {
       const reg = ((window as any).__octreePositions ??= {});
       const off = displayOffset ?? { x: 0, y: 0, z: 0 };
       reg[cacheId] = {
-        // Net Translate offset (object position minus loader base AND with the
-        // render-only display offset added back, so this still reports purely the
-        // Translate-tool contribution regardless of the precision safety net).
         net: {
           x: octree.position.x - base.x + off.x,
           y: octree.position.y - base.y + off.y,
           z: octree.position.z - base.z + off.z,
         },
-        // True WORLD position of the octree object (display position + offset), so
-        // a test can confirm an untranslated cloud maps to its true world spot
-        // rather than corner-slammed to the origin.
         world: {
           x: octree.position.x + off.x,
           y: octree.position.y + off.y,
           z: octree.position.z + off.z,
         },
-        // The render-only display offset in effect (0 for small-coord scenes).
         displayOffset: { x: off.x, y: off.y, z: off.z },
       };
     }
-  }, [octree, translation?.x, translation?.y, translation?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z, data.octree?.cacheId]);
+  }, [octree, translation?.x, translation?.y, translation?.z, rotation?.x, rotation?.y, rotation?.z, pivot?.x, pivot?.y, pivot?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z, data.octree?.cacheId]);
 
   // Drop the E2E position + crop-hidden hooks for this cloud on unmount.
   useEffect(() => {

@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous} from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -143,6 +143,9 @@ import { ViewportAxesGizmo } from './viewer/scene/ViewportAxesGizmo';
 import { SceneBackground } from './viewer/scene/SceneBackground';
 import { CameraCapture } from './viewer/scene/CameraCapture';
 import { TranslationGizmo } from './viewer/gizmos/TranslationGizmo';
+import { RotationGizmo } from './viewer/gizmos/RotationGizmo';
+import { OriginPicker } from './viewer/gizmos/OriginPicker';
+import { SceneOriginMarker } from './viewer/gizmos/SceneOriginMarker';
 import { CropBox } from './viewer/gizmos/CropBox';
 import { BoxDrawRaycaster } from './viewer/gizmos/BoxDrawRaycaster';
 import { PolygonCameraSnapshotter } from './viewer/gizmos/PolygonCameraSnapshotter';
@@ -160,7 +163,8 @@ import { defaultExportColumns, buildAsciiExport } from '../lib/exportColumns';
 import { QSMExportPanel } from './viewer/panels/QSMExportPanel';
 import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
-import { TranslatePanel } from './viewer/panels/TranslatePanel';
+import { TransformationPanel } from './viewer/panels/TransformationPanel';
+import { SceneOriginPanel } from './viewer/panels/SceneOriginPanel';
 import { ResamplePanel } from './viewer/panels/ResamplePanel';
 import { FilterPanel } from './viewer/panels/FilterPanel';
 import { ErasePanel } from './viewer/panels/ErasePanel';
@@ -262,6 +266,20 @@ const defaultMeshOpacity = (mesh: MeshEntry): number => {
   if (mesh.gridSubdivisions) return GRID_MESH_DEFAULT_OPACITY;
   if (mesh.sourceCloudId === 'imported') return 1.0;
   return MESH_DEFAULT_OPACITY;
+};
+
+// True when `object` sits under `group` in the scene graph. Used by the voxel-
+// grid pick rule to tell "another hit on my own box/wireframe" apart from "a hit
+// on something else" — a raycast through a box reports its near AND far faces,
+// so a naive "is there more than one hit?" test would always be true.
+const isDescendantOfGridGroup = (
+  object: THREE.Object3D,
+  group: THREE.Object3D,
+): boolean => {
+  for (let o: THREE.Object3D | null = object; o; o = o.parent) {
+    if (o === group) return true;
+  }
+  return false;
 };
 
 
@@ -1436,6 +1454,8 @@ export default function PointCloudViewer({
   // Skeleton positions - per skeleton id, default {x:0,y:0,z:0}
   const skeletonPositions = scene.state.skeletonPositions;
   const setSkeletonPositions = useMemo(() => makeFieldSetter('skeletonPositions'), [makeFieldSetter]);
+  // Scene Origin panel visibility (the CloudCompare-style pivot editor).
+  const [showSceneOriginPanel, setShowSceneOriginPanel] = useState(false);
   // Show resize panel when a mesh is selected
   const [showResizePanel, setShowResizePanel] = useState(false);
   // Lock per-axis scale so edits apply uniformly to X/Y/Z
@@ -1475,7 +1495,13 @@ export default function PointCloudViewer({
   // Cancel/X-discard revert cleanly, we snapshot the translation each selected
   // object had when translate mode opened — the BASELINE — so we can restore it.
   // Keyed by object id (cloud id or skeleton id). Empty when not translating.
-  const translateBaselineRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
+  // Carries both the translation and (for clouds) the draft rotation so Cancel/exit
+  // reverts the whole Transformation-tool draft. Skeletons only use `t` (their
+  // render-only offset is translation-only).
+  const translateBaselineRef = useRef<Map<string, {
+    t: { x: number; y: number; z: number };
+    r: { x: number; y: number; z: number };
+  }>>(new Map());
   // True while an OK-triggered bake is in flight (drives the panel's "Applying…"
   // state and blocks a second commit).
   const [isApplyingTranslate, setIsApplyingTranslate] = useState(false);
@@ -1527,6 +1553,28 @@ export default function PointCloudViewer({
     | 'awaiting-box-corner-2'
     | 'drawing-polygon'
     | 'drawing-rect';
+  // ---- Scene origin (CloudCompare-style pivot) --------------------------------
+  // A user-settable point in WORLD coordinates. Serves as (a) the rotation pivot
+  // for the Transformation tool (falling back to each cloud's bbox center when
+  // null) and (b) the camera orbit target. Viewer-level + session-only (like the
+  // crop region): File → New remounts the whole App/SceneProvider subtree (the
+  // key={resetKey} in main.tsx), so this useState resets to null for free — no
+  // explicit clear needed. Not persisted across restarts (an origin is tied to a
+  // specific dataset's world coordinates and rarely meaningful across scenes).
+  const [sceneOrigin, setSceneOrigin] = useState<[number, number, number] | null>(null);
+  // When true, the next left-click in the viewport places the scene origin (via
+  // octree surface-snap, else a ground-plane raycast). Armed from the Scene Origin
+  // panel; auto-disarms after a successful pick.
+  const [originPlaceMode, setOriginPlaceMode] = useState(false);
+  const sceneOriginRef = useRef<[number, number, number] | null>(null);
+  sceneOriginRef.current = sceneOrigin;
+
+  // NOTE: setting the scene origin deliberately does NOT move the camera. It is
+  // the rotation pivot for the Transformation tool only. Re-targeting the orbit
+  // to the origin was tried but reorients the view on every pick (OrbitControls
+  // always looks AT its target), which is jarring — so the origin never touches
+  // the camera. The marker just marks the pivot.
+
   const [cropMode, setCropMode] = useState<CropMode>('box');
   // World-space AABB. Null when crop mode hasn't been entered yet.
   const [cropBox, setCropBox] = useState<{
@@ -1912,6 +1960,7 @@ export default function PointCloudViewer({
     if (except !== 'qsm') setShowQSMPopup(false);
     if (except !== 'export') setShowExportPanel(false);
     if (except !== 'morph') setShowMorphPopup(false);
+    if (except !== 'scene-origin') { setShowSceneOriginPanel(false); setOriginPlaceMode(false); }
   }, []);
 
   // Get edit state for a cloud
@@ -1921,6 +1970,12 @@ export default function PointCloudViewer({
       erasedIndices: new Set<number>(),
     };
   }, [editStates]);
+
+  // Draft rotation (Euler XYZ, degrees) for a cloud, defaulting to zero when the
+  // edit state predates rotation support (the field is optional — see CloudEditState).
+  const getEditRotation = useCallback((id: string): { x: number; y: number; z: number } => {
+    return getEditState(id).rotation ?? { x: 0, y: 0, z: 0 };
+  }, [getEditState]);
 
   // Toggle the crop tool. Called from both the single-cloud toolbar and
   // the multi-cloud toolbar so the same Crop button is available to N≥1
@@ -4372,7 +4427,15 @@ export default function PointCloudViewer({
 
 
       // ── Pre-processing ──────────────────────────────────────────────
-      { id: 'cloud-translate', name: 'Translate Point Cloud', keywords: ['move', 'position'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'translate' ? 'none' : 'translate'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Move, isActive: () => editMode === 'translate' },
+      { id: 'cloud-translate', name: 'Transform Point Cloud', keywords: ['move', 'position', 'translate', 'rotate', 'rotation', 'transform'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'translate' ? 'none' : 'translate'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Move3d, isActive: () => editMode === 'translate' },
+      // Viewport-level, not scan-level: the scene origin is the rotation pivot,
+      // meaningful even with an empty scene (you can type coordinates), so it is
+      // NOT gated on a selection (`requires: null`). It is a SCENE CONTROL, not an
+      // analysis tool, so it lives in the top View Controls box next to Search
+      // (rendered directly in the sidebar JSX) rather than the Tools palette — no
+      // `toolGroup`, so it doesn't render as a Tools toolbar button. It stays in
+      // the registry for the Cmd+K palette and the Tools menu.
+      { id: 'set-scene-origin', name: 'Set Scene Origin', keywords: ['pivot', 'center', 'origin', 'rotation center', 'orbit'], action: () => { const open = showSceneOriginPanel; closeAllToolPanels('scene-origin'); setShowSceneOriginPanel(!open); if (open) setOriginPlaceMode(false); }, category: 'View', requires: null, icon: Crosshair, testId: 'tool-set-scene-origin', isActive: () => showSceneOriginPanel },
       { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => toggleCropMode(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
       { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
@@ -4448,7 +4511,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
 
   // While the Translate tool is open it owns an unbaked draft that must be
   // resolved (OK/Cancel/X) before anything else runs — otherwise a compute tool
@@ -4566,6 +4629,15 @@ export default function PointCloudViewer({
         z: state.translation.z + delta.z,
       },
     }));
+  }, [updateSelectedEditStates]);
+
+  // Accumulate a rotation-ring drag (or numeric) delta into the draft rotation of
+  // every selected cloud. Render-only preview; baked on OK (bakeCloudTransform).
+  const handleGizmoRotate = useCallback((axis: 'x' | 'y' | 'z', deltaDeg: number) => {
+    updateSelectedEditStates(state => {
+      const rot = state.rotation ?? { x: 0, y: 0, z: 0 };
+      return { ...state, rotation: { ...rot, [axis]: rot[axis] + deltaDeg } };
+    });
   }, [updateSelectedEditStates]);
 
   // Handle gizmo translation for selected mesh
@@ -5061,19 +5133,25 @@ export default function PointCloudViewer({
     return { positions, colors, intensities, pointCount, bounds: { min, max, center, size }, fileName: data.fileName };
   }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox]);
 
-  // BAKE a cloud's pending Translate-tool offset into its real geometry, then
-  // reset the local (render-only) translation to zero.
+  // BAKE a cloud's pending Transformation-tool draft (translation AND rotation)
+  // into its real geometry, then reset the local (render-only) draft to identity.
   //
-  // Why this exists: `editStates[id].translation` is a RENDER offset — the
-  // octree/point group is drawn at base+translation while the backend session
-  // still holds the untranslated points. Every consumer therefore had to
+  // Why this exists: `editStates[id].translation`/`.rotation` are RENDER offsets —
+  // the octree/point group is drawn at the transformed pose while the backend
+  // session still holds the un-transformed points. Every consumer therefore had to
   // remember to forward that offset, and the Helios path (triangulate + LAD)
-  // never did: `HeliosScanEntry` carries no translation field, so a translated
-  // cloud was computed against untranslated points while the scan origin and
-  // voxel grid were in translated world space. That fails SILENTLY (empty /
-  // misplaced voxels), which is the worst possible failure mode. Baking at the
-  // commit boundary makes the whole class of bug structurally impossible
-  // instead of requiring every future tool to opt in.
+  // never did: `HeliosScanEntry` carries no transform field, so a moved cloud was
+  // computed against un-moved points while the scan origin and voxel grid were in
+  // moved world space. That fails SILENTLY (empty / misplaced voxels), the worst
+  // possible failure mode. Baking at the commit boundary makes the whole class of
+  // bug structurally impossible instead of requiring every future tool to opt in.
+  //
+  // The transform is a rigid ROTATION about a world PIVOT, then a TRANSLATION:
+  //   world_new = R·(world − P) + P + t
+  // where P is the scene origin if one is set, else the cloud's bbox center
+  // (spin-in-place). Folded into the endpoint's `world_new = R·world + t_eff`
+  // form the effective translation is  t_eff = P − R·P + t  (see the backend test
+  // test_transform_euler_xyz_about_pivot_readback, which pins this convention).
   //
   // Session-backed clouds go through /api/cloud/session/{id}/transform, which
   // moves the points AND everything else that must travel with them — the
@@ -5087,100 +5165,131 @@ export default function PointCloudViewer({
   // bake succeeded (or was correctly a no-op), `{ok:false, reason}` when the
   // backend transform failed (caller aggregates into one toast), `{ok:false,
   // gone}` when the cloud vanished mid-rebuild. `noop` marks "nothing to do"
-  // (no cloud / zero translation / already baking) — distinct from a failure.
+  // (no cloud / identity transform / already baking) — distinct from a failure.
   const bakingTranslationRef = useRef<Set<string>>(new Set());
-  const bakeCloudTranslation = useCallback(async (
+  const bakeCloudTransform = useCallback(async (
     cloudId: string,
   ): Promise<{ ok: true } | { ok: false; reason?: string; gone?: boolean } | { ok: 'noop' }> => {
     const cloud = clouds.find(c => c.id === cloudId);
     if (!cloud) return { ok: 'noop' };
     // Read the LIVE edit state, not the render-time closure: the gizmo's final
     // onDrag → setEditStates lands in the same React batch as onDragEnd, so the
-    // captured `editStates` can still hold the pre-drag translation. Baking that
-    // would move the cloud by a stale offset and strand the remainder.
-    const t = (editStatesRef.current.get(cloudId) ?? getEditState(cloudId)).translation;
-    if (t.x === 0 && t.y === 0 && t.z === 0) return { ok: 'noop' };
+    // captured `editStates` can still hold the pre-drag draft. Baking that would
+    // move the cloud by a stale offset and strand the remainder.
+    const liveState = editStatesRef.current.get(cloudId) ?? getEditState(cloudId);
+    const t = liveState.translation;
+    const rot = liveState.rotation ?? { x: 0, y: 0, z: 0 };
+    const hasTranslation = t.x !== 0 || t.y !== 0 || t.z !== 0;
+    const hasRotation = rot.x !== 0 || rot.y !== 0 || rot.z !== 0;
+    if (!hasTranslation && !hasRotation) return { ok: 'noop' };
     // Re-entrancy guard. Two commit points can fire for one user action (gizmo
-    // drag-end, then the leave-translate-mode effect), and the session transform
-    // is slow enough that the second call would read the still-unbaked
-    // translation from edit-state and move the cloud TWICE. The in-flight set is
-    // keyed by cloud id and cleared in `finally`.
+    // drag-end, then the leave-transform-mode effect), and the session transform
+    // is slow enough that the second call would read the still-unbaked draft
+    // from edit-state and move the cloud TWICE. The in-flight set is keyed by
+    // cloud id and cleared in `finally`.
     if (bakingTranslationRef.current.has(cloudId)) return { ok: 'noop' };
     bakingTranslationRef.current.add(cloudId);
     try {
-      const clearTranslation = () => {
+      const clearDraft = () => {
         setEditStates(prev => {
           const next = new Map(prev);
           const state = next.get(cloudId);
-          if (state) next.set(cloudId, { ...state, translation: { x: 0, y: 0, z: 0 } });
+          if (state) next.set(cloudId, { ...state, translation: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 } });
           return next;
         });
       };
 
-      // The scanner ORIGIN (and, for a moving-platform scan, the whole
-      // trajectory of per-pose emission points) is WORLD-frame geometry that
-      // must move WITH the points — otherwise the recorded scanner position no
-      // longer matches where the cloud sits, and every origin-dependent op
-      // (LAD beam directions, triangulation crop, the Scans-panel readout)
-      // becomes wrong. `params.origin` is the primary copy; `octree.scanOrigin`
-      // is a fallback copy for clouds imported without scan params (e.g. E57
-      // pose). Translate whichever exist. Called on both the session and flat
-      // paths so the origin can never drift from the geometry.
-      const translateScanParams = () => {
+      // Pivot (WORLD): the scene origin if the user set one, else the cloud's own
+      // bbox center (spin-in-place). Rotation about this point.
+      const P = sceneOriginRef.current
+        ? new THREE.Vector3(sceneOriginRef.current[0], sceneOriginRef.current[1], sceneOriginRef.current[2])
+        : cloud.data.bounds.center.clone();
+      // Rotation quaternion / matrix from the Euler draft (degrees, XYZ order —
+      // matches the backend's R = Rz·Ry·Rx, verified in the transform test).
+      const euler = new THREE.Euler(
+        THREE.MathUtils.degToRad(rot.x),
+        THREE.MathUtils.degToRad(rot.y),
+        THREE.MathUtils.degToRad(rot.z),
+        'XYZ',
+      );
+      const q = new THREE.Quaternion().setFromEuler(euler);
+      const R3 = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(q));
+      // Apply the full rigid transform to a single world point: R·(p−P)+P+t.
+      const applyRigid = (x: number, y: number, z: number): [number, number, number] => {
+        const dx = x - P.x, dy = y - P.y, dz = z - P.z;
+        const e = R3.elements; // column-major 3x3
+        const rx = e[0] * dx + e[3] * dy + e[6] * dz;
+        const ry = e[1] * dx + e[4] * dy + e[7] * dz;
+        const rz = e[2] * dx + e[5] * dy + e[8] * dz;
+        return [rx + P.x + t.x, ry + P.y + t.y, rz + P.z + t.z];
+      };
+      // Row-major flat 4x4 for the endpoint / transformPoseStream: R in the top-
+      // left, t_eff = P − R·P + t in the last column.
+      const rE = R3.elements;
+      const rp = new THREE.Vector3(P.x, P.y, P.z).applyMatrix3(R3); // R·P
+      const teff = { x: P.x - rp.x + t.x, y: P.y - rp.y + t.y, z: P.z - rp.z + t.z };
+      const rowMajor = [
+        rE[0], rE[3], rE[6], teff.x,
+        rE[1], rE[4], rE[7], teff.y,
+        rE[2], rE[5], rE[8], teff.z,
+        0, 0, 0, 1,
+      ];
+
+      // The scanner ORIGIN (and, for a moving-platform scan, the whole trajectory
+      // of per-pose emission points) is WORLD-frame geometry that must move WITH
+      // the points — otherwise the recorded scanner position no longer matches
+      // where the cloud sits, and every origin-dependent op (LAD beam directions,
+      // triangulation crop, the Scans-panel readout) becomes wrong. `params.origin`
+      // is the primary copy; `octree.scanOrigin` is a fallback copy for clouds
+      // imported without scan params (e.g. E57 pose). Transform whichever exist,
+      // on both the session and flat paths, so the origin can never drift.
+      const transformScanParams = () => {
         const p = cloud.params;
         if (!p) return;
+        const o = applyRigid(p.origin.x, p.origin.y, p.origin.z);
         const nextParams: ScanParameters = {
           ...p,
-          origin: { x: p.origin.x + t.x, y: p.origin.y + t.y, z: p.origin.z + t.z },
-          // Moving-platform trajectory: shift every pose position by +t (a pure
-          // translation leaves attitude/quaternions and the lever arm unchanged).
-          // shiftPoseStream SUBTRACTS its arg, so negate to add.
+          origin: { x: o[0], y: o[1], z: o[2] },
+          // Moving-platform trajectory: full rigid transform of pose positions +
+          // attitude quaternions (transformPoseStream pre-multiplies each pose's
+          // attitude by q, keeping LAD beam directions consistent post-rotation).
           trajectory: p.trajectory
-            ? shiftPoseStream(p.trajectory, [-t.x, -t.y, -t.z])
+            ? transformPoseStream(p.trajectory, rowMajor, { x: q.x, y: q.y, z: q.z, w: q.w })
             : p.trajectory,
         };
         onUpdateScanParams(cloudId, nextParams);
       };
-      // Translate the octree's fallback scanOrigin copy in place on the ref we
-      // forward to buildSessionOctreeData (it copies scanOrigin verbatim).
-      const translatedScanOrigin = (o: [number, number, number] | null | undefined) =>
-        o ? ([o[0] + t.x, o[1] + t.y, o[2] + t.z] as [number, number, number]) : o;
+      // Transform the octree's fallback scanOrigin copy for buildSessionOctreeData.
+      const transformedScanOrigin = (o: [number, number, number] | null | undefined) =>
+        o ? applyRigid(o[0], o[1], o[2]) : o;
 
       const octreeInfo = cloud.data.octree;
       if (octreeInfo?.sessionId) {
-        // Row-major flat 4x4 pure translation (the layout the endpoint expects —
-        // the same one ICP's transformation_matrix uses).
-        const rowMajor = [
-          1, 0, 0, t.x,
-          0, 1, 0, t.y,
-          0, 0, 1, t.z,
-          0, 0, 0, 1,
-        ];
         let result: Awaited<ReturnType<typeof sessionTransform>>;
         try {
           result = await sessionTransform(octreeInfo.sessionId, rowMajor);
         } catch (err) {
-          // Leave the translation in edit-state so the user still sees the cloud
-          // where they put it and can retry — silently dropping it would move
-          // the cloud back under them. The caller aggregates failures into ONE
-          // toast (a per-cloud toast would stack N-high on a multi-cloud bake).
+          // Leave the draft in edit-state so the user still sees the cloud where
+          // they put it and can retry — silently dropping it would move the cloud
+          // back under them. The caller aggregates failures into ONE toast (a
+          // per-cloud toast would stack N-high on a multi-cloud bake).
           return { ok: false, reason: err instanceof Error ? err.message : String(err) };
         }
         // The rebuild took seconds; the cloud may have been deleted meanwhile.
         // Skip the state write for a vanished cloud (onUpdateCloud on a missing
         // id could otherwise resurrect a ghost row / orphan its octree).
         if (!clouds.some(c => c.id === cloudId)) return { ok: false, gone: true };
-        // Forward a scanOrigin already moved by +t so the rebuilt OctreeRef
-        // carries the translated origin (buildSessionOctreeData copies it as-is).
-        const movedOctreeInfo = { ...octreeInfo, scanOrigin: translatedScanOrigin(octreeInfo.scanOrigin) };
+        // Forward a scanOrigin already moved so the rebuilt OctreeRef carries the
+        // transformed origin (buildSessionOctreeData copies it as-is).
+        const movedOctreeInfo = { ...octreeInfo, scanOrigin: transformedScanOrigin(octreeInfo.scanOrigin) };
         onUpdateCloud(cloudId, buildSessionOctreeData(
           result, movedOctreeInfo, cloud.data.fileName ?? cloudId,
           // Geometry moved permanently; the source file still holds the
           // ORIGINAL position, so it can no longer be rebuilt from.
           undefined, { diverged: true },
         ));
-        translateScanParams();
-        clearTranslation();
+        transformScanParams();
+        clearDraft();
         // Destructive boundary: the session geometry moved permanently, so an
         // erase-undo must not reach back across it (the backend cleared its
         // own deleted_history for the same reason).
@@ -5191,16 +5300,14 @@ export default function PointCloudViewer({
       // Flat cloud: bake into the in-RAM positions and recompute bounds.
       const src = cloud.data;
       if (src.positions.length === 0) {
-        clearTranslation();
+        clearDraft();
         return { ok: true };
       }
       const positions = new Float32Array(src.positions.length);
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
       for (let i = 0; i < src.positions.length; i += 3) {
-        const x = src.positions[i] + t.x;
-        const y = src.positions[i + 1] + t.y;
-        const z = src.positions[i + 2] + t.z;
+        const [x, y, z] = applyRigid(src.positions[i], src.positions[i + 1], src.positions[i + 2]);
         positions[i] = x; positions[i + 1] = y; positions[i + 2] = z;
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
@@ -5217,11 +5324,11 @@ export default function PointCloudViewer({
         },
         // Move a flat cloud's embedded octree.scanOrigin fallback with the points.
         octree: src.octree
-          ? { ...src.octree, scanOrigin: translatedScanOrigin(src.octree.scanOrigin) }
+          ? { ...src.octree, scanOrigin: transformedScanOrigin(src.octree.scanOrigin) }
           : src.octree,
       });
-      translateScanParams();
-      clearTranslation();
+      transformScanParams();
+      clearDraft();
       scene.boundary([cloudId]);
       return { ok: true };
     } finally {
@@ -5229,22 +5336,22 @@ export default function PointCloudViewer({
     }
   }, [clouds, getEditState, onUpdateCloud, onUpdateScanParams, buildSessionOctreeData, scene]);
 
-  // Bake every selected cloud's pending translation (see bakeCloudTranslation).
-  // Called at the Translate-tool commit boundaries: T-modal confirm, gizmo
-  // drag-end, and leaving translate mode (which covers the numeric panel).
+  // Bake every selected cloud's pending transform (see bakeCloudTransform).
+  // Called at the Transformation-tool commit boundaries: T-modal confirm, gizmo
+  // drag-end, and leaving the tool (which covers the numeric panel).
   //
   // Sequential, not concurrent: each session bake triggers a PotreeConverter
   // rebuild, and running N in parallel would contend on the converter and
   // multiply peak memory (see the OOM notes in CLAUDE.md). One cloud's failure
   // does NOT abort the rest — the clouds that CAN move should move — but every
   // failure is collected and surfaced in a SINGLE toast rather than one per
-  // cloud. A failed cloud keeps its render offset, so the user can retry (and
-  // the leave-translate-mode safety net will).
-  const bakeSelectedTranslations = useCallback(async (ids?: Iterable<string>): Promise<boolean> => {
+  // cloud. A failed cloud keeps its render draft, so the user can retry (and
+  // the leave-tool safety net will).
+  const bakeSelectedTransforms = useCallback(async (ids?: Iterable<string>): Promise<boolean> => {
     const idList = [...(ids ?? selectedIds)];
     const failures: string[] = [];
     for (const id of idList) {
-      const r = await bakeCloudTranslation(id);
+      const r = await bakeCloudTransform(id);
       if (r.ok === false && !r.gone) failures.push(id);
     }
     if (failures.length > 0) {
@@ -5254,17 +5361,17 @@ export default function PointCloudViewer({
         .join(', ');
       const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
       showToast({
-        title: failures.length === 1 ? 'Could not apply translation' : `Could not apply translation to ${failures.length} clouds`,
+        title: failures.length === 1 ? 'Could not apply transform' : `Could not apply transform to ${failures.length} clouds`,
         message: `${names}${more}. The cloud stayed where you placed it — try again once the backend responds.`,
         type: 'error',
       });
     }
     return failures.length === 0;
-  }, [selectedIds, bakeCloudTranslation, clouds]);
+  }, [selectedIds, bakeCloudTransform, clouds]);
 
   // Keep the early-declared ref pointing at the latest closure (see its
   // declaration near editStatesRef for why it lives up there).
-  bakeSelectedTranslationsRef.current = bakeSelectedTranslations;
+  bakeSelectedTranslationsRef.current = bakeSelectedTransforms;
 
   // Revert the translate DRAFT back to the baseline captured when the tool
   // opened. For clouds this rewrites the render-only `translation` in editStates;
@@ -5274,14 +5381,14 @@ export default function PointCloudViewer({
     const base = translateBaselineRef.current;
     if (base.size === 0) return;
     if (selectedSkeletonId && base.has(selectedSkeletonId)) {
-      const p = base.get(selectedSkeletonId)!;
+      const p = base.get(selectedSkeletonId)!.t;
       setSkeletonPositions(prev => new Map(prev).set(selectedSkeletonId, { ...p }));
     } else {
       setEditStates(prev => {
         const next = new Map(prev);
-        for (const [id, t] of base) {
+        for (const [id, { t, r }] of base) {
           const state = next.get(id);
-          if (state) next.set(id, { ...state, translation: { ...t } });
+          if (state) next.set(id, { ...state, translation: { ...t }, rotation: { ...r } });
         }
         return next;
       });
@@ -5306,7 +5413,7 @@ export default function PointCloudViewer({
     setIsApplyingTranslate(true);
     let ok = false;
     try {
-      ok = await bakeSelectedTranslations();
+      ok = await bakeSelectedTransforms();
     } finally {
       setIsApplyingTranslate(false);
     }
@@ -5314,18 +5421,21 @@ export default function PointCloudViewer({
       setEditMode('none');
     } else {
       // Bake failed: re-arm the baseline so a later Cancel/exit can still revert
-      // the offset the user is still seeing (bakeSelectedTranslations left it in
+      // the offset the user is still seeing (bakeSelectedTransforms left it in
       // edit-state). Recapture from the CURRENT (pre-bake) selection state.
-      const rearmed = new Map<string, { x: number; y: number; z: number }>();
+      const rearmed = new Map<string, {
+        t: { x: number; y: number; z: number };
+        r: { x: number; y: number; z: number };
+      }>();
       for (const id of selectedIds) {
-        // Baseline is the ORIGINAL position (translation 0 unless it was already
+        // Baseline is the ORIGINAL pose (translation/rotation 0 unless already
         // baked-in); since a failed bake didn't move geometry, reverting to zero
-        // offset restores the visible pre-translate state.
-        rearmed.set(id, { x: 0, y: 0, z: 0 });
+        // draft restores the visible pre-transform state.
+        rearmed.set(id, { t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 0 } });
       }
       translateBaselineRef.current = rearmed;
     }
-  }, [selectedSkeletonId, bakeSelectedTranslations, selectedIds]);
+  }, [selectedSkeletonId, bakeSelectedTransforms, selectedIds]);
 
   // Cancel / Discard: revert to baseline and close.
   const handleCancelTranslate = useCallback(() => {
@@ -5347,15 +5457,20 @@ export default function PointCloudViewer({
     prevEditModeRef.current = editMode;
 
     if (prev !== 'translate' && editMode === 'translate') {
-      // ENTER: capture baselines for the current selection.
-      const base = new Map<string, { x: number; y: number; z: number }>();
+      // ENTER: capture baselines (translation + rotation) for the current selection.
+      const base = new Map<string, {
+        t: { x: number; y: number; z: number };
+        r: { x: number; y: number; z: number };
+      }>();
       if (selectedSkeletonId) {
         const p = skeletonPositionsRef.current.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
-        base.set(selectedSkeletonId, { ...p });
+        base.set(selectedSkeletonId, { t: { ...p }, r: { x: 0, y: 0, z: 0 } });
       } else {
         for (const id of selectedIds) {
-          const t = (editStatesRef.current.get(id) ?? { translation: { x: 0, y: 0, z: 0 } }).translation;
-          base.set(id, { ...t });
+          const state = editStatesRef.current.get(id);
+          const t = state?.translation ?? { x: 0, y: 0, z: 0 };
+          const r = state?.rotation ?? { x: 0, y: 0, z: 0 };
+          base.set(id, { t: { ...t }, r: { ...r } });
         }
       }
       translateBaselineRef.current = base;
@@ -12672,6 +12787,15 @@ export default function PointCloudViewer({
                   // preview renders at the origin (group position [0,0,0]), so it
                   // gets no offset either.
                   translation={hasResamplePreview ? undefined : editState.translation}
+                  // Draft rotation (Transformation tool). Applied about the pivot:
+                  // the scene origin if one is set, else this cloud's bbox center
+                  // (spin-in-place). Zero rotation costs nothing (position fast path).
+                  rotation={hasResamplePreview ? undefined : editState.rotation}
+                  pivot={hasResamplePreview ? undefined : (
+                    sceneOrigin
+                      ? { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }
+                      : { x: cloud.data.bounds.center.x, y: cloud.data.bounds.center.y, z: cloud.data.bounds.center.z }
+                  )}
                   // Render-only precision safety net: the resample preview lives
                   // at the origin already (group [0,0,0]), so it gets no offset;
                   // the live cloud renders at world − displayOffset.
@@ -12757,22 +12881,49 @@ export default function PointCloudViewer({
                   // that's impossible, surface a clear message.
                   onOctreeMissing={() => handleOctreeMissing(cloud.id)}
                 />
-              ) : (
-                <PointCloud
-                  data={sourceData}
-                  indices={indices}
-                  pointSize={pointSize}
-                  // 'per-scan' is rendered as 'single' with the cloud's own
-                  // swatch color — keeps PointCloud unaware of multi-cloud state.
-                  colorMode={colorMode === 'per-scan' ? 'single' : colorMode}
-                  singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
-                  selectedScalarField={selectedScalarField}
-                  filters={cloudFilters.get(cloud.id)}
-                  colormap={colormap}
-                  rangeMin={activeRange?.min}
-                  rangeMax={activeRange?.max}
-                />
-              )}
+              ) : (() => {
+                // Flat cloud draft rotation (Transformation tool): the parent group
+                // already places points at (world − displayOffset), so the local
+                // frame here is world coords. Wrap in T(pivot)·R·T(−pivot) groups to
+                // rotate about the pivot (scene origin, else the cloud's bbox
+                // center). Zero rotation renders the bare cloud (no extra nodes).
+                const rot = editState.rotation;
+                const hasRot = !!rot && (rot.x !== 0 || rot.y !== 0 || rot.z !== 0);
+                const cloudEl = (
+                  <PointCloud
+                    data={sourceData}
+                    indices={indices}
+                    pointSize={pointSize}
+                    // 'per-scan' is rendered as 'single' with the cloud's own
+                    // swatch color — keeps PointCloud unaware of multi-cloud state.
+                    colorMode={colorMode === 'per-scan' ? 'single' : colorMode}
+                    singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
+                    selectedScalarField={selectedScalarField}
+                    filters={cloudFilters.get(cloud.id)}
+                    colormap={colormap}
+                    rangeMin={activeRange?.min}
+                    rangeMax={activeRange?.max}
+                  />
+                );
+                if (!hasRot || hasResamplePreview) return cloudEl;
+                const P = sceneOrigin
+                  ? { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }
+                  : { x: cloud.data.bounds.center.x, y: cloud.data.bounds.center.y, z: cloud.data.bounds.center.z };
+                const euler: [number, number, number] = [
+                  THREE.MathUtils.degToRad(rot!.x),
+                  THREE.MathUtils.degToRad(rot!.y),
+                  THREE.MathUtils.degToRad(rot!.z),
+                ];
+                return (
+                  <group position={[P.x, P.y, P.z]}>
+                    <group rotation={euler}>
+                      <group position={[-P.x, -P.y, -P.z]}>
+                        {cloudEl}
+                      </group>
+                    </group>
+                  </group>
+                );
+              })()}
             </group>
           );
         })}
@@ -12798,6 +12949,10 @@ export default function PointCloudViewer({
               missCacheId={oct.missOctreeCacheId}
               pointSize={pointSize}
               translation={editState.translation}
+              rotation={editState.rotation}
+              pivot={sceneOrigin
+                ? { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }
+                : { x: cloud.data.bounds.center.x, y: cloud.data.bounds.center.y, z: cloud.data.bounds.center.z }}
               displayOffset={displayOffset}
             />
           );
@@ -12848,6 +13003,23 @@ export default function PointCloudViewer({
               onClick={(e) => {
                 if (!meshSelectionEnabled) return;
                 if (e.delta > 4) return;
+                // A voxel GRID is a translucent volume-bounds box you look
+                // *through* — it usually encloses the very geometry it measures
+                // (a Helios <grid> around the scanned plant). Its near faces sit
+                // between the camera and everything inside, so as a solid pick
+                // target it swallowed every click on the contents: in
+                // example-datasets/sphere.xml the 0.5 m grid wraps the sphere,
+                // and clicking the sphere or a scan marker selected the grid.
+                // So a grid yields to anything else under the cursor and is
+                // picked only when it is the sole hit. Its wireframe stays
+                // clickable in the empty space around the contents, and the
+                // panel row always selects it outright.
+                if (mesh.gridSubdivisions) {
+                  const others = e.intersections.filter(
+                    (i) => !isDescendantOfGridGroup(i.object, e.eventObject),
+                  );
+                  if (others.length > 0) return; // let the enclosed object take it
+                }
                 e.stopPropagation();
                 handleSelectMesh(mesh.id, e.ctrlKey || e.metaKey, e.shiftKey);
               }}
@@ -13076,6 +13248,17 @@ export default function PointCloudViewer({
                 color={scan.color}
                 selected={isMarkerSelected}
                 markerScale={scanMarkerScale}
+                // Viewport picking: clicking the instrument selects its scan
+                // through the SAME handler as the Scans-pane row, so the row
+                // highlight and the marker glow can't drift apart. Gated on
+                // meshSelectionEnabled so a marker can't steal a click while a
+                // tool (crop, erase, gizmo drag, trajectory editor) owns the
+                // pointer. allowDeselect matches the row: only toggle off when
+                // no mesh/skeleton is also selected.
+                onSelect={meshSelectionEnabled ? (additive, range) => {
+                  const allowDeselect = selectedMeshIds.size === 0 && selectedSkeletonIds.size === 0;
+                  onToggleSelection(scan.id, additive, range, allowDeselect);
+                } : undefined}
               />
             </group>
           );
@@ -13181,6 +13364,27 @@ export default function PointCloudViewer({
           <OrthoProjectionOverride />
         )}
 
+        {/* Scene-origin click-to-place target. Armed from the Scene Origin panel;
+            surface-snaps to the octree, else drops on the selected cloud's ground
+            plane. Auto-disarms on a successful pick. */}
+        {originPlaceMode && (
+          <OriginPicker
+            octree={eraseOctreeRef.current}
+            groundZ={(firstSelectedCloud?.data.bounds.min.z ?? 0) - displayOffset.z}
+            displayOffset={displayOffset}
+            onPick={(world) => { setSceneOrigin(world); setOriginPlaceMode(false); }}
+          />
+        )}
+
+        {/* Scene-origin marker (amber crosshair sphere) at the WORLD origin,
+            rendered in display space via the wrapping group. Visible whenever an
+            origin is set, so it stays put as a persistent pivot indicator. */}
+        {sceneOrigin && (
+          <group position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+            <SceneOriginMarker position={[sceneOrigin[0], sceneOrigin[1], sceneOrigin[2]]} />
+          </group>
+        )}
+
         {/* Translation Gizmo for selected clouds */}
         {editMode === 'translate' && firstSelectedCloud && (
           <TranslationGizmo
@@ -13206,6 +13410,31 @@ export default function PointCloudViewer({
             }}
           />
         )}
+
+        {/* Rotation Gizmo for selected clouds — three rings centered on the pivot
+            (scene origin, else the cloud's bbox center). Dragging updates the draft
+            rotation (render-only); OK bakes it. */}
+        {editMode === 'translate' && firstSelectedCloud && (() => {
+          const P = sceneOrigin
+            ? { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }
+            : {
+                x: firstSelectedCloud.data.bounds.center.x,
+                y: firstSelectedCloud.data.bounds.center.y,
+                z: firstSelectedCloud.data.bounds.center.z,
+              };
+          return (
+            <RotationGizmo
+              // Pivot in DISPLAY space (world − displayOffset) — see the translate
+              // gizmo. Rings are drawn slightly larger than the translate arrows so
+              // the two don't overlap and stay grabbable.
+              center={new THREE.Vector3(P.x - displayOffset.x, P.y - displayOffset.y, P.z - displayOffset.z)}
+              size={firstSelectedCloud.data.bounds.size.length() / 2}
+              onRotate={handleGizmoRotate}
+              onDragStart={() => setGizmoDragging(true)}
+              onDragEnd={() => { setGizmoDragging(false); pendingHistoryRef.current = null; }}
+            />
+          );
+        })()}
 
         {/* Translation Gizmo for selected mesh */}
         {editMode === 'translate' && selectedMesh && (() => {
@@ -14850,10 +15079,34 @@ export default function PointCloudViewer({
       {/* data-testid doubles as the anchor ViewportAxesGizmo measures to keep
           the axes gizmo out from under this column (see useGizmoMargin). */}
       <div data-testid="left-toolbar-column" className="absolute top-4 left-4 bottom-16 flex flex-col gap-2 overflow-y-auto overflow-x-hidden pr-1 pointer-events-none [&>*]:pointer-events-auto">
-        {/* View Controls */}
+        {/* View Controls — scene-level controls (not analysis tools): command
+            search + the scene origin / rotation pivot. */}
         <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg p-2 shadow-lg flex gap-1">
           <button onClick={() => { setShowCommandPalette(true); setCommandSearch(''); setCommandSelectedIndex(0); }} className="p-2 hover:bg-neutral-700 rounded transition-colors flex items-center justify-center" title="Search Commands (Cmd+K)">
             <Search className="w-4 h-4 text-neutral-300" />
+          </button>
+          {/* Set Scene Origin — the rotation pivot. A scene control, so it lives
+              here beside Search rather than in the Tools palette. Toggles the
+              Scene Origin panel; highlighted while it's open. Disabled while a
+              Transform draft is open (editMode 'translate') — moving the pivot
+              mid-rotation would shift the rotation center under the draft. */}
+          <button
+            data-testid="tool-set-scene-origin"
+            disabled={editMode === 'translate'}
+            onClick={() => {
+              const open = showSceneOriginPanel;
+              closeAllToolPanels('scene-origin');
+              setShowSceneOriginPanel(!open);
+              if (open) setOriginPlaceMode(false);
+            }}
+            className={`p-2 rounded transition-colors flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed ${
+              showSceneOriginPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'
+            }`}
+            title={editMode === 'translate'
+              ? 'Finish the Transform first to change the scene origin'
+              : 'Set Scene Origin — the rotation center'}
+          >
+            <Crosshair className={`w-4 h-4 ${showSceneOriginPanel ? 'text-white' : 'text-neutral-300'}`} />
           </button>
         </div>
 
@@ -15660,36 +15913,48 @@ export default function PointCloudViewer({
         );
       })()}
 
-      {/* Translate Coordinates Panel - shown for clouds/skeletons. Meshes use the Transform panel instead. */}
+      {/* Transformation Panel (translate + rotate) - shown for clouds/skeletons.
+          Meshes use the Transform panel instead. Rotation is cloud-only. */}
       {editMode === 'translate' && !selectedMesh && (selectedSkeletonId || selectedIds.size > 0) && (() => {
-        // Resolve current translation + display name from the active selection.
+        // Resolve current translation + rotation + display name from the active
+        // selection. Skeletons have no rotation (render-only offset is translate).
         let currentPos = { x: 0, y: 0, z: 0 };
+        let currentRot = { x: 0, y: 0, z: 0 };
         let objectName = '';
+        const isCloud = !selectedSkeletonId && selectedIds.size > 0;
         if (selectedSkeletonId) {
           currentPos = skeletonPositions.get(selectedSkeletonId) || { x: 0, y: 0, z: 0 };
           const skeleton = skeletons.find(s => s.id === selectedSkeletonId);
           objectName = skeleton ? `Skeleton ${skeleton.id.slice(0, 8)}` : 'Skeleton';
-        } else if (selectedIds.size > 0) {
+        } else if (isCloud) {
           const firstCloudId = Array.from(selectedIds)[0];
           const editState = getEditState(firstCloudId);
-          currentPos = editState ? { x: editState.translation.x, y: editState.translation.y, z: editState.translation.z } : { x: 0, y: 0, z: 0 };
+          currentPos = { x: editState.translation.x, y: editState.translation.y, z: editState.translation.z };
+          currentRot = { ...getEditRotation(firstCloudId) };
           objectName = clouds.find(c => c.id === firstCloudId)?.data.fileName || 'Point Cloud';
         }
 
-        // Dirty = the live draft differs from the baseline captured when the
-        // tool opened. Drives the X-close confirm and the OK enabled state.
-        // Compare against the first selected object's baseline (the panel edits
-        // all selected clouds by the same delta, so one representative suffices).
+        // Dirty = the live draft (translation AND rotation) differs from the
+        // baseline captured when the tool opened. Drives the X-close confirm and
+        // the OK enabled state. Compare against the first selected object's
+        // baseline (the panel edits all selected clouds by the same delta, so one
+        // representative suffices).
         const baselineId = selectedSkeletonId ?? Array.from(selectedIds)[0];
-        const baseline = (baselineId && translateBaselineRef.current.get(baselineId)) || { x: 0, y: 0, z: 0 };
+        const baseline = (baselineId && translateBaselineRef.current.get(baselineId))
+          || { t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 0 } };
         const isDirty =
-          Math.abs(currentPos.x - baseline.x) > 1e-9 ||
-          Math.abs(currentPos.y - baseline.y) > 1e-9 ||
-          Math.abs(currentPos.z - baseline.z) > 1e-9;
+          Math.abs(currentPos.x - baseline.t.x) > 1e-9 ||
+          Math.abs(currentPos.y - baseline.t.y) > 1e-9 ||
+          Math.abs(currentPos.z - baseline.t.z) > 1e-9 ||
+          Math.abs(currentRot.x - baseline.r.x) > 1e-9 ||
+          Math.abs(currentRot.y - baseline.r.y) > 1e-9 ||
+          Math.abs(currentRot.z - baseline.r.z) > 1e-9;
 
         return (
-          <TranslatePanel
+          <TransformationPanel
             position={currentPos}
+            rotation={currentRot}
+            showRotation={isCloud}
             objectName={objectName}
             isDirty={isDirty}
             isApplying={isApplyingTranslate}
@@ -15712,9 +15977,22 @@ export default function PointCloudViewer({
                 });
               }
             }}
+            onRotationChange={(axis, numValue) => {
+              // Clouds only (rotation section is hidden for skeletons).
+              if (selectedIds.size === 0) return;
+              setEditStates(prev => {
+                const next = new Map(prev);
+                for (const cloudId of selectedIds) {
+                  const state = next.get(cloudId) || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+                  const rot = state.rotation ?? { x: 0, y: 0, z: 0 };
+                  next.set(cloudId, { ...state, rotation: { ...rot, [axis]: numValue } });
+                }
+                return next;
+              });
+            }}
             onReset={() => {
-              // Zero the DRAFT (not a bake). Note: this makes the draft differ
-              // from a non-zero baseline, so isDirty stays true and OK/Cancel
+              // Zero the DRAFT translation (not a bake). Note: this makes the draft
+              // differ from a non-zero baseline, so isDirty stays true and OK/Cancel
               // still resolve it — Reset is just "set the pending offset to 0".
               if (selectedSkeletonId) {
                 setSkeletonPositions(prev => new Map(prev).set(selectedSkeletonId, { x: 0, y: 0, z: 0 }));
@@ -15729,8 +16007,69 @@ export default function PointCloudViewer({
                 });
               }
             }}
+            onResetRotation={() => {
+              if (selectedIds.size === 0) return;
+              setEditStates(prev => {
+                const next = new Map(prev);
+                for (const cloudId of selectedIds) {
+                  const state = next.get(cloudId);
+                  if (state) next.set(cloudId, { ...state, rotation: { x: 0, y: 0, z: 0 } });
+                }
+                return next;
+              });
+            }}
             onApply={() => { void handleApplyTranslate(); }}
             onCancel={handleCancelTranslate}
+          />
+        );
+      })()}
+
+      {/* Scene Origin panel — the CloudCompare-style pivot editor. Sets the WORLD
+          point used as the rotation pivot (Transformation tool) and camera orbit
+          center. */}
+      {showSceneOriginPanel && (() => {
+        // Center of the selected clouds' union bounds (WORLD), for the convenience
+        // "center on selection" button. Uses translated bounds so a cloud with an
+        // unbaked draft still centers where the user sees it.
+        const selectedClouds = Array.from(selectedIds)
+          .map(id => clouds.find(c => c.id === id))
+          .filter((c): c is PointCloudEntry => !!c);
+        const canMoveToSelection = selectedClouds.length > 0;
+        const selectionCenter = (): [number, number, number] | null => {
+          if (selectedClouds.length === 0) return null;
+          const union = worldBoundsUnion(selectedClouds.map(c => ({
+            bounds: {
+              min: { x: c.data.bounds.min.x, y: c.data.bounds.min.y, z: c.data.bounds.min.z },
+              max: { x: c.data.bounds.max.x, y: c.data.bounds.max.y, z: c.data.bounds.max.z },
+            },
+            translation: getEditState(c.id).translation,
+          })));
+          if (!union) return null;
+          return [
+            (union.min.x + union.max.x) / 2,
+            (union.min.y + union.max.y) / 2,
+            (union.min.z + union.max.z) / 2,
+          ];
+        };
+        return (
+          <SceneOriginPanel
+            origin={sceneOrigin}
+            placeMode={originPlaceMode}
+            canMoveToSelection={canMoveToSelection}
+            onCoordChange={(axis, value) => {
+              const cur = sceneOrigin ?? [0, 0, 0];
+              const idx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+              const next: [number, number, number] = [cur[0], cur[1], cur[2]];
+              next[idx] = value;
+              setSceneOrigin(next);
+            }}
+            onTogglePlaceMode={() => setOriginPlaceMode(m => !m)}
+            onMoveToSelection={() => {
+              const c = selectionCenter();
+              if (c) setSceneOrigin(c);
+            }}
+            onClear={() => { setSceneOrigin(null); setOriginPlaceMode(false); }}
+            onClose={() => { setShowSceneOriginPanel(false); setOriginPlaceMode(false); }}
           />
         );
       })()}

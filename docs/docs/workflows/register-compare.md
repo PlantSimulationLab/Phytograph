@@ -154,8 +154,8 @@ ICP finds a *local* minimum, so it needs the inputs to be roughly
 pre-aligned. If RMSE comes back huge, or the result looks visibly
 wrong:
 
-1. **Pre-align manually** with [Translate](clean-point-cloud.md#translate-and-level)
-   — get within ~10 cm and a few degrees before running ICP.
+1. **Pre-align manually** with [Transform](clean-point-cloud.md#transform-translate-and-rotate)
+   — translate and rotate to within ~10 cm and a few degrees before running ICP.
 2. **Reduce voxel size** for finer-grained matching.
 3. **Increase max iterations** if convergence is plausible but slow.
 

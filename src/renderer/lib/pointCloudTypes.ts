@@ -162,6 +162,13 @@ export interface PointCloudEntry {
 // every selected scan (see CropRegion / cropRegion state below).
 export interface CloudEditState {
   translation: { x: number; y: number; z: number };
+  // Render-only draft rotation (Euler XYZ, DEGREES) from the Transformation tool.
+  // Like `translation` it is a preview offset — the octree/points are drawn rotated
+  // about the active pivot (scene origin, or the cloud's bbox center when no origin
+  // is set) while the backend session still holds the un-rotated points. Baked into
+  // real geometry on OK (bakeCloudTransform) and reset to {0,0,0}. Optional so older
+  // constructions default to no rotation; treat a missing value as {0,0,0}.
+  rotation?: { x: number; y: number; z: number };
   erasedIndices: Set<number>;  // Set of erased point indices (flat clouds only)
   // Session-backed clouds (Family-1): the ordered stack of delete regions
   // applied this session but NOT yet baked. Each is the exact CropOctreeRegion

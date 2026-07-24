@@ -33,7 +33,7 @@ first non-numeric row as a header if present.
 
 | Operation | Workflow |
 |---|---|
-| Reposition / level | [Clean a point cloud](../workflows/clean-point-cloud.md#translate-and-level) |
+| Reposition / level | [Clean a point cloud](../workflows/clean-point-cloud.md#transform-translate-and-rotate) |
 | Crop out ground or unwanted regions | [Clean a point cloud](../workflows/clean-point-cloud.md#crop) |
 | Classify ground vs plant points | [Segment ground points](../workflows/segment-ground.md) |
 | Segment individual trees | [Segment individual trees](../workflows/segment-trees.md) |
@@ -62,5 +62,5 @@ choppy:
 Phytograph treats whatever frame your data was in as the world frame.
 The grid and axes overlays show the world XY plane (Z up). If your
 scan is rotated relative to Z-up (common with airborne scans), use
-**Translate** with rotation handles to re-align it before downstream
+**Transform** with its rotation rings to re-align it before downstream
 work.

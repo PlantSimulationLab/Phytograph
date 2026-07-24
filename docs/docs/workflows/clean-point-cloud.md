@@ -1,65 +1,95 @@
 # Clean a point cloud
 
 Raw LiDAR data almost never lands ready for analysis. This workflow
-covers the five operations you'll reach for most often: **translate**,
+covers the five operations you'll reach for most often: **transform**,
 **crop**, **erase**, **filter**, and **resample**. Apply them in
 roughly that order.
 
-## Translate and level
+## Transform (translate and rotate)
 
-Use **Translate** (in the tool column, or right-click the cloud →
-Translate) to move a cloud in world space — most often to bring it to the
-origin, or to line it up with another cloud before registration.
+Use **Transform** (in the tool column, or right-click the cloud →
+Transform) to move *and rotate* a cloud in world space — most often to
+bring it to the origin, level a tilted scan, or line it up with another
+cloud before registration.
 
-Opening the tool shows a **Position** panel and a translation gizmo at the
-cloud's center. Set the move any of three ways — all update the viewport
+Opening the tool shows a **Transform** panel with **Position** and
+**Rotation (°)** sections, plus translation arrows and rotation rings at
+the cloud. Set the change any of these ways — all update the viewport
 **live** so you can see the result before committing:
 
-- Type exact **X / Y / Z** values in the panel.
-- Drag the gizmo's **arrows** along an axis.
-- Use the Blender-style shortcut: press <kbd>T</kbd>, optionally lock an
-  axis with <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd>, type a distance,
-  then click (or <kbd>Enter</kbd>) to set it. See
+- Type exact **X / Y / Z** values (metres for position, degrees for
+  rotation) in the panel.
+- Drag the gizmo's **arrows** to translate along an axis, or its colored
+  **rings** to rotate about an axis.
+- Use the Blender-style shortcut for translation: press <kbd>T</kbd>,
+  optionally lock an axis with <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd>,
+  type a distance, then click (or <kbd>Enter</kbd>) to set it. See
   [Keyboard shortcuts](../reference/shortcuts.md).
+
+Rotation turns the cloud about the **scene origin** if you have set one
+(see below), otherwise about the cloud's own bounding-box center
+(spin-in-place). Set an origin first when you need to pivot around a
+specific point.
 
 Nothing is applied until you decide:
 
-- **OK** applies the translation (see the note below) and closes the panel.
+- **OK** applies the transform (see the note below) and closes the panel.
 - **Cancel** discards it — the cloud snaps back to where it started.
-- **Reset Position** zeroes the pending values without closing, so you can
-  start over.
+- **Reset Position** / **Reset Rotation** zero the pending values without
+  closing, so you can start over.
 - Closing with the **✕** while you have unsaved changes asks whether to
   **Apply** or **Discard** first.
 
 While the panel is open the other tools are locked, so you always finish
-(or cancel) a move before doing anything else — a half-entered position
+(or cancel) a change before doing anything else — a half-entered transform
 can never leak into a later step.
 
-!!! note "OK bakes the move into the geometry"
+!!! note "OK bakes the transform into the geometry"
 
-    Clicking **OK** writes the translation into the cloud's actual point
-    coordinates rather than keeping a display-only offset. This is what
-    guarantees that every later tool — triangulation, leaf area density,
-    skeletons, QSM, export — operates on the cloud *where you put it*.
+    Clicking **OK** writes the translation and rotation into the cloud's
+    actual point coordinates rather than keeping a display-only offset.
+    This is what guarantees that every later tool — triangulation, leaf
+    area density, skeletons, QSM, export — operates on the cloud *where
+    and how you placed it*.
 
     Two consequences worth knowing:
 
-    - Everything tied to the scan's world position moves with it: the
-      recorded **scanner origin** (and, for a moving-platform scan, the
-      whole trajectory), the sky/miss points, per-pulse beam origins, and
-      the miss overlay. So a translated scan stays internally consistent —
-      the scanner still sits in the right place relative to its points,
-      which is what LAD and triangulation depend on.
-    - Like applying a crop or a filter, an applied translation is a
+    - Everything tied to the scan's world position moves and rotates with
+      it: the recorded **scanner origin** (and, for a moving-platform scan,
+      the whole trajectory *and its per-pose orientation*), the sky/miss
+      points, per-pulse beam origins, and the miss overlay. So a
+      transformed scan stays internally consistent — the scanner still
+      sits in the right place relative to its points, which is what LAD and
+      triangulation depend on.
+    - Like applying a crop or a filter, an applied transform is a
       permanent edit to the working copy — it is not on the undo stack.
       Your source file on disk is never modified.
 
-Rotation and scaling apply to *meshes*, not point clouds. To rotate a
-cloud so Z points up, use **Align (ICP)** against a reference, or rotate
-at export time in your downstream tool.
-
 The toolbar also has a one-click **Move to Origin** that centers the
 cloud's bounding box at (0, 0, 0) without rotating it.
+
+### Setting the scene origin
+
+**Set Scene Origin** (the crosshair button in the top **View Controls** box,
+next to the command-search icon / **Tools → Pre-processing → Set Scene
+Origin**) places a pivot point, like CloudCompare's. It's a scene control
+rather than an analysis tool, so it sits with the view controls. The origin
+is the **rotation center** for the Transform tool. Setting it does **not**
+move the camera — it only marks the pivot that rotation turns about.
+
+In the **Scene Origin** panel you can:
+
+- **Pick in viewport** — arm click-to-place, then click a point; it snaps
+  to the cloud surface where you click, or drops onto the ground plane if
+  you click past the cloud. (The view does not move when you pick.)
+- Type exact **X / Y / Z** world coordinates.
+- **Center on selection** — snap the origin to the middle of the selected
+  cloud(s).
+- **Clear origin** — remove it (rotation then falls back to each cloud's
+  own center).
+
+A red-and-white ring marker (a 3D cursor) shows the origin in the scene.
+The origin is cleared when you start a new scene (**File → New**).
 
 ## Crop
 
@@ -306,7 +336,7 @@ export to `.ply` and use a tool like CloudCompare.
 
 ## A typical cleaning order
 
-1. **Translate** — get the cloud level and centered.
+1. **Transform** — translate and rotate the cloud level and centered.
 2. **Crop** — remove the ground and far-field noise with a single box.
 3. **Filter** — drop low-intensity returns if intensity is reliable.
 4. **Erase** — clean up stragglers a box couldn't reach.

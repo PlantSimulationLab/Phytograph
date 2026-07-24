@@ -4,6 +4,7 @@ import { PointCloudOctree, PointColorType, PointSizeType } from 'potree-core';
 import * as THREE from 'three';
 import { MISS_COLOR } from '../../../lib/classification';
 import { getPotreeManager, OctreeRequestManager } from '../potreeManager';
+import { applyOctreePose } from './octreePose';
 
 // =====================================================================
 // Miss-point octree overlay
@@ -27,10 +28,13 @@ export interface MissOctreeProps {
   missCacheId: string;
   // Point size in screen pixels (FIXED, matching the hits octree's material).
   pointSize?: number;
-  // The Translate-tool offset and render-only display offset applied to the HITS
-  // octree for this cloud. The miss shell MUST use the same values or it drifts
-  // off the tree (it attaches to the scene root, like the hits octree).
+  // The Transformation-tool offset and render-only display offset applied to the
+  // HITS octree for this cloud. The miss shell MUST use the same values (and the
+  // same pivot rotation) or it drifts off the tree (it attaches to the scene root,
+  // like the hits octree).
   translation?: { x: number; y: number; z: number } | null;
+  rotation?: { x: number; y: number; z: number } | null;
+  pivot?: { x: number; y: number; z: number } | null;
   displayOffset?: { x: number; y: number; z: number };
 }
 
@@ -43,17 +47,23 @@ export function MissOctree({
   missCacheId,
   pointSize = 2,
   translation = null,
+  rotation = null,
+  pivot = null,
   displayOffset,
 }: MissOctreeProps) {
   const { scene, camera, gl } = useThree();
   const manager = getPotreeManager();
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
 
-  // Latest translation / display offset in refs so the cacheId-keyed loader can
-  // seed the initial position without reloading the octree on every drag tick
+  // Latest transform / display offset in refs so the cacheId-keyed loader can
+  // seed the initial pose without reloading the octree on every drag tick
   // (mirrors OctreePointCloud).
   const translationRef = useRef(translation);
   translationRef.current = translation;
+  const rotationRef = useRef(rotation);
+  rotationRef.current = rotation;
+  const pivotRef = useRef(pivot);
+  pivotRef.current = pivot;
   const displayOffsetRef = useRef(displayOffset);
   displayOffsetRef.current = displayOffset;
 
@@ -76,15 +86,10 @@ export function MissOctree({
           return;
         }
         basePositionRef.current.copy(pco.position);
-        const t = translationRef.current;
-        const o = displayOffsetRef.current;
-        if (t || o) {
-          pco.position.set(
-            basePositionRef.current.x + (t?.x ?? 0) - (o?.x ?? 0),
-            basePositionRef.current.y + (t?.y ?? 0) - (o?.y ?? 0),
-            basePositionRef.current.z + (t?.z ?? 0) - (o?.z ?? 0),
-          );
-        }
+        applyOctreePose(
+          pco, basePositionRef.current,
+          translationRef.current, rotationRef.current, pivotRef.current, displayOffsetRef.current,
+        );
 
         scene.add(pco);
         pcoForCleanup = pco;
@@ -145,17 +150,12 @@ export function MissOctree({
     }
   }, [octree, pointSize]);
 
-  // Keep the shell's world offset in sync with the Translate tool + display
+  // Keep the shell's world pose in sync with the Transformation tool + display
   // offset (it's on the scene root, so the parent group doesn't reach it).
   useEffect(() => {
     if (!octree) return;
-    const base = basePositionRef.current;
-    octree.position.set(
-      base.x + (translation?.x ?? 0) - (displayOffset?.x ?? 0),
-      base.y + (translation?.y ?? 0) - (displayOffset?.y ?? 0),
-      base.z + (translation?.z ?? 0) - (displayOffset?.z ?? 0),
-    );
-  }, [octree, translation?.x, translation?.y, translation?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
+    applyOctreePose(octree, basePositionRef.current, translation, rotation, pivot, displayOffset);
+  }, [octree, translation?.x, translation?.y, translation?.z, rotation?.x, rotation?.y, rotation?.z, pivot?.x, pivot?.y, pivot?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
 
   // Per-frame LOD/budget streaming — the whole point of the octree path.
   useFrame(() => {
