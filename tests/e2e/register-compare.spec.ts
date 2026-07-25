@@ -188,8 +188,17 @@ test('Snap to Fit (ICP) REMOVES a known cloud↔mesh offset', async () => {
   const snap = panel.getByTestId('alignment-snap-to-fit');
   await expect(snap).toBeEnabled();  // works with nothing selected (remembered inputs)
   await snap.click();
-  const toast = page.locator('[data-testid="toast-success"]').last();
-  await expect(toast.getByTestId('toast-title')).toContainText(/Snap to Fit Complete/i, { timeout: 60_000 });
+  // ICP finished — either toast counts. On this deliberately coarse 60-point
+  // cylinder the residual (~40-65 mm, see below) is >2% of the fixture's ~1.5 m
+  // extent, so the backend attaches a `quality_warning` and the renderer raises
+  // a WARNING toast ("Snap to Fit — Check Result") instead of the success one.
+  // That is correct behaviour for a sparse fixture, not a failure — the real
+  // correctness checks are the two assertions below. Matching only
+  // `toast-success` made this test unpassable.
+  await expect(
+    page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]')
+      .filter({ hasText: /Snap to Fit/i }).last().getByTestId('toast-title'),
+  ).toContainText(/Snap to Fit (Complete|— Check Result)/i, { timeout: 60_000 });
 
   // ICP must have pulled the mesh back toward the cloud: the 0.15 m offset is
   // substantially removed (residual well under half of it). On this coarse
@@ -247,8 +256,13 @@ test('Align Mesh to Mesh (ICP) REMOVES a known offset between two meshes', async
   await dialog.getByTestId('mesh-align-run').click();
   await expect(dialog).toBeHidden();
 
-  const toast = page.locator('[data-testid="toast-success"]').last();
-  await expect(toast.getByTestId('toast-title')).toContainText(/Mesh Alignment Complete/i, { timeout: 60_000 });
+  // Either toast means ICP finished — the sparse-fixture residual trips the
+  // backend's 2%-of-extent quality warning, so this is a WARNING toast
+  // ("Mesh Alignment — Check Result"). See the note in the Snap to Fit test.
+  await expect(
+    page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]')
+      .filter({ hasText: /Mesh Alignment/i }).last().getByTestId('toast-title'),
+  ).toContainText(/Mesh Alignment (Complete|— Check Result)/i, { timeout: 60_000 });
   await expect(meshRows).toHaveCount(2);
 
   // ICP must have moved the source cylinder back toward the target: their

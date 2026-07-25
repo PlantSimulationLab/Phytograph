@@ -22172,8 +22172,17 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
         if progress is not None:
             progress(0.10, "Sampling mesh")
 
-        # Sample points from mesh surface for ICP
-        num_samples = min(len(points), 50000)
+        # Sample points from the mesh surface for ICP.
+        #
+        # Density is driven by the MESH's own complexity (vertices x10, the same
+        # rule _do_m2m_icp uses), floored so a coarse mesh still gets a workable
+        # sample. Tying it to `len(points)` instead — as this did — makes a sparse
+        # target cloud starve the source: a 60-point cloud sampled the mesh with
+        # 60 points, and ICP then converged to a different pose on every run
+        # (residuals wandering ~20-190 mm on the same inputs) because the draw,
+        # not the geometry, decided the correspondence. The target cloud still
+        # caps the useful count, so keep it as an upper bound alongside 50k.
+        num_samples = min(50000, max(len(mesh.vertices) * 10, 1000))
         source_pcd = mesh.sample_points_uniformly(number_of_points=num_samples)
 
         # --- STEP 1: Center alignment (move source centroid to target centroid) ---

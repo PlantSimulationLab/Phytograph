@@ -123,6 +123,57 @@ def test_m2m_worker_recovers_known_offset():
     assert residual < 0.15, f"residual {residual:.4f} vs offset {np.linalg.norm(offset):.4f}"
 
 
+def test_c2m_worker_recovers_known_offset_from_a_sparse_cloud():
+    """Cloud→mesh ICP pulls an offset mesh back onto a SPARSE target cloud.
+
+    The sparse target is the point: the mesh-surface sample count is driven by
+    the mesh's own complexity, not by `len(points)`. When it was tied to the
+    cloud, a 60-point target sampled the mesh with only 60 points and ICP
+    converged to a different pose on every run (residuals wandering ~20-190 mm
+    on identical inputs) — the random draw, not the geometry, chose the
+    correspondence. This is the c2m analogue of the c2c/m2m recovery tests,
+    which the suite previously had no equivalent of.
+
+    Deliberately NOT seeded: the whole contract is that the result no longer
+    depends on the sampling draw, so a seed would hide a regression here.
+    """
+    # The same structured cylinder as tests/e2e/fixtures/tiny.xyz: 5 rings of 12
+    # points, r=0.3, h=1.5. Regular rings (not a random draw) are what lets ball
+    # pivoting mesh a 60-point cloud cleanly, so this exercises the real path.
+    ring = np.arange(12) * (2 * np.pi / 12)
+    cloud = np.array([
+        [0.3 * np.cos(t), 0.3 * np.sin(t), z]
+        for z in np.linspace(0.0, 1.5, 5)
+        for t in ring
+    ])
+
+    # Mesh the cloud, then rigidly offset that mesh by a known 0.15 m along X.
+    tri = main._do_open3d_triangulation(
+        main.TriangulationRequest(method="ball_pivoting", points=cloud.tolist())
+    )
+    verts = np.asarray(tri["vertices"], dtype=np.float64).reshape(-1, 3)
+    tris = np.asarray(tri["triangles"], dtype=np.int32).reshape(-1, 3)
+    offset = np.array([0.15, 0.0, 0.0])
+
+    result = main._do_c2m_icp(
+        main.ICPRegistrationRequest(
+            points=cloud.ravel().tolist(),
+            mesh_vertices=(verts + offset).ravel().tolist(),
+            mesh_indices=tris.ravel().tolist(),
+        ),
+        progress=None,
+    )
+    assert result["success"] is True, result.get("error")
+
+    # Reproduce what the renderer does with the matrix: newPos = R*currentPos + t.
+    m = np.array(result["transformation_matrix"], dtype=np.float64).reshape(4, 4)
+    new_pos = m[:3, :3] @ offset + m[:3, 3]
+    residual = float(np.linalg.norm(new_pos))
+    # The 150 mm offset must be largely removed. Observed ~8-21 mm across runs;
+    # 80 mm is decisively below the offset while leaving margin for the draw.
+    assert residual < 0.08, f"residual {residual:.4f} m vs 0.15 m offset"
+
+
 def test_c2m_distance_worker_zero_for_points_on_mesh():
     """Points sampled ON the cube's surface have ~zero distance to the mesh."""
     verts, tris = _cube_mesh()
