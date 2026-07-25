@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.56.0"
+BACKEND_VERSION = "0.56.1"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2038,14 +2038,24 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
                 mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(pcd, radii)
 
         elif request.method == "poisson":
-            # Poisson Surface Reconstruction
+            # Poisson Surface Reconstruction.
+            #
+            # Normals are estimated HERE (cheap, stable), but the reconstruction
+            # itself runs in a child process — Open3D 0.19.0 segfaults inside it
+            # on ~6% of calls, which would otherwise kill the whole backend.
+            # See `_run_poisson_isolated`.
             if not pcd.has_normals():
                 pcd.estimate_normals()
                 pcd.orient_normals_consistent_tangent_plane(k=15)
 
-            mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-                pcd, depth=request.depth
+            p_verts, p_tris, densities = _run_poisson_isolated(
+                np.asarray(pcd.points),
+                np.asarray(pcd.normals) if pcd.has_normals() else None,
+                request.depth,
             )
+            mesh = o3d.geometry.TriangleMesh()
+            mesh.vertices = o3d.utility.Vector3dVector(p_verts)
+            mesh.triangles = o3d.utility.Vector3iVector(p_tris)
 
             # Remove low-density vertices (artifacts)
             _report(0.7, "Filtering low-density vertices")
@@ -16009,6 +16019,88 @@ def reap_seg_workers() -> None:
 
 # Reap on graceful exit (the supervisor's SIGTERM → Python shutdown runs atexit).
 atexit.register(reap_seg_workers)
+
+
+def _run_poisson_isolated(points: "np.ndarray", normals, depth: int):
+    """Run Open3D's Poisson reconstruction in a CHILD PROCESS and return
+    `(vertices, triangles, densities)` as numpy arrays.
+
+    Why a subprocess: Open3D 0.19.0's `create_from_point_cloud_poisson` segfaults
+    inside its own OpenMP microtask on ~6% of calls (28/30 survived in a
+    single-call trial on macOS/arm64; the crash stack is entirely open3d's
+    pybind + libomp `__kmp_invoke_microtask`). It is NOT caused by pyhelios'
+    libomp, by running off the main thread, or by repeated calls — a bare
+    `python -c` doing one Poisson on a 3k-point sphere reproduces it, and
+    OMP_NUM_THREADS=1 does not help. A SIGSEGV in-process takes the entire
+    backend down (killing every other in-flight request and the user's session);
+    in a child it is an exit code we can turn into a normal error response.
+
+    Unlike `_run_killable` this is SYNCHRONOUS: `_do_open3d_triangulation` is
+    itself already running off the event loop on an executor thread, so it can
+    simply block on the child. Cancellation is unaffected — the surrounding
+    stream loop still abandons the request on disconnect.
+
+    Raises RuntimeError (with the child's traceback, or a segfault note) on
+    failure, which the endpoint reports like any other triangulation error."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="phyto_poisson_") as workdir:
+        np.save(os.path.join(workdir, "input.npy"),
+                np.ascontiguousarray(np.asarray(points, dtype=np.float64)))
+        if normals is not None:
+            np.save(os.path.join(workdir, "normals.npy"),
+                    np.ascontiguousarray(np.asarray(normals, dtype=np.float64)))
+        with open(os.path.join(workdir, "request.json"), "w") as f:
+            json.dump({"tool": "poisson", "params": {"depth": int(depth)}}, f)
+
+        # Mirror _run_killable: scrub the bundle's lib-path vars so the child
+        # resolves libraries the way the parent did at its own launch.
+        env = os.environ.copy()
+        for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+            env.pop(var, None)
+        env["PHYTOGRAPH_SEG_WORKER"] = workdir
+
+        stderr_log = os.path.join(workdir, "worker_stderr.log")
+        proc = _spawn_seg_worker(env, stderr_log)
+        with _SEG_WORKERS_LOCK:
+            _SEG_WORKERS[proc.pid] = proc
+        try:
+            proc.wait()
+        finally:
+            with _SEG_WORKERS_LOCK:
+                _SEG_WORKERS.pop(proc.pid, None)
+
+        # Success is judged by the OUTPUTS, not by the exit code alone. `wait()`
+        # can legitimately leave `returncode` as None — the pid may already have
+        # been reaped elsewhere (reap_seg_workers at shutdown, or a poll() that
+        # raced this wait) — and `None != 0` would otherwise sail past this guard
+        # and fail later with a bare FileNotFoundError on vertices.npy. Treat
+        # "no mesh on disk" as failure however the child got there.
+        outputs = [os.path.join(workdir, n)
+                   for n in ("vertices.npy", "triangles.npy", "densities.npy")]
+        missing = [p for p in outputs if not os.path.exists(p)]
+        if proc.returncode not in (0, None) or missing:
+            err = ""
+            err_path = os.path.join(workdir, "error.txt")
+            if os.path.exists(err_path):
+                with open(err_path, "r") as f:
+                    err = f.read().strip()
+            if not err and os.path.exists(stderr_log):
+                with open(stderr_log, "r", errors="replace") as f:
+                    err = f.read().strip()
+            if not err:
+                # Negative code = killed by a signal (-11 = SIGSEGV, the Open3D
+                # bug). A 0/None code with no mesh on disk means the child died
+                # before writing — same user-visible outcome, same advice.
+                err = (
+                    "Poisson reconstruction crashed inside Open3D "
+                    f"(worker exited {proc.returncode}). This is a known "
+                    "intermittent Open3D failure — retrying usually succeeds, or "
+                    "use Ball Pivoting / Alpha Shape instead."
+                )
+            raise RuntimeError(err)
+
+        return (np.load(outputs[0]), np.load(outputs[1]), np.load(outputs[2]))
 
 
 async def _run_killable(

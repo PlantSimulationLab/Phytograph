@@ -70,6 +70,18 @@ Method-specific parameters:
     - **Octree depth** — higher = more detail and slower. Default 8 is a
       good starting point for whole-plant scans.
 
+    !!! tip "If Poisson fails, just run it again"
+
+        Poisson occasionally fails with *"Poisson reconstruction crashed
+        inside Open3D"*. This is an intermittent bug in the underlying
+        Open3D library, not a problem with your cloud or your settings —
+        it hits a small fraction of runs regardless of input. Simply
+        triangulating again almost always succeeds; if you'd rather not
+        retry, **Ball Pivot** or **Alpha Shape** on the same cloud avoids
+        it entirely. The reconstruction runs in a separate process, so a
+        failure only affects that one triangulation — the app and the rest
+        of your scene are unaffected.
+
 === "Alpha Shape"
 
     - **Auto Alpha** *(default on)* — alpha is chosen automatically.
