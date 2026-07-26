@@ -92,7 +92,31 @@ test.describe('viewport picking', () => {
     // under test appears at the app's OWN post-import framing, which fits the
     // point data — a ~0.5 m scene viewed from ~1 m, where the grid box covers
     // much of the viewport. Test what the user actually sees.
-    await page.waitForTimeout(2000);
+    //
+    // Wait for that framing to LATCH and the camera to stop moving, rather than
+    // sleeping a fixed interval. Every test here projects a world point to a
+    // screen pixel through the live camera, so a camera still settling puts the
+    // click somewhere else entirely — the assertion then reads "clicked and
+    // nothing was selected". A 2 s sleep was enough on macOS but not on the
+    // slower headless CI runner, which is exactly how these passed locally and
+    // failed in CI.
+    await expect
+      .poll(() => page.evaluate(() => (window as any).__getCameraState?.()?.framedContent ?? false),
+            { timeout: 20_000 })
+      .toBe(true);
+    // Then require two identical consecutive camera reads: `framedContent`
+    // latches when framing is REQUESTED, and snapToView animates from there.
+    await expect
+      .poll(async () => {
+        const read = () => page.evaluate(() => {
+          const s = (window as any).__getCameraState?.();
+          return s ? JSON.stringify([s.position, s.target]) : '';
+        });
+        const a = await read();
+        await page.waitForTimeout(120);
+        return (await read()) === a ? a : '';
+      }, { timeout: 20_000 })
+      .not.toBe('');
 
     // Importing the XML leaves all four scans selected; clear that via the
     // panel's Deselect All so each test starts from a known empty selection.

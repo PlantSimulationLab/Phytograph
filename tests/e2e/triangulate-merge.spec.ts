@@ -12,10 +12,17 @@ import { resetToFreshScene } from './helpers/resetApp';
 //     "Scans fused: 2".
 //   - PER-SCAN: select both scans, separate → TWO mesh rows.
 //
-// Uses the Poisson method (like import-and-triangulate.spec.ts): Ball Pivoting's
-// auto radius is unreliable on these sparse 60-point fixtures, whereas Poisson
-// reliably produces a mesh — and the merge/per-scan plumbing under test is
-// method-agnostic.
+// Uses BALL PIVOTING (the app's default). These tests are about the merge /
+// per-scan plumbing, which is method-agnostic — the method is just a means to
+// get a mesh out.
+//
+// They used to select Poisson, on the grounds that ball pivoting's auto radius
+// was unreliable on these sparse 60-point fixtures. That is no longer true
+// (adaptive ball pivot meshes tiny.xyz → 109 tris and tiny-offset.xyz → 96),
+// and Poisson now runs in a child process for crash isolation (see
+// `_run_poisson_isolated`), paying a fresh `import open3d` per call. Two of
+// those in one test crept up on the 60 s budget under full-suite load and made
+// this file flaky. Ball pivoting is both the realistic default and ~0.2 s.
 //
 // Per CLAUDE.md Testing rules: live backend, drive the real UI, assert concrete
 // outputs (mesh counts, provenance text), not the absence of errors.
@@ -64,9 +71,7 @@ test('merges two scans into one mesh via the Triangulation modal', async () => {
   await expect(modal.getByTestId('triangulation-method')).toHaveValue('ball_pivoting');
   await expect(modal.getByTestId('triangulation-scan-row')).toHaveCount(2);
 
-  // Poisson (reliable on sparse fixtures), depth 7. Choose "Merge".
-  await modal.getByTestId('triangulation-method').selectOption('poisson');
-  await modal.getByTestId('triangulation-poisson-depth').fill('7');
+  // Keep the default Ball Pivoting (auto radius) and choose "Merge".
   await modal.getByTestId('triangulation-merge-toggle').getByRole('radio').nth(1).check();
 
   await modal.getByTestId('triangulation-run-button').click();
@@ -79,11 +84,11 @@ test('merges two scans into one mesh via the Triangulation modal', async () => {
   expect(trianglesStr).not.toBeNull();
   expect(parseInt(trianglesStr!, 10)).toBeGreaterThan(0);
 
-  // Provenance must record the merge (Poisson + "Scans fused: 2").
+  // Provenance must record the method AND the merge ("Scans fused: 2").
   await meshRow.getByTestId('mesh-color-expand').click();
   const info = page.getByTestId('mesh-triangulation-info');
   await expect(info).toBeVisible();
-  await expect(info).toContainText('Poisson triangulation');
+  await expect(info).toContainText('Ball-pivoting triangulation');
   await expect(info).toContainText('Scans fused: 2');
 });
 
@@ -97,10 +102,8 @@ test('triangulates two scans separately into two meshes', async () => {
   await expect(modal).toBeVisible();
   await expect(modal.getByTestId('triangulation-scan-row')).toHaveCount(2);
 
-  // Poisson (reliable on sparse fixtures), depth 7. "Triangulate each scan
-  // separately" is the default — assert it, then run.
-  await modal.getByTestId('triangulation-method').selectOption('poisson');
-  await modal.getByTestId('triangulation-poisson-depth').fill('7');
+  // Default Ball Pivoting. "Triangulate each scan separately" is the default
+  // output mode — assert it, then run.
   await expect(modal.getByTestId('triangulation-merge-toggle').getByRole('radio').nth(0)).toBeChecked();
   await modal.getByTestId('triangulation-run-button').click();
 

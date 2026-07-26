@@ -22,8 +22,32 @@ async function setWindowSize(launched: LaunchedApp, w: number, h: number) {
   await launched.app.evaluate(({ BrowserWindow }, size) => {
     BrowserWindow.getAllWindows()[0]?.setSize(size.w, size.h);
   }, { w, h });
-  // Let the ResizeObserver → R3F setSize round-trip settle.
-  await launched.page.waitForTimeout(500);
+  // Wait for the resize to actually land in the renderer instead of sleeping a
+  // fixed interval. The chain is X11/WM → Electron → window.innerWidth →
+  // ResizeObserver → react-use-measure → R3F gl.setSize → canvas rect, and on
+  // the headless CI runner (Xvfb + a synthetic WM, two Playwright workers) that
+  // takes longer than the 500 ms this used to allow. The old sleep returned
+  // mid-flight, so `layout()` read the PREVIOUS size: after growing to 1600 and
+  // shrinking to 950 the canvas still measured 1600, which reads exactly like
+  // the historical "canvas ratchet" bug this spec guards against. Locally the
+  // round-trip is ~50 ms, which is why only CI ever saw it.
+  //
+  // Settle on window.innerWidth first (the DOM viewport), then require the
+  // canvas rect to agree and hold still for two consecutive reads.
+  await launched.page.waitForFunction(
+    (expected) => Math.abs(window.innerWidth - expected) <= 2,
+    w,
+    { timeout: 20_000 },
+  );
+  await launched.page.waitForFunction(() => {
+    const c = document.querySelector('canvas');
+    if (!c) return false;
+    const r = c.getBoundingClientRect();
+    const prev = (window as any).__lastCanvasProbe;
+    (window as any).__lastCanvasProbe = `${Math.round(r.width)}x${Math.round(r.height)}`;
+    // Stable across two polls AND consistent with the current viewport width.
+    return prev === (window as any).__lastCanvasProbe && r.width <= window.innerWidth + 1;
+  }, undefined, { timeout: 20_000, polling: 100 });
 }
 
 async function layout(launched: LaunchedApp) {
@@ -85,7 +109,16 @@ test('window resize: canvas shrinks with the window, min height fits the toolbar
     // overlays.
     expect(shrunk.canvas.bottom).toBeLessThanOrEqual(shrunk.viewport.h + 1);
     expect(shrunk.canvas.right).toBeLessThanOrEqual(shrunk.viewport.w + 1);
-    expect(shrunk.canvas.w).toBe(950);
+    // Carry the surrounding state into the failure message: if this ever fires
+    // again on a runner we can't reproduce locally, we need to know whether the
+    // WINDOW failed to shrink (bounds/viewport still ~1600 — an X11/WM clamp) or
+    // only the CANVAS lagged (viewport 950 but canvas wider — the ratchet). The
+    // bare "Expected 950, Received 1600" could not distinguish those.
+    expect(
+      shrunk.canvas.w,
+      `canvas=${shrunk.canvas.w}x${shrunk.canvas.h} viewport=${shrunk.viewport.w}x${shrunk.viewport.h} ` +
+      `bounds=${bounds.width}x${bounds.height} minHeight=${minHeight}`,
+    ).toBe(950);
 
     // --- Min height fits the full toolbar column: no scroll-cropping. ---
     expect(shrunk.column.scrollHeight).toBeLessThanOrEqual(shrunk.column.clientHeight + 1);

@@ -189,8 +189,13 @@ jobs:
 
       # Electron needs a display; the E2E harness picks a free backend port and
       # drives the live supervised backend (no mocking).
+      #
+      # The explicit screen size matters: `xvfb-run -a` alone defaults to
+      # 1280x1024, but window-resize.spec.ts grows the window to 1600x1000 to
+      # exercise the canvas-ratchet regression. Give the virtual display room for
+      # that so the window manager isn't clamping the very geometry under test.
       - name: E2E tests (Playwright + Electron)
-        run: xvfb-run -a npm run test:e2e
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" npm run test:e2e
 
       - name: Upload Playwright report on failure
         if: failure()

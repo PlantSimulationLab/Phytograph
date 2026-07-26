@@ -7096,8 +7096,18 @@ export default function PointCloudViewer({
         };
         applyMethodParams(request);
 
-        const response = await triangulatePointCloud(request, abort.signal, (p, msg) =>
-          setTriProgress({ label: msg, value: p }), (runId) => { triRunIdRef.current = runId; });
+        const response = await triangulatePointCloud(request, abort.signal, (p, msg) => {
+          setTriProgress({ label: msg, value: p });
+          // E2E hook: record every stage AS RECEIVED from the backend stream.
+          // A test can't reliably read these off the DOM — React may batch two
+          // stages into one paint, and the rAF sampler that used to scrape the
+          // pill is throttled when the renderer is starved (full-suite load,
+          // headless CI), so a fast run legitimately showed only one label.
+          // Recording at the source makes the assertion about what the backend
+          // actually reported, not about paint timing.
+          const w = window as unknown as { __triStages?: string[] };
+          if (w.__triStages && msg) w.__triStages.push(msg);
+        }, (runId) => { triRunIdRef.current = runId; });
         if (!response.success) throw new Error(response.error || 'Triangulation failed');
 
         const meshData: MeshData = {
@@ -7178,6 +7188,12 @@ export default function PointCloudViewer({
           const frac = p == null ? null : (cloudIdx + p) / targets.length;
           const label = targets.length > 1 ? `[${cloudIdx + 1}/${targets.length}] ${msg}` : msg;
           setTriProgress({ label, value: frac });
+          // E2E hook — see the matching recorder on the single-cloud path above.
+          // Records the RAW backend stage (unprefixed), so a test asserts on what
+          // the backend reported rather than on what survived React batching and
+          // rAF throttling in the DOM.
+          const w = window as unknown as { __triStages?: string[] };
+          if (w.__triStages && msg) w.__triStages.push(msg);
         }, (runId) => { triRunIdRef.current = runId; });
         if (!response.success) throw new Error(response.error || 'Triangulation failed');
 

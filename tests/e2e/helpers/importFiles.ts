@@ -31,7 +31,15 @@ export async function importFiles(
   // The menu command is delivered to the renderer's onMenuCommand subscriber
   // (registered in a React effect). Wait until the app has mounted before
   // firing, or the IPC arrives before anything is listening and is dropped.
-  await page.getByTestId('app-dropzone-input').waitFor({ state: 'attached' });
+  //
+  // 60 s, not Playwright's default 30 s: launchApp() only waits for the BACKEND
+  // to serve /version, not for the renderer to mount. On the headless CI runner
+  // two Playwright workers each drive an Electron app plus a PyInstaller
+  // backend, and first paint (Vite bundle + R3F canvas) can exceed 30 s under
+  // that contention — a per-test launchApp() spec then dies here before it has
+  // done anything. Locally this mounts in ~2 s, which is why it only ever failed
+  // in CI.
+  await page.getByTestId('app-dropzone-input').waitFor({ state: 'attached', timeout: 60_000 });
 
   await app.evaluate(async ({ ipcMain }, fixturePaths: string[]) => {
     ipcMain.removeHandler('dialog:open');
