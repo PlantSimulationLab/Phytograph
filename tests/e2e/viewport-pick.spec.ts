@@ -97,22 +97,34 @@ test.describe('viewport picking', () => {
     // nothing was selected". A 2 s sleep was enough on macOS but not on the
     // slower headless CI runner, which is exactly how these passed locally and
     // failed in CI.
-    await expect
-      .poll(() => page.evaluate(() => (window as any).__getCameraState?.()?.framedContent ?? false),
-            { timeout: 20_000 })
-      .toBe(true);
-    // Then require two identical consecutive camera reads: `framedContent`
-    // latches when framing is REQUESTED, and snapToView animates from there.
+    // Wait on the thing the tests actually depend on: the projected position of
+    // a known scan marker holding still.
+    //
+    // `framedContent` alone is NOT a safe barrier. resetToFreshScene drives
+    // File → New, which REMOUNTS App + SceneProvider and therefore
+    // CameraController — measured directly, right after the reset the window
+    // hooks are GONE (`typeof __worldToScreen === 'undefined'`) until the new
+    // controller mounts. A barrier that reads a hook during that gap, or that
+    // trusts a flag which re-arms on remount, can be satisfied by a camera that
+    // is not yet framing this scene's content. CI showed the consequence: the
+    // marker projected to y≈212 where the settled framing puts it at y≈652 — a
+    // ~440 px miss, which reads as "clicked and nothing was selected".
+    //
+    // Polling the projection is immune to both: it yields '' while the hook is
+    // absent (keep waiting) and only succeeds once a LIVE camera reports the
+    // same on-screen position twice, i.e. framing has run and settled.
     await expect
       .poll(async () => {
-        const read = () => page.evaluate(() => {
-          const s = (window as any).__getCameraState?.();
-          return s ? JSON.stringify([s.position, s.target]) : '';
-        });
+        const read = () => page.evaluate(
+          () => (window as any).__worldToScreen?.([-2, 0, 0.5]) ?? null,
+        );
         const a = await read();
-        await page.waitForTimeout(120);
-        return (await read()) === a ? a : '';
-      }, { timeout: 20_000 })
+        await page.waitForTimeout(150);
+        const b = await read();
+        if (!a || !b || !b.visible) return '';
+        if (Math.abs(a.x - b.x) > 1 || Math.abs(a.y - b.y) > 1) return '';
+        return `${Math.round(b.x)},${Math.round(b.y)}`;
+      }, { timeout: 30_000 })
       .not.toBe('');
 
     // Importing the XML leaves all four scans selected; clear that via the
