@@ -144,13 +144,44 @@ test('clicking the gizmo +X head (real mouse) reorients the camera', async () =>
   // Pixel center of the rendered +X head (read after a couple of animation
   // frames so the gizmo has re-synced to the +Y view), then click it for real.
   // (__gizmoHeadScreenPos takes the head's world direction as a [x,y,z] tuple.)
-  const pos = await page.evaluate(
-    () => new Promise<{ x: number; y: number } | null>((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(() =>
-        resolve((window as any).__gizmoHeadScreenPos([1, 0, 0])),
-      ));
-    }),
-  );
+  // Wait for the gizmo to finish ANIMATING to the new camera orientation.
+  //
+  // drei's GizmoHelper does not snap: it slerps the gizmo toward the main
+  // camera's quaternion each frame (`q1.rotateTowards(q2, step)`) and only stops
+  // once `q1.angleTo(q2) < 0.01`. So after __orientToAxis the +X head slides
+  // across the screen for many frames. Sampling too early reads a MID-SLERP
+  // pixel: measured on a failing run the head was at (252, 666) when the test
+  // clicked (184, 652) — ~69 px off, well outside the picker's 22 px radius, so
+  // the click hit bare canvas and the camera never reoriented ("Received: 0").
+  //
+  // Two consecutive frames are not enough to prove it stopped (the slerp can
+  // look static across one step). Require the projected position to hold still
+  // over a longer window, sampled in the browser across real animation frames.
+  let pos: { x: number; y: number } | null = null;
+  await expect.poll(async () => {
+    const settled = await page.evaluate(() => new Promise<{ x: number; y: number } | null>((resolve) => {
+      const hook = (window as any).__gizmoHeadScreenPos;
+      let last: { x: number; y: number } | null = null;
+      let stable = 0;
+      let frames = 0;
+      const tick = () => {
+        const p = hook?.([1, 0, 0]);
+        if (!p) return resolve(null);
+        if (last && Math.abs(p.x - last.x) < 0.25 && Math.abs(p.y - last.y) < 0.25) stable++;
+        else stable = 0;
+        last = p;
+        // ~8 consecutive unchanged frames — comfortably past the slerp's
+        // convergence threshold without depending on wall-clock timing.
+        if (stable >= 8) return resolve(p);
+        if (++frames > 240) return resolve(null); // ~4 s of frames: give up, poll again
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }));
+    if (!settled) return '';
+    pos = settled;
+    return `${Math.round(settled.x)},${Math.round(settled.y)}`;
+  }, { timeout: 30_000 }).not.toBe('');
   expect(pos, 'gizmo +X head must project to a screen position').not.toBeNull();
   // Guard: nothing must overlay the head's pixel (a left-toolbar overlap was
   // exactly the bug — it intercepted the click before it reached the canvas).

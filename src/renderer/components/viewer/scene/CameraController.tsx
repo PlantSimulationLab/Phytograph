@@ -24,7 +24,7 @@ export function CameraController({
   // points where we write camera.position / controls.target. Defaults to origin.
   displayOffset?: { x: number; y: number; z: number };
 }) {
-  const { camera } = useThree();
+  const { camera, gl } = useThree();
   const controlsRef = useRef<any>(null);
   const initializedRef = useRef(false);
   const boundsRef = useRef(bounds);
@@ -275,14 +275,41 @@ export function CameraController({
         ? [offsetRef.current.x, offsetRef.current.y, offsetRef.current.z]
         : [0, 0, 0],
     });
+    // Test hook: project a WORLD point to viewport pixels through the REAL
+    // camera, so a test can click exactly where the renderer draws something.
+    // Mirrors __gizmoHeadScreenPos. Tests used to re-implement this projection
+    // (rebuilding the view basis and hardcoding fov=60 / the aspect ratio),
+    // which silently drifts from the renderer whenever the camera setup changes
+    // and produces an off-target click that reads as "clicked, nothing selected".
+    // camera.project() uses the live projection + view matrices, so it cannot
+    // drift. Applies the render-only displayOffset (world → display) first.
+    (window as any).__worldToScreen = (world: [number, number, number]) => {
+      const el = gl.domElement;
+      const r = el.getBoundingClientRect();
+      const off = offsetRef.current;
+      const v = new THREE.Vector3(
+        world[0] - (off?.x ?? 0),
+        world[1] - (off?.y ?? 0),
+        world[2] - (off?.z ?? 0),
+      );
+      camera.updateMatrixWorld();
+      v.project(camera);
+      return {
+        x: r.left + ((v.x + 1) / 2) * r.width,
+        y: r.top + ((1 - v.y) / 2) * r.height,
+        // Behind the camera (or outside the frustum) — a test must not click it.
+        visible: v.z < 1 && v.x >= -1 && v.x <= 1 && v.y >= -1 && v.y <= 1,
+      };
+    };
     return () => {
       delete (window as any).__resetPointCloudCamera;
       delete (window as any).__snapToView;
       delete (window as any).__orientToAxis;
       delete (window as any).__frameSelection;
       delete (window as any).__getCameraState;
+      delete (window as any).__worldToScreen;
     };
-  }, [resetCamera, snapToView, orientToAxis, frameSelection, camera]);
+  }, [resetCamera, snapToView, orientToAxis, frameSelection, camera, gl]);
 
   return (
     <OrbitControls

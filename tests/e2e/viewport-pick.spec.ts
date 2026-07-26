@@ -36,36 +36,33 @@ test.describe('viewport picking', () => {
       .getByTestId('scans-panel')
       .locator('[data-testid="scan-row"][data-selected="true"]');
 
-  // Projects a WORLD point to a canvas fraction using the LIVE camera state, so
-  // a click targets geometry wherever the current framing puts it rather than at
-  // a hardcoded pixel. Both the scan markers and the grid box are small on
-  // screen, so a click has to land on the body — not merely near it.
-  async function worldToScreenPoint(
-    world: [number, number, number],
-    box: { width: number; height: number },
-  ) {
-    return session.page.evaluate(({ w, h, world }) => {
-      const s = (window as any).__getCameraState();
-      const [px, py, pz] = s.position as [number, number, number];
-      const [tx, ty, tz] = s.target as [number, number, number];
-      const [ux, uy, uz] = s.up as [number, number, number];
-      const sub = (a: number[], b: number[]) => a.map((v, i) => v - b[i]);
-      const norm = (v: number[]) => { const l = Math.hypot(...v); return v.map(x => x / l); };
-      const cross = (a: number[], b: number[]) =>
-        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-      const dot = (a: number[], b: number[]) => a.reduce((acc, v, i) => acc + v * b[i], 0);
-      // three's camera looks down its local -Z.
-      const zAx = norm(sub([px, py, pz], [tx, ty, tz]));
-      const xAx = norm(cross([ux, uy, uz], zAx));
-      const yAx = cross(zAx, xAx);
-      // World point minus the render-only display offset (zero for this scene).
-      const off = s.displayOffset as [number, number, number];
-      const d = sub([world[0] - off[0], world[1] - off[1], world[2] - off[2]], [px, py, pz]);
-      const v = [dot(d, xAx), dot(d, yAx), dot(d, zAx)];
-      const f = 1 / Math.tan(((60 * Math.PI) / 180) / 2); // Canvas fov=60
-      const wClip = -v[2];
-      return { x: ((f / (w / h)) * v[0] / wClip + 1) / 2, y: (1 - (f * v[1] / wClip)) / 2 };
-    }, { w: box.width, h: box.height, world });
+  // Projects a WORLD point to VIEWPORT PIXELS through the renderer's own camera
+  // (the __worldToScreen hook in CameraController), so a click targets geometry
+  // wherever the current framing actually draws it. Both the scan markers and
+  // the grid box are small on screen, so a click has to land on the body — not
+  // merely near it.
+  //
+  // This used to re-implement the projection here: rebuild the view basis from
+  // __getCameraState, hardcode fov=60, and derive the aspect from the canvas
+  // bounding box. That duplicate math only has to disagree with the real
+  // camera by a few pixels to miss a small marker, and it did so on the
+  // headless CI runner (whose canvas is a different size than macOS) while
+  // passing locally — the failure reads as "clicked and nothing was selected",
+  // which looks like a picking bug rather than a bad click coordinate.
+  // camera.project() cannot drift from what is on screen.
+  async function worldToScreenPx(world: [number, number, number]) {
+    const pt = await session.page.evaluate(
+      (w) => (window as any).__worldToScreen?.(w) ?? null,
+      world,
+    );
+    if (!pt) throw new Error('__worldToScreen hook unavailable (camera not mounted?)');
+    if (!pt.visible) {
+      throw new Error(
+        `world point ${JSON.stringify(world)} is outside the frustum ` +
+        `(projected to ${pt.x.toFixed(1)},${pt.y.toFixed(1)}) — the camera is not framing it`,
+      );
+    }
+    return pt as { x: number; y: number; visible: boolean };
   }
 
   // Imports a sphere XML through the real Add Scan → Import XML path.
@@ -132,8 +129,6 @@ test.describe('viewport picking', () => {
     await importSphere('sphere-enclosing-grid.xml', 2);
     const { page } = session;
 
-    const canvas = page.locator('canvas').first();
-    const box = (await canvas.boundingBox())!;
     const gridRow = page.locator('[data-testid="mesh-row"]').first();
     const selectedMeshes = () => page.locator('[data-testid="mesh-row"][data-selected="true"]');
 
@@ -147,8 +142,8 @@ test.describe('viewport picking', () => {
     // pick and swallow the click; the marker must get it instead.
     // (Point clouds are not viewport-pickable — they are selected from their
     // panel row — so the marker is the object to assert on here.)
-    const onMarker = await worldToScreenPoint([-2, 0, 0.5], box);
-    await page.mouse.click(box.x + box.width * onMarker.x, box.y + box.height * onMarker.y);
+    const onMarker = await worldToScreenPx([-2, 0, 0.5]);
+    await page.mouse.click(onMarker.x, onMarker.y);
     await expect(selectedRows()).toHaveCount(1);
     await expect(selectedMeshes()).toHaveCount(0);
     await expect(gridRow).toHaveAttribute('data-selected', 'false');
@@ -159,8 +154,8 @@ test.describe('viewport picking', () => {
     // (the box is 0.5^3 at (0,0,0.5) rotated 45 deg, so its top-face corners
     // sit at (0, +-0.354, 0.75)) — clear of the sphere, which only reaches
     // z ~ 0.70 near the centre.
-    const corner = await worldToScreenPoint([0, 0.30, 0.75], box);
-    await page.mouse.click(box.x + box.width * corner.x, box.y + box.height * corner.y);
+    const corner = await worldToScreenPx([0, 0.30, 0.75]);
+    await page.mouse.click(corner.x, corner.y);
     await expect(selectedMeshes()).toHaveCount(1);
     await expect(gridRow).toHaveAttribute('data-selected', 'true');
   });
@@ -195,8 +190,11 @@ test.describe('viewport picking', () => {
         0.5 + sz * HALF,
       ]);
     }
+    // Corner silhouette in VIEWPORT PIXELS (the probe offsets below are relative
+    // to this footprint, so pixels and fractions work equally — pixels just keep
+    // one unit throughout).
     const projected = [];
-    for (const c of corners) projected.push(await worldToScreenPoint(c, box));
+    for (const c of corners) projected.push(await worldToScreenPx(c));
     const foot = {
       minx: Math.min(...projected.map(p => p.x)), maxx: Math.max(...projected.map(p => p.x)),
       miny: Math.min(...projected.map(p => p.y)), maxy: Math.max(...projected.map(p => p.y)),
@@ -216,10 +214,11 @@ test.describe('viewport picking', () => {
     ];
 
     let probed = 0;
-    for (const [label, fx, fy] of probes) {
-      if (fx < 0.02 || fx > 0.98 || fy < 0.02 || fy > 0.98) continue;
-      const px = box.x + box.width * fx;
-      const py = box.y + box.height * fy;
+    for (const [label, px, py] of probes) {
+      // Stay inside the canvas rect with a small inset (probe coordinates are
+      // viewport pixels now, so compare against the canvas box directly).
+      if (px < box.x + 4 || px > box.x + box.width - 4) continue;
+      if (py < box.y + 4 || py > box.y + box.height - 4) continue;
       // Only probe points that are actually on the canvas and not behind a
       // panel/toolbar — an overlay would eat the click and fake a pass.
       const onCanvas = await page.evaluate(
@@ -244,12 +243,9 @@ test.describe('viewport picking', () => {
 
     await expect(selectedRows()).toHaveCount(0);
 
-    const canvas = page.locator('canvas').first();
-    const box = (await canvas.boundingBox())!;
-
     // Scan 0's marker sits at its world origin (-2, 0, 0.5).
-    const pt = await worldToScreenPoint([-2, 0, 0.5], box);
-    await page.mouse.click(box.x + box.width * pt.x, box.y + box.height * pt.y);
+    const pt = await worldToScreenPx([-2, 0, 0.5]);
+    await page.mouse.click(pt.x, pt.y);
 
     // Exactly one scan selected, and it is the one whose marker we clicked.
     await expect(selectedRows()).toHaveCount(1);
