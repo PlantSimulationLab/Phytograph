@@ -101,6 +101,33 @@ test.describe('viewport picking', () => {
     return pt as { x: number; y: number; visible: boolean };
   }
 
+  // Click a viewport pixel the way a REAL pointer arrives at it: move first,
+  // let R3F raycast, then press and release.
+  //
+  // R3F's `onClick` is not a DOM click. From its events.ts: pointerdown records
+  // `internal.initialHits` (the objects under the cursor at press time) and the
+  // click handler only fires for an object that was in that list. And per the
+  // R3F docs, "Fiber will only raycast when the user is interacting with the
+  // canvas" — the intersection state is driven by pointer MOVEMENT.
+  //
+  // `page.mouse.click()` is move+down+up dispatched back-to-back at a pixel the
+  // pointer has never visited. On a fast machine R3F still processes the move
+  // and has fresh hits by pointerdown; on the loaded CI runner it does not, so
+  // `initialHits` comes up empty and the click is silently dropped. That is
+  // exactly the observed signature: the click is on the canvas, at a correctly
+  // projected pixel, and nothing is selected.
+  //
+  // Moving first (and yielding a frame) gives R3F its raycast before the press.
+  async function clickViewport(x: number, y: number) {
+    await session.page.mouse.move(x, y);
+    // Let the move be processed and the hover raycast run.
+    await session.page.evaluate(
+      () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+    );
+    await session.page.mouse.down();
+    await session.page.mouse.up();
+  }
+
   // Imports a sphere XML through the real Add Scan → Import XML path.
   // `fixture` picks sphere.xml (4 scans) or sphere-with-grid.xml (1 scan + a
   // <grid> voxel box, so grid selection can be asserted).
@@ -211,7 +238,7 @@ test.describe('viewport picking', () => {
     // (Point clouds are not viewport-pickable — they are selected from their
     // panel row — so the marker is the object to assert on here.)
     const onMarker = await worldToScreenPx([-2, 0, 0.5]);
-    await page.mouse.click(onMarker.x, onMarker.y);
+    await clickViewport(onMarker.x, onMarker.y);
     await expect(selectedRows()).toHaveCount(1);
     await expect(selectedMeshes()).toHaveCount(0);
     await expect(gridRow).toHaveAttribute('data-selected', 'false');
@@ -238,7 +265,7 @@ test.describe('viewport picking', () => {
       }
     }
     if (!corner) throw new Error(`no grid top-face corner landed on the canvas: ${lastErr}`);
-    await page.mouse.click(corner.x, corner.y);
+    await clickViewport(corner.x, corner.y);
     await expect(selectedMeshes()).toHaveCount(1);
     await expect(gridRow).toHaveAttribute('data-selected', 'true');
   });
@@ -313,7 +340,7 @@ test.describe('viewport picking', () => {
       if (onCanvas !== 'canvas') continue;
 
       probed++;
-      await page.mouse.click(px, py);
+      await clickViewport(px, py);
       await expect(
         selectedMeshes(),
         `clicking well outside the grid's on-screen footprint (${label}) must not select it`,
@@ -330,7 +357,7 @@ test.describe('viewport picking', () => {
 
     // Scan 0's marker sits at its world origin (-2, 0, 0.5).
     const pt = await worldToScreenPx([-2, 0, 0.5]);
-    await page.mouse.click(pt.x, pt.y);
+    await clickViewport(pt.x, pt.y);
 
     // Exactly one scan selected, and it is the one whose marker we clicked.
     // On failure, report the camera + projection state: the marker is a
