@@ -70,6 +70,12 @@ test.describe('viewport picking', () => {
       );
     }
     if (!requireOnCanvas) return pt as { x: number; y: number; visible: boolean };
+    // Report what the ray actually hits at this pixel if the click fails to
+    // select anything. A count alone is not usable — the sphere's POINTS are
+    // raycastable too, so any pixel over the cloud reports 100+ hits whether or
+    // not the scan marker's OBJ (loaded via useLoader inside
+    // <Suspense fallback={null}>) has resolved into clickable geometry.
+    // This is attached to the click helper so a CI failure names the objects.
     // The pixel must actually belong to the canvas. A click that lands on a
     // panel/toolbar is swallowed by the DOM and never reaches the 3-D picker,
     // which surfaces as the very confusing "clicked and nothing was selected".
@@ -136,9 +142,7 @@ test.describe('viewport picking', () => {
     // hooks are GONE (`typeof __worldToScreen === 'undefined'`) until the new
     // controller mounts. A barrier that reads a hook during that gap, or that
     // trusts a flag which re-arms on remount, can be satisfied by a camera that
-    // is not yet framing this scene's content. CI showed the consequence: the
-    // marker projected to y≈212 where the settled framing puts it at y≈652 — a
-    // ~440 px miss, which reads as "clicked and nothing was selected".
+    // is not yet framing this scene's content.
     //
     // Polling the projection is immune to both: it yields '' while the hook is
     // absent (keep waiting) and only succeeds once a LIVE camera reports the
@@ -329,7 +333,32 @@ test.describe('viewport picking', () => {
     await page.mouse.click(pt.x, pt.y);
 
     // Exactly one scan selected, and it is the one whose marker we clicked.
-    await expect(selectedRows()).toHaveCount(1);
+    // On failure, report the camera + projection state: the marker is a
+    // real-world-sized mesh, so how many pixels it covers depends entirely on
+    // the framing distance, and a click can be on the right pixel yet still miss
+    // a marker that the current framing has shrunk to almost nothing.
+    const diag = async () => {
+      const s = await page.evaluate((p) => {
+        const cam = (window as any).__getCameraState?.();
+        const w2s = (window as any).__worldToScreen;
+        const at = (q: [number, number, number]) => w2s?.(q) ?? null;
+        return {
+          cam,
+          marker: at([-2, 0, 0.5]),
+          // A point 0.1 m away in world space: the pixel gap between these two
+          // is the marker's on-screen scale.
+          nearby: at([-2, 0.1, 0.5]),
+          // What the ray actually hits at the clicked pixel, nearest first.
+          // This is the decisive datum: if the marker's OBJ has not resolved,
+          // no marker mesh appears here (only cloud Points / the grid), which
+          // tells us the click was fine and the geometry was missing.
+          hits: (window as any).__hitInfoAt?.(p.x, p.y) ?? null,
+        };
+      }, { x: pt.x, y: pt.y });
+      return JSON.stringify(s);
+    };
+    await expect(selectedRows(), `click=(${pt.x.toFixed(1)},${pt.y.toFixed(1)}) state=${await diag()}`)
+      .toHaveCount(1);
     await expect(selectedRows()).toHaveAttribute('data-scan-origin', '-2.000,0.000,0.500');
   });
 });

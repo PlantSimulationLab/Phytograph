@@ -24,7 +24,7 @@ export function CameraController({
   // points where we write camera.position / controls.target. Defaults to origin.
   displayOffset?: { x: number; y: number; z: number };
 }) {
-  const { camera, gl } = useThree();
+  const { camera, gl, scene } = useThree();
   const controlsRef = useRef<any>(null);
   const initializedRef = useRef(false);
   const boundsRef = useRef(bounds);
@@ -275,6 +275,45 @@ export function CameraController({
         ? [offsetRef.current.x, offsetRef.current.y, offsetRef.current.z]
         : [0, 0, 0],
     });
+    // Test hook: is there any scene geometry under this viewport pixel?
+    //
+    // Scan markers load their body from an OBJ via useLoader, wrapped in
+    // <Suspense fallback={null}> — so until that asset resolves the marker
+    // renders as NOTHING and there is literally nothing to click. A test that
+    // clicks the marker's projected position before then hits empty space, and
+    // the failure reads "clicked and nothing was selected", which looks like a
+    // picking regression rather than an asset that had not loaded yet. Locally
+    // the OBJ is warm and this never shows up; on CI it is slower.
+    //
+    // Returns a description of what the ray hits, nearest first — not just a
+    // count. A bare count is useless here: the sphere's POINTS are also
+    // raycastable, so a pixel over the cloud reports well over a hundred hits
+    // whether or not the marker's mesh has loaded.
+    (window as any).__hitInfoAt = (clientX: number, clientY: number) => {
+      const el = gl.domElement;
+      const r = el.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((clientX - r.left) / r.width) * 2 - 1,
+        -((clientY - r.top) / r.height) * 2 + 1,
+      );
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, camera);
+      return ray.intersectObjects(scene.children, true).slice(0, 8).map((i) => ({
+        type: i.object.type,
+        name: i.object.name || null,
+        dist: Number(i.distance.toFixed(3)),
+        // Walk up for a named ancestor — that is what identifies a scan marker
+        // vs. the point cloud vs. the grid box.
+        parents: (() => {
+          const out: string[] = [];
+          let o: any = i.object;
+          for (let k = 0; k < 4 && o; k++, o = o.parent) {
+            if (o.name) out.push(o.name);
+          }
+          return out;
+        })(),
+      }));
+    };
     // Test hook: project a WORLD point to viewport pixels through the REAL
     // camera, so a test can click exactly where the renderer draws something.
     // Mirrors __gizmoHeadScreenPos. Tests used to re-implement this projection
@@ -308,8 +347,9 @@ export function CameraController({
       delete (window as any).__frameSelection;
       delete (window as any).__getCameraState;
       delete (window as any).__worldToScreen;
+      delete (window as any).__hitInfoAt;
     };
-  }, [resetCamera, snapToView, orientToAxis, frameSelection, camera, gl]);
+  }, [resetCamera, snapToView, orientToAxis, frameSelection, camera, gl, scene]);
 
   return (
     <OrbitControls
