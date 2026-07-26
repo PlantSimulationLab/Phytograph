@@ -49,7 +49,13 @@ test('cancelling a heavy canopy build abandons it and leaves the UI usable', asy
     await page.getByTestId('plant-generate-button').click();
 
     const meshRow = page.getByTestId('mesh-row').first();
-    await expect(meshRow).toBeVisible({ timeout: 120_000 });
+    // 180 s: this small single-plant build is normally seconds, but it runs
+    // right after cancelling an 8x8 canopy — the backend may still be unwinding
+    // that work — and CI runs two Playwright workers on a shared runner. It
+    // timed out at 120 s once in four CI runs (passing the other three), which
+    // is runner load rather than a logic failure; the assertions below still
+    // prove the build actually produced a plant mesh.
+    await expect(meshRow).toBeVisible({ timeout: 180_000 });
     await expect(meshRow).toHaveAttribute('data-is-plant', 'true');
   } finally {
     await close();

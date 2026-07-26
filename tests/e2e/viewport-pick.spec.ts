@@ -50,7 +50,14 @@ test.describe('viewport picking', () => {
   // passing locally — the failure reads as "clicked and nothing was selected",
   // which looks like a picking bug rather than a bad click coordinate.
   // camera.project() cannot drift from what is on screen.
-  async function worldToScreenPx(world: [number, number, number]) {
+  // `requireOnCanvas` (default true) is for points we are about to CLICK. Pass
+  // false when the caller only needs the coordinate — e.g. projecting the grid's
+  // eight corners to measure its on-screen silhouette, where corners legitimately
+  // fall outside the canvas and are never clicked.
+  async function worldToScreenPx(
+    world: [number, number, number],
+    { requireOnCanvas = true }: { requireOnCanvas?: boolean } = {},
+  ) {
     const pt = await session.page.evaluate(
       (w) => (window as any).__worldToScreen?.(w) ?? null,
       world,
@@ -60,6 +67,29 @@ test.describe('viewport picking', () => {
       throw new Error(
         `world point ${JSON.stringify(world)} is outside the frustum ` +
         `(projected to ${pt.x.toFixed(1)},${pt.y.toFixed(1)}) — the camera is not framing it`,
+      );
+    }
+    if (!requireOnCanvas) return pt as { x: number; y: number; visible: boolean };
+    // The pixel must actually belong to the canvas. A click that lands on a
+    // panel/toolbar is swallowed by the DOM and never reaches the 3-D picker,
+    // which surfaces as the very confusing "clicked and nothing was selected".
+    // The sibling probe test already guards this way; these did not, so a click
+    // off the canvas was indistinguishable from a picking bug.
+    const where = await session.page.evaluate((p) => {
+      const el = document.elementFromPoint(p.x, p.y) as HTMLElement | null;
+      const c = document.querySelector('canvas')!.getBoundingClientRect();
+      return {
+        tag: el?.tagName?.toLowerCase() ?? null,
+        cls: (el?.className ?? '').toString().slice(0, 80),
+        canvas: { x: c.x, y: c.y, w: c.width, h: c.height },
+        win: { w: window.innerWidth, h: window.innerHeight },
+      };
+    }, { x: pt.x, y: pt.y });
+    if (where.tag !== 'canvas') {
+      throw new Error(
+        `projected ${JSON.stringify(world)} to (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) but that ` +
+        `pixel belongs to <${where.tag} class="${where.cls}">, not the canvas. ` +
+        `canvas=${JSON.stringify(where.canvas)} window=${JSON.stringify(where.win)}`,
       );
     }
     return pt as { x: number; y: number; visible: boolean };
@@ -127,6 +157,28 @@ test.describe('viewport picking', () => {
       }, { timeout: 30_000 })
       .not.toBe('');
 
+    // Dismiss any toasts before the tests start clicking the viewport.
+    //
+    // The toast stack is `fixed bottom-4 right-4` and each CARD is
+    // `pointer-events-auto`, so a visible toast is a real click target sitting
+    // over the bottom-right of the canvas. The import raises one, and these
+    // specs click wherever the framing puts the geometry — which can be under
+    // it. The click then lands on the toast's <p>, never reaches the 3-D picker,
+    // and the failure reads as "clicked and nothing was selected" with no hint
+    // that the DOM ate it. Toasts auto-expire, so a fast local run is usually
+    // past them by click time while the slower CI runner is not: that timing gap
+    // is why these two specs failed only on CI.
+    // Dismiss via a direct DOM click, NOT locator.click(): a toast can
+    // auto-expire between resolving the locator and the click, and Playwright
+    // then retries actionability for its full default timeout (measured: 30 s
+    // burned per test, turning a 4 s spec into 34 s). Firing the DOM event is
+    // immediate and a no-op if the node already went away.
+    await page.evaluate(() => {
+      document.querySelectorAll<HTMLElement>('[data-testid="toast-close"]')
+        .forEach((b) => b.click());
+    });
+    await expect(page.getByTestId('toast-close')).toHaveCount(0, { timeout: 15_000 });
+
     // Importing the XML leaves all four scans selected; clear that via the
     // panel's Deselect All so each test starts from a known empty selection.
     await page.getByTitle('Deselect All').click();
@@ -166,7 +218,22 @@ test.describe('viewport picking', () => {
     // (the box is 0.5^3 at (0,0,0.5) rotated 45 deg, so its top-face corners
     // sit at (0, +-0.354, 0.75)) — clear of the sphere, which only reaches
     // z ~ 0.70 near the centre.
-    const corner = await worldToScreenPx([0, 0.30, 0.75]);
+    // The box is symmetric about its centre, so BOTH top-face corners are
+    // equally valid targets — take whichever currently projects onto bare
+    // canvas. Hardcoding one of them made this depend on where the framing
+    // happens to put it: on the CI runner (+0.30) landed on the right-hand
+    // scene panel, so the click never reached the picker.
+    let corner: { x: number; y: number } | null = null;
+    let lastErr = '';
+    for (const y of [0.30, -0.30]) {
+      try {
+        corner = await worldToScreenPx([0, y, 0.75]);
+        break;
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (!corner) throw new Error(`no grid top-face corner landed on the canvas: ${lastErr}`);
     await page.mouse.click(corner.x, corner.y);
     await expect(selectedMeshes()).toHaveCount(1);
     await expect(gridRow).toHaveAttribute('data-selected', 'true');
@@ -206,7 +273,9 @@ test.describe('viewport picking', () => {
     // to this footprint, so pixels and fractions work equally — pixels just keep
     // one unit throughout).
     const projected = [];
-    for (const c of corners) projected.push(await worldToScreenPx(c));
+    // Coordinates only — these corners are measured, never clicked, and some of
+    // them legitimately project outside the canvas.
+    for (const c of corners) projected.push(await worldToScreenPx(c, { requireOnCanvas: false }));
     const foot = {
       minx: Math.min(...projected.map(p => p.x)), maxx: Math.max(...projected.map(p => p.x)),
       miny: Math.min(...projected.map(p => p.y)), maxy: Math.max(...projected.map(p => p.y)),
