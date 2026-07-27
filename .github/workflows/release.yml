@@ -208,9 +208,18 @@ jobs:
           VERSION_OVERRIDE: "1.0.12"
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip pybind11
+          # setuptools + wheel are required in THIS environment because of
+          # --no-build-isolation: without isolation pip runs the build backend
+          # from the ambient interpreter, and a missing `wheel` makes setuptools
+          # fail with "error: invalid command 'bdist_wheel'" AFTER it has
+          # already written the correct 1.0.12 metadata. (A local venv that
+          # happens to have wheel installed hides this.)
+          python -m pip install --upgrade pip setuptools wheel pybind11
           rm -rf /tmp/cut_pursuit_src
           git clone --depth 1 https://github.com/truebelief/cut_pursuit_py.git /tmp/cut_pursuit_src
+          # --no-build-isolation so VERSION_OVERRIDE (and the pybind11 above)
+          # are visible to setup.py; isolation would spawn a fresh env where the
+          # version falls back to the hardcoded 0.1.2.
           python -m pip install --no-build-isolation /tmp/cut_pursuit_src
           # Fail loudly here rather than letting requirements.txt fall back to
           # the broken sdist and produce a confusing error much later.
