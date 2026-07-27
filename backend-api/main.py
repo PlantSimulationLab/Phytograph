@@ -4889,26 +4889,66 @@ def _otsu_threshold_eta(log_vals, nbins: int = 256):
     return float(centers[idx]), max(0.0, min(1.0, eta))
 
 
+# Degenerate-sliver floor for the Lmax auto-estimate, as a fraction of the median
+# candidate max-edge. Otsu splits the candidate edge distribution into "surface"
+# and "gap bridges", but it finds the DOMINANT bimodal split — and a cluster of
+# sub-millimetre micro-triangles (near-coincident returns, which Helios's aspect
+# filter can't catch because their aspect ratio looks normal) is a far stronger
+# mode than the surface/bridge boundary. Otsu then thresholds BELOW every real
+# triangle, the seeded filter keeps nothing, and the mesh silently renders empty
+# (which the LAD reuse path reports as "mesh_indices is empty"). A triangle whose
+# max edge is under 1% of the median cannot be real geometry at that sampling
+# density, so drop those before estimating. The exact fraction is not sensitive:
+# on the observed failure anything from 0.1% to 5% removes the same sliver cluster,
+# and on well-formed distributions the floor removes nothing and the estimate is
+# bit-identical.
+_HELIOS_DEGENERATE_EDGE_FRACTION = 0.01
+
+
 def _helios_filter_estimate(edge_max, scan_ids) -> dict:
     """Auto-estimate the triangulation Lmax + separation confidence (+ merged-
     cloud guard) from the candidate per-triangle max-edge lengths. Returns
     {lmax, eta, label, merged, merged_message}; lmax is None when the spread is
     too small to threshold. Folds the (retired) /suggest logic into the main run
-    so estimation is instant — no second triangulation."""
+    so estimation is instant — no second triangulation.
+
+    The estimate is made over the NON-degenerate candidates (see
+    `_HELIOS_DEGENERATE_EDGE_FRACTION`) and is floored at the smallest real edge,
+    so the returned lmax can never sit below the whole candidate set and filter
+    the mesh down to nothing."""
     import numpy as np
-    e = np.asarray(edge_max, dtype=np.float64)
-    e = e[e > 0]
-    if e.size < 16:
+    e_all = np.asarray(edge_max, dtype=np.float64)
+    e_all = e_all[e_all > 0]
+    if e_all.size < 16:
         return {"lmax": None, "eta": 0.0, "label": "n/a",
                 "sep_ratio": None, "sep_label": "n/a",
                 "merged": False, "merged_message": None}
+    # Estimate over real geometry only: drop degenerate micro-triangles that would
+    # otherwise dominate the Otsu split. Keep the full set when the floor would
+    # leave too few candidates to threshold meaningfully.
+    floor = float(np.median(e_all)) * _HELIOS_DEGENERATE_EDGE_FRACTION
+    e = e_all[e_all > floor]
+    if e.size < 16:
+        e = e_all
     thr_log, eta = _otsu_threshold_eta(np.log(e))
     lmax = float(np.exp(thr_log)) if math.isfinite(thr_log) else None
-    # Merged-cloud guard, per scan (each is triangulated independently).
+    # Never seed a filter that keeps nothing: Otsu's threshold is a bin CENTER, so
+    # even on a healthy unimodal set it can land just under the smallest edge.
+    # Clamping to the minimum real edge guarantees the seeded mesh has ≥1 triangle.
+    if lmax is not None and e.size:
+        lmax = max(lmax, float(e.min()))
+    # Merged-cloud guard, per scan (each is triangulated independently). Runs over
+    # the SAME non-degenerate subset the estimate used, so `sids` is masked by both
+    # the positive-edge and the degenerate-floor filters to stay row-aligned with
+    # `e` — a sliver cluster would otherwise crush the 5th percentile and trip the
+    # merged heuristic on a perfectly ordinary single-scan cloud.
     merged = False
     sids = np.asarray(scan_ids, dtype=np.int64)
-    pos = np.asarray(edge_max, dtype=np.float64) > 0
+    edges_arr = np.asarray(edge_max, dtype=np.float64)
+    pos = edges_arr > 0
     sids = sids[pos]
+    if e.size != e_all.size:
+        sids = sids[edges_arr[pos] > floor]
     for s in np.unique(sids):
         es = e[sids == s]
         if es.size < 64:

@@ -20,15 +20,20 @@ const OBJ = join(repoRoot, 'tests', 'e2e', 'fixtures', 'upslope-canopy.obj');
 // Two full LAD runs (each triangulates + inverts the canopy) plus the DEM/snap
 // setup don't fit the default 180s budget — give the whole flow more room.
 //
-// QUARANTINED (test.fixme): the terrain-snapped LAD path is incomplete work and
-// fails at the first LAD run with "No miss points found in the point cloud" —
-// the snapped-grid point cull drops the miss (sky) points that the Beer's-law
-// inversion needs, so calculateLeafArea has no transmitted-beam denominator.
-// This reproduces on pristine main (it predates the current release work) and
-// needs dedicated work on the terrain-following LAD cull to retain misses. Skip
-// it here rather than block the suite; re-enable once the snap-to-ground LAD
-// path is finished.
-test.fixme('snaps a voxel grid to a DEM and LAD follows the slope', async () => {
+// Previously quarantined (test.fixme) for "No miss points found in the point
+// cloud". Two independent causes, the first masking the second:
+//
+//  1. A product bug in the Lmax auto-estimate: a cluster of degenerate
+//     sub-millimetre candidate triangles dominated the Otsu split, so the
+//     estimate landed BELOW every real triangle, the seeded filter kept nothing,
+//     and the empty mesh failed the inversion with "mesh_indices is empty".
+//     Fixed by the degenerate floor + Lmax clamp in `_helios_filter_estimate`.
+//  2. A flaw in THIS TEST's geometry (not in the product): the original 2x2 m
+//     grid was narrower than the canopy, so the only beams threading it were
+//     near-nadir ones the canopy fully intercepts — no miss ray could reach the
+//     inversion. The beam-frustum cull was behaving correctly. Fixed by sizing
+//     the grid past the canopy edge (see the grid-scale comment below).
+test('snaps a voxel grid to a DEM and LAD follows the slope', async () => {
   test.setTimeout(480_000);
   const { app, page, close } = await launchApp();
 
@@ -103,8 +108,18 @@ test.fixme('snaps a voxel grid to a DEM and LAD follows the slope', async () => 
     await scannerRow.getByTestId('scan-row-name').click();
     await page.getByTestId('tool-create-voxel').click();
     // A 2x2-column grid spanning the slope: +x columns sit uphill, -x downhill.
-    await page.getByTestId('mesh-scale-x').fill('2');
-    await page.getByTestId('mesh-scale-y').fill('2');
+    //
+    // The footprint must be WIDER than the canopy (which spans ~±2.5 m), not just
+    // the interior. LAD's Beer's-law inversion needs miss rays that pass THROUGH
+    // the grid, and the beam-frustum cull keeps a beam only if it actually
+    // intersects the grid box. With a 2x2 m grid under an overhead scanner, the
+    // only beams threading it are within ~11° of nadir — and this canopy (LAI 1,
+    // 20k leaves, no gaps at this sampling) intercepts every one of them, so zero
+    // misses survive the cull and the inversion fails with "No miss points found".
+    // At 7x7 m the grid reaches past the canopy edge, so beams that see sky also
+    // thread the grid (~400 of them) and the transmission denominator is real.
+    await page.getByTestId('mesh-scale-x').fill('7');
+    await page.getByTestId('mesh-scale-y').fill('7');
     await page.getByTestId('mesh-scale-z').fill('0.4');
     await page.getByTestId('voxel-grid-x').fill('2');
     await page.getByTestId('voxel-grid-y').fill('2');

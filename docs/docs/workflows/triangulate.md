@@ -257,6 +257,13 @@ Watch for **High η with Low Modes**: a confident split placed in the wrong
 spot. If the mesh looks holey there, raise Lmax. The filter breakdown above the
 controls (candidates / kept / dropped) updates as you adjust the filter.
 
+Scans with near-coincident returns can produce a handful of *degenerate*
+triangles thousands of times smaller than the real surface. Those are excluded
+from the estimate — otherwise they would form the strongest split in the
+distribution and pull Lmax below every genuine triangle, leaving the mesh empty.
+The estimate is also never placed below the smallest real candidate, so **Auto**
+always yields at least one triangle.
+
 #### Check point spacing
 
 The edge-based auto-estimate has a blind spot: on a **sparsely-sampled surface**
