@@ -183,6 +183,42 @@ jobs:
             || { echo "xerces headers missing under /usr/local/include" >&2; exit 1; }
           echo "staged libxerces-c-3.2.dylib from $real"
 
+      # cut_pursuit_py has NO x86_64 macOS wheel — every macOS wheel it
+      # publishes is arm64 — and its 1.0.12 sdist is unusable: upstream's
+      # setup.py takes its version from a VERSION_OVERRIDE env var that their
+      # wheel CI sets, falling back to a hardcoded '0.1.2'. The sdist was packed
+      # WITHOUT that variable, so it declares 0.1.2 while being named 1.0.12 and
+      # modern pip refuses it:
+      #   Requested cut_pursuit_py>=1.0.12 ... has inconsistent version:
+      #   expected '1.0.12', but metadata has '0.1.2'
+      # leaving no installable candidate on Intel macOS at all.
+      #
+      # Build it from upstream git with VERSION_OVERRIDE set, which is exactly
+      # what their own wheel CI does, so Intel gets the SAME 1.0.12 algorithm as
+      # every other platform rather than the old 0.1.2. Verified locally: the
+      # build succeeds, reports "Successfully installed cut_pursuit_py-1.0.12",
+      # and `import cut_pursuit_py` exposes perform_cut_pursuit.
+      #
+      # Installed BEFORE requirements.txt so pip sees the requirement already
+      # satisfied and never reaches for the broken sdist.
+      - name: Install cut_pursuit_py from source (macOS Intel)
+        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          VERSION_OVERRIDE: "1.0.12"
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip pybind11
+          rm -rf /tmp/cut_pursuit_src
+          git clone --depth 1 https://github.com/truebelief/cut_pursuit_py.git /tmp/cut_pursuit_src
+          python -m pip install --no-build-isolation /tmp/cut_pursuit_src
+          # Fail loudly here rather than letting requirements.txt fall back to
+          # the broken sdist and produce a confusing error much later.
+          python -c "import cut_pursuit_py, importlib.metadata as m; \
+            v = m.version('cut_pursuit_py'); print('cut_pursuit_py', v); \
+            assert v == '1.0.12', f'expected 1.0.12, got {v}'; \
+            assert hasattr(cut_pursuit_py, 'perform_cut_pursuit')"
+
       - name: Install Python dependencies
         if: steps.backend-cache.outputs.cache-hit != 'true'
         working-directory: backend-api
