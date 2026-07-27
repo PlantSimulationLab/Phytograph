@@ -32,7 +32,8 @@ Defined in `tsconfig.json`:
 - `dist-main/` — Electron main process
 - `dist-preload/` — preload script
 - `dist-renderer/` — renderer bundle
-- `release/` — electron-builder output
+- `~/builds/phytograph.noindex/` — electron-builder output (outside the repo
+  and outside Dropbox; CI falls back to a repo-relative `release/`)
 - `resources/phytograph_backend/` — PyInstaller bundle
 
 Don't hand-edit these; they're produced by the scripts above.

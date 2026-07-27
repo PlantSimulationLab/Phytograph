@@ -20,10 +20,13 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveBuildOutputDir } from './build-output-dir.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, '..');
-const releaseDir = join(repoRoot, 'release');
+// Must match wherever electron-builder actually wrote — local builds go to
+// ~/builds/phytograph.noindex, CI keeps repo-relative release/.
+const releaseDir = resolveBuildOutputDir();
 
 const EXPECTED_VERSION = JSON.parse(
   readFileSync(join(repoRoot, 'package.json'), 'utf-8'),
@@ -46,10 +49,11 @@ function findFreePort() {
   });
 }
 
-// Locate the packaged executable that electron-builder produced under release/.
-//   macOS:   release/mac*/Phytograph.app/Contents/MacOS/Phytograph
-//   Linux:   release/linux-unpacked/phytograph        (the unpacked binary)
-//   Windows: release/win-unpacked/Phytograph.exe
+// Locate the packaged executable that electron-builder produced under the
+// build output dir (see build-output-dir.mjs).
+//   macOS:   <output>/mac*/Phytograph.app/Contents/MacOS/Phytograph
+//   Linux:   <output>/linux-unpacked/phytograph        (the unpacked binary)
+//   Windows: <output>/win-unpacked/Phytograph.exe
 function findPackagedBinary() {
   if (process.platform === 'darwin') {
     const macDirs = readdirSync(releaseDir).filter((d) => d.startsWith('mac'));
@@ -70,12 +74,15 @@ function findPackagedBinary() {
 
 async function main() {
   if (!existsSync(releaseDir)) {
-    fail(`no release/ directory — run electron-builder first (e.g. SKIP_NOTARIZATION=1 npm run package).`);
+    fail(
+      `no build output directory at ${releaseDir} — run electron-builder first ` +
+        `(e.g. SKIP_NOTARIZATION=1 npm run package).`,
+    );
   }
   const bin = findPackagedBinary();
   if (!bin) {
     fail(
-      `could not find a packaged Phytograph binary under release/. ` +
+      `could not find a packaged Phytograph binary under ${releaseDir}. ` +
         `Contents: ${readdirSync(releaseDir).join(', ')}`,
     );
   }

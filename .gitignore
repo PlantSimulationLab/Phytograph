@@ -2,6 +2,10 @@ node_modules/
 dist-main/
 dist-preload/
 dist-renderer/
+# electron-builder output. Local builds go to ~/builds/phytograph.noindex
+# (outside the repo AND outside Dropbox — see scripts/build-output-dir.mjs);
+# this entry still covers CI and any bare `npx electron-builder` run, which
+# fall back to the repo-relative default.
 release/
 resources/phytograph_backend/
 resources/phytograph_backend.exe
