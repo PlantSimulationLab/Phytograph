@@ -102,13 +102,19 @@ jobs:
         run: |
           echo "sha=$(git -C pyhelios rev-parse HEAD)-$(git -C pyhelios/helios-core rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Same cache key as release.yml so CI and release share the bundle.
+      # Same cache key as release.yml so CI and release share the bundle — keep
+      # the hashFiles globs IDENTICAL in both files or they stop sharing.
+      #
+      # Globs cover exactly what PyInstaller bundles: main.py + the qsm/ package
+      # it imports + vendor/treeiso (--add-data). Deliberately NOT
+      # `backend-api/**/*.py`, which also matched 87 test files, so touching a
+      # pytest file evicted a bundle that would have rebuilt byte-identical.
       - name: Cache PyInstaller backend
         id: backend-cache
         uses: actions/cache@v4
         with:
           path: resources/phytograph_backend
-          key: backend-${{ runner.os }}-x64-${{ hashFiles('backend-api/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}
+          key: backend-${{ runner.os }}-x64-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}
 
       - name: Install Python dependencies
         working-directory: backend-api

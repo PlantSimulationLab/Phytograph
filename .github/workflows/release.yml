@@ -129,7 +129,25 @@ jobs:
           # `-cuda` marks the GPU-enabled backend: bumping it (or any change
           # that should force a fresh backend) invalidates pre-GPU CPU-only
           # caches so the next build actually recompiles with CUDA.
-          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}-cuda
+          #
+          # Hash only what actually ends up IN the bundle. The old glob was
+          # `backend-api/**/*.py`, which on a runner matches 120 files — 87 of
+          # them tests. PyInstaller bundles main.py, the qsm/ package it imports,
+          # and vendor/treeiso via --add-data (see scripts/build-backend.mjs);
+          # it never bundles tests/, research/ or scripts/. So editing a pytest
+          # file used to throw away a cache whose output would have been
+          # byte-identical. That is not free: macOS Intel is the only platform
+          # that compiles cut_pursuit_py, pye57 and cloth-simulation-filter from
+          # sdist plus libhelios, so a miss costs it ~27 min (measured on
+          # v0.57.0: 60 min cold vs ~5 min warm on Linux/Windows).
+          #
+          # If a new top-level package under backend-api/ is imported by the
+          # backend, ADD IT HERE — omitting it would restore a stale binary
+          # built from different sources, which is far worse than a cache miss.
+          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}-cuda
+          # No fallback on purpose: a partial-match restore would ship a backend
+          # built from different sources than the commit being released. Better
+          # to pay the rebuild than to publish a stale binary.
 
       # Intel macOS: several backend deps publish NO macOS x86_64 wheels —
       # cut_pursuit_py and pye57 never have, and cloth-simulation-filter's
