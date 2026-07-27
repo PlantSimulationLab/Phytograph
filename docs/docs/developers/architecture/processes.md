@@ -50,6 +50,8 @@ Only these surfaces are exposed to the renderer:
 - `logs` (forward renderer logs, get the log path, export a combined log file)
 - `webUtils.getPathForFile` (drag-and-drop path resolution)
 - `onBackendStatus` (one-way main → renderer push of backend crash/restart status)
+- `onUpdaterStatus` (one-way main → renderer push of auto-update download
+  progress, rendered as a `StatusPill`)
 - `onOpenFiles` / `notifyRendererReady` (OS "Open With" / file-association
   support — main pushes the paths the OS handed Phytograph; the renderer
   acknowledges readiness so main can flush paths queued during cold start)

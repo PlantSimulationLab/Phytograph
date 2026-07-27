@@ -19,6 +19,7 @@ import { resolveTargets } from "./lib/bulkActions";
 import { FeedbackDialog } from "./components/FeedbackDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
+import StatusPill from "./components/StatusPill";
 import { getSettings } from "./lib/store";
 import type { FeedbackMode } from "./lib/feedback";
 
@@ -199,6 +200,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // Whether the "New" (reset to a fresh app) confirmation is open. File → New
   // clears everything; we confirm first because it's unrecoverable.
   const [newConfirmOpen, setNewConfirmOpen] = useState(false);
+  // In-flight auto-update download, shown as a top-center StatusPill. null when
+  // no download is running. `percent` is null until the first progress event.
+  const [updateDownload, setUpdateDownload] = useState<
+    { version: string; percent: number | null } | null
+  >(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const pendingImportTypeRef = useRef<ImportType>('auto');
 
@@ -1509,6 +1515,23 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     return unsubscribe;
   }, []);
 
+  // Subscribe to auto-updater download progress pushed by src/main/updater.ts.
+  // The installer is a few hundred MB, so without this the download is a silent
+  // multi-minute stretch ending in an out-of-nowhere "restart to install"
+  // dialog. `onUpdaterStatus` may be absent in older preload builds, so guard.
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onUpdaterStatus?.((payload) => {
+      if (payload.status === 'downloading') {
+        setUpdateDownload({ version: payload.version, percent: payload.percent });
+      } else {
+        // 'downloaded' hands off to the native restart prompt; 'error' is
+        // reported in the log. Either way the pill's job is done.
+        setUpdateDownload(null);
+      }
+    });
+    return unsubscribe;
+  }, []);
+
   // Calculate total points across data-bearing scans only.
   const totalPoints = scans.reduce((sum, s) => sum + (s.data?.pointCount ?? 0), 0);
 
@@ -1590,6 +1613,21 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           viewer ratchets to its largest-ever size and window shrinks crop the
           bottom overlays (axes gizmo, toolbar column) instead of reflowing. */}
       <div className="relative flex-1 min-h-0 min-w-0 flex flex-col">
+        {/* Auto-update download progress. Same top-center pill the viewer's own
+            long operations use, so a background download reads as "the app is
+            busy with something" rather than nothing at all. Not cancelable —
+            electron-updater has no cancel once downloadUpdate() is underway. */}
+        {updateDownload && (
+          <StatusPill
+            testId="update-downloading"
+            label={
+              updateDownload.version
+                ? `Downloading update v${updateDownload.version}…`
+                : 'Downloading update…'
+            }
+            progress={updateDownload.percent != null ? updateDownload.percent / 100 : null}
+          />
+        )}
         <PointCloudViewer
           scans={scans}
           selectedScanIds={selectedScanIds}

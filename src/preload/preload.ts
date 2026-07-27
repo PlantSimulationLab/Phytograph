@@ -12,6 +12,7 @@ import {
   type OpenDialogOptions,
   type OpenFilesPayload,
   type SaveDialogOptions,
+  type UpdaterStatusPayload,
 } from '../shared/ipc.js';
 
 const api = {
@@ -96,6 +97,12 @@ const api = {
     const listener = (_e: unknown, payload: BackendStatusPayload) => handler(payload);
     ipcRenderer.on(IPC.BackendStatus, listener);
     return () => ipcRenderer.removeListener(IPC.BackendStatus, listener);
+  },
+  // Auto-updater download progress (main -> renderer), surfaced as a StatusPill.
+  onUpdaterStatus: (handler: (payload: UpdaterStatusPayload) => void): (() => void) => {
+    const listener = (_e: unknown, payload: UpdaterStatusPayload) => handler(payload);
+    ipcRenderer.on(IPC.UpdaterStatus, listener);
+    return () => ipcRenderer.removeListener(IPC.UpdaterStatus, listener);
   },
 };
 

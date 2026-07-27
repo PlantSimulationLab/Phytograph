@@ -171,10 +171,21 @@ a bug — the same numbers are auto-attached to the
 
 Open **Phytograph → Check for Updates…** (macOS) or **Help → Check for
 Updates…** (Windows/Linux) to see whether a newer release is available.
-If one is, Phytograph asks before downloading it, then prompts you to
-restart once the download finishes to install it in place. If you're
-already on the latest version, it tells you so. Phytograph also checks
-automatically once each time it starts.
+If you're already on the latest version, it tells you so.
+
+Phytograph also checks automatically once each time it starts. Either
+way, it always asks before downloading — the installer is several hundred
+megabytes, so it never starts a large download on its own.
+
+While the download runs, a progress pill appears at the top of the
+viewer, the same indicator used for other long-running operations. The
+download continues in the background; you can keep working.
+
+Once it finishes, Phytograph asks whether to restart. Choosing **Restart
+now** closes the app, installs the update, and reopens it — the window
+disappears for up to a minute while that happens, which is normal.
+Choosing **Later** keeps the downloaded update and installs it the next
+time you quit.
 
 ## Command palette
 

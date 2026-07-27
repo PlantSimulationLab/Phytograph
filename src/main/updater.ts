@@ -5,10 +5,16 @@
 import { app, dialog, BrowserWindow } from 'electron';
 import electronUpdater from 'electron-updater';
 import { updaterLog } from './logger.js';
+import { IPC, type UpdaterStatusPayload } from '../shared/ipc.js';
 
 const { autoUpdater } = electronUpdater;
 
 type GetWindow = () => BrowserWindow | null;
+
+// How long the install+relaunch typically takes, quoted in the restart prompt.
+// The bundle is large (PyInstaller sidecar + native libs), so the app is gone
+// for ~30s and the user otherwise has no idea whether it's working.
+const RESTART_ESTIMATE = 'This usually takes under a minute.';
 
 // Register the shared event listeners exactly once, whether the first trigger
 // is the startup auto-check or a manual "Check for Updates…" click.
@@ -20,15 +26,43 @@ function registerListeners(getWindow: GetWindow): void {
   if (listenersRegistered) return;
   listenersRegistered = true;
 
+  // Push updater state to the renderer, which renders it as the same top-center
+  // StatusPill used by triangulation/LAD. Best-effort: the window may not exist
+  // yet (startup check) or may be tearing down (quitAndInstall).
+  const emit = (payload: UpdaterStatusPayload): void => {
+    try {
+      getWindow()?.webContents.send(IPC.UpdaterStatus, payload);
+    } catch {
+      // A dropped status event is harmless — the dialogs are the real contract.
+    }
+  };
+
+  // Remembered from 'update-available' so the progress/downloaded events can
+  // name the version; electron-updater's ProgressInfo doesn't carry it.
+  let pendingVersion = '';
+
   autoUpdater.on('checking-for-update', () => updaterLog.info('checking for update...'));
-  autoUpdater.on('update-available', (info) => updaterLog.info(`update available: v${info.version}`));
+  autoUpdater.on('update-available', (info) => {
+    pendingVersion = info.version;
+    updaterLog.info(`update available: v${info.version}`);
+  });
   autoUpdater.on('update-not-available', () => updaterLog.info('already up to date.'));
-  autoUpdater.on('error', (err) => updaterLog.error('error:', err));
+  autoUpdater.on('error', (err) => {
+    updaterLog.error('error:', err);
+    // Clear the pill — otherwise a failed download leaves it spinning forever.
+    emit({ status: 'error' });
+  });
   autoUpdater.on('download-progress', (p) => {
     updaterLog.info(`download ${p.percent.toFixed(1)}% (${(p.bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s)`);
+    emit({
+      status: 'downloading',
+      version: pendingVersion,
+      percent: Number.isFinite(p.percent) ? p.percent : null,
+    });
   });
 
   autoUpdater.on('update-downloaded', async (info) => {
+    emit({ status: 'downloaded', version: info.version });
     const win = getWindow();
     const choice = await dialog.showMessageBox(win ?? undefined!, {
       type: 'info',
@@ -37,7 +71,10 @@ function registerListeners(getWindow: GetWindow): void {
       cancelId: 1,
       title: 'Update ready',
       message: `Phytograph v${info.version} is ready to install.`,
-      detail: 'The app will restart to apply the update.',
+      // Spell out the whole close → install → reopen sequence and how long it
+      // takes. Without it the window just vanishes for ~30s and the user is
+      // left guessing whether the update failed.
+      detail: `Phytograph will close, install the update, and reopen. ${RESTART_ESTIMATE}`,
     });
     if (choice.response === 0) autoUpdater.quitAndInstall();
   });
@@ -49,13 +86,38 @@ export function setupAutoUpdater(getWindow: GetWindow): void {
     return;
   }
 
-  autoUpdater.autoDownload = true;
+  // Ask before pulling a few hundred MB, same as the manual path. This used to
+  // auto-download, which meant a launch on a metered/slow connection spent
+  // minutes downloading with no prompt and no indication it was happening.
+  autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
 
   registerListeners(getWindow);
 
   // Fire-and-forget; failures are logged in the error handler above.
-  autoUpdater.checkForUpdates().catch((err) => updaterLog.error('check failed:', err));
+  autoUpdater
+    .checkForUpdates()
+    .then(async (result) => {
+      const latest = result?.updateInfo?.version;
+      const current = app.getVersion();
+      if (!latest || latest === current) return;
+
+      const win = getWindow();
+      const choice = await dialog.showMessageBox(win ?? undefined!, {
+        type: 'info',
+        buttons: ['Download', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Update available',
+        message: `Phytograph v${latest} is available.`,
+        detail: `You're on v${current}. Download the update now? You'll be prompted to restart once it finishes.`,
+      });
+      if (choice.response === 0) {
+        // The download-progress / update-downloaded listeners take over here.
+        autoUpdater.downloadUpdate().catch((err) => updaterLog.error('download failed:', err));
+      }
+    })
+    .catch((err) => updaterLog.error('check failed:', err));
 }
 
 // Manual "Check for Updates…" trigger from the app/Help menu. Unlike the

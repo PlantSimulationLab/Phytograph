@@ -48,7 +48,19 @@ export const IPC = {
   RendererReady: 'app:rendererReady',
   // Backend supervisor status (main -> renderer): crash/restart lifecycle
   BackendStatus: 'backend:status',
+  // Auto-updater download status (main -> renderer). The installer is a few
+  // hundred MB (PyInstaller sidecar + native libs), so the download is a
+  // multi-minute silent stretch without this.
+  UpdaterStatus: 'updater:status',
 } as const;
+
+export type UpdaterStatusPayload =
+  // A download has started; percent may not have arrived yet.
+  | { status: 'downloading'; version: string; percent: number | null }
+  // Bytes are in; the restart prompt is up (or deferred to next quit).
+  | { status: 'downloaded'; version: string }
+  // The download failed. The pill goes away; the error is logged.
+  | { status: 'error' };
 
 export type BackendStatusPayload =
   // The sidecar crashed; the supervisor is respawning it on the same port.
