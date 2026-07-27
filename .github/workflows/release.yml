@@ -142,7 +142,32 @@ jobs:
       # needs none of this.
       - name: Install sdist build deps (macOS Intel)
         if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true'
-        run: brew install xerces-c swig
+        run: |
+          set -euo pipefail
+          brew install xerces-c swig
+          # pye57's setup.py hardcodes the xerces-c SONAME it copies into the
+          # wheel — `libxerces-c-3.2.dylib`. Homebrew has since moved to
+          # xerces-c 3.3, which installs `libxerces-c-3.3.dylib`, so the build
+          # dies with:
+          #   FileNotFoundError: '/usr/local/lib/libxerces-c-3.2.dylib'
+          # That is upstream version drift, not anything about this repo: it
+          # broke a tag that CI had just proved green. pye57 ships no prebuilt
+          # x86_64 macOS wheel (sdist only, through 0.4.19), so the source build
+          # is unavoidable and we make the installed library answer to the name
+          # pye57 expects. The 3.2 → 3.3 ABI is compatible for the libE57Format
+          # XML surface pye57 uses.
+          # Version-agnostic: link whatever major.minor brew actually installed.
+          real="$(ls /usr/local/lib/libxerces-c-3.*.dylib 2>/dev/null | head -1 || true)"
+          if [ -z "$real" ]; then
+            echo "xerces-c dylib not found under /usr/local/lib after brew install" >&2
+            ls -la /usr/local/lib | grep -i xerces || true
+            exit 1
+          fi
+          echo "xerces-c installed as: $real"
+          if [ ! -e /usr/local/lib/libxerces-c-3.2.dylib ]; then
+            ln -sf "$real" /usr/local/lib/libxerces-c-3.2.dylib
+            echo "symlinked libxerces-c-3.2.dylib -> $real"
+          fi
 
       - name: Install Python dependencies
         if: steps.backend-cache.outputs.cache-hit != 'true'
