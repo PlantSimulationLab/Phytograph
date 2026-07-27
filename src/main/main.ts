@@ -1,13 +1,13 @@
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
-import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startBackend, stopBackend, setBackendWindowGetter, setBackendFailedHandler } from './backend.js';
 import { registerIpc } from './ipc.js';
+import { authorizeOpenPaths, extractFilePathsFromArgv } from './openPaths.js';
 import { installApplicationMenu } from './menu.js';
 import { setupAutoUpdater } from './updater.js';
 import { IPC, type FileDropPayload } from '../shared/ipc.js';
-import { RENDERER_DEV_PORT, IMPORTABLE_EXTENSIONS } from '../shared/constants.js';
+import { RENDERER_DEV_PORT } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
 import { initLogging, getLogDir, getLogSessionTag, setFatalErrorHandler, log } from './logger.js';
 import { installCrashHandlers, showBackendFailedDialog, showFatalMainErrorDialog } from './crashDialog.js';
@@ -151,21 +151,12 @@ if (!isE2E) {
 let pendingOpenPaths: string[] = [];
 let rendererReady = false;
 
-function isImportablePath(p: string): boolean {
-  const ext = p.toLowerCase().split('.').pop() ?? '';
-  return (IMPORTABLE_EXTENSIONS as readonly string[]).includes(ext);
-}
-
-// Extract importable file paths from a process argv array. The executable and
-// any leading `electron .`/flag tokens are not files; in dev, argv also includes
-// the entry script path. Filtering to known importable extensions + existence on
-// disk is a robust, platform-agnostic way to pick out genuine file arguments.
-function extractFilePathsFromArgv(argv: string[]): string[] {
-  return argv.filter((a) => !a.startsWith('-') && isImportablePath(a) && existsSync(a));
-}
-
 function handleOpenPaths(paths: string[]): void {
-  const importable = paths.filter(isImportablePath);
+  // Keeps only importable paths AND registers each with the fs allowlist — a
+  // file the OS handed us is user-selected, just via the shell instead of our
+  // own dialog. Without that the renderer's fs:readBinary is denied and the
+  // import fails with "... is not a user-selected path".
+  const importable = authorizeOpenPaths(paths);
   if (importable.length === 0) return;
   if (rendererReady && mainWindow) {
     if (mainWindow.isMinimized()) mainWindow.restore();
