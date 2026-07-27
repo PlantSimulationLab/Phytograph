@@ -164,10 +164,24 @@ jobs:
             exit 1
           fi
           echo "xerces-c installed as: $real"
-          if [ ! -e /usr/local/lib/libxerces-c-3.2.dylib ]; then
-            ln -sf "$real" /usr/local/lib/libxerces-c-3.2.dylib
-            echo "symlinked libxerces-c-3.2.dylib -> $real"
-          fi
+          # COPY, don't symlink, and make it writable. pye57's setup.py does a
+          # shutil.copy2() of this file into its own source tree; copy2 preserves
+          # the source mode, and Homebrew's dylib is r-xr-xr-x. pip retries
+          # metadata generation, so the second copy hits an unwritable
+          # destination and dies with:
+          #   PermissionError: .../src/pye57/libxerces-c-3.2.dylib
+          # A 0644 copy makes that overwrite succeed.
+          cp -f "$real" /usr/local/lib/libxerces-c-3.2.dylib
+          chmod 0644 /usr/local/lib/libxerces-c-3.2.dylib
+          # pye57 also links with `-lxerces-c` and includes /usr/local/include,
+          # which on Intel resolve through brew's keg symlinks. `brew install`
+          # normally creates them, but link them explicitly so a partially
+          # linked keg can't fail the build after the copy above succeeded.
+          brew link --overwrite --force xerces-c || true
+          ls -la /usr/local/lib/libxerces-c*.dylib
+          test -e /usr/local/include/xercesc/util/XercesVersion.hpp \
+            || { echo "xerces headers missing under /usr/local/include" >&2; exit 1; }
+          echo "staged libxerces-c-3.2.dylib from $real"
 
       - name: Install Python dependencies
         if: steps.backend-cache.outputs.cache-hit != 'true'
