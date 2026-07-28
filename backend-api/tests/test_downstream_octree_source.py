@@ -240,6 +240,68 @@ def test_export_source_all_formats(client, tree_xyz, tree_points, fmt):
             assert math.isclose(float(first[0]), tree_points[0, 0], abs_tol=1e-4)
 
 
+def test_export_session_source_preserves_rgb_and_intensity(client):
+    """A SESSION-backed export must keep RGB + intensity.
+
+    Every other export test here uses `source_path` (the file branch, which
+    worked). The app's normal state for an octree import is session-backed, and
+    that branch hardcoded `colors = None` / `intensity = None` regardless of
+    `want_colors` — so the LAS writer saw no colours and silently downgraded to
+    point format 0, dropping the dimension entirely rather than leaving it blank.
+    """
+    import time
+    import tempfile
+    import os
+    import main
+
+    laspy = pytest.importorskip("laspy")
+
+    n = 8
+    xyz = np.column_stack([np.linspace(0, 1, n), np.zeros(n), np.zeros(n)])
+    colors = np.column_stack([                      # uint16 LAS scale, as sessions store
+        np.full(n, 65535), np.zeros(n), np.full(n, 32768)]).astype(np.uint16)
+    sess = main.CloudSession(
+        session_id="export_rgb_sess", source_path="<test>", ascii_format=None,
+        column_plan=None, positions=xyz, colors=colors,
+        intensity=np.full(n, 16384, dtype=np.uint16), extras={}, extra_dims_meta=[],
+        deleted=np.zeros(n, dtype=bool), deleted_history=[], octree_cache_id=None,
+        created_at=time.time(),
+    )
+    main._cloud_sessions[sess.session_id] = sess
+    try:
+        # LAS keeps a real colour dimension (format 2, not the colourless 0).
+        res = client.post("/api/pointcloud/export", json={
+            "source": {"session_id": sess.session_id}, "format": "las",
+        }).json()
+        assert res["success"], res.get("error")
+        blob = base64.b64decode(res["data"])
+        with tempfile.NamedTemporaryFile(suffix=".las", delete=False) as fh:
+            fh.write(blob)
+            las_path = fh.name
+        try:
+            las = laspy.read(las_path)
+            assert las.header.point_format.id != 0, "colourless LAS point format"
+            assert "red" in [d.name for d in las.point_format.dimensions]
+            assert int(las.red[0]) == 65535
+            assert int(las.blue[0]) in (32767, 32768)   # uint16 round-trip
+        finally:
+            os.unlink(las_path)
+
+        # Text formats carry the 0-255 colour columns too.
+        res = client.post("/api/pointcloud/export", json={
+            "source": {"session_id": sess.session_id}, "format": "csv",
+        }).json()
+        assert res["success"], res.get("error")
+        text = base64.b64decode(res["data"]).decode("utf-8")
+        header = text.splitlines()[0].lower()
+        assert "r" in header and "g" in header and "b" in header, header
+        first = text.splitlines()[1].split(",")
+        assert len(first) >= 6, first
+        assert int(float(first[3])) == 255 and int(float(first[4])) == 0
+    finally:
+        main._cloud_sessions.pop(sess.session_id, None)
+
+
 def test_export_source_translation_shifts_output(client, tree_xyz, tree_points):
     res = client.post("/api/pointcloud/export", json={
         "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT,

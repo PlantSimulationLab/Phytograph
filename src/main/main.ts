@@ -45,6 +45,24 @@ initCrashReporter();
 // stay uncatchable and correctly trip the post-mortem path.)
 installCleanShutdownSignals(stopBackend);
 
+// Last-resort reaper. The two fatal-error paths (crashDialog's
+// showFatalMainErrorDialog and logger's fallback) call process.exit(1) directly,
+// which runs NEITHER 'before-quit' NOR the signal handlers above — so the
+// sidecar was orphaned on every uncaught main-process exception. It is spawned
+// `detached` on POSIX (its own process group, so we can kill the whole tree), so
+// it does not die with its parent and nothing else ever reaps it: an orphan
+// holds its port, its file handles and, with a cloud loaded, multiple GB of RAM.
+// 'exit' only admits synchronous work — stopBackend() is synchronous by design
+// (see its comment about the signal path). Safe to run twice: it no-ops once the
+// child handle is cleared.
+process.on('exit', () => {
+  try {
+    stopBackend();
+  } catch {
+    // Never let cleanup throw out of an exit handler.
+  }
+});
+
 // Must run before app.whenReady(). `protocol.registerSchemesAsPrivileged` is
 // a once-per-process call that has to be made while the protocol module is
 // still configurable. Late registration is a silent no-op.
@@ -158,7 +176,9 @@ function handleOpenPaths(paths: string[]): void {
   // import fails with "... is not a user-selected path".
   const importable = authorizeOpenPaths(paths);
   if (importable.length === 0) return;
-  if (rendererReady && mainWindow) {
+  // `isDestroyed()` as well as the null check: a closed-but-not-yet-collected
+  // BrowserWindow is truthy, and every call on it throws.
+  if (rendererReady && mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
     mainWindow.webContents.send(IPC.OpenFiles, { paths: importable });
@@ -263,6 +283,20 @@ function createWindow(): void {
   // renderer crash, so a reload can recover the session. Suppressed under E2E,
   // where a native modal would hang the Playwright driver. See crashDialog.ts.
   if (!isE2E) installCrashHandlers(mainWindow, reloadRenderer);
+
+  // Drop the reference when the window goes away. On macOS the app deliberately
+  // stays alive with no window (see 'window-all-closed'), so "closed but
+  // running" is a routine state — and a destroyed BrowserWindow is still
+  // TRUTHY. Without this, `rendererReady && mainWindow` passed and the next
+  // `mainWindow.isMinimized()` threw "Object has been destroyed", which the
+  // fatal handler turned into a crash dialog + process.exit(1) — triggered by
+  // something as ordinary as double-clicking a .las in Finder. Clearing
+  // `rendererReady` too routes those opens back through `pendingOpenPaths`, so
+  // they are flushed when a window next reports ready.
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    rendererReady = false;
+  });
 }
 
 /**
@@ -343,7 +377,7 @@ app.whenReady().then(async () => {
   // Mark ready and flush any paths the OS handed us before the window was up.
   ipcMain.on(IPC.RendererReady, () => {
     rendererReady = true;
-    if (pendingOpenPaths.length > 0 && mainWindow) {
+    if (pendingOpenPaths.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(IPC.OpenFiles, { paths: pendingOpenPaths });
       pendingOpenPaths = [];
     }

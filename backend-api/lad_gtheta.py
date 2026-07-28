@@ -181,12 +181,17 @@ def _gtheta_eff(g_L_density: np.ndarray, beam_zenith_samples: np.ndarray) -> flo
 # Public API
 # ---------------------------------------------------------------------------
 def beam_zenith_samples(dirs: np.ndarray) -> np.ndarray:
-    """Beam zenith angles (radians) from per-beam ray directions.
+    """Beam zenith angles (radians) from CARTESIAN per-beam ray directions.
 
-    ``dirs`` is an (N, 3) array of (not necessarily normalized) beam directions, as the
-    LAD pipeline reconstructs for every scan via ``cart2sphere(xyz - origin)``. The
-    zenith is ``arccos(|dz| / |d|)`` — the absolute z keeps up/down beams together,
-    consistent with the hemispheric kernel.
+    ``dirs`` is an (N, 3) array of (not necessarily normalized) Cartesian direction
+    vectors ``[dx, dy, dz]``. The zenith is ``arccos(|dz| / |d|)`` — the absolute z
+    keeps up/down beams together, consistent with the hemispheric kernel.
+
+    NOTE: the LAD pipeline's `_directions_from_origin` returns SPHERICAL triples
+    ``[radius, elevation, azimuth]``, NOT Cartesian vectors — passing those here
+    computes ``|azimuth| / ||[r, elev, az]||``, which divides an angle by a range in
+    metres and collapses every beam toward 90 degrees. Use
+    `beam_zenith_from_spherical` for that array instead.
     """
     d = np.asarray(dirs, dtype=float)
     if d.ndim != 2 or d.shape[1] != 3:
@@ -197,6 +202,28 @@ def beam_zenith_samples(dirs: np.ndarray) -> np.ndarray:
     cosz[good] = np.abs(d[good, 2]) / norm[good]
     cosz = np.clip(cosz, -1.0, 1.0)
     return np.arccos(cosz)[good]
+
+
+def beam_zenith_from_spherical(dirs: np.ndarray) -> np.ndarray:
+    """Beam zenith angles (radians) from the LAD pipeline's SPHERICAL beam array.
+
+    ``dirs`` is the (N, 3) ``[radius, elevation, azimuth]`` array that
+    `_directions_from_origin` (main.py) produces to mirror Helios's
+    ``cart2sphere(xyz - origin)``. Elevation is measured from the horizontal plane,
+    so the zenith is exactly ``pi/2 - |elevation|`` — no trig round-trip needed. The
+    absolute elevation folds up/down beams together, matching
+    `beam_zenith_samples`'s ``|dz|`` and the hemispheric kernel.
+
+    Degenerate rows (radius == 0, i.e. a return coincident with its own origin) carry
+    no direction and are dropped, mirroring the ``norm > 0`` filter in
+    `beam_zenith_samples`.
+    """
+    d = np.asarray(dirs, dtype=float)
+    if d.ndim != 2 or d.shape[1] != 3:
+        raise ValueError("dirs must be an (N, 3) [radius, elevation, azimuth] array")
+    good = d[:, 0] > 0
+    elev = np.clip(d[good, 1], -np.pi / 2.0, np.pi / 2.0)
+    return (np.pi / 2.0) - np.abs(elev)
 
 
 def gtheta_constant(value: float) -> float:

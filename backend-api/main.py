@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.57.0"
+BACKEND_VERSION = "0.57.1"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -5948,9 +5948,13 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
     # LAD caller so it can use them directly and bypass the timestamp join. Subset
     # by `keep` to stay aligned with `xyz`. Carried on `flags` (which already flows
     # out) rather than widening the return tuple. None unless the LAS carried them.
+    # Length-guarded like `timestamps` above: a mutation site that fails to
+    # re-slice this must degrade to the timestamp->trajectory join rather than
+    # raise IndexError mid-LAD. (`bake` was exactly that site.)
+    _bo = getattr(sess, "beam_origins", None)
     flags["beam_origins"] = (
-        np.ascontiguousarray(sess.beam_origins[keep], dtype=np.float64)
-        if getattr(sess, "beam_origins", None) is not None else None
+        np.ascontiguousarray(_bo[keep], dtype=np.float64)
+        if _bo is not None and _bo.shape[0] == sess.positions.shape[0] else None
     )
 
     backfilled = sess.backfilled_misses if include_backfilled else None
@@ -6256,6 +6260,34 @@ def _run_gapfill_extract(cloud):
     return synth_xyz, int(mask.sum())
 
 
+def _dem_in_lad_frame(dem: "DemRaster", lad_shift) -> "DemRaster":
+    """Re-express a DEM in the recentered LAD compute frame.
+
+    When a request carries a moving-platform scan the points and grid are shifted
+    by `lad_shift` for float32 precision, so the DEM must move with them — on ALL
+    THREE axes. Shifting only x/y (the original bug) left `grid_z` in world
+    elevation while `grid_bottom_z` came from the already-shifted grid, and the
+    terrain-follow offset `ground_max + clearance - grid_bottom_z` then mixed the
+    two frames: at 195 m terrain elevation every voxel column was lifted ~195 m
+    into empty sky and the whole grid returned LAD 0.
+
+    Void cells (NaN, or the JSON `nodata` sentinel) are sentinels rather than
+    elevations, so they pass through untouched.
+    """
+    if lad_shift is None:
+        return dem
+    z = np.asarray(dem.grid_z, dtype=np.float64)
+    void = ~np.isfinite(z)
+    if dem.nodata is not None:
+        void |= (z == float(dem.nodata))
+    z = np.where(void, z, z - float(lad_shift[2]))
+    return DemRaster(
+        grid_z=z.tolist(), nx=dem.nx, ny=dem.ny, cell=dem.cell,
+        origin=[dem.origin[0] - float(lad_shift[0]),
+                dem.origin[1] - float(lad_shift[1])],
+        nodata=dem.nodata)
+
+
 def _sample_dem_columns(grid_center, grid_size, grid_nx, grid_ny, grid_nz,
                         grid_rotation_rad, dem: "DemRaster", safety_fraction: float):
     """Sample a DEM under each voxel column for terrain-following LAD.
@@ -6511,14 +6543,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         #     the inversion uses below, so the cull box matches the actual voxels).
         cull_offsets = request.grid.column_offsets
         if cull_offsets is None and request.terrain_follow and request.dem is not None:
-            _dem_cull = request.dem
-            if lad_shift is not None:
-                _dem_cull = DemRaster(
-                    grid_z=request.dem.grid_z, nx=request.dem.nx, ny=request.dem.ny,
-                    cell=request.dem.cell,
-                    origin=[request.dem.origin[0] - float(lad_shift[0]),
-                            request.dem.origin[1] - float(lad_shift[1])],
-                    nodata=request.dem.nodata)
+            _dem_cull = _dem_in_lad_frame(request.dem, lad_shift)
             try:
                 cull_offsets, _km, _dr = _sample_dem_columns(
                     grid_center, grid_size, grid_nx, grid_ny, grid_nz,
@@ -6612,6 +6637,17 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     warnings=warnings)
                 scan_moving = True
             else:
+                # STATIC scan. `lad_shift` is enabled when ANY scan in the request
+                # is moving, and the grid was already recentred by it — so a static
+                # scan in a MIXED selection must be recentred too. Without this its
+                # points stayed in the world frame while the grid AABB lived in the
+                # shifted one, so `_cull_to_grid` tested them against a box that can
+                # be hundreds of km away, dropped every beam, and the static scan
+                # silently contributed nothing. (Static-ONLY requests leave
+                # `lad_shift` None and are byte-for-byte unchanged.)
+                if lad_shift is not None:
+                    xyz = xyz - lad_shift
+                    origin = np.asarray(origin, dtype=np.float64) - lad_shift
                 cull_origin = origin
                 scan_moving = False
 
@@ -6783,16 +6819,10 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             if request.dem is None:
                 raise ValueError("terrain_follow requires a DEM (none supplied).")
             # Sample the DEM in the COMPUTE frame: on a moving-platform scan the
-            # points + grid were recentered by lad_shift, so shift the DEM origin by
-            # the same (x,y) so raster, grid, and points share one frame.
-            dem_for_sampling = request.dem
-            if lad_shift is not None:
-                dem_for_sampling = DemRaster(
-                    grid_z=request.dem.grid_z, nx=request.dem.nx, ny=request.dem.ny,
-                    cell=request.dem.cell,
-                    origin=[request.dem.origin[0] - float(lad_shift[0]),
-                            request.dem.origin[1] - float(lad_shift[1])],
-                    nodata=request.dem.nodata)
+            # points + grid were recentered by lad_shift, so move the raster by the
+            # same shift — origin in x/y AND elevations in z — so raster, grid, and
+            # points share one frame.
+            dem_for_sampling = _dem_in_lad_frame(request.dem, lad_shift)
             column_offsets, terrain_kept_mask, terrain_dropped = _sample_dem_columns(
                 grid_center, grid_size, grid_nx, grid_ny, grid_nz,
                 grid_rotation_rad, dem_for_sampling, request.safety_fraction)
@@ -6850,11 +6880,18 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 # Derive G(theta) from the prescribed distribution(s). Pool the per-beam
                 # zeniths across all scans (works for static and moving scans alike) so
                 # de Wit / Beta derivations reflect the actual acquisition geometry.
+                # `s["dirs"]` comes from `_directions_from_origin`, which returns
+                # SPHERICAL [radius, elevation, azimuth] (Helios cart2sphere), so the
+                # zenith must come from the elevation column — feeding this array to the
+                # Cartesian `beam_zenith_samples` divides an angle by a range in metres
+                # and collapses every beam toward 90 degrees (~-29% G error, and hence
+                # LAD error, on a planophile canopy; spherical G is 0.5 at every zenith
+                # so it alone cannot reveal the mistake).
                 beam_dirs = [s["dirs"] for s in scans_arrays
                              if s.get("dirs") is not None and len(s["dirs"]) > 0]
                 if beam_dirs:
                     pooled_dirs = np.vstack(beam_dirs)
-                    beam_zen = lad_gtheta.beam_zenith_samples(pooled_dirs)
+                    beam_zen = lad_gtheta.beam_zenith_from_spherical(pooled_dirs)
                 else:
                     beam_zen = np.array([])
                 if gspec.spatial == "profile":
@@ -12367,7 +12404,17 @@ class QSMAdjustLeafAnglesRequest(QSMLeavesRequest):
     cell_targets: Optional[List[QSMCellTarget]] = None
     grid: Optional[QSMGrid] = None
     seed: int = 0
-    max_cell_leaves: Optional[int] = None
+    # Per-cell cap on the optimal-assignment step, which is O(N^3) in the leaf
+    # count of ONE cell and allocates an N x N float64 cost matrix. This used to
+    # default to None (unbounded) and no caller ever set it, so a coarse
+    # triangulation grid — the repo's own fixtures use 1x1x1 — put every leaf in
+    # a single cell: a routine ~20k-leaf tree meant a 20000^2 (3.2 GB) matrix and
+    # hours of wall time, long past the renderer's 5-minute abort, with the
+    # backend worker still pegged on a request nobody was waiting for.
+    # 4000 measures ~2.2 s / 128 MB per cell; above it a deterministic
+    # (seed-derived) subset is adjusted and the remaining leaves are left as
+    # placed. Send an explicit larger value — or null — to opt back out.
+    max_cell_leaves: Optional[int] = 4000
 
 
 @app.post("/api/qsm/adjust-leaf-angles", response_model=QSMLeavesResponse)
@@ -16669,8 +16716,12 @@ def _read_points_from_source(
     in-RAM array with its per-point deletions already applied (the Family-1
     source of truth), so downstream ops honor unbaked deletions without a
     rebuild. The compute consumers of this path want positions only, so colours
-    and intensity resolve to None here (the session DOES hold them — see
-    `_read_las_into_arrays` — they're simply not surfaced for these ops).
+    and intensity are surfaced ONLY when `src.want_colors` is set — which the
+    export endpoint does. Before that, the session branch hardcoded both to None
+    regardless of the flag, so exporting a session-backed cloud (the app's normal
+    state for every octree import) silently dropped RGB and intensity: the LAS
+    writer saw no colours and downgraded to point format 0, so the dimension was
+    absent rather than merely blank.
 
     Sky/miss points (`is_miss != 0`) are dropped here on BOTH branches, exactly
     as the hits-only octree does (see `_session_to_las(exclude_misses=True)`). A
@@ -16692,6 +16743,19 @@ def _read_points_from_source(
                 keep = keep & (sess.extras[_MISS_SLUG] == 0)
             positions = sess.positions[keep].copy()
             session_world_shift = sess.world_shift
+            # Surface colours/intensity only when asked (export does; the compute
+            # consumers don't need them and skip the copy). The session stores
+            # both at LAS uint16 scale, but every consumer of this function's
+            # return — `_format_points_as_text`, the LAS writer's `* 65535` — wants
+            # 0-1 floats, matching the file branch below (which divides by 65535).
+            if src.want_colors and sess.colors is not None:
+                colors = (np.asarray(sess.colors[keep], dtype=np.float32) / 65535.0)
+            else:
+                colors = None
+            if src.want_colors and sess.intensity is not None:
+                intensity = (np.asarray(sess.intensity[keep], dtype=np.float32) / 65535.0)
+            else:
+                intensity = None
         # Restore true world coordinates: the session stored points with the
         # import-time global shift SUBTRACTED, so add it back here — the single
         # chokepoint every downstream op (triangulate/skeleton/LAD/export) reads
@@ -16699,8 +16763,6 @@ def _read_points_from_source(
         # translation still composes on top of world coords.
         if session_world_shift is not None:
             positions = positions.astype(np.float64, copy=False) + session_world_shift
-        colors = None
-        intensity = None
     else:
         if not src.source_path:
             raise HTTPException(
@@ -20592,6 +20654,12 @@ async def bake_cloud_session(session_id: str):
             sess.extras[slug] = sess.extras[slug][keep]
         if sess.timestamps is not None:
             sess.timestamps = sess.timestamps[keep]
+        # Per-pulse beam origins are point-aligned too. Missing this re-slice left
+        # `beam_origins` at the PRE-bake length, and `_session_to_lad_arrays`
+        # indexes it with a survivor-length mask -> IndexError (a 500 on LAD) for
+        # exactly the moving-platform scans its ground-truth-origin path serves.
+        if sess.beam_origins is not None:
+            sess.beam_origins = sess.beam_origins[keep]
         sess.deleted = np.zeros(len(sess.positions), dtype=bool)
         sess.deleted_history = []
         sess.octree_cache_id = cache_key
@@ -20701,6 +20769,13 @@ def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSess
         # join key survives a split/crop with full precision (and stays aligned).
         timestamps=(np.asarray(sess.timestamps)[surv][keep].copy()
                     if sess.timestamps is not None else None),
+        # Same reasoning for the per-pulse beam origins, which are the ground-truth
+        # LAD origin source that BYPASSES the timestamp join entirely — dropping
+        # them silently downgraded a split/extract/duplicate of a moving-platform
+        # scan to the less-accurate join (or to a static origin) with no warning.
+        beam_origins=(np.asarray(sess.beam_origins, dtype=np.float64)[surv][keep].copy()
+                      if sess.beam_origins is not None else None),
+        gps_time_encoding=getattr(sess, "gps_time_encoding", None),
         # Inherit the parent's import shift so the subset's stored positions stay
         # in the same (shifted) space and still restore to world coords on read.
         world_shift=(sess.world_shift.copy() if sess.world_shift is not None else None),
@@ -21665,6 +21740,10 @@ async def session_filter(session_id: str, request: SessionFilterRequest):
             lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
             keep &= _scalar_filter_mask(sess.extras[slug][surv], lo, hi, value_set)
 
+        # `kept_count` counts the HITS the user's filter kept — it drives the
+        # "you filtered everything away" guard below, so it is measured BEFORE
+        # misses are forced back in (otherwise a filter that keeps nothing would
+        # look non-empty purely because the sky survived).
         kept_count = int(keep.sum())
         total = int(len(sess.positions))
         # Empty result: do NOT commit the deletion or rebuild (PotreeConverter
@@ -21672,6 +21751,21 @@ async def session_filter(session_id: str, request: SessionFilterRequest):
         if kept_count == 0:
             return {"session_id": session_id, "point_count": 0, "rebuilt": False,
                     "remaining_count": int(surv.sum()), "total_count": total}
+
+        # NEVER delete sky/miss points, exactly as `delete_region` refuses to.
+        # A miss is a ray that hit nothing, projected ~1 km out; it is not a
+        # surface point, so it fails any hit-shaped filter by coordinate accident
+        # rather than user intent:
+        #   - a spatial filter's box comes from the HITS-ONLY octree bounds, so
+        #     every miss sits outside it;
+        #   - a scalar filter (e.g. wood/leaf "remove" mode keeping wood_class ==
+        #     LEAF) tests a column where misses default to 0 and so match nothing.
+        # Deleting them silently corrupts LAD's Beer's-law transmission
+        # denominator — and unlike a crop this path never marks the miss set
+        # stale, so nothing warns the user.
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        if miss_arr is not None:
+            keep = keep | (miss_arr[surv] != 0)
 
         # Commit: delete the filter-excluded survivors. Filter is presented as a
         # non-undoable commit (the renderer clears its erase undo stack), so we

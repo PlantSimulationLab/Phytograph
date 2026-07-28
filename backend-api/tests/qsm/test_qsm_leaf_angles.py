@@ -144,6 +144,45 @@ def test_adjustment_is_deterministic():
     assert any(not np.allclose(x.basis, y.basis) for x, y in zip(a1, a3))  # different seed
 
 
+def test_max_cell_leaves_bounds_the_assignment_and_stays_deterministic():
+    """The per-cell optimal assignment is O(N^3) with an N x N float64 cost
+    matrix. `max_cell_leaves` bounds it by adjusting a deterministic subset and
+    leaving the rest as placed."""
+    placements = _horizontal_leaves(60)
+    target = A.CellTarget(beta_mu=1.0, beta_nu=8.0, ecc=0.0, phi0_deg=0.0, n_measured=100)
+
+    capped = A.adjust_placements_to_distribution(
+        placements, {0: target}, _GRID, seed=3, max_cell_leaves=20)
+
+    # Exactly the capped number moved; the rest kept their original basis.
+    moved = [i for i, (a, b) in enumerate(zip(capped, placements))
+             if not np.allclose(a.basis, b.basis)]
+    assert len(moved) <= 20
+    assert len(moved) > 0
+    # Bases stay valid rotations, and no leaf ever moves off its base.
+    for a, b in zip(capped, placements):
+        assert np.allclose(a.position, b.position)
+        assert np.allclose(a.basis.T @ a.basis, np.eye(3), atol=1e-6)
+
+    # Same seed -> same subset (the cap must not introduce nondeterminism).
+    again = A.adjust_placements_to_distribution(
+        placements, {0: target}, _GRID, seed=3, max_cell_leaves=20)
+    assert all(np.allclose(x.basis, y.basis) for x, y in zip(capped, again))
+
+
+def test_adjust_leaf_angles_request_caps_cell_size_by_default():
+    """The endpoint used to default `max_cell_leaves` to None (unbounded) and no
+    caller ever set it, so a coarse grid put every leaf in one cell — a ~20k-leaf
+    tree meant a 20000^2 (3.2 GB) cost matrix and hours of wall time, well past
+    the renderer's 5-minute abort. A finite default keeps the worst case bounded;
+    an explicit null still opts out."""
+    import main
+
+    field = main.QSMAdjustLeafAnglesRequest.model_fields["max_cell_leaves"]
+    assert field.default is not None, "unbounded O(N^3) assignment by default"
+    assert 0 < field.default <= 8000
+
+
 def test_single_leaf_cell():
     placements = _horizontal_leaves(1)
     target = A.CellTarget(beta_mu=1.0, beta_nu=6.0, ecc=0.0, phi0_deg=0.0)

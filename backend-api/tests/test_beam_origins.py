@@ -144,6 +144,79 @@ def test_session_to_lad_arrays_exposes_beam_origins():
     np.testing.assert_allclose(flags["beam_origins"], origins[[0, 1, 3, 4]])
 
 
+def test_bake_compacts_beam_origins_so_lad_still_works(monkeypatch, tmp_path):
+    """`bake` compacts every point-aligned array to the survivors. Missing
+    `beam_origins` left it at the PRE-bake length, so `_session_to_lad_arrays`
+    indexed it with a survivor-length mask and raised IndexError -> a 500 on LAD
+    for exactly the moving-platform scans this path exists to serve.
+
+    Drives the REAL endpoint (PotreeConverter stubbed) rather than mirroring the
+    compaction inline — a hand-copied compaction passes even against the bug.
+    """
+    import asyncio
+
+    n = 6
+    xyz = np.column_stack([np.linspace(0, 1, n), np.zeros(n), np.zeros(n)])
+    origins = np.column_stack([np.zeros(n), np.zeros(n), np.arange(n, dtype=float)])
+    sess = _session_with_origins(origins.copy(), xyz.copy())
+    sess.deleted[1] = True
+    sess.deleted[4] = True
+
+    monkeypatch.setitem(main._cloud_sessions, sess.session_id, sess)
+    # Stub the slow PotreeConverter step; we only care about the array compaction.
+    # `cache_dir` must be a real Path — the cache sweep resolve()s it.
+    import pathlib
+    cache_dir = tmp_path / "octree_cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(main, "_build_octree_from_las",
+                        lambda *a, **k: ("cache_key", pathlib.Path(cache_dir), {}))
+    try:
+        asyncio.run(main.bake_cloud_session(sess.session_id))
+
+        assert sess.beam_origins is not None
+        assert sess.beam_origins.shape[0] == sess.positions.shape[0] == 4
+        np.testing.assert_allclose(sess.beam_origins, origins[[0, 2, 3, 5]])
+
+        # LAD must still resolve, with the surviving origins intact and in order.
+        _xyz, _d, _l, _v, flags = main._session_to_lad_arrays(sess, [0, 0, 8])
+        assert flags["beam_origins"] is not None
+        np.testing.assert_allclose(flags["beam_origins"], origins[[0, 2, 3, 5]])
+    finally:
+        main._cloud_sessions.pop(sess.session_id, None)
+
+
+def test_lad_arrays_degrade_when_beam_origins_misaligned():
+    """Defensive guard: a beam_origins array that is out of step with positions
+    (some future mutation site forgetting to re-slice) must degrade to the
+    timestamp->trajectory join, NOT raise IndexError mid-LAD. Mirrors the
+    length guard already on `timestamps`."""
+    n = 5
+    xyz = np.column_stack([np.linspace(0, 1, n), np.zeros(n), np.zeros(n)])
+    sess = _session_with_origins(np.zeros((n + 3, 3)), xyz)  # deliberately stale
+    _xyz, _dirs, _labels, _vals, flags = main._session_to_lad_arrays(sess, [0, 0, 8])
+    assert flags["beam_origins"] is None
+
+
+def test_subset_carries_beam_origins_to_split_children():
+    """split/extract/duplicate go through `_session_subset_locked`, which dropped
+    `beam_origins` entirely — silently downgrading a moving-platform child to the
+    timestamp join despite `duplicate` documenting full independence."""
+    n = 6
+    xyz = np.column_stack([np.linspace(0, 1, n), np.zeros(n), np.zeros(n)])
+    origins = np.column_stack([np.zeros(n), np.zeros(n), np.arange(n, dtype=float)])
+    sess = _session_with_origins(origins.copy(), xyz.copy())
+    sess.deleted[0] = True                      # one already-deleted point
+    keep = np.array([True, False, True, True, False])   # over the 5 survivors
+
+    child = main._session_subset_locked(sess, keep)
+    try:
+        assert child.beam_origins is not None
+        assert child.beam_origins.shape[0] == child.positions.shape[0]
+        np.testing.assert_allclose(child.beam_origins, origins[[1, 3, 4]])
+    finally:
+        main._cloud_sessions.pop(child.session_id, None)
+
+
 def test_lad_uses_beam_origins_and_bypasses_trajectory(stub_pyhelios):
     """End-to-end (stubbed pyhelios): a session carrying beam_origins makes LAD take
     the per-beam path — writing origin_x/y/z from the EXPLICIT origins — even when a

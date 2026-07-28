@@ -144,6 +144,56 @@ def test_beam_zenith_samples_from_dirs():
     assert z[2] == pytest.approx(math.pi / 4, abs=1e-6)
 
 
+def test_beam_zenith_from_spherical_matches_cartesian_truth():
+    """The LAD pipeline hands G(theta) a SPHERICAL [radius, elevation, azimuth]
+    array (main._directions_from_origin / Helios cart2sphere), not Cartesian
+    vectors. Drive the REAL production helper rather than hand-authored input:
+    passing its output to the Cartesian `beam_zenith_samples` computes
+    |azimuth| / ||[r, elev, az]|| — an angle over a range in metres — which
+    collapses every beam toward 90 deg and skewed G by ~-29% on a planophile
+    canopy.
+
+    Note this test deliberately uses NON-spherical distributions: spherical has
+    G == 0.5 at every zenith, so it is mathematically incapable of detecting a
+    beam-geometry bug.
+    """
+    import main  # the production spherical reconstruction
+
+    rng = np.random.default_rng(0)
+    origin = np.array([0.0, 0.0, 1.5])          # tripod-height TLS scanner
+    n = 20000
+    xyz = np.column_stack([
+        rng.uniform(-15.0, 15.0, (n, 2)),        # returns within 15 m
+        rng.uniform(0.0, 12.0, n),               # canopy 0-12 m
+    ])
+
+    sph = main._directions_from_origin(xyz, origin)
+    zen = L.beam_zenith_from_spherical(sph)
+
+    # Ground truth straight from Cartesian geometry.
+    d = xyz - origin
+    truth = np.arccos(np.abs(d[:, 2]) / np.linalg.norm(d, axis=1))
+    # float32 round-trip through _directions_from_origin bounds the agreement.
+    assert np.max(np.abs(zen - truth)) < 1e-4
+
+    # A realistic oblique acquisition must not read as near-horizontal.
+    assert 55.0 < math.degrees(zen.mean()) < 75.0
+
+    # G(theta) matches the Cartesian-truth answer for every non-spherical
+    # distribution. The buggy path produced -28.9% here for planophile.
+    for name in ("planophile", "erectophile", "plagiophile", "uniform"):
+        assert L.gtheta_from_dewit(name, zen) == pytest.approx(
+            L.gtheta_from_dewit(name, truth), rel=1e-3)
+
+
+def test_beam_zenith_from_spherical_drops_degenerate_rows():
+    # radius == 0 (return coincident with its own origin) carries no direction.
+    sph = np.array([[0.0, 0.0, 0.0], [5.0, math.pi / 4, 1.0]])
+    z = L.beam_zenith_from_spherical(sph)
+    assert z.shape == (1,)
+    assert z[0] == pytest.approx(math.pi / 4, abs=1e-9)
+
+
 def test_empty_beam_zenith_falls_back_not_crashes():
     # No beam directions -> a representative oblique angle is used, G still finite.
     g = L.gtheta_from_dewit("erectophile", np.array([]))
