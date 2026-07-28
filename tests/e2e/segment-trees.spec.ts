@@ -86,15 +86,25 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
   await page.getByTestId('tree-split-clouds').check();
   await expect(page.getByTestId('tree-split-clouds')).toBeChecked();
 
+  // The split runs AFTER the panel closes, so the status pill is the only thing
+  // telling the user the backend is still building per-tree octrees. Arm the
+  // waiter before clicking so the transition can't be missed.
+  const splitPill = page.getByTestId('tree-split-running');
+  const sawSplitPill = splitPill
+    .waitFor({ state: 'visible', timeout: 120_000 })
+    .then(() => true)
+    .catch(() => false);
+
   await page.getByTestId('tree-segment-run-button').click();
 
   // The parent is still recoloured by tree_instance …
   const overlay = page.getByTestId('scalar-overlay');
   await expect(overlay).toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 120_000 });
 
-  // … AND one "… (tree N)" child cloud is added per detected tree. The split
-  // fans out a `sessionExtract` per tree id, so the children arrive after the
-  // parent recolour — wait for at least one to appear.
+  // … AND one "… (tree N)" child cloud is added per detected tree. The split is
+  // one batched `sessionExtractByColumn` call whose per-child octree builds run
+  // server-side, so the children arrive after the parent recolour — wait for at
+  // least one to appear.
   const childRows = page.locator('[data-testid="scan-row"][data-scan-name*="(tree "]');
   await expect(async () => {
     expect(await childRows.count()).toBeGreaterThan(0);
@@ -116,4 +126,8 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
     sum += parseInt((await childRows.nth(i).getAttribute('data-point-count')) ?? '0', 10);
   }
   expect(sum).toBeLessThanOrEqual(EXPECTED_POINTS);
+
+  // The pill was shown while the children were being built, and is gone now.
+  expect(await sawSplitPill).toBe(true);
+  await expect(splitPill).toHaveCount(0);
 });

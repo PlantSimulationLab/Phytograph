@@ -515,6 +515,95 @@ def test_session_split_partitions_into_kept_and_leftover(client, cache_root, gri
     assert called["loaded"] is False  # no source file read during split
 
 
+def test_extract_by_column_partitions_and_streams_progress(client, cache_root, grid_xyz, monkeypatch):
+    """extract_by_column fans a categorical column out into one child session per
+    distinct value: parent untouched, children partition the non-excluded points,
+    and the response streams PHP1 progress markers ahead of its JSON (the pill
+    the renderer shows while the per-tree octrees build)."""
+    from tests.binframe import decode_progress_markers, decode_streamed_json
+
+    sid = client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).json()["session_id"]
+
+    # Label the 1000-point grid: value 0 (excluded by default) plus three real
+    # groups of known, distinct sizes so a mis-sliced child is visible.
+    labels = np.zeros(1000, dtype=np.float32)
+    labels[0:100] = 1
+    labels[100:400] = 2
+    labels[400:650] = 3
+    with main._cloud_session_lock:
+        main._session_add_extra_column(main._cloud_sessions[sid], "tree_instance",
+                                       "Tree Instance", labels)
+    parent_positions = _session_positions(sid).copy()
+
+    called = {"loaded": False}
+    orig = main._load_pointcloud_arrays
+    monkeypatch.setattr(main, "_load_pointcloud_arrays",
+                        lambda *a, **k: (called.__setitem__("loaded", True), orig(*a, **k))[1])
+
+    res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                      json={"slug": "tree_instance"})
+    assert res.status_code == 200, res.text
+    body = decode_streamed_json(res.content)
+
+    children = body["children"]
+    assert [c["value"] for c in children] == [1, 2, 3]          # ordered, 0 excluded
+    assert [c["point_count"] for c in children] == [100, 300, 250]
+
+    # Each child holds exactly the parent rows carrying its label — the index
+    # gather must not shuffle or reuse rows across children.
+    for child, (lo, hi) in zip(children, [(0, 100), (100, 400), (400, 650)]):
+        child_sess = main._cloud_sessions[child["session_id"]]
+        assert np.array_equal(child_sess.positions, parent_positions[lo:hi])
+        assert child["session_id"] != sid
+
+    # Parent is untouched and no source file was re-read.
+    assert int(main._cloud_sessions[sid].deleted.sum()) == 0
+    assert len(main._cloud_sessions[sid].positions) == 1000
+    assert called["loaded"] is False
+
+    # The stream carried real per-child progress, not just a run-id preamble.
+    markers = decode_progress_markers(res.content)
+    fractions = [m["progress"] for m in markers if m.get("progress") is not None]
+    assert fractions and fractions[-1] == pytest.approx(1.0)
+    assert any("3 clouds" in (m.get("message") or "") for m in markers)
+
+
+def test_extract_by_column_on_empty_selection_returns_no_children(client, cache_root, grid_xyz):
+    """A column whose only value is the excluded one yields no children (and no
+    octree builds) rather than an empty child session."""
+    from tests.binframe import decode_streamed_json
+
+    sid = client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).json()["session_id"]
+    with main._cloud_session_lock:
+        main._session_add_extra_column(main._cloud_sessions[sid], "tree_instance",
+                                       "Tree Instance", np.zeros(1000, dtype=np.float32))
+
+    res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                      json={"slug": "tree_instance"})
+    assert res.status_code == 200, res.text
+    assert decode_streamed_json(res.content)["children"] == []
+
+
+def test_extract_by_column_unknown_slug_is_a_400_not_a_broken_stream(client, cache_root, grid_xyz):
+    """The slug is validated BEFORE the stream opens, so a typo still reaches the
+    client as a normal 400 with a readable detail (once the 200 + first chunk is
+    out, an error can only arrive as a truncated body)."""
+    sid = client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).json()["session_id"]
+    res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                      json={"slug": "no_such_column"})
+    assert res.status_code == 400
+    assert "no_such_column" in res.json()["detail"]
+
+
 def test_delete_session_frees_arrays(client, cache_root, grid_xyz):
     sid = client.post(
         "/api/cloud/session/create",

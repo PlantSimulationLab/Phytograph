@@ -63,6 +63,13 @@ shown grey). (No legend is shown for tree instances — with one entry per tree 
 would fill the viewport and the IDs are arbitrary anyway.) If you enabled
 **Split**, one new cloud per tree (`… (tree N)`) is added to the list.
 
+The split runs after the recoloured cloud appears, and each per-tree cloud gets
+its own display octree — on a large plot with many trees that takes a while. A
+**Building _n_ of _N_ clouds…** status pill at the top of the viewer tracks the
+progress; the per-tree clouds all appear in the scan list when it finishes.
+Cancelling from the pill leaves the recoloured parent cloud in place and adds no
+per-tree clouds.
+
 ## Seeding trunks (optional)
 
 For tricky scenes you can guide the result by marking trunks yourself:

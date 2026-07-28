@@ -814,6 +814,12 @@ export default function PointCloudViewer({
   const [showTreeSegmentPanel, setShowTreeSegmentPanel] = useState(false);
   const [treeSegmentInProgress, setTreeSegmentInProgress] = useState(false);
   const [treeSegmentError, setTreeSegmentError] = useState<string | null>(null);
+  // "Split into one cloud per tree" runs AFTER the panel (and its inline
+  // spinner) has closed and the recoloured parent is already on screen, so
+  // without this the user watches a finished-looking viewport while the backend
+  // builds one octree per tree. Drives the top-center StatusPill.
+  const [treeSplitProgress, setTreeSplitProgress] = useState<{ label: string; value: number | null } | null>(null);
+  const treeSplitRunIdRef = useRef<string | null>(null);
   const [treeRegStrength1, setTreeRegStrength1] = useState(1.0);
   const [treeRegStrength2, setTreeRegStrength2] = useState(15.0);
   const [treeMaxGap, setTreeMaxGap] = useState(2.0);
@@ -8201,8 +8207,15 @@ export default function PointCloudViewer({
         const numTrees = meta.num_trees ?? 0;
         let splitCount = 0;
         if (treeSplitClouds && onAddCloud && numTrees > 0) {
+          setTreeSplitProgress({ label: 'Splitting into per-tree clouds…', value: null });
+          treeSplitRunIdRef.current = null;
           const { children } = await sessionExtractByColumn(sessionId, 'tree_instance', {
             signal: abort.signal,
+            onProgress: (value, message) => setTreeSplitProgress({
+              label: message || 'Splitting into per-tree clouds…',
+              value: value ?? null,
+            }),
+            onRunId: (runId) => { treeSplitRunIdRef.current = runId; },
           });
           splitCount = children.length;
           // Don't reframe the camera for any of these — dozens of child clouds
@@ -8326,15 +8339,19 @@ export default function PointCloudViewer({
           : `Segmented ${response.num_trees} trees.`,
       });
     } catch (error) {
-      // User cancelled (Cancel button aborted the fetch) — not a failure.
+      // User cancelled (Cancel button aborted the fetch, or the split pill's
+      // cancel reached the backend worker) — not a failure.
       if (error instanceof DOMException && error.name === 'AbortError') return;
+      if (error instanceof ScanCancelledError) return;
       console.error('Tree segmentation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Tree segmentation failed';
       setTreeSegmentError(errorMessage);
       showToast({ type: 'error', title: 'Tree Segmentation Failed', message: errorMessage });
     } finally {
       setTreeSegmentInProgress(false);
+      setTreeSplitProgress(null);
       treeSegmentAbortRef.current = null;
+      treeSplitRunIdRef.current = null;
     }
   }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints]);
 
@@ -11663,9 +11680,15 @@ export default function PointCloudViewer({
   }, []);
 
   const cancelTreeSegment = useCallback(() => {
+    // Stop the backend worker first when a run-id arrived (the per-tree split
+    // streams one); it drops the child sessions it had already registered, so a
+    // cancelled split doesn't strand a second copy of the cloud in the sidecar.
+    if (treeSplitRunIdRef.current) void cancelRun(treeSplitRunIdRef.current);
     treeSegmentAbortRef.current?.abort();
     treeSegmentAbortRef.current = null;
+    treeSplitRunIdRef.current = null;
     setTreeSegmentInProgress(false);
+    setTreeSplitProgress(null);
   }, []);
 
   const cancelSkeleton = useCallback(() => {
@@ -14163,6 +14186,19 @@ export default function PointCloudViewer({
           label={backfillProgress?.label ?? 'Backfilling misses…'}
           progress={backfillProgress?.value ?? null}
           onCancel={cancelBackfill}
+        />
+      )}
+
+      {/* Per-tree split status. The Segment Trees panel (and its inline
+          spinner) closes as soon as the recoloured parent lands, so this pill is
+          the only signal that the backend is still building one octree per tree
+          — a minute-scale job on a large plot. */}
+      {treeSplitProgress && (
+        <StatusPill
+          testId="tree-split-running"
+          label={treeSplitProgress.label}
+          progress={treeSplitProgress.value}
+          onCancel={cancelTreeSegment}
         />
       )}
 

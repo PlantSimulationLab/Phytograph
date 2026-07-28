@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.57.1"
+BACKEND_VERSION = "0.57.2"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -20745,42 +20745,51 @@ def _session_rebuild(sess: "CloudSession") -> tuple[str, _Path, dict]:
     return cache_key, cache_dir, meta
 
 
-def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSession":
-    """Build a NEW session from the `keep` subset of `sess`'s SURVIVING points
-    (positions[~deleted][keep] + aligned attributes) and register it. The CALLER
+def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) -> "CloudSession":
+    """Build a NEW session from the rows `take` (ABSOLUTE indices into `sess`'s
+    arrays, already survivor-filtered by the caller) and register it. The CALLER
     MUST HOLD `_cloud_session_lock` — this reads `sess`'s arrays and inserts the
     new session into the registry without taking the lock itself, so it can be
     composed inside a larger locked critical section (e.g. split's commit). The
-    octree is NOT built here (caller rebuilds, outside the lock)."""
+    octree is NOT built here (caller rebuilds, outside the lock).
+
+    Index-based rather than mask-based because of the K-way split: the obvious
+    `sess.positions[~sess.deleted][keep]` materialises the ENTIRE survivor array
+    before narrowing it, so slicing K subsets out of an N-point cloud moved
+    O(K x N) bytes per attribute column. On a multi-million-point plot split into
+    a few dozen trees that was tens of seconds of pure memcpy under the global
+    lock — the dominant cost of "split into one cloud per tree". Gathering by
+    absolute index touches only the subset's own rows, making the whole split
+    O(N) total across all K children."""
     import time
-    surv = ~sess.deleted
     new_id = uuid.uuid4().hex[:8]
+    # Fancy indexing already returns a fresh array — no .copy() needed on top.
     new_sess = CloudSession(
         session_id=new_id,
         source_path=sess.source_path,  # provenance label only
         ascii_format=sess.ascii_format,
         column_plan=sess.column_plan,
-        positions=sess.positions[surv][keep].copy(),
-        colors=sess.colors[surv][keep].copy() if sess.colors is not None else None,
-        intensity=sess.intensity[surv][keep].copy() if sess.intensity is not None else None,
-        extras={k: v[surv][keep].copy() for k, v in sess.extras.items()},
+        positions=sess.positions[take],
+        colors=sess.colors[take] if sess.colors is not None else None,
+        intensity=sess.intensity[take] if sess.intensity is not None else None,
+        extras={k: v[take] for k, v in sess.extras.items()},
         extra_dims_meta=list(sess.extra_dims_meta),
         # Carry the float64 timestamps onto the subset so the moving-platform LAD
         # join key survives a split/crop with full precision (and stays aligned).
-        timestamps=(np.asarray(sess.timestamps)[surv][keep].copy()
+        timestamps=(np.asarray(sess.timestamps)[take]
                     if sess.timestamps is not None else None),
         # Same reasoning for the per-pulse beam origins, which are the ground-truth
         # LAD origin source that BYPASSES the timestamp join entirely — dropping
         # them silently downgraded a split/extract/duplicate of a moving-platform
         # scan to the less-accurate join (or to a static origin) with no warning.
-        beam_origins=(np.asarray(sess.beam_origins, dtype=np.float64)[surv][keep].copy()
+        beam_origins=(np.asarray(sess.beam_origins, dtype=np.float64)[take]
                       if sess.beam_origins is not None else None),
         gps_time_encoding=getattr(sess, "gps_time_encoding", None),
         # Inherit the parent's import shift so the subset's stored positions stay
         # in the same (shifted) space and still restore to world coords on read.
         world_shift=(sess.world_shift.copy() if sess.world_shift is not None else None),
         crs_epsg=sess.crs_epsg,  # subsets keep the parent's CRS for DEM georeferencing
-        deleted=np.zeros(int(keep.sum()), dtype=bool),
+        deleted=np.zeros(len(take), dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
         created_at=time.time(),
@@ -20788,6 +20797,14 @@ def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSess
     )
     _cloud_sessions[new_id] = new_sess
     return new_sess
+
+
+def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSession":
+    """Build a NEW session from the `keep` subset of `sess`'s SURVIVING points
+    (positions[~deleted][keep] + aligned attributes) and register it. `keep` is a
+    boolean mask (or index array) over the SURVIVORS. Caller must hold the lock;
+    see `_session_subset_by_indices_locked`, which does the work."""
+    return _session_subset_by_indices_locked(sess, np.flatnonzero(~sess.deleted)[keep])
 
 
 def _session_subset(sess: "CloudSession", keep: np.ndarray) -> "CloudSession":
@@ -20926,56 +20943,129 @@ class SessionExtractByColumnRequest(BaseModel):
 _EXTRACT_BUILD_POOL = min(8, max(2, (_os.cpu_count() or 4)))
 
 
-@app.post("/api/cloud/session/{session_id}/extract_by_column")
-async def session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest):
-    """Fan a categorical column out into one child session per distinct value
-    (parent untouched). Returns {session_id, children: [{value, ...octree}]}
-    ordered by value. Empty selections are skipped. No source file read.
+def _slice_children_by_column(sess: "CloudSession", slug: str,
+                              exclude: set) -> "list[tuple[int, CloudSession]]":
+    """Register one child session per distinct integer value of `slug`, in value
+    order. Takes `_cloud_session_lock` itself; builds NO octrees.
 
-    All subsets are sliced up front under a single `_cloud_session_lock`
-    acquisition (cheap NumPy fancy-indexing); the expensive per-child octree
-    builds then run CONCURRENTLY in a bounded thread pool. Distinct values hash
-    to distinct octree cache keys, so `_octree_build_lock` never serializes them
-    and the global session lock is already released before PotreeConverter runs
-    (see `_session_rebuild`)."""
-    import asyncio
-    sess = _get_cloud_session(session_id)
-
-    # Slice every subset under ONE lock: read the column on survivors, enumerate
-    # the distinct values, and register a child session per value. No octree yet.
-    exclude = set(int(v) for v in (request.exclude_values if request.exclude_values is not None else [0]))
+    Grouped by ONE stable argsort of the column rather than a `col == v` pass per
+    value: the per-value scan is O(values x survivors) of boolean work, which on
+    a multi-million-point plot with dozens of trees costs more than the sort. The
+    stable sort also leaves each group's absolute row indices ascending, so the
+    per-child gather in `_session_subset_by_indices_locked` reads the parent
+    arrays in order."""
     with _cloud_session_lock:
-        if request.slug not in sess.extras:
-            raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {request.slug!r}.")
-        surv = ~sess.deleted
-        col = np.rint(sess.extras[request.slug][surv]).astype(np.int64)
-        values = [int(v) for v in np.unique(col) if int(v) not in exclude]
-        # value -> registered (but not-yet-built) child session
-        children: list[tuple[int, "CloudSession"]] = []
-        for v in values:
-            keep = col == v
-            if not bool(keep.any()):
+        if slug not in sess.extras:
+            raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {slug!r}.")
+        surv_idx = np.flatnonzero(~sess.deleted)
+        col = np.rint(sess.extras[slug][surv_idx]).astype(np.int64)
+        if col.size == 0:
+            return []
+        order = np.argsort(col, kind="stable")
+        ordered = col[order]
+        # Start offset of each run of equal values in the sorted column.
+        starts = np.flatnonzero(np.concatenate(([True], ordered[1:] != ordered[:-1])))
+        ends = np.concatenate((starts[1:], [ordered.size]))
+        children: "list[tuple[int, CloudSession]]" = []
+        for value, start, end in zip(ordered[starts], starts, ends):
+            v = int(value)
+            if v in exclude:
                 continue
-            children.append((v, _session_subset_locked(sess, keep)))
+            children.append((v, _session_subset_by_indices_locked(sess, surv_idx[order[start:end]])))
+    return children
 
+
+def _do_session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest,
+                                  progress=None) -> dict:
+    """Worker for POST .../extract_by_column — see the endpoint docstring.
+
+    Runs off the event loop (via `_bin_frame_streaming_response`) so it can
+    report per-child progress and be cancelled. On cancel or failure the
+    already-registered child sessions are dropped from the registry, so a
+    half-finished split doesn't strand a full copy of the cloud in RAM."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    sess = _get_cloud_session(session_id)
+    exclude = set(int(v) for v in (request.exclude_values if request.exclude_values is not None else [0]))
+    if progress is not None:
+        progress(None, "Slicing clouds…")
+    children = _slice_children_by_column(sess, request.slug, exclude)
     if not children:
         return {"session_id": session_id, "children": []}
 
-    # Build the child octrees concurrently (each release the lock before its slow
-    # PotreeConverter run, so the pool actually parallelizes).
-    loop = asyncio.get_event_loop()
-    sem = asyncio.Semaphore(_EXTRACT_BUILD_POOL)
+    total = len(children)
+    built: List[dict] = []
+    try:
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.0, f"Building 0 of {total} clouds…")
 
-    async def _build(value: int, child: "CloudSession"):
-        async with sem:
-            ck, ccd, cmeta = await loop.run_in_executor(None, _session_rebuild, child)
-        return {"value": value, "session_id": child.session_id,
-                "point_count": int(len(child.positions)), "cache_id": ck,
-                "cache_dir": str(ccd), **cmeta}
+        def _build(item):
+            value, child = item
+            # A cancel that lands while this item is still queued skips its build.
+            _cancel_checkpoint(progress)
+            ck, ccd, cmeta = _session_rebuild(child)
+            return {"value": value, "session_id": child.session_id,
+                    "point_count": int(len(child.positions)), "cache_id": ck,
+                    "cache_dir": str(ccd), **cmeta}
 
-    built = await asyncio.gather(*[_build(v, c) for v, c in children])
+        with ThreadPoolExecutor(max_workers=_EXTRACT_BUILD_POOL) as pool:
+            futures = [pool.submit(_build, item) for item in children]
+            try:
+                for future in as_completed(futures):
+                    built.append(future.result())
+                    if progress is not None:
+                        progress(len(built) / total, f"Building {len(built)} of {total} clouds…")
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+    except BaseException as exc:
+        with _cloud_session_lock:
+            for _value, child in children:
+                _cloud_sessions.pop(child.session_id, None)
+        if isinstance(exc, ScanCancelled):
+            raise
+        # The response stream is already open, so an exception here could only
+        # reach the client as a truncated body ("Unexpected end of JSON input").
+        # Report the failure IN the JSON tail instead, where the renderer can
+        # surface the real reason (e.g. a PotreeConverter crash).
+        logger.exception("extract_by_column failed for session %s", session_id)
+        detail = getattr(exc, "detail", None) or str(exc) or exc.__class__.__name__
+        return {"session_id": session_id, "children": [], "error": str(detail)}
+
     built.sort(key=lambda r: r["value"])
     return {"session_id": session_id, "children": built}
+
+
+@app.post("/api/cloud/session/{session_id}/extract_by_column")
+async def session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest,
+                                    http_request: Request):
+    """Fan a categorical column out into one child session per distinct value
+    (parent untouched). Returns {session_id, children: [{value, ...octree}]}
+    ordered by value. Empty selections are skipped. No source file read.
+    Streams PHP1 progress markers ahead of the JSON result (cancellable pill) —
+    a per-tree split of a large plot is a minute-scale operation and the caller
+    has no other signal that it's running.
+
+    All subsets are sliced up front under a single `_cloud_session_lock`
+    acquisition (one argsort + a per-child index gather); the expensive per-child
+    octree builds then run CONCURRENTLY in a bounded thread pool. Distinct values
+    hash to distinct octree cache keys, so `_octree_build_lock` never serializes
+    them and the global session lock is already released before PotreeConverter
+    runs (see `_session_rebuild`)."""
+    # Validate before the stream opens: once the 200 + first chunk is out, an
+    # HTTPException can only reach the client as a truncated body.
+    sess = _get_cloud_session(session_id)
+    if request.slug not in sess.extras:
+        raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {request.slug!r}.")
+
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_session_extract_by_column(session_id, request, progress)
+        ).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 @app.post("/api/cloud/session/{session_id}/duplicate")

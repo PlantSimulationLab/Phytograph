@@ -3460,32 +3460,34 @@ export type SessionExtractChild = OctreeMetadata & {
 export async function sessionExtractByColumn(
   sessionId: string,
   slug: string,
-  options?: { excludeValues?: number[]; signal?: AbortSignal },
+  options?: {
+    excludeValues?: number[];
+    signal?: AbortSignal;
+    // Per-child build progress ("Building 7 of 42 clouds…"). The split is a
+    // minute-scale op on a large plot, so the caller needs a status pill.
+    onProgress?: BinaryFrameProgress;
+    onRunId?: (runId: string) => void;
+  },
 ): Promise<{ session_id: string; children: SessionExtractChild[] }> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000);
-  const onAbort = () => controller.abort();
-  options?.signal?.addEventListener('abort', onAbort);
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/extract_by_column`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slug, exclude_values: options?.excludeValues ?? null }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
+    const result = await fetchJsonWithProgress<
+      { session_id: string; children: SessionExtractChild[]; error?: string }
+    >(
+      `/api/cloud/session/${sessionId}/extract_by_column`,
+      { slug, exclude_values: options?.excludeValues ?? null },
+      options?.signal,
+      600000,
+      options?.onProgress,
+      options?.onRunId,
+    );
+    // A build that failed mid-stream reports in the JSON tail (the response is
+    // already a 200 by then), so surface it as a real error rather than
+    // silently returning zero children.
+    if (result.error) throw new Error(result.error);
+    return result;
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('session_extract_by_column failed:', error);
     throw error;
-  } finally {
-    options?.signal?.removeEventListener('abort', onAbort);
   }
 }
 
