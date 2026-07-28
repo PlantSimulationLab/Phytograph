@@ -11,7 +11,17 @@ Pipeline (each step optional / guarded):
 Design constraints (from the plan):
 - **Deterministic**: no global RNG; voxel downsample uses a stable
   lowest-index-per-voxel rule, connected components use scipy.csgraph, inputs
-  are processed in given order. Same input -> identical output.
+  are processed in given order. Same input -> identical output for every stage
+  implemented here.
+  The ONE exception is stage 1, which delegates to CSF: its Linux wheel links
+  libgomp and relaxes the cloth constraints inside an OpenMP parallel region, so
+  the converged cloth — and with it the classification of points sitting within
+  a hair of ``ground_class_threshold`` — depends on thread interleaving. Two
+  runs on one loaded 8-core CI runner differed by 19 of ~3090 survivors. The
+  macOS wheel carries no OpenMP symbols at all and is bit-stable, so this never
+  reproduces on a dev laptop. Pass ``remove_ground=False`` when you need an
+  exactly reproducible result, or re-run ground removal once and reuse its
+  labels across the runs you want to compare.
 - **Index-preserving**: every step returns a boolean ``keep`` mask over the
   *current* points so the caller (and the validation harness) can map the final
   cloud back to the input and check "didn't delete real wood / did remove
