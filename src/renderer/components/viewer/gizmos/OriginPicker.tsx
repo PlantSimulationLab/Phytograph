@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
+import type { PointCloudOctree } from 'potree-core';
 
 // Click target for placing the scene origin (the CloudCompare-style pivot).
 // While mounted (origin place-mode armed), a left-click prefers a SURFACE hit on
@@ -18,9 +19,8 @@ export function OriginPicker({
   onPick,
 }: {
   // Live PointCloudOctree of the selected cloud (from OctreePointCloud's
-  // onOctreeReady handoff), or null for a flat cloud / none. Typed loosely to
-  // avoid importing potree-core's class here.
-  octree: { pick: (...args: unknown[]) => unknown } | null;
+  // onOctreeReady handoff), or null for a flat cloud / none.
+  octree: PointCloudOctree | null;
   // Ground-plane Z in DISPLAY space (fallback when no surface is hit).
   groundZ: number;
   displayOffset: { x: number; y: number; z: number };

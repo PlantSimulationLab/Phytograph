@@ -199,6 +199,7 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
           submenu: [
             { label: 'Transform Point Cloud', click: () => send({ kind: 'tool', toolId: 'cloud-translate' }) },
             { label: 'Set Scene Origin', click: () => send({ kind: 'tool', toolId: 'set-scene-origin' }) },
+            { label: 'Pick Point', click: () => send({ kind: 'tool', toolId: 'pick-point' }) },
             { label: 'Crop Point Cloud', click: () => send({ kind: 'tool', toolId: 'cloud-crop' }) },
             { label: 'Erase Brush', click: () => send({ kind: 'tool', toolId: 'cloud-erase' }) },
             { label: 'Filter Points', click: () => send({ kind: 'tool', toolId: 'cloud-filter' }) },

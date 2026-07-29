@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForRange, buildCategoricalGradientStops } from '../../../lib/classification';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
+import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
 import { getPotreeManager, OctreeRequestManager } from '../potreeManager';
 import { applyOctreePose } from './octreePose';
 
@@ -130,10 +131,20 @@ export interface OctreePointCloudProps {
 // into `intensity` is a zero-copy reference swap. Idempotent — re-running on
 // an already-swapped geometry is a no-op (same buffer reference). Returns
 // true if the geometry had the field (so callers can detect missing data).
+//
+// Before the first swap the REAL intensity buffer is re-registered under
+// ORIG_INTENSITY_ATTRIBUTE. potree's picker reports a point's value for every
+// named attribute on the geometry, so without this the point picker would read
+// the aliased scalar and label it "intensity". It's another zero-copy
+// reference (no second upload — three.js only uploads attributes the active
+// shader program actually binds).
 function swapScalarIntoIntensity(geometry: any, field: string): boolean {
   const src = geometry?.attributes?.[field];
   if (!src) return false;
   if (geometry.attributes.intensity !== src) {
+    if (!geometry.attributes[ORIG_INTENSITY_ATTRIBUTE] && geometry.attributes.intensity) {
+      geometry.setAttribute(ORIG_INTENSITY_ATTRIBUTE, geometry.attributes.intensity);
+    }
     geometry.setAttribute('intensity', src);
   }
   return true;

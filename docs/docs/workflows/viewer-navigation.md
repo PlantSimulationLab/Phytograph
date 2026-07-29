@@ -94,6 +94,48 @@ Right-click any cloud entry, or use its inline **Color By** dropdown:
 See **[Color modes](../reference/color-modes.md)** for when each is most
 useful.
 
+## Inspect a point
+
+Coloring by a scalar tells you how a value varies across the cloud; the
+**Pick Point** tool tells you what it is at *one* point.
+
+1. Click **Pick Point** in the view controls at the top of the left column
+   (or find it in the command palette / **Tools → Pick Point**). The cursor
+   becomes a crosshair.
+2. Click a point. A label appears, tethered to it by a dashed leader line,
+   listing:
+    - the scan the point came from,
+    - its **X / Y / Z**, and
+    - every scalar attribute it carries — intensity, color, imported columns
+      such as reflectance or deviation, and classification labels like
+      `ground_class` or `wood_class` resolved to their names
+      (e.g. `2 (Non-ground)`).
+3. Keep clicking to label as many points as you like. Labels stay pinned to
+   their points as you orbit, and shuffle out of each other's way when the
+   points are close together.
+
+No selection is needed — the tool picks whatever cloud is visible under the
+cursor.
+
+!!! note "Coordinates on a shifted cloud"
+
+    If you enabled a **global shift** when importing (offered automatically
+    for projected/UTM coordinates), each label shows two columns: the
+    **world** coordinate, which matches your source file, and the **local**
+    coordinate in parentheses, which is the smaller number Phytograph works
+    in internally. Clouds without a shift show a single column.
+
+Sky/miss points — laser pulses that returned nothing — are never picked, so
+you can leave the miss overlay on while inspecting real returns.
+
+To copy the numbers out, use the **copy** icon on a label for that one point,
+or **Copy all (CSV)** in the panel for every label at once. Dismiss a single
+label with its **✕**, or clear them all from the panel.
+
+Labels are annotations, not scene objects: they aren't saved, aren't part of
+undo, and are dropped automatically if the cloud they point at is deleted,
+moved, or edited (so a label can never quietly point at the wrong place).
+
 ## Adjust point size and colormap
 
 The right panel has:

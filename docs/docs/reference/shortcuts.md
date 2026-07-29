@@ -28,6 +28,7 @@ start typing, press <kbd>Enter</kbd> to run, <kbd>Esc</kbd> to close.
 | Clear the mesh selection | Left-click empty space |
 | Select a scan | Left-click its scanner marker (same as clicking its row in the **Scans** panel) |
 | Add/remove a scan from the selection | <kbd>⌘/Ctrl</kbd> + left-click its scanner marker |
+| Label a point (while **Pick Point** is armed) | Left-click the point |
 
 A voxel **grid** box is deliberately "click-through": because it usually
 encloses the very geometry it measures, clicking it selects whatever is
@@ -85,6 +86,17 @@ button) then toggles erase mode: ON freezes the viewport and **click** /
 cloud); OFF unfreezes the view so you can reorient without closing the
 tool. Apply with the panel's **Apply Erase** button or discard with
 **Clear Strokes**. <kbd>E</kbd> only acts while the Erase tool is open.
+
+## Point picker
+
+| Shortcut | Action |
+|---|---|
+| <kbd>Esc</kbd> | Disarm the picker (placed labels stay) |
+
+The view stays fully interactive while the picker is armed: a **click**
+labels the point under the cursor, a **click-drag** orbits as usual. Clear
+the labels from the panel's **Clear all**, or dismiss one with its **✕**.
+See **[Inspect a point](../workflows/viewer-navigation.md#inspect-a-point)**.
 
 ## Transform mode (Blender-style)
 

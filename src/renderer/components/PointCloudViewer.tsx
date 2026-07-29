@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick} from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -146,6 +146,24 @@ import { TranslationGizmo } from './viewer/gizmos/TranslationGizmo';
 import { RotationGizmo } from './viewer/gizmos/RotationGizmo';
 import { OriginPicker } from './viewer/gizmos/OriginPicker';
 import { SceneOriginMarker } from './viewer/gizmos/SceneOriginMarker';
+import type { PointCloudOctree } from 'potree-core';
+import { PointPicker, type PointPickHit } from './viewer/gizmos/PointPicker';
+import { PointPickerPanel } from './viewer/panels/PointPickerPanel';
+import {
+  PickedPointLabels,
+  PickedPointProjector,
+  usePickedPointOverlay,
+} from './viewer/PickedPointLabels';
+import {
+  buildAttributeRows,
+  displayToLocal,
+  flatCloudAttributeValues,
+  flatCloudRanges,
+  hasNonZeroShift,
+  localToWorld,
+  pickedPointsToCsv,
+  type PickedPoint,
+} from '../lib/pointPick';
 import { CropBox } from './viewer/gizmos/CropBox';
 import { BoxDrawRaycaster } from './viewer/gizmos/BoxDrawRaycaster';
 import { PolygonCameraSnapshotter } from './viewer/gizmos/PolygonCameraSnapshotter';
@@ -1575,6 +1593,21 @@ export default function PointCloudViewer({
   const sceneOriginRef = useRef<[number, number, number] | null>(null);
   sceneOriginRef.current = sceneOrigin;
 
+  // ── Point picker (CloudCompare-style click-to-inspect) ───────────────────
+  // `showPointPickerPanel` opens the panel; `pointPickMode` arms the viewport
+  // so clicks place labels. Unlike the scene-origin picker the mode stays armed
+  // after a pick, so a user can label several points in a row.
+  const [showPointPickerPanel, setShowPointPickerPanel] = useState(false);
+  const [pointPickMode, setPointPickMode] = useState(false);
+  // The placed labels. Annotation/view state, so it lives here rather than in
+  // the scene store — see that module's header on what belongs under undo.
+  const [pickedPoints, setPickedPoints] = useState<PickedPoint[]>([]);
+  const [pickedCopied, setPickedCopied] = useState(false);
+  // Monotonic counter behind each label's screen-offset stagger. Kept out of
+  // the array index so dismissing a label doesn't shuffle the survivors.
+  const pickSeqRef = useRef(0);
+  const pickedOverlay = usePickedPointOverlay();
+
   // NOTE: setting the scene origin deliberately does NOT move the camera. It is
   // the rotation pivot for the Transformation tool only. Re-targeting the orbit
   // to the origin was tried but reorients the view on every pick (OrbitControls
@@ -1660,10 +1693,19 @@ export default function PointCloudViewer({
   const [erasePreviewBoxes, setErasePreviewBoxes] = useState<THREE.Matrix4[]>([]);
   // Camera-facing square indicator transform that follows the cursor.
   const [eraseBrushMatrix, setEraseBrushMatrix] = useState<THREE.Matrix4 | null>(null);
-  // Live PointCloudOctree of the selected cloud, handed up by OctreePointCloud
-  // so the octree erase brush can pick the hovered surface point. Typed loosely
-  // to avoid importing potree-core's class into this already-large module.
-  const eraseOctreeRef = useRef<{ pick: (...args: unknown[]) => unknown } | null>(null);
+  // Live PointCloudOctree of EVERY mounted octree cloud, keyed by cloud id and
+  // handed up by OctreePointCloud (which also reports null on unmount).
+  //
+  // The erase brush and the scene-origin picker only ever want the SELECTED
+  // cloud — see selectedOctree() below — but the point picker has to pick
+  // across every visible cloud, which is why this is a registry rather than the
+  // single slot it used to be. The projected-miss octrees are never registered,
+  // which is what keeps sky/miss points unpickable for free.
+  const octreeRegistryRef = useRef<Map<string, PointCloudOctree>>(new Map());
+  const selectedOctree = (): PointCloudOctree | null => {
+    const id = firstSelectedCloud?.id;
+    return (id ? octreeRegistryRef.current.get(id) : null) ?? null;
+  };
 
   // Undo/redo history now lives in the scene store (scene.commit / scene.undo /
   // scene.redo / scene.boundary). isUndoingRef still guards capture during replay
@@ -1967,6 +2009,9 @@ export default function PointCloudViewer({
     if (except !== 'export') setShowExportPanel(false);
     if (except !== 'morph') setShowMorphPopup(false);
     if (except !== 'scene-origin') { setShowSceneOriginPanel(false); setOriginPlaceMode(false); }
+    // Closing the picker only disarms it — placed labels persist, so they can
+    // still be read while another tool is open.
+    if (except !== 'point-pick') { setShowPointPickerPanel(false); setPointPickMode(false); }
   }, []);
 
   // Get edit state for a cloud
@@ -3777,6 +3822,12 @@ export default function PointCloudViewer({
         }
         setEditMode('none');
       }
+      // Escape also disarms the point picker (its placed labels stay — clearing
+      // those is what the panel's Clear all button is for).
+      if (e.key === 'Escape' && pointPickMode) {
+        e.preventDefault();
+        setPointPickMode(false);
+      }
       // Backspace: pop the last polygon vertex while drawing.
       if (e.key === 'Backspace' && editMode === 'crop' && cropDrawState === 'drawing-polygon') {
         e.preventDefault();
@@ -3785,7 +3836,7 @@ export default function PointCloudViewer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress]);
+  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode]);
 
   // Track shift key state for mixed selection (cloud + mesh)
   useEffect(() => {
@@ -4363,6 +4414,102 @@ export default function PointCloudViewer({
   const displayOffsetRef = useRef<Vec3Like>(displayOffset);
   displayOffsetRef.current = displayOffset;
 
+  // ── Point picker: turn a raw hit into a placed label ─────────────────────
+  //
+  // The gizmo reports a hit in DISPLAY space with a bag of raw attribute
+  // values; everything user-facing (frame conversion, labels, class names,
+  // number formatting) lives in lib/pointPick.ts. Two frames come back out:
+  // `local` is the frame the app and backend store points in, `world` adds the
+  // cloud's import-time global shift so it matches the source file.
+  const handlePointPick = useCallback((hit: PointPickHit) => {
+    const cloud = clouds.find((c) => c.id === hit.cloudId);
+    if (!cloud) return;
+    const octree = cloud.data.octree;
+    const worldShift = octree?.worldShift ?? null;
+
+    const local = displayToLocal(hit.position, displayOffsetRef.current);
+    const world = localToWorld(local, worldShift);
+
+    // Octree hits arrive with the values already on them; a flat cloud's
+    // arrays are sampled here by the index the raycast reported.
+    const values = hit.sourceIndex !== undefined
+      ? flatCloudAttributeValues(cloud.data, hit.sourceIndex)
+      : hit.values;
+    const ranges = octree?.attributeRanges ?? flatCloudRanges(cloud.data);
+
+    setPickedPoints((prev) => [
+      ...prev,
+      {
+        id: `pick-${pickSeqRef.current}`,
+        seq: pickSeqRef.current++,
+        cloudId: cloud.id,
+        cloudLabel: cloud.data.fileName ?? 'Scan',
+        world,
+        local,
+        hasShift: hasNonZeroShift(worldShift),
+        attributes: buildAttributeRows(values, { labels: octree?.attributeLabels, ranges }),
+        sourceIndex: hit.sourceIndex,
+      },
+    ]);
+  }, [clouds]);
+
+  const dismissPickedPoint = useCallback((id: string) => {
+    setPickedPoints((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+
+  const copyPickedPoints = useCallback(() => {
+    if (pickedPoints.length === 0) return;
+    navigator.clipboard.writeText(pickedPointsToCsv(pickedPoints));
+    setPickedCopied(true);
+    setTimeout(() => setPickedCopied(false), 600);
+  }, [pickedPoints]);
+
+  // Cloud data by id, for the picker's flat-cloud path (it gets a cloud id off
+  // the hit object's userData and needs the arrays behind it).
+  const cloudDataById = useMemo(() => {
+    const m = new Map<string, PointCloudData>();
+    for (const c of clouds) m.set(c.id, c.data);
+    return m;
+  }, [clouds]);
+  const getPickCloudData = useCallback(
+    (id: string) => cloudDataById.get(id),
+    [cloudDataById],
+  );
+
+  // A label is anchored to a FIXED world position, so it goes stale the moment
+  // its cloud moves or its geometry is rebuilt underneath it — a baked or draft
+  // transform, an applied crop/erase, a filter, a re-bake. Signature covers all
+  // of those; when a cloud's signature changes (or the cloud disappears), its
+  // labels are dropped rather than left pointing at empty space.
+  const cloudAnchorSignature = useMemo(() => {
+    const sig = new Map<string, string>();
+    for (const c of clouds) {
+      const es = getEditState(c.id);
+      const t = es.translation;
+      const r = getEditRotation(c.id);
+      sig.set(c.id, [
+        t.x, t.y, t.z, r.x, r.y, r.z,
+        c.data.pointCount,
+        c.data.octree?.cacheId ?? '',
+        es.pendingDeletedCount ?? 0,
+        es.erasedIndices.size,
+      ].join('|'));
+    }
+    return sig;
+  }, [clouds, getEditState, getEditRotation]);
+  const anchorSigRef = useRef(cloudAnchorSignature);
+  useEffect(() => {
+    const prevSig = anchorSigRef.current;
+    anchorSigRef.current = cloudAnchorSignature;
+    setPickedPoints((prev) => {
+      const kept = prev.filter((p) => {
+        const now = cloudAnchorSignature.get(p.cloudId);
+        return now !== undefined && now === prevSig.get(p.cloudId);
+      });
+      return kept.length === prev.length ? prev : kept;
+    });
+  }, [cloudAnchorSignature]);
+
   // World-space coordinate of the ground-grid plane along the up-axis (z for
   // z-up, y for y-up). The natural ground reference in a local coordinate system
   // is 0, so we SNAP to 0 whenever 0 is a plausible floor near the geometry —
@@ -4442,6 +4589,10 @@ export default function PointCloudViewer({
       // `toolGroup`, so it doesn't render as a Tools toolbar button. It stays in
       // the registry for the Cmd+K palette and the Tools menu.
       { id: 'set-scene-origin', name: 'Set Scene Origin', keywords: ['pivot', 'center', 'origin', 'rotation center', 'orbit'], action: () => { const open = showSceneOriginPanel; closeAllToolPanels('scene-origin'); setShowSceneOriginPanel(!open); if (open) setOriginPlaceMode(false); }, category: 'View', requires: null, icon: Crosshair, testId: 'tool-set-scene-origin', isActive: () => showSceneOriginPanel },
+      // Also a scene control rather than an analysis tool (no `toolGroup`, so it
+      // renders in the View Controls box beside Set Scene Origin, not the Tools
+      // palette) — it inspects whatever is visible and needs no selection.
+      { id: 'pick-point', name: 'Pick Point', keywords: ['point', 'inspect', 'identify', 'query', 'coordinates', 'attribute', 'scalar', 'label', 'probe'], action: () => { const open = showPointPickerPanel; closeAllToolPanels('point-pick'); setShowPointPickerPanel(!open); setPointPickMode(!open); }, category: 'View', requires: null, icon: MousePointerClick, testId: 'tool-point-pick', isActive: () => showPointPickerPanel },
       { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => toggleCropMode(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
       { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
@@ -4517,7 +4668,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
 
   // While the Translate tool is open it owns an unbaked draft that must be
   // resolved (OK/Cancel/X) before anything else runs — otherwise a compute tool
@@ -12601,7 +12752,8 @@ export default function PointCloudViewer({
   // when an edit tool owns the click (crop/erase/translate gizmo), tree-seed
   // placement is active, or a gizmo drag is in flight, those clicks belong to
   // the tool, not selection.
-  const meshSelectionEnabled = editMode === 'none' && !treeSeedMode && !gizmoDragging && !trajectoryEditor;
+  const meshSelectionEnabled = editMode === 'none' && !treeSeedMode && !gizmoDragging
+    && !trajectoryEditor && !pointPickMode;
 
   // Color modes that benefit from a colormap + colorbar (continuous scalars).
   const isScalarColorMode = (
@@ -12908,13 +13060,14 @@ export default function PointCloudViewer({
                     const all = [...committed, ...live];
                     return all.length > 0 ? all.map(matrix => ({ matrix })) : null;
                   })()}
-                  // Hand the live octree up so the erase brush can pick the
-                  // hovered surface point. Only the selected cloud needs it.
-                  onOctreeReady={
-                    isSelected
-                      ? (oct) => { eraseOctreeRef.current = oct as any; }
-                      : undefined
-                  }
+                  // Hand the live octree up so the gizmos that pick against it
+                  // (erase brush, scene-origin picker, point picker) can reach
+                  // it. Registered for EVERY octree cloud, not just the selected
+                  // one — the point picker works on whatever is visible.
+                  onOctreeReady={(oct) => {
+                    if (oct) octreeRegistryRef.current.set(cloud.id, oct);
+                    else octreeRegistryRef.current.delete(cloud.id);
+                  }}
                   // The octree files are gone on disk (cache cleared / evicted /
                   // version-bumped). Rebuild from the source descriptor or, if
                   // that's impossible, surface a clear message.
@@ -12932,6 +13085,11 @@ export default function PointCloudViewer({
                   <PointCloud
                     data={sourceData}
                     indices={indices}
+                    // Tag the THREE.Points so the point picker can distinguish a
+                    // real cloud from the scene's other Points objects. The
+                    // resample preview is a throwaway rendering at the origin,
+                    // so it stays untagged (and unpickable).
+                    cloudId={hasResamplePreview ? undefined : cloud.id}
                     pointSize={pointSize}
                     // 'per-scan' is rendered as 'single' with the cloud's own
                     // swatch color — keeps PointCloud unaware of multi-cloud state.
@@ -13408,12 +13566,36 @@ export default function PointCloudViewer({
             plane. Auto-disarms on a successful pick. */}
         {originPlaceMode && (
           <OriginPicker
-            octree={eraseOctreeRef.current}
+            octree={selectedOctree()}
             groundZ={(firstSelectedCloud?.data.bounds.min.z ?? 0) - displayOffset.z}
             displayOffset={displayOffset}
             onPick={(world) => { setSceneOrigin(world); setOriginPlaceMode(false); }}
           />
         )}
+
+        {/* Point picker. Armed from the Pick Point control; each click labels
+            the point under the cursor. Picks across EVERY visible octree cloud
+            plus the flat ones, so it needs no selection. */}
+        {pointPickMode && (
+          <PointPicker
+            octrees={clouds.flatMap((c) => {
+              if (!c.visible || !c.data.octree) return [];
+              const oct = octreeRegistryRef.current.get(c.id);
+              return oct ? [{ cloudId: c.id, octree: oct }] : [];
+            })}
+            getCloudData={getPickCloudData}
+            onPick={handlePointPick}
+          />
+        )}
+
+        {/* Keeps each placed label pinned to its 3D anchor as the camera moves.
+            Writes screen positions straight into the DOM (no React state), so a
+            scene full of labels costs a few style writes per frame. */}
+        <PickedPointProjector
+          points={pickedPoints}
+          displayOffset={displayOffset}
+          registry={pickedOverlay}
+        />
 
         {/* Scene-origin marker (amber crosshair sphere) at the WORLD origin,
             rendered in display space via the wrapping group. Visible whenever an
@@ -13713,7 +13895,7 @@ export default function PointCloudViewer({
           const b = firstSelectedCloud.data.bounds;
           return (
             <EraseBrushOctree
-              octree={eraseOctreeRef.current as any}
+              octree={selectedOctree()}
               brushHalfPx={eraseBrushPx}
               // cloudCenter in DISPLAY space: it's the fallback anchor plane for
               // anchorAt(), which runs against the display-positioned octree and
@@ -15160,6 +15342,25 @@ export default function PointCloudViewer({
           >
             <Crosshair className={`w-4 h-4 ${showSceneOriginPanel ? 'text-white' : 'text-neutral-300'}`} />
           </button>
+          {/* Pick Point — inspect a single point's coordinates and scalar
+              attributes. Like Set Scene Origin it's an inspection control that
+              works on whatever is visible (no selection needed), so it lives
+              here rather than in the analysis Tools palette. */}
+          <button
+            data-testid="tool-point-pick"
+            onClick={() => {
+              const open = showPointPickerPanel;
+              closeAllToolPanels('point-pick');
+              setShowPointPickerPanel(!open);
+              setPointPickMode(!open);
+            }}
+            className={`p-2 rounded transition-colors flex items-center justify-center ${
+              showPointPickerPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'
+            }`}
+            title="Pick Point — click a point to read its coordinates and attributes"
+          >
+            <MousePointerClick className={`w-4 h-4 ${showPointPickerPanel ? 'text-white' : 'text-neutral-300'}`} />
+          </button>
         </div>
 
         {/* Snap to View */}
@@ -16125,6 +16326,26 @@ export default function PointCloudViewer({
           />
         );
       })()}
+
+      {/* Point picker panel + the floating labels themselves. The labels are
+          rendered whenever any exist — closing the panel only disarms the tool,
+          so a user can keep reading their labels while working elsewhere. */}
+      {showPointPickerPanel && (
+        <PointPickerPanel
+          armed={pointPickMode}
+          count={pickedPoints.length}
+          copied={pickedCopied}
+          onToggleArmed={() => setPointPickMode(m => !m)}
+          onCopyAll={copyPickedPoints}
+          onClearAll={() => setPickedPoints([])}
+          onClose={() => { setShowPointPickerPanel(false); setPointPickMode(false); }}
+        />
+      )}
+      <PickedPointLabels
+        points={pickedPoints}
+        registry={pickedOverlay}
+        onDismiss={dismissPickedPoint}
+      />
 
       {/* Plant Growth Panel - shows when plant mesh is selected and growth panel is open */}
       {/* Positioned to the left of the main right panel to avoid overlap */}

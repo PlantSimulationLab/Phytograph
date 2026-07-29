@@ -721,7 +721,7 @@ export function fuzzyMatch(query: string, text: string): number {
 //
 // NOTE: 'classification' is intentionally NOT filtered — it's a real LAS dim a
 // user may have segmented (ground/wood/leaf), so it stays selectable.
-const OCTREE_BUILTIN_ATTRIBUTES = new Set([
+export const OCTREE_BUILTIN_ATTRIBUTES = new Set([
   'position', 'rgb', 'rgba', 'color', 'intensity',
   'normal', 'indices', 'spacing',
   // LAS sensor/schema dimensions PotreeConverter always emits (degenerate for

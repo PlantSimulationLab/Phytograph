@@ -28,8 +28,9 @@ confirmation first because it can&rsquo;t be undone.
 ## Left tool column
 
 A vertical column down the left side. At the top are the **view** controls
-(command-palette search and **Set Scene Origin** — the rotation pivot) and
-the **snap-view** gizmo. Below those are two always-visible blocks —
+(command-palette search, **Set Scene Origin** — the rotation pivot — and
+**Pick Point**, which labels individual points with their coordinates and
+attributes) and the **snap-view** gizmo. Below those are two always-visible blocks —
 **Create** and **Tools**:
 
 | Block | Buttons |
@@ -90,6 +91,11 @@ The main interactive area. Camera controls:
 
 The 1m × 1m grid on the world XY plane gives you a fixed sense of
 scale; lighter lines every 10 cm let you eyeball details.
+
+Labels dropped by the **Pick Point** tool also live here: each one is a small
+bubble tethered by a dashed leader line to the point it describes, and it
+stays pinned to that point as you orbit. See
+[Inspect a point](../workflows/viewer-navigation.md#inspect-a-point).
 
 ## Right-side scene panel
 

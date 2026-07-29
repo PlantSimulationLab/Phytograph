@@ -26,6 +26,12 @@ export interface PointCloudProps {
   // keeps each preview update at ~4 bytes per visible point instead of
   // ~28-36 bytes (positions + colors + intensities).
   indices?: Uint32Array | null;
+  // Scene id of the cloud this mesh draws. Stamped onto the THREE.Points'
+  // userData so the point picker can tell a real point cloud from the other
+  // THREE.Points objects in the scene (skeleton nodes, overlays), which are not
+  // pick targets. Omitted for the resample preview and other throwaway
+  // renderings, which shouldn't be pickable either.
+  cloudId?: string;
 }
 
 // Point cloud mesh component.
@@ -55,6 +61,7 @@ export function PointCloud({
   rangeMin,
   rangeMax,
   indices,
+  cloudId,
 }: PointCloudProps) {
   const pointsRef = useRef<THREE.Points>(null);
 
@@ -280,5 +287,12 @@ export function PointCloud({
   useEffect(() => () => { material.dispose(); }, [material]);
 
   if (!data || data.pointCount === 0) return null;
-  return <points ref={pointsRef} geometry={geometry} material={material} />;
+  return (
+    <points
+      ref={pointsRef}
+      geometry={geometry}
+      material={material}
+      userData={cloudId ? { pointCloudId: cloudId } : undefined}
+    />
+  );
 }
