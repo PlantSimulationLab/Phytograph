@@ -13,6 +13,7 @@ export function CameraController({
   hasContent,
   enabled = true,
   displayOffset,
+  orbitPivot,
 }: {
   bounds: PointCloudData['bounds'];
   hasContent: boolean;
@@ -23,6 +24,11 @@ export function CameraController({
   // coordinates. We convert world bounds centers to display space only at the
   // points where we write camera.position / controls.target. Defaults to origin.
   displayOffset?: { x: number; y: number; z: number };
+  // WORLD-space point the view turns about (the scene origin — what the 3D-cursor
+  // marker shows). When set, left-drag orbits about THIS point instead of the
+  // OrbitControls target, so panning no longer moves the rotation center. Null
+  // falls back to stock OrbitControls rotation about its target.
+  orbitPivot?: [number, number, number] | null;
 }) {
   const { camera, gl, scene } = useThree();
   const controlsRef = useRef<any>(null);
@@ -40,6 +46,13 @@ export function CameraController({
     const o = offsetRef.current;
     return o ? new THREE.Vector3(c.x - o.x, c.y - o.y, c.z - o.z) : c.clone();
   }, []);
+
+  // Live copies for the pivot-orbit listeners (installed once; reading refs keeps
+  // them from being torn down and re-added on every pivot/enable change).
+  const orbitPivotRef = useRef(orbitPivot);
+  orbitPivotRef.current = orbitPivot;
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
 
   const snapToView = useCallback((direction: ViewDirection, target?: { center: THREE.Vector3, size: THREE.Vector3 }) => {
     if (!controlsRef.current) return;
@@ -249,6 +262,113 @@ export function CameraController({
     };
   }, [bounds, camera, hasContent]);
 
+  // ── Pivot orbit: turn the view about the scene origin, not the pan target ──
+  //
+  // Stock OrbitControls always rotates about `controls.target`, and panning
+  // TRANSLATES that target — so every pan silently moved the rotation center,
+  // and the 3D-cursor marker (which is the Transform tool's pivot) disagreed
+  // with what the view actually turned about. Here a left-drag instead applies
+  // ONE rigid rotation about the pivot to both `camera.position` and
+  // `controls.target`, so the whole view swings around that fixed world point
+  // even when it sits off-center after a pan. Panning still moves the view
+  // freely; it just no longer decides what you rotate around.
+  //
+  // The deltas mirror three-stdlib's own rotate math so the feel is unchanged
+  // (and so pivot == target reduces exactly to the stock behavior):
+  //   Δθ = −2π·dx/clientHeight about camera.up      (its rotateLeft)
+  //   Δφ = −2π·dy/clientHeight about the camera right axis (its rotateUp)
+  // In three's spherical convention, adding Δθ to `theta` IS a right-handed
+  // rotation about the up axis, and adding Δφ to `phi` is a right-handed
+  // rotation about cross(up, position − target) — i.e. the camera's right
+  // vector — which is why these two axes reproduce OrbitControls exactly.
+  //
+  // Rotation is disabled on the controls themselves (`enableRotate={false}`)
+  // whenever a pivot is supplied, so the two can never both run. Zoom, and pan
+  // on middle/right (and shift+left, which three-stdlib routes to pan), are
+  // untouched and still owned by OrbitControls.
+  useEffect(() => {
+    const el = gl.domElement;
+    const EPS = 1e-4;
+    let dragging = false;
+    let last = { x: 0, y: 0 };
+
+    const rotateAboutPivot = (dx: number, dy: number) => {
+      const controls = controlsRef.current;
+      const pivotWorld = orbitPivotRef.current;
+      if (!controls || !pivotWorld) return;
+      const height = el.clientHeight || 1;
+
+      const o = offsetRef.current;
+      const P = new THREE.Vector3(
+        pivotWorld[0] - (o?.x ?? 0),
+        pivotWorld[1] - (o?.y ?? 0),
+        pivotWorld[2] - (o?.z ?? 0),
+      );
+
+      const up = camera.up.clone().normalize();
+      const offset = camera.position.clone().sub(controls.target);
+      if (offset.lengthSq() < 1e-12) return;
+
+      // Clamp the vertical drag exactly like OrbitControls clamps `phi` — the
+      // view must never tip past the poles, where lookAt's up vector flips.
+      const phi = offset.angleTo(up);
+      let dPhi = (-2 * Math.PI * dy) / height;
+      dPhi = Math.max(EPS - phi, Math.min(Math.PI - EPS - phi, dPhi));
+      const dTheta = (-2 * Math.PI * dx) / height;
+
+      // Camera right = cross(up, position − target); degenerate only if the view
+      // is dead-on the up axis, which the phi clamp already prevents.
+      const right = new THREE.Vector3().crossVectors(up, offset);
+      if (right.lengthSq() < 1e-12) return;
+      right.normalize();
+
+      const qTheta = new THREE.Quaternion().setFromAxisAngle(up, dTheta);
+      // Tilt about the right axis AFTER the azimuth turn, so the two compose
+      // like OrbitControls' simultaneous spherical update.
+      const qPhi = new THREE.Quaternion().setFromAxisAngle(
+        right.applyQuaternion(qTheta), dPhi,
+      );
+      const q = qPhi.multiply(qTheta);
+
+      camera.position.sub(P).applyQuaternion(q).add(P);
+      controls.target.sub(P).applyQuaternion(q).add(P);
+      controls.update();
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (!enabledRef.current || !orbitPivotRef.current) return;
+      // Left button only, and never with a modifier: shift/ctrl/meta+left is
+      // OrbitControls' pan, and alt+left is reserved.
+      if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      dragging = true;
+      last = { x: e.clientX, y: e.clientY };
+    };
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragging) return;
+      if (!enabledRef.current) { dragging = false; return; }
+      const dx = e.clientX - last.x;
+      const dy = e.clientY - last.y;
+      if (dx === 0 && dy === 0) return;
+      last = { x: e.clientX, y: e.clientY };
+      rotateAboutPivot(dx, dy);
+    };
+    const onPointerUp = () => { dragging = false; };
+
+    // Down on the canvas only (so a click on a floating panel never orbits), but
+    // move/up on the window so a drag that leaves the canvas still tracks —
+    // matching OrbitControls' own pointer-capture behavior.
+    el.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    return () => {
+      el.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+    };
+  }, [camera, gl]);
+
   useEffect(() => {
     (window as any).__resetPointCloudCamera = resetCamera;
     (window as any).__snapToView = snapToView;
@@ -357,6 +477,11 @@ export function CameraController({
       makeDefault
       enabled={enabled}
       enableDamping={false}
+      // Rotation is ours whenever a pivot is supplied (see the pivot-orbit effect
+      // above): stock rotation would fight it and would still turn about the
+      // pan-following target. Left-drag PAN (shift/ctrl/meta+left) is unaffected —
+      // three-stdlib routes that through its pan path, not enableRotate.
+      enableRotate={!orbitPivot}
       screenSpacePanning={true}
       minDistance={0.1}
       maxDistance={10000}

@@ -1,6 +1,7 @@
-import { useRef, useMemo } from 'react';
-import { useThree, useFrame } from '@react-three/fiber';
+import { useRef, useMemo, useState, useEffect } from 'react';
+import { useThree, useFrame, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
+import { worldPerPixel } from '../../../lib/screenScale';
 
 // Blender-style 3D-cursor marker for the scene origin: a camera-facing ring
 // striped red/white with a fine crosshair through the center. Drawn on top
@@ -12,15 +13,40 @@ import * as THREE from 'three';
 // around the circle (no dashed-line distance bookkeeping needed, so it stays
 // crisp under the per-frame rescale).
 //
+// The marker is also a PICK TARGET: an invisible sphere inside the billboard
+// group (so it inherits the constant-size scale) turns a click into `onSelect`,
+// which the viewer uses to show a translation gizmo on the origin. The sphere is
+// `transparent opacity={0}` rather than `visible={false}` — the same
+// invisible-raycast-target idiom as OriginPicker / BoxDrawRaycaster.
+//
 // `position` is in DISPLAY space (the parent already subtracts displayOffset), so
 // this component only handles billboarding + constant-size scaling.
 
 // Target on-screen radius of the ring, in pixels.
-const PIXEL_RADIUS = 17;
+const PIXEL_RADIUS = 12;
+// Pick target: an ANNULUS around the ring, not a disc. The origin defaults to
+// the scene center, which is usually dead-center in the viewport, so a filled
+// hit target would steal the clicks that select whatever is under it. Leaving
+// the middle open keeps those clicks passing through while the visible ring
+// (and a little either side of it) stays grabbable.
+const HIT_INNER = 0.55;
+const HIT_OUTER = 1.45;
 
-export function SceneOriginMarker({ position }: { position: [number, number, number] }) {
+interface SceneOriginMarkerProps {
+  position: [number, number, number];
+  /** True while the origin is selected (its translation gizmo is showing). */
+  selected?: boolean;
+  /** When false the marker is display-only and swallows no pointer events. */
+  interactive?: boolean;
+  onSelect?: () => void;
+}
+
+export function SceneOriginMarker({
+  position, selected = false, interactive = false, onSelect,
+}: SceneOriginMarkerProps) {
   const groupRef = useRef<THREE.Group>(null);
-  const { camera, size } = useThree();
+  const { camera, size, gl } = useThree();
+  const [hovered, setHovered] = useState(false);
 
   // Unit-radius ring with alternating red/white vertex colors (the group scale
   // sets the world size that projects to PIXEL_RADIUS).
@@ -59,6 +85,20 @@ export function SceneOriginMarker({ position }: { position: [number, number, num
     return g;
   }, []);
 
+  // Plain circle used for the hover/selection halo (drawn at a larger radius via
+  // the group scale on its own mesh).
+  const haloGeom = useMemo(() => {
+    const segments = 64;
+    const pts: number[] = [];
+    for (let i = 0; i <= segments; i++) {
+      const a = (i / segments) * Math.PI * 2;
+      pts.push(Math.cos(a), Math.sin(a), 0);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    return g;
+  }, []);
+
   const ringMat = useMemo(() => {
     const m = new THREE.LineBasicMaterial({ vertexColors: true });
     m.depthTest = false;
@@ -74,33 +114,81 @@ export function SceneOriginMarker({ position }: { position: [number, number, num
     m.opacity = 0.85;
     return m;
   }, []);
+  const haloMat = useMemo(() => {
+    const m = new THREE.LineBasicMaterial({ color: '#f59e0b' });
+    m.depthTest = false;
+    m.depthWrite = false;
+    m.transparent = true;
+    return m;
+  }, []);
 
+  const worldPos = useRef(new THREE.Vector3()).current;
   useFrame(() => {
     const grp = groupRef.current;
     if (!grp) return;
     // Face the camera (billboard).
     grp.quaternion.copy(camera.quaternion);
     // Constant screen size: pick a world radius so PIXEL_RADIUS px is subtended at
-    // this point's distance from the camera.
-    const p = grp.position;
-    let worldRadius: number;
-    if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
-      const cam = camera as THREE.PerspectiveCamera;
-      const dist = cam.position.distanceTo(p);
-      const worldPerPixel = (2 * Math.tan((cam.fov * Math.PI / 180) / 2) * dist) / size.height;
-      worldRadius = PIXEL_RADIUS * worldPerPixel;
-    } else {
-      const cam = camera as THREE.OrthographicCamera;
-      const worldPerPixel = (cam.top - cam.bottom) / cam.zoom / size.height;
-      worldRadius = PIXEL_RADIUS * worldPerPixel;
-    }
-    if (isFinite(worldRadius) && worldRadius > 0) grp.scale.setScalar(worldRadius);
+    // this point's distance from the camera. Must use the WORLD position, not the
+    // local one — the parent group cancels displayOffset, so on a georeferenced
+    // scene `grp.position` is a UTM coordinate while the camera lives in display
+    // space, and the distance (hence the scale) would be wildly wrong.
+    grp.getWorldPosition(worldPos);
+    const scale = PIXEL_RADIUS * worldPerPixel(camera, camera.position, size.height, worldPos);
+    if (scale > 0) grp.scale.setScalar(scale);
   });
+
+  const handleClick = (e: ThreeEvent<MouseEvent>) => {
+    // Reject the tail of a camera orbit that happened to end on the marker (the
+    // same 4px guard the mesh picker uses).
+    if (e.delta > 4) return;
+    e.stopPropagation();
+    onSelect?.();
+  };
+
+  const hoveredRef = useRef(false);
+  const setCursor = (hover: boolean) => {
+    hoveredRef.current = hover;
+    setHovered(hover);
+    gl.domElement.style.cursor = hover ? 'pointer' : 'auto';
+  };
+
+  // Release the pointer cursor if the hit target disappears from under the mouse
+  // (marker hidden, tool opened, unmount) — pointerOut never fires for an
+  // unmounted object, so the cursor would otherwise stay a hand forever. Only
+  // touched when WE set it, so an armed OriginPicker keeps its crosshair.
+  useEffect(() => {
+    if (interactive) return;
+    if (hoveredRef.current) setCursor(false);
+  }, [interactive]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { if (hoveredRef.current) gl.domElement.style.cursor = 'auto'; }, [gl]);
+
+  const halo = selected || hovered;
 
   return (
     <group ref={groupRef} position={position} renderOrder={10000}>
       <lineLoop geometry={ringGeom} material={ringMat} />
       <lineSegments geometry={crossGeom} material={crossMat} />
+      {halo && (
+        // Amber halo: solid once selected, faint on hover — the only cue that
+        // the marker is grabbable / currently owns the gizmo.
+        <lineLoop
+          geometry={haloGeom}
+          material={haloMat}
+          scale={1.45}
+          material-opacity={selected ? 0.95 : 0.5}
+        />
+      )}
+      {interactive && (
+        <mesh
+          onClick={handleClick}
+          onPointerOver={(e) => { e.stopPropagation(); setCursor(true); }}
+          onPointerOut={(e) => { e.stopPropagation(); setCursor(false); }}
+        >
+          <ringGeometry args={[HIT_INNER, HIT_OUTER, 32]} />
+          <meshBasicMaterial transparent opacity={0} depthWrite={false} depthTest={false} side={THREE.DoubleSide} />
+        </mesh>
+      )}
     </group>
   );
 }

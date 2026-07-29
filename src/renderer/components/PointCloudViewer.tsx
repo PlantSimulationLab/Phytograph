@@ -1578,20 +1578,29 @@ export default function PointCloudViewer({
     | 'drawing-polygon'
     | 'drawing-rect';
   // ---- Scene origin (CloudCompare-style pivot) --------------------------------
-  // A user-settable point in WORLD coordinates. Serves as (a) the rotation pivot
-  // for the Transformation tool (falling back to each cloud's bbox center when
-  // null) and (b) the camera orbit target. Viewer-level + session-only (like the
-  // crop region): File → New remounts the whole App/SceneProvider subtree (the
-  // key={resetKey} in main.tsx), so this useState resets to null for free — no
-  // explicit clear needed. Not persisted across restarts (an origin is tied to a
-  // specific dataset's world coordinates and rarely meaningful across scenes).
-  const [sceneOrigin, setSceneOrigin] = useState<[number, number, number] | null>(null);
+  // A point in WORLD coordinates that is the rotation pivot for the
+  // Transformation tool. It ALWAYS exists: with no user override it sits at the
+  // scene bounds center (see `sceneOrigin` below), which is what the marker
+  // shows on a fresh scene. `sceneOriginOverride` is only the user's explicit
+  // placement (typed / picked / dragged / centered-on-selection); clearing it
+  // returns the origin to the scene center.
+  //
+  // Viewer-level + session-only (like the crop region): File → New remounts the
+  // whole App/SceneProvider subtree (the key={resetKey} in main.tsx), so this
+  // useState resets for free — no explicit clear needed. Not persisted across
+  // restarts (an origin is tied to a specific dataset's world coordinates and
+  // rarely meaningful across scenes).
+  const [sceneOriginOverride, setSceneOriginOverride] = useState<[number, number, number] | null>(null);
   // When true, the next left-click in the viewport places the scene origin (via
   // octree surface-snap, else a ground-plane raycast). Armed from the Scene Origin
   // panel; auto-disarms after a successful pick.
   const [originPlaceMode, setOriginPlaceMode] = useState(false);
-  const sceneOriginRef = useRef<[number, number, number] | null>(null);
-  sceneOriginRef.current = sceneOrigin;
+  // Marker visibility is independent of the origin itself — hiding it never
+  // changes the pivot, it just gets the 3D cursor out of the way.
+  const [showOriginMarker, setShowOriginMarker] = useState(true);
+  // True while the marker is clicked-selected and showing its translation gizmo.
+  const [originSelected, setOriginSelected] = useState(false);
+  const sceneOriginRef = useRef<[number, number, number]>([0, 0, 0]);
 
   // ── Point picker (CloudCompare-style click-to-inspect) ───────────────────
   // `showPointPickerPanel` opens the panel; `pointPickMode` arms the viewport
@@ -1608,11 +1617,14 @@ export default function PointCloudViewer({
   const pickSeqRef = useRef(0);
   const pickedOverlay = usePickedPointOverlay();
 
-  // NOTE: setting the scene origin deliberately does NOT move the camera. It is
-  // the rotation pivot for the Transformation tool only. Re-targeting the orbit
-  // to the origin was tried but reorients the view on every pick (OrbitControls
-  // always looks AT its target), which is jarring — so the origin never touches
-  // the camera. The marker just marks the pivot.
+  // NOTE: placing the scene origin deliberately does NOT move the camera — the
+  // view stays exactly where it was. It IS what the view turns about, though:
+  // it's handed to CameraController as `orbitPivot`, which rotates the whole view
+  // rigidly around it (see the pivot-orbit effect there). Re-*targeting*
+  // OrbitControls at the origin was tried first and backed out — the controls
+  // always look AT their target, so every pick swung the view around, which is
+  // jarring. Rotating about the pivot without moving the target is the fix, and
+  // it's also why panning no longer drags the rotation center along.
 
   const [cropMode, setCropMode] = useState<CropMode>('box');
   // World-space AABB. Null when crop mode hasn't been entered yet.
@@ -3822,6 +3834,12 @@ export default function PointCloudViewer({
         }
         setEditMode('none');
       }
+      // Escape also drops the scene-origin selection (and its gizmo) — the
+      // keyboard twin of clicking empty space. The origin itself stays put.
+      if (e.key === 'Escape' && originSelected) {
+        e.preventDefault();
+        setOriginSelected(false);
+      }
       // Escape also disarms the point picker (its placed labels stay — clearing
       // those is what the panel's Clear all button is for).
       if (e.key === 'Escape' && pointPickMode) {
@@ -3836,7 +3854,7 @@ export default function PointCloudViewer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode]);
+  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode, originSelected]);
 
   // Track shift key state for mixed selection (cloud + mesh)
   useEffect(() => {
@@ -4413,6 +4431,30 @@ export default function PointCloudViewer({
   );
   const displayOffsetRef = useRef<Vec3Like>(displayOffset);
   displayOffsetRef.current = displayOffset;
+
+  // Is anything actually loaded? Drives the camera's framing decision and the
+  // scene-origin marker's visibility. Note this is false in exactly the cases
+  // where App draws its "Drag scan files here" hint over the viewport (that hint
+  // needs scans.length === 0, which implies no clouds and no params scans), so
+  // gating the marker on it keeps the two from colliding on a fresh launch.
+  const sceneHasContent = useMemo(
+    () => clouds.length > 0 || meshes.length > 0 || skeletons.length > 0 || qsms.length > 0
+      || scansWithParams.some(s => s.visible),
+    [clouds, meshes, skeletons, qsms, scansWithParams],
+  );
+
+  // Effective scene origin (WORLD): the user's explicit placement, else the
+  // scene bounds center. Keyed on `staticBounds` — NOT `combinedBounds` — on
+  // purpose: staticBounds is latched on the add-only object-id set and never
+  // moves during a Translate drag, so rotating a cloud about the default origin
+  // can't feed back into the pivot mid-drag. On an empty scene staticBounds
+  // falls back to a unit box centered at (0,0,0), so the marker starts at the
+  // world origin. The ref mirrors it for the async bake path.
+  const sceneOrigin = useMemo<[number, number, number]>(
+    () => sceneOriginOverride ?? [staticBounds.center.x, staticBounds.center.y, staticBounds.center.z],
+    [sceneOriginOverride, staticBounds],
+  );
+  sceneOriginRef.current = sceneOrigin;
 
   // ── Point picker: turn a raw hit into a placed label ─────────────────────
   //
@@ -5356,11 +5398,11 @@ export default function PointCloudViewer({
         });
       };
 
-      // Pivot (WORLD): the scene origin if the user set one, else the cloud's own
-      // bbox center (spin-in-place). Rotation about this point.
-      const P = sceneOriginRef.current
-        ? new THREE.Vector3(sceneOriginRef.current[0], sceneOriginRef.current[1], sceneOriginRef.current[2])
-        : cloud.data.bounds.center.clone();
+      // Pivot (WORLD): the scene origin — the point the marker shows. Always
+      // set (defaults to the scene center), so there's no per-cloud fallback.
+      const P = new THREE.Vector3(
+        sceneOriginRef.current[0], sceneOriginRef.current[1], sceneOriginRef.current[2],
+      );
       // Rotation quaternion / matrix from the Euler draft (degrees, XYZ order —
       // matches the backend's R = Rz·Ry·Rx, verified in the transform test).
       const euler = new THREE.Euler(
@@ -12755,6 +12797,16 @@ export default function PointCloudViewer({
   const meshSelectionEnabled = editMode === 'none' && !treeSeedMode && !gizmoDragging
     && !trajectoryEditor && !pointPickMode;
 
+  // Drop the scene-origin selection (and its gizmo) whenever the marker goes
+  // away or a tool takes over the viewport — a gizmo the user can no longer see
+  // the anchor for, or that overlaps the Transform gizmos, is just clutter.
+  // gizmoDragging is deliberately NOT a trigger: it goes true as soon as the
+  // user grabs the origin's own arrow.
+  useEffect(() => {
+    if (showOriginMarker && sceneHasContent && editMode === 'none' && !treeSeedMode && !trajectoryEditor) return;
+    setOriginSelected(false);
+  }, [showOriginMarker, sceneHasContent, editMode, treeSeedMode, trajectoryEditor]);
+
   // Color modes that benefit from a colormap + colorbar (continuous scalars).
   const isScalarColorMode = (
     colorMode === 'x' ||
@@ -12859,6 +12911,10 @@ export default function PointCloudViewer({
       // default ±5 origin box (size ≈ 17.3), which would blank the viewport.
       data-scene-bounds-size={combinedBounds.size.length().toFixed(2)}
       data-scene-center={`${combinedBounds.center.x.toFixed(1)},${combinedBounds.center.y.toFixed(1)},${combinedBounds.center.z.toFixed(1)}`}
+      // Test hook: whether the scene-origin marker is click-selected (and so
+      // showing its translation gizmo). The gizmo lives in the canvas and has no
+      // DOM of its own, so this is the only way to assert on it.
+      data-origin-selected={originSelected ? 'true' : 'false'}
       // Record the press location so onPointerMissed can reject orbit-drags
       // (native event has no R3F `delta`). Bubbles up from the canvas.
       onPointerDown={(e) => { viewportPointerDownRef.current = { x: e.clientX, y: e.clientY }; }}
@@ -12876,14 +12932,18 @@ export default function PointCloudViewer({
         events={createNoWheelPointerEvents}
         onCreated={({ gl }) => { gl.setClearColor('#171717'); }}
         // Left-click on empty space clears the mesh selection (single-focus,
-        // matching a plain panel click). Gated so it never fires mid-tool, and
-        // a drag guard (vs. the press position) keeps a camera orbit that ends
-        // on nothing from deselecting.
+        // matching a plain panel click) and deselects the scene origin. Fires
+        // only when the click hit NOTHING, so clicking an origin gizmo arrow
+        // can't deselect it mid-interaction. A drag guard (vs. the press
+        // position) keeps a camera orbit that ends on nothing from deselecting.
         onPointerMissed={(e) => {
-          if (!meshSelectionEnabled) return;
           if (e.button !== 0) return;
           const down = viewportPointerDownRef.current;
           if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+          // The origin deselects regardless of tool state: whatever raised the
+          // gizmo, a click on empty space should always put it away.
+          setOriginSelected(false);
+          if (!meshSelectionEnabled) return;
           setSelectedMeshIds(new Set());
         }}
       >
@@ -13103,9 +13163,7 @@ export default function PointCloudViewer({
                   />
                 );
                 if (!hasRot || hasResamplePreview) return cloudEl;
-                const P = sceneOrigin
-                  ? { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }
-                  : { x: cloud.data.bounds.center.x, y: cloud.data.bounds.center.y, z: cloud.data.bounds.center.z };
+                const P = { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] };
                 const euler: [number, number, number] = [
                   THREE.MathUtils.degToRad(rot!.x),
                   THREE.MathUtils.degToRad(rot!.y),
@@ -13147,9 +13205,7 @@ export default function PointCloudViewer({
               pointSize={pointSize}
               translation={editState.translation}
               rotation={editState.rotation}
-              pivot={sceneOrigin
-                ? { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }
-                : { x: cloud.data.bounds.center.x, y: cloud.data.bounds.center.y, z: cloud.data.bounds.center.z }}
+              pivot={{ x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }}
               displayOffset={displayOffset}
             />
           );
@@ -13537,9 +13593,14 @@ export default function PointCloudViewer({
 
         <CameraController
           bounds={combinedBounds}
-          hasContent={clouds.length > 0 || meshes.length > 0 || skeletons.length > 0 || qsms.length > 0 || scansWithParams.some(s => s.visible)}
+          hasContent={sceneHasContent}
           enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive}
           displayOffset={displayOffset}
+          // The view turns about the scene origin — the point the 3D-cursor
+          // marker shows — so panning no longer moves the rotation center. Same
+          // pivot the Transform tool rotates about, whether or not the marker is
+          // currently drawn (hiding it is about clutter, not behavior).
+          orbitPivot={sceneOrigin}
         />
 
         {/* Snapshots the camera/size for the polygon- and rect-crop in/out
@@ -13569,7 +13630,7 @@ export default function PointCloudViewer({
             octree={selectedOctree()}
             groundZ={(firstSelectedCloud?.data.bounds.min.z ?? 0) - displayOffset.z}
             displayOffset={displayOffset}
-            onPick={(world) => { setSceneOrigin(world); setOriginPlaceMode(false); }}
+            onPick={(world) => { setSceneOriginOverride(world); setOriginPlaceMode(false); }}
           />
         )}
 
@@ -13597,13 +13658,47 @@ export default function PointCloudViewer({
           registry={pickedOverlay}
         />
 
-        {/* Scene-origin marker (amber crosshair sphere) at the WORLD origin,
-            rendered in display space via the wrapping group. Visible whenever an
-            origin is set, so it stays put as a persistent pivot indicator. */}
-        {sceneOrigin && (
+        {/* Scene-origin marker (Blender-style red/white 3D cursor), rendered in
+            display space via the wrapping group. The origin always exists, so the
+            marker is up whenever the scene has content and the user hasn't hidden
+            it — it stays down on an empty viewport, where it would otherwise sit
+            on top of App's "Drag scan files here" hint. Clicking it selects the
+            origin and raises its translation gizmo below. */}
+        {showOriginMarker && sceneHasContent && (
           <group position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
-            <SceneOriginMarker position={[sceneOrigin[0], sceneOrigin[1], sceneOrigin[2]]} />
+            <SceneOriginMarker
+              position={[sceneOrigin[0], sceneOrigin[1], sceneOrigin[2]]}
+              selected={originSelected}
+              // Not grabbable while a tool owns the click, and never while the
+              // click-to-place picker is armed (it would swallow the pick).
+              interactive={meshSelectionEnabled && !originPlaceMode}
+              onSelect={() => setOriginSelected(true)}
+            />
           </group>
+        )}
+
+        {/* Scene-origin translation gizmo — raised by clicking the marker, so the
+            pivot can be dragged instead of retyped. Sized in PIXELS (like the
+            marker) rather than off the scene bounds: it has to stay usable on an
+            empty scene and at any zoom. Deliberately NOT gated on !gizmoDragging,
+            which would unmount it the instant a drag started. */}
+        {originSelected && showOriginMarker && sceneHasContent && editMode === 'none' && !treeSeedMode && !trajectoryEditor && (
+          <TranslationGizmo
+            // Display space (world − displayOffset), matching every other gizmo.
+            center={new THREE.Vector3(
+              sceneOrigin[0] - displayOffset.x,
+              sceneOrigin[1] - displayOffset.y,
+              sceneOrigin[2] - displayOffset.z,
+            )}
+            size={1}
+            constantScreenSize={90}
+            onTranslate={(d) => {
+              const b = sceneOriginRef.current;
+              setSceneOriginOverride([b[0] + d.x, b[1] + d.y, b[2] + d.z]);
+            }}
+            onDragStart={() => setGizmoDragging(true)}
+            onDragEnd={() => setGizmoDragging(false)}
+          />
         )}
 
         {/* Translation Gizmo for selected clouds */}
@@ -13632,17 +13727,11 @@ export default function PointCloudViewer({
           />
         )}
 
-        {/* Rotation Gizmo for selected clouds — three rings centered on the pivot
-            (scene origin, else the cloud's bbox center). Dragging updates the draft
+        {/* Rotation Gizmo for selected clouds — three rings centered on the scene
+            origin (the pivot the marker shows). Dragging updates the draft
             rotation (render-only); OK bakes it. */}
         {editMode === 'translate' && firstSelectedCloud && (() => {
-          const P = sceneOrigin
-            ? { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }
-            : {
-                x: firstSelectedCloud.data.bounds.center.x,
-                y: firstSelectedCloud.data.bounds.center.y,
-                z: firstSelectedCloud.data.bounds.center.z,
-              };
+          const P = { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] };
           return (
             <RotationGizmo
               // Pivot in DISPLAY space (world − displayOffset) — see the translate
@@ -16277,9 +16366,9 @@ export default function PointCloudViewer({
         );
       })()}
 
-      {/* Scene Origin panel — the CloudCompare-style pivot editor. Sets the WORLD
-          point used as the rotation pivot (Transformation tool) and camera orbit
-          center. */}
+      {/* Scene Origin panel — the CloudCompare-style pivot editor. Overrides the
+          WORLD point used as the rotation pivot (Transformation tool), which
+          defaults to the scene center. */}
       {showSceneOriginPanel && (() => {
         // Center of the selected clouds' union bounds (WORLD), for the convenience
         // "center on selection" button. Uses translated bounds so a cloud with an
@@ -16307,21 +16396,29 @@ export default function PointCloudViewer({
         return (
           <SceneOriginPanel
             origin={sceneOrigin}
+            isCustom={sceneOriginOverride !== null}
             placeMode={originPlaceMode}
+            showMarker={showOriginMarker}
+            // The marker stands down on an empty viewport (it would sit on top of
+            // the "Drag scan files here" hint), so say so rather than showing a
+            // ticked box next to nothing.
+            markerSuppressed={!sceneHasContent}
             canMoveToSelection={canMoveToSelection}
             onCoordChange={(axis, value) => {
-              const cur = sceneOrigin ?? [0, 0, 0];
+              // Base on the EFFECTIVE origin, so editing one axis of the default
+              // scene-center origin keeps the other two where they're shown.
               const idx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
-              const next: [number, number, number] = [cur[0], cur[1], cur[2]];
+              const next: [number, number, number] = [sceneOrigin[0], sceneOrigin[1], sceneOrigin[2]];
               next[idx] = value;
-              setSceneOrigin(next);
+              setSceneOriginOverride(next);
             }}
             onTogglePlaceMode={() => setOriginPlaceMode(m => !m)}
+            onToggleShowMarker={() => setShowOriginMarker(v => !v)}
             onMoveToSelection={() => {
               const c = selectionCenter();
-              if (c) setSceneOrigin(c);
+              if (c) setSceneOriginOverride(c);
             }}
-            onClear={() => { setSceneOrigin(null); setOriginPlaceMode(false); }}
+            onReset={() => { setSceneOriginOverride(null); setOriginPlaceMode(false); }}
             onClose={() => { setShowSceneOriginPanel(false); setOriginPlaceMode(false); }}
           />
         );

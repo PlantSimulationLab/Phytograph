@@ -1,17 +1,18 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
-import { useThree, ThreeEvent } from '@react-three/fiber';
+import { useThree, useFrame, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
+import { worldPerPixel } from '../../../lib/screenScale';
 
-// Translation gizmo arrow
+// Translation gizmo arrow. Drawn around the LOCAL origin — the parent group
+// carries the world position, so the whole glyph can be rescaled as a unit.
 interface TranslationArrowProps {
   axis: 'x' | 'y' | 'z';
-  position: THREE.Vector3;
   size: number;
   onDragStart: (axis: 'x' | 'y' | 'z') => void;
   onHover: (hovered: boolean) => void;
 }
 
-function TranslationArrow({ axis, position, size, onDragStart, onHover }: TranslationArrowProps) {
+function TranslationArrow({ axis, size, onDragStart, onHover }: TranslationArrowProps) {
   const [hovered, setHovered] = useState(false);
   const { gl } = useThree();
 
@@ -62,7 +63,7 @@ function TranslationArrow({ axis, position, size, onDragStart, onHover }: Transl
   const currentColor = hovered ? hoverColor : color;
 
   return (
-    <group position={position}>
+    <group>
       <mesh position={shaftPosition} rotation={rotation} onPointerOver={handlePointerOver} onPointerOut={handlePointerOut} onPointerDown={handlePointerDown}>
         <cylinderGeometry args={[shaftRadius, shaftRadius, shaftLength, 12]} />
         <meshBasicMaterial color={currentColor} />
@@ -147,6 +148,28 @@ function DragHandler({ activeAxis, gizmoCenter, onDrag, onDragEnd }: DragHandler
   return null;
 }
 
+// Rescales the visual group so the gizmo subtends a fixed number of screen
+// pixels regardless of zoom. Only mounted when `constantScreenSize` is set; the
+// DragHandler is deliberately left alone (it works off the UNSCALED center, so
+// its screen-space projection math is unaffected).
+function ConstantScreenScaler({
+  target, pixels, size,
+}: { target: React.RefObject<THREE.Group | null>; pixels: number; size: number }) {
+  const { camera, size: viewport } = useThree();
+  const worldPos = useRef(new THREE.Vector3()).current;
+  useFrame(() => {
+    const grp = target.current;
+    if (!grp) return;
+    // World position, not local — a parent group may be cancelling displayOffset.
+    grp.getWorldPosition(worldPos);
+    // `size` is the gizmo's nominal world extent, so dividing it out makes the
+    // scaled arrow length exactly `pixels` px.
+    const world = pixels * worldPerPixel(camera, camera.position, viewport.height, worldPos);
+    if (world > 0 && size > 0) grp.scale.setScalar(world / size);
+  });
+  return null;
+}
+
 // Translation gizmo
 export interface TranslationGizmoProps {
   center: THREE.Vector3;
@@ -154,10 +177,19 @@ export interface TranslationGizmoProps {
   onTranslate: (delta: { x: number; y: number; z: number }) => void;
   onDragStart: () => void;
   onDragEnd: () => void;
+  /**
+   * When set, the arrows are rescaled every frame to span this many screen
+   * pixels instead of `size` world units. Used by the scene-origin gizmo, whose
+   * marker is itself constant-size and which must stay usable on an empty scene
+   * (where a bounds-derived size would be degenerate). Omit for the normal
+   * bounds-sized behavior.
+   */
+  constantScreenSize?: number;
 }
 
-export function TranslationGizmo({ center, size, onTranslate, onDragStart, onDragEnd }: TranslationGizmoProps) {
+export function TranslationGizmo({ center, size, onTranslate, onDragStart, onDragEnd, constantScreenSize }: TranslationGizmoProps) {
   const [activeAxis, setActiveAxis] = useState<'x' | 'y' | 'z' | null>(null);
+  const visualRef = useRef<THREE.Group>(null);
 
   const handleAxisDragStart = useCallback((axis: 'x' | 'y' | 'z') => {
     setActiveAxis(axis);
@@ -171,13 +203,20 @@ export function TranslationGizmo({ center, size, onTranslate, onDragStart, onDra
 
   return (
     <group>
-      <TranslationArrow axis="x" position={center} size={size} onDragStart={handleAxisDragStart} onHover={() => {}} />
-      <TranslationArrow axis="y" position={center} size={size} onDragStart={handleAxisDragStart} onHover={() => {}} />
-      <TranslationArrow axis="z" position={center} size={size} onDragStart={handleAxisDragStart} onHover={() => {}} />
-      <mesh position={center}>
-        <sphereGeometry args={[size * 0.05, 16, 16]} />
-        <meshBasicMaterial color="#a3a3a3" />
-      </mesh>
+      {/* Everything visual hangs off one group positioned at the center, so the
+          constant-size scaler can scale the whole glyph about that point. */}
+      <group ref={visualRef} position={center}>
+        <TranslationArrow axis="x" size={size} onDragStart={handleAxisDragStart} onHover={() => {}} />
+        <TranslationArrow axis="y" size={size} onDragStart={handleAxisDragStart} onHover={() => {}} />
+        <TranslationArrow axis="z" size={size} onDragStart={handleAxisDragStart} onHover={() => {}} />
+        <mesh>
+          <sphereGeometry args={[size * 0.05, 16, 16]} />
+          <meshBasicMaterial color="#a3a3a3" />
+        </mesh>
+      </group>
+      {constantScreenSize !== undefined && (
+        <ConstantScreenScaler target={visualRef} pixels={constantScreenSize} size={size} />
+      )}
       <DragHandler activeAxis={activeAxis} gizmoCenter={center} onDrag={onTranslate} onDragEnd={handleDragEnd} />
     </group>
   );

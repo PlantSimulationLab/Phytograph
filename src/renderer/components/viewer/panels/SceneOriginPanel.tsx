@@ -1,40 +1,51 @@
-import { Crosshair, X, Target, MousePointerClick } from 'lucide-react';
+import { Crosshair, X, Target, MousePointerClick, Eye, EyeOff } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 
 type Axis = 'x' | 'y' | 'z';
 
 // Scene-origin panel (CloudCompare-style pivot). The origin is a point in WORLD
-// coordinates that serves as the rotation pivot for the Transformation tool and
-// the camera orbit center. The parent (PointCloudViewer) owns the origin state,
-// the pick-mode arming, and the world-frame math; this component only renders the
-// current value and reports intent.
+// coordinates that serves as the rotation pivot for the Transformation tool. It
+// ALWAYS exists — with no user override it sits at the scene bounds center — so
+// `origin` is never null; `isCustom` distinguishes "the user placed this" from
+// "the default", which is all the Reset button needs. The parent
+// (PointCloudViewer) owns the origin state, the pick-mode arming, and the
+// world-frame math; this component only renders the current value and reports
+// intent.
 interface SceneOriginPanelProps {
-  /** Current origin in WORLD coords, or null when none is set. */
-  origin: [number, number, number] | null;
+  /** Effective origin in WORLD coords (user override, else the scene center). */
+  origin: [number, number, number];
+  /** True when the user has overridden the default scene-center origin. */
+  isCustom: boolean;
   /** True while click-to-place is armed (next viewport click sets the origin). */
   placeMode: boolean;
+  /** Whether the marker is drawn in the viewport. */
+  showMarker: boolean;
+  /** True when the marker is standing down regardless of `showMarker` (empty scene). */
+  markerSuppressed?: boolean;
   /** Whether a "move to selection center" target is available. */
   canMoveToSelection: boolean;
   onCoordChange: (axis: Axis, value: number) => void;
   onTogglePlaceMode: () => void;
+  onToggleShowMarker: () => void;
   onMoveToSelection: () => void;
-  onClear: () => void;
+  onReset: () => void;
   onClose: () => void;
 }
 
 const AXES: Axis[] = ['x', 'y', 'z'];
 
 export function SceneOriginPanel({
-  origin, placeMode, canMoveToSelection,
-  onCoordChange, onTogglePlaceMode, onMoveToSelection, onClear, onClose,
+  origin, isCustom, placeMode, showMarker, markerSuppressed = false, canMoveToSelection,
+  onCoordChange, onTogglePlaceMode, onToggleShowMarker, onMoveToSelection, onReset, onClose,
 }: SceneOriginPanelProps) {
-  const value = origin ?? [0, 0, 0];
+  const markerDrawn = showMarker && !markerSuppressed;
   return (
     <div
       className="absolute top-4 right-[280px] bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
       data-testid="scene-origin-panel"
-      data-has-origin={origin ? 'true' : 'false'}
+      data-has-origin={isCustom ? 'true' : 'false'}
       data-place-mode={placeMode ? 'true' : 'false'}
+      data-marker-visible={markerDrawn ? 'true' : 'false'}
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
         <span className="flex items-center gap-2">
@@ -53,8 +64,9 @@ export function SceneOriginPanel({
       </div>
 
       <p className="text-[10px] text-neutral-500 mb-2 leading-relaxed">
-        The pivot for cloud rotation and camera orbit. Click a point in the
-        viewport, or type world coordinates.
+        The pivot the view and the Transform tool rotate about. Defaults to the
+        scene center — drag its marker, click a point in the viewport, or type
+        world coordinates.
       </p>
 
       <button
@@ -78,7 +90,7 @@ export function SceneOriginPanel({
             </label>
             <DebouncedNumberInput
               step={0.1}
-              value={value[AXES.indexOf(axis)]}
+              value={origin[AXES.indexOf(axis)]}
               format={(n) => n.toFixed(3)}
               onCommit={(n) => onCoordChange(axis, n)}
               debounceMs={0}
@@ -102,13 +114,33 @@ export function SceneOriginPanel({
         Center on selection
       </button>
 
-      <button
-        onClick={onClear}
-        disabled={!origin}
-        data-testid="scene-origin-clear"
-        className="w-full mt-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+      <label
+        className={`w-full mt-2 py-1.5 flex items-center gap-2 text-[11px] select-none ${
+          markerSuppressed ? 'text-neutral-500 cursor-default' : 'text-neutral-300 cursor-pointer'
+        }`}
+        title={markerSuppressed
+          ? 'The marker is hidden until something is loaded'
+          : 'Hide the origin marker in the viewport (the pivot itself is unchanged)'}
       >
-        Clear origin
+        <input
+          type="checkbox"
+          checked={showMarker}
+          onChange={onToggleShowMarker}
+          data-testid="scene-origin-show-marker"
+          className="accent-blue-500"
+        />
+        {markerDrawn ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+        Show origin marker
+      </label>
+
+      <button
+        onClick={onReset}
+        disabled={!isCustom}
+        data-testid="scene-origin-clear"
+        title="Move the origin back to the center of the scene"
+        className="w-full mt-1 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Reset to scene center
       </button>
     </div>
   );

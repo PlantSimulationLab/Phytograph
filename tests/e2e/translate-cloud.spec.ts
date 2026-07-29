@@ -687,6 +687,300 @@ test.describe('translate cloud', () => {
     expect(dist(camBefore.target, camAfter.target)).toBeLessThan(1e-3);
   });
 
+  // Read the three origin inputs as numbers. Requires the panel to be open.
+  async function readOriginFields(): Promise<[number, number, number]> {
+    const { page } = session;
+    const v = await Promise.all((['x', 'y', 'z'] as const).map(async (axis) =>
+      parseFloat(await page.getByTestId(`scene-origin-input-${axis}`).inputValue())));
+    return [v[0], v[1], v[2]];
+  }
+
+  // Project a WORLD point to viewport pixels through the live camera (the same
+  // hook the gizmo-drag tests use), so a click lands exactly where the renderer
+  // drew something.
+  async function worldToScreen(world: [number, number, number]) {
+    const p = await session.page.evaluate(
+      (w) => (window as any).__worldToScreen(w),
+      world,
+    ) as { x: number; y: number; visible: boolean };
+    if (!p.visible) throw new Error(`world point ${world} is not on screen`);
+    return p;
+  }
+
+  // A viewport point that is (a) actually the canvas — the corners are covered by
+  // the floating toolbars/panels, whose clicks never reach three.js at all — and
+  // (b) far from the scene center, so nothing is drawn there. Used to test
+  // click-on-empty-space behavior.
+  async function emptyViewportPoint() {
+    const { page } = session;
+    const box = (await page.locator('canvas').first().boundingBox())!;
+    const candidates: [number, number][] = [
+      [0.15, 0.75], [0.15, 0.5], [0.3, 0.85], [0.5, 0.9], [0.7, 0.85],
+    ];
+    for (const [fx, fy] of candidates) {
+      const x = box.x + box.width * fx;
+      const y = box.y + box.height * fy;
+      const onCanvas = await page.evaluate(
+        ([px, py]) => document.elementFromPoint(px, py)?.tagName === 'CANVAS',
+        [x, y],
+      );
+      if (onCanvas) return { x, y };
+    }
+    throw new Error('no uncovered canvas point found');
+  }
+
+  // The origin marker is drawn as a ring ~12 px in radius, and its PICK target is
+  // the ring band only (the middle is deliberately click-through so the marker
+  // can't steal centre clicks from cloud/mesh selection). So click 12 px off the
+  // center, not on it.
+  const RING_PX = 12;
+
+  // The origin now always exists — with no user placement it sits at the scene
+  // center, and its marker is up from the moment content loads. Guards against a
+  // regression to "invisible until you set one", and against the default drifting
+  // off the scene.
+  test('Scene Origin defaults to the scene center with no user placement', async () => {
+    const { page } = session;
+    await importTiny();
+
+    await page.getByTestId('tool-set-scene-origin').click();
+    const panel = page.getByTestId('scene-origin-panel');
+    await expect(panel).toBeVisible();
+    // No override yet, but the fields are populated and the marker is drawn.
+    await expect(panel).toHaveAttribute('data-has-origin', 'false');
+    await expect(panel).toHaveAttribute('data-marker-visible', 'true');
+
+    const origin = await readOriginFields();
+    const sceneCenter = (await page.locator('[data-scene-bounds-size]')
+      .getAttribute('data-scene-center'))!.split(',').map(parseFloat);
+    // data-scene-center is rounded to 1 dp, hence the loose tolerance.
+    expect(Math.abs(origin[0] - sceneCenter[0])).toBeLessThan(0.15);
+    expect(Math.abs(origin[1] - sceneCenter[1])).toBeLessThan(0.15);
+    expect(Math.abs(origin[2] - sceneCenter[2])).toBeLessThan(0.15);
+
+    // Reset is a no-op offer while the default is in force.
+    await expect(page.getByTestId('scene-origin-clear')).toBeDisabled();
+
+    // Typing an override flips data-has-origin and enables Reset; resetting puts
+    // the origin back on the scene center.
+    const xInput = page.getByTestId('scene-origin-input-x');
+    await xInput.fill(String(origin[0] + 4));
+    await xInput.press('Enter');
+    await expect(panel).toHaveAttribute('data-has-origin', 'true');
+    await page.getByTestId('scene-origin-clear').click();
+    await expect(panel).toHaveAttribute('data-has-origin', 'false');
+    expect(Math.abs((await readOriginFields())[0] - origin[0])).toBeLessThan(1e-3);
+
+    await page.getByTestId('scene-origin-close').click();
+  });
+
+  // On an empty scene App draws its "Drag scan files here" hint across the middle
+  // of the viewport — exactly where the default (scene-center) origin projects.
+  // The marker must stay down until something is loaded, then appear on its own.
+  test('Scene Origin marker stays down while the empty-viewer hint is showing', async () => {
+    const { page } = session;
+    // beforeEach reset to a fresh (empty) scene; do NOT import yet.
+    await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
+
+    await page.getByTestId('tool-set-scene-origin').click();
+    const panel = page.getByTestId('scene-origin-panel');
+    await expect(panel).toBeVisible();
+    // The origin still exists and is editable — only its marker is suppressed.
+    await expect(panel).toHaveAttribute('data-marker-visible', 'false');
+    const viewer = page.locator('[data-scene-bounds-size]');
+    expect(await readOriginFields()).toEqual([0, 0, 0]);
+    // (__worldToScreen isn't installed on an empty scene, but the default camera
+    // looks straight down its own -Z at the world origin, so the suppressed
+    // marker would be drawn dead center.) Clicking there selects nothing.
+    const box = (await page.locator('canvas').first().boundingBox())!;
+    await page.mouse.click(box.x + box.width / 2 + RING_PX, box.y + box.height / 2);
+    await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
+
+    // Loading content brings the marker up with no further interaction, and it
+    // is a live click target from that moment. (Close the panel first — opening
+    // the import tool would close it anyway, and the reopen re-reads the state.)
+    await page.getByTestId('scene-origin-close').click();
+    await importTiny();
+    await expect(page.getByTestId('empty-viewer-hint')).toBeHidden();
+    await page.getByTestId('tool-set-scene-origin').click();
+    await expect(panel).toHaveAttribute('data-marker-visible', 'true');
+    const loaded = await worldToScreen(await readOriginFields());
+    await page.mouse.click(loaded.x + RING_PX, loaded.y);
+    await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
+
+    await page.getByTestId('scene-origin-close').click();
+  });
+
+  // The view turns about the scene origin, NOT about the pan-following
+  // OrbitControls target. Stock OrbitControls translates its target on every pan,
+  // which silently moved the rotation center away from the point the marker
+  // claims is the pivot. The invariant here: after panning the view well off the
+  // origin, an orbit keeps the camera's distance to the ORIGIN fixed (a rotation
+  // about a point preserves distance to it) — under target-centered rotation that
+  // distance changes.
+  test('Scene Origin is the camera pivot: panning does not move the rotation center', async () => {
+    const { page } = session;
+    await importTiny();
+
+    const camState = () => page.evaluate(() => (window as any).__getCameraState?.()) as Promise<{
+      position: number[]; target: number[]; displayOffset: number[];
+    }>;
+    await page.getByTestId('tool-set-scene-origin').click();
+    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
+    const origin = await readOriginFields();
+    await page.getByTestId('scene-origin-close').click();
+
+    const box = (await page.locator('canvas').first().boundingBox())!;
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    // Pivot in DISPLAY space — the frame the camera lives in.
+    const pivotDisplay = async () => {
+      const s = await camState();
+      return [
+        origin[0] - s.displayOffset[0],
+        origin[1] - s.displayOffset[1],
+        origin[2] - s.displayOffset[2],
+      ];
+    };
+    const dist = (a: number[], b: number[]) =>
+      Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+    // Pan hard with the right button (OrbitControls' pan), which drags the orbit
+    // target off the origin.
+    const beforePan = await camState();
+    await page.mouse.move(cx, cy);
+    await page.mouse.down({ button: 'right' });
+    await page.mouse.move(cx + 160, cy + 90, { steps: 8 });
+    await page.mouse.up({ button: 'right' });
+    const afterPan = await camState();
+    const P = await pivotDisplay();
+    // The pan really moved the target (otherwise the test proves nothing)...
+    expect(dist(afterPan.target, beforePan.target)).toBeGreaterThan(0.1);
+    // ...and it is now well away from the pivot.
+    expect(dist(afterPan.target, P)).toBeGreaterThan(0.1);
+    // Panning must not drag the origin itself along.
+    await page.getByTestId('tool-set-scene-origin').click();
+    expect(await readOriginFields()).toEqual(origin);
+    await page.getByTestId('scene-origin-close').click();
+
+    // Now orbit with the left button.
+    const radiusBefore = dist(afterPan.position, P);
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    await page.mouse.move(cx + 120, cy + 40, { steps: 10 });
+    await page.mouse.up();
+    const afterOrbit = await camState();
+
+    // The camera moved (an orbit happened)...
+    expect(dist(afterOrbit.position, afterPan.position)).toBeGreaterThan(0.05);
+    // ...on a sphere centered on the ORIGIN, not on the panned target.
+    const radiusAfter = dist(afterOrbit.position, P);
+    expect(Math.abs(radiusAfter - radiusBefore)).toBeLessThan(radiusBefore * 0.02);
+    // The view stayed rigid: camera→target distance is preserved too, so the
+    // orbit is a rotation of the whole view rather than a re-target.
+    expect(Math.abs(
+      dist(afterOrbit.position, afterOrbit.target) - dist(afterPan.position, afterPan.target),
+    )).toBeLessThan(1e-2);
+  });
+
+  // The marker can be hidden without disturbing the pivot — and once hidden it
+  // is no longer a click target (no invisible hit zone left behind).
+  test('Scene Origin marker can be hidden, which also disarms its click target', async () => {
+    const { page } = session;
+    await importTiny();
+
+    await page.getByTestId('tool-set-scene-origin').click();
+    const panel = page.getByTestId('scene-origin-panel');
+    await expect(panel).toBeVisible();
+    const origin = await readOriginFields();
+    const viewer = page.locator('[data-scene-bounds-size]');
+
+    // Visible: clicking the ring selects the origin (raises its gizmo).
+    const p = await worldToScreen(origin);
+    await page.mouse.click(p.x + RING_PX, p.y);
+    await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
+
+    // Hiding the marker drops the selection AND the hit target...
+    await page.getByTestId('scene-origin-show-marker').uncheck();
+    await expect(panel).toHaveAttribute('data-marker-visible', 'false');
+    await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
+    await page.mouse.click(p.x + RING_PX, p.y);
+    await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
+
+    // ...while the origin itself is untouched.
+    expect(await readOriginFields()).toEqual(origin);
+
+    await page.getByTestId('scene-origin-show-marker').check();
+    await expect(panel).toHaveAttribute('data-marker-visible', 'true');
+    await page.getByTestId('scene-origin-close').click();
+  });
+
+  // Clicking the marker raises a translation gizmo; dragging an arrow MOVES the
+  // origin along that axis (and only that axis); clicking empty space puts the
+  // gizmo away. This is the drag-the-pivot path — the numeric fields are the
+  // fallback, not the primary interaction.
+  test('Scene Origin marker: click selects it, dragging its gizmo moves the origin', async () => {
+    const { page } = session;
+    await importTiny();
+
+    await page.getByTestId('tool-set-scene-origin').click();
+    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
+    const before = await readOriginFields();
+    const viewer = page.locator('[data-scene-bounds-size]');
+
+    // Select the marker by clicking its ring band.
+    const center = await worldToScreen(before);
+    await page.mouse.click(center.x + RING_PX, center.y);
+    await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
+
+    // Pick whichever axis projects longest on screen — the camera's default
+    // three-quarter view leaves one axis nearly edge-on, and dragging an arrow
+    // that's a few pixels long is not a meaningful test.
+    const dirs = await Promise.all([0, 1, 2].map(async (i) => {
+      const tip: [number, number, number] = [before[0], before[1], before[2]];
+      tip[i] += 1;
+      const q = await worldToScreen(tip);
+      return { dx: q.x - center.x, dy: q.y - center.y };
+    }));
+    let best = 0;
+    dirs.forEach((d, i) => {
+      if (Math.hypot(d.dx, d.dy) > Math.hypot(dirs[best].dx, dirs[best].dy)) best = i;
+    });
+    const len = Math.hypot(dirs[best].dx, dirs[best].dy);
+    const unit = { x: dirs[best].dx / len, y: dirs[best].dy / len };
+
+    // Grab the ARROWHEAD (the widest part of the arrow, ~0.925 of the 90 px
+    // gizmo) and drag 60 px further along the same screen direction.
+    const grab = { x: center.x + unit.x * 83, y: center.y + unit.y * 83 };
+    await page.mouse.move(grab.x, grab.y);
+    await page.mouse.down();
+    // Several moves: the drag handler treats the first as the baseline sample.
+    await page.mouse.move(grab.x + unit.x * 20, grab.y + unit.y * 20, { steps: 4 });
+    await page.mouse.move(grab.x + unit.x * 60, grab.y + unit.y * 60, { steps: 6 });
+    await page.mouse.up();
+
+    // The dragged axis moved in the drag direction; the other two did not.
+    const after = await readOriginFields();
+    expect(after[best]).toBeGreaterThan(before[best] + 0.05);
+    for (let i = 0; i < 3; i++) {
+      if (i !== best) expect(Math.abs(after[i] - before[i])).toBeLessThan(1e-3);
+    }
+    // A drag counts as a user placement, so Reset is now live.
+    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-has-origin', 'true');
+    // The drag must NOT have deselected (its mouse-up lands on empty space).
+    await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
+
+    // Clicking empty space, well clear of the cloud and the gizmo, deselects.
+    const empty = await emptyViewportPoint();
+    await page.mouse.click(empty.x, empty.y);
+    await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
+    // Deselecting leaves the origin where the drag put it.
+    expect(await readOriginFields()).toEqual(after);
+
+    await page.getByTestId('scene-origin-clear').click();
+    await page.getByTestId('scene-origin-close').click();
+  });
+
   // Import the Helios scan XML (params + attached tiny.xyz data), returning its
   // row. The scan carries a defined scanner origin (0.5, -1.0, 0.25).
   async function importScanWithOrigin() {

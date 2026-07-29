@@ -7,13 +7,19 @@
 | Orbit | Left-click drag | One-finger drag |
 | Pan | Right-click drag, or ⌘/Ctrl + left drag | Two-finger drag |
 | Zoom | Scroll wheel | Pinch |
-| Set focus point | Double-click an object | Same |
 | Zoom to selection | <kbd>F</kbd> (or the **Zoom to Selection** button) | Same |
 | Fit everything | <kbd>⌘/Ctrl</kbd>+<kbd>0</kbd>, or **Reset View** | Same |
 
-The camera orbits around a **focus point**. Double-clicking sets the
-focus point to whatever you double-clicked, which is the fastest way
-to start examining a region of a large scan.
+The camera orbits around the **scene origin** — the red-and-white ring
+marker in the viewport, which starts at the center of everything you have
+loaded. Panning moves the view without moving that pivot, so you can pan
+off to one side and still turn about the same point.
+
+To orbit around something else, move the origin: click its ring and drag
+the arrow gizmo, or use **Set Scene Origin** to click a point on a surface
+("Pick in viewport"), type coordinates, or snap it to the selected cloud.
+That is the fastest way to start examining a region of a large scan. See
+[Setting the scene origin](clean-point-cloud.md#setting-the-scene-origin).
 
 ### Zoom to Selection vs. Reset Camera
 

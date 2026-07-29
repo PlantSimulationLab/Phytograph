@@ -26,10 +26,11 @@ the cloud. Set the change any of these ways — all update the viewport
   type a distance, then click (or <kbd>Enter</kbd>) to set it. See
   [Keyboard shortcuts](../reference/shortcuts.md).
 
-Rotation turns the cloud about the **scene origin** if you have set one
-(see below), otherwise about the cloud's own bounding-box center
-(spin-in-place). Set an origin first when you need to pivot around a
-specific point.
+Rotation turns the cloud about the **scene origin** (see below). There is
+always one: until you place it yourself it sits at the center of the loaded
+scene, marked in the viewport by a red-and-white ring. Move it first when you
+need to pivot around a specific point — for a single cloud, **Center on
+selection** puts it on the cloud's own center, which spins the cloud in place.
 
 Nothing is applied until you decide:
 
@@ -72,10 +73,19 @@ cloud's bounding box at (0, 0, 0) without rotating it.
 
 **Set Scene Origin** (the crosshair button in the top **View Controls** box,
 next to the command-search icon / **Tools → Pre-processing → Set Scene
-Origin**) places a pivot point, like CloudCompare's. It's a scene control
+Origin**) moves the pivot point, like CloudCompare's. It's a scene control
 rather than an analysis tool, so it sits with the view controls. The origin
-is the **rotation center** for the Transform tool. Setting it does **not**
-move the camera — it only marks the pivot that rotation turns about.
+is the **rotation center** for both the Transform tool and the camera: a
+left-drag in the viewport turns the whole view about it, so panning no longer
+changes what you rotate around. Moving the origin does **not** move the
+camera — the view stays exactly where it is, it just pivots somewhere else.
+
+A red-and-white ring marker (a 3D cursor) shows the origin in the scene, at
+a constant size no matter how far you zoom. **Click the ring** to select it:
+an X/Y/Z arrow gizmo appears, and dragging an arrow slides the origin along
+that axis. Click anywhere else in the viewport (or press <kbd>Esc</kbd>) to
+put the gizmo away. The marker only appears once something is loaded, so it
+never sits on top of the empty-viewport import prompt.
 
 In the **Scene Origin** panel you can:
 
@@ -85,11 +95,13 @@ In the **Scene Origin** panel you can:
 - Type exact **X / Y / Z** world coordinates.
 - **Center on selection** — snap the origin to the middle of the selected
   cloud(s).
-- **Clear origin** — remove it (rotation then falls back to each cloud's
-  own center).
+- **Show origin marker** — uncheck to hide the marker (and its gizmo). The
+  pivot itself is unchanged; it just stops drawing over your scene.
+- **Reset to scene center** — drop your placement and return the origin to
+  the middle of the loaded scene.
 
-A red-and-white ring marker (a 3D cursor) shows the origin in the scene.
-The origin is cleared when you start a new scene (**File → New**).
+The origin returns to the scene center when you start a new scene
+(**File → New**).
 
 ## Crop
 
