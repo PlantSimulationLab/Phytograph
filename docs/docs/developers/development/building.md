@@ -36,6 +36,24 @@ download links never change between releases):
     entirely. Only the finished DMG/ZIP should be copied into Dropbox for
     distribution — never the unpacked `.app`.
 
+    **`.noindex` handles Spotlight but not Launch Services.** The suffix
+    suppresses Spotlight *content indexing* only; Launch Services is a separate
+    subsystem that registers any app bundle it notices, so a build into the
+    `.noindex` directory still lands in `lsregister -dump` and the Apps
+    launcher. `scripts/run-electron-builder.mjs` therefore runs
+    `lsregister -u` on each unpacked `<output>/mac*/Phytograph.app` after every
+    local build (macOS only, skipped under `CI`, never fails the build).
+
+    To audit by hand:
+
+    ```bash
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/\
+    LaunchServices.framework/Support/lsregister -dump | grep -i phytograph.app
+    ```
+
+    Only `/Applications/Phytograph.app` (and its nested helpers) should appear.
+    Mounted DMG volumes under `/Volumes/` are normal — they clear on eject.
+
     CI keeps the repo-relative `release/` default (ephemeral runners, no
     Dropbox or Launch Services to pollute). Override anywhere with
     `PHYTOGRAPH_BUILD_OUTPUT=/some/path`. Resolution lives in

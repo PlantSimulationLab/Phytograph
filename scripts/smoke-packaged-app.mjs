@@ -11,7 +11,7 @@
 //   3. the supervised backend answers /version with the expected version,
 //   4. the renderer mounts (the #app-root element appears = splash cleared).
 //
-// Run after `electron-builder` has produced release/. Usage:
+// Run after `electron-builder` has produced the build output dir. Usage:
 //   node scripts/smoke-packaged-app.mjs
 // On Linux/CI, wrap in a virtual display: xvfb-run -a node scripts/smoke-packaged-app.mjs
 
