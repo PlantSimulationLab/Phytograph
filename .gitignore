@@ -68,3 +68,6 @@ tests/e2e/visual/plant-render.png
 
 # Resource-monitor output (scripts/monitor-resources.mjs, npm run test:e2e:profile)
 perf/
+
+# Project instructions for AI coding agents — per-checkout, not tracked.
+CLAUDE.md
