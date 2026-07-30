@@ -81,3 +81,62 @@ The suite runs **2 Playwright workers**: parallel spec files each get
 their own app instance, backend port, and octree cache directory, so a
 test must never assume a fixed port or that it is the only running
 instance.
+
+## Profiling resource usage during E2E
+
+E2E drives two full app instances (Electron + an open3d/pyhelios backend
+each) through the heaviest compute in the product, so it is the best
+available load test — and the fastest way to catch a tool that is
+quietly resource-hungry.
+
+```bash
+npm run test:e2e:profile      # the suite, wrapped in the resource sampler
+```
+
+`scripts/monitor-resources.mjs` samples once a second while the suite
+runs and prints a mean/p50/p95/max table plus a per-spec breakdown:
+
+- **CPU** per process group (backend / Electron / node / everything
+  else), as per-core percentages — `1000%` means 10 cores pinned.
+- **Memory** — free, compressed, and wired GB from `vm_stat`, swap used
+  from `sysctl vm.swapusage`, and swapin/pageout rates. On macOS these
+  matter more than RSS: the machine gets sluggish from compression and
+  swap long before anything reports an out-of-memory error.
+- **GPU** — `Device Utilization %` from the IORegistry accelerator entry
+  (Apple Silicon; no `sudo`, unlike `powermetrics`).
+- **Per spec file** — peak Phytograph-attributed CPU and peak backend /
+  Electron RSS observed while that spec was in flight. Spans overlap
+  across the 2 workers, so a sample is credited to every spec running at
+  that instant, and a light spec scheduled beside a heavy one inherits
+  its peak — read the table as a shortlist, then confirm a suspect by
+  profiling it alone.
+
+The **phytograph share** line is the one that answers "is it us?". Take
+an idle baseline to compare against — run the sampler with no command
+and Ctrl-C after a minute:
+
+```bash
+node scripts/monitor-resources.mjs      # Ctrl-C to stop and summarize
+```
+
+A dev machine's sync, backup, and endpoint-security agents can account
+for more CPU than the suite does, and they also *react* to the file
+churn a build or test run creates, so the idle number is the only honest
+reference point.
+
+Raw per-second samples land in `perf/*.jsonl` (gitignored) for plotting.
+
+The sampler works on any command, not just the suite — no `--` command
+means it samples until Ctrl-C, which is handy for profiling a manual
+`npm run dev` session:
+
+```bash
+node scripts/monitor-resources.mjs --interval 500 -- npm run test:e2e -- tests/e2e/qsm-build.spec.ts
+node scripts/monitor-resources.mjs             # Ctrl-C to stop and summarize
+```
+
+Per-spec attribution needs the timeline reporter
+(`tests/e2e/helpers/timeline-reporter.ts`), which `playwright.config.ts`
+registers only when `PHYTOGRAPH_E2E_TIMELINE` is set — the `--timeline`
+flag does that. Passing `--reporter=…` on the Playwright command line
+overrides the config reporter list and silently drops it.

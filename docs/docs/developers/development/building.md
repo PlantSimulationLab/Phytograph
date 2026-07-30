@@ -59,6 +59,48 @@ download links never change between releases):
     `PHYTOGRAPH_BUILD_OUTPUT=/some/path`. Resolution lives in
     `scripts/build-output-dir.mjs`.
 
+### Generated directories inside a Dropbox checkout
+
+A checkout that lives in a Dropbox folder would otherwise sync ~6.5 GB of
+regenerable output — `node_modules`, `backend-api/venv`,
+`resources/phytograph_backend`, the `dist-` dirs,
+`pyhelios/pyhelios_build`, `docs/site`, `tmp`, and the pytest /
+`__pycache__` caches — and hand all of it to whatever backup and
+endpoint-security agents watch the same tree. On a profiled E2E run that
+background churn cost more CPU than the tests themselves.
+
+`scripts/dropbox-ignore.mjs` marks those directories with the
+`com.dropbox.ignored` extended attribute:
+
+```bash
+npm run dropbox:ignore
+```
+
+!!! warning "Applying it by hand once does not stick"
+
+    The attribute lives on the **directory**, and builds delete and
+    recreate those directories — `npm run build:backend` replaces all
+    ~1 GB of `resources/phytograph_backend/` every time. The fresh
+    directory comes back un-ignored and starts syncing again. That is why
+    the script is wired into `postinstall`, the tail of `npm run build`,
+    and the exit path of `scripts/build-backend.mjs` rather than being a
+    one-time `xattr -w`.
+
+It no-ops off macOS, under `CI`, and outside a Dropbox tree.
+`example-datasets/` is deliberately **not** ignored — it is gitignored
+only because it is too large for git, but it is real input data that
+belongs in sync.
+
+`.claude/worktrees/` is ignored too. Agent worktrees are full duplicate
+checkouts that build their own venv and `node_modules`, and they are
+abandoned rather than cleaned up — one stale worktree measured 3.9 GB.
+Prune them periodically:
+
+```bash
+git worktree list                        # anything under .claude/worktrees/
+git worktree remove --force <path>       # after checking for unmerged commits
+```
+
 ## Launching the unsigned macOS build for testing
 
 Gatekeeper blocks unsigned apps by default:

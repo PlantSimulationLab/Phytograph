@@ -65,3 +65,6 @@ tests/e2e/visual/plant-render.png
 # Editor / IDE config (per-machine)
 .idea/
 .vscode/
+
+# Resource-monitor output (scripts/monitor-resources.mjs, npm run test:e2e:profile)
+perf/

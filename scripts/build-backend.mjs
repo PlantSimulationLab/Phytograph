@@ -23,6 +23,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { applyDropboxIgnores } from './dropbox-ignore.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -234,5 +235,9 @@ proc.on('exit', (code) => {
   }
   // Clean up PyInstaller's build artifacts; keep only the bundle directory.
   rmSync(join(distPath, 'build'), { recursive: true, force: true });
+  // The bundle directory was just recreated from scratch, which drops the
+  // com.dropbox.ignored xattr — re-mark it, or ~1 GB of regenerable output
+  // starts syncing (and gets scanned by every backup/AV agent) all over again.
+  applyDropboxIgnores();
   console.log('[build-backend] done.');
 });

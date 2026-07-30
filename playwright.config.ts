@@ -1,4 +1,11 @@
-import { defineConfig } from '@playwright/test';
+import { defineConfig, type ReporterDescription } from '@playwright/test';
+
+// Opt-in test-span log for `npm run test:e2e:profile` — lets
+// scripts/monitor-resources.mjs attribute CPU/memory peaks to a spec file.
+// Absent env var → plain `npm run test:e2e` behaves exactly as before.
+const timelineReporter: ReporterDescription[] = process.env.PHYTOGRAPH_E2E_TIMELINE
+  ? [['./tests/e2e/helpers/timeline-reporter.ts']]
+  : [];
 
 // E2E drives the packaged Electron app via `_electron.launch`. There is no
 // browser to install — Playwright reuses Phytograph's bundled Electron. Each
@@ -20,7 +27,7 @@ export default defineConfig({
   workers: 2,
   forbidOnly: !!process.env.CI,
   retries: 0,
-  reporter: [['list'], ['html', { open: 'never' }]],
+  reporter: [['list'], ['html', { open: 'never' }], ...timelineReporter],
   use: {
     trace: 'retain-on-failure',
   },
