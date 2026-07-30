@@ -91,7 +91,7 @@ const isDev = !app.isPackaged;
 // PHYTOGRAPH_E2E=1 is set by the Playwright launcher (tests/e2e/helpers/launchApp.ts):
 //   - window starts hidden, unfocusable, off the taskbar/Window menu
 //   - app registers as a macOS "accessory" (no Dock tile, no menu bar, no
-//     foreground activation), eliminating window/dock flashes between specs
+//     foreground activation), so it never steals focus between specs
 //   - devtools are suppressed even though Electron sees `isDev=true`
 //   - app.quit() is invoked on window-all-closed even on darwin, so each
 //     spec's app.close() actually exits the process and doesn't race the
@@ -101,12 +101,24 @@ const isDev = !app.isPackaged;
 const isE2E = process.env.PHYTOGRAPH_E2E === '1';
 const wantDevTools = process.env.PHYTOGRAPH_DEVTOOLS === '1' && !isE2E;
 
-// MUST run synchronously at module top-level (before app.whenReady()) so the
-// process never registers as a regular GUI app. 'accessory' = no Dock, no
-// menu bar, no Cmd-Tab, no automatic activation. Renderer windows can still
-// be created and driven by Playwright over CDP.
+// Demote to a background app: 'accessory' = no Dock, no menu bar, no Cmd-Tab,
+// no automatic activation. Renderer windows can still be created and driven by
+// Playwright over CDP.
+//
+// This runs at module top-level (before app.whenReady()) to demote as early as
+// JS can, but it CANNOT prevent the Dock icon from appearing in the first
+// place: Electron creates NSApp in PreBrowserMain(), well before
+// PostEarlyInitialization() loads this file, so the process is already a
+// registered foreground app by line 1 — hence the icon that flashes and
+// vanishes. The real fix is LSUIElement=1 in the running bundle's Info.plist,
+// which AppKit reads before any JS exists; E2E gets that from the patched
+// bundle clone built by scripts/headless-electron.mjs.
+//
+// So keep this as the fallback, not the primary mechanism — it's what still
+// applies on non-macOS, and whenever the clone is unavailable.
 // Refs: https://www.electronjs.org/docs/latest/api/app#appsetactivationpolicypolicy-macos
 //       https://github.com/electron/electron/issues/21970
+//       https://github.com/electron/electron/issues/422 (LSUIElement is the only cure)
 if (isE2E && process.platform === 'darwin') {
   app.setActivationPolicy('accessory');
 }

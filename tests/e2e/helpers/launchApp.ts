@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { waitForBackend } from './waitForBackend';
+// @ts-expect-error -- plain .mjs helper, shared with the standalone harness scripts
+import { ensureHeadlessElectron } from '../../../scripts/headless-electron.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = join(__dirname, '..', '..', '..');
@@ -81,7 +83,20 @@ export async function launchApp(): Promise<LaunchedApp> {
   // fixtures. Removed in close().
   const octreeCacheRoot = await mkdtemp(join(tmpdir(), 'phyto-octree-'));
 
+  // Launch a Dock-less clone of the Electron bundle instead of the one in
+  // node_modules. main.ts's app.setActivationPolicy('accessory') can only
+  // demote the app after AppKit has already registered it, so on its own it
+  // leaves a Dock icon flashing once per spec file (91 of them). The clone has
+  // LSUIElement=1 in its Info.plist, which AppKit reads before any JS runs, so
+  // no tile is ever drawn. See scripts/headless-electron.mjs.
+  //
+  // null on non-macOS, or if the clone couldn't be built: Playwright then falls
+  // back to require('electron'), which is exactly the previous behavior — the
+  // accessory policy still applies, we just get the flash back.
+  const headlessElectron: string | null = await ensureHeadlessElectron();
+
   const app = await _electron.launch({
+    ...(headlessElectron ? { executablePath: headlessElectron } : {}),
     args: ['.'],
     cwd: repoRoot,
     timeout: 60_000,

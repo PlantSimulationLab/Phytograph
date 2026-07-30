@@ -82,6 +82,46 @@ their own app instance, backend port, and octree cache directory, so a
 test must never assume a fixed port or that it is the only running
 instance.
 
+## Why E2E launches a cloned Electron bundle (macOS)
+
+On macOS the suite does **not** run
+`node_modules/electron/dist/Electron.app`. It runs a patched clone of it,
+built on demand by `scripts/headless-electron.mjs` and passed to
+`_electron.launch({ executablePath })` by
+`tests/e2e/helpers/launchApp.ts`.
+
+The reason is the Dock. `src/main/main.ts` calls
+`app.setActivationPolicy('accessory')` under `PHYTOGRAPH_E2E`, but that
+can only *demote* an app AppKit has already registered — Electron creates
+`NSApp` in `PreBrowserMain()`, long before `main.js` is loaded. Measured
+on the pristine bundle, the process is registered as a `Foreground` app
+from roughly +230 ms to +450 ms after launch, which is exactly long
+enough to draw a Dock icon and then destroy it. With one app per spec
+file that was ~90 icon flashes per local run.
+
+The only real cure is `LSUIElement=1` in the running bundle's
+`Info.plist`, which AppKit reads before any JavaScript exists, so no tile
+is ever created. It cannot be set at runtime. Since that same bundle also
+serves `npm run dev` and the docs screenshot scripts — which *want* a
+Dock icon — the flag goes on a test-only copy instead:
+
+- The clone lives at
+  `~/Library/Caches/Phytograph/e2e-electron.noindex/Electron.app`, outside
+  both the repo and the Dropbox tree.
+- It is created with `cp -c`, an APFS copy-on-write clone: a 233 MB
+  bundle for about 72 KB of real disk and under half a second.
+- It is rebuilt automatically when the Electron version or the source
+  `Info.plist` changes, and `rm -rf`ing the cache directory is always a
+  safe reset.
+- `app.setActivationPolicy('accessory')` stays in `main.ts` as the
+  fallback for Windows, Linux, and any run where the clone can't be
+  built. Those still work; they just flash.
+
+`scripts/smoke-packaged-app.mjs` is deliberately excluded. It launches the
+real signed `.app`, whose Developer ID signature seals `Info.plist`, and
+patching it would mean the smoke test no longer exercises the exact
+artifact that ships. It launches once per run, so it costs one flash.
+
 ## Profiling resource usage during E2E
 
 E2E drives two full app instances (Electron + an open3d/pyhelios backend
