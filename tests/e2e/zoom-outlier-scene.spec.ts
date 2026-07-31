@@ -129,7 +129,19 @@ test('you can zoom right into the content and still pan — the view never freez
 
   // The camera genuinely closed on the CONTENT — the old behavior stalled with
   // the content still far off because the target was out at the box centre.
-  expect(distZoomed).toBeLessThan(distStart * 0.25);
+  //
+  // Measured against the content BOX, not its centre. Zoom-to-cursor converges
+  // on the surface under the pointer, and that surface is on the near face of
+  // the plot — so the distance to the centre bottoms out at roughly the box's
+  // half-diagonal no matter how far in you fly, and asserting a fraction of it
+  // really asserts that the camera drifted THROUGH the near surface toward the
+  // middle. (It used to, because the anchor was re-picked every notch and
+  // wandered deeper; that wandering is the bug this suite now guards against.)
+  // What "zoomed right in" actually means is: the camera ends up at the content,
+  // i.e. within a small multiple of the content's own size.
+  const contentSpan = Math.max(...CONTENT_MAX.map((v, i) => v - CONTENT_MIN[i]));
+  expect(distZoomed).toBeLessThan(contentSpan);
+  expect(distZoomed).toBeLessThan(distStart * 0.5);
   // And it did not fly through and out the other side.
   expect(distZoomed).toBeGreaterThan(0);
 
@@ -279,4 +291,120 @@ test('zooming at empty sky converges on the scene instead of flying off', async 
   // Closer than it started, and never overshooting past the content.
   expect(distAfter).toBeLessThan(distStart);
   expect(distAfter).toBeGreaterThan(0);
+});
+
+// ── Regression: a scroll BURST must converge monotonically ──────────────────
+//
+// The bug these cover was invisible to the tests above, which only compare the
+// state before a burst with the state after it. The failure happens BETWEEN
+// notches: the depth probe misses on some of them (sparse data under the
+// pointer, or its budget guard backing off for 250 ms while the octree
+// streams), and each miss used to substitute a far-away fallback anchor. A
+// single notch measured against that distant anchor takes a step big enough to
+// fly the camera PAST the near surface the burst was converging on — after
+// which camera→anchor points backward, and every further "zoom in" notch
+// dollies AWAY. Scroll silently inverts and zoom reads as frozen; only an
+// orbit revives it, because rotating rebuilds the camera/target relationship.
+//
+// Sampling per notch is what makes that observable, so these walk the wheel one
+// notch at a time and assert on the whole trajectory.
+
+// Distance to content after each of `n` single wheel notches at (x, y).
+async function distancesPerNotch(x: number, y: number, n: number): Promise<number[]> {
+  const { page } = session;
+  await page.mouse.move(x, y);
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    await page.mouse.wheel(0, -120);
+    // One frame, so the handler and controls.update() have both run.
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+    out.push(distToContent(await readState()));
+  }
+  return out;
+}
+
+test('a sustained scroll burst never reverses direction mid-gesture', async () => {
+  await loadFramedScene();
+  const { page } = session;
+  const box = (await page.locator('canvas').first().boundingBox())!;
+
+  // Dead centre, over the drawn plot — the "freezes in the middle of the scene"
+  // report. Enough notches to outlast several probe-miss windows.
+  const d = await distancesPerNotch(box.x + box.width / 2, box.y + box.height / 2, 25);
+
+  // Every notch must close the gap, or at worst hold it (the near clamp is
+  // asymptotic, so late notches move very little). None may INCREASE it: that
+  // is the inversion, and it is what made zoom appear stuck.
+  for (let i = 1; i < d.length; i++) {
+    expect(
+      d[i],
+      `notch ${i} moved AWAY from the content: ${d[i - 1].toFixed(4)} → ${d[i].toFixed(4)}`,
+    ).toBeLessThanOrEqual(d[i - 1] * 1.001);
+  }
+  // And the burst as a whole actually arrived somewhere.
+  expect(d[d.length - 1]).toBeLessThan(d[0] * 0.5);
+});
+
+test('zooming at the periphery still closes on what is under the cursor', async () => {
+  await loadFramedScene();
+  const { page } = session;
+  const box = (await page.locator('canvas').first().boundingBox())!;
+
+  // Near the edge of the viewport — the reported "lags at the periphery" case.
+  // The probe misses out here far more often, so this is the path where the
+  // fallback anchor does the work. It must lie along the CURSOR ray: an anchor
+  // on the camera→target axis (the old behavior) degrades every one of these
+  // notches to a plain on-axis dolly whose step shrinks toward zero as the
+  // camera nears the centre plane, which is the "lag" the user saw.
+  const d = await distancesPerNotch(box.x + box.width * 0.9, box.y + box.height * 0.85, 20);
+
+  for (let i = 1; i < d.length; i++) {
+    expect(
+      d[i],
+      `peripheral notch ${i} moved AWAY: ${d[i - 1].toFixed(4)} → ${d[i].toFixed(4)}`,
+    ).toBeLessThanOrEqual(d[i - 1] * 1.001);
+  }
+
+  // Crucially, it must keep making progress rather than decelerating to a
+  // standstill: the second half of the burst has to cover real ground too.
+  const firstHalf = d[0] - d[Math.floor(d.length / 2)];
+  const secondHalf = d[Math.floor(d.length / 2)] - d[d.length - 1];
+  expect(firstHalf).toBeGreaterThan(0);
+  expect(secondHalf).toBeGreaterThan(0);
+});
+
+test('zoom stays responsive after a deep zoom — no permanent freeze', async () => {
+  await loadFramedScene();
+  const { page } = session;
+  const box = (await page.locator('canvas').first().boundingBox())!;
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+
+  // Drive in deep. This is what used to re-seat the orbit target closer than
+  // OrbitControls' own minDistance, after which update() clamped the spherical
+  // radius and shoved the camera straight back out — cancelling every
+  // subsequent dolly permanently.
+  await page.mouse.move(cx, cy);
+  for (let i = 0; i < 40; i++) await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(300);
+
+  const deep = await readState();
+  // The look-at distance must remain inside the controls' legal range, or the
+  // next update() will fight every move.
+  const sep = Math.hypot(
+    deep.position[0] - deep.target[0],
+    deep.position[1] - deep.target[1],
+    deep.position[2] - deep.target[2],
+  );
+  expect(sep).toBeGreaterThanOrEqual(deep.zoomLimits.minDistance * 0.999);
+  expect(sep).toBeLessThanOrEqual(deep.zoomLimits.maxDistance * 1.001);
+
+  // And zoom still WORKS: scrolling out from here must actually retreat,
+  // without needing an orbit first to unstick it.
+  const before = distToContent(deep);
+  await page.mouse.move(cx, cy);
+  for (let i = 0; i < 10; i++) await page.mouse.wheel(0, 120);
+  await page.waitForTimeout(300);
+  const after = distToContent(await readState());
+  expect(after).toBeGreaterThan(before);
 });

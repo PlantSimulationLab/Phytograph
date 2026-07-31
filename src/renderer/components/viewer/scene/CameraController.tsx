@@ -294,6 +294,40 @@ export function CameraController({
   useEffect(() => {
     const el = gl.domElement;
 
+    // ── The anchor is LATCHED for the duration of a scroll gesture ───────────
+    //
+    // Re-picking per notch is what broke this. `clampDollyToSurface` only bounds
+    // a step against the anchor IT WAS GIVEN, so it cannot prevent overshoot when
+    // the anchor changes underneath it: the depth probe legitimately misses on
+    // some notches (sparse data at the pointer, or its 8 ms budget guard backing
+    // off for 250 ms under octree streaming load), and a miss substitutes a
+    // far-away fallback anchor. One notch computed against that distant anchor
+    // takes a step large enough to fly the camera PAST the near surface the
+    // previous notches were converging on. From there camera→anchor points
+    // backward, `anchorDist` is effectively negative, and every further "zoom in"
+    // notch dollies the camera AWAY — the scroll direction silently inverts and
+    // zoom appears frozen. (Rotating "fixed" it only because orbiting rebuilds
+    // the camera/target relationship from scratch.)
+    //
+    // So the anchor is captured once, on the first notch of a gesture, and reused
+    // until the gesture ends. Every notch in a burst then measures against the
+    // SAME world point, which is what makes the asymptotic near clamp actually
+    // asymptotic and makes a run of notches converge instead of diverge.
+    //
+    // The latch is invalidated by: an idle gap (a new gesture), the pointer
+    // moving far enough to be aiming at something else, or a reversal of scroll
+    // direction. Anything else — including a probe miss mid-burst — keeps flying
+    // at the point the user originally aimed at, which is also what they meant.
+    const GESTURE_IDLE_MS = 140;     // wheel bursts arrive far tighter than this
+    const GESTURE_MOVE_PX = 40;      // beyond this the cursor is on a new subject
+    let latch: {
+      anchor: THREE.Vector3;
+      x: number;
+      y: number;
+      time: number;
+      zoomIn: boolean;
+    } | null = null;
+
     const onWheel = (e: WheelEvent) => {
       if (!enabledRef.current) return;
       const controls = controlsRef.current;
@@ -318,47 +352,94 @@ export function CameraController({
       const camPos = camera.position;
       const target: THREE.Vector3 = controls.target;
 
-      // Anchor: the surface under the pointer, else a fixed point in the WORLD.
+      // Reuse the latched anchor when this notch continues the same gesture.
       //
-      // The fallback must be world-anchored, not "targetDist ahead of the
-      // camera". Camera and target translate rigidly on every zoom (that is what
-      // lets the look-at follow the cursor), so camera→target is invariant — a
-      // fallback defined from it would sit a constant distance ahead forever.
-      // The camera would then fly at a constant speed that never decelerates,
-      // straight through the scene and out the far side, with the near clamp
-      // never engaging because the gap never closes. Anchoring on the scene
-      // centre instead means the gap genuinely shrinks as the camera closes in.
-      const picked = pickDepthRef.current?.(e.clientX, e.clientY) ?? null;
-      const viewDir = new THREE.Vector3().subVectors(target, camPos);
-      if (viewDir.lengthSq() < 1e-18) return;
-      viewDir.normalize();
+      // The near clamp is asymptotic, so a long burst can close almost all of the
+      // gap to the anchor without ever reaching it. Once the remainder is a
+      // negligible fraction of the scene the latch has been consumed: keeping it
+      // would leave `anchorDist` shrinking toward the guard below and the zoom
+      // would quietly stall at a surface. Dropping it re-probes, which is correct
+      // — at that range the pointer is over something new.
+      const now = performance.now();
+      const spent = latch
+        ? camera.position.distanceTo(latch.anchor) < limitsRef.current.scale * 1e-4
+        : false;
+      const reuse = latch
+        && !spent
+        && now - latch.time < GESTURE_IDLE_MS
+        && latch.zoomIn === zoomIn
+        && Math.abs(e.clientX - latch.x) < GESTURE_MOVE_PX
+        && Math.abs(e.clientY - latch.y) < GESTURE_MOVE_PX;
 
       let anchor: THREE.Vector3;
-      if (picked) {
-        anchor = picked;
+      if (reuse && latch) {
+        anchor = latch.anchor;
       } else {
-        // Project the scene centre onto the view ray, so an empty-sky zoom still
-        // converges on the content rather than veering off at an angle.
-        //
-        // The centre must be the CONTENT's, not the raw bounding box's. With far
-        // outliers the box centre sits out in empty space among the strays — the
-        // camera then converges perfectly on a point nowhere near the data and
-        // the zoom appears to stall hundreds of metres short. `contentCentre`
-        // (robust when the scene has a percentile extent) is the real target.
-        const o = offsetRef.current;
-        const cc = contentCentreRef.current;
-        const sceneCentre = new THREE.Vector3(
-          cc[0] - (o?.x ?? 0),
-          cc[1] - (o?.y ?? 0),
-          cc[2] - (o?.z ?? 0),
-        );
-        const along = sceneCentre.clone().sub(camPos).dot(viewDir);
-        // Behind the camera (already flown past the scene): fall back to the
-        // orbit target so a zoom still does something sane instead of reversing.
-        anchor = along > 1e-6
-          ? camPos.clone().addScaledVector(viewDir, along)
-          : target.clone();
+        // Anchor: the surface under the pointer, else a point on the CURSOR ray.
+        const picked = pickDepthRef.current?.(e.clientX, e.clientY) ?? null;
+        if (picked) {
+          anchor = picked;
+        } else {
+          // Fallback for a probe miss. It must lie along the ray THROUGH THE
+          // CURSOR, not along camera→target: the whole promise of zoom-to-cursor
+          // is that the thing under the pointer stays put while everything else
+          // expands around it, and an anchor on the view axis moves the camera
+          // straight ahead instead. That is why zooming near the edge of the
+          // viewport used to drift and stall — the probe misses most often out
+          // there (fewer points under the pointer), and the fallback quietly
+          // degraded every one of those notches to an on-axis dolly.
+          //
+          // The old form also decelerated to a standstill: it projected the
+          // content centre onto the view ray, and that projection shrinks as the
+          // camera approaches the centre plane, so `step` (a fraction of the
+          // remaining gap) shrank toward zero while the user kept scrolling.
+          //
+          // Distance along the cursor ray comes from the content centre's depth
+          // measured along the VIEW direction — "how far away is the subject" —
+          // which stays finite and stable as the camera closes in. The centre
+          // must be the CONTENT's, not the raw bounding box's: with far outliers
+          // the box centre sits in empty space among the strays.
+          const o = offsetRef.current;
+          const cc = contentCentreRef.current;
+          const sceneCentre = new THREE.Vector3(
+            cc[0] - (o?.x ?? 0),
+            cc[1] - (o?.y ?? 0),
+            cc[2] - (o?.z ?? 0),
+          );
+          const viewDir = new THREE.Vector3().subVectors(target, camPos);
+          if (viewDir.lengthSq() < 1e-18) return;
+          viewDir.normalize();
+
+          // Depth of the subject ahead of the camera. Behind us (already flown
+          // past the scene) or degenerate: fall back to the current look-at
+          // distance so a zoom still does something sane instead of reversing.
+          let depth = sceneCentre.clone().sub(camPos).dot(viewDir);
+          if (!(depth > 1e-6)) depth = camPos.distanceTo(target);
+          if (!(depth > 1e-6)) return;
+
+          // Ray through the cursor, in world space.
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return;
+          const ndc = new THREE.Vector3(
+            ((e.clientX - rect.left) / rect.width) * 2 - 1,
+            -((e.clientY - rect.top) / rect.height) * 2 + 1,
+            0.5,
+          );
+          const cursorDir = ndc.unproject(camera).sub(camPos);
+          if (cursorDir.lengthSq() < 1e-18) return;
+          cursorDir.normalize();
+
+          // Place the anchor at the subject's depth along the cursor ray. Divide
+          // by cos(angle to the view axis) so the anchor sits on the same depth
+          // PLANE as the subject rather than on a sphere around the camera —
+          // otherwise an off-centre cursor would anchor short of the content.
+          const cosA = cursorDir.dot(viewDir);
+          const alongCursor = cosA > 1e-3 ? depth / cosA : depth;
+          anchor = camPos.clone().addScaledVector(cursorDir, alongCursor);
+        }
+        latch = { anchor: anchor.clone(), x: e.clientX, y: e.clientY, time: now, zoomIn };
       }
+      if (latch) latch.time = now;
 
       // Move along camera→anchor (not camera→target): that is what makes the
       // pointed-at point stay put on screen while everything else expands around
@@ -432,15 +513,28 @@ export function CameraController({
       // makes this robust rather than a hand-fitted sensitivity curve.
       //
       // The anchor serves for this whether or not the GPU pick landed. A real
-      // depth pick is the exact surface under the cursor; the fallback is the
-      // content centre projected onto the view ray, which is still a sound
+      // depth pick is the exact surface under the cursor; the fallback sits at
+      // the subject's depth along the cursor ray, which is still a sound
       // estimate of "how far away is the subject" — and it is the case that
       // matters most in practice, because potree's `pick` renders a small window
       // and reads it back, so it legitimately misses on sparse clouds (measured:
       // 0 hits in 30 notches on a 209-point fixture). Keying the correction to a
       // successful pick would have left pan sensitivity unfixed exactly there.
-      const anchorDistAfter = anchorDist - step;
-      if (anchorDistAfter > minDistance) {
+      //
+      // CLAMPED INTO THE CONTROLS' OWN RANGE, which is not optional. The
+      // `controls.update()` below re-derives the camera position from the
+      // spherical radius |camera − target| after clamping it into
+      // [minDistance, maxDistance] (three-stdlib OrbitControls, `update()`).
+      // Re-seating the target closer than minDistance therefore had the update
+      // immediately shove the camera back out along the target ray, cancelling
+      // the dolly — zoom died permanently, and only an orbit (which rebuilds the
+      // offset) revived it. Keeping the re-seat inside the range means the
+      // clamp is a no-op and the dolly always survives the update.
+      const anchorDistAfter = Math.min(
+        Math.max(anchorDist - step, minDistance),
+        maxDistance,
+      );
+      {
         // Preserve the VIEW DIRECTION — re-seating must not rotate the camera.
         // Move the target along the existing camera→target ray, NOT onto the
         // anchor point itself (which is off-axis whenever the cursor isn't

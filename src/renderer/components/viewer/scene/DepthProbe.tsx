@@ -135,6 +135,11 @@ export function DepthProbe({
       const ctrlTarget = (controls as unknown as { target?: THREE.Vector3 } | null)?.target;
       const viewDist = (ctrlTarget ? camera.position.distanceTo(ctrlTarget) : 0) || 1;
       const t0 = performance.now();
+      // A GPU hit is exact and already the nearest — the CPU pass cannot improve
+      // on it, so skip the expensive raycast entirely rather than running it to
+      // (at best) confirm the same surface. This is also what keeps the budget
+      // guard from tripping on dense clouds, where the GPU pick is reliable.
+      if (best) return best;
       if (t0 < skipUntil) return best;
       for (const frac of [0.02, 0.15]) {
         raycaster.params.Points = { threshold: Math.max(viewDist * frac, 1e-9) };

@@ -32,6 +32,11 @@ Because zoom follows the cursor, the origin is only the point you *orbit*
 around — it does not pull the zoom toward itself. Anywhere you can see, you
 can zoom to.
 
+A continuous scroll keeps flying at whatever you first aimed at, so a long
+burst closes on that one spot smoothly instead of wandering between surfaces
+as the view changes. Pausing, moving the pointer somewhere else, or reversing
+direction starts a fresh gesture and picks a new target.
+
 How close and how far you can zoom is scaled to the size of your scene, so
 the same scroll gesture feels right on a single potted plant and on a
 400-metre plot. A few stray far-away points do not affect it.
