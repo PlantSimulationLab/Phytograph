@@ -88,7 +88,18 @@ function Toast({ toast, onClose }: ToastProps) {
       <div className="flex-1 min-w-0 select-text">
         <p data-testid="toast-title" className="font-medium text-white break-words">{toast.title}</p>
         {toast.message && (
-          <p data-testid="toast-message" className="text-sm text-white/70 mt-1 break-words whitespace-pre-wrap">{toast.message}</p>
+          // A backend traceback or a multi-hundred-line validation error would
+          // otherwise grow the card taller than the window — and because the
+          // stack is anchored to the bottom, the overflow runs off the TOP,
+          // taking the close button with it and leaving the toast undismissable.
+          // Cap the message body and let it scroll instead; the header row (with
+          // copy/dismiss) stays outside this box so it's always reachable.
+          <p
+            data-testid="toast-message"
+            className="text-sm text-white/70 mt-1 break-words whitespace-pre-wrap max-h-48 overflow-y-auto overscroll-contain"
+          >
+            {toast.message}
+          </p>
         )}
         {toast.actions && toast.actions.length > 0 && (
           <div className="flex flex-wrap gap-2 mt-2">
@@ -154,7 +165,13 @@ export function ToastContainer() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-[110] space-y-2 max-w-md pointer-events-none">
+    // top-4 (with bottom-4) bounds the stack to the window height, and
+    // overflow-y-auto scrolls the excess: many toasts at once — or one with a
+    // very long title — can't grow past the top of the window, where the dismiss
+    // buttons would be clipped out of reach. justify-end keeps a short stack
+    // pinned to the bottom corner. The wrapper stays pointer-events-none so
+    // empty space around the cards remains click-through.
+    <div className="fixed bottom-4 right-4 top-4 z-[110] flex flex-col justify-end gap-2 max-w-md overflow-y-auto overscroll-contain pointer-events-none">
       {toasts.map(toast => (
         <Toast key={toast.id} toast={toast} onClose={removeToast} />
       ))}
