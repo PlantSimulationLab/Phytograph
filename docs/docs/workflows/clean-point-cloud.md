@@ -96,14 +96,18 @@ A red-and-white ring marker (a 3D cursor) shows the origin in the scene, at
 a constant size no matter how far you zoom. **Click the ring** to select it:
 an X/Y/Z arrow gizmo appears, and dragging an arrow slides the origin along
 that axis. Click anywhere else in the viewport (or press <kbd>Esc</kbd>) to
-put the gizmo away. The marker only appears once something is loaded, so it
-never sits on top of the empty-viewport import prompt.
+put the gizmo away. (Opening the panel arms **Pick in viewport**, which takes
+over viewport clicks — click that button once to turn it off if you want to
+grab the marker instead.) The marker only appears once something is loaded,
+so it never sits on top of the empty-viewport import prompt.
 
 In the **Scene Origin** panel you can:
 
-- **Pick in viewport** — arm click-to-place, then click a point; it snaps
-  to the cloud surface where you click, or drops onto the ground plane if
-  you click past the cloud. (The view does not move when you pick.)
+- **Pick in viewport** — click-to-place. This is **already armed** when the
+  panel opens, so you can just click a point straight away; it snaps to the
+  cloud surface where you click, or drops onto the ground plane if you click
+  past the cloud. (The view does not move when you pick.) Placing a point
+  disarms it, and the button toggles it off and on again by hand.
 - Type exact **X / Y / Z** world coordinates.
 - **Center on selection** — snap the origin to the middle of the selected
   cloud(s).

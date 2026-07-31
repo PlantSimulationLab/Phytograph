@@ -647,25 +647,32 @@ test.describe('translate cloud', () => {
     await expect(page.getByTestId('scene-origin-panel')).toBeHidden();
   });
 
-  // Click-to-place: arming pick mode and clicking the viewport sets the origin
-  // and populates the panel's X/Y/Z fields (surface-snap or ground-plane).
+  // Click-to-place: opening the panel arms pick mode, and clicking the viewport
+  // sets the origin and populates the panel's X/Y/Z fields (surface-snap or
+  // ground-plane).
   test('Set Scene Origin — click-to-place sets the origin from a viewport click', async () => {
     const { page } = session;
     await importTiny();
 
-    await page.getByTestId('tool-set-scene-origin').click();
-    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
-    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-has-origin', 'false');
+    // Opening the panel ARMS click-to-place on its own — no second click on the
+    // Pick button needed. Arming is not placing, so there is still no override.
+    const panel = await openSceneOriginPanel();
+    await expect(panel).toHaveAttribute('data-has-origin', 'false');
+
+    // The Pick button is still a real toggle: off and back on again.
+    await page.getByTestId('scene-origin-pick').click();
+    await expect(panel).toHaveAttribute('data-place-mode', 'false');
+    await page.getByTestId('scene-origin-pick').click();
+    await expect(panel).toHaveAttribute('data-place-mode', 'true');
+    await expect(panel).toHaveAttribute('data-has-origin', 'false');
 
     // Snapshot the camera BEFORE picking: placing an origin must NOT move the
     // view (it's the rotation pivot only, not an orbit re-target).
     const camState = () => page.evaluate(() => (window as any).__getCameraState?.());
     const camBefore = await camState();
 
-    // Arm pick mode, then click OFF-center (so a would-be orbit re-target would be
-    // clearly visible) — the cylinder still fills enough of the view to hit it.
-    await page.getByTestId('scene-origin-pick').click();
-    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-place-mode', 'true');
+    // Click OFF-center (so a would-be orbit re-target would be clearly visible)
+    // — the cylinder still fills enough of the view to hit it.
     const canvas = page.locator('canvas').first();
     const box = await canvas.boundingBox();
     if (!box) throw new Error('canvas has no bounding box');
@@ -686,6 +693,25 @@ test.describe('translate cloud', () => {
     expect(dist(camBefore.position, camAfter.position)).toBeLessThan(1e-3);
     expect(dist(camBefore.target, camAfter.target)).toBeLessThan(1e-3);
   });
+
+  // Open the Scene Origin panel. Opening AUTO-ARMS click-to-place (placing the
+  // pivot by clicking is the common reason to open it), which mounts a
+  // full-viewport picker plane that swallows every canvas click and makes the
+  // marker itself non-interactive. Tests about the marker/gizmo therefore pass
+  // `armed: false` to toggle it back off first — otherwise their very first
+  // viewport click would be eaten by the picker.
+  async function openSceneOriginPanel({ armed = true }: { armed?: boolean } = {}) {
+    const { page } = session;
+    await page.getByTestId('tool-set-scene-origin').click();
+    const panel = page.getByTestId('scene-origin-panel');
+    await expect(panel).toBeVisible();
+    await expect(panel).toHaveAttribute('data-place-mode', 'true');
+    if (!armed) {
+      await page.getByTestId('scene-origin-pick').click();
+      await expect(panel).toHaveAttribute('data-place-mode', 'false');
+    }
+    return panel;
+  }
 
   // Read the three origin inputs as numbers. Requires the panel to be open.
   async function readOriginFields(): Promise<[number, number, number]> {
@@ -791,9 +817,9 @@ test.describe('translate cloud', () => {
     // beforeEach reset to a fresh (empty) scene; do NOT import yet.
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    await page.getByTestId('tool-set-scene-origin').click();
-    const panel = page.getByTestId('scene-origin-panel');
-    await expect(panel).toBeVisible();
+    // Disarm click-to-place: this test's viewport clicks are about marker
+    // selection, and an armed picker would swallow them.
+    const panel = await openSceneOriginPanel({ armed: false });
     // The origin still exists and is editable — only its marker is suppressed.
     await expect(panel).toHaveAttribute('data-marker-visible', 'false');
     const viewer = page.locator('[data-scene-bounds-size]');
@@ -814,7 +840,7 @@ test.describe('translate cloud', () => {
     await page.getByTestId('scene-origin-close').click();
     await importTiny();
     await expect(page.getByTestId('empty-viewer-hint')).toBeHidden();
-    await page.getByTestId('tool-set-scene-origin').click();
+    await openSceneOriginPanel({ armed: false });
     await expect(panel).toHaveAttribute('data-marker-visible', 'true');
     const loaded = await worldToScreen(await readOriginFields());
     await page.mouse.click(loaded.x + RING_PX, loaded.y);
@@ -901,9 +927,8 @@ test.describe('translate cloud', () => {
     const { page } = session;
     await importTiny();
 
-    await page.getByTestId('tool-set-scene-origin').click();
-    const panel = page.getByTestId('scene-origin-panel');
-    await expect(panel).toBeVisible();
+    // Disarm click-to-place — this test clicks the marker, not the picker.
+    const panel = await openSceneOriginPanel({ armed: false });
     const origin = await readOriginFields();
     const viewer = page.locator('[data-scene-bounds-size]');
 
@@ -935,8 +960,9 @@ test.describe('translate cloud', () => {
     const { page } = session;
     await importTiny();
 
-    await page.getByTestId('tool-set-scene-origin').click();
-    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
+    // Disarm click-to-place — this test drags the marker's gizmo, and an armed
+    // picker would eat the selecting click.
+    await openSceneOriginPanel({ armed: false });
     const before = await readOriginFields();
     const viewer = page.locator('[data-scene-bounds-size]');
 

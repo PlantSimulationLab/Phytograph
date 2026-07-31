@@ -4969,7 +4969,11 @@ export default function PointCloudViewer({
       // (rendered directly in the sidebar JSX) rather than the Tools palette — no
       // `toolGroup`, so it doesn't render as a Tools toolbar button. It stays in
       // the registry for the Cmd+K palette and the Tools menu.
-      { id: 'set-scene-origin', name: 'Set Scene Origin', keywords: ['pivot', 'center', 'origin', 'rotation center', 'orbit'], action: () => { const open = showSceneOriginPanel; closeAllToolPanels('scene-origin'); setShowSceneOriginPanel(!open); if (open) setOriginPlaceMode(false); }, category: 'View', requires: null, icon: Crosshair, testId: 'tool-set-scene-origin', isActive: () => showSceneOriginPanel },
+      // Opening the panel ARMS click-to-place straight away (same as Pick Point) —
+      // placing the pivot by clicking is the overwhelmingly common reason to open
+      // it, and the arming is one click away from being undone (the button
+      // toggles off, and any viewport click both places and disarms).
+      { id: 'set-scene-origin', name: 'Set Scene Origin', keywords: ['pivot', 'center', 'origin', 'rotation center', 'orbit'], action: () => { const open = showSceneOriginPanel; closeAllToolPanels('scene-origin'); setShowSceneOriginPanel(!open); setOriginPlaceMode(!open); }, category: 'View', requires: null, icon: Crosshair, testId: 'tool-set-scene-origin', isActive: () => showSceneOriginPanel },
       // Also a scene control rather than an analysis tool (no `toolGroup`, so it
       // renders in the View Controls box beside Set Scene Origin, not the Tools
       // palette) — it inspects whatever is visible and needs no selection.
@@ -15805,7 +15809,8 @@ export default function PointCloudViewer({
               const open = showSceneOriginPanel;
               closeAllToolPanels('scene-origin');
               setShowSceneOriginPanel(!open);
-              if (open) setOriginPlaceMode(false);
+              // Auto-arm click-to-place on open (see the registry entry above).
+              setOriginPlaceMode(!open);
             }}
             className={`p-2 rounded transition-colors flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed ${
               showSceneOriginPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'

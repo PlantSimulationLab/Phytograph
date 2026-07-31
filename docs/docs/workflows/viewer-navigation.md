@@ -41,9 +41,11 @@ view — a drag always covers about the same fraction of the screen, so panning
 tracks your cursor whether you are surveying a whole plot or inspecting a
 single leaf.
 
-To orbit around something else, move the origin: click its ring and drag
-the arrow gizmo, or use **Set Scene Origin** to click a point on a surface
-("Pick in viewport"), type coordinates, or snap it to the selected cloud.
+To orbit around something else, move the origin: open **Set Scene Origin**
+and click a point on a surface (click-to-place is armed as soon as the panel
+opens), type coordinates, or snap it to the selected cloud. You can also
+click the marker's ring and drag the arrow gizmo — turn **Pick in viewport**
+off first so the click reaches the marker.
 **Zoom to origin** in that panel flies the camera to the origin without
 changing your viewing angle — handy after typing in coordinates. See
 [Setting the scene origin](clean-point-cloud.md#setting-the-scene-origin).

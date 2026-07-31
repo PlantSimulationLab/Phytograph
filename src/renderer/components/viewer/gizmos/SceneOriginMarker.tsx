@@ -1,6 +1,9 @@
 import { useRef, useMemo, useState, useEffect } from 'react';
 import { useThree, useFrame, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { worldPerPixel } from '../../../lib/screenScale';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
@@ -10,9 +13,20 @@ import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 // a CONSTANT on-screen size — so it reads as a clean UI overlay at any zoom
 // instead of a giant sphere up close / an invisible dot far away.
 //
-// The red/white stripe is a single line-loop with per-vertex colors alternating
-// around the circle (no dashed-line distance bookkeeping needed, so it stays
-// crisp under the per-frame rescale).
+// Every line is a LineSegments2 (three's instanced-quad thick lines), NOT a
+// plain lineLoop/lineSegments: `LineBasicMaterial.linewidth` is silently
+// clamped to 1px by every WebGL implementation we ship on, and a 1px marker
+// disappears into a dense point cloud. LineMaterial's `linewidth` is real, and
+// with the default `worldUnits: false` it is in CSS pixels — which composes
+// exactly right with the constant-screen-size group scale below (both the
+// radius and the stroke are specified in pixels). The catch is `resolution`:
+// LineMaterial expands the quads in clip space, so it must be told the drawing
+// buffer size or the lines render at the wrong thickness (and stretch on
+// resize) — kept in sync in useFrame.
+//
+// The red/white stripe is per-segment instance colors around the circle (no
+// dashed-line distance bookkeeping needed, so it stays crisp under the
+// per-frame rescale).
 //
 // The marker is also a PICK TARGET: an invisible sphere inside the billboard
 // group (so it inherits the constant-size scale) turns a click into `onSelect`,
@@ -25,6 +39,12 @@ import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
 // Target on-screen radius of the ring, in pixels.
 const PIXEL_RADIUS = 12;
+// Stroke widths, in CSS pixels (LineMaterial with worldUnits: false). Chosen so
+// the marker stays legible on top of a dense cloud without growing in extent —
+// this is thickness only; PIXEL_RADIUS still owns the overall size.
+const RING_WIDTH = 2.25;
+const CROSS_WIDTH = 1.5;
+const HALO_WIDTH = 1.75;
 // Pick target: an ANNULUS around the ring, not a disc. The origin defaults to
 // the scene center, which is usually dead-center in the viewport, so a filled
 // hit target would steal the clicks that select whatever is under it. Leaving
@@ -49,8 +69,11 @@ export function SceneOriginMarker({
   const { camera, size, gl } = useThree();
   const [hovered, setHovered] = useState(false);
 
-  // Unit-radius ring with alternating red/white vertex colors (the group scale
-  // sets the world size that projects to PIXEL_RADIUS).
+  // Unit-radius ring with alternating red/white stripes (the group scale sets
+  // the world size that projects to PIXEL_RADIUS). LineSegmentsGeometry wants
+  // an explicit start/end pair per segment, and `setColors` likewise wants a
+  // colour per endpoint, so the circle is emitted as discrete segments rather
+  // than a loop.
   const ringGeom = useMemo(() => {
     const stripes = 12;            // number of red/white alternations around the ring
     const perStripe = 8;           // segments per stripe (higher = smoother arcs)
@@ -59,15 +82,18 @@ export function SceneOriginMarker({
     const col: number[] = [];
     const red = new THREE.Color('#ef4444');
     const white = new THREE.Color('#f8fafc');
-    for (let i = 0; i <= segments; i++) {
+    const at = (i: number) => {
       const a = (i / segments) * Math.PI * 2;
-      pos.push(Math.cos(a), Math.sin(a), 0);
+      return [Math.cos(a), Math.sin(a), 0];
+    };
+    for (let i = 0; i < segments; i++) {
+      pos.push(...at(i), ...at(i + 1));
       const c = Math.floor(i / perStripe) % 2 === 0 ? red : white;
-      col.push(c.r, c.g, c.b);
+      col.push(c.r, c.g, c.b, c.r, c.g, c.b);
     }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    const g = new LineSegmentsGeometry();
+    g.setPositions(pos);
+    g.setColors(col);
     return g;
   }, []);
 
@@ -75,40 +101,40 @@ export function SceneOriginMarker({
   const crossGeom = useMemo(() => {
     const gap = 0.35; // inner gap (unit-radius fraction)
     const ext = 1.3;  // outer extent
-    const pts = [
+    const g = new LineSegmentsGeometry();
+    g.setPositions([
       gap, 0, 0, ext, 0, 0,
       -gap, 0, 0, -ext, 0, 0,
       0, gap, 0, 0, ext, 0,
       0, -gap, 0, 0, -ext, 0,
-    ];
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    ]);
     return g;
   }, []);
 
   // Plain circle used for the hover/selection halo (drawn at a larger radius via
-  // the group scale on its own mesh).
+  // its own scale).
   const haloGeom = useMemo(() => {
     const segments = 64;
-    const pts: number[] = [];
-    for (let i = 0; i <= segments; i++) {
-      const a = (i / segments) * Math.PI * 2;
-      pts.push(Math.cos(a), Math.sin(a), 0);
+    const pos: number[] = [];
+    for (let i = 0; i < segments; i++) {
+      const a0 = (i / segments) * Math.PI * 2;
+      const a1 = ((i + 1) / segments) * Math.PI * 2;
+      pos.push(Math.cos(a0), Math.sin(a0), 0, Math.cos(a1), Math.sin(a1), 0);
     }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    const g = new LineSegmentsGeometry();
+    g.setPositions(pos);
     return g;
   }, []);
 
   const ringMat = useMemo(() => {
-    const m = new THREE.LineBasicMaterial({ vertexColors: true });
+    const m = new LineMaterial({ vertexColors: true, linewidth: RING_WIDTH });
     m.depthTest = false;
     m.depthWrite = false;
     m.transparent = true;
     return m;
   }, []);
   const crossMat = useMemo(() => {
-    const m = new THREE.LineBasicMaterial({ color: '#e5e7eb' });
+    const m = new LineMaterial({ color: 0xe5e7eb, linewidth: CROSS_WIDTH });
     m.depthTest = false;
     m.depthWrite = false;
     m.transparent = true;
@@ -116,12 +142,26 @@ export function SceneOriginMarker({
     return m;
   }, []);
   const haloMat = useMemo(() => {
-    const m = new THREE.LineBasicMaterial({ color: '#f59e0b' });
+    const m = new LineMaterial({ color: 0xf59e0b, linewidth: HALO_WIDTH });
     m.depthTest = false;
     m.depthWrite = false;
     m.transparent = true;
     return m;
   }, []);
+
+  // LineMaterial needs the drawing-buffer size to expand its quads correctly.
+  useEffect(() => {
+    const w = size.width * gl.getPixelRatio();
+    const h = size.height * gl.getPixelRatio();
+    for (const m of [ringMat, crossMat, haloMat]) m.resolution.set(w, h);
+  }, [size.width, size.height, gl, ringMat, crossMat, haloMat]);
+
+  // Free the GPU buffers these own — unlike the shared r3f-managed primitives,
+  // nothing else disposes an imperatively-constructed geometry/material.
+  useEffect(() => () => {
+    for (const g of [ringGeom, crossGeom, haloGeom]) g.dispose();
+    for (const m of [ringMat, crossMat, haloMat]) m.dispose();
+  }, [ringGeom, crossGeom, haloGeom, ringMat, crossMat, haloMat]);
 
   const worldPos = useRef(new THREE.Vector3()).current;
   useFrame(() => {
@@ -166,21 +206,26 @@ export function SceneOriginMarker({
 
   const halo = selected || hovered;
 
+  // LineSegments2 isn't in r3f's catalogue, so each line is built imperatively
+  // and mounted via <primitive>. `computeLineDistances` is only needed for
+  // dashing, which we don't use.
+  const ringLine = useMemo(() => new LineSegments2(ringGeom, ringMat), [ringGeom, ringMat]);
+  const crossLine = useMemo(() => new LineSegments2(crossGeom, crossMat), [crossGeom, crossMat]);
+  const haloLine = useMemo(() => {
+    const l = new LineSegments2(haloGeom, haloMat);
+    l.scale.setScalar(1.45);
+    return l;
+  }, [haloGeom, haloMat]);
+  haloMat.opacity = selected ? 0.95 : 0.5;
+
   return (
     // UI overlay, not content — see lib/sceneOverlay.ts.
     <group {...SCENE_OVERLAY} ref={groupRef} position={position} renderOrder={10000}>
-      <lineLoop geometry={ringGeom} material={ringMat} />
-      <lineSegments geometry={crossGeom} material={crossMat} />
-      {halo && (
-        // Amber halo: solid once selected, faint on hover — the only cue that
-        // the marker is grabbable / currently owns the gizmo.
-        <lineLoop
-          geometry={haloGeom}
-          material={haloMat}
-          scale={1.45}
-          material-opacity={selected ? 0.95 : 0.5}
-        />
-      )}
+      <primitive object={ringLine} />
+      <primitive object={crossLine} />
+      {/* Amber halo: solid once selected, faint on hover — the only cue that
+          the marker is grabbable / currently owns the gizmo. */}
+      {halo && <primitive object={haloLine} />}
       {interactive && (
         <mesh
           onClick={handleClick}
