@@ -211,8 +211,9 @@ new **"… (segment)"** cloud is added to the scene holding the cropped-out
 points. No points are lost. It works with all three shapes — **Box**,
 **Rect**, and **Polygon**.
 
-The new cloud is added in a distinct colour so it's easy to tell apart;
-recolour or rename it from the scan list like any other scan. It's handy
+The new cloud inherits the colour of the scan it came from, so the two halves
+read as one family in the scan list — tell them apart by the **"… (segment)"**
+name. Recolour or rename it from the scan list like any other scan. It's handy
 for separating a plant from its ground, or splitting one scan into named
 regions without re-importing.
 
@@ -232,8 +233,9 @@ will **not** bring them back.
 
 Tick **Keep original cloud** to crop non-destructively. The source scan stays
 in the scene untouched (just hidden, so the viewport looks the same as a
-normal crop) and the kept points are added as a new **"… (cropped)"** cloud in
-its own colour. Click the eye icon next to the original to show it again.
+normal crop) and the kept points are added as a new **"… (cropped)"** cloud,
+which inherits the source scan's colour. Click the eye icon next to the
+original to show it again.
 
 Because nothing is destroyed, a retained crop **is** undoable — one
 <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> removes the new cloud and leaves the original

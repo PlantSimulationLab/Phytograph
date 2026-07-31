@@ -8,6 +8,14 @@ import { zoomLimits, clampDollyToSurface } from '../../../lib/cameraScale';
 // View direction type
 export type ViewDirection = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso';
 
+// How long the scene must stay empty before the auto-frame latch re-arms.
+// Multi-cloud rebuilds (a crop applying across several selected scans) pass
+// through frames with nothing visible; anything shorter than this is treated as
+// such a gap rather than a cleared scene. Generous enough to span a slow
+// backend round-trip between two clouds, short enough that a real Clear All
+// followed by an immediate import still re-frames.
+const EMPTY_SCENE_REARM_MS = 1000;
+
 // Camera controller
 export function CameraController({
   bounds,
@@ -486,11 +494,36 @@ export function CameraController({
   // plain latch would then never correct it. So we re-frame exactly once more,
   // when the robust box first becomes available.
   const framedRobustRef = useRef(false);
+  // Re-arming is DEFERRED, because "no content this render" does not mean the
+  // scene was cleared. Multi-cloud operations rebuild their clouds one at a
+  // time (crop applies per selected scan, hiding the source before its
+  // replacement mounts, with a setTimeout(0) yield between iterations), so
+  // React commits real frames in which every scan is hidden. Re-arming
+  // immediately made the NEXT cloud to appear look like a first load, so the
+  // camera re-framed once per cloud produced — the view visibly jumping around
+  // as a crop applied. Only a scene that STAYS empty (File → New, Clear All,
+  // deleting the last cloud) should re-arm.
+  const rearmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (rearmTimerRef.current !== null) clearTimeout(rearmTimerRef.current);
+  }, []);
   useEffect(() => {
     if (!hasContent) {
-      hasFramedContentRef.current = false;  // re-arm for the next load
-      framedRobustRef.current = false;
+      // Wait out the transient gap; a genuine clear leaves this to fire.
+      if (rearmTimerRef.current === null) {
+        rearmTimerRef.current = setTimeout(() => {
+          rearmTimerRef.current = null;
+          hasFramedContentRef.current = false;
+          framedRobustRef.current = false;
+        }, EMPTY_SCENE_REARM_MS);
+      }
       return;
+    }
+    // Content came back before the timer fired — this was a rebuild, not a
+    // clear. Cancel the re-arm so the existing framing is kept.
+    if (rearmTimerRef.current !== null) {
+      clearTimeout(rearmTimerRef.current);
+      rearmTimerRef.current = null;
     }
     const haveRobust = !!(bounds.robustExtent && bounds.contentCenter);
     // Already framed, and either we used the robust box or there is none to

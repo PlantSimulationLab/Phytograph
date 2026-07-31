@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { useThree, useFrame } from '@react-three/fiber';
+import { useThree } from '@react-three/fiber';
 import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
 import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForRange, buildCategoricalGradientStops } from '../../../lib/classification';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
-import { getPotreeManager, OctreeRequestManager } from '../potreeManager';
+import { getPotreeManager, OctreeRequestManager, registerOctreeForFrame } from '../potreeManager';
 import { applyOctreePose } from './octreePose';
 
 // =====================================================================
@@ -238,7 +238,7 @@ export function OctreePointCloud({
   // crop preview is active would drop the ClipBox.
   const [materialVersion, setMaterialVersion] = useState(0);
   const manager = getPotreeManager();
-  const { gl, camera, scene } = useThree();
+  const { scene } = useThree();
 
   // Keep the latest onOctreeReady in a ref so the load effect (keyed on
   // cacheId) doesn't re-run when the parent passes a new callback identity.
@@ -753,54 +753,79 @@ export function OctreePointCloud({
     (octree as any).maxLevel = cropPreviewActive ? CROP_PREVIEW_MAX_LEVEL : Infinity;
   }, [octree, cropPreviewActive]);
 
-  // Per-frame LOD update. Potree decides which nodes to fetch / drop
-  // based on the camera's view of the octree's bounding boxes. Also
-  // keeps per-tile sceneNode.material in sync with the cloud's current
-  // material — tiles loaded between material-effect runs get their
-  // ref synced here on the next frame.
-  useFrame(() => {
-    if (!octree) return;
-    // When the crop clip box makes this cloud empty (it left the points, or a
-    // keep-outside box swallowed them), skip potree's LOD update — an under-
-    // filled point budget otherwise makes it stream the whole region (ultra-lag
-    // on large clouds). Hide the cloud while empty; restore on the next frame
-    // the box overlaps again.
-    const cropEmpty = !!clipBox && cropClipsEverything(clipBox, data.bounds, translation ?? { x: 0, y: 0, z: 0 });
-    if (cropEmpty !== cropHiddenRef.current) {
-      cropHiddenRef.current = cropEmpty;
-      const cacheId = data.octree?.cacheId;
-      if (cacheId) ((window as any).__octreeCropHidden ??= {})[cacheId] = cropEmpty;
-    }
-    if (cropEmpty) {
-      if (octree.visible) octree.visible = false;
-      return;
-    }
-    if (!octree.visible) octree.visible = true;
-    manager.updatePointClouds([octree], camera, gl);
-    const cur = octree.material;
-    const visible = (octree as any).visibleNodes;
-    if (Array.isArray(visible)) {
-      // Notify the parent the first time geometry is actually present, so it
-      // can force the one-shot recompile remount (mount-into-gradient-mode fix).
-      if (!firstTilesFiredRef.current && visible.length > 0) {
-        firstTilesFiredRef.current = true;
-        onFirstTilesReady?.();
-      }
-      const scalarActive =
-        colorMode === 'scalar' && !!selectedScalarField &&
-        !!data.octree?.attributeRanges?.[selectedScalarField];
-      for (const node of visible) {
-        const sn = (node as any).sceneNode;
-        if (sn && sn.material !== cur) sn.material = cur;
-        // Re-apply the scalar→intensity buffer swap to tiles that streamed
-        // in since the last material effect. Cheap and idempotent (a
-        // reference compare short-circuits already-swapped geometries).
-        if (scalarActive && sn?.geometry) {
-          swapScalarIntoIntensity(sn.geometry, selectedScalarField!);
-        }
-      }
-    }
+  // Per-frame LOD work. The potree update itself is NOT driven here — the point
+  // budget and node LRU are global to the shared manager, so one cloud updating
+  // alone claims the whole budget and evicts the other clouds' nodes (see
+  // potreeManager). Instead we register this octree's skip test and its
+  // post-update sync with the registry, and a single useFrame in the viewer
+  // updates every registered cloud in one call.
+  //
+  // The hooks close over props that change on most renders (clipBox, colorMode,
+  // …), so they read through a ref — the registration itself stays keyed on the
+  // octree alone and doesn't churn every render.
+  const frameStateRef = useRef({
+    clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
   });
+  frameStateRef.current = {
+    clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
+  };
+
+  useEffect(() => {
+    if (!octree) return;
+    return registerOctreeForFrame({
+      octree,
+      // When the crop clip box makes this cloud empty (it left the points, or a
+      // keep-outside box swallowed them), skip potree's LOD update — an under-
+      // filled point budget otherwise makes it stream the whole region (ultra-lag
+      // on large clouds). Hide the cloud while empty; restore on the next frame
+      // the box overlaps again.
+      shouldSkip: () => {
+        const { clipBox: cb, data: d, translation: t } = frameStateRef.current;
+        const cropEmpty = !!cb && cropClipsEverything(cb, d.bounds, t ?? { x: 0, y: 0, z: 0 });
+        if (cropEmpty !== cropHiddenRef.current) {
+          cropHiddenRef.current = cropEmpty;
+          const cacheId = d.octree?.cacheId;
+          if (cacheId) ((window as any).__octreeCropHidden ??= {})[cacheId] = cropEmpty;
+        }
+        if (cropEmpty) {
+          if (octree.visible) octree.visible = false;
+          return true;
+        }
+        if (!octree.visible) octree.visible = true;
+        return false;
+      },
+      // Keeps per-tile sceneNode.material in sync with the cloud's current
+      // material — tiles loaded between material-effect runs get their ref
+      // synced here on the next frame.
+      afterUpdate: () => {
+        const {
+          data: d, colorMode: cm, selectedScalarField: field,
+          onFirstTilesReady: onReady,
+        } = frameStateRef.current;
+        const cur = octree.material;
+        const visible = (octree as any).visibleNodes;
+        if (!Array.isArray(visible)) return;
+        // Notify the parent the first time geometry is actually present, so it
+        // can force the one-shot recompile remount (mount-into-gradient-mode fix).
+        if (!firstTilesFiredRef.current && visible.length > 0) {
+          firstTilesFiredRef.current = true;
+          onReady?.();
+        }
+        const scalarActive =
+          cm === 'scalar' && !!field && !!d.octree?.attributeRanges?.[field];
+        for (const node of visible) {
+          const sn = (node as any).sceneNode;
+          if (sn && sn.material !== cur) sn.material = cur;
+          // Re-apply the scalar→intensity buffer swap to tiles that streamed
+          // in since the last material effect. Cheap and idempotent (a
+          // reference compare short-circuits already-swapped geometries).
+          if (scalarActive && sn?.geometry) {
+            swapScalarIntoIntensity(sn.geometry, field!);
+          }
+        }
+      },
+    });
+  }, [octree]);
 
   // Scene attach/detach is handled in the loader effect above. This
   // component returns null because the cloud lives directly on the scene

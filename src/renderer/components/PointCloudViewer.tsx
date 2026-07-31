@@ -125,6 +125,8 @@ import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { MissOctree } from './viewer/renderers/MissOctree';
+import { PotreeFrameDriver } from './viewer/renderers/PotreeFrameDriver';
+import { CropCornerMarker } from './viewer/gizmos/CropCornerMarker';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
 import { JFAOutline, OutlineSelect } from './viewer/outline/JFAOutline';
@@ -1556,9 +1558,16 @@ export default function PointCloudViewer({
   // GPU can't cull occluded points during preview and overdraw goes quadratic
   // with on-screen point density — concentrating the crop box pins the frame
   // rate to single digits on a large cloud. Fewer points ⇒ proportionally fewer
-  // fragment invocations. The budget is global (shared potree manager), which is
-  // fine: crop is a modal, single-cloud-focused mode. Apply re-converts at full
-  // resolution, so the reduced preview detail never reaches the saved cloud.
+  // fragment invocations. Apply re-converts at full resolution, so the reduced
+  // preview detail never reaches the saved cloud.
+  //
+  // The budget is global to the shared potree manager and is spent across ALL
+  // visible clouds in one pass (PotreeFrameDriver), so this caps total on-screen
+  // points during preview no matter how many scans are selected — which is the
+  // quantity the overdraw cost actually tracks. Crop is emphatically not a
+  // single-cloud mode (it applies to every selected scan); an earlier version
+  // assumed it was and let each cloud claim this budget independently, which
+  // multiplied resident points by the cloud count and thrashed the node LRU.
   const cropPreviewActive = editMode === 'crop' || isApplyingCrop;
   useEffect(() => {
     const budget = cropPreviewActive ? CROP_PREVIEW_POINT_BUDGET : DEFAULT_POINT_BUDGET;
@@ -2682,9 +2691,11 @@ export default function PointCloudViewer({
     const derivedCounts: number[] = [];
     // Number of new "(segment)" clouds added this apply — drives the toast.
     let segmentedCount = 0;
-    // Distinct color for the new segment cloud so it's separable from the
-    // source in the scene (mustard, matching the brand highlight palette).
-    const SEGMENT_COLOR = '#f59e0b';
+    // Note: derived clouds (segment / retained crop) inherit their SOURCE
+    // scan's color rather than taking a new palette entry — a crop output is
+    // the same scan's points, and the scene list reads better when the family
+    // shares a swatch. They're told apart by their "(segment)"/"(cropped)"
+    // label, not by colour.
 
     const finishUp = () => {
       if (touchedCloudIds.length > 0) {
@@ -2879,11 +2890,15 @@ export default function PointCloudViewer({
               }
               const newId = crypto.randomUUID();
               // Read from the ref, not the closure-captured `scans`: clouds
-              // added earlier in THIS loop must count toward name/color
-              // allocation, or a multi-scan crop hands every child the same
-              // label and swatch. Collisions are checked against DISPLAY names
-              // (scan.label), which is what the scene list actually shows.
+              // added earlier in THIS loop must count toward name allocation,
+              // or a multi-scan crop hands every child the same label.
+              // Collisions are checked against DISPLAY names (scan.label),
+              // which is what the scene list actually shows.
               const live = scansRef.current;
+              // Applying a crop must not move the camera: the user framed the
+              // region they're cropping and expects to keep looking at it.
+              // Registered BEFORE the add so the frame-on-add effect skips it.
+              suppressFrameCloudIdsRef.current.add(newId);
               onAddScan({
                 id: newId,
                 label: derivedScanName(
@@ -2892,7 +2907,11 @@ export default function PointCloudViewer({
                   'cropped',
                 ),
                 visible: true,
-                color: allocateScanColor(new Set(live.map(s => s.color))),
+                // Inherit the source scan's color. A cropped cloud is the same
+                // scan's points, so a fresh palette entry would break the visual
+                // link to its parent (and in a multi-scan crop, hand each child a
+                // colour belonging to a DIFFERENT source scan).
+                color: cloud.color,
                 data,
                 // A crop is a subset of the SAME scanner's returns, so the beam
                 // apex is still valid — keep the origin (deep-cloned so the two
@@ -2933,14 +2952,16 @@ export default function PointCloudViewer({
               }
               onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, src.fileName ?? cloud.id, undefined, { diverged: true }));
               if (result.leftover) {
+                const segmentId = crypto.randomUUID();
+                suppressFrameCloudIdsRef.current.add(segmentId);
                 onAddCloud({
-                  id: crypto.randomUUID(),
+                  id: segmentId,
                   data: buildSessionOctreeData(
                     result.leftover, octreeInfo, `${src.fileName ?? cloud.id} (segment)`,
                     result.leftover.session_id, { diverged: true },
                   ),
                   visible: true,
-                  color: SEGMENT_COLOR,
+                  color: cloud.color,
                 });
                 segmentedCount++;
               }
@@ -3072,11 +3093,13 @@ export default function PointCloudViewer({
       if (segment && onAddCloud) {
         const inverseData = buildSubset(cropInvert);
         if (inverseData) {
+          const segmentId = crypto.randomUUID();
+          suppressFrameCloudIdsRef.current.add(segmentId);
           onAddCloud({
-            id: crypto.randomUUID(),
+            id: segmentId,
             data: { ...inverseData, fileName: `${src.fileName ?? cloud.id} (segment)` },
             visible: true,
-            color: SEGMENT_COLOR,
+            color: cloud.color,
           });
           segmentedCount++;
         }
@@ -3099,6 +3122,7 @@ export default function PointCloudViewer({
         }
         const newId = crypto.randomUUID();
         const live = cloudsRef.current;
+        suppressFrameCloudIdsRef.current.add(newId);
         onAddScan({
           id: newId,
           label: derivedScanName(
@@ -3107,7 +3131,8 @@ export default function PointCloudViewer({
             'cropped',
           ),
           visible: true,
-          color: allocateScanColor(new Set(live.map(c => c.color))),
+          // Inherit the source scan's color — see the octree path above.
+          color: cloud.color,
           data: keptData,
           params: cloud.params
             ? { ...cloud.params, origin: { ...cloud.params.origin } }
@@ -13294,6 +13319,10 @@ export default function PointCloudViewer({
         {/* Camera capture for GIF generation */}
         <CameraCapture cameraRef={mainCameraRef} />
 
+        {/* The one per-frame potree LOD/budget update for every octree in the
+            scene. Must stay a single instance — see PotreeFrameDriver. */}
+        <PotreeFrameDriver />
+
         {/* Render all visible clouds.
             We pass the source `cloud.data` (or the resample preview when
             active) straight to <PointCloud> without copying. Crop preview
@@ -14228,19 +14257,15 @@ export default function PointCloudViewer({
           const first = boxDrawFirstCornerRef.current;
           const cursor = boxDrawCursorRef.current;
           const markerColor = cropInvert ? '#ef4444' : '#22c55e';
-          const markerSize = Math.max(
-            (combinedBounds.max.x - combinedBounds.min.x),
-            (combinedBounds.max.y - combinedBounds.min.y),
-          ) * 0.01 || 0.1;
           return (
             // first/cursor are stored in WORLD coords; this preview group renders
             // them in DISPLAY space via the −displayOffset transform.
             <group {...SCENE_OVERLAY} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
               {first && (
-                <mesh position={[first.x, first.y, combinedBounds.min.z]}>
-                  <sphereGeometry args={[markerSize, 16, 16]} />
-                  <meshBasicMaterial color={markerColor} />
-                </mesh>
+                <CropCornerMarker
+                  position={[first.x, first.y, combinedBounds.min.z]}
+                  color={markerColor}
+                />
               )}
               {first && cursor && (
                 <CropBox

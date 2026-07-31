@@ -131,6 +131,18 @@ Heavy data never crosses IPC as JSON:
   `fs.createReadStream` → a web `ReadableStream` rather than reading it into a
   Buffer — no main-process memory spike, no event-loop block. `metadata.json`
   stays a small buffered read (it needs an inf/nan→null rewrite).
+    - **One frame update for every octree.** potree's point budget and its node
+      LRU are both global to the shared `Potree` manager, so
+      `updatePointClouds` must be called **once per frame with the full array
+      of visible octrees** — never once per cloud. Cloud components
+      (`OctreePointCloud`, `MissOctree`) register with the frame registry in
+      `viewer/potreeManager.ts`; the single `PotreeFrameDriver` inside the
+      Canvas drives them together. Updating clouds individually makes each one
+      claim the entire budget (N× the intended resident points) and makes each
+      call's `lru.freeMemory()` evict whichever cloud was touched least
+      recently — so with several scans loaded the clouds visibly flicker in and
+      out every frame, worst during crop preview where the reduced budget puts
+      demand above the `2 × pointBudget` eviction threshold.
 - **Binary point-cloud frames.** Point-cloud import and compute responses use a
   packed binary layout (`PHX1` for import via `_pack_pointcloud_response`; `PHB1`
   for array responses) decoded straight into `Float32Array` views, bypassing
