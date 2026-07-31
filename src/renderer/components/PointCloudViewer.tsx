@@ -138,6 +138,8 @@ import { QSM3D, type QSMColorMode } from './viewer/renderers/QSM3D';
 import { QsmIcon } from './icons/QsmIcon';
 import { SkeletonPoints } from './viewer/renderers/SkeletonPoints';
 import { CameraController } from './viewer/scene/CameraController';
+import { DepthProbe } from './viewer/scene/DepthProbe';
+import { SCENE_OVERLAY } from '../lib/sceneOverlay';
 import { GroundGrid } from './viewer/scene/GroundGrid';
 import { ViewportAxesGizmo } from './viewer/scene/ViewportAxesGizmo';
 import { SceneBackground } from './viewer/scene/SceneBackground';
@@ -1745,6 +1747,16 @@ export default function PointCloudViewer({
     return (id ? octreeRegistryRef.current.get(id) : null) ?? null;
   };
 
+  // Depth probe for zoom-to-cursor. DepthProbe (inside the Canvas, where the
+  // live camera/renderer are) fills this in; CameraController calls it on every
+  // wheel notch to find the surface under the pointer. Null while the probe is
+  // unmounted, in which case zoom falls back to a plain view-ray dolly.
+  const depthProbeRef = useRef<((x: number, y: number) => THREE.Vector3 | null) | null>(null);
+  const pickDepth = useCallback(
+    (x: number, y: number) => depthProbeRef.current?.(x, y) ?? null,
+    [],
+  );
+
   // Undo/redo history now lives in the scene store (scene.commit / scene.undo /
   // scene.redo / scene.boundary). isUndoingRef still guards capture during replay
   // so applying a store undo doesn't re-record a new transaction.
@@ -1898,8 +1910,21 @@ export default function PointCloudViewer({
       const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
       for (const cloud of clouds) {
         if (!newIdSet.has(cloud.id) || !cloud.data.bounds) continue;
-        min.min(cloud.data.bounds.min);
-        max.max(cloud.data.bounds.max);
+        // Frame the CONTENT: prefer the backend's percentile box over the raw
+        // AABB. A few stray returns hundreds of metres out (multipath, birds, a
+        // mis-registered scan) otherwise set the framing, which parks the camera
+        // far enough back to hold THEM and aims it at the empty space between
+        // them — the imported cloud lands as an off-axis speck, and no amount of
+        // zooming or panning recovers it because a dolly moves along the view
+        // ray and never corrects a lateral offset.
+        const rb = cloud.data.robustBounds;
+        if (rb) {
+          min.min(new THREE.Vector3(rb.min[0], rb.min[1], rb.min[2]));
+          max.max(new THREE.Vector3(rb.max[0], rb.max[1], rb.max[2]));
+        } else {
+          min.min(cloud.data.bounds.min);
+          max.max(cloud.data.bounds.max);
+        }
       }
       if (isFinite(min.x)) {
         const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
@@ -4199,7 +4224,52 @@ export default function PointCloudViewer({
     }
     if (!isFinite(groundZ)) groundZ = min.z;
 
-    return { min, max, center, size, groundZ };
+    // Outlier-resistant scene extent for the camera's zoom limits: the LARGEST
+    // per-cloud robust extent (a percentile span the backend computed at import
+    // — see `_robust_extent`). Largest, not summed: it stands for "how big is
+    // the thing I am looking at", and with several clouds loaded the biggest one
+    // sets the scale at which the view has to work.
+    //
+    // Clouds only. Meshes, skeletons and scanner markers carry no percentile of
+    // their own, and folding their raw AABBs in would re-admit exactly the
+    // outlier inflation this exists to reject. When no cloud has one (mesh-only
+    // scene, renderer-side synthetic data, a cloud from before this existed) the
+    // result is undefined and the camera falls back to the raw `size`.
+    let robustExtent: [number, number, number] | undefined;
+    for (const cloud of clouds) {
+      if (!cloud.visible) continue;
+      const e = cloud.data.robustExtent;
+      if (!e) continue;
+      robustExtent = robustExtent
+        ? [Math.max(robustExtent[0], e[0]), Math.max(robustExtent[1], e[1]), Math.max(robustExtent[2], e[2])]
+        : [e[0], e[1], e[2]];
+    }
+
+    // Where the CONTENT actually is, for the camera's zoom fallback anchor. The
+    // union of the per-cloud percentile boxes (plus each cloud's live
+    // translation, so it tracks a Translate drag like groundZ does). With far
+    // outliers this is nowhere near `center`, which is the midpoint of the
+    // inflated raw box and can sit in empty space among the strays.
+    let cMin: [number, number, number] | undefined;
+    let cMax: [number, number, number] | undefined;
+    for (const cloud of clouds) {
+      if (!cloud.visible) continue;
+      const rb = cloud.data.robustBounds;
+      if (!rb) continue;
+      const t = getEditState(cloud.id).translation;
+      const tv = [t.x, t.y, t.z];
+      const lo = rb.min.map((v, i) => v + tv[i]) as [number, number, number];
+      const hi = rb.max.map((v, i) => v + tv[i]) as [number, number, number];
+      cMin = cMin ? (cMin.map((v, i) => Math.min(v, lo[i])) as [number, number, number]) : lo;
+      cMax = cMax ? (cMax.map((v, i) => Math.max(v, hi[i])) as [number, number, number]) : hi;
+    }
+    // Falls back to the raw centre when no cloud carries a percentile box
+    // (mesh-only scene, renderer-side synthetic data, an older cloud).
+    const contentCenter: [number, number, number] = cMin && cMax
+      ? [(cMin[0] + cMax[0]) / 2, (cMin[1] + cMax[1]) / 2, (cMin[2] + cMax[2]) / 2]
+      : [center.x, center.y, center.z];
+
+    return { min, max, center, size, groundZ, robustExtent, contentCenter };
   }, [clouds, meshes, skeletons, qsms, scansWithParams, meshPositions, meshScales, meshRotations, getEditState]);
 
   // Open the add-scan popup with sensible defaults: next label and current
@@ -5369,6 +5439,11 @@ export default function PointCloudViewer({
 
   // Get display data for a cloud (with edits applied)
   // showCropPreview: when true, apply crop filtering for preview (used in crop mode)
+  //
+  // Segment mode never culls: both halves survive the apply, so hiding one of
+  // them in the preview is misleading (and pointless work). The region outline
+  // alone shows where the split will fall — see the `cropSegment` guards on the
+  // predicate below, in getDisplayIndices, and on the octree clipBox.
   const getDisplayData = useCallback((cloud: PointCloudEntry, showCropPreview: boolean = false): PointCloudData => {
     const editState = getEditState(cloud.id);
     const data = cloud.data;
@@ -5393,6 +5468,7 @@ export default function PointCloudViewer({
     const hasTranslation = tx !== 0 || ty !== 0 || tz !== 0;
     const cropIsNoOp =
       !showCropPreview ||
+      cropSegment ||
       (cropMode === 'box' && cropBox && !cropInvert &&
         data.bounds.min.x + tx >= cropBox.min.x && data.bounds.max.x + tx <= cropBox.max.x &&
         data.bounds.min.y + ty >= cropBox.min.y && data.bounds.max.y + ty <= cropBox.max.y &&
@@ -5459,7 +5535,7 @@ export default function PointCloudViewer({
     // get its world position, then run the predicate. We still write the
     // kept points back in local coordinates — the translate pass below
     // bakes translation into the rendered geometry.
-    const cropPredicate = showCropPreview ? buildCropPredicate() : null;
+    const cropPredicate = showCropPreview && !cropSegment ? buildCropPredicate() : null;
     if (cropPredicate) {
       const tx = editState.translation.x;
       const ty = editState.translation.y;
@@ -5574,7 +5650,7 @@ export default function PointCloudViewer({
     }
 
     return { positions, colors, intensities, pointCount, bounds: { min, max, center, size }, fileName: data.fileName };
-  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox]);
+  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox, cropSegment]);
 
   // BAKE a cloud's pending Transformation-tool draft (translation AND rotation)
   // into its real geometry, then reset the local (render-only) draft to identity.
@@ -5986,7 +6062,9 @@ export default function PointCloudViewer({
     const ty = editState.translation.y;
     const tz = editState.translation.z;
 
-    const cropPredicate = showCropPreview ? buildCropPredicate() : null;
+    // Segment mode keeps the whole cloud visible — only the region outline is
+    // drawn, since neither half is discarded by the apply.
+    const cropPredicate = showCropPreview && !cropSegment ? buildCropPredicate() : null;
 
     // Fast path: nothing filters anything.
     if (!erased.size && !cropPredicate) return null;
@@ -6021,7 +6099,7 @@ export default function PointCloudViewer({
     let w = 0;
     for (let i = 0; i < data.pointCount; i++) if (keep(i)) out[w++] = i;
     return out;
-  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox]);
+  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox, cropSegment]);
 
   // Helper to download a file
   const downloadFile = useCallback((content: string | Blob, fileName: string) => {
@@ -13339,9 +13417,11 @@ export default function PointCloudViewer({
                   // is in the selection. Polygon mode falls back to the
                   // overlay-only preview (the gizmo-screen polygon is
                   // already drawn); the apply still runs full polygon
-                  // through the backend.
+                  // through the backend. Segment mode never clips — both
+                  // halves survive, so the whole cloud stays visible and
+                  // only the CropBox wireframe marks the split.
                   clipBox={
-                    showCropPreview && cropMode === 'box' && cropBox
+                    showCropPreview && !cropSegment && cropMode === 'box' && cropBox
                       ? {
                           min: new THREE.Vector3(cropBox.min.x, cropBox.min.y, cropBox.min.z),
                           max: new THREE.Vector3(cropBox.max.x, cropBox.max.y, cropBox.max.z),
@@ -13861,6 +13941,22 @@ export default function PointCloudViewer({
           // pivot the Transform tool rotates about, whether or not the marker is
           // currently drawn (hiding it is about clutter, not behavior).
           orbitPivot={sceneOrigin}
+          // Zoom flies toward whatever is under the pointer, not toward the
+          // orbit target — see the zoom-to-cursor effect in CameraController.
+          pickDepth={pickDepth}
+        />
+
+        {/* Publishes the depth probe the zoom-to-cursor path uses. Probes every
+            VISIBLE octree cloud (miss/sky octrees are never registered, so a ray
+            into the sky can't anchor zoom on a point projected ~1 km out) plus
+            mesh geometry via the BVH raycast. */}
+        <DepthProbe
+          probeRef={depthProbeRef}
+          octrees={clouds.flatMap((c) => {
+            if (!c.visible || !c.data.octree) return [];
+            const oct = octreeRegistryRef.current.get(c.id);
+            return oct ? [oct] : [];
+          })}
         />
 
         {/* Snapshots the camera/size for the polygon- and rect-crop in/out
@@ -14139,7 +14235,7 @@ export default function PointCloudViewer({
           return (
             // first/cursor are stored in WORLD coords; this preview group renders
             // them in DISPLAY space via the −displayOffset transform.
-            <group position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+            <group {...SCENE_OVERLAY} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
               {first && (
                 <mesh position={[first.x, first.y, combinedBounds.min.z]}>
                   <sphereGeometry args={[markerSize, 16, 16]} />
@@ -14275,7 +14371,7 @@ export default function PointCloudViewer({
             at the cursor (the cross-section of the view-extruded erase volume),
             red while actively erasing. Shown only while erase mode is active. */}
         {editMode === 'erase' && eraseActive && firstSelectedCloud?.data.octree && eraseBrushMatrix && (
-          <group matrixAutoUpdate={false} matrix={eraseBrushMatrix}>
+          <group {...SCENE_OVERLAY} matrixAutoUpdate={false} matrix={eraseBrushMatrix}>
             {/* Unit plane (the box matrix already scales X/Y to the square). A
                 thin box edge reads as a square ring facing the camera. */}
             <lineSegments>
@@ -16692,6 +16788,10 @@ export default function PointCloudViewer({
               const c = selectionCenter();
               if (c) setSceneOriginOverride(c);
             }}
+            // Explicit "take me to the pivot". Framing no longer bends toward the
+            // origin implicitly (zoom-to-cursor makes the whole scene reachable),
+            // so getting there is a command the user invokes.
+            onFrameOrigin={() => (window as any).__frameSceneOrigin?.()}
             onReset={() => { setSceneOriginOverride(null); setOriginPlaceMode(false); }}
             onClose={() => { setShowSceneOriginPanel(false); setOriginPlaceMode(false); }}
           />

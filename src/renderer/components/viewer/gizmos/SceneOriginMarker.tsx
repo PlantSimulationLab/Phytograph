@@ -2,6 +2,7 @@ import { useRef, useMemo, useState, useEffect } from 'react';
 import { useThree, useFrame, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { worldPerPixel } from '../../../lib/screenScale';
+import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
 // Blender-style 3D-cursor marker for the scene origin: a camera-facing ring
 // striped red/white with a fine crosshair through the center. Drawn on top
@@ -166,7 +167,8 @@ export function SceneOriginMarker({
   const halo = selected || hovered;
 
   return (
-    <group ref={groupRef} position={position} renderOrder={10000}>
+    // UI overlay, not content — see lib/sceneOverlay.ts.
+    <group {...SCENE_OVERLAY} ref={groupRef} position={position} renderOrder={10000}>
       <lineLoop geometry={ringGeom} material={ringMat} />
       <lineSegments geometry={crossGeom} material={crossMat} />
       {halo && (

@@ -3064,6 +3064,16 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // a bird, a scanner artefact) sinks it arbitrarily far. null when the backend
   // could not compute one (empty/degenerate cloud) — fall back to the min then.
   ground_z?: number | null;
+  // Outlier-resistant per-axis extent [dx, dy, dz] (see `_robust_extent` in
+  // main.py). The viewer scales the camera's zoom limits from it so a handful of
+  // stray returns hundreds of metres out can't make the scene un-navigable.
+  // Cannot be derived from `tight_bounds`: rejecting the tail needs the points,
+  // which only exist backend-side at import. null on a degenerate cloud.
+  robust_extent?: [number, number, number] | null;
+  // The percentile box `robust_extent` was measured across. Its CENTRE is the
+  // content's centre — unlike `tight_bounds`', which far outliers drag into
+  // empty space. null on a degenerate cloud.
+  robust_bounds?: { min: [number, number, number]; max: [number, number, number] } | null;
 }
 
 // The wire shape of the backend `scan_params` dict. Canonically defined in

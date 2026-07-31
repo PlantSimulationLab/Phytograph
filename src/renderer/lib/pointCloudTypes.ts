@@ -140,6 +140,22 @@ export interface PointCloudData {
   // Undefined on clouds that predate this or were built renderer-side; callers
   // fall back to `bounds.min.z`.
   groundZ?: number;
+  // Outlier-resistant per-axis extent [dx, dy, dz], computed by the backend at
+  // import from a 1st-99th percentile span per axis (world units, same frame as
+  // `bounds`).
+  //
+  // Prefer this over `bounds.size` for anything that means "how big is this
+  // scene" — the camera's zoom limits, in particular. The raw size is set by the
+  // most extreme point on each axis, so a few stray returns hundreds of metres
+  // out inflate it by orders of magnitude and produce zoom limits calibrated to
+  // empty space instead of to the data. Undefined on clouds that predate this or
+  // were built renderer-side; callers fall back to `bounds.size`.
+  robustExtent?: [number, number, number];
+  // The percentile box `robustExtent` was measured across (world coords, same
+  // frame as `bounds`). Prefer its centre over `bounds.center` for "where is the
+  // content" — the raw centre is the midpoint of the outlier-inflated box, which
+  // on a scene with far strays lands in empty space nowhere near the data.
+  robustBounds?: { min: [number, number, number]; max: [number, number, number] };
 }
 
 // Point cloud entry with metadata. Internal alias matching the data-bearing

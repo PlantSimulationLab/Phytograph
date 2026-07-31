@@ -77,14 +77,15 @@ Origin**) moves the pivot point, like CloudCompare's. It's a scene control
 rather than an analysis tool, so it sits with the view controls. The origin
 is the **rotation center** for both the Transform tool and the camera: a
 left-drag in the viewport turns the whole view about it, so panning no longer
-changes what you rotate around. It is also what the camera looks at by
-default, so zooming converges on it (until you pan, after which zoom follows
-your view). Moving the origin does **not** move the camera — the view stays
-exactly where it is, it just pivots somewhere else.
+changes what you rotate around. Zoom is *not* tied to it — the scroll wheel
+flies toward whatever is under your cursor — so the origin only decides what
+you circle. Moving the origin does **not** move the camera: the view stays
+exactly where it is, it just pivots somewhere else. Use **Zoom to origin** in
+the panel if you do want the camera to go there.
 
 With no placement of your own, the origin sits laterally at the center of the
 loaded scene but vertically at its **base** — on the ground rather than
-halfway up — which is usually the point you want to circle and zoom toward.
+halfway up — which is usually the point you want to circle.
 
 That ground level is measured robustly, so a handful of erroneous returns
 below the terrain (multipath, birds, scanner artefacts) will not drag it
@@ -130,7 +131,8 @@ applies to every scan you have selected.
 3. Shape the region (see below).
 4. Click **Apply** at the bottom of the panel. A **Cropping…** indicator
    appears while the crop is processed, and the removed points stay
-   hidden the whole time. Click the **×** in the panel header to dismiss
+   hidden the whole time (in **Segment** mode nothing is hidden, since
+   both halves are kept). Click the **×** in the panel header to dismiss
    without applying.
 
 When more than one scan is selected, the panel shows "Applies to N scans"
@@ -213,6 +215,13 @@ The new cloud is added in a distinct colour so it's easy to tell apart;
 recolour or rename it from the scan list like any other scan. It's handy
 for separating a plant from its ground, or splitting one scan into named
 regions without re-importing.
+
+!!! note "The whole cloud stays visible in Segment mode"
+    **Keep Inside** and **Keep Outside** hide the points they are about to
+    discard, so the preview shows you what will survive. **Segment** discards
+    nothing — both halves become clouds — so it leaves the entire cloud on
+    screen and draws only the region outline to show where the split will
+    fall. Switching between the modes turns that culling on and off.
 
 ### Keep original cloud
 

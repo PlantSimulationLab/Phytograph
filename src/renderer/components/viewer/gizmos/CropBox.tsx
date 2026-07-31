@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import * as THREE from 'three';
+import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
 // World-space crop box visualization. Purely a wireframe + faint fill — the
 // box is resized/repositioned through the numeric Center/Dimensions inputs in
@@ -18,7 +19,10 @@ export function CropBox({ min, max, keepInside }: CropBoxProps) {
   const boxColor = keepInside ? '#22c55e' : '#ef4444';
 
   return (
-    <group>
+    // A UI overlay, not content: the faint fill below is a full-volume
+    // raycastable box, and without this marker zoom-to-cursor anchors the camera
+    // on its front face instead of on the points inside the crop region.
+    <group {...SCENE_OVERLAY}>
       <lineSegments position={center}>
         <edgesGeometry args={[new THREE.BoxGeometry(dimensions.x, dimensions.y, dimensions.z)]} />
         <lineBasicMaterial color={boxColor} linewidth={2} transparent opacity={0.8} />

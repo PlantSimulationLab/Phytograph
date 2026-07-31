@@ -81,11 +81,22 @@ test('the camera looks at the real ground, so the scene is not framed around the
   const state = await page.evaluate(() => (window as any).__getCameraState());
   const targetZWorld = state.target[2] + state.displayOffset[2];
 
-  // The look-at follows the ground anchor. If it had used the raw minimum it
-  // would sit ~12 m below the terrain, pointing the camera at empty space under
-  // the scene with the actual content pushed to the top of the viewport.
+  // The look-at sits within the REAL content, not down among the noise. Framing
+  // aims at the content's centre (not at ground level — zoom-to-cursor, rather
+  // than a look-at pinned to the origin, is what makes the scene reachable), so
+  // the bar is that it is above the noise and inside the cloud's real Z range.
+  // Had framing used the raw minimum it would sit ~12 m below the terrain,
+  // pointing the camera at empty space under the scene with the actual content
+  // pushed to the top of the viewport.
   expect(targetZWorld).toBeGreaterThan(NOISE_Z + 1);
-  expect(targetZWorld).toBeLessThanOrEqual(REAL_GROUND_MAX + 0.2);
+
+  // Inside the real cloud: at or below its top, and not far above the terrain.
+  const maxZ = state.bounds.max[2];
+  expect(targetZWorld).toBeLessThanOrEqual(maxZ + 0.2);
+  expect(targetZWorld).toBeGreaterThanOrEqual(REAL_GROUND_MAX - 0.2);
+
+  // And the noise really is far below what we framed — otherwise this is vacuous.
+  expect(targetZWorld - NOISE_Z).toBeGreaterThan(10);
 });
 
 test('a cloud with no sub-terrain noise is unaffected', async () => {

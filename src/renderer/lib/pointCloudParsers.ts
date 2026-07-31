@@ -858,6 +858,21 @@ export function buildPointCloudFromOctree(
     groundZ: typeof (meta as OctreeMetadata & { ground_z?: number | null }).ground_z === 'number'
       ? (meta as OctreeMetadata & { ground_z: number }).ground_z
       : undefined,
+    // Same provenance as groundZ: present on the cloud-session create response,
+    // undefined for plain OctreeMetadata callers (who fall back to the raw size).
+    robustExtent: (() => {
+      const e = (meta as OctreeMetadata & { robust_extent?: unknown }).robust_extent;
+      return Array.isArray(e) && e.length === 3 && e.every((v) => typeof v === 'number' && isFinite(v))
+        ? ([e[0], e[1], e[2]] as [number, number, number])
+        : undefined;
+    })(),
+    robustBounds: (() => {
+      const b = (meta as OctreeMetadata & { robust_bounds?: unknown }).robust_bounds as
+        | { min?: unknown; max?: unknown } | null | undefined;
+      const ok = (v: unknown): v is [number, number, number] =>
+        Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && isFinite(n));
+      return b && ok(b.min) && ok(b.max) ? { min: b.min, max: b.max } : undefined;
+    })(),
     fileName,
     octree: {
       cacheId: meta.cache_id,

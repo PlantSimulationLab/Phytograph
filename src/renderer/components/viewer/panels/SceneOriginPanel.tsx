@@ -1,4 +1,4 @@
-import { Crosshair, X, Target, MousePointerClick, Eye, EyeOff } from 'lucide-react';
+import { Crosshair, X, Target, MousePointerClick, Eye, EyeOff, Focus } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 
 type Axis = 'x' | 'y' | 'z';
@@ -28,6 +28,8 @@ interface SceneOriginPanelProps {
   onTogglePlaceMode: () => void;
   onToggleShowMarker: () => void;
   onMoveToSelection: () => void;
+  /** Re-centre the camera on the origin, keeping the current viewing angle. */
+  onFrameOrigin: () => void;
   onReset: () => void;
   onClose: () => void;
 }
@@ -36,7 +38,8 @@ const AXES: Axis[] = ['x', 'y', 'z'];
 
 export function SceneOriginPanel({
   origin, isCustom, placeMode, showMarker, markerSuppressed = false, canMoveToSelection,
-  onCoordChange, onTogglePlaceMode, onToggleShowMarker, onMoveToSelection, onReset, onClose,
+  onCoordChange, onTogglePlaceMode, onToggleShowMarker, onMoveToSelection, onFrameOrigin,
+  onReset, onClose,
 }: SceneOriginPanelProps) {
   const markerDrawn = showMarker && !markerSuppressed;
   return (
@@ -113,6 +116,16 @@ export function SceneOriginPanel({
       >
         <Target className="w-3 h-3" />
         Center on selection
+      </button>
+
+      <button
+        onClick={onFrameOrigin}
+        data-testid="scene-origin-frame"
+        title="Move the camera to look at the origin, keeping the current viewing angle"
+        className="w-full mt-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[11px] flex items-center justify-center gap-1.5"
+      >
+        <Focus className="w-3 h-3" />
+        Zoom to origin
       </button>
 
       <label

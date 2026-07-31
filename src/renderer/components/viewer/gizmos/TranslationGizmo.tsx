@@ -2,6 +2,7 @@ import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { useThree, useFrame, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { worldPerPixel } from '../../../lib/screenScale';
+import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
 // Translation gizmo arrow. Drawn around the LOCAL origin — the parent group
 // carries the world position, so the whole glyph can be rescaled as a unit.
@@ -63,7 +64,8 @@ function TranslationArrow({ axis, size, onDragStart, onHover }: TranslationArrow
   const currentColor = hovered ? hoverColor : color;
 
   return (
-    <group>
+    // UI overlay, not content — see lib/sceneOverlay.ts.
+    <group {...SCENE_OVERLAY}>
       <mesh position={shaftPosition} rotation={rotation} onPointerOver={handlePointerOver} onPointerOut={handlePointerOut} onPointerDown={handlePointerDown}>
         <cylinderGeometry args={[shaftRadius, shaftRadius, shaftLength, 12]} />
         <meshBasicMaterial color={currentColor} />
@@ -202,7 +204,9 @@ export function TranslationGizmo({ center, size, onTranslate, onDragStart, onDra
   }, [onDragEnd]);
 
   return (
-    <group>
+    // UI overlay, not content — see lib/sceneOverlay.ts. On the root group so
+    // every arrow, drag handler and the centre marker inherit it.
+    <group {...SCENE_OVERLAY}>
       {/* Everything visual hangs off one group positioned at the center, so the
           constant-size scaler can scale the whole glyph about that point. */}
       <group ref={visualRef} position={center}>

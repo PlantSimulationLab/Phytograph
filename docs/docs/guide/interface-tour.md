@@ -91,8 +91,9 @@ The main interactive area. Camera controls:
 Orbiting turns the view about the **scene origin** (the red-and-white ring
 marker, which starts laterally centered on your loaded content at ground
 level, and can be dragged elsewhere) — panning does not move that pivot.
-Zooming also converges on the origin until you pan. See
-[Viewer navigation](../workflows/viewer-navigation.md#camera).
+Zooming is independent of the origin: the scroll wheel flies the camera
+toward whatever is under your mouse cursor, so anything you can see, you can
+zoom to. See [Viewer navigation](../workflows/viewer-navigation.md#camera).
 
 The 1m × 1m grid on the world XY plane gives you a fixed sense of
 scale; lighter lines every 10 cm let you eyeball details.

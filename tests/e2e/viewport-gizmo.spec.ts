@@ -125,6 +125,14 @@ test('clicking the gizmo +X head (real mouse) reorients the camera', async () =>
       && typeof (window as any).__gizmoHeadScreenPos === 'function',
     { timeout: 20_000 },
   );
+  // Wait for the initial auto-frame to have RUN, not merely for the hooks to
+  // exist. The auto-frame is deferred a tick (see CameraController), so an
+  // __orientToAxis call issued before it lands is silently overwritten by the
+  // iso reframe and the camera ends up nowhere near the axis we asked for.
+  await page.waitForFunction(
+    () => (window as any).__getCameraState()?.framedContent === true,
+    { timeout: 20_000 },
+  );
 
   const dist = (p: number[], t: number[]) =>
     Math.hypot(p[0] - t[0], p[1] - t[1], p[2] - t[2]);

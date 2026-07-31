@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
+import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
 // Erase brush component for erasing points
 export interface EraseBrushProps {
@@ -155,7 +156,8 @@ export function EraseBrush({ brushSize, brushPosition, isErasing, cloudData, clo
   const brushColor = isErasing ? '#ef4444' : '#f97316';
 
   return (
-    <group position={brushPosition}>
+    // UI overlay, not content — see lib/sceneOverlay.ts.
+    <group {...SCENE_OVERLAY} position={brushPosition}>
       {/* Translucent fill showing the erase volume */}
       <mesh>
         <sphereGeometry args={[brushSize, 32, 32]} />

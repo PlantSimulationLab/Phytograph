@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.58.0"
+BACKEND_VERSION = "0.59.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -15102,6 +15102,63 @@ def _robust_ground_z(positions: "np.ndarray") -> "Optional[float]":
     return float(np.percentile(z, _GROUND_PERCENTILE))
 
 
+# Central span used for the robust extent: the 1st-99th percentile per axis, so
+# up to 1% of points at each end of every axis can be arbitrarily far out without
+# moving the answer.
+_EXTENT_LOW_PERCENTILE = 1.0
+_EXTENT_HIGH_PERCENTILE = 99.0
+
+
+def _robust_aabb(positions: "np.ndarray") -> "Optional[Dict[str, List[float]]]":
+    """Outlier-resistant bounding box {"min": [...], "max": [...]}, or None.
+
+    The percentile box the extent is measured across. The renderer needs the box
+    and not just the span: with far outliers the RAW box centre sits out in empty
+    space among the strays, so a camera that converges on it stalls hundreds of
+    metres short of the data. This gives the centre of the actual content.
+    """
+    if positions is None or len(positions) == 0 or positions.shape[1] < 3:
+        return None
+    finite = positions[np.isfinite(positions[:, :3]).all(axis=1), :3]
+    if finite.shape[0] == 0:
+        return None
+    lo = np.percentile(finite, _EXTENT_LOW_PERCENTILE, axis=0)
+    hi = np.percentile(finite, _EXTENT_HIGH_PERCENTILE, axis=0)
+    return {
+        "min": [float(lo[i]) for i in range(3)],
+        # A degenerate axis (all points identical) must not produce max < min.
+        "max": [float(max(hi[i], lo[i])) for i in range(3)],
+    }
+
+
+def _robust_extent(positions: "np.ndarray") -> "Optional[List[float]]":
+    """Outlier-resistant per-axis extent [dx, dy, dz], or None if unknown.
+
+    The raw bounding box is set by its most extreme point on each axis, so a
+    handful of stray returns — multipath, birds, a mis-registered scan, a sky
+    point projected a kilometre out — inflate it by orders of magnitude. The
+    renderer scales the camera's zoom limits from the scene size, and limits
+    derived from an inflated box are wrong for the content the user is actually
+    looking at: you cannot get close enough to inspect anything, and the far
+    limit sits out where the real data is a dot.
+
+    A per-axis percentile span fixes it where the AABB cannot. Note this is NOT
+    something the renderer can derive from min/max alone — discarding the tail
+    requires the points, which only exist here at import. Same cost profile as
+    `_robust_ground_z`: one `np.percentile` over an array already in RAM.
+
+    Returns None for an empty/degenerate cloud so callers keep their own fallback.
+    """
+    if positions is None or len(positions) == 0 or positions.shape[1] < 3:
+        return None
+    finite = positions[np.isfinite(positions[:, :3]).all(axis=1), :3]
+    if finite.shape[0] == 0:
+        return None
+    lo = np.percentile(finite, _EXTENT_LOW_PERCENTILE, axis=0)
+    hi = np.percentile(finite, _EXTENT_HIGH_PERCENTILE, axis=0)
+    return [float(max(0.0, hi[i] - lo[i])) for i in range(3)]
+
+
 def _autodetect_misses(
     positions: "np.ndarray",
     extras: Dict[str, "np.ndarray"],
@@ -20389,6 +20446,10 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             _gz_mask = np.asarray(extras["is_miss"]) == 0
         _gz_src = positions[_gz_mask] if _gz_mask is not None else positions
         ground_z = _robust_ground_z(_gz_src)
+        # Same hits-only source: misses sit ~1 km out along the beam and would
+        # dominate a percentile span exactly as they do the raw bounding box.
+        robust_extent = _robust_extent(_gz_src)
+        robust_bounds = _robust_aabb(_gz_src)
 
         sess = CloudSession(
             session_id=session_id,
@@ -20530,6 +20591,15 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             # it for the default scene origin's height and the ground grid instead
             # of tight_bounds.min.z, which a single stray low point can sink.
             "ground_z": ground_z,
+            # Outlier-resistant per-axis extent (see `_robust_extent`). The
+            # renderer scales the camera's zoom limits from it, so a few stray
+            # returns hundreds of metres out can't make the scene un-navigable.
+            # Cannot be derived renderer-side: rejecting the tail needs the points.
+            "robust_extent": robust_extent,
+            # The percentile box those spans were measured across. The renderer
+            # needs its CENTRE: with far outliers the raw box centre sits out in
+            # empty space, so a camera converging on it stalls short of the data.
+            "robust_bounds": robust_bounds,
             **miss_info, **meta}
 
 

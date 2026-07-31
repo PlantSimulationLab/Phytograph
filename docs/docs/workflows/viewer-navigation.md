@@ -18,15 +18,34 @@ the lowest points, so stray returns beneath the terrain do not drag it down.
 Panning moves the view without moving that pivot, so you can pan off to one
 side and still turn about the same point.
 
-The origin is also what the camera looks at, so **zooming moves you toward
-the origin** rather than toward the middle of the bounding box. Once you
-pan, zoom follows your new view instead — pan is how you say "I want to
-look over here". **Reset View** re-centers on the origin again.
+**Zoom goes wherever you point.** The scroll wheel moves the camera toward
+whatever surface is under the mouse cursor, so the point you are pointing at
+stays put on screen while everything else expands around it. Point at a
+branch on the far side of a plot and scroll, and you fly to that branch —
+no panning required. Zoom stops just short of the surface you are
+approaching rather than passing through it, so you can push in as close as
+you like. This works the same while a tool is open — the crop box, the erase
+brush and the transform gizmos are drawn on top of your data but are never
+what the camera flies to.
+
+Because zoom follows the cursor, the origin is only the point you *orbit*
+around — it does not pull the zoom toward itself. Anywhere you can see, you
+can zoom to.
+
+How close and how far you can zoom is scaled to the size of your scene, so
+the same scroll gesture feels right on a single potted plant and on a
+400-metre plot. A few stray far-away points do not affect it.
+
+**Panning is zoom-dependent.** The closer you are, the finer a drag moves the
+view — a drag always covers about the same fraction of the screen, so panning
+tracks your cursor whether you are surveying a whole plot or inspecting a
+single leaf.
 
 To orbit around something else, move the origin: click its ring and drag
 the arrow gizmo, or use **Set Scene Origin** to click a point on a surface
 ("Pick in viewport"), type coordinates, or snap it to the selected cloud.
-That is the fastest way to start examining a region of a large scan. See
+**Zoom to origin** in that panel flies the camera to the origin without
+changing your viewing angle — handy after typing in coordinates. See
 [Setting the scene origin](clean-point-cloud.md#setting-the-scene-origin).
 
 ### Zoom to Selection vs. Reset Camera
