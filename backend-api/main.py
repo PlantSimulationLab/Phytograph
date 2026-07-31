@@ -22524,7 +22524,8 @@ def _robust_cloud_diagonal(points: np.ndarray) -> float:
     return diag if np.isfinite(diag) else 0.0
 
 
-def _icp_quality(rmse: float, diagonal: float) -> tuple[Optional[float], Optional[str]]:
+def _icp_quality(rmse: float, diagonal: float,
+                 fitness: Optional[float] = None) -> tuple[Optional[float], Optional[str]]:
     """Return (rmse_ratio, quality_warning) for an ICP result.
 
     ICP's `fitness` is the fraction of source points that found a correspondence
@@ -22539,12 +22540,29 @@ def _icp_quality(rmse: float, diagonal: float) -> tuple[Optional[float], Optiona
     The 2% threshold is deliberately permissive: a good tree-scan registration
     lands well under 1% of extent, so this only fires on fits that are visibly
     off rather than second-guessing normal results.
+
+    ZERO CORRESPONDENCES is the opposite trap and must be checked FIRST. When
+    ICP matches nothing at all, Open3D reports fitness=0.0 *and* inlier_rmse=0.0
+    — an RMSE of zero, which reads as a flawless fit. Both of the guards above
+    then wave it through: `run_icp_until_convergence`'s plateau test sees
+    0.0 - 0.0 = 0.0 improvement and prints "converged", and a 0.0 ratio is far
+    under the 2% threshold, so nothing warns. The user is shown a perfect
+    alignment for a registration that completely failed. `rmse == 0` is only
+    physically meaningful when points coincide exactly, so pair it with
+    fitness to tell "identical clouds" apart from "no overlap found".
     """
     if not diagonal or not np.isfinite(diagonal) or diagonal <= 0:
         return None, None
     ratio = float(rmse) / float(diagonal)
     if not np.isfinite(ratio):
         return None, None
+    if fitness is not None and float(fitness) <= 0.0:
+        return ratio, (
+            "Alignment failed: no overlapping points were found between the two "
+            "clouds, so the result is meaningless despite reporting zero error. "
+            "Give them a rough manual pre-alignment (or check they cover the "
+            "same area) and try again."
+        )
     warning = None
     if ratio > 0.02:
         warning = (
@@ -22735,7 +22753,7 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
             progress(1.0, "Done")
 
         rmse_ratio, quality_warning = _icp_quality(
-            float(reg_result.inlier_rmse), diagonal)
+            float(reg_result.inlier_rmse), diagonal, float(reg_result.fitness))
 
         return dict(
             success=True,
@@ -22897,7 +22915,7 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
             progress(1.0, "Done")
 
         rmse_ratio, quality_warning = _icp_quality(
-            float(reg_result.inlier_rmse), diagonal)
+            float(reg_result.inlier_rmse), diagonal, float(reg_result.fitness))
 
         return dict(
             success=True,
@@ -23053,7 +23071,7 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
             progress(1.0, "Done")
 
         rmse_ratio, quality_warning = _icp_quality(
-            float(reg_result.inlier_rmse), diagonal)
+            float(reg_result.inlier_rmse), diagonal, float(reg_result.fitness))
 
         return dict(
             success=True,
