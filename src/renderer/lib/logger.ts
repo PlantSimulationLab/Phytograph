@@ -14,10 +14,55 @@ import type { LogLevel } from '../../shared/ipc';
 
 function forward(level: LogLevel, args: unknown[]): void {
   try {
-    window.electronAPI?.logs?.write(level, args.map(formatArg).join(' '));
+    window.electronAPI?.logs?.write(level, formatArgs(args));
   } catch {
     // Never let logging break the app.
   }
+}
+
+/**
+ * Render console arguments the way DevTools would, applying printf-style
+ * substitution when the first argument is a format string.
+ *
+ * React logs errors as ('%s\n\n%s', message, componentStack). Joining the raw
+ * args dropped the substitutions on the floor, so the log recorded a literal
+ * "%s" and threw away the two things a bug report actually needs: the error
+ * message and the component stack. Substituting first keeps them.
+ *
+ * Supports the specifiers React and console consumers actually emit (%s %d %i
+ * %f %o %O %j %c); %% is a literal percent. Unmatched specifiers are left as-is
+ * and surplus args are appended, so nothing is ever silently lost.
+ */
+function formatArgs(args: unknown[]): string {
+  const [first, ...rest] = args;
+  if (typeof first !== 'string' || !/%[sdifoOjc%]/.test(first)) {
+    return args.map(formatArg).join(' ');
+  }
+
+  let i = 0;
+  const out = first.replace(/%([sdifoOjc%])/g, (match, spec: string) => {
+    if (spec === '%') return '%';
+    if (i >= rest.length) return match; // more specifiers than args — keep literal
+    const arg = rest[i++];
+    switch (spec) {
+      case 'd':
+      case 'i': {
+        const n = Number(arg);
+        return Number.isNaN(n) ? 'NaN' : String(Math.trunc(n));
+      }
+      case 'f': {
+        const n = Number(arg);
+        return Number.isNaN(n) ? 'NaN' : String(n);
+      }
+      case 'c':
+        return ''; // CSS styling directive — no textual output
+      default:
+        return formatArg(arg);
+    }
+  });
+
+  const leftover = rest.slice(i);
+  return leftover.length ? `${out} ${leftover.map(formatArg).join(' ')}` : out;
 }
 
 function formatArg(a: unknown): string {

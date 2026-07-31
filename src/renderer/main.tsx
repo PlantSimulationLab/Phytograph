@@ -47,12 +47,33 @@ function Root() {
   );
 }
 
+// The React root, cached across re-executions of this module.
+//
+// Vite's HMR falls back to re-running the entry module when a change can't be
+// hot-patched. Without this cache that re-run called createRoot() a SECOND time
+// on the same #root, leaving two React roots fighting over one DOM subtree: one
+// tears down nodes the other still holds refs to, the viewer's WebGL context is
+// orphaned, and every subsequent render throws ("An error occurred in the <div>
+// component"). The window goes black while the process stays alive — so there's
+// no crash dialog and no minidump, just a dead-looking app. Reusing the existing
+// root turns that into an ordinary re-render.
+declare global {
+  interface Window {
+    __phytographRoot?: ReactDOM.Root;
+  }
+}
+
 // Resolve the backend URL from the main process before first render, so every
 // getBackendUrl() caller sees the per-instance dynamic port. The fetch is a
 // single fast IPC round-trip; if it fails (e.g. running outside Electron) the
 // cached default is used and we render anyway.
 function mount() {
-  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+  const root =
+    window.__phytographRoot ??
+    (window.__phytographRoot = ReactDOM.createRoot(
+      document.getElementById("root") as HTMLElement,
+    ));
+  root.render(
     <React.StrictMode>
       <Root />
     </React.StrictMode>,
