@@ -22,11 +22,16 @@ interface StitchDialogProps {
   onClose: () => void;
   clouds: StitchCloudOption[];
   initialSelectedIds?: Set<string>;
-  onStitch: (ids: string[]) => void;
+  // `opts` is an object so future stitch options stay additive.
+  onStitch: (ids: string[], opts: { retainOriginals: boolean }) => void;
 }
 
 export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onStitch }: StitchDialogProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // When true the input clouds survive the merge (hidden) instead of being
+  // removed from the scene. Deliberately not persisted — resets on every open,
+  // so the destructive default is always an explicit choice.
+  const [retainOriginals, setRetainOriginals] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -35,6 +40,7 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
       for (const id of initialSelectedIds) if (clouds.some(c => c.id === id)) seed.add(id);
     }
     setSelected(seed);
+    setRetainOriginals(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
@@ -89,6 +95,24 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
             emptyMessage="No point clouds available to stitch."
           />
 
+          <label
+            data-testid="stitch-retain-originals"
+            className="flex items-center gap-2 select-none cursor-pointer"
+          >
+            <input
+              type="checkbox"
+              checked={retainOriginals}
+              onChange={(e) => setRetainOriginals(e.target.checked)}
+              className="w-3.5 h-3.5 rounded bg-neutral-700 border-neutral-600 accent-green-600"
+            />
+            <span className="flex flex-col">
+              <span className="text-xs text-neutral-300">Keep original clouds</span>
+              <span className="text-[10px] text-neutral-500">
+                Sources stay in the scene (hidden) instead of being removed.
+              </span>
+            </span>
+          </label>
+
           {originsLost > 0 && (
             <div
               data-testid="stitch-origin-warning"
@@ -105,7 +129,10 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
                 <div className="text-amber-300/80">
                   Origin-dependent analyses (<strong>Backfill Misses</strong> overlay,{' '}
                   <strong>Helios triangulation</strong>, <strong>Leaf Area Density</strong>) will be
-                  unavailable on the merged cloud. Register the clouds first if you need them.
+                  unavailable on the merged cloud.{' '}
+                  {retainOriginals
+                    ? 'The originals keep their origins, so you can still run those on them.'
+                    : 'Register the clouds first, or keep the originals, if you need them.'}
                 </div>
               </div>
             </div>
@@ -118,7 +145,7 @@ export function StitchDialog({ isOpen, onClose, clouds, initialSelectedIds, onSt
           </span>
           <button
             data-testid="stitch-run"
-            onClick={() => { onStitch(Array.from(selected)); onClose(); }}
+            onClick={() => { onStitch(Array.from(selected), { retainOriginals }); onClose(); }}
             disabled={!canStitch}
             className={`px-4 py-1.5 rounded text-xs font-medium transition-colors ${
               canStitch ? 'bg-green-600 hover:bg-green-500 text-white' : 'bg-neutral-700 text-neutral-500 cursor-not-allowed'

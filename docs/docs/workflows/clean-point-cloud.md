@@ -203,11 +203,32 @@ recolour or rename it from the scan list like any other scan. It's handy
 for separating a plant from its ground, or splitting one scan into named
 regions without re-importing.
 
-Cropping is non-destructive in the sense that it's undoable
-(<kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd>). With **Keep Inside** / **Keep Outside**
-it discards the points outside the kept set — if you need them back,
-re-import the original file or use **Segment** so they're kept as a new
-cloud.
+### Keep original cloud
+
+By default a crop **replaces** the scan: the points outside the kept set are
+discarded, and because the cropped points become the new ground truth the
+apply also clears that scan's undo history — <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd>
+will **not** bring them back.
+
+Tick **Keep original cloud** to crop non-destructively. The source scan stays
+in the scene untouched (just hidden, so the viewport looks the same as a
+normal crop) and the kept points are added as a new **"… (cropped)"** cloud in
+its own colour. Click the eye icon next to the original to show it again.
+
+Because nothing is destroyed, a retained crop **is** undoable — one
+<kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> removes the new cloud and leaves the original
+exactly as it was. The new cloud also inherits the scanner origin, so
+origin-dependent analyses (**Backfill Misses**, **Helios triangulation**,
+**Leaf Area Density**) still work on it.
+
+The option is unavailable in **Segment** mode, which already keeps every point
+across its two output clouds.
+
+!!! tip "Which to use"
+    Use **Keep original cloud** when you're isolating a region for analysis
+    and may want to go back to the full scan — cropping one tree out of a
+    plot, say. Use a plain crop when you're cleaning a scan down to what you
+    actually want to keep and the discarded points are just noise.
 
 !!! note "How edits are applied (the in-memory model)"
     When you import a point cloud, Phytograph reads the file **once** and

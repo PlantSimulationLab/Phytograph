@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.57.2"
+BACKEND_VERSION = "0.58.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -2433,6 +2433,10 @@ class GroundSegmentationRequest(BaseModel):
     class_threshold: float = 0.02
     iterations: int = 500
     slope_smooth: bool = False
+    # Derive class_threshold from the settled cloth rather than the caller's
+    # value (which the UI seeds from the cloud's horizontal extent — a quantity
+    # unrelated to the ground band's thickness). See _estimate_class_threshold.
+    auto_class_threshold: bool = False
 
 
 class GroundSegmentationResponse(BaseModel):
@@ -2443,6 +2447,10 @@ class GroundSegmentationResponse(BaseModel):
     num_plant: int = 0
     num_points: int = 0
     error: Optional[str] = None
+    # The threshold actually applied, and how it was chosen ("manual" | "knee" |
+    # "tail" | "fallback"). Lets the panel show what auto mode picked.
+    class_threshold_used: Optional[float] = None
+    class_threshold_method: Optional[str] = None
 
 
 def _resolve_segmentation_points(request: GroundSegmentationRequest) -> np.ndarray:
@@ -2484,9 +2492,11 @@ async def segment_ground_points(request: GroundSegmentationRequest, http_request
             class_threshold=request.class_threshold,
             iterations=request.iterations,
             slope_smooth=request.slope_smooth,
+            auto_class_threshold=request.auto_class_threshold,
         )
         try:
-            labels = await _run_killable("ground", points, csf_params, http_request=http_request)
+            labels, gmeta = await _run_killable("ground", points, csf_params,
+                                                http_request=http_request)
         except ClientDisconnected:
             return GroundSegmentationResponse(
                 success=False,
@@ -2511,6 +2521,8 @@ async def segment_ground_points(request: GroundSegmentationRequest, http_request
             num_ground=num_ground,
             num_plant=len(labels) - num_ground,
             num_points=len(labels),
+            class_threshold_used=gmeta.get("class_threshold"),
+            class_threshold_method=gmeta.get("method"),
         )
 
     except HTTPException:
@@ -9428,6 +9440,143 @@ GROUND_CLASS_GROUND = 1
 GROUND_CLASS_PLANT = 2
 
 
+def _height_above_cloth(points: np.ndarray, cloth_nodes: np.ndarray) -> np.ndarray:
+    """Signed height of every point above CSF's settled cloth, by bilinear
+    interpolation of the cloth grid.
+
+    `cloth_nodes` is the (M, 3) x/y/z table CSF dumps to `cloth_nodes.txt`. The
+    nodes form a regular grid one cell larger than the cloud's XY bounding box.
+
+    This reproduces CSF's OWN classification exactly: `abs(height) <
+    class_threshold` matched CSF's labels on 3.6 M points (Mission1 orchard) and
+    2.6 M points (BR04 ALS forest) with zero disagreements, at both nearest- and
+    far-from-cloth extremes. Nearest-node sampling does NOT match (~0.2%
+    disagreement), so the interpolation here is load-bearing, not cosmetic.
+
+    Note CSF's test is on the ABSOLUTE height: a point far enough BELOW the
+    cloth is non-ground too (verified — 745 BR04 points sit >0.5 m under the
+    cloth and CSF rejects every one)."""
+    xs = np.unique(cloth_nodes[:, 0])
+    ys = np.unique(cloth_nodes[:, 1])
+    if len(xs) < 2 or len(ys) < 2:
+        raise ValueError("degenerate cloth grid")
+    step = xs[1] - xs[0]
+    grid = np.full((len(xs), len(ys)), np.nan, dtype=np.float64)
+    grid[np.searchsorted(xs, cloth_nodes[:, 0]),
+         np.searchsorted(ys, cloth_nodes[:, 1])] = cloth_nodes[:, 2]
+
+    fx = (points[:, 0] - xs[0]) / step
+    fy = (points[:, 1] - ys[0]) / step
+    i = np.clip(np.floor(fx).astype(np.int64), 0, len(xs) - 2)
+    j = np.clip(np.floor(fy).astype(np.int64), 0, len(ys) - 2)
+    tx = fx - i
+    ty = fy - j
+    z = (grid[i, j] * (1 - tx) * (1 - ty) + grid[i + 1, j] * tx * (1 - ty)
+         + grid[i, j + 1] * (1 - tx) * ty + grid[i + 1, j + 1] * tx * ty)
+    return points[:, 2] - z
+
+
+def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
+                              fallback: float) -> "tuple[float, dict]":
+    """Pick a CSF `class_threshold` from the settled cloth instead of from the
+    cloud's horizontal extent. Returns (threshold, meta).
+
+    WHY this exists. The extent-scaled seed (`groundSegmentDefaults.ts`,
+    `_auto_csf_params`) sets the tolerance to extent/100, but the quantity the
+    tolerance actually has to clear is the THICKNESS OF THE GROUND RETURN BAND —
+    sensor range noise plus soil micro-roughness — which is independent of how
+    wide the tile is. On the Mission1 orchard the two disagree badly: a 50 m tile
+    seeds 0.5 m, while the ground returns form a ~0.5 m thick band (measured:
+    plane-fit residuals over the flattest open 5x5 m patch span -18..+37 cm,
+    sigma ~10 cm, symmetric — noise/roughness, not topography and not a
+    vegetation tail). The 0.5 m cut therefore lands mid-band and rejects ~40 K
+    genuine ground points in coherent patches, which is what a user sees as
+    "ground labelled non-ground for no visible reason".
+
+    HOW. `height` is measured from the settled cloth, which is terrain-following,
+    so topography — including slope — is already removed. Verified: shearing the
+    Mission1 cloud to 15 deg and 30 deg of slope changes the estimate by <0.02 m.
+    What remains is a ground mode near zero plus whatever vegetation sits above
+    it. The threshold belongs where the ground mode's falloff meets the
+    vegetation background, i.e. the first local minimum above the mode.
+
+    A valley-DEPTH test (e.g. "density < 1% of peak") does not generalise: it
+    works on an orchard, whose crowns float clear of the ground, but a forested
+    slope has continuous understory and never gets that empty — BR04's density
+    plateaus at ~10% of peak from 1 m to 8 m and never drops below it. A turning
+    point still exists there, so this looks for a local minimum, not a depth.
+
+    Deliberately NOT done: mirroring the below-cloth side to infer the band's
+    upper half-width. The cloth is a lower ENVELOPE, not the band's centre, so
+    that sample is censored — it yields 0.38 m on Mission1, worse than the
+    extent-scaled default it replaces."""
+    h = np.asarray(height, dtype=np.float64)
+    h = h[np.isfinite(h)]
+    meta: dict = {"method": "fallback", "class_threshold": float(fallback)}
+    if len(h) < 500:
+        return float(fallback), meta
+
+    # Bin width from the cloth's own scale; the result is insensitive to it
+    # (0.98-1.02 m on Mission1 across a 7.5x sweep of cloth_resolution).
+    binw = float(np.clip(cloth_resolution / 10.0, 0.002, 0.10))
+    lo = max(float(h.min()), -20.0 * binw - 2.0 * cloth_resolution)
+    hi = min(float(h.max()), lo + 4000 * binw)
+    if not (hi > lo + 10 * binw):
+        return float(fallback), meta
+    counts, edges = np.histogram(h, bins=np.arange(lo, hi + binw, binw))
+    centres = edges[:-1] + binw / 2.0
+
+    # The ground mode: the cloth is fitted TO the ground, so it sits near zero.
+    # Bounding the search keeps a canopy-dominated cloud from picking a canopy
+    # mode as "ground".
+    window = max(2.0 * cloth_resolution, 0.25)
+    near = np.abs(centres) <= window
+    if not near.any():
+        return float(fallback), meta
+    peak = int(np.flatnonzero(near)[np.argmax(counts[near])])
+
+    # Mode width, measured on the upper side at half maximum.
+    half = counts[peak] / 2.0
+    hwhm = next((centres[k] - centres[peak]
+                 for k in range(peak, len(counts)) if counts[k] < half), None)
+    if hwhm is None or hwhm <= 0:
+        return float(fallback), meta
+
+    # Smooth proportionally to the mode's own width so the turning-point search
+    # is not derailed by per-bin noise, then walk up for the first local minimum.
+    nsm = int(np.clip(round(hwhm / binw), 3, 101)) | 1
+    smooth = np.convolve(counts.astype(np.float64), np.ones(nsm) / nsm, mode="same")
+    span = max(2, nsm // 2)
+    knee = None
+    for k in range(peak + span, len(smooth) - span):
+        if smooth[k] > 0.5 * smooth[peak]:
+            continue                      # still on the mode's own shoulder
+        if smooth[k] <= smooth[k - span] and smooth[k] < smooth[k + span]:
+            knee = float(centres[k])
+            meta["method"] = "knee"
+            break
+    if knee is None:
+        # Nothing above the ground: the density decays and stays down. Take the
+        # point where it has effectively reached zero.
+        tail = np.flatnonzero((centres > centres[peak]) & (smooth < 0.01 * smooth[peak]))
+        if tail.size:
+            knee = float(centres[tail[0]])
+            meta["method"] = "tail"
+    if knee is None:
+        return float(fallback), meta
+
+    # Never cut inside the ground mode itself, and stay inside the panel's range.
+    threshold = float(np.clip(max(knee, centres[peak] + hwhm), 0.02, 5.0))
+    meta.update({
+        "class_threshold": threshold,
+        "mode": float(centres[peak]),
+        "mode_hwhm": float(hwhm),
+        "bin_width": binw,
+        "smooth_bins": nsm,
+    })
+    return threshold, meta
+
+
 def segment_ground(
     points: np.ndarray,
     cloth_resolution: float = 0.05,
@@ -9436,6 +9585,8 @@ def segment_ground(
     iterations: int = 500,
     slope_smooth: bool = False,
     time_step: float = 0.65,
+    auto_class_threshold: bool = False,
+    meta: "Optional[dict]" = None,
 ) -> np.ndarray:
     """Classify each point as ground (1) or plant (2) via the Cloth Simulation
     Filter (Zhang et al. 2016).
@@ -9447,6 +9598,17 @@ def segment_ground(
 
     Returns an int array of length len(points), aligned to input order, with
     values GROUND_CLASS_GROUND / GROUND_CLASS_PLANT.
+
+    With `auto_class_threshold`, `class_threshold` is ignored and derived from
+    the settled cloth instead (see `_estimate_class_threshold`). This costs no
+    extra simulation: CSF's `class_threshold` only feeds its final
+    point-to-cloth comparison, never the cloth physics — verified by running the
+    same cloud at 0.5 and 1.0 and getting bit-identical `cloth_nodes.txt`. So the
+    cloth is settled once, the threshold is read off it, and the points are
+    classified against the same cloth CSF would have used.
+
+    Pass a dict as `meta` to receive the threshold actually applied plus the
+    estimator's diagnostics.
 
     Raises ImportError if the `CSF` extension is unavailable — the caller turns
     that into a clean error response rather than a 500.
@@ -9474,17 +9636,43 @@ def segment_ground(
     # dir so the packaged app doesn't litter the user's filesystem, then drop
     # the artifact.
     prev_cwd = os.getcwd()
+    cloth_nodes = None
     with tempfile.TemporaryDirectory() as tmp:
         try:
             os.chdir(tmp)
             csf.do_filtering(ground_idx, non_ground_idx)
+            if auto_class_threshold:
+                # Read the settled cloth before the temp dir is torn down.
+                nodes_path = os.path.join(tmp, "cloth_nodes.txt")
+                if os.path.exists(nodes_path):
+                    cloth_nodes = np.loadtxt(nodes_path)
         finally:
             os.chdir(prev_cwd)
+
+    if auto_class_threshold and cloth_nodes is not None and cloth_nodes.ndim == 2:
+        try:
+            height = _height_above_cloth(points[:, :3].astype(np.float64), cloth_nodes)
+            threshold, est = _estimate_class_threshold(
+                height, float(cloth_resolution), float(class_threshold))
+            labels = np.where(np.abs(height) < threshold,
+                              GROUND_CLASS_GROUND, GROUND_CLASS_PLANT).astype(np.int32)
+            if meta is not None:
+                meta.update(est)
+                meta["auto"] = True
+            return labels
+        except Exception as e:
+            # An unreadable/degenerate cloth must never fail the segmentation —
+            # fall through to CSF's own labels at the caller's threshold.
+            print(f"[ground] auto class_threshold failed ({e}); using {class_threshold}")
 
     labels = np.full(n, GROUND_CLASS_PLANT, dtype=np.int32)
     gi = np.fromiter(ground_idx, dtype=np.int64, count=len(ground_idx))
     if gi.size:
         labels[gi] = GROUND_CLASS_GROUND
+    if meta is not None:
+        meta.setdefault("class_threshold", float(class_threshold))
+        meta.setdefault("method", "manual")
+        meta.setdefault("auto", False)
     return labels
 
 
@@ -16203,9 +16391,9 @@ async def _run_killable(
     """Run one segmentation compute (`tool` ∈ ground|wood|trees|skeleton) in a
     KILLABLE child process and return its result.
 
-    Returns an (N,) int label array for ground/wood/trees, or — for wood and
-    skeleton — a `(labels_or_None, result_dict)` is NOT used; instead:
-      - ground/trees → np.ndarray of labels
+    Returns, by tool:
+      - trees       → np.ndarray of labels
+      - ground      → (np.ndarray labels, dict {"class_threshold": float, ...})
       - wood        → (np.ndarray labels, dict {"warnings": [...]})
       - skeleton    → dict (the SkeletonResponse fields)
 
@@ -16277,6 +16465,8 @@ async def _run_killable(
         labels = np.load(out_path)
         if tool == "wood":
             return labels, (result_dict or {"warnings": []})
+        if tool == "ground":
+            return labels, (result_dict or {})
         return labels
 
 
@@ -21314,6 +21504,8 @@ class SessionGroundSegmentRequest(BaseModel):
     class_threshold: float = 0.02
     iterations: int = 500
     slope_smooth: bool = False
+    # See GroundSegmentationRequest.auto_class_threshold.
+    auto_class_threshold: bool = False
 
 
 @app.post("/api/cloud/session/{session_id}/segment_ground")
@@ -21342,9 +21534,11 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
         class_threshold=request.class_threshold,
         iterations=request.iterations,
         slope_smooth=request.slope_smooth,
+        auto_class_threshold=request.auto_class_threshold,
     )
     try:
-        hit_labels = await _run_killable("ground", pts, csf_params, http_request=http_request)
+        hit_labels, gmeta = await _run_killable("ground", pts, csf_params,
+                                                http_request=http_request)
     except ClientDisconnected:
         raise HTTPException(status_code=499, detail="Ground segmentation was cancelled.")
     except RuntimeError as e:
@@ -21359,7 +21553,10 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     with _cloud_session_lock:
         _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
     cache_key, cache_dir, meta = _session_rebuild(sess)
-    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key,
+            "cache_dir": str(cache_dir), **meta,
+            "class_threshold_used": gmeta.get("class_threshold"),
+            "class_threshold_method": gmeta.get("method")}
 
 
 class SessionDemRequest(BaseModel):

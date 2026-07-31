@@ -14,13 +14,33 @@ in world coordinates, and you want a single combined cloud.
 2. In the dialog, check the two or more clouds to merge. (If you had clouds
    selected in the scene, they're pre-checked — you can change the choice
    here.)
-3. Click **Stitch**. The clouds are combined in the backend (a brief
+3. Optionally tick **Keep original clouds** to merge non-destructively — see
+   below.
+4. Click **Stitch**. The clouds are combined in the backend (a brief
    progress indicator shows while the merged cloud's octree is built), and a
    single new cloud replaces the originals in the scene.
 
 Stitching is reversible: a single **Undo** removes the merged cloud and
 restores the original clouds exactly as they were, so you can re-stitch with
 a different subset.
+
+### Keep original clouds
+
+By default the source clouds are **removed** from the scene when they merge.
+Tick **Keep original clouds** and they stay instead — hidden, so the viewport
+looks the same, but still listed and still fully usable. Click the eye icon
+next to one to bring it back.
+
+This is useful when you want the merged cloud for a whole-plot view while
+keeping the individual scans for per-scan analyses — the retained clouds keep
+their scanner origins, so **Backfill Misses**, **Helios triangulation**, and
+**Leaf Area Density** still run on them even though they're unavailable on the
+merge itself.
+
+!!! note "Undo with retained originals"
+    With **Keep original clouds** ticked, **Undo** removes the merged cloud but
+    leaves the originals hidden — showing and hiding clouds isn't part of the
+    undo history. Click the eye icons to bring them back.
 
 !!! note "Stitch ≠ register"
     Stitch **concatenates** the clouds' points into one cloud. Clouds
@@ -44,9 +64,11 @@ a different subset.
 
     If any cloud you're stitching carries an origin, the Stitch dialog shows a
     warning and the button reads **Stitch anyway** so the loss is a deliberate
-    choice. Run these analyses on the individual scans *before* stitching, or —
-    if the clouds are mis-aligned — **register** them with Cloud-to-cloud ICP
-    first (that preserves each scan's own origin) rather than stitching.
+    choice. You have three ways around it: tick **Keep original clouds** so the
+    sources (and their origins) survive the merge, run these analyses on the
+    individual scans *before* stitching, or — if the clouds are mis-aligned —
+    **register** them with Cloud-to-cloud ICP first (that preserves each scan's
+    own origin) rather than stitching.
 
     The underlying points, colors, intensity, and scalar attributes are all
     preserved (attributes present on only some inputs are carried through and

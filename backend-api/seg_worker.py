@@ -95,8 +95,13 @@ def run(workdir: str) -> int:
         import main
 
         if tool == "ground":
-            labels = main.segment_ground(points, **params)
+            # `meta` carries back the class_threshold actually applied (the
+            # caller may have asked for it to be auto-derived from the cloth).
+            gmeta: dict = {}
+            labels = main.segment_ground(points, meta=gmeta, **params)
             np.save(os.path.join(workdir, "output.npy"), np.asarray(labels))
+            with open(os.path.join(workdir, "result.json"), "w") as f:
+                json.dump(gmeta, f, default=_json_default)
 
         elif tool == "wood":
             refl_path = os.path.join(workdir, "reflectance.npy")

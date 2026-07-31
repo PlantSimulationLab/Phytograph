@@ -120,6 +120,8 @@ scan — its point data *and* any scan-parameter metadata — named
 editing, cropping, or deleting one never affects the other. It's handy
 for branching experiments — run two different crops or segmentations off
 the same import, or place a second scanner with the same sweep settings.
+(For a one-off non-destructive crop you don't need to duplicate first —
+tick **Keep original cloud** in the crop panel instead.)
 
 A scan can hold point data, scan parameters (origin, sweep, return mode),
 or both — see [Scans](../concepts/scans.md) for details.

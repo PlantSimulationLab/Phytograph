@@ -40,6 +40,11 @@ labels the points the cloth settles onto as ground.
       tree canopy as non-ground, whereas the seeded ~0.5 m keeps them
       separate. Nudge it up until the weeds flip to ground without the trees
       following.
+    - **Measure from the scan** — tick this to have the tolerance measured
+      from your data instead of seeded from the cloud's size, and see
+      [below](#why-ground-points-come-out-as-non-ground) for when you need it.
+      The measured value is reported when the run finishes and filled into the
+      tolerance box, so you can nudge it from there on a later run.
     - **Rigidness (1–3)** — cloth stiffness. Use **3** for flat ground,
       lower (down to **1**) for undulating or sloped terrain so the cloth can
       bend to follow the slope instead of bridging over it.
@@ -81,6 +86,36 @@ skeleton extraction / triangulation on the non-ground cloud alone.
     Clouds imported from XYZ files stream from disk as an octree. Ground
     segmentation re-reads the original file at full resolution, so the
     classification covers every point — not a downsampled subset.
+
+## Why ground points come out as non-ground
+
+The most common surprise is patches of obviously-flat ground labelled
+non-ground, sitting right next to ground points at what looks like the same
+height. Raising the **Ground tolerance** fixes it, which feels wrong when the
+terrain is visibly flat.
+
+It isn't the terrain. Ground returns don't form a thin sheet — they form a
+*band* several tens of centimetres thick, because of the scanner's range noise
+plus soil roughness. The cloth settles onto the **bottom** of that band, and the
+tolerance is measured upward from the cloth, so it has to clear the band's full
+thickness. On a real aerial orchard scan that band measured ~0.5 m thick even
+over the flattest bare patches, so a 0.5 m tolerance cut straight through the
+middle of it and rejected tens of thousands of genuine ground points — in
+patches, because the band is thicker under canopy than in the open.
+
+The seeded tolerance scales with how *wide* your scan is, which has nothing to
+do with how thick the band is. That's fine at pot scale, but the two can
+disagree badly on field-scale tiles.
+
+**Measure from the scan** removes the guesswork: it measures the band directly
+off the draped cloth and cuts where the ground returns end and vegetation
+begins. Because the measurement is taken relative to the cloth, terrain slope
+is already accounted for — it works the same on a hillside as on flat ground.
+
+If you'd rather set it by hand, look at the point where the ground stops and
+the canopy starts: a tolerance anywhere in that empty gap gives the same
+result, so aim for the middle of it rather than the smallest value that seems
+to work.
 
 ## See also
 

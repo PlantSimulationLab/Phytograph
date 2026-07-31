@@ -8,6 +8,8 @@ import { InfoHint } from '../../InfoHint';
 interface GroundSegmentPanelProps {
   clothResolution: number;
   classThreshold: number;
+  autoClassThreshold: boolean;
+  lastAutoThreshold: number | null;
   rigidness: number;
   slopeSmooth: boolean;
   splitClouds: boolean;
@@ -16,6 +18,7 @@ interface GroundSegmentPanelProps {
   onClose: () => void;
   onClothResolutionChange: (n: number) => void;
   onClassThresholdChange: (n: number) => void;
+  onAutoClassThresholdChange: (v: boolean) => void;
   onRigidnessChange: (n: number) => void;
   onSlopeSmoothChange: (v: boolean) => void;
   onSplitCloudsChange: (v: boolean) => void;
@@ -26,6 +29,8 @@ interface GroundSegmentPanelProps {
 export function GroundSegmentPanel({
   clothResolution,
   classThreshold,
+  autoClassThreshold,
+  lastAutoThreshold,
   rigidness,
   slopeSmooth,
   splitClouds,
@@ -34,6 +39,7 @@ export function GroundSegmentPanel({
   onClose,
   onClothResolutionChange,
   onClassThresholdChange,
+  onAutoClassThresholdChange,
   onRigidnessChange,
   onSlopeSmoothChange,
   onSplitCloudsChange,
@@ -101,9 +107,36 @@ export function GroundSegmentPanel({
           min={0.001}
           max={5}
           step={0.01}
-          disabled={inProgress}
-          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+          disabled={inProgress || autoClassThreshold}
+          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600 disabled:opacity-50"
         />
+        <div className="flex items-center gap-1 mt-1">
+          <label className="flex items-center gap-2 text-[10px] text-neutral-400">
+            <input
+              data-testid="ground-auto-class-threshold"
+              type="checkbox"
+              checked={autoClassThreshold}
+              onChange={(e) => onAutoClassThresholdChange(e.target.checked)}
+              className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500"
+              disabled={inProgress}
+            />
+            Measure from the scan
+          </label>
+          <InfoHint
+            data-testid="ground-auto-class-threshold-help"
+            label="Measure tolerance from the scan"
+            align="right"
+            text="Derive the tolerance from the draped cloth instead of the cloud's size. The seeded value scales with how wide the scan is, but what the tolerance has to clear is the thickness of the ground return band — sensor noise plus soil roughness — which is unrelated to tile width. This measures that band directly and cuts where it ends. Terrain slope is already removed by the cloth, so it works on slopes too."
+          />
+        </div>
+        {autoClassThreshold && lastAutoThreshold != null && (
+          <div
+            data-testid="ground-auto-class-threshold-result"
+            className="mt-1 text-[10px] text-neutral-500"
+          >
+            Last run measured {lastAutoThreshold.toFixed(2)} m
+          </div>
+        )}
       </div>
 
       {/* Rigidness */}

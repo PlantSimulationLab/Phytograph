@@ -132,6 +132,9 @@ test('crop without Segment discards cropped-out points (no new cloud)', async ()
   // Mode defaults to Keep Inside; Segment is not selected.
   await expect(page.getByTestId('crop-mode-inside')).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByTestId('crop-mode-segment')).toHaveAttribute('aria-pressed', 'false');
+  // "Keep original cloud" defaults OFF, so this stays the destructive path.
+  // (The retain path has its own spec.)
+  await expect(page.getByTestId('crop-retain-original').locator('input')).not.toBeChecked();
 
   async function setNumber(testId: string, value: number) {
     const input = page.getByTestId(testId);

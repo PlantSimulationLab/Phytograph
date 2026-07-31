@@ -273,6 +273,10 @@ export interface GroundSegmentationRequest {
   class_threshold?: number;
   iterations?: number;
   slope_smooth?: boolean;
+  // Measure the tolerance off the settled cloth instead of using
+  // `class_threshold`. The seeded value scales with the cloud's horizontal
+  // extent, which is unrelated to how thick the ground return band actually is.
+  auto_class_threshold?: boolean;
 }
 
 export interface GroundSegmentationResponse {
@@ -282,6 +286,10 @@ export interface GroundSegmentationResponse {
   num_plant: number;
   num_points: number;
   error?: string;
+  // What the run actually used, and how it was chosen:
+  // 'manual' | 'knee' | 'tail' | 'fallback'.
+  class_threshold_used?: number;
+  class_threshold_method?: string;
 }
 
 export async function segmentGround(
@@ -3555,10 +3563,11 @@ export async function sessionMerge(
  * `ground_class` column, and rebuild the octree from the arrays (no file read). */
 export async function sessionSegmentGround(
   sessionId: string,
-  params: { cloth_resolution?: number; rigidness?: number; class_threshold?: number; iterations?: number; slope_smooth?: boolean },
+  params: { cloth_resolution?: number; rigidness?: number; class_threshold?: number; iterations?: number; slope_smooth?: boolean; auto_class_threshold?: boolean },
   signal?: AbortSignal,
-): Promise<CloudSessionBakeResult> {
-  return postSegment<CloudSessionBakeResult>(`/api/cloud/session/${sessionId}/segment_ground`, params, signal);
+): Promise<CloudSessionBakeResult & { class_threshold_used?: number; class_threshold_method?: string }> {
+  return postSegment<CloudSessionBakeResult & { class_threshold_used?: number; class_threshold_method?: string }>(
+    `/api/cloud/session/${sessionId}/segment_ground`, params, signal);
 }
 
 /** Run wood/leaf segmentation on the session's in-RAM points, append a

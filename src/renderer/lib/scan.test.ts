@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import {
-  duplicateScanName, hasData, hasParams, scanDisplayName,
+  duplicateScanName, derivedScanName, hasData, hasParams, scanDisplayName,
   missColumnsAvailable, isBackfillEligible, scanHasKnownOrigin, missReconSources, type Scan,
 } from './scan';
 import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
@@ -106,6 +106,37 @@ describe('duplicateScanName', () => {
   it('treats the base independently of unrelated names in the set', () => {
     expect(duplicateScanName('Scan A', ['Scan B', 'Scan B (copy)']))
       .toBe('Scan A (copy)');
+  });
+});
+
+// derivedScanName generalises the "(copy)" enumeration to any suffix, so a
+// retained crop can produce "… (cropped)". duplicateScanName is now a thin
+// wrapper over it — the suite above doubles as the regression guard.
+describe('derivedScanName', () => {
+  it('appends the given suffix to a fresh base name', () => {
+    expect(derivedScanName('tree.xyz', [], 'cropped')).toBe('tree.xyz (cropped)');
+  });
+
+  it('enumerates when the first slot is taken', () => {
+    expect(derivedScanName('tree.xyz', ['tree.xyz (cropped)'], 'cropped'))
+      .toBe('tree.xyz (cropped 2)');
+  });
+
+  it('strips its own suffix so cropping a crop does not stack', () => {
+    expect(
+      derivedScanName('tree.xyz (cropped)', ['tree.xyz', 'tree.xyz (cropped)'], 'cropped'),
+    ).toBe('tree.xyz (cropped 2)');
+  });
+
+  it('only strips the MATCHING suffix, leaving other derivations intact', () => {
+    // A crop of a duplicate keeps the "(copy)" part of its lineage.
+    expect(derivedScanName('tree.xyz (copy)', [], 'cropped'))
+      .toBe('tree.xyz (copy) (cropped)');
+  });
+
+  it('is independent per suffix — a taken "(copy)" never blocks "(cropped)"', () => {
+    expect(derivedScanName('tree.xyz', ['tree.xyz (copy)'], 'cropped'))
+      .toBe('tree.xyz (cropped)');
   });
 });
 

@@ -121,17 +121,33 @@ export function scanDisplayName(scan: Scan): string {
   return 'Untitled scan';
 }
 
-// Generate a unique label for a duplicated scan. A trailing "(copy)" / "(copy N)"
-// on the source is stripped first so duplicating a copy reads "… (copy 2)" rather
-// than "… (copy) (copy)". The result is the first of "{base} (copy)",
-// "{base} (copy 2)", "{base} (copy 3)", … not already present in `existing`.
-export function duplicateScanName(sourceLabel: string, existing: Iterable<string>): string {
+// Generate a unique label for a scan DERIVED from another one, tagged with
+// `suffix` ("copy" for a duplicate, "cropped" for a retained crop). A trailing
+// "(suffix)" / "(suffix N)" on the source is stripped first so deriving from an
+// already-derived scan reads "… (copy 2)" rather than "… (copy) (copy)". The
+// result is the first of "{base} (suffix)", "{base} (suffix 2)", … not already
+// present in `existing`.
+export function derivedScanName(
+  sourceLabel: string,
+  existing: Iterable<string>,
+  suffix: string,
+): string {
   const taken = new Set(existing);
-  const base = sourceLabel.replace(/\s*\(copy(?: \d+)?\)\s*$/, '').trim() || sourceLabel.trim();
+  // Escape the suffix so a regex metacharacter in it can't corrupt the strip
+  // pattern. Both current callers pass plain words, but this is cheap.
+  const esc = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const strip = new RegExp(`\\s*\\(${esc}(?: \\d+)?\\)\\s*$`);
+  const base = sourceLabel.replace(strip, '').trim() || sourceLabel.trim();
   for (let i = 1; ; i++) {
-    const candidate = i === 1 ? `${base} (copy)` : `${base} (copy ${i})`;
+    const candidate = i === 1 ? `${base} (${suffix})` : `${base} (${suffix} ${i})`;
     if (!taken.has(candidate)) return candidate;
   }
+}
+
+// Unique label for a duplicated scan — the "(copy)" specialisation of
+// {@link derivedScanName}.
+export function duplicateScanName(sourceLabel: string, existing: Iterable<string>): string {
+  return derivedScanName(sourceLabel, existing, 'copy');
 }
 
 // The fixed per-scan color palette. New scans (imports, params-only scans, and

@@ -218,7 +218,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // as File → Import instead of silently falling back to the in-renderer parser
   // (which can't handle large scans — the "No data found" bug).
   const droppedPathsRef = useRef<Map<string, string>>(new Map());
-  const fileKey = (f: File): string => `${f.name} ${f.size} ${f.lastModified}`;
+  // NUL separates the parts because it's the one byte that can't occur in a
+  // filename, so the composite key is unambiguous. Written as a `\u0000` escape
+  // rather than a literal NUL: a raw NUL in the source makes grep/ripgrep class
+  // the whole file as binary and silently return no matches without `-a`.
+  const fileKey = (f: File): string => `${f.name}\u0000${f.size}\u0000${f.lastModified}`;
 
   // Last resort for an octree-eligible drop whose on-disk path couldn't be
   // resolved (cloud-storage placeholder, drag from a non-file source): write the
@@ -1043,6 +1047,15 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     setSelectedScanIds(new Set());
   }, []);
 
+  // Replace the selection outright. Used by tools that finish by handing the
+  // user a different set of scans than they started with — a retained crop
+  // selects the new "(cropped)" clouds so the hidden originals aren't left
+  // selected (a hidden-but-selected cloud would be silently re-cropped by the
+  // next apply, since handleApplyCrop gates on selection, not visibility).
+  const handleSetScanSelection = useCallback((ids: Set<string>) => {
+    setSelectedScanIds(new Set(ids));
+  }, []);
+
   const handleUpdateScanData = useCallback((id: string, data: PointCloudData) => {
     // Replacing the in-RAM data makes any prior `sourcePath` stale: it points at
     // the file the OLD data came from, not the new `data`. Downstream ops
@@ -1094,7 +1107,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
 
   // Stitch multiple data-bearing scans into one. The result is data-only —
   // a merged cloud has no single defined origin, so any source params are
-  // dropped. Undo restores the originals (params included) from the snapshot.
+  // dropped. By default the sources are REMOVED from the scene and undo
+  // restores them (params included) from the snapshot; with
+  // `opts.retainOriginals` they stay in the scene, hidden, and undo removes
+  // only the merged cloud (visibility is outside the undo model).
   //
   // The merge itself runs in the BACKEND (POST /api/cloud/session/merge): real
   // clouds are octree-backed and their points live in the backend session, NOT
@@ -1103,8 +1119,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // every octree cloud to the origin (issue #3: green dot, un-framable camera).
   // The backend reads the in-RAM arrays, reconciles differing global shifts, and
   // unions scalar columns, returning a new session + octree we wrap as a Scan.
-  const handleStitchScans = useCallback(async (ids: string[]) => {
+  const handleStitchScans = useCallback(async (ids: string[], opts?: { retainOriginals?: boolean }) => {
     if (ids.length < 2) return;
+    // Retain mode: the sources stay in the scene (hidden) rather than being
+    // removed. The backend merge already leaves the input sessions untouched,
+    // so this is purely a matter of which actions the transaction carries.
+    const retain = opts?.retainOriginals ?? false;
 
     const scansToStitch = scans.filter(s => ids.includes(s.id) && s.data);
     if (scansToStitch.length < 2) return;
@@ -1126,7 +1146,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         // No params on the merged scan — origin is no longer meaningful.
       };
       const cur = scene.state.scans;
-      const removeActions = scansToStitch.map((s) => {
+      const removeActions = retain ? [] : scansToStitch.map((s) => {
         const index = cur.findIndex((x) => x.id === s.id);
         return {
           t: 'remove' as const, kind: 'scan' as const, id: s.id, index, object: s,
@@ -1136,17 +1156,39 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         };
       });
       scene.commit({
-        label: `Stitch ${scansToStitch.length} scans`,
+        label: retain
+          ? `Stitch ${scansToStitch.length} scans (kept originals)`
+          : `Stitch ${scansToStitch.length} scans`,
         actions: [
           ...removeActions,
-          { t: 'add', kind: 'scan', id: newScan.id, object: newScan },
+          // `sessionId` rides on the add for the same reason addScanTx carries it:
+          // undo pushes this transaction onto the redo stack, where the merged
+          // scan is off screen but its backend session is still resident. Without
+          // the id, the store's free check never sees that session and a stitch
+          // that's undone and then superseded by another edit leaks it into the
+          // sidecar until quit. (Deleting the merged scan normally is already
+          // covered — removeScanTx reads the id off the scan itself.)
+          {
+            t: 'add', kind: 'scan', id: newScan.id, object: newScan,
+            sessionId: newData.octree?.sessionId ?? null,
+          },
         ],
       });
+      // Hide the retained sources rather than removing them, so the viewport
+      // looks the same as a destructive stitch. Deliberately OUTSIDE the
+      // transaction: SceneAction's `property` kind covers label/color/opacity/
+      // colorMode only — visibility is intentionally not undoable — and
+      // extending the action model for a cosmetic flag isn't worth it. The
+      // documented consequence: undoing a retained stitch removes the merged
+      // cloud but leaves the originals hidden until the user unhides them.
+      if (retain) for (const s of scansToStitch) handleHideScan(s.id);
       setSelectedScanIds(new Set([newScan.id]));
       showToast({
         type: 'success',
         title: 'Scans Stitched',
-        message: `Combined ${scansToStitch.length} scans into ${newData.pointCount.toLocaleString()} points`,
+        message: retain
+          ? `Combined ${scansToStitch.length} scans into ${newData.pointCount.toLocaleString()} points — originals kept and hidden`
+          : `Combined ${scansToStitch.length} scans into ${newData.pointCount.toLocaleString()} points`,
       });
     };
 
@@ -1243,7 +1285,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     } finally {
       setStitchProgress(null);
     }
-  }, [scans, scene]);
+  }, [scans, scene, handleHideScan]);
 
   const handleSavePointCloud = useCallback((data: PointCloudData, fileName: string) => {
     // Convert point cloud data to XYZ format
@@ -1639,6 +1681,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           onRemoveScan={handleRemoveScan}
           onSelectAll={handleSelectAll}
           onDeselectAll={handleDeselectAll}
+          onSetScanSelection={handleSetScanSelection}
           onUpdateScanData={handleUpdateScanData}
           onUpdateScanParams={handleUpdateScanParams}
           onUpdateScanLabel={handleUpdateScanLabel}

@@ -33,6 +33,11 @@ interface CropPanelProps {
   cropPolygonPointCount: number;
   cropInvert: boolean;
   cropSegment: boolean;
+  // When true the source cloud survives the apply (hidden) and the kept points
+  // land in a new "… (cropped)" cloud. Disabled in Segment mode, which already
+  // keeps both halves — see `retainEnabled`.
+  retainOriginal: boolean;
+  retainEnabled: boolean;
   applyDisabled: boolean;
   // data-* diagnostics for regression tests.
   cropBoxMinStr: string;
@@ -43,6 +48,7 @@ interface CropPanelProps {
   onKeepInside: () => void;
   onKeepOutside: () => void;
   onSegment: () => void;
+  onToggleRetainOriginal: (retain: boolean) => void;
   onSetBoxSize: (axis: 'x' | 'y' | 'z', newSize: number) => void;
   onSetBoxCenter: (axis: 'x' | 'y' | 'z', newCenter: number) => void;
   onDrawBox: () => void;
@@ -66,6 +72,8 @@ export function CropPanel({
   cropPolygonPointCount,
   cropInvert,
   cropSegment,
+  retainOriginal,
+  retainEnabled,
   applyDisabled,
   cropBoxMinStr,
   cropBoxMaxStr,
@@ -75,6 +83,7 @@ export function CropPanel({
   onKeepInside,
   onKeepOutside,
   onSegment,
+  onToggleRetainOriginal,
   onSetBoxSize,
   onSetBoxCenter,
   onDrawBox,
@@ -183,8 +192,33 @@ export function CropPanel({
         <div className="text-[10px] text-neutral-500 mt-1.5 leading-tight">
           {cropSegment
             ? 'Splits in two: original keeps the in-region points, a new cloud gets the rest.'
-            : 'Cropped-out points are discarded.'}
+            : retainOriginal
+              ? 'Kept points go to a new cloud; the original is preserved and hidden.'
+              : 'Cropped-out points are discarded.'}
         </div>
+
+        {/* Non-destructive opt-out. Greyed in Segment mode, which already keeps
+            every point across the two output clouds — a third full copy would
+            just be noise. `checked` is AND-ed with the enabled flag so the box
+            reads unchecked while disabled even if it was ticked beforehand. */}
+        <label
+          data-testid="crop-retain-original"
+          className={`flex items-center gap-2 mt-2 select-none ${retainEnabled ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}
+        >
+          <input
+            type="checkbox"
+            disabled={!retainEnabled}
+            checked={retainOriginal && retainEnabled}
+            onChange={(e) => onToggleRetainOriginal(e.target.checked)}
+            className="w-3.5 h-3.5 rounded bg-neutral-700 border-neutral-600 accent-blue-600"
+          />
+          <span className="text-[10px] text-neutral-300">Keep original cloud</span>
+        </label>
+        {!retainEnabled && (
+          <div className="text-[10px] text-neutral-500 mt-1 leading-tight">
+            Segment already keeps both halves.
+          </div>
+        )}
       </div>
 
       {cropMode === 'box' && cropBox && (

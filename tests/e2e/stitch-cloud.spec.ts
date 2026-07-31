@@ -63,6 +63,9 @@ test('stitch merges two octree clouds into one cloud with correct count and boun
   await page.getByTestId('tool-cloud-stitch').click();
   const dialog = page.getByTestId('stitch-dialog');
   await expect(dialog).toBeVisible();
+  // "Keep original clouds" defaults OFF, so this run exercises the destructive
+  // path unchanged. (The retain path has its own spec.)
+  await expect(dialog.getByTestId('stitch-retain-originals').locator('input')).not.toBeChecked();
   await dialog.getByTestId('stitch-run').click();
   await expect(dialog).toHaveCount(0);
 

@@ -79,6 +79,63 @@ test('segments ground vs plant and colours by the ground_class attribute', async
   expect(parseInt((await plantRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(600);
 });
 
+// "Measure from the scan" derives the ground tolerance from the settled cloth
+// instead of the seeded value (which scales with the cloud's horizontal extent —
+// a quantity unrelated to how thick the ground return band is). Drives the real
+// checkbox against the live backend and asserts on the concrete outcome: the
+// tolerance field is disabled while auto is on, the run reports the measured
+// value back into the panel, and the split still partitions 1600/600 — i.e. the
+// measured tolerance actually separates this fixture correctly.
+test('measures the ground tolerance from the scan when asked', async () => {
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+  await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+  await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+
+  await page.getByTestId('tool-ground-segment').click();
+  await page.getByTestId('ground-cloth-resolution').fill('0.1');
+  // Seed a deliberately WRONG tolerance: 0.001 m would leave almost nothing as
+  // ground. Auto mode must override it and still split cleanly.
+  await page.getByTestId('ground-class-threshold').fill('0.001');
+  await page.getByTestId('ground-auto-class-threshold').check();
+  // With auto on, the manual field is not editable — the value comes from the scan.
+  await expect(page.getByTestId('ground-class-threshold')).toBeDisabled();
+  await page.getByTestId('ground-split-clouds').check();
+
+  await page.getByTestId('ground-segment-run-button').click();
+  await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
+
+  // The split proves the measured tolerance separated the fixture correctly:
+  // the plant blob starts at z≈0.12, so anything ≥0.12 would swallow it and
+  // anything ≈0.001 would reject the ground. Only a measured value works.
+  const groundRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz (ground)"]');
+  const plantRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz (non-ground)"]');
+  await expect(groundRow).toBeVisible({ timeout: 60_000 });
+  await expect(plantRow).toBeVisible({ timeout: 60_000 });
+  expect(parseInt((await groundRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(1600);
+  expect(parseInt((await plantRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(600);
+
+  // The measured value is reported back into the panel rather than left hidden,
+  // and it is no longer the 0.001 the user seeded. Re-select the segmented
+  // parent first — the split left one of the new child clouds selected, and the
+  // measurement is deliberately keyed to the cloud it was measured on.
+  if ((await cloudRow.getAttribute('data-selected')) !== 'true') {
+    await cloudRow.click();
+  }
+  await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+  await page.getByTestId('tool-ground-segment').click();
+  await expect(page.getByTestId('ground-segment-panel')).toBeVisible();
+  const readout = page.getByTestId('ground-auto-class-threshold-result');
+  await expect(readout).toBeVisible();
+  const measured = parseFloat((await readout.textContent())?.match(/([\d.]+)\s*m/)?.[1] ?? '0');
+  expect(measured).toBeGreaterThan(0.001);
+  expect(measured).toBeLessThan(0.12);
+});
+
 // Regression: after an in-place ground classify, the cloud must be filterable by
 // the baked `ground_class` attribute. This used to 400 — the filter re-read the
 // original XYZ source (no ground_class column) instead of the segmented one. Also

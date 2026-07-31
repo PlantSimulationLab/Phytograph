@@ -71,7 +71,7 @@ import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
 import { poseStreamToWire, shiftPoseStream, transformPoseStream, trajectoryDurationS, deriveMovingScanGrid, poseStreamBounds } from '../lib/poseStream';
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
-import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin } from '../lib/scan';
+import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -335,6 +335,8 @@ interface PointCloudViewerProps {
   onRemoveScan: (id: string) => void;
   onSelectAll: () => void;
   onDeselectAll: () => void;
+  // Replace the scan selection outright (see handleSetScanSelection in App).
+  onSetScanSelection?: (ids: Set<string>) => void;
   onUpdateScanData: (id: string, data: PointCloudData) => void;
   onUpdateScanParams: (id: string, params: ScanParameters | undefined) => void;
   onUpdateScanLabel?: (id: string, label: string) => void;
@@ -342,7 +344,7 @@ interface PointCloudViewerProps {
   onSave: (data: PointCloudData, fileName: string) => void;
   onAddScan?: (scan: Scan) => void;
   onAddScans?: (scans: Scan[]) => void;
-  onStitchScans?: (ids: string[]) => void;
+  onStitchScans?: (ids: string[], opts?: { retainOriginals?: boolean }) => void;
   className?: string;
   importRefsCallback?: (refs: ImportRefs) => void;
   // Fired when the number of session clouds with UNBAKED deletions changes, so
@@ -452,6 +454,7 @@ export default function PointCloudViewer({
   onRemoveScan,
   onSelectAll,
   onDeselectAll,
+  onSetScanSelection,
   onUpdateScanData,
   onUpdateScanParams,
   onUpdateScanLabel,
@@ -747,6 +750,17 @@ export default function PointCloudViewer({
   const [groundSegmentError, setGroundSegmentError] = useState<string | null>(null);
   const [groundClothResolution, setGroundClothResolution] = useState(0.05);
   const [groundClassThreshold, setGroundClassThreshold] = useState(0.02);
+  // Measure the ground tolerance off the settled cloth rather than seeding it
+  // from the cloud's extent (the seed scales with tile width, which is unrelated
+  // to the ground return band's thickness — see _estimate_class_threshold).
+  // `lastAutoThreshold` echoes what the last run measured, so the value the user
+  // is being given is visible rather than hidden inside the backend.
+  const [groundAutoClassThreshold, setGroundAutoClassThreshold] = useState(false);
+  // Keyed by cloud: a measured tolerance describes the cloud it was measured on,
+  // and the panel re-seeds from extent every time it opens, so without the key
+  // the measurement would be silently clobbered the moment the user reopened it.
+  const [groundAutoMeasured, setGroundAutoMeasured] =
+    useState<{ cloudId: string; value: number } | null>(null);
   const [groundRigidness, setGroundRigidness] = useState(3);
   const [groundSlopeSmooth, setGroundSlopeSmooth] = useState(false);
   const [groundSplitClouds, setGroundSplitClouds] = useState(false);
@@ -769,13 +783,18 @@ export default function PointCloudViewer({
       if (size) {
         const defaults = groundSegmentDefaultsForExtent(Math.max(size.x, size.y), size.z);
         setGroundClothResolution(defaults.clothResolution);
-        setGroundClassThreshold(defaults.classThreshold);
         setGroundRigidness(defaults.rigidness);
         setGroundSlopeSmooth(defaults.slopeSmooth);
+        // Prefer a tolerance already MEASURED on this cloud over the extent seed
+        // — it's the better number, and re-seeding over it would throw away the
+        // result of the run the user just did.
+        const measured = sel && groundAutoMeasured?.cloudId === sel.id
+          ? groundAutoMeasured.value : null;
+        setGroundClassThreshold(measured ?? defaults.classThreshold);
       }
     }
     groundPanelWasOpen.current = showGroundSegmentPanel;
-  }, [showGroundSegmentPanel, clouds, selectedIds]);
+  }, [showGroundSegmentPanel, clouds, selectedIds, groundAutoMeasured]);
   // DEM (Digital Elevation Model) generation state. Like CSF, the cell size is an
   // absolute distance, so seed it from the selected cloud's horizontal extent
   // each time the DEM panel opens (guarded by a ref so it only fires on the open
@@ -1644,6 +1663,13 @@ export default function PointCloudViewer({
   // in-region points (normal crop) and the cropped-out (inverse) points
   // become a brand-new cloud added to the scene — no points are discarded.
   const [cropSegment, setCropSegment] = useState(false);
+  // When true, Apply leaves the source cloud untouched (hidden, so the viewport
+  // looks the same) and puts the kept points in a new "… (cropped)" cloud. The
+  // octree path routes through session `extract` (parent untouched) instead of
+  // delete_region + bake (which compacts the arrays irreversibly). Deliberately
+  // NOT persisted — a destructive default is safer, so this resets to false on
+  // every entry into crop mode.
+  const [cropRetainOriginal, setCropRetainOriginal] = useState(false);
   const [cropDrawState, setCropDrawState] = useState<CropDrawState>('idle');
   // In-progress polygon vertices while the user is clicking. Promoted to
   // cropPolygon when they press Enter.
@@ -2382,6 +2408,11 @@ export default function PointCloudViewer({
   // well under the ceiling.
   const cloudsRef = useRef(clouds);
   cloudsRef.current = clouds;
+  // Same live-read purpose as cloudsRef, but over the full Scan list (labels,
+  // colors) — needed when a loop allocates names/colors for clouds it is
+  // itself adding, where the closure-captured `scans` is a stale snapshot.
+  const scansRef = useRef(scans);
+  scansRef.current = scans;
   const editStatesRef = useRef(editStates);
   editStatesRef.current = editStates;
   // Live handle for `bakeSelectedTranslations`, declared here (early) so callers
@@ -2614,6 +2645,16 @@ export default function PointCloudViewer({
     // rather than discarding them. Captured here so the value is stable for
     // the whole apply even though the panel is torn down mid-run.
     const segment = cropSegment;
+    // Retain mode: the source cloud is left untouched (and hidden) while the
+    // kept points become a NEW cloud. Mutually exclusive with segment, which
+    // already keeps every point across its two outputs. Captured here for the
+    // same closure-stability reason as `segment` above.
+    const retain = cropRetainOriginal && !cropSegment;
+    // Ids of the new "(cropped)" clouds created in retain mode, and their point
+    // counts. Kept separate from touchedCloudIds because nothing was modified:
+    // these must NOT get an editStates reset or a scene.boundary (see finishUp).
+    const derivedCloudIds: string[] = [];
+    const derivedCounts: number[] = [];
     // Number of new "(segment)" clouds added this apply — drives the toast.
     let segmentedCount = 0;
     // Distinct color for the new segment cloud so it's separable from the
@@ -2650,6 +2691,25 @@ export default function PointCloudViewer({
         }
       }
 
+      // Retain-mode confirmation. Deliberately does NOT touch editStates or
+      // call scene.boundary: nothing was destroyed, so the originals' undo
+      // history stays valid and the new clouds entered history as ordinary
+      // invertible `add`s. (A retained crop is therefore undoable, unlike a
+      // destructive one, which drops history at the boundary above.)
+      if (derivedCloudIds.length > 0) {
+        const total = derivedCounts.reduce((s, n) => s + n, 0);
+        const cloudWord = derivedCloudIds.length === 1 ? 'cloud' : 'clouds';
+        showToast({
+          title: `Cropped to ${derivedCloudIds.length} new ${cloudWord} (${total.toLocaleString()} points)`,
+          message: 'The original cloud was kept and hidden.',
+          type: 'success',
+        });
+        // Move the selection onto the new clouds. Leaving the hidden originals
+        // selected would let the next apply silently re-crop a cloud the user
+        // can't see, and would inflate the default crop box via resetWorldBox.
+        onSetScanSelection?.(new Set(derivedCloudIds));
+      }
+
       // Segment-mode confirmation. Fires independently of the crop toast
       // above (the source cloud may have been fully cropped away yet the
       // inverse still produced a new cloud).
@@ -2677,6 +2737,7 @@ export default function PointCloudViewer({
       rectDragCurrentRef.current = null;
       setCropDrawState('idle');
       setCropSegment(false);
+      setCropRetainOriginal(false);
       setEditMode('none');
     };
 
@@ -2710,8 +2771,11 @@ export default function PointCloudViewer({
       // No-op short-circuit: when the box-mode crop fully encloses this
       // cloud's translated bounds and there's nothing else to bake in,
       // the apply would produce a byte-identical copy of cloud.data.
-      // Skip the allocation entirely.
+      // Skip the allocation entirely. NOT in retain mode — there the user
+      // explicitly asked for a separate copy, so returning early would
+      // silently produce nothing.
       if (
+        !retain &&
         cropMode === 'box' && cropBox && !cropInvert &&
         erased.size === 0 && tx === 0 && ty === 0 && tz === 0 &&
         src.bounds.min.x >= cropBox.min.x && src.bounds.max.x <= cropBox.max.x &&
@@ -2761,6 +2825,78 @@ export default function PointCloudViewer({
             ...deleteRegion, invert: !(deleteRegion.invert ?? false),
           } as CropOctreeRegion;
           try {
+            if (retain && onAddScan) {
+              // Non-destructive crop: `extract` builds a NEW child session from
+              // the keep-region and leaves the parent's arrays completely alone
+              // (no delete_region, no bake — bake compacts irreversibly). One
+              // round-trip instead of two. The child's mask is computed over the
+              // parent's survivors, so pending erases are already excluded.
+              const r = await sessionExtract(sessionId, { region: keepRegion });
+              if (!r.extracted) {
+                showToast({
+                  type: 'warning',
+                  title: `Nothing to crop in ${src.fileName || 'cloud'}`,
+                  message: 'The crop region contains no points, so no new cloud was created. The original is unchanged.',
+                });
+                return;
+              }
+              const data = buildSessionOctreeData(
+                r.extracted, octreeInfo, src.fileName ?? cloud.id,
+                r.extracted.session_id, { diverged: true },
+              );
+              // buildSessionOctreeData carries hasMisses/missOctreeCacheId
+              // forward from the parent, but that miss octree describes the
+              // PRE-crop extent. Drop it rather than offer a stale overlay —
+              // the user re-runs Backfill Misses on the new cloud.
+              if (data.octree && octreeInfo.hasMisses) {
+                data.octree.hasMisses = false;
+                data.octree.missOctreeCacheId = null;
+              }
+              const newId = crypto.randomUUID();
+              // Read from the ref, not the closure-captured `scans`: clouds
+              // added earlier in THIS loop must count toward name/color
+              // allocation, or a multi-scan crop hands every child the same
+              // label and swatch. Collisions are checked against DISPLAY names
+              // (scan.label), which is what the scene list actually shows.
+              const live = scansRef.current;
+              onAddScan({
+                id: newId,
+                label: derivedScanName(
+                  src.fileName ?? cloud.id,
+                  live.map(scanDisplayName),
+                  'cropped',
+                ),
+                visible: true,
+                color: allocateScanColor(new Set(live.map(s => s.color))),
+                data,
+                // A crop is a subset of the SAME scanner's returns, so the beam
+                // apex is still valid — keep the origin (deep-cloned so the two
+                // scans never share a mutable object). The destructive path
+                // preserves it too; dropping it here would be a regression.
+                params: cloud.params
+                  ? { ...cloud.params, origin: { ...cloud.params.origin } }
+                  : undefined,
+              });
+              // `extract` returns points in the session's stored frame, but the
+              // crop region was evaluated in WORLD space with the parent's
+              // pending translation applied. Re-apply it so the child lands
+              // exactly where the preview showed it.
+              if (tx !== 0 || ty !== 0 || tz !== 0) {
+                setEditStates(prev => {
+                  const next = new Map(prev);
+                  next.set(newId, {
+                    translation: { x: tx, y: ty, z: tz },
+                    erasedIndices: new Set<number>(),
+                  });
+                  return next;
+                });
+              }
+              onHideScan(cloud.id);
+              derivedCloudIds.push(newId);
+              derivedCounts.push(r.extracted.point_count);
+              return;
+            }
+
             if (segment && onAddCloud) {
               // Segment mode: split the session into kept (inside the crop) +
               // a NEW leftover session (the cropped-out points). One array-side
@@ -2922,6 +3058,45 @@ export default function PointCloudViewer({
       }
 
       const keptData = buildSubset(!cropInvert);
+
+      // Retain mode: the kept points become a NEW cloud and the source is left
+      // untouched (hidden). No `emptied` entry on an empty result — that drives
+      // a delete confirmation, and offering to delete an untouched original is
+      // the opposite of what the checkbox asked for.
+      if (retain && onAddScan) {
+        if (!keptData) {
+          showToast({
+            type: 'warning',
+            title: `Nothing to crop in ${src.fileName || 'cloud'}`,
+            message: 'The crop region contains no points, so no new cloud was created. The original is unchanged.',
+          });
+          return;
+        }
+        const newId = crypto.randomUUID();
+        const live = cloudsRef.current;
+        onAddScan({
+          id: newId,
+          label: derivedScanName(
+            src.fileName ?? cloud.id,
+            live.map(c => c.data?.fileName ?? c.id),
+            'cropped',
+          ),
+          visible: true,
+          color: allocateScanColor(new Set(live.map(c => c.color))),
+          data: keptData,
+          params: cloud.params
+            ? { ...cloud.params, origin: { ...cloud.params.origin } }
+            : undefined,
+        });
+        // No edit-state seeding here (unlike the octree path): buildSubset
+        // already wrote WORLD coordinates, so the translation is baked into
+        // the points and the child must start at zero translation.
+        onHideScan(cloud.id);
+        derivedCloudIds.push(newId);
+        derivedCounts.push(keptData.pointCount);
+        return;
+      }
+
       if (!keptData) {
         emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
         return;
@@ -2950,7 +3125,7 @@ export default function PointCloudViewer({
       setTimeout(next, 0);
     };
     void next();
-  }, [editMode, selectedIds, isApplyingCrop, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon]);
+  }, [editMode, selectedIds, isApplyingCrop, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon, cropSegment, cropRetainOriginal, onAddScan, onAddCloud, onHideScan, onSetScanSelection, buildSessionOctreeData, scene]);
 
   // Apply erased points permanently - removes erased points and bakes in translation
   const handleApplyErase = useCallback(async () => {
@@ -7506,6 +7681,15 @@ export default function PointCloudViewer({
       rigidness: groundRigidness,
       class_threshold: groundClassThreshold,
       slope_smooth: groundSlopeSmooth,
+      auto_class_threshold: groundAutoClassThreshold,
+    };
+    // Show what auto mode measured, and keep it against this cloud so reopening
+    // the panel offers the measured value instead of re-seeding from extent.
+    const noteAutoThreshold = (used?: number) => {
+      if (!groundAutoClassThreshold || used == null) return '';
+      setGroundAutoMeasured({ cloudId: id, value: used });
+      setGroundClassThreshold(used);
+      return ` Measured ground tolerance ${used.toFixed(2)} m.`;
     };
 
     try {
@@ -7553,7 +7737,8 @@ export default function PointCloudViewer({
         showToast({
           type: 'success',
           title: 'Ground Segmentation Complete',
-          message: `Classified ${meta.point_count.toLocaleString()} points (ground vs plant).`,
+          message: `Classified ${meta.point_count.toLocaleString()} points (ground vs plant).`
+            + noteAutoThreshold(meta.class_threshold_used),
         });
         return;
       }
@@ -7637,7 +7822,8 @@ export default function PointCloudViewer({
       showToast({
         type: 'success',
         title: 'Ground Segmentation Complete',
-        message: `${response.num_ground.toLocaleString()} ground, ${response.num_plant.toLocaleString()} plant`,
+        message: `${response.num_ground.toLocaleString()} ground, ${response.num_plant.toLocaleString()} plant`
+          + noteAutoThreshold(response.class_threshold_used),
       });
     } catch (error) {
       // User cancelled (Cancel button aborted the fetch) — not a failure.
@@ -7650,7 +7836,7 @@ export default function PointCloudViewer({
       setGroundSegmentInProgress(false);
       groundSegmentAbortRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds]);
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds, groundAutoClassThreshold]);
 
   // Generate a DEM (Digital Elevation Model) from the selected cloud's ground
   // points. The bare-earth surface comes back as a heightmap mesh (stored as a
@@ -15504,6 +15690,7 @@ export default function PointCloudViewer({
           setPolygonInProgress([]);
           setRectDragStart(null);
           rectDragCurrentRef.current = null;
+          setCropRetainOriginal(false);
         };
         const resetWorldBox = () => {
           const initial = worldBoundsUnion(
@@ -15549,6 +15736,8 @@ export default function PointCloudViewer({
             cropPolygonPointCount={cropPolygon?.points.length ?? 0}
             cropInvert={cropInvert}
             cropSegment={cropSegment}
+            retainOriginal={cropRetainOriginal}
+            retainEnabled={!cropSegment}
             applyDisabled={
               (cropMode === 'box' && !cropBox) ||
               ((cropMode === 'polygon' || cropMode === 'rect') && !cropPolygon)
@@ -15575,6 +15764,7 @@ export default function PointCloudViewer({
             onKeepInside={() => { setCropInvert(false); setCropSegment(false); }}
             onKeepOutside={() => { setCropInvert(true); setCropSegment(false); }}
             onSegment={() => { setCropInvert(false); setCropSegment(true); }}
+            onToggleRetainOriginal={setCropRetainOriginal}
             onSetBoxSize={(axisKey, newSize) => setCropBox(prev => {
               if (!prev) return prev;
               const center = (prev.min[axisKey] + prev.max[axisKey]) / 2;
@@ -16000,6 +16190,11 @@ export default function PointCloudViewer({
         <GroundSegmentPanel
           clothResolution={groundClothResolution}
           classThreshold={groundClassThreshold}
+          autoClassThreshold={groundAutoClassThreshold}
+          lastAutoThreshold={
+            Array.from(selectedIds)[0] === groundAutoMeasured?.cloudId
+              ? groundAutoMeasured.value : null
+          }
           rigidness={groundRigidness}
           slopeSmooth={groundSlopeSmooth}
           splitClouds={groundSplitClouds}
@@ -16008,6 +16203,7 @@ export default function PointCloudViewer({
           onClose={() => setShowGroundSegmentPanel(false)}
           onClothResolutionChange={setGroundClothResolution}
           onClassThresholdChange={setGroundClassThreshold}
+          onAutoClassThresholdChange={setGroundAutoClassThreshold}
           onRigidnessChange={setGroundRigidness}
           onSlopeSmoothChange={setGroundSlopeSmooth}
           onSplitCloudsChange={setGroundSplitClouds}
@@ -17216,7 +17412,7 @@ export default function PointCloudViewer({
           return { id: c.id, label: scanDisplayName(scan), color: c.color, pointCount: c.data.pointCount, hasOrigin: scanHasKnownOrigin(scan) };
         })}
         initialSelectedIds={selectedIds}
-        onStitch={(ids) => { if (ids.length >= 2) onStitchClouds?.(ids); }}
+        onStitch={(ids, opts) => { if (ids.length >= 2) onStitchClouds?.(ids, opts); }}
       />
       <AlignDialog
         isOpen={showAlignDialog}

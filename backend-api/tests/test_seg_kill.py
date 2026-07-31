@@ -60,8 +60,12 @@ def test_ground_worker_returns_labels():
     pts = _ground_cloud()
     csf = dict(cloth_resolution=0.5, rigidness=3, class_threshold=0.1,
                iterations=200, slope_smooth=False)
-    labels = _run(main._run_killable("ground", pts, csf, http_request=None))
+    # Like `wood`, the ground worker returns (labels, meta); meta carries the
+    # class_threshold actually applied so the panel can show what auto mode chose.
+    labels, meta = _run(main._run_killable("ground", pts, csf, http_request=None))
     assert labels.shape == (len(pts),)
+    assert meta["class_threshold"] == pytest.approx(0.1)
+    assert meta["method"] == "manual"
     # Both classes present and the flat slab is mostly ground.
     assert set(np.unique(labels)).issubset({main.GROUND_CLASS_GROUND, main.GROUND_CLASS_PLANT})
     assert int((labels == main.GROUND_CLASS_GROUND).sum()) > len(pts) // 2
