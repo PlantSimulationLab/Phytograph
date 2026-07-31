@@ -134,6 +134,26 @@ function build() {
   run('cmake', ['--build', '.', '--config', 'Release', '-j'], { cwd: BUILD_DIR });
 }
 
+// Parse the LC_RPATH entries out of `otool -l`. Each one appears as a
+// three-line stanza:
+//     cmd LC_RPATH
+//     cmdsize 80
+//     path /some/dir (offset 12)
+function machoRpaths(bin) {
+  const r = spawnSync('otool', ['-l', bin], { encoding: 'utf8' });
+  if (r.status !== 0) return [];
+  const paths = [];
+  const lines = r.stdout.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() !== 'cmd LC_RPATH') continue;
+    for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+      const m = lines[j].match(/^\s*path (.+?) \(offset \d+\)\s*$/);
+      if (m) { paths.push(m[1]); break; }
+    }
+  }
+  return paths;
+}
+
 function install() {
   const tag = platformTag();
   const outDir = join(repoRoot, 'resources', 'potree_converter', tag);
@@ -172,6 +192,18 @@ function install() {
     // Add the binary's own directory to its rpath search list (idempotent: a
     // duplicate -add_rpath is only a non-fatal warning).
     spawnSync('install_name_tool', ['-add_rpath', '@loader_path', dstBin], { stdio: 'inherit' });
+    // Then drop CMake's baked-in build-tree rpath. `-add_rpath` only appends,
+    // so without this the binary keeps searching BUILD_DIR *first* and only
+    // falls through to @loader_path when that misses. That ordering is what
+    // makes the failure mode so slippery: on the build machine the stale path
+    // still resolves, so a binary that is broken everywhere else tests fine
+    // here — and it breaks the moment `tmp/` is cleaned. Removing it makes
+    // @loader_path the only search path, so local behaviour matches shipped.
+    for (const stale of machoRpaths(dstBin).filter((p) => p !== '@loader_path')) {
+      const r = spawnSync('install_name_tool', ['-delete_rpath', stale, dstBin], { encoding: 'utf8' });
+      if (r.status === 0) console.log(`removed stale rpath ${stale}`);
+      else console.warn(`could not remove rpath ${stale}: ${(r.stderr ?? '').trim()}`);
+    }
   } else if (platform() === 'linux') {
     bundleSiblings((f) => f.includes('.so'));
     // $ORIGIN lets the ELF binary load siblings from its own directory.
@@ -183,15 +215,36 @@ function install() {
   }
 }
 
-function outputExists() {
+// Is the installed binary present AND actually runnable? Mere existence is
+// not enough: a binary built before this script bundled sibling libs carries
+// an rpath into the (long-since-deleted) build tree, so it aborts under dyld
+// with "Library not loaded: @rpath/liblaszip.dylib" — exit -6, before main().
+// `resources/potree_converter/` is gitignored, so that stale binary survives
+// pulls and a plain existence check would skip the rebuild forever, leaving
+// imports broken with a dyld backtrace far from the actual cause. Executing
+// it is the only check that catches a missing/unresolvable dependency.
+function outputUsable() {
   const dst = join(repoRoot, 'resources', 'potree_converter', platformTag(), binaryName());
-  return existsSync(dst);
+  if (!existsSync(dst)) return { ok: false, reason: 'not built yet' };
+  // --help exits 0 without touching the filesystem, but still forces dyld to
+  // resolve every dependent library first — which is the part that fails.
+  const r = spawnSync(dst, ['--help'], { encoding: 'utf8', timeout: 30_000 });
+  if (r.error) return { ok: false, reason: `cannot execute: ${r.error.message}` };
+  if (r.status !== 0) {
+    const tail = ((r.stderr || r.stdout) ?? '').trim().split('\n').slice(0, 3).join('\n  ');
+    return { ok: false, reason: `exits ${r.status ?? r.signal}:\n  ${tail}` };
+  }
+  return { ok: true };
 }
 
 async function main() {
-  if (outputExists() && !FORCE) {
-    console.log(`PotreeConverter for ${platformTag()} already exists. Set FORCE=1 to rebuild.`);
-    return;
+  if (!FORCE) {
+    const state = outputUsable();
+    if (state.ok) {
+      console.log(`PotreeConverter for ${platformTag()} already built and runnable. Set FORCE=1 to rebuild.`);
+      return;
+    }
+    console.log(`Rebuilding PotreeConverter for ${platformTag()} — existing binary ${state.reason}`);
   }
   preflight();
   ensureSourceTree();
