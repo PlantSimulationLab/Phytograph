@@ -89,8 +89,9 @@ The main interactive area. Camera controls:
 | Zoom to selection | <kbd>F</kbd> (or the **Zoom to Selection** toolbar button) | Same |
 
 Orbiting turns the view about the **scene origin** (the red-and-white ring
-marker, which starts at the center of your loaded content and can be dragged
-elsewhere) — panning does not move that pivot. See
+marker, which starts laterally centered on your loaded content at ground
+level, and can be dragged elsewhere) — panning does not move that pivot.
+Zooming also converges on the origin until you pan. See
 [Viewer navigation](../workflows/viewer-navigation.md#camera).
 
 The 1m × 1m grid on the world XY plane gives you a fixed sense of

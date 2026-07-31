@@ -739,7 +739,7 @@ test.describe('translate cloud', () => {
   // center, and its marker is up from the moment content loads. Guards against a
   // regression to "invisible until you set one", and against the default drifting
   // off the scene.
-  test('Scene Origin defaults to the scene center with no user placement', async () => {
+  test('Scene Origin defaults to the ground-anchored scene center with no user placement', async () => {
     const { page } = session;
     await importTiny();
 
@@ -751,12 +751,21 @@ test.describe('translate cloud', () => {
     await expect(panel).toHaveAttribute('data-marker-visible', 'true');
 
     const origin = await readOriginFields();
-    const sceneCenter = (await page.locator('[data-scene-bounds-size]')
-      .getAttribute('data-scene-center'))!.split(',').map(parseFloat);
-    // data-scene-center is rounded to 1 dp, hence the loose tolerance.
+    const viewerEl = page.locator('[data-scene-bounds-size]');
+    const sceneCenter = (await viewerEl.getAttribute('data-scene-center'))!
+      .split(',').map(parseFloat);
+    const sceneMinZ = parseFloat((await viewerEl.getAttribute('data-scene-min-z'))!);
+    // Laterally the scene centre...
+    // (the data attributes are rounded to 1 dp, hence the loose tolerance)
     expect(Math.abs(origin[0] - sceneCenter[0])).toBeLessThan(0.15);
     expect(Math.abs(origin[1] - sceneCenter[1])).toBeLessThan(0.15);
-    expect(Math.abs(origin[2] - sceneCenter[2])).toBeLessThan(0.15);
+    // ...but vertically the FLOOR, not the mid-height: these scenes stand on the
+    // ground, and this point is both the orbit pivot and the camera's default
+    // look-at, so a mid-height default would put both in empty air.
+    expect(Math.abs(origin[2] - sceneMinZ)).toBeLessThan(0.15);
+    // Guard against the two coinciding and making the assertion vacuous — the
+    // fixture must have real vertical extent for this to mean anything.
+    expect(Math.abs(sceneCenter[2] - sceneMinZ)).toBeGreaterThan(0.2);
 
     // Reset is a no-op offer while the default is in force.
     await expect(page.getByTestId('scene-origin-clear')).toBeDisabled();
@@ -775,8 +784,8 @@ test.describe('translate cloud', () => {
   });
 
   // On an empty scene App draws its "Drag scan files here" hint across the middle
-  // of the viewport — exactly where the default (scene-center) origin projects.
-  // The marker must stay down until something is loaded, then appear on its own.
+  // of the viewport, where the default origin projects. The marker must stay down
+  // until something is loaded, then appear on its own.
   test('Scene Origin marker stays down while the empty-viewer hint is showing', async () => {
     const { page } = session;
     // beforeEach reset to a fresh (empty) scene; do NOT import yet.
@@ -788,7 +797,10 @@ test.describe('translate cloud', () => {
     // The origin still exists and is editable — only its marker is suppressed.
     await expect(panel).toHaveAttribute('data-marker-visible', 'false');
     const viewer = page.locator('[data-scene-bounds-size]');
-    expect(await readOriginFields()).toEqual([0, 0, 0]);
+    // Empty scene: bounds fall back to a ±5 box at the world origin, so the
+    // ground-anchored default origin is laterally (0,0) and vertically that
+    // box's floor.
+    expect(await readOriginFields()).toEqual([0, 0, -5]);
     // (__worldToScreen isn't installed on an empty scene, but the default camera
     // looks straight down its own -Z at the world origin, so the suppressed
     // marker would be drawn dead center.) Clicking there selects nothing.

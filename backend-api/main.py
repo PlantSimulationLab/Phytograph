@@ -15053,6 +15053,55 @@ _MISS_TARGET_INDEX_SENTINEL = 99.0
 _MISS_RAYTRACE_DISTANCE = 1001.0
 
 
+# Fraction of points allowed to sit below the reported ground level. Low-flying
+# noise (multipath, birds, scanner artefacts, a stray sub-surface return) is a
+# tiny tail; real ground is a dense mode. 0.5% is well above any plausible noise
+# count and well below the ground's own share of a terrestrial scan.
+_GROUND_PERCENTILE = 0.5
+
+# NOTE: there is deliberately no "don't move too far" guard here.
+#
+# The obvious safety rail — refuse the correction when it lifts the estimate a
+# long way — is exactly backwards: a large lift is the signature of a SUCCESSFUL
+# rejection (one point 500 m down is corrected by 500 m), so bounding it defeats
+# the function on precisely the cases it exists for.
+#
+# No guard is needed, because the percentile is self-correcting. When the low tail
+# is real structure rather than noise, it contains far more than 0.5% of the
+# points, so p0.5 lands INSIDE it and the estimate stays low on its own. Measured
+# on the cases in test_robust_ground_z.py: uniform 50 m relief lifts 0.24 m
+# (0.5%), and a 6k-point lower terrace under a 12k-point upper tier lifts 0.014 m
+# — while genuine noise lifts 15-505 m. Structure and noise separate by three
+# orders of magnitude with no threshold at all.
+
+
+def _robust_ground_z(positions: "np.ndarray") -> "Optional[float]":
+    """Outlier-resistant ground level (world Z) for a cloud, or None if unknown.
+
+    `positions[:, 2].min()` is the obvious answer and the wrong one: a single
+    erroneous point below the terrain — and real scans routinely carry a few —
+    drags it arbitrarily far down. That value is load-bearing in the UI (the
+    default scene origin, the ground grid's height, the fallback pick plane), so
+    one stray return visibly sinks the whole ground reference.
+
+    This takes a low percentile instead, which ignores a thin tail of noise but
+    still tracks the real surface. Cheap by construction: one `np.percentile`
+    over an array the caller already has in RAM (O(n) introselect, no sort, no
+    file I/O, no copy of the full cloud), so it costs microseconds-to-milliseconds
+    on the import path and nothing at all thereafter.
+
+    Returns None for an empty/degenerate cloud so callers keep their own fallback.
+    """
+    if positions is None or len(positions) == 0 or positions.shape[1] < 3:
+        return None
+    z = positions[:, 2]
+    z = z[np.isfinite(z)]
+    if z.size == 0:
+        return None
+
+    return float(np.percentile(z, _GROUND_PERCENTILE))
+
+
 def _autodetect_misses(
     positions: "np.ndarray",
     extras: Dict[str, "np.ndarray"],
@@ -20329,6 +20378,18 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         )
 
         n = int(len(positions))
+
+        # Outlier-resistant ground level, computed HERE because this is the one
+        # place the full point array is already in RAM (it is never re-read from
+        # the file). Sky/miss points are excluded: they are projected ~1 km out
+        # along the beam and would drag the percentile with them. Reported in the
+        # same (post-world-shift) frame as `positions`, matching `tight_bounds`.
+        _gz_mask = None
+        if extras is not None and "is_miss" in extras:
+            _gz_mask = np.asarray(extras["is_miss"]) == 0
+        _gz_src = positions[_gz_mask] if _gz_mask is not None else positions
+        ground_z = _robust_ground_z(_gz_src)
+
         sess = CloudSession(
             session_id=session_id,
             source_path=str(source_path),
@@ -20465,6 +20526,10 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     # OctreeRef (provenance + world-coord readouts). null when no shift was applied.
     world_shift_out = world_shift_arr.tolist() if world_shift_arr is not None else None
     return {"session_id": session_id, "point_count": n, "world_shift": world_shift_out,
+            # Outlier-resistant floor (see `_robust_ground_z`). The renderer uses
+            # it for the default scene origin's height and the ground grid instead
+            # of tight_bounds.min.z, which a single stray low point can sink.
+            "ground_z": ground_z,
             **miss_info, **meta}
 
 

@@ -130,6 +130,16 @@ export interface PointCloudData {
   };
   fileName?: string;
   octree?: OctreeRef;  // present iff the cloud is streamed from an octree
+  // Outlier-resistant ground level (world Z, same frame as `bounds`), computed
+  // by the backend at import from a low Z percentile.
+  //
+  // Prefer this over `bounds.min.z` for anything that means "the ground" — the
+  // default scene origin's height, the ground grid, a ground-plane pick. The raw
+  // minimum is set by a single point, so one bad low return sinks it arbitrarily;
+  // the percentile ignores a thin noise tail while still tracking real terrain.
+  // Undefined on clouds that predate this or were built renderer-side; callers
+  // fall back to `bounds.min.z`.
+  groundZ?: number;
 }
 
 // Point cloud entry with metadata. Internal alias matching the data-bearing

@@ -28,6 +28,11 @@ export function CameraController({
   // marker shows). When set, left-drag orbits about THIS point instead of the
   // OrbitControls target, so panning no longer moves the rotation center. Null
   // falls back to stock OrbitControls rotation about its target.
+  //
+  // It is ALSO the camera's default look-at: framing aims `controls.target` at
+  // this point (see `anchorCenter`), so zoom — which OrbitControls dollies along
+  // camera→target — converges on the scene origin too, not on the bounds
+  // mid-height. Panning deliberately breaks that link (see `pannedRef`).
   orbitPivot?: [number, number, number] | null;
 }) {
   const { camera, gl, scene } = useThree();
@@ -53,6 +58,46 @@ export function CameraController({
   orbitPivotRef.current = orbitPivot;
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
+
+  // ── Zoom anchor: the scene origin, until the user pans ────────────────────
+  //
+  // OrbitControls dollies along camera→`controls.target`, so whatever the target
+  // is IS what zoom converges on. We aim framing at the scene origin (below) so
+  // zoom lands there by default. But a pan is an explicit "I want to look over
+  // HERE" — after one, forcing zoom back to the origin would make it impossible
+  // to zoom into an off-origin detail you just panned to. So a pan latches this
+  // flag and hands the target back to stock OrbitControls behavior; any
+  // re-framing (reset view, frame selection, axis snap, a moved origin, new
+  // content) clears it and re-anchors on the origin.
+  const pannedRef = useRef(false);
+
+  // Where framing should aim `controls.target`: the caller's centre laterally,
+  // but the scene origin's HEIGHT — so the view looks at the ground-anchored
+  // origin plane and zoom converges there rather than on the bounds mid-height.
+  //
+  // Only Z is taken from the origin, deliberately. Each caller has already
+  // decided WHAT it is framing, and that choice lives in X/Y: `frameSelection`
+  // with an explicit target frames a newly added mesh or an off-frame scan on
+  // its own bounds (frameMeshInViewport / frameScanInViewport), which can sit
+  // far from the scene centre. Overriding X/Y with the origin's would drag the
+  // view off whatever the caller meant to frame — and since the default origin
+  // tracks the whole-scene bounds (scan markers included), that is a large
+  // lateral swing on exactly the scenes where framing matters most. Height is
+  // the axis the user asked to change, and it is the axis that is common to
+  // every framing.
+  //
+  // Takes and returns DISPLAY space; `orbitPivot` is WORLD, so its Z is
+  // offset-converted here.
+  const anchorCenter = useCallback((displayFallback: THREE.Vector3): THREE.Vector3 => {
+    const pivotWorld = orbitPivotRef.current;
+    if (!pivotWorld || pannedRef.current) return displayFallback;
+    const o = offsetRef.current;
+    return new THREE.Vector3(
+      displayFallback.x,
+      displayFallback.y,
+      pivotWorld[2] - (o?.z ?? 0),
+    );
+  }, []);
 
   const snapToView = useCallback((direction: ViewDirection, target?: { center: THREE.Vector3, size: THREE.Vector3 }) => {
     if (!controlsRef.current) return;
@@ -103,10 +148,26 @@ export function CameraController({
         break;
     }
 
-    camera.position.copy(newPos);
-    controlsRef.current.target.copy(center);
+    // A deliberate re-frame re-anchors zoom on the scene origin.
+    pannedRef.current = false;
+
+    // The LOOK-AT takes the scene origin's HEIGHT (when there is one) rather than
+    // the bounds mid-height — that is what makes zoom converge on the origin,
+    // since OrbitControls dollies along camera→target. Applied on both the
+    // no-target and explicit-target forms, unlike frameSelection: snapToView's
+    // caller passes whole-scene bounds (the auto-frame, the view-snap menu), not
+    // a single object to centre on, so the ground anchor is always right here.
+    //
+    // The camera is then placed at `distance` from THAT point, along the same
+    // direction the switch above chose — i.e. the whole camera/target pair is
+    // translated by (lookAt − center). Leaving the camera at `newPos` (measured
+    // from the bounds centre) while anchoring the target lower would shorten
+    // camera→target by that offset and silently zoom the view in.
+    const lookAt = anchorCenter(center);
+    camera.position.copy(newPos).add(lookAt).sub(center);
+    controlsRef.current.target.copy(lookAt);
     controlsRef.current.update();
-  }, [camera, displayCenter]);
+  }, [camera, displayCenter, anchorCenter]);
 
   // Rotate the view to look straight down a world axis WITHOUT reframing.
   // Unlike snapToView (which recomputes distance from bounds and re-zooms),
@@ -158,10 +219,20 @@ export function CameraController({
     if (dir.lengthSq() < 1e-12) dir.set(0.6, -0.6, 0.5); // degenerate: fall back to iso-ish
     dir.normalize();
 
-    camera.position.copy(center).addScaledVector(dir, distance);
-    controls.target.copy(center);
+    // Framing an EXPLICIT target (zoom-to-selection, or a newly added mesh/scan
+    // via frameMeshInViewport / frameScanInViewport) aims at exactly that target,
+    // including its height — the caller framed a specific object, and dropping
+    // the look-at to the whole-scene floor would push that object up out of the
+    // view. Only the no-argument "fit everything" form takes the ground anchor,
+    // and it is also the only form that counts as a deliberate re-frame and so
+    // re-anchors zoom on the origin.
+    const lookAt = target ? center : anchorCenter(center);
+    if (!target) pannedRef.current = false;
+
+    camera.position.copy(lookAt).addScaledVector(dir, distance);
+    controls.target.copy(lookAt);
     controls.update();
-  }, [camera, displayCenter]);
+  }, [camera, displayCenter, anchorCenter]);
 
   // Initialize camera once on mount - fixed position, not dependent on bounds
   useEffect(() => {
@@ -202,6 +273,14 @@ export function CameraController({
     }, 0);
     return () => clearTimeout(timer);
   }, [hasContent, bounds, snapToView]);
+
+  // NOTE: there is deliberately NO effect here that re-centers the view when the
+  // scene origin moves. The origin tracks the scene bounds by default, so it
+  // changes whenever content is added — and an effect on it would fight the
+  // explicit framing paths (frameMeshInViewport / frameScanInViewport, which
+  // frame a newly added mesh or an off-frame scan on its own bounds) by yanking
+  // the camera back to the origin right after they ran. Re-anchoring happens
+  // only through the framing calls themselves (see `anchorCenter`).
 
   // Adapt the perspective near/far planes for depth precision AND to keep the
   // infinite ground grid from clipping. The Canvas seeds a fixed near=0.01 /
@@ -336,7 +415,18 @@ export function CameraController({
     };
 
     const onPointerDown = (e: PointerEvent) => {
-      if (!enabledRef.current || !orbitPivotRef.current) return;
+      if (!enabledRef.current) return;
+      // A PAN detaches zoom from the scene origin (see `pannedRef`). Pan is
+      // middle/right drag, or modifier+left — exactly the gestures three-stdlib
+      // routes to its pan path, mirrored here because OrbitControls emits no
+      // event that distinguishes a pan from a dolly. Latched on pointerdown
+      // rather than on movement: a click that turns out not to drag re-frames
+      // nothing, and re-anchoring on the next zoom would be just as surprising.
+      const isPanGesture = e.button === 1 || e.button === 2
+        || (e.button === 0 && (e.shiftKey || e.ctrlKey || e.metaKey));
+      if (isPanGesture) pannedRef.current = true;
+
+      if (!orbitPivotRef.current) return;
       // Left button only, and never with a modifier: shift/ctrl/meta+left is
       // OrbitControls' pan, and alt+left is reserved.
       if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;

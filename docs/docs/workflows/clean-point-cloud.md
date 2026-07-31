@@ -77,8 +77,19 @@ Origin**) moves the pivot point, like CloudCompare's. It's a scene control
 rather than an analysis tool, so it sits with the view controls. The origin
 is the **rotation center** for both the Transform tool and the camera: a
 left-drag in the viewport turns the whole view about it, so panning no longer
-changes what you rotate around. Moving the origin does **not** move the
-camera — the view stays exactly where it is, it just pivots somewhere else.
+changes what you rotate around. It is also what the camera looks at by
+default, so zooming converges on it (until you pan, after which zoom follows
+your view). Moving the origin does **not** move the camera — the view stays
+exactly where it is, it just pivots somewhere else.
+
+With no placement of your own, the origin sits laterally at the center of the
+loaded scene but vertically at its **base** — on the ground rather than
+halfway up — which is usually the point you want to circle and zoom toward.
+
+That ground level is measured robustly, so a handful of erroneous returns
+below the terrain (multipath, birds, scanner artefacts) will not drag it
+down: it ignores the lowest 0.5% of points rather than taking the single
+lowest one. The ground grid uses the same estimate.
 
 A red-and-white ring marker (a 3D cursor) shows the origin in the scene, at
 a constant size no matter how far you zoom. **Click the ring** to select it:
@@ -98,9 +109,9 @@ In the **Scene Origin** panel you can:
 - **Show origin marker** — uncheck to hide the marker (and its gizmo). The
   pivot itself is unchanged; it just stops drawing over your scene.
 - **Reset to scene center** — drop your placement and return the origin to
-  the middle of the loaded scene.
+  its default: laterally the middle of the loaded scene, vertically its base.
 
-The origin returns to the scene center when you start a new scene
+The origin returns to that default when you start a new scene
 (**File → New**).
 
 ## Crop

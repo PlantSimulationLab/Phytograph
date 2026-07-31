@@ -12,7 +12,7 @@ type Axis = 'x' | 'y' | 'z';
 // world-frame math; this component only renders the current value and reports
 // intent.
 interface SceneOriginPanelProps {
-  /** Effective origin in WORLD coords (user override, else the scene center). */
+  /** Effective origin in WORLD coords (user override, else the ground-anchored scene center). */
   origin: [number, number, number];
   /** True when the user has overridden the default scene-center origin. */
   isCustom: boolean;
@@ -64,9 +64,10 @@ export function SceneOriginPanel({
       </div>
 
       <p className="text-[10px] text-neutral-500 mb-2 leading-relaxed">
-        The pivot the view and the Transform tool rotate about. Defaults to the
-        scene center — drag its marker, click a point in the viewport, or type
-        world coordinates.
+        The pivot the view and the Transform tool rotate about, and what the
+        camera looks at (so zoom converges here until you pan). Defaults to the
+        scene center at ground level — drag its marker, click a point in the
+        viewport, or type world coordinates.
       </p>
 
       <button
@@ -137,7 +138,7 @@ export function SceneOriginPanel({
         onClick={onReset}
         disabled={!isCustom}
         data-testid="scene-origin-clear"
-        title="Move the origin back to the center of the scene"
+        title="Move the origin back to the default: the center of the scene, at ground level"
         className="w-full mt-1 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
       >
         Reset to scene center

@@ -3055,6 +3055,15 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // turns this into a Scan's ScanParameters at import (XML-parity), filling any
   // missing field from the defaults. Angles are in degrees, origin in metres.
   scan_params?: ScanParamsFromFile;
+  // Outlier-resistant ground level (a low Z percentile), in the same frame as
+  // `tight_bounds` — i.e. post-world_shift. Computed once at import, where the
+  // full point array is already in RAM.
+  //
+  // Use this, NOT `tight_bounds.min.z`, wherever "the ground" is meant: the raw
+  // minimum is defined by a single point, so one erroneous low return (multipath,
+  // a bird, a scanner artefact) sinks it arbitrarily far. null when the backend
+  // could not compute one (empty/degenerate cloud) — fall back to the min then.
+  ground_z?: number | null;
 }
 
 // The wire shape of the backend `scan_params` dict. Canonically defined in

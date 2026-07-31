@@ -245,26 +245,34 @@ test.describe('viewport picking', () => {
 
     // ...but the grid is still selectable where it is the ONLY thing under the
     // cursor. Without this, the assertion above could pass by making the grid
-    // unpickable entirely. Target the box's top face well out toward a corner
-    // (the box is 0.5^3 at (0,0,0.5) rotated 45 deg, so its top-face corners
-    // sit at (0, +-0.354, 0.75)) — clear of the sphere, which only reaches
-    // z ~ 0.70 near the centre.
-    // The box is symmetric about its centre, so BOTH top-face corners are
-    // equally valid targets — take whichever currently projects onto bare
-    // canvas. Hardcoding one of them made this depend on where the framing
-    // happens to put it: on the CI runner (+0.30) landed on the right-hand
-    // scene panel, so the click never reached the picker.
+    // unpickable entirely. Target the box out toward a side corner, clear of the
+    // sphere: the box is 0.5^3 at (0,0,0.5) rotated 45 deg, so its vertical
+    // edges run through (0, +-0.354) and (+-0.354, 0), and the sphere only
+    // reaches z ~ 0.70 near the centre.
+    //
+    // The box is symmetric about its centre, so every corner is an equally valid
+    // target — take whichever currently projects onto bare canvas. Hardcoding
+    // one made this depend on where the framing happens to put it: on the CI
+    // runner (0, +0.30) landed on the right-hand scene panel, so the click never
+    // reached the picker. Candidates span BOTH heights, not just the top face:
+    // the camera looks at the ground-anchored scene origin (the bounds floor),
+    // which draws the scene lower in the viewport than a mid-height look-at did,
+    // and the top face can sit just above the top edge of the canvas.
+    const CANDIDATES: Array<[number, number, number]> = [];
+    for (const z of [0.75, 0.25]) {
+      CANDIDATES.push([0, 0.30, z], [0, -0.30, z], [0.30, 0, z], [-0.30, 0, z]);
+    }
     let corner: { x: number; y: number } | null = null;
     let lastErr = '';
-    for (const y of [0.30, -0.30]) {
+    for (const c of CANDIDATES) {
       try {
-        corner = await worldToScreenPx([0, y, 0.75]);
+        corner = await worldToScreenPx(c);
         break;
       } catch (e) {
         lastErr = e instanceof Error ? e.message : String(e);
       }
     }
-    if (!corner) throw new Error(`no grid top-face corner landed on the canvas: ${lastErr}`);
+    if (!corner) throw new Error(`no grid corner landed on the canvas: ${lastErr}`);
     await clickViewport(corner.x, corner.y);
     await expect(selectedMeshes()).toHaveCount(1);
     await expect(gridRow).toHaveAttribute('data-selected', 'true');
@@ -303,10 +311,27 @@ test.describe('viewport picking', () => {
     // Corner silhouette in VIEWPORT PIXELS (the probe offsets below are relative
     // to this footprint, so pixels and fractions work equally — pixels just keep
     // one unit throughout).
-    const projected = [];
     // Coordinates only — these corners are measured, never clicked, and some of
-    // them legitimately project outside the canvas.
-    for (const c of corners) projected.push(await worldToScreenPx(c, { requireOnCanvas: false }));
+    // them legitimately project outside the canvas (and outside the frustum: the
+    // camera looks at the ground-anchored scene origin, so the box's top corners
+    // can sit just above the viewport).
+    //
+    // Read the RAW projection rather than going through worldToScreenPx, whose
+    // frustum guard exists for points that are about to be clicked. Every corner
+    // must be included: the footprint is the reference for probes placed OUTSIDE
+    // it, so silently dropping the top corners would shrink the rectangle upward
+    // and put the "above" probe on the box itself — which is a false FAILURE
+    // here, and in the other direction would be a false pass. A corner behind the
+    // camera would project meaninglessly, so those are still rejected loudly.
+    const projected = [];
+    for (const c of corners) {
+      const pt = await session.page.evaluate(
+        (w) => (window as any).__worldToScreen?.(w) ?? null,
+        c,
+      );
+      if (!pt) throw new Error('__worldToScreen hook unavailable (camera not mounted?)');
+      projected.push(pt as { x: number; y: number; visible: boolean });
+    }
     const foot = {
       minx: Math.min(...projected.map(p => p.x)), maxx: Math.max(...projected.map(p => p.x)),
       miny: Math.min(...projected.map(p => p.y)), maxy: Math.max(...projected.map(p => p.y)),

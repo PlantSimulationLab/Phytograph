@@ -852,6 +852,12 @@ export function buildPointCloudFromOctree(
     positions: new Float32Array(0),
     pointCount: meta.point_count,
     bounds: { min, max, center, size },
+    // Outlier-resistant floor from the cloud-session create response (a superset
+    // of OctreeMetadata); plain OctreeMetadata callers leave it undefined and
+    // consumers fall back to bounds.min.z.
+    groundZ: typeof (meta as OctreeMetadata & { ground_z?: number | null }).ground_z === 'number'
+      ? (meta as OctreeMetadata & { ground_z: number }).ground_z
+      : undefined,
     fileName,
     octree: {
       cacheId: meta.cache_id,

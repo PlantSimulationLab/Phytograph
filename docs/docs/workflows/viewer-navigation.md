@@ -11,9 +11,17 @@
 | Fit everything | <kbd>⌘/Ctrl</kbd>+<kbd>0</kbd>, or **Reset View** | Same |
 
 The camera orbits around the **scene origin** — the red-and-white ring
-marker in the viewport, which starts at the center of everything you have
-loaded. Panning moves the view without moving that pivot, so you can pan
-off to one side and still turn about the same point.
+marker in the viewport. It starts laterally centered on everything you have
+loaded, at ground level (the bottom of the scene), since these scenes
+generally stand on the ground. That ground level ignores a small fraction of
+the lowest points, so stray returns beneath the terrain do not drag it down.
+Panning moves the view without moving that pivot, so you can pan off to one
+side and still turn about the same point.
+
+The origin is also what the camera looks at, so **zooming moves you toward
+the origin** rather than toward the middle of the bounding box. Once you
+pan, zoom follows your new view instead — pan is how you say "I want to
+look over here". **Reset View** re-centers on the origin again.
 
 To orbit around something else, move the origin: click its ring and drag
 the arrow gizmo, or use **Set Scene Origin** to click a point on a surface

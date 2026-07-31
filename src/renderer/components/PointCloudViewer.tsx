@@ -4064,6 +4064,7 @@ export default function PointCloudViewer({
         max: new THREE.Vector3(5, 5, 5),
         center: new THREE.Vector3(0, 0, 0),
         size: new THREE.Vector3(10, 10, 10),
+        groundZ: -5,
       };
     }
 
@@ -4165,19 +4166,40 @@ export default function PointCloudViewer({
 
     // Fallback if no visible objects
     if (!isFinite(min.x)) {
-      if (clouds.length > 0) return clouds[0].data.bounds;
+      if (clouds.length > 0) {
+        const b = clouds[0].data.bounds;
+        // That cloud's own robust floor when it has one, else its raw minimum.
+        return { ...b, groundZ: clouds[0].data.groundZ ?? b.min.z };
+      }
       // Create default bounds for mesh/skeleton only scenarios
       return {
         min: new THREE.Vector3(-1, -1, -1),
         max: new THREE.Vector3(1, 1, 1),
         center: new THREE.Vector3(0, 0, 0),
         size: new THREE.Vector3(2, 2, 2),
+        groundZ: -1,
       };
     }
 
     const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
     const size = new THREE.Vector3().subVectors(max, min);
-    return { min, max, center, size };
+
+    // Scene ground level — the lowest per-cloud robust floor, plus that cloud's
+    // live translation so it tracks a Translate drag (unlike staticBounds.groundZ,
+    // which is deliberately latched). Clouds only; see the staticBounds version
+    // for why meshes/skeletons/scanner markers are excluded. Falls back to the
+    // raw minimum when no cloud carries one.
+    let groundZ = Infinity;
+    for (const cloud of clouds) {
+      if (!cloud.visible) continue;
+      const g = cloud.data.groundZ;
+      if (typeof g === 'number' && isFinite(g)) {
+        groundZ = Math.min(groundZ, g + getEditState(cloud.id).translation.z);
+      }
+    }
+    if (!isFinite(groundZ)) groundZ = min.z;
+
+    return { min, max, center, size, groundZ };
   }, [clouds, meshes, skeletons, qsms, scansWithParams, meshPositions, meshScales, meshRotations, getEditState]);
 
   // Open the add-scan popup with sensible defaults: next label and current
@@ -4447,6 +4469,9 @@ export default function PointCloudViewer({
     max: new THREE.Vector3(5, 5, 5),
     center: new THREE.Vector3(0, 0, 0),
     size: new THREE.Vector3(10, 10, 10),
+    // Empty-scene default: the fallback box's own floor (see the `groundZ`
+    // computation below for what this means once content exists).
+    groundZ: -5,
   });
 
   const staticBounds = useMemo(() => {
@@ -4579,6 +4604,7 @@ export default function PointCloudViewer({
         max: new THREE.Vector3(1, 1, 1),
         center: new THREE.Vector3(0, 0, 0),
         size: new THREE.Vector3(2, 2, 2),
+        groundZ: -1,
       };
       stableStaticBoundsRef.current = fallback;
       return fallback;
@@ -4586,7 +4612,27 @@ export default function PointCloudViewer({
 
     const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
     const size = new THREE.Vector3().subVectors(max, min);
-    const result = { min, max, center, size };
+
+    // Scene ground level: the LOWEST per-cloud robust floor (see PointCloudData
+    // .groundZ — a low Z percentile computed by the backend at import, which a
+    // stray sub-terrain point cannot sink). Lowest, not average: with several
+    // clouds the ground is wherever the lowest real surface is.
+    //
+    // Only CLOUDS contribute. Meshes, skeletons and scanner markers have no
+    // percentile of their own, and a scanner rig at head height is emphatically
+    // not the ground — including them would pull the reference up. When no cloud
+    // carries one (mesh-only scene, renderer-side synthetic data, a cloud from
+    // before this existed) we fall back to the raw bounds minimum, which is the
+    // previous behavior.
+    let groundZ = Infinity;
+    for (const cloud of clouds) {
+      if (!cloud.visible) continue;
+      const g = cloud.data.groundZ;
+      if (typeof g === 'number' && isFinite(g)) groundZ = Math.min(groundZ, g);
+    }
+    if (!isFinite(groundZ)) groundZ = min.z;
+
+    const result = { min, max, center, size, groundZ };
     stableStaticBoundsRef.current = result;
     return result;
   }, [clouds, meshes, skeletons, scansWithParams, meshPositions, meshRotations, meshScales]);
@@ -4619,14 +4665,31 @@ export default function PointCloudViewer({
   );
 
   // Effective scene origin (WORLD): the user's explicit placement, else the
-  // scene bounds center. Keyed on `staticBounds` — NOT `combinedBounds` — on
-  // purpose: staticBounds is latched on the add-only object-id set and never
-  // moves during a Translate drag, so rotating a cloud about the default origin
-  // can't feed back into the pivot mid-drag. On an empty scene staticBounds
-  // falls back to a unit box centered at (0,0,0), so the marker starts at the
-  // world origin. The ref mirrors it for the async bake path.
+  // GROUND-anchored scene center — laterally the bounds center (X/Y), but
+  // vertically at the scene's ground level (`staticBounds.groundZ`, an
+  // outlier-resistant floor) rather than the mid-height.
+  //
+  // Why the floor and not center.z: this point is both the orbit pivot and the
+  // camera's default look-at, and these scenes are ground-standing — plants,
+  // terrain, scans of a plot. A mid-height pivot puts the rotation center in
+  // empty air above the canopy floor, so orbiting swings the ground plane
+  // through the view and zooming drives at nothing. Anchoring at ground level
+  // puts the pivot where the content actually meets the ground, which is the
+  // point a user is almost always circling.
+  //
+  // `groundZ`, NOT `min.z`: the raw minimum is defined by a single point, so one
+  // erroneous return below the terrain (and real scans carry a few) drops the
+  // origin metres into the void. groundZ is a low percentile computed once at
+  // import — see PointCloudData.groundZ.
+  //
+  // Keyed on `staticBounds` — NOT `combinedBounds` — on purpose: staticBounds is
+  // latched on the add-only object-id set and never moves during a Translate
+  // drag, so rotating a cloud about the default origin can't feed back into the
+  // pivot mid-drag. On an empty scene staticBounds falls back to a unit box
+  // centered at (0,0,0) (so groundZ = −5); `sceneHasContent` gates the marker
+  // off there anyway. The ref mirrors it for the async bake path.
   const sceneOrigin = useMemo<[number, number, number]>(
-    () => sceneOriginOverride ?? [staticBounds.center.x, staticBounds.center.y, staticBounds.center.z],
+    () => sceneOriginOverride ?? [staticBounds.center.x, staticBounds.center.y, staticBounds.groundZ],
     [sceneOriginOverride, staticBounds],
   );
   sceneOriginRef.current = sceneOrigin;
@@ -4738,7 +4801,13 @@ export default function PointCloudViewer({
   // computed extent floor, since 0 there is meaningless (and invisible).
   const gridFloor = useMemo(() => {
     const upAxis = gridPlane === 'z-up' ? 'z' : 'y';
-    const floor = staticBounds.min[upAxis];
+    // For the z-up (real) case use the outlier-resistant ground rather than the
+    // raw minimum: a few noise points below the terrain would otherwise drop the
+    // grid metres under the scene, exactly where it reads as "the ground is
+    // wrong". The y-up display mode has no equivalent estimate, so it keeps the
+    // extent floor. Note this also feeds `distFromZero` below, so a scene whose
+    // only sub-zero content is noise can still snap the grid to 0.
+    const floor = upAxis === 'z' ? staticBounds.groundZ : staticBounds.min[upAxis];
     const ceil = staticBounds.max[upAxis];
     const sceneScale = Math.max(staticBounds.size.length(), 1e-6);
     // Distance from 0 to the geometry's up-axis span (0 if the span straddles 0).
@@ -13097,6 +13166,11 @@ export default function PointCloudViewer({
       // default ±5 origin box (size ≈ 17.3), which would blank the viewport.
       data-scene-bounds-size={combinedBounds.size.length().toFixed(2)}
       data-scene-center={`${combinedBounds.center.x.toFixed(1)},${combinedBounds.center.y.toFixed(1)},${combinedBounds.center.z.toFixed(1)}`}
+      // The bounds FLOOR. The default scene origin is laterally the centre but
+      // vertically this, so a test asserting the origin's ground anchor needs it
+      // — data-scene-center alone cannot distinguish the floor from the
+      // mid-height.
+      data-scene-min-z={combinedBounds.min.z.toFixed(1)}
       // Test hook: whether the scene-origin marker is click-selected (and so
       // showing its translation gizmo). The gizmo lives in the canvas and has no
       // DOM of its own, so this is the only way to assert on it.
@@ -13814,7 +13888,11 @@ export default function PointCloudViewer({
         {originPlaceMode && (
           <OriginPicker
             octree={selectedOctree()}
-            groundZ={(firstSelectedCloud?.data.bounds.min.z ?? 0) - displayOffset.z}
+            // Robust floor when the cloud has one, else its raw minimum — a
+            // single sub-terrain noise point must not drop the pick plane.
+            groundZ={(firstSelectedCloud?.data.groundZ
+              ?? firstSelectedCloud?.data.bounds.min.z
+              ?? 0) - displayOffset.z}
             displayOffset={displayOffset}
             onPick={(world) => { setSceneOriginOverride(world); setOriginPlaceMode(false); }}
           />
@@ -14011,7 +14089,7 @@ export default function PointCloudViewer({
             // plane is at the display z. The hit (x,y) is display-space; the
             // corner refs + cropBox below store WORLD coords (offset added back),
             // since cropBox is sent to the backend in world space.
-            groundZ={combinedBounds.min.z - displayOffset.z}
+            groundZ={combinedBounds.groundZ - displayOffset.z}
             onMove={(x, y) => {
               boxDrawCursorRef.current = { x: x + displayOffset.x, y: y + displayOffset.y };
               // Re-render so the corner-1 marker / preview box follows the
@@ -14274,7 +14352,7 @@ export default function PointCloudViewer({
       {showTreeSegmentPanel && treeSeedMode && selectedIds.size === 1 && (() => {
         const cam = mainCameraRef.current;
         const cloud = clouds.find(c => selectedIds.has(c.id));
-        const groundZ = cloud?.data.bounds?.min.z ?? 0;
+        const groundZ = cloud?.data.groundZ ?? cloud?.data.bounds?.min.z ?? 0;
         // treeSeedPoints are stored in WORLD coords (sent to the backend for
         // segmentation), but `cam` renders in DISPLAY space (world − offset). So
         // project world→display before .project(cam), and add the offset back on
