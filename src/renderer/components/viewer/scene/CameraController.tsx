@@ -318,8 +318,23 @@ export function CameraController({
     // moving far enough to be aiming at something else, or a reversal of scroll
     // direction. Anything else — including a probe miss mid-burst — keeps flying
     // at the point the user originally aimed at, which is also what they meant.
-    const GESTURE_IDLE_MS = 140;     // wheel bursts arrive far tighter than this
+    // Idle gap that ends a gesture. Measured wheel-to-wheel spacing on an idle
+    // machine is 23-75 ms, but that is the best case: while the octree streams,
+    // or the app is otherwise busy, the main thread stalls and notches from one
+    // continuous flick arrive much further apart. A threshold near the idle
+    // spacing therefore expires the latch BETWEEN notches of a single gesture
+    // exactly when the machine is under load — every notch then re-probes, the
+    // gesture never coheres, and zoom degenerates into the lurching that the
+    // latch exists to prevent (reproduced under two parallel E2E workers: a
+    // burst that made no progress at all, and a step 75x its predecessor).
+    // Sized well above the worst observed spacing; the cost of being generous is
+    // only that a deliberate pause under ~0.4 s keeps flying at the old anchor.
+    const GESTURE_IDLE_MS = 400;
     const GESTURE_MOVE_PX = 40;      // beyond this the cursor is on a new subject
+    // Closest the camera may get to the content centre, as a fraction of the
+    // scene scale. Keeps a deep zoom inspecting the subject rather than passing
+    // through the middle of it — see the clamp in the wheel handler.
+    const CONTENT_APPROACH_FLOOR = 0.02;
     let latch: {
       anchor: THREE.Vector3;
       x: number;
@@ -352,24 +367,62 @@ export function CameraController({
       const camPos = camera.position;
       const target: THREE.Vector3 = controls.target;
 
+      // ── Pace: how far one notch travels, set by the CONTENT distance ────────
+      //
+      // Deliberately NOT derived from the anchor gap, and not from
+      // `|camera − target|` either. The target is re-seated onto the anchor gap
+      // after the dolly (it has to be, so pan sensitivity stays right), so
+      // reading speed back off either one creates a feedback loop: gap sets
+      // speed, the near clamp shrinks the gap, speed decays to nothing. Measured
+      // doing exactly that — steps fell from 17.3 to 0.026 across one burst,
+      // which is the "it gets laggy then momentarily freezes" report.
+      //
+      // Distance to the content centre is the one quantity here that does NOT
+      // collapse as the camera closes on a surface: fly onto a leaf and you are
+      // still a real distance from the middle of the tree. Floored near the
+      // scene scale so sitting at the centre (or a degenerate scene) still gives
+      // a usable step. Scale-free, continuous across a re-probe, never decays.
+      // The anchor steers; this sets the pace.
+      const oPace = offsetRef.current;
+      const ccPace = contentCentreRef.current;
+      const contentDist = camPos.distanceTo(new THREE.Vector3(
+        ccPace[0] - (oPace?.x ?? 0),
+        ccPace[1] - (oPace?.y ?? 0),
+        ccPace[2] - (oPace?.z ?? 0),
+      ));
+      const pace = Math.max(contentDist, limitsRef.current.scale * 0.02);
+
       // Reuse the latched anchor when this notch continues the same gesture.
       //
-      // The near clamp is asymptotic, so a long burst can close almost all of the
-      // gap to the anchor without ever reaching it. Once the remainder is a
-      // negligible fraction of the scene the latch has been consumed: keeping it
-      // would leave `anchorDist` shrinking toward the guard below and the zoom
-      // would quietly stall at a surface. Dropping it re-probes, which is correct
-      // — at that range the pointer is over something new.
+      // The latch keeps the DIRECTION stable; step size no longer depends on it.
+      // But it must still be released once the camera has arrived, or the near
+      // clamp pins the camera against it and zoom hits a hard wall — measured
+      // stopping dead at 0.004 from a consumed anchor and never moving again,
+      // however long the user kept scrolling.
+      //
+      // "Arrived" is defined by the clamp that actually stops the motion rather
+      // than by a tuned distance: `clampDollyToSurface` lets a step close at most
+      // (1 − stopFraction) of the gap, so once the requested step exceeds the gap
+      // the clamp is what governs, the camera is as close as this anchor will
+      // ever allow, and the anchor has nothing left to give. Re-probing then
+      // finds the surface now under the pointer and the approach continues.
       const now = performance.now();
-      const spent = latch
-        ? camera.position.distanceTo(latch.anchor) < limitsRef.current.scale * 1e-4
+      const arrived = latch
+        ? camera.position.distanceTo(latch.anchor) <= pace * fraction
         : false;
       const reuse = latch
-        && !spent
+        && !arrived
         && now - latch.time < GESTURE_IDLE_MS
         && latch.zoomIn === zoomIn
         && Math.abs(e.clientX - latch.x) < GESTURE_MOVE_PX
         && Math.abs(e.clientY - latch.y) < GESTURE_MOVE_PX;
+
+      // The anchor this gesture was flying at before a re-probe, kept so a
+      // zoom-in can refuse a receding replacement (see below). Only meaningful
+      // while the gesture continues — an idle gap means a genuinely new aim.
+      const prevAnchor = latch && now - latch.time < GESTURE_IDLE_MS && latch.zoomIn === zoomIn
+        ? latch.anchor
+        : null;
 
       let anchor: THREE.Vector3;
       if (reuse && latch) {
@@ -437,6 +490,28 @@ export function CameraController({
           const alongCursor = cosA > 1e-3 ? depth / cosA : depth;
           anchor = camPos.clone().addScaledVector(cursorDir, alongCursor);
         }
+        // A zoom-IN must never adopt an anchor farther away than the one it just
+        // arrived at. Once the camera reaches a surface the latch is released and
+        // the next probe reports whatever is now under the pointer — which, from
+        // right on top of a leaf, is routinely something well BEHIND it (measured
+        // at the periphery: 0.87 → 29.05). Flying at that carries the camera back
+        // out through the canopy while the user is still scrolling inward, so the
+        // view recedes on a zoom-in. Keeping the old anchor makes the motion
+        // simply stop at the surface, which is the honest outcome: there is
+        // nothing closer under the cursor to fly to.
+        // Only ever a defence against a real PICK receding. Applying it to the
+        // fallback deadlocks: pointing at empty sky near the edge of a small scene
+        // misses every time, the fallback legitimately sits at content depth
+        // (farther than a surface the camera reached earlier in the gesture),
+        // and substituting that consumed anchor pins the camera against it via
+        // clampDollyToSurface — measured frozen at 11.819 for 20 straight
+        // notches with the approach floor nowhere near engaging.
+        if (
+          zoomIn && picked && prevAnchor
+          && camPos.distanceTo(anchor) > camPos.distanceTo(prevAnchor) + 1e-6
+        ) {
+          anchor = prevAnchor;
+        }
         latch = { anchor: anchor.clone(), x: e.clientX, y: e.clientY, time: now, zoomIn };
       }
       if (latch) latch.time = now;
@@ -449,7 +524,49 @@ export function CameraController({
       if (anchorDist < 1e-9) return;
       toAnchor.normalize();
 
-      let step = anchorDist * fraction * (zoomIn ? 1 : -1);
+      // ── Speed comes from the SUBJECT DISTANCE, not from the anchor gap ──────
+      //
+      // The anchor's job is to set the DIRECTION (that is what makes the point
+      // under the cursor stay put). Deriving the step size from it as well is
+      // what produced every remaining artefact, because the anchor gap is not a
+      // stable quantity:
+      //
+      //   • Latched, it shrinks geometrically. A 25-notch burst decayed from 9.9
+      //     world units per notch to 0.03 and parked 34.9 from the content — the
+      //     "momentary freeze" where scrolling visibly does nothing.
+      //   • Re-probed, it jumps discontinuously. A fresh pick can be nearer than
+      //     the old anchor (one notch then teleports the camera into the
+      //     geometry — the over-zoom) or FARTHER, when the camera has already
+      //     passed the near surface and the probe returns something beyond it
+      //     (measured: 17.2 → 20.8, after which the camera flew away from the
+      //     content while still "zooming in").
+      //
+      // Speed comes from `pace` (see above), not from this gap.
+      let step = pace * fraction * (zoomIn ? 1 : -1);
+
+      // ── Don't fly INTO the content ──────────────────────────────────────────
+      //
+      // `clampDollyToSurface` below stops the camera short of the surface it is
+      // flying at, which is the right guard in open space but provides no
+      // protection once the camera is inside the cloud: from in there the
+      // nearest surface is millimetres away in every direction, the probe keeps
+      // returning it (measured: an anchor 0.004 out, notch after notch), and
+      // "stop 2% short of 4 mm" still lets the camera sit buried in the canopy
+      // with nothing on screen. That is the "over-zooms until no points are in
+      // view" half of the report, and it is why the scene-scaled `minDistance`
+      // (scale/1e4 = 4 mm here) never caught it either.
+      //
+      // So bound the approach by distance to the CONTENT as well. The floor is a
+      // fraction of the content's own size rather than of the derived scene
+      // scale: 2% of a 41 m tree is ~0.8 m, which puts the camera close enough
+      // to inspect an individual branch while still leaving the subject in
+      // frame. (A floor keyed to the scale alone came out at 0.165 m — still
+      // buried inside the canopy, with the tree filling the entire frustum.)
+      if (step > 0) {
+        const floor = limitsRef.current.scale * CONTENT_APPROACH_FLOOR;
+        const room = contentDist - floor;
+        step = room <= 0 ? 0 : Math.min(step, room);
+      }
 
       // Near clamp — never tunnel through what you are flying at. Asymptotic, so
       // a surface can be approached arbitrarily closely but never crossed.
