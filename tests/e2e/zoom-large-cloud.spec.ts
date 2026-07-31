@@ -123,3 +123,84 @@ test('a scroll burst on a 13M-point cloud converges without reversing', async ()
     expect(distTo(await state()), `${label}: zoom-out froze`).toBeGreaterThan(before);
   }
 });
+
+// ── Regression: fast in past the ground, then straight back out ─────────────
+//
+// The reported gesture that still froze after the pacing fix. Its cause was a
+// positive feedback loop on zoom-OUT: step size is proportional to the distance
+// from the content, and zooming out increases that distance, so each notch was
+// larger than the last. Measured stepping 84 → 102 → 124 → 150 → 182 world
+// units, ending ~1000 units from a 41 m tree — where the scene is a sub-pixel
+// dot and no further notch can recover the view. Reads exactly as a freeze, and
+// only an orbit (which reframes the camera/target relationship) got it back.
+//
+// `maxDistance` could not catch it: the outer clamp is applied to the ANCHOR
+// gap, which under a rigid camera+target translation says nothing about how far
+// the camera is from the scene.
+test('a hard zoom in past the ground then back out never escapes the scene', async () => {
+  test.skip(!existsSync(CLOUD), 'example-datasets/BPP_tree_000.xyz not present');
+  test.setTimeout(300_000);
+  const { page } = session;
+
+  const state = () => page.evaluate(() => (window as any).__getCameraState());
+  // This spec shares one app across its tests (the import is slow), so the cloud
+  // is already loaded — but the previous test may have left a panel or dialog
+  // over the viewport. Press Escape and confirm the canvas is actually under the
+  // pointer below; a wheel event landing on an overlay is indistinguishable from
+  // a frozen camera, and has already caused one false result in this suite.
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => (window as any).__resetPointCloudCamera?.());
+  await page.waitForTimeout(300);
+
+  const s0 = await state();
+  const centre = s0.contentCenter.map((v: number, i: number) => v - s0.displayOffset[i]);
+  const distTo = (s: any) => Math.hypot(
+    s.position[0] - centre[0], s.position[1] - centre[1], s.position[2] - centre[2],
+  );
+  const scale = s0.zoomLimits.scale;
+
+  const box = (await page.locator('canvas').first().boundingBox())!;
+  // Low in the frame — aimed at/below the ground, as reported.
+  const px = box.x + box.width * 0.5;
+  const py = box.y + box.height * 0.72;
+  await page.mouse.move(px, py);
+  const over = await page.evaluate(([x, y]) => {
+    const e = document.elementFromPoint(x as number, y as number);
+    return e ? e.tagName : 'NONE';
+  }, [px, py]);
+  expect(over, `pointer is over ${over}, not the viewport`).toBe('CANVAS');
+
+  // Fast flick in — no frame yield between notches, driving past the ground.
+  for (let i = 0; i < 40; i++) await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(400);
+  // Then hard back out, long enough to run the old feedback loop away.
+  for (let i = 0; i < 80; i++) await page.mouse.wheel(0, 120);
+  await page.waitForTimeout(400);
+
+  // The camera is still in the same world as the scene. Before the fix this
+  // reached ~24x the scene scale and kept climbing.
+  const after = await state();
+  expect(
+    distTo(after) / scale,
+    'the camera escaped the scene on zoom-out',
+  ).toBeLessThan(15);
+
+  // And zoom still works, both ways, WITHOUT an orbit to unstick it — the
+  // actual complaint.
+  const a = (await state()).position;
+  for (let i = 0; i < 6; i++) { await page.mouse.wheel(0, -120); await page.waitForTimeout(30); }
+  await page.waitForTimeout(300);
+  const b = (await state()).position;
+  expect(
+    Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]),
+    'zoom-in was frozen after the in/out gesture',
+  ).toBeGreaterThan(scale * 0.01);
+
+  for (let i = 0; i < 6; i++) { await page.mouse.wheel(0, 120); await page.waitForTimeout(30); }
+  await page.waitForTimeout(300);
+  const c = (await state()).position;
+  expect(
+    Math.hypot(c[0] - b[0], c[1] - b[1], c[2] - b[2]),
+    'zoom-out was frozen after the in/out gesture',
+  ).toBeGreaterThan(scale * 0.01);
+});

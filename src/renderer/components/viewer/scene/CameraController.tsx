@@ -335,6 +335,14 @@ export function CameraController({
     // scene scale. Keeps a deep zoom inspecting the subject rather than passing
     // through the middle of it — see the clamp in the wheel handler.
     const CONTENT_APPROACH_FLOOR = 0.02;
+    // Largest single-notch step, as a fraction of the scene scale. Bounds the
+    // zoom-out feedback loop (speed ∝ distance, and zooming out grows distance).
+    const PACE_CEILING = 2;
+    // Farthest the camera may get from the content centre, as a fraction of the
+    // scene scale. The auto-frame sits at ~2x the scene size, so this leaves
+    // ample room to pull back and see everything while keeping the scene from
+    // receding to a dot that no further notch can recover from.
+    const CONTENT_RETREAT_CEILING = 12;
     let latch: {
       anchor: THREE.Vector3;
       x: number;
@@ -383,6 +391,18 @@ export function CameraController({
       // scene scale so sitting at the centre (or a degenerate scene) still gives
       // a usable step. Scale-free, continuous across a re-probe, never decays.
       // The anchor steers; this sets the pace.
+      //
+      // CEILED as well as floored, which is not optional for zoom-OUT. Speed is
+      // proportional to the content distance, and zooming out increases that
+      // distance — so without a ceiling the two feed each other and the camera
+      // escapes exponentially. Measured on the 13 M-point cloud: successive
+      // zoom-out notches stepped 84 → 102 → 124 → 150 → 182 world units and the
+      // camera ended ~1000 units from a 41 m tree, where the scene is a
+      // sub-pixel dot and every further notch is a no-op. That reads exactly
+      // like a freeze, and it is reached by the reported gesture — fast in,
+      // then straight back out. `maxDistance` could not catch it because the
+      // outer clamp below is written against the ANCHOR distance, not against
+      // how far the camera is from the scene.
       const oPace = offsetRef.current;
       const ccPace = contentCentreRef.current;
       const contentDist = camPos.distanceTo(new THREE.Vector3(
@@ -390,7 +410,10 @@ export function CameraController({
         ccPace[1] - (oPace?.y ?? 0),
         ccPace[2] - (oPace?.z ?? 0),
       ));
-      const pace = Math.max(contentDist, limitsRef.current.scale * 0.02);
+      const pace = Math.min(
+        Math.max(contentDist, limitsRef.current.scale * 0.02),
+        limitsRef.current.scale * PACE_CEILING,
+      );
 
       // Reuse the latched anchor when this notch continues the same gesture.
       //
@@ -566,6 +589,17 @@ export function CameraController({
         const floor = limitsRef.current.scale * CONTENT_APPROACH_FLOOR;
         const room = contentDist - floor;
         step = room <= 0 ? 0 : Math.min(step, room);
+      } else if (step < 0) {
+        // Symmetric outward bound. The ceiling on `pace` slows the runaway but
+        // does not stop it — the camera would still crawl outward forever, and
+        // once the scene is a distant speck the view is unrecoverable by
+        // scrolling. This is the clamp `maxDistance` was meant to be, expressed
+        // against the thing that actually matters: how far the camera is from
+        // the CONTENT (maxDistance is applied to the anchor gap, which under a
+        // rigid camera+target move says nothing about that).
+        const ceiling = limitsRef.current.scale * CONTENT_RETREAT_CEILING;
+        const room = ceiling - contentDist;
+        step = room <= 0 ? 0 : -Math.min(-step, room);
       }
 
       // Near clamp — never tunnel through what you are flying at. Asymptotic, so
