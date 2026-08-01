@@ -26,6 +26,12 @@ import { isSceneOverlay } from '../../../lib/sceneOverlay';
 // still registers under the cursor, narrow enough not to grab a neighbour.
 const OCTREE_PICK_WINDOW_PX = 13;
 
+// Above this many loaded octree points, the CPU raycast is skipped and the GPU
+// pick carries the probe alone. Chosen well below the point at which the walk
+// costs a frame (~1 M points measured in the millisecond range), and far above
+// the sparse clouds where the GPU pick is unreliable and the CPU pass is needed.
+const CPU_RAYCAST_POINT_BUDGET = 400_000;
+
 export function DepthProbe({
   octrees,
   probeRef,
@@ -135,6 +141,42 @@ export function DepthProbe({
       const ctrlTarget = (controls as unknown as { target?: THREE.Vector3 } | null)?.target;
       const viewDist = (ctrlTarget ? camera.position.distanceTo(ctrlTarget) : 0) || 1;
       const t0 = performance.now();
+
+      // ── Don't run the CPU raycast over a heavy scene ────────────────────────
+      //
+      // `intersectObjects(scene.children, true)` walks EVERY point of EVERY
+      // loaded octree node. That cost tracks how much of the cloud is resident,
+      // which is highest exactly when the whole cloud is framed — so the wheel
+      // gets slower the further out you are, which is the reported "zooming is
+      // laggy when the full cloud is in view, and increasingly responsive as you
+      // zoom in".
+      //
+      // The existing budget guard only reacts AFTER an 8 ms overrun has already
+      // been paid, and it re-pays it every 250 ms. Counting the points that are
+      // actually loaded lets us skip the pass before spending anything.
+      //
+      // Skipping is safe precisely where it triggers: the GPU pick above renders
+      // a small window and reads it back, so its reliability rises with point
+      // DENSITY — the same condition that makes the CPU pass expensive. On the
+      // sparse clouds where the GPU pick misses, the point count is low and the
+      // CPU pass still runs. Where neither lands, zoom uses the cursor-ray
+      // fallback anchor, which is smooth and correctly aimed.
+      // Counted off the SCENE GRAPH, not off `octree.visibleNodes`. The raycast
+      // walks whatever `Points` objects are actually in the graph, and that is
+      // exactly the cost being bounded; `visibleNodes` is potree's own
+      // bookkeeping, and it measured EMPTY here even with a cloud on screen and
+      // the CPU pass hitting its points — a guard keyed to it would have been
+      // silently inert. (`numPoints` is also a getter on PointCloudOctreeNode,
+      // not a method; calling it as one yields 0 and disables the guard too.)
+      let loadedPoints = 0;
+      scene.traverseVisible((o) => {
+        if (loadedPoints > CPU_RAYCAST_POINT_BUDGET) return;
+        const pts = o as THREE.Points;
+        if (pts.isPoints && pts.geometry) {
+          loadedPoints += pts.geometry.getAttribute('position')?.count ?? 0;
+        }
+      });
+      if (loadedPoints > CPU_RAYCAST_POINT_BUDGET) return best;
       // A GPU hit is exact and already the nearest — the CPU pass cannot improve
       // on it, so skip the expensive raycast entirely rather than running it to
       // (at best) confirm the same surface. This is also what keeps the budget

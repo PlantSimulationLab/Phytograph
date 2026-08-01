@@ -364,11 +364,36 @@ export function CameraController({
 
       const { minDistance, maxDistance } = limitsRef.current;
 
-      // Fraction of the remaining gap to close per notch. Multiplicative, so the
-      // approach is smooth at every scale — the same feel zooming across a plot
-      // as onto a leaf. deltaY is normalised per notch (~100px on most mice; a
-      // trackpad sends many small deltas, which compose to the same rate).
-      const notches = Math.max(-4, Math.min(4, e.deltaY / 100));
+      // ── Notches: never DISCARD scroll input ─────────────────────────────────
+      //
+      // Fraction of the remaining gap to close, compounding at 0.82 per notch.
+      // deltaY is normalised per notch (~100px on most mice; a trackpad sends
+      // many small deltas, which compose to the same rate).
+      //
+      // The clamp used to be ±4, which silently turned the frame rate into a
+      // zoom gain — the cause of "zoom gets more sensitive the further in you
+      // go, and I shoot past the ground". Zoom advances per EVENT, not per
+      // second, and when the scene is heavy the main thread stalls so the OS
+      // COALESCES wheel events: ten physical notches arrive as a couple of
+      // events carrying a large deltaY. Clamping at 4 threw the surplus away, so
+      // a flick over the full cloud travelled less than it was asked to. Zoomed
+      // in the scene is cheap, nothing coalesces, every notch arrives as its own
+      // event and all of it counts — the identical flick then delivers its full
+      // travel and overshoots.
+      //
+      // The compounding is ASSOCIATIVE — 0.82^a * 0.82^b == 0.82^(a+b) — so a
+      // coalesced event carrying N notches produces exactly the same travel as N
+      // separate one-notch events, PROVIDED none of it is discarded. Verified:
+      // ten notches spent as 10x1 or as 4+4+2 both close 0.8626 of the gap,
+      // while 4+4 with the remainder dropped closes only 0.7956.
+      //
+      // So the clamp only has to be high enough never to bite on real input. A
+      // physical wheel emits at most a handful of notches per frame even when
+      // coalesced; 40 is far beyond that, while still bounding a pathological
+      // deltaY (some drivers report pixel deltas in the thousands) so one event
+      // cannot swallow the whole scene.
+      const notches = Math.max(-40, Math.min(40, e.deltaY / 100));
+      if (notches === 0) return;
       const zoomIn = notches < 0;
       const fraction = 1 - Math.pow(0.82, Math.abs(notches));
 
