@@ -1,6 +1,7 @@
 import { BrowserWindow, Menu, MenuItemConstructorOptions, app, shell } from 'electron';
 import { IPC, type MenuCommandPayload, type SnapViewDirection } from '../shared/ipc.js';
 import { REPO_URL } from '../shared/constants.js';
+import { TOOLS_MENU, CREATE_MENU, SIMULATE_MENU, type ToolMenuItem } from '../shared/toolMenu.js';
 import { checkForUpdatesManually } from './updater.js';
 
 const isMac = process.platform === 'darwin';
@@ -24,6 +25,15 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
     accelerator,
     click: () => send({ kind: 'snap-view', direction }),
   });
+
+  // Tools / Create / Simulate items are generated from the shared manifest
+  // (src/shared/toolMenu.ts) rather than hand-listed here, so a tool added to
+  // the renderer's registry can't be left out of the menu bar — a parity test
+  // checks the manifest against the registry.
+  const toolItem = (item: ToolMenuItem | null): MenuItemConstructorOptions =>
+    item === null
+      ? { type: 'separator' }
+      : { label: item.label, click: () => send({ kind: 'tool', toolId: item.id }) };
 
   const template: MenuItemConstructorOptions[] = [
     // macOS app menu (the first menu, always labeled "Phytograph").
@@ -193,67 +203,20 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
       // Geometry generation and synthetic scanning are NOT here — they're
       // scene-building, so they live under their own Create / Simulate menus.
       label: 'Tools',
-      submenu: [
-        {
-          label: 'Pre-processing',
-          submenu: [
-            { label: 'Transform Point Cloud', click: () => send({ kind: 'tool', toolId: 'cloud-translate' }) },
-            { label: 'Set Scene Origin', click: () => send({ kind: 'tool', toolId: 'set-scene-origin' }) },
-            { label: 'Pick Point', click: () => send({ kind: 'tool', toolId: 'pick-point' }) },
-            { label: 'Crop Point Cloud', click: () => send({ kind: 'tool', toolId: 'cloud-crop' }) },
-            { label: 'Erase Brush', click: () => send({ kind: 'tool', toolId: 'cloud-erase' }) },
-            { label: 'Filter Points', click: () => send({ kind: 'tool', toolId: 'cloud-filter' }) },
-            { label: 'Resample Point Cloud', click: () => send({ kind: 'tool', toolId: 'cloud-resample' }) },
-            { label: 'Move to Origin', click: () => send({ kind: 'tool', toolId: 'cloud-move-origin' }) },
-            { label: 'Backfill Misses', click: () => send({ kind: 'tool', toolId: 'cloud-backfill-misses' }) },
-            { type: 'separator' },
-            { label: 'Stitch Clouds…', click: () => send({ kind: 'tool', toolId: 'cloud-stitch' }) },
-          ],
-        },
-        {
-          label: 'Segmentation',
-          submenu: [
-            { label: 'Segment Ground', click: () => send({ kind: 'tool', toolId: 'cloud-ground-segment' }) },
-            { label: 'Segment Wood / Leaf', click: () => send({ kind: 'tool', toolId: 'cloud-wood-segment' }) },
-            { label: 'Segment Trees', click: () => send({ kind: 'tool', toolId: 'cloud-segment-trees' }) },
-          ],
-        },
-        {
-          label: 'Reconstruction & Analysis',
-          submenu: [
-            { label: 'Triangulate…', click: () => send({ kind: 'tool', toolId: 'cloud-triangulate' }) },
-            { label: 'Extract Skeleton', click: () => send({ kind: 'tool', toolId: 'cloud-skeleton' }) },
-            { label: 'Build QSM', click: () => send({ kind: 'tool', toolId: 'cloud-qsm' }) },
-            { label: 'Compute Leaf Area Density…', click: () => send({ kind: 'tool', toolId: 'compute-lad' }) },
-          ],
-        },
-        {
-          label: 'Registration',
-          submenu: [
-            { label: 'Align Clouds (ICP)…', click: () => send({ kind: 'tool', toolId: 'cloud-align' }) },
-            { label: 'Align Mesh to Mesh (ICP)…', click: () => send({ kind: 'tool', toolId: 'mesh-mesh-align' }) },
-            { label: 'Align Mesh to Cloud (ICP)…', click: () => send({ kind: 'tool', toolId: 'mesh-cloud-icp' }) },
-            { label: 'Cloud-to-Mesh Distance…', click: () => send({ kind: 'tool', toolId: 'mesh-cloud-align' }) },
-          ],
-        },
-      ],
+      submenu: TOOLS_MENU.map(section => ({
+        label: section.label,
+        submenu: section.items.map(toolItem),
+      })),
     },
     {
       // Create — geometry generation + scanner placement (scene-building).
       label: 'Create',
-      submenu: [
-        { label: 'Generate Plant…', click: () => send({ kind: 'tool', toolId: 'create-plant' }) },
-        { label: 'Import Model…', click: () => send({ kind: 'tool', toolId: 'import-model' }) },
-        { label: 'Create Voxel Grid', click: () => send({ kind: 'tool', toolId: 'create-voxel' }) },
-        { label: 'Add Scan…', click: () => send({ kind: 'tool', toolId: 'add-scan' }) },
-      ],
+      submenu: CREATE_MENU.map(toolItem),
     },
     {
       // Simulate — synthetic scanning.
       label: 'Simulate',
-      submenu: [
-        { label: 'Run Synthetic Scan…', click: () => send({ kind: 'tool', toolId: 'lidar-scan' }) },
-      ],
+      submenu: SIMULATE_MENU.map(toolItem),
     },
     { role: 'windowMenu' },
     {
