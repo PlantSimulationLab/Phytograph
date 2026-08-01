@@ -170,6 +170,64 @@ test.describe('point picker', () => {
     });
   });
 
+  test('picks a point clicked NEAR rather than dead-on, in a sparse region', async () => {
+    // The density regression. `Potree.pick` re-renders the visible nodes into
+    // an index buffer and `findHit` only accepts a pixel that was actually
+    // written, so a point is pickable exactly where its splat rasterised. The
+    // pick material used to inherit the DISPLAY point size (FIXED, default 1),
+    // which meant 1-pixel targets: in a solid-looking region every pixel is
+    // covered so any click lands, but wherever background showed through you
+    // had to hit a dot dead-on. Users reported 5-10 clicks per pick in
+    // moderately sparse areas and near-impossibility in genuinely sparse ones.
+    //
+    // scalars.xyz draws as well-separated dots at the default framing, so an
+    // offset click reproduces that: every other test here clicks the projected
+    // centre exactly, which is precisely the case that always worked.
+    await importScalars();
+    await armPicker();
+
+    const target: [number, number, number] = [0.4, 0.0, 0.3];
+    const px = await worldToScreenPx(target);
+
+    // Far enough off-centre that a 1 px splat cannot be hit, comfortably
+    // inside the inflated pick target. Offset diagonally so neither axis
+    // alone explains a pass.
+    const OFFSET_PX = 4;
+    await clickViewport(px.x + OFFSET_PX, px.y - OFFSET_PX);
+
+    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    // It must resolve to the point actually under the cursor's neighbourhood —
+    // "a label appeared" would also pass if the pick grabbed some other point,
+    // which is the failure mode an over-large splat would introduce.
+    expect(await worldCoordsOf(labels().first())).toEqual(['0.400', '0.000', '0.300']);
+  });
+
+  test('an offset click still resolves to the NEAREST point, not a neighbour', async () => {
+    // Guard on the other side of the same fix: inflating the pick splat trades
+    // away precision if taken too far, because potree's `findHit` breaks ties
+    // by 2D distance-to-centre with no depth test. A click nudged toward one
+    // point must not be won by the adjacent one.
+    await importScalars();
+    await armPicker();
+
+    const a: [number, number, number] = [0.4, 0.0, 0.3];
+    const b: [number, number, number] = [0.6, 0.0, 0.45];
+    const pxA = await worldToScreenPx(a);
+    const pxB = await worldToScreenPx(b);
+
+    // Nudge a few pixels from A *along the direction of B* — still nearer A.
+    const len = Math.hypot(pxB.x - pxA.x, pxB.y - pxA.y);
+    expect(len).toBeGreaterThan(12); // otherwise the two dots overlap and the assert is meaningless
+    const step = 3;
+    await clickViewport(
+      pxA.x + ((pxB.x - pxA.x) / len) * step,
+      pxA.y + ((pxB.y - pxA.y) / len) * step,
+    );
+
+    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    expect(await worldCoordsOf(labels().first())).toEqual(['0.400', '0.000', '0.300']);
+  });
+
   test('reports true intensity while a scalar colour mode is active', async () => {
     // Colouring by a scalar ALIASES that scalar's buffer into each tile's
     // `intensity` attribute (that's how the potree gradient shader reaches it).

@@ -11,6 +11,8 @@ import {
   pickedPointsToCsv,
   pickedPointToText,
   labelOffsetFor,
+  worldPerPixel,
+  nearSurfaceDistance,
   type PickedPoint,
 } from './pointPick';
 import {
@@ -323,5 +325,83 @@ describe('labelOffsetFor', () => {
 
   it('handles a negative sequence without producing a negative step', () => {
     expect(labelOffsetFor(-1)).toEqual(labelOffsetFor(4));
+  });
+});
+
+describe('worldPerPixel', () => {
+  const persp = { isPerspectiveCamera: true as const, fov: 50 };
+
+  it('scales linearly with distance under a perspective camera', () => {
+    // Twice as far away ⇒ each pixel spans twice as much world.
+    const near = worldPerPixel(persp, 1000, 10);
+    const far = worldPerPixel(persp, 1000, 20);
+    expect(far / near).toBeCloseTo(2, 10);
+  });
+
+  it('matches the frustum height at a known distance', () => {
+    // Frustum height at distance d is 2·d·tan(fov/2); over 1000 px rows that
+    // is the per-pixel span.
+    const expected = (2 * 10 * Math.tan((50 * Math.PI) / 360)) / 1000;
+    expect(worldPerPixel(persp, 1000, 10)).toBeCloseTo(expected, 12);
+  });
+
+  it('ignores distance under an orthographic camera', () => {
+    const ortho = { top: 5, bottom: -5, zoom: 1 };
+    expect(worldPerPixel(ortho, 500, 1)).toBeCloseTo(worldPerPixel(ortho, 500, 9999), 12);
+    expect(worldPerPixel(ortho, 500, 1)).toBeCloseTo(10 / 500, 12);
+  });
+
+  it('divides the ortho span by zoom', () => {
+    const zoomed = { top: 5, bottom: -5, zoom: 4 };
+    expect(worldPerPixel(zoomed, 500, 1)).toBeCloseTo(10 / 4 / 500, 12);
+  });
+
+  it('treats zoom 0 as 1 rather than dividing by zero', () => {
+    expect(worldPerPixel({ top: 5, bottom: -5, zoom: 0 }, 500, 1)).toBeCloseTo(10 / 500, 12);
+  });
+
+  it('returns 0 for a zero-height viewport instead of Infinity', () => {
+    expect(worldPerPixel(persp, 0, 10)).toBe(0);
+  });
+});
+
+describe('nearSurfaceDistance', () => {
+  it('measures to the near surface, not the centre', () => {
+    // Camera 100 m from the centre of a 40 m-radius cloud: the closest visible
+    // points are 60 m out, not 100.
+    expect(nearSurfaceDistance(100, 40)).toBeCloseTo(60, 12);
+  });
+
+  it('keeps the near half of a deep cloud clickable', () => {
+    // The regression this exists for. A 100 m-deep scan viewed end-on, camera
+    // 10 m off its near face: centre-based sizing computed the tolerance for a
+    // point 60 m away, ~6x too large in world terms for the near face — which
+    // in practice meant the pixel tolerance the user experienced at the near
+    // points was far off the intended one.
+    const cameraToCenter = 60;
+    const radius = 50;
+    const centreBased = cameraToCenter;
+    const nearBased = nearSurfaceDistance(cameraToCenter, radius);
+
+    expect(nearBased).toBeCloseTo(10, 12);
+    // Sizing from the centre over-states the near-face distance six-fold.
+    expect(centreBased / nearBased).toBeCloseTo(6, 10);
+  });
+
+  it('scales the radius by the object matrix', () => {
+    // A cloud scaled 2x has a world radius twice its local one.
+    expect(nearSurfaceDistance(100, 20, 2)).toBeCloseTo(60, 12);
+  });
+
+  it('stays positive when the camera is inside the cloud', () => {
+    // Camera 5 m from the centre of a 50 m-radius cloud is deep inside it; a
+    // naive subtraction gives -45, which would invert the tolerance.
+    const d = nearSurfaceDistance(5, 50);
+    expect(d).toBeGreaterThan(0);
+    expect(Number.isFinite(d)).toBe(true);
+  });
+
+  it('is a no-op for a degenerate zero-radius bound', () => {
+    expect(nearSurfaceDistance(42, 0)).toBeCloseTo(42, 12);
   });
 });

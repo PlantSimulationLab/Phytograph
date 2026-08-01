@@ -62,6 +62,53 @@ export interface PickedPoint {
   sourceIndex?: number;
 }
 
+// ── Pick tolerance sizing ──────────────────────────────────────────────────
+//
+// Both cloud kinds want a click tolerance expressed in SCREEN PIXELS, but the
+// mechanisms differ: the octree path inflates the splat in a GPU pick render,
+// while the flat path hands three.js a world-space radius around the ray. The
+// pixels→world conversion for the latter is the fiddly part, so it lives here
+// where it can be tested without a GL context.
+
+// World units per canvas pixel at `distance` from the camera. Perspective and
+// orthographic are both live in this app (the ortho snap views and the
+// crop-mode projection override), and they scale differently: perspective grows
+// with distance, ortho does not depend on it at all.
+export function worldPerPixel(
+  camera:
+    | { isPerspectiveCamera: true; fov: number }
+    | { isPerspectiveCamera?: false; top: number; bottom: number; zoom: number },
+  viewportHeight: number,
+  distance: number,
+): number {
+  if (viewportHeight <= 0) return 0;
+  if (camera.isPerspectiveCamera) {
+    return (2 * Math.tan((camera.fov * Math.PI) / 360) * Math.max(distance, 1e-6)) / viewportHeight;
+  }
+  return (camera.top - camera.bottom) / (camera.zoom || 1) / viewportHeight;
+}
+
+// Distance from the camera to the NEAR SURFACE of a cloud's bounding sphere.
+//
+// This is what a flat cloud's ray tolerance must be sized from. three.js tests
+// `params.Points.threshold` as a world-space radius around the ray and applies
+// it unscaled at every depth under a perspective camera, so whichever distance
+// feeds the pixels→world conversion decides which slice of the cloud is
+// comfortably clickable. Sizing from the sphere's CENTRE (the previous
+// behaviour) under-serves the near half of any cloud that is deep along the
+// view axis — a 100 m scan viewed end-on got a midpoint-sized tolerance, so
+// near points were too tight to hit.
+//
+// Clamped positive because the camera may sit inside the cloud, which would
+// otherwise yield a zero or negative distance and collapse the tolerance.
+export function nearSurfaceDistance(
+  cameraToCenter: number,
+  boundingRadius: number,
+  scale = 1,
+): number {
+  return Math.max(cameraToCenter - boundingRadius * scale, 1e-6);
+}
+
 // ── Frame conversion ───────────────────────────────────────────────────────
 //
 // The scene renders at (world − displayOffset), and a cloud's stored points are
