@@ -109,6 +109,94 @@ export function nearSurfaceDistance(
   return Math.max(cameraToCenter - boundingRadius * scale, 1e-6);
 }
 
+// ── Depth-aware pick probing ───────────────────────────────────────────────
+//
+// potree's GPU pick resolves occlusion correctly WITHIN a pixel (the pick pass
+// runs with depth test + write against a cleared depth buffer), but its
+// `findHit` chooses between DIFFERENT pixels of the readback window purely by
+// 2D distance to the centre:
+//
+//   l = (x - c)² + (y - c)²;  if (written && l < best) take it
+//
+// There is no depth term, and none is possible — the pick pass packs the point
+// index into all four RGBA channels (`vec4(color, pcIndex/255)`), so the
+// readback carries no depth at all, and `findHit` is private to the library.
+//
+// The consequence shows up at a silhouette: click just off a foreground twig
+// and a background trunk 20 m away can win simply because its splat happened
+// to cover a pixel one step nearer the cursor. The fix is to probe a few
+// cursor positions independently — each probe is internally occlusion-correct
+// — and then rank the results by true distance along the view ray rather than
+// by screen distance.
+
+// Offsets, in CSS pixels, at which to re-probe around the cursor. The centre
+// comes first so an exact hit is found immediately and the ring is only paid
+// for when it can change the answer.
+//
+// A ring rather than a filled disc: probes are GPU round-trips
+// (render + readPixels), so this is the expensive axis of the picker. Eight
+// compass points at one radius catch the silhouette case — where the competing
+// surfaces sit on opposite sides of the cursor — without a quadratic blow-up.
+export function pickProbeOffsets(radiusPx: number): Array<{ dx: number; dy: number }> {
+  const r = Math.max(radiusPx, 0);
+  if (r === 0) return [{ dx: 0, dy: 0 }];
+  const diag = r * Math.SQRT1_2;
+  return [
+    { dx: 0, dy: 0 },
+    { dx: r, dy: 0 },
+    { dx: -r, dy: 0 },
+    { dx: 0, dy: r },
+    { dx: 0, dy: -r },
+    { dx: diag, dy: diag },
+    { dx: diag, dy: -diag },
+    { dx: -diag, dy: diag },
+    { dx: -diag, dy: -diag },
+  ];
+}
+
+// One probe's outcome, reduced to what ranking needs.
+export interface PickCandidate {
+  // Distance from the camera along the view ray to the hit point.
+  depth: number;
+  // How far the probe that produced it sat from the cursor, in CSS pixels.
+  offsetPx: number;
+}
+
+// Choose the winning probe: NEAREST along the ray, with screen distance used
+// only to break a depth tie.
+//
+// The depth tolerance keeps this from over-correcting. Probes that land on the
+// same surface differ slightly in depth (a twig is a few mm deep, and adjacent
+// probes hit adjacent points on it); without a tolerance the picker would
+// drift to whichever probe happened to graze nearest the camera, which reads
+// as the label jumping away from where the user clicked. Only a difference
+// bigger than the tolerance counts as a genuinely different surface — and then
+// the nearer one is what the user is looking at.
+//
+// Returns the index into `candidates`, or -1 when there is nothing to pick.
+export function chooseNearestCandidate(
+  candidates: Array<PickCandidate | null>,
+  depthToleranceFrac = 0.02,
+): number {
+  let bestIdx = -1;
+  let best: PickCandidate | null = null;
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    if (!c || !isFinite(c.depth)) continue;
+    if (!best) { best = c; bestIdx = i; continue; }
+    // Scale the tolerance with distance: 2% of the nearer depth. A fixed metric
+    // tolerance would be far too coarse on a 10 cm specimen and far too fine on
+    // a 100 m stand.
+    const tol = Math.max(Math.min(best.depth, c.depth) * depthToleranceFrac, 1e-6);
+    if (c.depth < best.depth - tol) {
+      best = c; bestIdx = i;                    // genuinely nearer surface
+    } else if (Math.abs(c.depth - best.depth) <= tol && c.offsetPx < best.offsetPx) {
+      best = c; bestIdx = i;                    // same surface — prefer the closer probe
+    }
+  }
+  return bestIdx;
+}
+
 // ── Frame conversion ───────────────────────────────────────────────────────
 //
 // The scene renders at (world − displayOffset), and a cloud's stored points are

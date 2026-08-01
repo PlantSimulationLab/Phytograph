@@ -228,6 +228,46 @@ test.describe('point picker', () => {
     expect(await worldCoordsOf(labels().first())).toEqual(['0.400', '0.000', '0.300']);
   });
 
+  test('a near-miss click takes the FOREGROUND point, not the closer-on-screen background', async () => {
+    // Depth-aware tie-breaking. potree's pick pass depth-tests correctly WITHIN
+    // a pixel, but its `findHit` ranks the pixels of the readback window purely
+    // by 2D distance to the cursor — and the readback is all index bytes, so
+    // there is no depth available to rank by and `findHit` is private anyway.
+    //
+    // depth-layers.xyz is built for exactly this: a SPARSE near plane (y=0, a
+    // 0.5 lattice) in front of a DENSE far plane (y=8, a 0.05 lattice). Viewed
+    // from the front, a click that just misses a near dot always has a far-plane
+    // dot within a pixel or two. Ranking by screen distance therefore reaches
+    // straight through the foreground and labels the background 8 m behind it.
+    await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'depth-layers.xyz'));
+    await completeImportWizard(session.page);
+    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="depth-layers.xyz"]');
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await expect(row).toHaveAttribute('data-point-count', '1706');
+
+    // Look down +Y so the two planes stack in depth rather than side by side.
+    await session.page.evaluate(() => (window as any).__orientToAxis?.({ x: 0, y: -1, z: 0 }));
+    await waitForCameraSettled();
+    await armPicker();
+
+    // A near-plane point and, directly behind it, the far plane.
+    const near: [number, number, number] = [0.5, 0.0, 0.5];
+    const px = await worldToScreenPx(near);
+
+    // Offset far enough to miss the near dot's own splat outright, so the pick
+    // has to arbitrate between a foreground and a background candidate. Both
+    // planes cover this pixel, and the far one is denser — under screen-distance
+    // ranking the background wins.
+    await clickViewport(px.x + 6, px.y + 6);
+
+    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    const coords = await worldCoordsOf(labels().first());
+    // Y is the depth axis: 0 is the near plane, 8 the far one. This is the whole
+    // assertion — picking ANY near-plane point is correct, picking the far plane
+    // is the bug.
+    expect(coords[1]).toBe('0.000');
+  });
+
   test('reports true intensity while a scalar colour mode is active', async () => {
     // Colouring by a scalar ALIASES that scalar's buffer into each tile's
     // `intensity` attribute (that's how the potree gradient shader reaches it).

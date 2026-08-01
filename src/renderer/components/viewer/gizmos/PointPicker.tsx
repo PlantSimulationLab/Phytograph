@@ -8,6 +8,9 @@ import {
   ORIG_INTENSITY_ATTRIBUTE,
   worldPerPixel,
   nearSurfaceDistance,
+  pickProbeOffsets,
+  chooseNearestCandidate,
+  type PickCandidate,
 } from '../../../lib/pointPick';
 
 // A raw pick, before any frame conversion or formatting (that all happens in
@@ -73,6 +76,12 @@ const OCTREE_PICK_WINDOW_PX = 13;
 // viewer's <Canvas> does not override it) an unscaled value would cover half
 // the intended area relative to the window.
 const OCTREE_PICK_POINT_SIZE_PX = 9;
+// Radius, in CSS pixels, of the ring of extra pick probes fired when the
+// cursor itself lands on nothing. Sized to about half the inflated splat so
+// the ring samples the surfaces flanking the cursor — the ones that compete to
+// win a near-miss click — rather than reaching out past them into unrelated
+// geometry. Only ever costs anything on a click that misses outright.
+const PROBE_RING_RADIUS_PX = 5;
 // A click that travels further than this between press and release was an
 // orbit, not a pick. Mirrors the 4 px drag guard the viewport's mesh selection
 // uses.
@@ -159,8 +168,13 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
   useEffect(() => {
     const canvas = gl.domElement;
     const pressRef = { x: 0, y: 0, active: false };
+    // Refreshed once per pick in doPick, before anything reads it.
+    const viewDir = new THREE.Vector3();
 
-    const pickOctrees = (ray: THREE.Ray): PointPickHit | null => {
+    // One GPU pick at one ray. Occlusion within the probe is potree's job and
+    // it does it correctly (the pick pass depth-tests against a cleared depth
+    // buffer); choosing BETWEEN probes is the caller's, in pickOctrees.
+    const probeOctrees = (ray: THREE.Ray): PointPickHit | null => {
       const entries = octreesRef.current;
       if (entries.length === 0) return null;
       let hit: Record<string, unknown> | null = null;
@@ -201,6 +215,75 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
         delete values[ORIG_INTENSITY_ATTRIBUTE];
       }
       return { cloudId: owner.cloudId, position: position.clone(), values };
+    };
+
+    // Depth-aware octree pick.
+    //
+    // Probes the cursor plus a ring around it and keeps the hit NEAREST THE
+    // CAMERA, not the one nearest the cursor on screen. This is the half of
+    // occlusion potree cannot do for us: its `findHit` ranks the pixels of a
+    // single readback window by 2D distance with no depth term (the readback
+    // is all index bytes — there is no depth to rank by), so clicking just off
+    // a foreground twig could return a trunk far behind it, purely because the
+    // trunk's splat covered a pixel one step closer to the cursor.
+    //
+    // The centre probe is a CANDIDATE, not a short-circuit. Returning early on
+    // it was the obvious optimisation and it is wrong: potree's centre probe
+    // has already searched its own 13 px window by 2D distance, so a click that
+    // misses the foreground can come back holding the background — the exact
+    // hit this function exists to overrule. It has to be ranked against the
+    // ring like any other probe.
+    const pickOctrees = (
+      clientX: number,
+      clientY: number,
+      rect: DOMRect,
+      centerHit: PointPickHit | null,
+    ): PointPickHit | null => {
+      const offsets = pickProbeOffsets(PROBE_RING_RADIUS_PX);
+      const hits: Array<PointPickHit | null> = [centerHit];
+      const candidates: Array<PickCandidate | null> = [
+        centerHit
+          ? {
+              depth: centerHit.position.clone().sub(camera.position).dot(viewDir),
+              offsetPx: 0,
+            }
+          : null,
+      ];
+      const probeRay = new THREE.Raycaster();
+      const ndc = new THREE.Vector2();
+
+      for (const off of offsets.slice(1)) { // centre already probed by the caller
+        const x = clientX + off.dx;
+        const y = clientY + off.dy;
+        // A probe pushed outside the canvas would clamp back onto the edge and
+        // report a hit for a pixel the user did not click.
+        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+          hits.push(null);
+          candidates.push(null);
+          continue;
+        }
+        ndc.set(
+          ((x - rect.left) / rect.width) * 2 - 1,
+          -((y - rect.top) / rect.height) * 2 + 1,
+        );
+        probeRay.setFromCamera(ndc, camera);
+        const h = probeOctrees(probeRay.ray);
+        hits.push(h);
+        candidates.push(
+          h
+            ? {
+                // Depth along the VIEW direction, not distance to the camera:
+                // an off-axis probe is inherently further from the eye, and
+                // ranking by raw distance would bias against the ring.
+                depth: h.position.clone().sub(camera.position).dot(viewDir),
+                offsetPx: Math.hypot(off.dx, off.dy),
+              }
+            : null,
+        );
+      }
+
+      const winner = chooseNearestCandidate(candidates);
+      return winner < 0 ? null : hits[winner];
     };
 
     const pickFlatClouds = (raycaster: THREE.Raycaster): PointPickHit | null => {
@@ -310,16 +393,23 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
       const raycaster = new THREE.Raycaster();
       raycaster.setFromCamera(ndc, camera);
 
-      const octreeHit = pickOctrees(raycaster.ray);
+      // Unit view direction, for measuring depth along the axis the user is
+      // looking down. Used to rank probes against each other and to compare
+      // the two cloud kinds; distance-to-camera would penalise any hit that is
+      // merely off to the side.
+      camera.getWorldDirection(viewDir);
+
+      const centerHit = probeOctrees(raycaster.ray);
+      const octreeHit = pickOctrees(clientX, clientY, rect, centerHit);
       const flatHit = pickFlatClouds(raycaster);
       if (!octreeHit && !flatHit) return;
 
       let winner: PointPickHit;
       if (octreeHit && flatHit) {
-        // Both kinds are in the scene — the one nearer the camera along the
-        // ray is the one the user can actually see at that pixel.
-        const dOct = raycaster.ray.origin.distanceTo(octreeHit.position);
-        const dFlat = raycaster.ray.origin.distanceTo(flatHit.position);
+        // Both kinds are in the scene — the one nearer along the view axis is
+        // the one the user can actually see there.
+        const dOct = octreeHit.position.clone().sub(camera.position).dot(viewDir);
+        const dFlat = flatHit.position.clone().sub(camera.position).dot(viewDir);
         winner = dOct <= dFlat ? octreeHit : flatHit;
       } else {
         winner = (octreeHit ?? flatHit) as PointPickHit;
