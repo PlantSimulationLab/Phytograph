@@ -101,10 +101,36 @@ interchangeable foliage points.
    (<kbd>⌘/Ctrl</kbd>+<kbd>K</kbd>).
 2. Pick the **target** (stays fixed) and the **source** (moves onto it).
    Either may be a streamed cloud.
-3. Choose what to **match on** — see the table below.
-4. Click **Register**.
+3. Choose the **scene type** — see below. This is the important one.
+4. For vegetated scenes, choose what to **match on**.
+5. Click **Register**.
+
+### Scene type
+
+This picks the *method*, not a preset, so it is worth getting right:
+
+| Scene type | What it does |
+|------------|--------------|
+| **Crops or orchard** | Matches plant by plant. For plantings set out on a grid or in rows. |
+| **Natural woodland** | Matches plant by plant, tuned for irregular spacing. |
+| **Buildings or built site** | Matches **surface shape** instead. Built scenes have no per-plant landmark to find, so plant matching does not apply. |
+
+If the cloud looks nothing like the type you chose — say you picked *crops* for
+a street of buildings — Phytograph stops and asks before doing the slow work,
+rather than spending a minute producing something wrong. You can switch to what
+it suggests, or keep your choice and continue. It never changes the method on
+its own.
+
+!!! tip "Built scenes: try plain ICP too"
+    For buildings, **Align Clouds (ICP)** below is often all you need. Flat
+    walls, roofs and corners are exactly what ICP is good at — the opposite of
+    the vegetation case, where the lack of such surfaces is what makes
+    Auto-Register necessary. Reach for Auto-Register when a built scene starts
+    badly out of alignment.
 
 ### Choosing what to match on
+
+*(Vegetated scenes only — built scenes ignore this.)*
 
 The right landmark depends on how the data was captured, not on which
 algorithm sounds better:

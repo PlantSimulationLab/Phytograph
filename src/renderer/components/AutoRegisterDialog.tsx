@@ -13,7 +13,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { Sparkles, X } from 'lucide-react';
 import { ObjectPicker, type PickerItem } from './ObjectPicker';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
-import type { AnchorMethod, GlobalEstimator } from '../utils/backendApi';
+import type { AnchorMethod, GlobalEstimator, SceneType } from '../utils/backendApi';
 
 export interface AutoRegisterCloudOption {
   id: string;
@@ -22,6 +22,7 @@ export interface AutoRegisterCloudOption {
 }
 
 export interface AutoRegisterOptions {
+  sceneType: SceneType;
   anchorMethod: AnchorMethod;
   estimator: GlobalEstimator;
   voxelSize?: number;
@@ -35,6 +36,16 @@ interface AutoRegisterDialogProps {
   isRunning?: boolean;
   onRegister: (targetId: string, sourceId: string, options: AutoRegisterOptions) => void;
 }
+
+/** Scene type decides the ALGORITHM, so it is asked first and asked plainly.
+ *  Vegetated scenes are matched plant-by-plant; built scenes have no per-plant
+ *  landmark to find, so they are matched on surface shape instead — a different
+ *  pipeline, not a tuning knob. */
+const SCENE_TYPES: { value: SceneType; label: string; hint: string }[] = [
+  { value: 'agriculture', label: 'Crops or orchard', hint: 'Plants set out on a regular grid or in rows' },
+  { value: 'natural', label: 'Natural woodland', hint: 'Self-seeded trees at irregular spacing' },
+  { value: 'urban', label: 'Buildings or built site', hint: 'Matched on surface shape — plant matching does not apply' },
+];
 
 /** Each option names the landmark it keys on, so the choice is about the DATA
  *  rather than about an algorithm the user has no way to evaluate. */
@@ -54,6 +65,7 @@ export function AutoRegisterDialog({
 }: AutoRegisterDialogProps) {
   const [targetId, setTargetId] = useState<string>('');
   const [sourceId, setSourceId] = useState<string>('');
+  const [sceneType, setSceneType] = useState<SceneType>('agriculture');
   const [anchorMethod, setAnchorMethod] = useState<AnchorMethod>('crown');
   const [estimator, setEstimator] = useState<GlobalEstimator>('ransac_fpfh');
   const [voxelSize, setVoxelSize] = useState<number | undefined>(undefined);
@@ -132,6 +144,26 @@ export function AutoRegisterDialog({
           />
 
           <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-neutral-300">Scene type</label>
+            <select
+              data-testid="auto-register-scene"
+              value={sceneType}
+              onChange={(e) => setSceneType(e.target.value as SceneType)}
+              className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white"
+            >
+              {SCENE_TYPES.map(t => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+            <p className="text-[11px] text-neutral-500">
+              {SCENE_TYPES.find(t => t.value === sceneType)?.hint}
+            </p>
+          </div>
+
+          {/* Landmark choice is meaningless on a built scene — there are no
+              plants to key on — so it is hidden rather than shown disabled. */}
+          {sceneType !== 'urban' && (
+          <div className="space-y-1.5">
             <label className="block text-xs font-medium text-neutral-300">Match on</label>
             <select
               data-testid="auto-register-method"
@@ -147,6 +179,7 @@ export function AutoRegisterDialog({
               {ANCHOR_METHODS.find(m => m.value === anchorMethod)?.hint}
             </p>
           </div>
+          )}
 
           <div className="space-y-1.5">
             <label className="block text-xs font-medium text-neutral-300">Search method</label>
@@ -189,7 +222,7 @@ export function AutoRegisterDialog({
           <button
             data-testid="auto-register-run"
             onClick={() => {
-              onRegister(targetId, sourceId, { anchorMethod, estimator, voxelSize });
+              onRegister(targetId, sourceId, { sceneType, anchorMethod, estimator, voxelSize });
               onClose();
             }}
             disabled={!canRun}

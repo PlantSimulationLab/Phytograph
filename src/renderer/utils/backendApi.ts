@@ -2903,7 +2903,16 @@ export async function icpRegisterCloudToCloud(
 export type AnchorMethod = 'crown' | 'trunk' | 'chm';
 export type GlobalEstimator = 'ransac_fpfh' | 'fgr';
 
+/** What kind of scene this is. Not a preset: `urban` selects a structurally
+ *  different algorithm (surface matching) because built scenes have no
+ *  per-plant landmark to find. */
+export type SceneType = 'agriculture' | 'natural' | 'urban';
+
 export interface GlobalRegisterRequest {
+  scene_type?: SceneType;
+  /** Set after the user has dismissed a scene-type mismatch prompt, so the same
+   *  warning cannot block them twice. */
+  scene_type_confirmed?: boolean;
   target_points?: number[];
   source_points?: number[];
   target_source?: BackendPointSource;
@@ -2936,6 +2945,19 @@ export interface GlobalRegisterResponse extends ICPRegistrationResponse {
   ambiguous?: boolean;
   /** How far the winning pose beat the runner-up (0-1). */
   match_margin?: number | null;
+  /** The scene type the run actually used. */
+  scene_type_used?: SceneType;
+  /** A weak scene-type disagreement — worth showing, never worth blocking. */
+  scene_advisory?: string | null;
+
+  // --- Set INSTEAD of a result when the scene looks nothing like the chosen
+  // type. The run stops before the expensive stage so the user can confirm or
+  // switch; re-send with `scene_type_confirmed` to proceed regardless.
+  needs_scene_confirmation?: boolean;
+  observed_scene_type?: SceneType;
+  chosen_scene_type?: SceneType;
+  scene_message?: string;
+  scene_planarity?: number | null;
 }
 
 /**

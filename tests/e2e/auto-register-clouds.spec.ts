@@ -69,6 +69,7 @@ async function autoRegister(
   t: number,
   s: number,
   method?: 'crown' | 'trunk' | 'chm',
+  sceneType?: 'agriculture' | 'natural' | 'urban',
 ) {
   await runTool(page, 'cloud-auto-register');
   const dialog = page.getByTestId('auto-register-dialog');
@@ -76,6 +77,7 @@ async function autoRegister(
 
   await dialog.getByTestId('auto-register-target-picker').getByTestId('picker-row').nth(t).click();
   await dialog.getByTestId('auto-register-source-picker').getByTestId('picker-row').nth(s).click();
+  if (sceneType) await dialog.getByTestId('auto-register-scene').selectOption(sceneType);
   if (method) await dialog.getByTestId('auto-register-method').selectOption(method);
 
   await dialog.getByTestId('auto-register-run').click();
@@ -175,4 +177,49 @@ test('Auto-Register dialog offers every anchor method and defaults to crowns', a
   await expect(run).toBeDisabled();
   await dialog.getByTestId('auto-register-source-picker').getByTestId('picker-row').nth(1).click();
   await expect(run).toBeEnabled();
+});
+
+test('Scene type drives the method, and built-site hides the plant options', async () => {
+  const { page } = session;
+  await importBoth(page);
+
+  await runTool(page, 'cloud-auto-register');
+  const dialog = page.getByTestId('auto-register-dialog');
+  await expect(dialog).toBeVisible();
+
+  // Vegetated scenes are matched plant by plant, so the landmark choice applies.
+  const scene = dialog.getByTestId('auto-register-scene');
+  await expect(scene).toHaveValue('agriculture');
+  await expect(dialog.getByTestId('auto-register-method')).toBeVisible();
+  await expect(scene.locator('option')).toHaveCount(3);
+
+  // A built site is matched on surface shape instead — there is no per-plant
+  // landmark to pick, so the control is hidden rather than shown disabled.
+  await scene.selectOption('urban');
+  await expect(dialog.getByTestId('auto-register-method')).toHaveCount(0);
+
+  await scene.selectOption('natural');
+  await expect(dialog.getByTestId('auto-register-method')).toBeVisible();
+});
+
+test('Choosing the wrong scene type prompts instead of registering', async () => {
+  const { page } = session;
+  await importBoth(page);
+
+  // These fixtures are a planting. Asking for a built site is a strong enough
+  // disagreement to change the algorithm, so it must stop and ask rather than
+  // quietly running the wrong method — and it must ask BEFORE the slow stage.
+  await autoRegister(page, 0, 1, undefined, 'urban');
+
+  const prompt = page.getByTestId('scene-mismatch-dialog');
+  await expect(prompt).toBeVisible({ timeout: 60_000 });
+
+  // The user's choice always wins: keeping it re-runs with what they picked.
+  // Switching runs the suggested one. Either way it is their decision.
+  await expect(prompt.getByTestId('scene-mismatch-keep')).toBeVisible();
+  await prompt.getByTestId('scene-mismatch-switch').click();
+  await expect(prompt).toBeHidden();
+
+  const toast = page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]').last();
+  await expect(toast.getByTestId('toast-title')).toContainText(/Auto-Register/i, { timeout: 120_000 });
 });

@@ -5,7 +5,7 @@ import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Sparkles} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, type ICPRegistrationResponse, type CloudToCloudICPRequest, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -27,6 +27,7 @@ import { Toolbar } from './Toolbar';
 import { StitchDialog } from './StitchDialog';
 import { AlignDialog } from './AlignDialog';
 import { AutoRegisterDialog, type AutoRegisterOptions } from './AutoRegisterDialog';
+import { SceneTypeMismatchDialog } from './SceneTypeMismatchDialog';
 import { MeshAlignDialog } from './MeshAlignDialog';
 import { MeshCloudDistanceDialog } from './MeshCloudDistanceDialog';
 import { MeshCloudAlignDialog } from './MeshCloudAlignDialog';
@@ -1383,6 +1384,13 @@ export default function PointCloudViewer({
   // Multi-input tool dialogs (pick their own inputs; always launchable).
   const [showAlignDialog, setShowAlignDialog] = useState(false);
   const [showAutoRegisterDialog, setShowAutoRegisterDialog] = useState(false);
+  // Set when the cloud's geometry disagrees strongly with the chosen scene
+  // type. Holds everything needed to re-run either way, so the user answers
+  // once and the run continues without them re-entering the dialog.
+  const [sceneMismatch, setSceneMismatch] = useState<{
+    targetId: string; sourceId: string; opts: AutoRegisterOptions;
+    observed: SceneType; chosen: SceneType; message: string;
+  } | null>(null);
   const [showStitchDialog, setShowStitchDialog] = useState(false);
   const [showMeshAlignDialog, setShowMeshAlignDialog] = useState(false);
   const [showMeshCloudDistanceDialog, setShowMeshCloudDistanceDialog] = useState(false);
@@ -9355,18 +9363,39 @@ export default function PointCloudViewer({
   // apply path.
   const handleAutoRegister = useCallback(async (
     targetId: string, sourceId: string, opts: AutoRegisterOptions,
+    // Set once the user has answered a scene-type prompt, so the same warning
+    // cannot stop them twice.
+    confirmedSceneType?: SceneType,
   ) => {
     let confidenceNote = '';
     await handleCloudToCloudICP(targetId, sourceId, {
       label: 'Auto-Register',
       runRegistration: async ({ targetPayload, sourcePayload, signal, onProgress, onRunId }) => {
+        const sceneType = confirmedSceneType ?? opts.sceneType;
         const response = await globalRegisterCloudToCloud({
           ...targetPayload,
           ...sourcePayload,
+          scene_type: sceneType,
+          scene_type_confirmed: confirmedSceneType !== undefined,
           anchor_method: opts.anchorMethod,
           estimator: opts.estimator,
           ...(opts.voxelSize ? { voxel_size: opts.voxelSize } : {}),
         }, signal, onProgress, onRunId);
+
+        // The backend stops BEFORE the expensive stage when the cloud looks
+        // nothing like the chosen scene type, so a wrong choice costs a moment
+        // rather than a minute. Ask, then re-run with whichever the user picks —
+        // the decision stays theirs either way.
+        if (response.needs_scene_confirmation) {
+          setSceneMismatch({
+            targetId, sourceId, opts,
+            observed: response.observed_scene_type ?? 'urban',
+            chosen: response.chosen_scene_type ?? sceneType,
+            message: response.scene_message ?? '',
+          });
+          // Not an error and not a result: bail out of the shared apply path.
+          return { success: true } as ICPRegistrationResponse;
+        }
 
         // An unconfident result still carries a matrix — too few plants were
         // found, or the coarse match scored low. Surface that rather than
@@ -9391,6 +9420,12 @@ export default function PointCloudViewer({
             confidenceNote = `${how} This alignment may be wrong — review it before continuing.`;
           } else {
             confidenceNote = how;
+          }
+          // A weak scene-type disagreement (planted vs natural spacing) tunes
+          // the same pipeline rather than changing it, so it is never worth a
+          // dialog — but the user should still hear about it.
+          if (response.scene_advisory) {
+            confidenceNote = `${confidenceNote} ${response.scene_advisory}`;
           }
         }
         return response;
@@ -17631,6 +17666,15 @@ export default function PointCloudViewer({
         initialSelectedIds={selectedIds}
         isRunning={isRunningICP}
         onRegister={(targetId, sourceId, opts) => { void handleAutoRegister(targetId, sourceId, opts); }}
+      />
+      <SceneTypeMismatchDialog
+        mismatch={sceneMismatch}
+        onCancel={() => setSceneMismatch(null)}
+        onChoose={(sceneType) => {
+          const m = sceneMismatch;
+          setSceneMismatch(null);
+          if (m) void handleAutoRegister(m.targetId, m.sourceId, m.opts, sceneType);
+        }}
       />
       <MeshAlignDialog
         isOpen={showMeshAlignDialog}

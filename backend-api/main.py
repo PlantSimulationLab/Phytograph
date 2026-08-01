@@ -23006,6 +23006,7 @@ async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_requ
 # per-plant features (height, crown size) so a regular lattice cannot slip by
 # one plant unnoticed. See `anchor_extraction.py` for the extractors.
 
+_SCENE_TYPES = ("agriculture", "natural", "urban")
 _GLOBAL_ANCHOR_METHODS = ("crown", "trunk", "chm")
 _GLOBAL_ESTIMATORS = ("ransac_fpfh", "fgr")
 
@@ -23231,6 +23232,16 @@ class GlobalRegisterRequest(BaseModel):
     #           scans of woody plantings.
     #   chm   - canopy-height-model local maxima. Needs no segmentation, so it
     #           is the fallback when instance segmentation is unreliable.
+    # What KIND of scene this is. Not a cosmetic preset — `urban` selects a
+    # structurally different algorithm (match the raw surface with FPFH+RANSAC,
+    # which is what that method is designed for and where it excels) instead of
+    # reducing the cloud to per-plant landmarks, which has no meaning on
+    # buildings. The user picks this explicitly; nothing is auto-detected behind
+    # their back, so the path taken is always their decision.
+    scene_type: str = "agriculture"
+    # Set once the user has seen and dismissed a scene-type mismatch warning, so
+    # the same prompt cannot block them twice.
+    scene_type_confirmed: bool = False
     anchor_method: str = "crown"
     estimator: str = "ransac_fpfh"
     # Downsampling/feature scale. Defaults to a fraction of the robust extent.
@@ -23334,6 +23345,10 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             return dict(success=False,
                         error=f"Unknown anchor_method '{request.anchor_method}'. "
                               f"Expected one of {', '.join(_GLOBAL_ANCHOR_METHODS)}.")
+        if request.scene_type not in _SCENE_TYPES:
+            return dict(success=False,
+                        error=f"Unknown scene_type '{request.scene_type}'. "
+                              f"Expected one of {', '.join(_SCENE_TYPES)}.")
         if request.estimator not in _GLOBAL_ESTIMATORS:
             return dict(success=False,
                         error=f"Unknown estimator '{request.estimator}'. "
@@ -23379,19 +23394,58 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
         if not extent or not np.isfinite(extent) or extent <= 0:
             return dict(success=False, error="Target cloud has no measurable extent")
 
+        # --- Scene-type sanity check, BEFORE any expensive work -------------
+        #
+        # Runs on a subsample in ~0.05 s, so choosing the wrong scene type costs
+        # a moment rather than a minute of CSF and TreeIso. It never changes the
+        # path on its own: the user's choice stands, and a disagreement is
+        # reported back for them to resolve.
+        from scene_classify import classify_scene, check_scene_type
+
         _cancel_checkpoint(progress)
         if progress is not None:
-            progress(0.10, f"Extracting {request.anchor_method} anchors")
+            progress(0.08, "Checking scene type")
+        observed = classify_scene(target_points)
+        mismatch = check_scene_type(request.scene_type, observed)
+        if mismatch and mismatch["severity"] == "strong" and not request.scene_type_confirmed:
+            # A strong disagreement means the chosen setting would run a
+            # different ALGORITHM than the geometry calls for — worth stopping
+            # for. A weak one (planted vs natural spacing) only tunes the same
+            # path, so it rides along as a note and never interrupts.
+            return dict(
+                success=True,
+                needs_scene_confirmation=True,
+                observed_scene_type=mismatch["observed"],
+                chosen_scene_type=request.scene_type,
+                scene_message=mismatch["message"],
+                scene_planarity=observed.get("planarity"),
+            )
+
+        # `urban` is a genuinely different pipeline, not a preset: built scenes
+        # have no per-plant landmark to find, and the planes and corners they DO
+        # have are exactly what FPFH+RANSAC was designed for.
+        use_landmarks = request.scene_type != "urban"
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.10, f"Extracting {request.anchor_method} anchors"
+                     if use_landmarks else "Preparing surfaces")
 
         # Extraction runs in a killable child process (CSF + TreeIso), so Cancel
         # works mid-stage and a CSF segfault cannot take down the backend.
-        tgt_xyz, tgt_feat = _extract_anchors_killable(
-            target_points, request.anchor_method, extent, progress)
-        _cancel_checkpoint(progress)
-        if progress is not None:
-            progress(0.30, "Extracting anchors (source)")
-        src_xyz, src_feat = _extract_anchors_killable(
-            source_points, request.anchor_method, extent, progress)
+        if use_landmarks:
+            tgt_xyz, tgt_feat = _extract_anchors_killable(
+                target_points, request.anchor_method, extent, progress)
+            _cancel_checkpoint(progress)
+            if progress is not None:
+                progress(0.30, "Extracting anchors (source)")
+            src_xyz, src_feat = _extract_anchors_killable(
+                source_points, request.anchor_method, extent, progress)
+        else:
+            # Built scene: no landmark stage at all. Skipping it is most of why
+            # the urban path is fast — no CSF, no TreeIso.
+            tgt_xyz = src_xyz = np.empty((0, 3))
+            tgt_feat = src_feat = np.empty((0, 2))
 
         n_tgt, n_src = len(tgt_xyz), len(src_xyz)
 
@@ -23400,7 +23454,7 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
         # matching the raw points rather than failing: sometimes there is enough
         # structure for a rough answer, but it is never trustworthy, so the
         # result is always flagged unconfident.
-        anchors_usable = n_tgt >= 3 and n_src >= 3
+        anchors_usable = use_landmarks and n_tgt >= 3 and n_src >= 3
 
         _cancel_checkpoint(progress)
         if progress is not None:
@@ -23498,8 +23552,14 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
         # scene cannot distinguish them. Refusing to claim confidence there is
         # the honest outcome; the user gets a matrix plus a warning, not a
         # silent coin-flip.
+        # `anchors_usable` is the right requirement only when landmarks were the
+        # PLAN. On a built scene, surface matching is the intended algorithm, so
+        # having no landmarks is expected rather than a shortfall — requiring
+        # them there reported a provably exact urban alignment (0.00 degrees) as
+        # not confident, training users to ignore the flag.
+        path_delivered = anchors_usable or not use_landmarks
         confident = bool(
-            anchors_usable
+            path_delivered
             and not ambiguous
             and fit_is_sound
             and (coarse_fitness >= request.confidence_threshold or refined_ok)
@@ -23532,6 +23592,10 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             # matching, and a user seeing only a low-confidence flag had no way
             # to tell which method produced the result they are judging.
             match_path=match_path,
+            scene_type_used=request.scene_type,
+            # A weak disagreement (planted vs natural spacing) never blocks, but
+            # the user should still see it.
+            scene_advisory=(mismatch["message"] if mismatch else None),
             # True when a rival pose scored nearly as well as the winner, i.e.
             # the scene is too symmetric to distinguish them.
             ambiguous=ambiguous,
