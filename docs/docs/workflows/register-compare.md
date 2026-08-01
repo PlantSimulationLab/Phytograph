@@ -1,7 +1,14 @@
 # Register & compare
 
 Align two datasets and measure how well they match. Phytograph supports
-three flavors of ICP plus simple multi-cloud stitching.
+automatic registration (no starting guess needed), three flavors of ICP for
+refining an alignment, and simple multi-cloud stitching.
+
+**Which one do I want?**
+
+- Clouds are **far apart or rotated** → [Auto-Register](#auto-register-when-clouds-start-far-apart)
+- Clouds are **nearly aligned already** → [Cloud-to-cloud ICP](#cloud-to-cloud-icp)
+- Clouds are **already correct** and you want one file → [Stitch](#stitch)
 
 ## Stitch
 
@@ -74,10 +81,80 @@ merge itself.
     preserved (attributes present on only some inputs are carried through and
     filled with zeros for the clouds that lacked them).
 
+## Auto-register (when clouds start far apart)
+
+**Align Clouds (ICP)** below can only *polish* a pair that already starts
+close together. **Auto-Register** handles the case it can't: two scans of the
+same plot that are arbitrarily rotated or offset, with no manual
+pre-alignment.
+
+The difference is what gets matched. Matching raw points fails on a planting,
+because every plant's foliage looks like every other plant's — the match
+happily snaps the source onto a *neighbouring* plant, one row-spacing off,
+and still reports a good score. Auto-Register first reduces each cloud to
+**one landmark per plant**, then matches those. A few dozen well-separated
+landmarks are far easier to line up unambiguously than a million
+interchangeable foliage points.
+
+1. Open **Auto-Register Clouds** from the **Pre-processing** toolbar group
+   (sparkles icon), **Tools → Pre-processing**, or the command palette
+   (<kbd>⌘/Ctrl</kbd>+<kbd>K</kbd>).
+2. Pick the **target** (stays fixed) and the **source** (moves onto it).
+   Either may be a streamed cloud.
+3. Choose what to **match on** — see the table below.
+4. Click **Register**.
+
+### Choosing what to match on
+
+The right landmark depends on how the data was captured, not on which
+algorithm sounds better:
+
+| Match on | Use when | Notes |
+|----------|----------|-------|
+| **Tree crowns** (default) | Aerial/drone scans, or any data where trunks are hidden by canopy | Needs no visible trunk — the usual choice |
+| **Trunk bases** | Ground-based scans of trees or vines with clear trunks | The most repeatable landmark when trunks *are* visible |
+| **Canopy peaks** | Either of the above finds too few plants | Uses no segmentation at all, so it still works on dense or touching canopies |
+
+If a run looks wrong, switching the match method is the first thing to try —
+they fail in different ways, which is why all three ship.
+
+**Detail size** can normally stay blank; Phytograph sizes it from the cloud.
+Increase it if registration finds nothing; decrease it for small or very
+finely sampled plants.
+
+### Reading the result
+
+Auto-Register always tells you **which method actually ran**. Normally it
+matches the plants it found; if it could not find enough, it says so and
+matches the overall surface shape instead. That fallback still often works, but
+it is the weaker path — worth knowing before you trust the result.
+
+Two warnings are worth acting on:
+
+- **"This planting is too regular to be sure"** — another alignment fits almost
+  as well. On a perfectly regular block, an alignment shifted by one plant (or
+  rotated a quarter turn) can line up just as convincingly as the right one, and
+  no error measurement can tell them apart. Check the result visually, or crop
+  to an area with some irregularity — a gap, an edge, a size difference — and
+  register that first.
+- **"This alignment may be wrong"** — too few plants were matched to be
+  confident. Undo and try a different match method or detail size.
+
+A quiet result means the plants matched unambiguously.
+
+Like ICP, the transform is applied to the source's points *and* its scanner
+origin/trajectory, and a single **Undo** reverts it.
+
+!!! tip "Auto-register first, then fine-tune"
+    Auto-Register finishes with an ICP refinement pass, so its output is
+    usually final. If you later crop or clean the clouds, running **Align
+    Clouds (ICP)** afterwards will polish the fit further.
+
 ## Cloud-to-cloud ICP
 
 Align one cloud to another by iteratively minimizing point-to-point
-distance.
+distance. Use this to **polish** a pair that is already roughly lined up; if
+the clouds start far apart or rotated, use **Auto-Register** above instead.
 
 1. Open **Align Clouds (ICP)** from the **Pre-processing** toolbar group
    (globe icon) or **Tools → Registration → Align Clouds (ICP)**.
@@ -176,10 +253,20 @@ ICP finds a *local* minimum, so it needs the inputs to be roughly
 pre-aligned. If RMSE comes back huge, or the result looks visibly
 wrong:
 
-1. **Pre-align manually** with [Transform](clean-point-cloud.md#transform-translate-and-rotate)
+1. **Try [Auto-Register](#auto-register-when-clouds-start-far-apart)** — for
+   two clouds of a planting, this is usually the fix rather than a
+   workaround: it does not need a starting guess at all.
+2. **Pre-align manually** with [Transform](clean-point-cloud.md#transform-translate-and-rotate)
    — translate and rotate to within ~10 cm and a few degrees before running ICP.
-2. **Reduce voxel size** for finer-grained matching.
-3. **Increase max iterations** if convergence is plausible but slow.
+3. **Reduce voxel size** for finer-grained matching.
+4. **Increase max iterations** if convergence is plausible but slow.
+
+!!! warning "A zero-error result is not always a good result"
+    If the two clouds share no overlap at all, ICP can report zero error
+    simply because it found nothing to compare. Phytograph now flags this
+    ("no overlapping points were found") instead of showing it as a perfect
+    fit — if you see that warning, the clouds need a rough pre-alignment or
+    they may not cover the same ground.
 
 For very different inputs (e.g., a sparse cloud and a dense mesh),
 expect higher RMSE than for similar-density inputs.

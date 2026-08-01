@@ -2855,14 +2855,23 @@ export async function icpRegisterMeshToCloud(
 
 export interface CloudToCloudICPRequest {
   // Each side is flat inline points OR an octree source descriptor, resolved
-  // independently so a flat and an octree cloud can be mixed (the source must
-  // be flat in practice — its transform is baked renderer-side).
+  // independently so a flat and an octree cloud can be mixed. Either side may
+  // be octree-backed: a flat source is baked renderer-side, while an octree
+  // source is transformed on its backend session and the octree rebuilt.
   target_points?: number[];     // Flattened [x, y, z, ...] target (stays fixed); omit when target_source is set
   source_points?: number[];     // Flattened [x, y, z, ...] source (to be moved); omit when source_source is set
   target_source?: BackendPointSource;  // octree-backed target read from disk
   source_source?: BackendPointSource;  // octree-backed source read from disk
   max_correspondence_distance?: number;  // Optional max correspondence distance
   max_iterations?: number;     // Optional max iterations (default 50)
+  /**
+   * Optional starting pose as a row-major flat 4x4 (16 numbers) — the same
+   * layout `transformation_matrix` comes back in. Pass the result of
+   * `globalRegisterCloudToCloud` here to refine a coarse alignment instead of
+   * starting from identity. Omit for the default behaviour (identity init after
+   * centroid pre-alignment).
+   */
+  init_transform?: number[];
 }
 
 /**
@@ -2884,6 +2893,77 @@ export async function icpRegisterCloudToCloud(
       '/api/c2c/icp-register', request, signal, 120000, onProgress, onRunId);
   } catch (error) {
     console.error('Cloud-to-cloud ICP registration failed:', error);
+    throw error;
+  }
+}
+
+// ==================== GLOBAL (COARSE) REGISTRATION API ====================
+
+/** Which per-plant landmark each cloud is reduced to before matching. */
+export type AnchorMethod = 'crown' | 'trunk' | 'chm';
+export type GlobalEstimator = 'ransac_fpfh' | 'fgr';
+
+export interface GlobalRegisterRequest {
+  target_points?: number[];
+  source_points?: number[];
+  target_source?: BackendPointSource;
+  source_source?: BackendPointSource;
+  anchor_method?: AnchorMethod;
+  estimator?: GlobalEstimator;
+  voxel_size?: number;
+  refine_icp?: boolean;
+  confidence_threshold?: number;
+}
+
+export interface GlobalRegisterResponse extends ICPRegistrationResponse {
+  /** False when the result should not be trusted without review — too few
+   *  anchors were found, or the coarse match scored below threshold. A matrix
+   *  is still returned; this flags that it may be wrong. */
+  confident?: boolean;
+  anchor_method_used?: AnchorMethod;
+  num_anchors_target?: number;
+  num_anchors_source?: number;
+  /** Score of the coarse stage alone, before ICP refinement. */
+  coarse_fitness?: number;
+  /** Which algorithm actually ran: per-plant landmarks, or raw surface
+   *  matching when too few plants were found. Never left implicit — a user
+   *  judging a result needs to know which method produced it. */
+  match_path?: 'plant-landmarks' | 'raw-surface';
+  /** True when a rival pose scored nearly as well as the winner, i.e. the
+   *  scene is too symmetric to tell them apart. This is the one failure a
+   *  residual check cannot see: a 180°-flipped orchard is a genuinely good
+   *  fit to the wrong answer. */
+  ambiguous?: boolean;
+  /** How far the winning pose beat the runner-up (0-1). */
+  match_margin?: number | null;
+}
+
+/**
+ * Coarse (global) cloud-to-cloud registration.
+ *
+ * Unlike `icpRegisterCloudToCloud`, this does NOT require the clouds to start
+ * near each other: both are reduced to sparse per-plant anchors, those are
+ * matched, and the winner is refined with the same point-to-plane ICP. Use it
+ * when two scans are arbitrarily rotated/offset; use plain ICP to polish a pair
+ * that is already roughly aligned.
+ *
+ * Longer timeout than plain ICP: the anchor stage may run ground/tree
+ * segmentation over both clouds before any matching happens.
+ */
+export async function globalRegisterCloudToCloud(
+  request: GlobalRegisterRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<GlobalRegisterResponse> {
+  console.log('Global registration - anchor method:', request.anchor_method ?? 'crown',
+    'estimator:', request.estimator ?? 'ransac_fpfh');
+  // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+  try {
+    return await fetchJsonWithProgress<GlobalRegisterResponse>(
+      '/api/c2c/global-register', request, signal, 300000, onProgress, onRunId);
+  } catch (error) {
+    console.error('Global registration failed:', error);
     throw error;
   }
 }

@@ -123,6 +123,19 @@ def run(workdir: str) -> int:
             labels = main.segment_trees(points, ti_params, seeds)
             np.save(os.path.join(workdir, "output.npy"), np.asarray(labels))
 
+        elif tool == "anchors":
+            # Per-plant landmark extraction for coarse registration. Runs here
+            # rather than in the request handler because it drives CSF and
+            # TreeIso — the same heavyweight CPU work every other tool in this
+            # dispatch isolates, and CSF can segfault on degenerate input, which
+            # would otherwise take down the whole backend.
+            from anchor_extraction import extract_anchors
+
+            xyz, feats = extract_anchors(
+                points, params["method"], float(params["extent"]))
+            np.save(os.path.join(workdir, "output.npy"), np.asarray(xyz))
+            np.save(os.path.join(workdir, "features.npy"), np.asarray(feats))
+
         elif tool == "skeleton":
             result = main.compute_skeleton(points, params)
             with open(os.path.join(workdir, "result.json"), "w") as f:

@@ -3,9 +3,9 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Sparkles} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, type ICPRegistrationResponse, type CloudToCloudICPRequest, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -26,6 +26,7 @@ import { downloadFile as saveToFile } from '../utils/fileDownload';
 import { Toolbar } from './Toolbar';
 import { StitchDialog } from './StitchDialog';
 import { AlignDialog } from './AlignDialog';
+import { AutoRegisterDialog, type AutoRegisterOptions } from './AutoRegisterDialog';
 import { MeshAlignDialog } from './MeshAlignDialog';
 import { MeshCloudDistanceDialog } from './MeshCloudDistanceDialog';
 import { MeshCloudAlignDialog } from './MeshCloudAlignDialog';
@@ -1381,6 +1382,7 @@ export default function PointCloudViewer({
   const heliosAbortRef = useRef<AbortController | null>(null);
   // Multi-input tool dialogs (pick their own inputs; always launchable).
   const [showAlignDialog, setShowAlignDialog] = useState(false);
+  const [showAutoRegisterDialog, setShowAutoRegisterDialog] = useState(false);
   const [showStitchDialog, setShowStitchDialog] = useState(false);
   const [showMeshAlignDialog, setShowMeshAlignDialog] = useState(false);
   const [showMeshCloudDistanceDialog, setShowMeshCloudDistanceDialog] = useState(false);
@@ -4886,6 +4888,7 @@ export default function PointCloudViewer({
       { id: 'cloud-move-origin', name: 'Move to Origin', keywords: ['center', 'zero', 'reset position'], action: () => handleMoveToOrigin(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: CircleDot },
       { id: 'cloud-backfill-misses', name: 'Backfill Misses', keywords: ['sky', 'miss', 'gapfill', 'lad', 'leaf area', 'transmission', 'recover', 'beam'], action: () => { closeAllToolPanels(); setShowBackfillPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'preprocess', icon: CloudFog, testId: 'tool-backfill-misses', multiInput: true },
       { id: 'cloud-align', name: 'Align Clouds (ICP)', keywords: ['register', 'icp', 'alignment', 'fit'], action: () => setShowAlignDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Globe, multiInput: true },
+      { id: 'cloud-auto-register', name: 'Auto-Register Clouds', keywords: ['register', 'registration', 'global', 'coarse', 'automatic', 'align', 'rotated', 'match'], action: () => setShowAutoRegisterDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Sparkles, testId: 'tool-auto-register', multiInput: true },
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true },
 
       // ── Segmentation ────────────────────────────────────────────────
@@ -9033,7 +9036,36 @@ export default function PointCloudViewer({
   }, [clouds, meshes, buildPointSource, meshPositions, setMeshPositions, setMeshRotations]);
 
   // Handle Cloud-to-Cloud ICP alignment
-  const handleCloudToCloudICP = useCallback(async (targetId?: string, sourceId?: string) => {
+  // Cloud-to-cloud registration, shared by the two entry points.
+  //
+  // `runRegistration` is the only difference between them: Align Clouds runs
+  // plain ICP, while Auto-Register runs the coarse global search first and
+  // feeds its matrix to ICP as `init_transform`. Everything downstream — the
+  // dual flat/octree apply, the scan-origin transform, the quality toast — is
+  // identical and genuinely intricate (two opposite matrix conventions live in
+  // it), so both tools share this one implementation rather than a copy.
+  const handleCloudToCloudICP = useCallback(async (
+    targetId?: string,
+    sourceId?: string,
+    options?: {
+      /** Overrides the plain-ICP call. Receives the resolved point sources and
+       *  the streaming hooks; must return an ICP-shaped response. */
+      runRegistration?: (
+        args: {
+          targetPayload: Pick<CloudToCloudICPRequest, 'target_source' | 'target_points'>;
+          sourcePayload: Pick<CloudToCloudICPRequest, 'source_source' | 'source_points'>;
+          signal: AbortSignal;
+          onProgress: (p: number | null, msg: string) => void;
+          onRunId: (runId: string) => void;
+        },
+      ) => Promise<ICPRegistrationResponse>;
+      /** Title stem for toasts, so Auto-Register doesn't say "Cloud Alignment". */
+      label?: string;
+      /** Extra sentence appended to the toast. A callback rather than a string
+       *  so the caller can fill it in from the response it just received. */
+      extraDetail?: () => string;
+    },
+  ) => {
     // Inputs come from the Align dialog (explicit target/source) or, as a
     // fallback, from a 2-cloud viewport selection (target = first selected).
     let tId = targetId;
@@ -9071,18 +9103,38 @@ export default function PointCloudViewer({
       const targetPs = buildPointSource(targetCloud);
       const sourcePs = buildPointSource(sourceCloud);
 
-      const response = await icpRegisterCloudToCloud({
-        ...(targetPs.kind === 'source'
+      // Each side keys differently depending on whether it came back as an
+      // octree/session descriptor or inline points.
+      //
+      // INLINE points must have sky/miss returns stripped first. A miss is a
+      // ray that hit nothing, projected ~1 km out along the beam; leaving even
+      // a handful in inflates the cloud's extent ~1000x, and everything
+      // downstream scales off that extent — so the compute HANGS rather than
+      // erroring. The session/octree branch is already filtered by the backend
+      // reader (`include_misses=False`); the inline branch is not, so do it
+      // here with the same helper the other tools use.
+      const targetHits = targetPs.kind === 'source' ? null : collectHitPoints(targetPs.data);
+      const sourceHits = sourcePs.kind === 'source' ? null : collectHitPoints(sourcePs.data);
+      const targetPayload: Pick<CloudToCloudICPRequest, 'target_source' | 'target_points'> =
+        targetPs.kind === 'source'
           ? { target_source: targetPs.source }
-          : { target_points: Array.from(targetPs.data.positions) }),
-        ...(sourcePs.kind === 'source'
+          : { target_points: targetHits!.points.flat() };
+      const sourcePayload: Pick<CloudToCloudICPRequest, 'source_source' | 'source_points'> =
+        sourcePs.kind === 'source'
           ? { source_source: sourcePs.source }
-          : { source_points: Array.from(sourcePs.data.positions) }),
-      },
-        ctrl.signal,
-        (p, msg) => setIcpProgress({ label: msg, value: p }),
-        (runId) => { icpRunIdRef.current = runId; },
-      );
+          : { source_points: sourceHits!.points.flat() };
+
+      const onProgress = (p: number | null, msg: string) => setIcpProgress({ label: msg, value: p });
+      const onRunId = (runId: string) => { icpRunIdRef.current = runId; };
+
+      const response = options?.runRegistration
+        ? await options.runRegistration({
+            targetPayload, sourcePayload, signal: ctrl.signal, onProgress, onRunId,
+          })
+        : await icpRegisterCloudToCloud(
+            { ...targetPayload, ...sourcePayload },
+            ctrl.signal, onProgress, onRunId,
+          );
 
       if (!response.success) {
         throw new Error(response.error || 'Cloud-to-cloud ICP registration failed');
@@ -9266,14 +9318,18 @@ export default function PointCloudViewer({
         // "Fitness: 100%" toast on a visibly-wrong alignment was the norm. When
         // the backend flags the fit as untrustworthy, say so instead of
         // reporting success.
+        const toastLabel = options?.label ?? 'Cloud Alignment';
+        const pair = `Aligned "${sourceCloud.data.fileName || 'Cloud'}" to "${targetCloud.data.fileName || 'Cloud'}".`;
+        const extra = options?.extraDetail?.() ?? '';
+        const detail = extra ? ` ${extra}` : '';
         showToast({
           type: response.quality_warning ? 'warning' : 'success',
           title: response.quality_warning
-            ? 'Cloud Alignment — Check Result'
-            : 'Cloud Alignment Complete',
+            ? `${toastLabel} — Check Result`
+            : `${toastLabel} Complete`,
           message: response.quality_warning
-            ? `Aligned "${sourceCloud.data.fileName || 'Cloud'}" to "${targetCloud.data.fileName || 'Cloud'}". ${response.quality_warning}`
-            : `Aligned "${sourceCloud.data.fileName || 'Cloud'}" to "${targetCloud.data.fileName || 'Cloud'}". RMSE: ${response.rmse?.toFixed(4) ?? 'N/A'} m (${((response.fitness || 0) * 100).toFixed(1)}% overlap)`,
+            ? `${pair} ${response.quality_warning}${detail}`
+            : `${pair} RMSE: ${response.rmse?.toFixed(4) ?? 'N/A'} m (${((response.fitness || 0) * 100).toFixed(1)}% overlap)${detail}`,
           duration: response.quality_warning ? 0 : undefined,
         });
       }
@@ -9289,6 +9345,59 @@ export default function PointCloudViewer({
       icpRunIdRef.current = null;
     }
   }, [selectedIds, clouds, onUpdateCloud, onUpdateScanParams, buildPointSource, getEditState, setEditStates, buildSessionOctreeData]);
+
+  // Auto-Register: coarse global registration, then ICP refinement.
+  //
+  // Delegates to handleCloudToCloudICP for everything after the matrix is
+  // known, swapping in the global-register call. The coarse endpoint already
+  // runs the ICP refinement server-side (refine_icp defaults true), so this is
+  // one request, and the returned matrix is directly usable by the shared
+  // apply path.
+  const handleAutoRegister = useCallback(async (
+    targetId: string, sourceId: string, opts: AutoRegisterOptions,
+  ) => {
+    let confidenceNote = '';
+    await handleCloudToCloudICP(targetId, sourceId, {
+      label: 'Auto-Register',
+      runRegistration: async ({ targetPayload, sourcePayload, signal, onProgress, onRunId }) => {
+        const response = await globalRegisterCloudToCloud({
+          ...targetPayload,
+          ...sourcePayload,
+          anchor_method: opts.anchorMethod,
+          estimator: opts.estimator,
+          ...(opts.voxelSize ? { voxel_size: opts.voxelSize } : {}),
+        }, signal, onProgress, onRunId);
+
+        // An unconfident result still carries a matrix — too few plants were
+        // found, or the coarse match scored low. Surface that rather than
+        // letting a possibly-wrong alignment look like a clean success; the
+        // user can undo far more easily than they can spot a subtle mis-fit.
+        if (response.success) {
+          // Always say which algorithm ran. When too few plants are found the
+          // backend falls back to matching raw surfaces, and a user shown only
+          // a confidence flag has no way to tell which method produced the
+          // result they are being asked to judge.
+          const usedSurfaces = response.match_path === 'raw-surface';
+          const how = usedSurfaces
+            ? 'Too few plants found — matched using surface shape instead.'
+            : `Matched ${response.num_anchors_target ?? 0} plants.`;
+          if (response.ambiguous) {
+            // A rival alignment scored nearly as well: the scene is too
+            // repetitive to tell them apart, so the result may be rotated onto
+            // the wrong plants while still looking like a clean fit.
+            confidenceNote = `${how} This planting is too regular to be sure — `
+              + 'another alignment fits almost as well, so check the result before continuing.';
+          } else if (response.confident === false) {
+            confidenceNote = `${how} This alignment may be wrong — review it before continuing.`;
+          } else {
+            confidenceNote = how;
+          }
+        }
+        return response;
+      },
+      extraDetail: () => confidenceNote,
+    });
+  }, [handleCloudToCloudICP]);
 
   // Mesh-to-mesh ICP alignment
   // Mesh-to-mesh ICP. Inputs are picked in the MeshAlignDialog and passed in
@@ -15092,6 +15201,21 @@ export default function PointCloudViewer({
                     data-moving={isMovingScanRow ? 'true' : 'false'}
                     data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
                     data-octree-cache-id={scan.data?.octree?.cacheId ?? ''}
+                    // World-frame bounding box as "minx,miny,minz,maxx,maxy,maxz"
+                    // for E2E. Registration is judged by WHERE the cloud ends up,
+                    // and a wrong-plant match on a regular planting lands one
+                    // spacing off while still reporting success — so the extent
+                    // is the assertion that separates the two. Includes the
+                    // pending edit translation so it reflects what's on screen.
+                    data-scan-bounds={(() => {
+                      const b = scan.data?.bounds;
+                      if (!b) return '';
+                      const t = editStates.get(scan.id)?.translation ?? { x: 0, y: 0, z: 0 };
+                      return [
+                        b.min.x + t.x, b.min.y + t.y, b.min.z + t.z,
+                        b.max.x + t.x, b.max.y + t.y, b.max.z + t.z,
+                      ].map(v => v.toFixed(3)).join(',');
+                    })()}
                     // Effective world-frame scanner origin (params.origin primary,
                     // octree.scanOrigin fallback) as "x,y,z" for E2E — must move
                     // with the cloud when a translate is baked. Empty when none.
@@ -17499,6 +17623,14 @@ export default function PointCloudViewer({
         initialSelectedIds={selectedIds}
         isRunning={isRunningICP}
         onAlign={(targetId, sourceId) => { void handleCloudToCloudICP(targetId, sourceId); }}
+      />
+      <AutoRegisterDialog
+        isOpen={showAutoRegisterDialog}
+        onClose={() => setShowAutoRegisterDialog(false)}
+        clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color }))}
+        initialSelectedIds={selectedIds}
+        isRunning={isRunningICP}
+        onRegister={(targetId, sourceId, opts) => { void handleAutoRegister(targetId, sourceId, opts); }}
       />
       <MeshAlignDialog
         isOpen={showMeshAlignDialog}
