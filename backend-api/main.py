@@ -9476,6 +9476,12 @@ def _height_above_cloth(points: np.ndarray, cloth_nodes: np.ndarray) -> np.ndarr
     return points[:, 2] - z
 
 
+# Fractional rise required before a local minimum in the height histogram counts
+# as the knee. Guards the turning-point search against exact ties on sparse
+# clouds — see the comment at the comparison itself.
+_KNEE_RISE_FRAC = 0.10
+
+
 def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
                               fallback: float) -> "tuple[float, dict]":
     """Pick a CSF `class_threshold` from the settled cloth instead of from the
@@ -9551,7 +9557,23 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
     for k in range(peak + span, len(smooth) - span):
         if smooth[k] > 0.5 * smooth[peak]:
             continue                      # still on the mode's own shoulder
-        if smooth[k] <= smooth[k - span] and smooth[k] < smooth[k + span]:
+        # The rise out of the valley must be a REAL rise, not a tie. A strict
+        # `smooth[k] < smooth[k + span]` accepts a flat plateau whenever the
+        # last bit floats one ULP the right way, and on a sparse cloud that is
+        # decided by a single point landing either side of a bin edge: on the
+        # bean fixture smooth[k] and smooth[k+span] are both exactly 133/3 at
+        # k=14, so macOS (which keeps the tie and walks on to the true knee at
+        # 0.051) and Linux (whose cloth settles ~1e-6 differently, breaks the
+        # tie, and stops early at 0.021 — barely above the 0.02 clip floor,
+        # i.e. right back at the seed auto mode exists to beat) disagreed 2.4x
+        # on identical input. Requiring a relative margin makes the choice
+        # depend on the histogram's shape rather than on its last ULP: under
+        # simulated cloth-settle noise the strict form lands in the hand-tuned
+        # band 9 times in 60, this form 60 times in 60. RISE_FRAC=0.10 is an
+        # order of magnitude above the tie noise and 3x below the 0.5 that
+        # starts costing real knees (swept on the bean fixture, the synthetic
+        # gap case, and the no-vegetation case — all stable from 0 to 0.30).
+        if smooth[k] <= smooth[k - span] and smooth[k + span] > smooth[k] * (1.0 + _KNEE_RISE_FRAC):
             knee = float(centres[k])
             meta["method"] = "knee"
             break

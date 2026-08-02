@@ -179,6 +179,42 @@ def test_estimate_class_threshold_finds_the_gap():
     assert 0.35 <= threshold < 2.0, meta
 
 
+@requires_csf
+def test_auto_class_threshold_survives_a_differently_settled_cloth():
+    """The estimate must come from the histogram's shape, not from its last ULP.
+
+    This is the regression test for a real cross-platform failure: CSF's cloth
+    is bit-deterministic in-process but settles ~1e-6 differently on
+    macOS-arm64 vs Linux-x86_64. On this fixture that was enough to move ONE
+    point of 3698 across a bin edge, breaking an exact tie in the
+    turning-point search (`smooth[k]` and `smooth[k+span]` are both 133/3 at
+    k=14) and collapsing the estimate from 0.051 to 0.021 — barely above the
+    0.02 clip floor, i.e. back to the extent-scaled seed auto mode exists to
+    beat, costing 8 points of ground recall (0.997 -> 0.920). CI caught it;
+    macOS alone never would have.
+
+    So perturbing the cloud at a scale far below the measurement must not move
+    the threshold out of the hand-tuned band. Sensitive by construction: with
+    the old strict `<` this lands in-band roughly 1 run in 6."""
+    points, _ = _load_fixture()
+    rng = np.random.default_rng(11)
+    seen = []
+    for _ in range(8):
+        # Displacement ~0.3 mm: three orders of magnitude below the ~5 cm
+        # threshold being estimated, and well under the fixture's own noise.
+        jittered = points + rng.normal(0.0, 3e-4, size=points.shape)
+        meta: dict = {}
+        main.segment_ground(
+            jittered, cloth_resolution=0.05, rigidness=3,
+            class_threshold=0.02, auto_class_threshold=True, meta=meta,
+        )
+        seen.append(meta["class_threshold"])
+
+    assert all(0.03 <= t <= 0.08 for t in seen), seen
+    # And it should be genuinely stable, not merely in-band by luck.
+    assert max(seen) - min(seen) < 0.01, seen
+
+
 def test_estimate_class_threshold_without_vegetation():
     """Ground and nothing else: no turning point exists, so the tail rule runs
     and the threshold still clears the band rather than falling back."""
