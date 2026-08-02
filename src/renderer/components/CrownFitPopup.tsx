@@ -39,7 +39,7 @@ interface CrownFitPopupProps {
 
 const SHAPE_DESCRIPTIONS: Record<CrownShape, string> = {
   ellipsoid: 'Smooth upright ellipsoid — a good default for rounded, broadleaf crowns.',
-  prism: 'Tightest oriented box around the crown — reports width × depth × height directly.',
+  prism: 'Axis-aligned bounding box around the crown — reports width × depth × height directly.',
   cone: 'Upright cone (apex at the crown top) — suits conifers and young trees.',
   alpha: 'Smooth watertight concave hull that hugs the crown outline — the most faithful shape.',
 };

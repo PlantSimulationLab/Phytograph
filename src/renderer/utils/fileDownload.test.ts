@@ -27,6 +27,29 @@ describe('downloadFile (text)', () => {
     expect(writeText).toHaveBeenCalledWith('/tmp/out.csv', 'a,b,c\n1,2,3');
   });
 
+  // Regression: the text path used to hardcode a CSV filter, so saving a
+  // skeleton .json / mesh .obj / scan .xml presented a dialog filtered to
+  // .csv and hid the file the user was actually saving.
+  it.each([
+    ['skeleton.json', 'JSON', 'json'],
+    ['skeleton.obj', 'OBJ', 'obj'],
+    ['skeleton.ply', 'PLY', 'ply'],
+    ['scans.xml', 'XML', 'xml'],
+    ['crown_metrics.csv', 'CSV', 'csv'],
+  ])('derives the dialog filter from %s', async (filename, label, ext) => {
+    const save = vi.fn(async () => `/tmp/${filename}`);
+    window.electronAPI.dialog.save = save;
+    window.electronAPI.fs.writeText = vi.fn(async () => undefined);
+
+    await downloadFile('contents', filename);
+
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: [{ name: `${label} files`, extensions: [ext] }],
+      }),
+    );
+  });
+
   it('rethrows when fs.writeText fails', async () => {
     window.electronAPI.dialog.save = vi.fn(async () => '/tmp/out.csv');
     window.electronAPI.fs.writeText = vi.fn(async () => {
