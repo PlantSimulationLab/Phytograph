@@ -9476,10 +9476,13 @@ def _height_above_cloth(points: np.ndarray, cloth_nodes: np.ndarray) -> np.ndarr
     return points[:, 2] - z
 
 
-# Fractional rise required before a local minimum in the height histogram counts
-# as the knee. Guards the turning-point search against exact ties on sparse
-# clouds — see the comment at the comparison itself.
-_KNEE_RISE_FRAC = 0.10
+# A local minimum in the height histogram counts as the knee only if the density
+# climbs out of it and stays out: it must not dip back below the valley within
+# _KNEE_PERSIST_SPANS spans, and must reach _KNEE_RISE_FACTOR x the valley. This
+# is what separates the real knee from a shallow ripple in the sparse tail —
+# see the comment at the search itself.
+_KNEE_PERSIST_SPANS = 3
+_KNEE_RISE_FACTOR = 1.25
 
 
 def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
@@ -9557,23 +9560,32 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
     for k in range(peak + span, len(smooth) - span):
         if smooth[k] > 0.5 * smooth[peak]:
             continue                      # still on the mode's own shoulder
-        # The rise out of the valley must be a REAL rise, not a tie. A strict
-        # `smooth[k] < smooth[k + span]` accepts a flat plateau whenever the
-        # last bit floats one ULP the right way, and on a sparse cloud that is
-        # decided by a single point landing either side of a bin edge: on the
-        # bean fixture smooth[k] and smooth[k+span] are both exactly 133/3 at
-        # k=14, so macOS (which keeps the tie and walks on to the true knee at
-        # 0.051) and Linux (whose cloth settles ~1e-6 differently, breaks the
-        # tie, and stops early at 0.021 — barely above the 0.02 clip floor,
-        # i.e. right back at the seed auto mode exists to beat) disagreed 2.4x
-        # on identical input. Requiring a relative margin makes the choice
-        # depend on the histogram's shape rather than on its last ULP: under
-        # simulated cloth-settle noise the strict form lands in the hand-tuned
-        # band 9 times in 60, this form 60 times in 60. RISE_FRAC=0.10 is an
-        # order of magnitude above the tie noise and 3x below the 0.5 that
-        # starts costing real knees (swept on the bean fixture, the synthetic
-        # gap case, and the no-vegetation case — all stable from 0 to 0.30).
-        if smooth[k] <= smooth[k - span] and smooth[k + span] > smooth[k] * (1.0 + _KNEE_RISE_FRAC):
+        # A knee is a valley the curve CLIMBS OUT OF AND STAYS OUT OF — not any
+        # bin that happens to sit below its neighbours. Testing a single step
+        # (`smooth[k] < smooth[k + span]`) cannot tell the true knee from a
+        # shallow ripple in the sparse tail, because on this fixture the ripple
+        # at 0.021 and the real knee at 0.051 differ only in how far the curve
+        # rises afterwards, and the one-step rise at the ripple is pure noise:
+        # it swings roughly +0.02..+0.10 between cloth settles, so ANY constant
+        # margin gets straddled (0.10 was tried and still failed 2 runs in 8),
+        # and a margin high enough to reject it also rejects the real knee,
+        # whose own rise is only ~+0.29 on a bad settle.
+        #
+        # So require persistence instead: the curve must not dip back below the
+        # valley over the next few spans, and must end materially above it.
+        # That is a property of the histogram's shape rather than of any single
+        # comparison, and it is what makes the estimate reproducible — under
+        # simulated cloth-settle noise the one-step form lands in the
+        # hand-tuned band 33 times in 60 (spread 0.035), this form 60 in 60
+        # (spread 0.007). The bimodality is NOT platform-specific: it
+        # reproduces on macOS at the same rate. CI merely rolled the dice
+        # differently and caught it.
+        if smooth[k] > smooth[k - span]:
+            continue                      # not a local minimum at all
+        fwd = smooth[k + 1:min(k + _KNEE_PERSIST_SPANS * span + 1, len(smooth))]
+        if len(fwd) < 2 * span:
+            continue                      # too close to the end to judge
+        if fwd.min() >= smooth[k] and fwd.max() > smooth[k] * _KNEE_RISE_FACTOR:
             knee = float(centres[k])
             meta["method"] = "knee"
             break

@@ -181,25 +181,31 @@ def test_estimate_class_threshold_finds_the_gap():
 
 @requires_csf
 def test_auto_class_threshold_survives_a_differently_settled_cloth():
-    """The estimate must come from the histogram's shape, not from its last ULP.
+    """The estimate must come from the histogram's SHAPE, not from one bin.
 
-    This is the regression test for a real cross-platform failure: CSF's cloth
-    is bit-deterministic in-process but settles ~1e-6 differently on
-    macOS-arm64 vs Linux-x86_64. On this fixture that was enough to move ONE
-    point of 3698 across a bin edge, breaking an exact tie in the
-    turning-point search (`smooth[k]` and `smooth[k+span]` are both 133/3 at
-    k=14) and collapsing the estimate from 0.051 to 0.021 — barely above the
-    0.02 clip floor, i.e. back to the extent-scaled seed auto mode exists to
-    beat, costing 8 points of ground recall (0.997 -> 0.920). CI caught it;
-    macOS alone never would have.
+    Regression test for a bimodality that made this endpoint's answer depend
+    on floating-point luck. Perturbing the cloud far below the measurement
+    scale re-settles CSF's cloth slightly, and the old single-step knee test
+    then chose between a shallow ripple at ~0.021 and the true knee at ~0.051
+    — collapsing to the ripple in 27 of 60 runs. 0.021 is barely above the
+    0.02 clip floor, i.e. back at the extent-scaled seed auto mode exists to
+    beat, costing 8 points of ground recall (0.997 -> 0.920).
 
-    So perturbing the cloud at a scale far below the measurement must not move
-    the threshold out of the hand-tuned band. Sensitive by construction: with
-    the old strict `<` this lands in-band roughly 1 run in 6."""
+    It surfaced as a macOS-passes/Linux-fails CI failure, but it is NOT
+    platform-specific — it reproduces on macOS at the same rate. The
+    platforms merely rolled the dice differently. Hence the sample count: at
+    a ~45% per-run failure rate, 8 runs on a lucky seed pass while the bug is
+    live (which is exactly what happened), so use enough draws that surviving
+    by luck is not plausible."""
     points, _ = _load_fixture()
-    rng = np.random.default_rng(11)
+    # Seed 5 is chosen deliberately: swept over 40 seeds x 24 settles (960
+    # cloths), persistence is in-band on all of them, while the single-step
+    # rule fails on 22 of the 40 seeds and a fixed 10% rise-margin variant
+    # still fails on this one (3 of 24). A seed that no wrong rule fails would
+    # test nothing.
+    rng = np.random.default_rng(5)
     seen = []
-    for _ in range(8):
+    for _ in range(24):
         # Displacement ~0.3 mm: three orders of magnitude below the ~5 cm
         # threshold being estimated, and well under the fixture's own noise.
         jittered = points + rng.normal(0.0, 3e-4, size=points.shape)
@@ -211,8 +217,9 @@ def test_auto_class_threshold_survives_a_differently_settled_cloth():
         seen.append(meta["class_threshold"])
 
     assert all(0.03 <= t <= 0.08 for t in seen), seen
-    # And it should be genuinely stable, not merely in-band by luck.
-    assert max(seen) - min(seen) < 0.01, seen
+    # And genuinely stable, not merely in-band by luck: the observed spread is
+    # ~0.007, versus ~0.035 when the estimate is flipping between the two modes.
+    assert max(seen) - min(seen) < 0.015, seen
 
 
 def test_estimate_class_threshold_without_vegetation():
