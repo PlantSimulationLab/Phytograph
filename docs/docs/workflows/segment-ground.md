@@ -83,9 +83,11 @@ If you ticked **Split**, two extra clouds appear in the scan list —
 skeleton extraction / triangulation on the non-ground cloud alone.
 
 !!! note "Large clouds"
-    Clouds imported from XYZ files stream from disk as an octree. Ground
-    segmentation re-reads the original file at full resolution, so the
-    classification covers every point — not a downsampled subset.
+    Large clouds stream to the viewer as an octree, but the *data* lives in
+    an in-memory session that holds every point at full precision. Ground
+    segmentation runs on that in-RAM array — the source file is never
+    re-read — so the classification covers every point, not a downsampled
+    subset.
 
 ## Why ground points come out as non-ground
 

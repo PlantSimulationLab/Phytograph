@@ -80,6 +80,6 @@ parameters at the current age. See [Morph a plant](../workflows/morph-plant.md).
 | Change the age | Plant panel → Age slider |
 | Change a parameter | Morph popup |
 | Simulate a scan of it | Add a [Scan location](scans.md), then run **Synthetic LiDAR Scan** |
-| Save a parameter preset | Morph popup → Export JSON |
+| Save a parameter preset | Morph popup → **Export parameters** |
 | Load a parameter preset | Morph popup → Import JSON |
 | Export the mesh | Standard mesh export |

@@ -4,15 +4,15 @@
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.las` | ✅ | ✅ | LAS 1.2/1.4. Standard fields only on export (x, y, z, intensity, RGB, classification). |
+| `.las` | ✅ | ✅ | LAS 1.2/1.4. Export fidelity depends on the path: a **general cloud export** writes x/y/z + RGB only (LAS 1.2, point format 0/2 — no intensity, no classification), while a **scan export** writes LAS 1.4 with intensity, RGB, and a float32 ExtraBytes dimension for every scalar (including `is_miss`, `timestamp`, `target_index`, `target_count`). Use the scan path for full-fidelity round-trips. |
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
 | `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-scan (one `.e57` per scan) via the scan export's **Data only** mode, carrying x/y/z, intensity, and colour. |
-| `.ply` | ✅ | ✅ | Preserves all scalar fields. Best for full-fidelity round-trips. Structured/organized PLYs recover sky/miss points (see below). |
-| `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL). |
+| `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** writes only x/y/z + optional RGB. Structured/organized PLYs recover sky/miss points (see below). |
+| `.pcd` | ✅ | — | Point Cloud Data format (PCL). Import only; parsed via Open3D, which drops non-standard scalar fields. |
 | `.xyz` / `.txt` | ✅ | ✅ | Whitespace-separated. First three columns = x, y, z. |
 | `.csv` | ✅ | ✅ | Comma-separated. First non-numeric row treated as header. |
-| `.pts` | ✅ | ✅ | Whitespace-separated, usually with a header line of the point count. |
-| `.asc` | ✅ | ✅ | ASCII point cloud, treated like `.xyz`. |
+| `.pts` | ✅ | — | Whitespace-separated, usually with a header line of the point count. Import only. |
+| `.asc` | ✅ | — | ASCII point cloud, treated like `.xyz`. Import only as a point cloud — `.asc` *is* available as a DEM raster export (see below). |
 | `.obj` | — | ✅ | Vertices only, no faces. |
 
 ### ASCII format details
@@ -212,30 +212,39 @@ point clouds) does not carry arbitrary per-vertex scalar fields.
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.json` | ✅ | ✅ | Full graph: nodes, edges, branch orders, attributes. |
-| `.obj` | ✅ | ✅ | Line segments only (lines, not faces). |
+| `.json` | ✅ | ✅ | Full graph: nodes, edges, branch orders. The only importable skeleton format. |
+| `.obj` | ❌ | ✅ | Line segments (and cylinders when diameters are present). Export only. |
+| `.ply` | ❌ | ✅ | Vertices plus an `edge` element (`vertex1`/`vertex2`). Export only. |
 
 ### Skeleton JSON shape
 
 ```json
 {
   "nodes": [
-    {"id": 0, "x": 0.0, "y": 0.0, "z": 0.0, "branch_order": 1},
+    {"x": 0.0, "y": 0.0, "z": 0.0, "branchOrder": 1},
     ...
   ],
   "edges": [
-    {"source": 0, "target": 1, "length": 0.15},
+    [0, 1],
     ...
   ],
   "metadata": {
-    "method": "LAPLACE",
-    "tolerance": 0.02
+    "totalLength": 12.84,
+    "nodeCount": 512,
+    "edgeCount": 511,
+    "maxBranchOrder": 6
   }
 }
 ```
 
-Use `.json` for downstream analysis in Python/R. Use `.obj` for
-visualization in Blender or MeshLab.
+Note the exact shape, since the importer validates it: nodes have **no `id`**
+(their array index *is* the id) and use camelCase **`branchOrder`**; edges are
+flat **`[from, to]` index pairs**, not objects. `metadata` is informational —
+node diameters are not written to JSON (use `.obj` if you need them).
+
+Use `.json` for downstream analysis in Python/R, and to round-trip a skeleton
+back into Phytograph. Use `.obj` or `.ply` for visualization in Blender or
+MeshLab.
 
 ## Scan position files
 

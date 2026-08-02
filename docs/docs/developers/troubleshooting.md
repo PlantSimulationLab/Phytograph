@@ -30,8 +30,10 @@ cd backend-api && rm -rf venv && python3 -m venv venv && \
 
 **In dev:**
 
-- Confirm `resources/phytograph_backend/` exists (if not, run `npm run build:backend` once).
-- Or, if iterating Python, confirm uvicorn is running on port 8008.
+- If `backend-api/venv` exists, `npm run dev` runs uvicorn itself — check the
+  `[dev]` lines in the terminal for a uvicorn startup failure.
+- Without a venv, the supervisor falls back to the bundled sidecar, so confirm
+  `resources/phytograph_backend/` exists (if not, run `npm run build:backend`).
 
 **In packaged build:** open macOS Console.app or Windows Event Viewer and
 search for `[Backend stderr]:` lines from the supervisor.
@@ -47,9 +49,11 @@ Common causes:
   xattr -dr com.apple.quarantine /Applications/Phytograph.app
   ```
 - First-launch cold start (~30s with onedir, longer on slower disks)
-- A previous backend on port 8008 from a stale process:
+- An orphaned backend from a previous session (it won't block the new
+  instance, which picks its own port, but it does consume memory):
   ```bash
-  kill $(lsof -ti :8008)
+  pkill -f phytograph_backend      # packaged bundle
+  pkill -f 'uvicorn main:app'      # dev
   ```
 
 ## "Cannot remove quarantine" on macOS
@@ -60,10 +64,12 @@ approval), or use a signed+notarized CI build where this never comes up.
 
 ## Renderer can't reach the backend
 
-The renderer is hard-coded to `http://127.0.0.1:8008` via `getBackendUrl()`
-in `src/renderer/utils/backendApi.ts`. There is no dev/prod auto-switching —
-if you want to point at a different host or port (e.g. uvicorn on 8007),
-edit that function.
+The renderer does **not** hardcode the port. `initBackendUrl()` in
+`src/renderer/utils/backendApi.ts` fetches the real port from the main process
+over the `backend.getInfo` IPC before the first render, and `getBackendUrl()`
+returns that cached value. If requests are going to the wrong place, the
+resolution step is what to inspect — don't edit `getBackendUrl()`. To pin a
+specific port for both ends, set `PHYTOGRAPH_BACKEND_PORT`.
 
 ## Plant generation / Helios features fail in dev only
 
@@ -82,14 +88,18 @@ The backend also auto-rebuilds `libhelios` on startup when the C++ source is
 newer than the compiled lib, so a stale lib usually fixes itself on the next
 backend restart. A clean rebuild: `node scripts/build-pyhelios.mjs --clean`.
 
-## Stale backend on port 8008
+## Stale backend processes
 
-The single most common dev-time failure mode. The supervisor refuses to
-spawn over an existing process unless `/version` matches. If the existing
-process is unresponsive or mismatched:
+Since ports are resolved per instance, a leftover backend no longer blocks the
+next launch — it lands on a different free port. (The supervisor only kills a
+process on *its own* resolved port, and only when `/version` mismatches, so a
+running dev backend is never killed by a test run or a second instance.)
+
+To clean up orphans:
 
 ```bash
-kill $(lsof -ti :8008)
+pkill -f phytograph_backend      # packaged bundle
+pkill -f 'uvicorn main:app'      # dev
 ```
 
-Then re-run `npm run dev`.
+To see what holds a specific port: `lsof -ti :<port>`.

@@ -26,7 +26,7 @@ Three processes, three boundaries:
 
 - **Renderer** (React, no Node) talks to the backend over HTTP and to the OS via a narrow IPC bridge.
 - **Main** (Electron) supervises the Python sidecar and exposes a handful of OS surfaces (dialogs, fs, persistent store).
-- **Backend** (FastAPI, bundled by PyInstaller) does all heavy compute on `127.0.0.1:8008`.
+- **Backend** (FastAPI, bundled by PyInstaller) does all heavy compute on `127.0.0.1:<backend-port>`, a port chosen dynamically per app instance.
 
 The supervisor enforces a three-way version lock between
 `backend-api/main.py` (`BACKEND_VERSION`), `src/shared/constants.ts`

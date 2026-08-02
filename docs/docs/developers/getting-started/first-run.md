@@ -6,16 +6,21 @@ The simple case is one terminal:
 npm run dev
 ```
 
-This builds `main` + `preload` once, starts Vite on port **1427**, and launches
-Electron. Electron's `backend.ts` supervises the bundled PyInstaller backend
-on port **8008** — the same port the renderer always uses
-(`getBackendUrl()` in `src/renderer/utils/backendApi.ts`).
+This builds `main` + `preload` once, then picks a **free port** for both Vite
+and the backend and launches Electron. When `backend-api/venv` exists,
+`scripts/dev.mjs` starts `uvicorn --reload` itself and sets
+`PHYTOGRAPH_DEV_BACKEND=1`, so Electron's supervisor stands down instead of
+spawning the bundled sidecar.
 
-The sidecar bundle at `resources/phytograph_backend/` **must already exist**
-(step 4 of [Installation](installation.md)); if not, the renderer shows
-"Backend failed to start" and only viewer features work. Re-run
-`npm run build:backend` whenever you've changed backend code and want it
-picked up by `npm run dev`.
+The renderer doesn't hardcode the port: `initBackendUrl()` in
+`src/renderer/utils/backendApi.ts` fetches it from the main process over the
+`backend.getInfo` IPC before the first render.
+
+That means the PyInstaller bundle at `resources/phytograph_backend/` is **not
+required** for `npm run dev` — build it (`npm run build:backend`) when you want
+to run the E2E suite or package an installer. If the venv is missing, the
+supervisor falls back to the bundled sidecar; if that's absent too, the
+renderer shows "Backend failed to start" and only viewer features work.
 
 ## What you should see
 
@@ -26,22 +31,11 @@ picked up by `npm run dev`.
 - Importing any point cloud (LAS/LAZ/PLY/PCD/XYZ/TXT/CSV/PTS/ASC) via
   drag-and-drop should display it in the 3D viewer.
 
-## Iterating on Python without rebuilding the sidecar
+## Iterating on Python
 
-For tight Python iteration, run uvicorn directly so edits take effect on
-uvicorn restart (or live with `--reload`). Because the renderer is
-hard-coded to 8008, run uvicorn on 8008 too, and start `npm run dev` only
-after killing any prior sidecar on that port:
-
-```bash
-kill $(lsof -ti :8008) 2>/dev/null
-cd backend-api && source venv/bin/activate
-uvicorn main:app --port 8008 --reload
-```
-
-Then in another terminal: `npm run dev`. The supervisor checks `/version`
-on startup; if it sees a compatible backend already on 8008, it reuses it
-instead of spawning its own.
+Nothing to set up — `npm run dev` already runs uvicorn with `--reload`
+(watching `backend-api/`), so Python edits take effect in place without
+rebuilding the sidecar.
 
 ## HMR scope
 
@@ -49,4 +43,5 @@ instead of spawning its own.
 |---|---|
 | `src/renderer/` | Hot-reload (Vite) |
 | `src/main/` or `src/preload/` | Restart `npm run dev` |
-| `backend-api/` (Python) | Restart uvicorn (or `--reload`), OR `npm run build:backend` |
+| `backend-api/` (Python) | uvicorn `--reload` — automatic |
+| PyHelios/Helios C++ | Rebuilt on backend startup when stale — restart the backend |

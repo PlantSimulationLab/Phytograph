@@ -6,12 +6,15 @@ Three processes, three boundaries:
 
 React + Vite, **no Node access**. Talks to:
 
-- Python over HTTP to `127.0.0.1:8008/api/*`
+- Python over HTTP to `127.0.0.1:<backend-port>/api/*`
 - The OS via `window.electronAPI` (exposed by the preload script)
 
-The renderer is hard-coded to `http://127.0.0.1:8008` via `getBackendUrl()`
-in `src/renderer/utils/backendApi.ts`. There is no dev/prod auto-switching —
-if you want to point at a different host or port, edit that function.
+The port is **dynamic per app instance** — the renderer does not hardcode it.
+`initBackendUrl()` in `src/renderer/utils/backendApi.ts` runs from
+`src/renderer/main.tsx` before the first render: it fetches the real port from
+the main process over the `backend.getInfo` IPC and caches it, so the
+synchronous `getBackendUrl()` callers get the right base URL. To point at a
+different backend, set `PHYTOGRAPH_BACKEND_PORT` rather than editing code.
 
 ## Main (`src/main/`)
 
@@ -27,7 +30,7 @@ Electron lifecycle, written as ESM. Responsibilities:
 
 ## Backend (`backend-api/main.py`)
 
-A **single ~5000-line FastAPI file** containing all endpoints:
+A **single ~23,000-line FastAPI file** containing all endpoints:
 `/api/fit`, `/api/triangulate`, `/api/plant/*`, `/api/c2m/*`,
 `/api/skeleton/extract`, and more.
 
@@ -199,14 +202,29 @@ user saves and drags into a bug report (`copySessionLogTo` in `logger.ts`).
 
 ## Port wiring
 
-Constants live in `src/shared/constants.ts`:
+**Ports are chosen at runtime, not fixed.** The constants in
+`src/shared/constants.ts` are only *fallback defaults* for a bare
+`electron .` or a standalone `backend_wrapper.py` launch:
 
-| Purpose | Port |
+| Constant | Fallback |
 |---|---|
-| Renderer dev server (Vite) | **1427** |
-| Backend (dev and prod) | **8008** |
-| `BACKEND_PORT_DEV` (defined but unused) | 8007 |
+| `RENDERER_DEV_PORT` (Vite dev server) | **1427** |
+| `BACKEND_PORT_PROD` (backend) | **8008** |
 
-The renderer **always** hits 8008 via `getBackendUrl()`. `main.ts` calls
-`startBackend()` in dev too, so the supervised PyInstaller binary on 8008
-is what serves requests by default.
+Whoever owns the instance picks the real port, so concurrent app instances,
+a `npm run dev` session, and parallel E2E runs never collide:
+
+- **`npm run dev`** — `scripts/dev.mjs` calls `findFreePort()` (bind `:0`) for
+  both the backend and Vite, passes the backend port to `uvicorn --port` and to
+  Electron via `PHYTOGRAPH_BACKEND_PORT`, and the renderer port via
+  `PHYTOGRAPH_RENDERER_PORT`. It also sets `PHYTOGRAPH_DEV_BACKEND=1`, which
+  makes the Electron supervisor stand down instead of spawning its own bundle —
+  so in dev, **uvicorn** serves requests, not the PyInstaller sidecar.
+- **Packaged app** — `resolvePort()` in `src/main/backend.ts` picks a free port
+  (or honors `PHYTOGRAPH_BACKEND_PORT` if pinned) and spawns the bundled backend
+  with it.
+- **E2E** — `tests/e2e/helpers/launchApp.ts` picks a free port per launch and
+  pins it via `PHYTOGRAPH_BACKEND_PORT`.
+
+The renderer learns the port over the `backend.getInfo` IPC (see above), which
+returns `getBackendPort()` from the main process.

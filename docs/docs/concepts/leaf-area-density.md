@@ -25,7 +25,7 @@ that pass through each voxel:
    projection of the leaves onto the plane perpendicular to the beam. For
    a random (spherical) leaf-angle distribution `G(θ) ≈ 0.5`; for erect
    (vertical) leaves it is lower. (You can also skip this step and
-   [prescribe `G(θ)` directly](#leaf-angle-distributions-and-gθ) from a known
+   [prescribe `G(θ)` directly](#leaf-angle-distributions-and-g) from a known
    leaf-angle distribution.)
 2. **Trace every beam** through the voxel grid and measure the path
    length `dr` it travels inside each voxel.
@@ -60,7 +60,7 @@ Lemeur). Three common cases:
 Phytograph normally **estimates `G(θ)` per voxel from a triangulation** of the hit
 points (the surface normals give the leaf orientations). But you can also
 **prescribe it directly** — see
-[Override G(θ) directly](../workflows/estimate-leaf-area-density.md#override-gθ-directly).
+[Override G(θ) directly](../workflows/estimate-leaf-area-density.md#override-g-directly).
 Three ways to specify it:
 
 1. **Constant value** — e.g. `G(θ) = 0.42`.

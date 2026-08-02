@@ -302,8 +302,9 @@ Helios XML still takes precedence — its `<scan>` definitions win.) See
 
 ## Export
 
-Select an object in the Scene panel and click the purple **Export** button
-in the toolbar (or **File → Export…**) to open the **Export** window. It is
+Select an object in the Scene panel and choose **File → Export…**
+(<kbd>Shift</kbd>+<kbd>⌘/Ctrl</kbd>+<kbd>E</kbd>), or run *Export* from the
+command palette, to open the **Export** window. It is
 context-sensitive: a point cloud shows the format chooser + column picker, a
 mesh or skeleton shows its formats, and any scans in the scene show the scan
 export section. You pick the destination in a native file dialog after setting

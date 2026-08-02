@@ -13,8 +13,7 @@ Get the latest installer from the
 | macOS (Apple Silicon, M1/M2/M3/M4) | `Phytograph-arm64.dmg` |
 | macOS (Intel) | `Phytograph-x64.dmg` |
 | Windows 10/11 | `Phytograph-Setup.exe` |
-| Linux (most distros) | `Phytograph.AppImage` |
-| Linux (Debian/Ubuntu) | `Phytograph-amd64.deb` |
+| Linux (x64) | `Phytograph-x86_64.AppImage` |
 
 ## Install on macOS
 
@@ -44,19 +43,12 @@ it opens with a normal double-click — no security warning.
 
 ## Install on Linux
 
-Two formats are provided. The **AppImage** runs on most distributions
+Phytograph ships as an **AppImage**, which runs on most distributions
 without installing anything:
 
 ```bash
-chmod +x Phytograph.AppImage
-./Phytograph.AppImage
-```
-
-On **Debian/Ubuntu** you can install the `.deb` instead, which adds a
-desktop launcher and menu entry:
-
-```bash
-sudo apt install ./Phytograph-amd64.deb
+chmod +x Phytograph-x86_64.AppImage
+./Phytograph-x86_64.AppImage
 ```
 
 As with macOS, the first launch takes about 30 seconds while the bundled
@@ -67,7 +59,7 @@ Python environment unpacks itself.
     ship it; on a minimal install run `sudo apt install libfuse2`
     (Debian/Ubuntu) or your distribution's equivalent. Alternatively,
     extract and run without FUSE:
-    `./Phytograph.AppImage --appimage-extract-and-run`.
+    `./Phytograph-x86_64.AppImage --appimage-extract-and-run`.
 
 ## What gets installed
 

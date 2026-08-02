@@ -93,7 +93,7 @@ the "shrink-wrap" artifacts that come from cloud-only methods. See
 | Translate / rotate / scale | Click the **⤢** (double-arrow) button on the mesh's row in the Meshes panel to open its Transform panel |
 | Scan it into a point cloud | [Synthetic LiDAR scan](../workflows/simulate-scan.md) |
 | Align two meshes (ICP) | [Register & compare: M2M](../workflows/register-compare.md#mesh-to-mesh-icp) |
-| Compare a cloud to a mesh | [Register & compare: C2M](../workflows/register-compare.md#cloud-to-mesh) |
+| Compare a cloud to a mesh | [Register & compare: C2M](../workflows/register-compare.md#cloud-to-mesh-distance) |
 | Export | [Import & export](../workflows/import-export.md#export) |
 
 ## Display options

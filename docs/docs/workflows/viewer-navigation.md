@@ -101,10 +101,12 @@ down that world axis, preserving your current target and zoom.
 
 In the right-side properties panel, toggle:
 
-- **Grid** — a 1m × 1m grid on the world XY plane. Helpful for sanity-
-  checking units and scale.
+- **Grid** — a reference grid on the ground plane. Its cell size adapts as you
+  zoom, stepping through round values (…10 cm, 20 cm, 50 cm, 1 m, 2 m, 5 m…)
+  with a heavier line every fifth cell, so it stays readable at any scale.
 - **Axes** — the bottom-left orientation gizmo. On by default; turn it off
   to clear the corner.
+- **Scan markers** — the scanner position markers in the 3D view.
 
 The **orientation gizmo** in the bottom-left corner (red = X, green = Y,
 blue = Z) always tracks the current camera orientation; click its axis
@@ -112,23 +114,30 @@ heads to snap the view as described above.
 
 ## Isolate one object
 
-Hide everything except one cloud or mesh by clicking its eye icon to
-make it visible and clicking everything else's eye icon to hide them.
-Or:
+Each row in the **Scans**, **Meshes**, and **Skeletons** panels has an **eye**
+icon that toggles just that entry.
 
-1. Right-click the entry you want to focus on.
-2. Choose **Solo** (hides all others).
-3. **Unsolo** restores the previous visibility state.
+To isolate one object quickly, use the list header's bulk controls:
+
+1. Click the header's **eye** button with nothing selected — if anything is
+   visible it hides them all.
+2. Click the one entry's own eye icon to bring it back.
+
+The header eye also respects a selection: with rows selected it acts on just
+those ("hide the 3 selected scans") instead of the whole list.
 
 ## Change color modes
 
-Right-click any cloud entry, or use its inline **Color By** dropdown:
+Use the **Color by** dropdown in the Display panel. It is **global** — it
+applies to every cloud at once, not per scan:
 
-- **Height** (Z) — default; good for scans with vertical structure
-- **X / Y** — useful for horizontal stripes
+- **Per-scan color** — default; each cloud in its own swatch color
+- **Z Axis (Height)** — good for scans with vertical structure
+- **X Axis / Y Axis** — useful for horizontal stripes (not offered for
+  octree-streamed clouds)
 - **Intensity** — for LiDAR scans that carry intensity
 - **RGB** — original per-point color from the file
-- **Single Color** — flat color (the cloud's identifier color)
+- **Solid Color** — one flat color for everything
 - **Scalar Field** — any custom scalar present in the file
 
 See **[Color modes](../reference/color-modes.md)** for when each is most
@@ -182,8 +191,8 @@ The right panel has:
 
 - **Point size slider** — small for large clouds, larger for sparse
   ones.
-- **Colormap selector** — viridis (default), plasma, magma, inferno,
-  turbo, grayscale. Applies when coloring by any scalar (height,
+- **Colormap selector** — viridis (default), plasma, inferno, magma, turbo,
+  jet, coolwarm, grayscale. Applies when coloring by any scalar (height,
   intensity, scalar field).
 
 ## Command palette

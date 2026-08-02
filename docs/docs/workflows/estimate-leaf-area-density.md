@@ -76,7 +76,7 @@ surface.
           the original workflow; the triangulation choice below applies.
         - **Supply G(θ) directly** — prescribe the leaf-angle distribution / *G(θ)*
           yourself and skip triangulation entirely. See
-          [Override G(θ) directly](#override-gθ-directly) below. Moving-platform
+          [Override G(θ) directly](#override-g-directly) below. Moving-platform
           scans always use this path (they can't be triangulated).
     - **Triangulation.** *(Derive-from-triangulation only.)* If you've already triangulated over a voxel grid —
       either a [Helios triangulation](triangulate.md), or a **per-scan Ball
@@ -211,7 +211,7 @@ Instead of deriving *G(θ)* from a triangulated surface, you can prescribe the
 leaf-angle distribution / *G(θ)* yourself. Choose **Supply G(θ) directly** under
 **G(θ) source**, then pick:
 
-- **Spatial mode:**
+- **Vary with height?**
     - **Constant** — one *G(θ)* applied to every voxel.
     - **Vertical profile** — *G(θ)* varies with height. You pick the method once,
       then enter its value for each z-level of the grid (level 1 = lowest band).
@@ -229,7 +229,7 @@ leaf-angle distribution / *G(θ)* yourself. Choose **Supply G(θ) directly** und
       μ = toward-horizontal; mean inclination fraction ν/(ν+μ)), the same
       convention used by [Adjust leaf angles](adjust-leaf-angles.md). *G(θ)* is
       derived as for de Wit. See
-      [Leaf-angle distributions and G(θ)](../concepts/leaf-area-density.md#leaf-angle-distributions-and-gθ)
+      [Leaf-angle distributions and G(θ)](../concepts/leaf-area-density.md#leaf-angle-distributions-and-g)
       for the math.
 
 This path skips triangulation, so the **Lmax / aspect** fields are hidden. When you
@@ -243,7 +243,7 @@ LAD is computed with a **beam-based** inversion: every return is traced
 from its own per-beam origin (the platform pose when that pulse fired),
 joined to the trajectory by the return's timestamp. This path does **not**
 triangulate the scan — a moving sweep has no fixed angular grid to mesh —
-so it always uses the **[Supply G(θ) directly](#override-gθ-directly)** path
+so it always uses the **[Supply G(θ) directly](#override-g-directly)** path
 (the G(θ) source is forced to *supplied*). The simplest choice is a constant
 mean *G(θ)* of 0.5 (spherical / randomly-oriented leaves; set it to match the
 canopy if known), but the de Wit and Beta methods — and the vertical profile —

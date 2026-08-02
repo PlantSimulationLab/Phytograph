@@ -36,9 +36,9 @@ attributes) and the **snap-view** gizmo. Below those are two always-visible bloc
 | Block | Buttons |
 |---|---|
 | **Create** (build the scene) | Generate Plant, Import Model, Create Voxel Grid, Create Plane, Add Scan |
-| **Tools** › Pre-processing | Transform, Crop, Erase, Filter, Resample, Move to Origin, Align (ICP), Stitch |
+| **Tools** › Pre-processing | Transform, Crop, Erase, Filter, Resample, Move to Origin, Backfill Misses, Align (ICP), Stitch |
 | **Tools** › Segmentation | Segment Ground, Segment Wood / Leaf, Segment Trees |
-| **Tools** › Reconstruction | Triangulate, Extract Skeleton, Build QSM, Leaf Area Density |
+| **Tools** › Reconstruction | Triangulate, Generate DEM, Extract Skeleton, Build QSM, Leaf Area Density, Fit Crown & Metrics |
 
 **Create** is kept separate from **Tools** on purpose: Create *builds* a
 scene (generating geometry, placing scanners), whereas Tools *operate on
@@ -95,8 +95,10 @@ Zooming is independent of the origin: the scroll wheel flies the camera
 toward whatever is under your mouse cursor, so anything you can see, you can
 zoom to. See [Viewer navigation](../workflows/viewer-navigation.md#camera).
 
-The 1m × 1m grid on the world XY plane gives you a fixed sense of
-scale; lighter lines every 10 cm let you eyeball details.
+A reference grid on the world XY plane gives you a sense of scale. It
+adapts as you zoom: the cell size steps through round values (…10 cm,
+20 cm, 50 cm, 1 m, 2 m, 5 m…) so cells stay legible instead of packing
+together, with a heavier line every fifth cell.
 
 Labels dropped by the **Pick Point** tool also live here: each one is a small
 bubble tethered by a dashed leader line to the point it describes, and it
@@ -172,6 +174,11 @@ indicators (Left/Right/Scroll meanings depending on tool), and the
 last operation's status message (e.g., *"Loaded 84,795 points from
 scan.xyz"*).
 
+## Opening the documentation
+
+Open **Help → Phytograph Documentation** to open this documentation site
+in your web browser.
+
 ## About / version info
 
 Open **Phytograph → About Phytograph** (macOS) or **Help → About
@@ -217,7 +224,8 @@ close.
 ## Undo / redo
 
 <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> undoes the last edit;
-<kbd>⌘/Ctrl</kbd>+<kbd>Y</kbd> redoes it. Undo covers the whole scene:
+<kbd>⌘/Ctrl</kbd>+<kbd>Y</kbd> or
+<kbd>⌘/Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> redoes it. Undo covers the whole scene:
 adding objects (import, triangulate, generate plant, extract skeleton, build
 QSM, compute LAD), deleting them, transforms (move/rotate/scale), pre-bake
 erase/crop edits, stitching, and renaming/recoloring. Deleting several selected

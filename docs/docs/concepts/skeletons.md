@@ -17,16 +17,17 @@ When you extract a skeleton, Phytograph reports:
 - **Branch orders** — Strahler number per branch, colored from trunk
   (low order) to twig (high order)
 
-## Extraction methods
+## Extraction method
 
-| Method | Approach | Best for |
-|---|---|---|
-| **LAPLACE** | Contracts the cloud toward its medial axis | Dense clouds with full coverage |
-| **TEASAR** | Shortest-path on a voxelized cloud | Sparser scans, partial coverage |
+Phytograph uses a single **BFS graph** method: it builds a neighbourhood graph
+over the cloud, roots it at the trunk base, and traces branches outward to
+recover the centerline and its topology.
 
-Both expose a **branch simplification tolerance** slider that controls
-how aggressively colinear edges get merged. Higher tolerance = fewer
-nodes, smoother branches, less detail.
+The main controls are a **Search Radius** (left at `0` it auto-picks one from
+the cloud's density) and **Min Points/Block**, which sets how much support a
+branch needs before it's kept — raise it to suppress spurs, lower it to keep
+thin tips. An optional Laplace smoothing pass cleans up the result. See
+[Extract a skeleton](../workflows/extract-skeleton.md) for the full panel.
 
 See [Extract a skeleton](../workflows/extract-skeleton.md) for the full
 walkthrough.

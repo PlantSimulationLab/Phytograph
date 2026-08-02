@@ -10,7 +10,7 @@ The simplest case: you have several point clouds of the same plant
 in world coordinates, and you want a single combined cloud.
 
 1. Open **Stitch Clouds** from the **Pre-processing** toolbar group (merge
-   icon) or **Tools → Pre-processing → Stitch Clouds**.
+   icon) or **Tools → Pre-processing → Stitch Clouds…**.
 2. In the dialog, check the two or more clouds to merge. (If you had clouds
    selected in the scene, they're pre-checked — you can change the choice
    here.)
@@ -80,7 +80,7 @@ Align one cloud to another by iteratively minimizing point-to-point
 distance.
 
 1. Open **Align Clouds (ICP)** from the **Pre-processing** toolbar group
-   (globe icon) or **Tools → Registration → Align Clouds (ICP)**.
+   (globe icon) or **Tools → Registration → Align Clouds (ICP)…**.
 2. In the dialog, pick the **target** (stays fixed) and the **source**
    (moves onto the target). Either can be any cloud — a large streamed cloud
    can be the source too; its transform is applied on the backend and its
@@ -90,11 +90,18 @@ distance.
 ICP runs and reports:
 
 - **RMSE** — root-mean-square distance after alignment
-- **Min / Max distance** — worst-case error
+- **Overlap %** — the fitness score, i.e. the share of source points that
+  found a correspondence
 - A transformation matrix applied to the source cloud
 
-The source cloud is updated in place with the transformation. Undo to
-revert.
+!!! warning "ICP is not undoable"
+    The source cloud is updated in place and its backend session rewritten,
+    so <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> will **not** revert an alignment (it
+    pops whatever edit preceded it). Duplicate the scan first if you want to
+    keep the pre-alignment version.
+
+Read the **RMSE against the cloud's own extent**, not the overlap figure —
+fitness can read near-100% on a badly wrong alignment.
 
 Unlike stitching, ICP **preserves** the source's scan parameters: the
 scanner **origin** (and, for a moving-platform scan, the whole trajectory)
@@ -106,16 +113,18 @@ therefore keep working on a registered source scan.
 
 Same idea as cloud-to-cloud but on surfaces.
 
-1. Run **Align Mesh to Mesh (ICP)** from **Tools → Registration** or the
+1. Run **Align Mesh to Mesh (ICP)…** from **Tools → Registration** or the
    command palette (<kbd>⌘/Ctrl</kbd>+<kbd>K</kbd>).
 2. In the dialog, pick the **target** (stays fixed) and the **source** (moves
    onto the target). If you had meshes selected in the scene, they're
    pre-picked — you can change the choice here.
 3. Click **Align**. The source mesh is transformed to best fit the target;
-   the toast reports the fit. Undo to revert.
+   the toast reports the fit. As with the other ICP tools, this is **not
+   undoable**.
 
-Mesh-to-mesh is typically more accurate than cloud-to-cloud because surface
-normals provide an extra constraint.
+Mesh-to-mesh is typically more accurate than cloud-to-cloud because points
+are sampled uniformly off both surfaces, giving a denser and more even
+correspondence set than raw scan points.
 
 ## Cloud-to-mesh distance
 
@@ -123,7 +132,7 @@ Measure how well a mesh fits a point cloud — e.g., comparing a real scan
 against a procedural model or any cloud-versus-mesh ground truth — without
 moving anything.
 
-1. Run **Cloud-to-Mesh Distance** from **Tools → Registration** or the command
+1. Run **Cloud-to-Mesh Distance…** from **Tools → Registration** or the command
    palette.
 2. In the dialog, pick the **point cloud** and the **mesh**. (Pre-picked from
    the scene selection when available.)
@@ -133,22 +142,24 @@ The **Alignment** panel opens with point-to-mesh distance statistics:
 
 - **Mean / Median / RMSE** and **standard deviation**
 - **Min / Max** distance and the **90th / 95th / 99th percentiles**
-- **Coverage** — the share of cloud points lying within 1 mm, 5 mm, and 10 mm
-  of the mesh surface
+- **Coverage** — the share of cloud points within three distance bands. The
+  panel labels these *< 1mm*, *< 5mm*, and *< 10mm*, but they are **relative**,
+  not absolute: the thresholds are 0.1%, 0.5%, and 1% of the cloud's
+  bounding-box diagonal. On a 10 m cloud, "< 1mm" means within 10 mm
 - The **point count** the statistics were computed from
 
 ## Cloud-to-mesh ICP (snap to fit)
 
 To actually *move* a mesh onto a cloud:
 
-1. Run **Align Mesh to Cloud (ICP)** from **Tools → Registration** or the
+1. Run **Align Mesh to Cloud (ICP)…** from **Tools → Registration** or the
    command palette.
 2. In the dialog, pick the **point cloud** (stays fixed) and the **mesh**
    (moves onto it). Click **Snap to Fit (ICP)**.
 
 The mesh is transformed to best fit the cloud, and the toast reports the
 **RMSE** (the average residual distance after alignment) alongside the overlap
-percentage. Undo to revert.
+percentage. Like the other ICP tools, this is **not undoable**.
 
 !!! warning "Read the RMSE, not the overlap percentage"
     Overlap (ICP's "fitness") is the *share of points that found a match* — it
@@ -178,8 +189,12 @@ wrong:
 
 1. **Pre-align manually** with [Transform](clean-point-cloud.md#transform-translate-and-rotate)
    — translate and rotate to within ~10 cm and a few degrees before running ICP.
-2. **Reduce voxel size** for finer-grained matching.
-3. **Increase max iterations** if convergence is plausible but slow.
+2. **Crop away non-overlapping regions** so the correspondence search isn't
+   dominated by geometry the other input doesn't contain.
+
+The ICP dialogs are deliberately minimal — pick a source, pick a target, run.
+There are no voxel-size or iteration-count settings to tune, so improving a
+bad result means improving the inputs.
 
 For very different inputs (e.g., a sparse cloud and a dense mesh),
 expect higher RMSE than for similar-density inputs.

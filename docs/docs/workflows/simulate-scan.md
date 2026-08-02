@@ -179,8 +179,9 @@ You need geometry in the scene to scan: typically a generated
         Models full-waveform / multi-echo instruments (RIEGL VZ-400i,
         miniVUX). Produces realistic returns from leaves.
 
-    Both types also expose **beam exit diameter** (mm) and **beam divergence**
-    (mrad) — the cone the sub-rays sample.
+    Both types also expose **Beam exit diameter (m)** — note the unit is
+    **metres**, default `0.01` (i.e. 1 cm) — and **beam divergence**
+    (mrad). Together they define the cone the sub-rays sample.
 
     !!! note "Behavior change since v0.34"
 

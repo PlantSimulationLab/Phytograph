@@ -4,12 +4,12 @@ Step-by-step recipes for the common tasks. Each workflow is
 self-contained — start at the top, follow along, end with a result.
 
 Every operation is reachable from the always-visible toolbar (left of the
-viewer) and from the menu bar. The **menu bar** has three menus: **Create**
+viewer) and from the menu bar. Tools are spread across three menus: **Create**
 (build the scene — geometry and scanner placement), **Simulate** (synthesize
 scans), and **Tools** (analysis operations on existing data — pre-processing,
-segmentation, reconstruction). The **left toolbar** shows two of these as
-blocks — **Create** and **Tools**; the Simulate action (Run Synthetic Scan)
-lives in the Simulate menu and on the Scans panel. These workflows are grouped
+segmentation, reconstruction & analysis, registration). The **left toolbar**
+shows two of these as blocks — **Create** and **Tools**; the Simulate action
+(Run Synthetic Scan) lives in the Simulate menu and on the Scans panel. These workflows are grouped
 by the four stages of a typical processing pipeline.
 
 ## Getting around
@@ -20,6 +20,8 @@ by the four stages of a typical processing pipeline.
 
 - :material-rotate-3d-variant: **[Viewer navigation](viewer-navigation.md)** — moving the camera, switching color modes, isolating an object.
 
+- :material-export: **[Export from RiPROCESS](export-from-riprocess.md)** — get RIEGL scans out with the fields Phytograph needs.
+
 </div>
 
 ## 1. Pre-processing
@@ -27,6 +29,8 @@ by the four stages of a typical processing pipeline.
 <div class="grid cards" markdown>
 
 - :material-broom: **[Clean a point cloud](clean-point-cloud.md)** — translate, crop, erase, filter, resample. Get a scan ready for analysis.
+
+- :material-weather-fog: **[Backfill misses](backfill-misses.md)** — recover the sky/miss rays that LAD needs from a scan that dropped them.
 
 - :material-compare: **[Register & compare](register-compare.md)** — align clouds with ICP and stitch overlapping scans into one.
 
@@ -50,7 +54,11 @@ by the four stages of a typical processing pipeline.
 
 - :material-vector-triangle: **[Triangulate a mesh](triangulate.md)** — Delaunay, Ball Pivot, Poisson, and Helios multi-scan triangulation.
 
-- :material-graph: **[Extract a skeleton](extract-skeleton.md)** — pull branch topology out of a woody scan or mesh.
+- :material-tree: **[Fit a crown & metrics](fit-crown.md)** — wrap the canopy in a fitted shape and read off height, volume, and width.
+
+- :material-terrain: **[Generate a DEM](generate-dem.md)** — build a bare-earth DTM, a top-of-canopy DSM, or a canopy height model.
+
+- :material-graph: **[Extract a skeleton](extract-skeleton.md)** — pull branch topology out of a woody scan.
 
 - :phytograph-qsm: **[Build a QSM](build-qsm.md)** — reconstruct a dormant tree as connected cylinders with radii, continuous shoots, and shoot rank.
 

@@ -51,23 +51,34 @@ the prior bundle in place.
 
 `src/main/backend.ts` is the supervisor. On Electron startup it:
 
-1. Checks port 8008 for an existing backend by hitting `/version`.
-2. If a compatible backend is already running, it reuses it.
-3. Otherwise, it spawns the bundled binary from `resources/phytograph_backend/phytograph_backend` and waits for it to come up.
-4. If the existing process returns a **mismatched** version, the supervisor kills the port and respawns its own bundled binary.
+0. Resolves its port (`resolvePort()`): `PHYTOGRAPH_BACKEND_PORT` if pinned,
+   otherwise a freshly chosen free port. `BACKEND_PORT_PROD` (8008) is only the
+   standalone-launch default baked into `backend_wrapper.py`.
+1. If `PHYTOGRAPH_DEV_BACKEND=1` (set by `scripts/dev.mjs` when it has spawned
+   `uvicorn --reload`), it **stands down** immediately — killing the port would
+   defeat hot-reload.
+2. Otherwise it probes that port for an existing backend by hitting `/version`.
+3. If a **compatible** backend is already there, it reuses it.
+4. If one answers with a **mismatched** version, it's killed and the bundled
+   binary respawned.
+5. If nothing answers, it spawns `resources/phytograph_backend/phytograph_backend`
+   fresh and waits for it to come up.
 
-This means **dev sessions can iterate on Python by running uvicorn
-manually on 8008** — the supervisor will defer to it as long as the
-version matches `EXPECTED_BACKEND_VERSION`. See
+Because each instance picks its own port, a second app instance or a test run
+never disturbs a developer's running dev backend — and the supervisor never
+pre-emptively kills a port it couldn't version-probe. See
 [Version Lock](version-lock.md) for the contract details.
 
 ## How it's addressed
 
-| Environment | Renderer hits | Supervisor spawns |
-|---|---|---|
-| Dev (`npm run dev`) | `http://127.0.0.1:8008` | `resources/phytograph_backend/phytograph_backend` |
-| Dev (manual uvicorn) | `http://127.0.0.1:8008` | Reuses your uvicorn |
-| Packaged build | `http://127.0.0.1:8008` | Bundled binary alongside the app |
+The renderer resolves the port over the `backend.getInfo` IPC, so every row
+below is `http://127.0.0.1:<resolved-port>`:
+
+| Environment | Who serves it |
+|---|---|
+| Dev (`npm run dev`, venv present) | `uvicorn --reload`, spawned by `scripts/dev.mjs`; supervisor stands down |
+| Dev (no venv) | Supervisor spawns `resources/phytograph_backend/phytograph_backend` |
+| Packaged build | Bundled binary alongside the app |
 
 ## Wire format: JSON vs binary frames
 

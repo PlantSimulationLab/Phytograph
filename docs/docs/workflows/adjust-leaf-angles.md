@@ -65,6 +65,10 @@ as many times as you like.
   QSM and that its cells contain leaf triangles — empty cells leave their leaves
   alone. A coarser grid (fewer, larger cells) gives each cell more measured
   leaves to fit.
+- **Only some leaves moved?** A cell holding more than **4,000** leaves is
+  capped: a deterministic (seed-derived) subset is adjusted and the rest are
+  left as placed, so a single very coarse cell on a large tree can leave most
+  leaves untouched. Use a finer grid so no one cell exceeds the cap.
 - **The match looks noisy:** with only a few leaves per cell the fitted Beta /
   ellipsoidal parameters are uncertain. Use a grid sized so each cell holds a
   representative sample of leaf surface.

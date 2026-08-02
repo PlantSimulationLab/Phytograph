@@ -98,7 +98,8 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
 - If one tree is split into several, raise **2D reg. strength** or **Merge** the
   pieces afterward.
 - Segmentation runs in the background, so the rest of the app stays responsive
-  while it works; closing the panel cancels the run.
+  while it works. Use the panel's **Cancel** button to stop a run — closing the
+  panel does *not* cancel it.
 
 ## See also
 

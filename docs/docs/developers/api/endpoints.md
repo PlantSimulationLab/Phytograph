@@ -1,56 +1,71 @@
 # HTTP Endpoints
 
 All endpoints listed below are served by `backend-api/main.py` on
-`http://127.0.0.1:8008`. The table is grouped by feature area; the
-**source** column points at the line in `main.py` where the route handler
-is defined.
+`http://127.0.0.1:<backend-port>` — the port is chosen dynamically per app
+instance (see [Processes & IPC](../architecture/processes.md#port-wiring)).
+The tables are grouped by feature area. To find a handler, grep `^@app\.` in
+`main.py`.
 
 ## Health & metadata
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| GET | `/` | `main.py:49` | Root ping |
-| GET | `/health` | `main.py:54` | Liveness probe |
-| GET | `/version` | `main.py:60` | Returns `BACKEND_VERSION` (used by the supervisor) |
+| GET | `/` | `main.py` | Root ping |
+| GET | `/health` | `main.py` | Liveness probe |
+| GET | `/version` | `main.py` | Returns `BACKEND_VERSION` (used by the supervisor) |
 | GET | `/api/device-info` | `main.py` | Reports whether synthetic-scan ray tracing runs on **GPU** or **CPU**. Shipped Windows/Linux builds always contain the CUDA path (the release CI fails otherwise) and macOS never does, so the path is decided by a runtime probe for a usable NVIDIA GPU (`gpu_present`/`gpu_count`/`gpu_name`/`driver_version`, via `pyhelios.runtime.get_gpu_runtime_info` — mainly `nvidia-smi`). `effective_path` is `"gpu"` when a GPU is present on a non-macOS host, else `"cpu"` (Helios falls back to CPU/OpenMP; cudart is statically linked so a GPU build still runs driverless). `reason` is a human-readable explanation. The renderer surfaces this as the GPU/CPU pill in the Synthetic Scan Options dialog |
 
 ## Curve / surface fitting
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/fit` | `main.py:98` | Fit a built-in model to data |
-| GET | `/api/models` | `main.py:156` | List available fitting models |
-| POST | `/api/fit/custom` | `main.py:346` | Fit a user-supplied model expression |
-| POST | `/api/fit/prospect` | `main.py:1219` | PROSPECT leaf optical model |
+| POST | `/api/fit` | `main.py` | Fit a built-in model to data |
+| GET | `/api/models` | `main.py` | List available fitting models |
+| POST | `/api/fit/custom` | `main.py` | Fit a user-supplied model expression |
+| POST | `/api/fit/prospect` | `main.py` | PROSPECT leaf optical model |
+| POST | `/api/fit/crown` | `main.py` | Fit crown shapes + derive per-tree metrics. Streams PHP1 progress ahead of a JSON tail (one entry per fitted crown); cancelable via the run-id token |
 
 ## LaTeX & export
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/latex` | `main.py:714` | Render expressions to LaTeX |
-| GET | `/api/latex` | `main.py:730` | Retrieve a previously rendered expression |
-| POST | `/api/export` | `main.py:771` | Export fit results |
+| POST | `/api/latex` | `main.py` | Render expressions to LaTeX |
+| GET | `/api/latex` | `main.py` | Retrieve a previously rendered expression |
+| POST | `/api/export` | `main.py` | Export fit results |
 
 ## Meshing & sampling
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/triangulate` | `main.py:1291` | Triangulate a point cloud |
-| POST | `/api/triangulate/helios` | `main.py:2334` | Helios-style triangulation. Each `scans[]` entry carries its own acquisition geometry (`origin`, `n_theta`/`n_phi`, `theta_min`/`max`, `phi_min`/`max`); an optional `grid` (center/size + `nx`/`ny`/`nz`) comes from a voxel box. With no `grid` the backend auto-fits a single cell over all points and sets `grid_warning` on the response. Each scan is triangulated independently, so the response includes `triangle_scan_ids` — the source scan index per triangle — for coloring by scan |
+| POST | `/api/triangulate` | `main.py` | Triangulate a point cloud |
+| POST | `/api/triangulate/helios` | `main.py` | Helios-style triangulation. Each `scans[]` entry carries its own acquisition geometry (`origin`, `n_theta`/`n_phi`, `theta_min`/`max`, `phi_min`/`max`); an optional `grid` (center/size + `nx`/`ny`/`nz`) comes from a voxel box. With no `grid` the backend auto-fits a single cell over all points and sets `grid_warning` on the response. Each scan is triangulated independently, so the response includes `triangle_scan_ids` — the source scan index per triangle — for coloring by scan |
 | POST | `/api/lidar/scan` | `main.py` | True ray-traced synthetic LiDAR scan via the PyHelios `lidar` plugin. `meshes[]` carry world-space `vertices`/`triangles` (+ optional per-vertex `colors`); `scanners[]` carry each scanner's renderer `id` plus its `ScanParameters` (`origin`, `n_theta`/`n_phi`, `theta_min_deg`/`max`, `phi_min_deg`/`max`, `return_mode` (`single`/`multi`), `max_returns` (multi), `return_selection` (`strongest`/`first`/`last`, single), `exit_diameter_m`, `beam_divergence_mrad`). A legacy `return_type` (`single`/`multi`) is still accepted and mapped to `return_mode`. Optional `extra_fields[]` names custom primitive-data labels to sample onto hits (column-format driven). All meshes load into one Helios `Context`; scanners are added in order so the Helios scanID equals the request index, and each scan's stored `ReturnMode`/`maxReturns`/selection is set via the per-scan setters. `syntheticScan` ray-traces once (one global `rays_per_pulse`: every scan fires that many sub-rays across its beam cone, and `rays_per_pulse=1` collapses the cone to one exact ray per pulse — the idealized scan) and hits are partitioned back per scanner via `getHitScanID`. Optional `synthetic_scan_memory_budget_mb` caps the transient ray-tracing scratch buffers (via `LiDARCloud.setSyntheticScanMemoryBudget`) so a large fan-out is chunked instead of traced in one OOM-prone batch; omitted/`null`/≤0 leaves Helios's automatic path-dependent default (4 GiB CPU / 8 GiB GPU) in place, and chunking is result-invariant. Returns `results[]` — one per scanner (`scanner_id`, `points`, `colors`, and `scalars{}`: intensity/distance/timestamp/target_index/target_count read via `getHitData`) — occlusion-aware, unlike random surface sampling |
 | POST | `/api/mesh/import` | `main.py` | Parse a textured `.obj` (+ sibling `.mtl` + images) from a disk `path` into geometry, V-flipped per-vertex UVs, per-material triangle groups, and base64-encoded textures — the same response shape the textured renderer consumes for plant models |
+| POST | `/api/triangulate/check-spacing` | `main.py` | Opt-in diagnostic cross-checking the auto-estimated `Lmax` against actual in-grid point spacing (the renderer offers it when the Otsu indicators aren't both High). Builds a KD-tree over up to tens of millions of points, so it streams keepalive whitespace to survive WebKit's ~60s stall timeout, then yields the JSON verdict. Reuses `HeliosTriangulationRequest` |
+
+## Scanning support & job control
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| POST | `/api/scan/export-xml` | `main.py` | Export scans to a Helios XML + per-scan ASCII bundle, returned as base64 files |
+| POST | `/api/trajectory/parse` | `main.py` | Parse a **binary** trajectory (SBET `.sbet`/`.out`) into the canonical PoseStream wire dict. Server-side because it needs `pyproj` for the geographic→UTM projection. Text trajectories (`.csv`/`.txt`/`.tsv`/`.traj`) are parsed in the renderer and never reach this endpoint |
+| POST | `/api/cancel/{id}` | `main.py` | Cancel an in-flight streaming op (synthetic scan / triangulation / LAD / DEM / crown fit). Streaming endpoints emit their `run_id` as the first PHP1 marker; POSTing it here stops the work and frees the C++/numpy memory without waiting for the computation to finish. Idempotent — an unknown or already-finished id returns `cancelled: false` rather than an error |
 
 ## Skeleton extraction
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/skeleton/extract` | `main.py:3101` | Extract a topological skeleton |
+| POST | `/api/skeleton/extract` | `main.py` | Extract a topological skeleton |
 
 ## QSM (Quantitative Structure Model)
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
 | POST | `/api/qsm/build` | `main.py` | Reconstruct a dormant tree as connected cylinders with radii + topology, segment continuous shoots, and classify them by **shoot rank** (trunk=0, scaffolds=1, …) |
+| POST | `/api/qsm/phyllotaxis` | `main.py` | Auto-detect the phyllotactic angle from the QSM's branching geometry (child-shoot azimuths around each parent). Returns a canonical angle + pattern + leaves-per-node + confidence; pre-fills the Add Leaves modal |
+| POST | `/api/qsm/leaves` | `main.py` | Place leaves on the QSM's terminal shoots and return a textured mesh |
+| GET | `/api/qsm/leaf-textures` | `main.py` | List the curated built-in leaf textures available for QSM leaf placement |
+| POST | `/api/qsm/adjust-leaf-angles` | `main.py` | Rotate placed leaves so each voxel cell's leaf-angle distribution matches a target measured from a leaf-on triangulation, via per-cell optimal assignment. Takes either a `triangulation` or precomputed `cell_targets` |
 
 Takes inline `points` or a `source` descriptor (octree-backed clouds). The full
 pipeline lives in the `qsm/` package and is a thin call from the endpoint:
@@ -87,21 +102,41 @@ TreeIso is vendored (MIT) under `backend-api/vendor/treeiso/`; its graph-cut
 backend `cut_pursuit_py` is bundled via `collectAll` in
 `scripts/build-backend.mjs`. No GPU or PyTorch required.
 
+## Wood / leaf segmentation
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| POST | `/api/segment/wood` | `main.py` | Classify points into wood (1) / leaf (2) from local geometry. Aggregates multiple `sources` at full resolution (concatenated in order so labels slice back per source) and accepts optional per-point reflectance. Returns per-point `labels` aligned to input order. Session clouds use `/api/cloud/session/{id}/segment_wood` instead |
+
+## DEM (digital elevation model)
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| POST | `/api/dem` | `main.py` | Generate a DEM from a flat cloud (inline `points` / `source`). Returns a **PHB1** binary frame (heightmap mesh + regular grid); cancelable |
+| POST | `/api/dem/export-raster` | `main.py` | Write a DEM grid to ESRI ASCII (`.asc`) or GeoTIFF (`.tif`), returned base64. The renderer round-trips the grid it got from `/api/dem`, with voids encoded as `nodata` (JSON can't carry NaN) and the origin shifted back to true-world coordinates. GeoTIFF uses `tifffile` (pure-Python — no GDAL) |
+
+## Leaf area density
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| POST | `/api/lad/compute` | `main.py` | Per-voxel leaf area density via PyHelios. Accepts either a JSON `LADComputeRequest` (fresh-triangulation path) or a **PHB1** binary frame carrying the request fields plus the mesh as raw buffers — the binary path lets a 1M+ triangle mesh ride back compactly to be injected via `setExternalTriangulation` instead of re-triangulated. Streams PHP1 progress ahead of the JSON result. **Requires misses** (see the admonition below) |
+| POST | `/api/lad/snap-grid` | `main.py` | Sample a DEM under each voxel column so the grid can be displaced to follow the ground. Returns the authoritative per-column offsets (`column_offsets`) the UI renders and feeds to the inversion, plus `kept_columns` / `dropped_columns` |
+
 ## Plant models & sessions
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| GET | `/api/plant/models` | `main.py:3482` | List available plant models |
-| POST | `/api/plant/session/create` | `main.py:3588` | Start a new plant simulation session |
-| POST | `/api/plant/session/{session_id}/advance` | `main.py:3693` | Advance a session in time |
-| GET | `/api/plant/session/{session_id}` | `main.py:3754` | Get session status |
-| DELETE | `/api/plant/session/{session_id}` | `main.py:3787` | Destroy a session |
-| GET | `/api/plant/sessions` | `main.py:3815` | List active sessions |
-| POST | `/api/plant/morph/parse` | `main.py:4043` | Parse a morph expression |
-| POST | `/api/plant/morph` | `main.py:4074` | Apply a morph to a plant |
-| POST | `/api/plant/generate` | `main.py:4235` | Generate a plant from parameters |
-| POST | `/api/plant/canopy/generate` | `main.py:5035` | Generate a grid of plants as one merged mesh |
-| POST | `/api/plant/generate/stream` | `main.py:5205` | Generate a plant or canopy with SSE progress |
+| GET | `/api/plant/models` | `main.py` | List available plant models |
+| POST | `/api/plant/session/create` | `main.py` | Start a new plant simulation session |
+| POST | `/api/plant/session/{session_id}/advance` | `main.py` | Advance a session in time |
+| GET | `/api/plant/session/{session_id}` | `main.py` | Get session status |
+| DELETE | `/api/plant/session/{session_id}` | `main.py` | Destroy a session |
+| GET | `/api/plant/sessions` | `main.py` | List active sessions |
+| POST | `/api/plant/morph/parse` | `main.py` | Parse a morph expression |
+| POST | `/api/plant/morph` | `main.py` | Apply a morph to a plant |
+| POST | `/api/plant/generate` | `main.py` | Generate a plant from parameters |
+| POST | `/api/plant/canopy/generate` | `main.py` | Generate a grid of plants as one merged mesh |
+| POST | `/api/plant/generate/stream` | `main.py` | Generate a plant or canopy with SSE progress |
 
 ### `POST /api/plant/generate/stream`
 
@@ -160,7 +195,7 @@ structure as a representative sample.
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/pointcloud/import` | `main.py:4650` | Import a LAS/LAZ file (multipart upload) |
+| POST | `/api/pointcloud/import` | `main.py` | Import a LAS/LAZ file (multipart upload) |
 | POST | `/api/pointcloud/preview` | `main.py` | Cheaply inspect a file for the import wizard: reads only the header + first ~20 rows (ASCII) or header + a few points (PLY/PCD/LAS) and returns the detected delimiter, per-column auto-detected role, a `type_hint` (integer/float/categorical/empty) used to pre-tick the categorical box, sample rows, and `remappable` (true for ASCII, false for in-file-layout formats). Never 500s on a parse problem — returns a 200 with a `warning` so the wizard can still offer auto-detect |
 | POST | `/api/pointcloud/import_by_path` | `main.py` | Parse a point cloud from a path on disk (dispatches `.xyz`/`.txt`/`.csv`/`.pts`/`.asc` to pandas, `.ply`/`.pcd` to open3d). Returns a packed binary stream so multi-GB scans aren't bottlenecked by JSON encoding. Accepts an optional `column_plan` (the import wizard's explicit per-column roles + custom scalar slug/label + `rgb_is_255` scale) that overrides auto-detection; absent → identical to the previous behaviour |
 | POST | `/api/pointcloud/export` | `main.py` | Export a point cloud to LAS/LAZ — or, for octree-backed clouds (via a `source` descriptor), to any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ. The backend streams from the source file and applies any pending translation |
@@ -202,6 +237,9 @@ sessions from the array. All of it is file-read-free after import.
 | POST | `/api/cloud/session/merge` | `main.py` | Concatenate the surviving points of **≥2 sessions** (body `{session_ids}`) into one NEW session and build its octree. Reconciles differing global shifts (re-expresses every input into a common `world_shift`) and **unions** scalar extra-dim columns (zero-filling inputs that lack a column). Builds a projected-miss octree when any input carried misses. Returns `{merged: {session_id, point_count, world_shift, cache_id, has_misses, miss_octree_cache_id, …octree}}`. Powers **Stitch Clouds** — the merge runs here, not in the renderer, because octree clouds hold their points in the session (the renderer's flat `positions` is empty) |
 | POST | `/api/cloud/session/{id}/segment_ground` | `main.py` | Run CSF on the array, append a `ground_class` column, rebuild from arrays |
 | POST | `/api/cloud/session/{id}/segment_trees` | `main.py` | Run TreeIso on the array, append a `tree_instance` column, rebuild from arrays |
+| POST | `/api/cloud/session/{id}/segment_wood` | `main.py` | Wood/leaf segmentation on the in-RAM survivors → append `wood_class` → rebuild the octree. No file read. The compute runs in a **killable subprocess** so Cancel can SIGKILL it; the column write + rebuild happen in the parent afterwards, so a cancel mid-compute leaves the session pristine |
+| POST | `/api/cloud/session/{id}/dem` | `main.py` | DEM from the session's in-RAM survivors (ground-aware). Returns a PHB1 frame (heightmap mesh + grid). With `add_height_column`, also appends a `height_above_ground` scalar and rebuilds the octree |
+| POST | `/api/cloud/session/{id}/transform` | `main.py` | Bake a rigid 4×4 (row-major, world-frame) transform into the session geometry and rebuild the octree. The session stores points with `world_shift` subtracted, so the matrix is conjugated by the shift. A permanent, **non-undoable** geometry change — this is what commits a Translate |
 | POST | `/api/cloud/session/{id}/backfill-misses` | `main.py` | Recover sky/miss points and persist them in a lightweight per-session buffer (`CloudSession.backfilled_misses`). Builds an ephemeral PyHelios cloud from the surviving points, runs `gapfillMisses()` (auto-selects the row/column or timestamp path; `row_index`/`column_index` are relabelled to the bare `row`/`column` keys the C++ dispatcher probes), and slices the synthesised misses via the bulk getters. Hit arrays are untouched. Rebuilds the projected-miss octree and returns its `miss_octree_cache_id`. Session-resolve + eligibility run up front (404 / 400-when-no-timestamp-or-grid); the heavy build/gapfill/extract **streams PHP1 progress markers** ahead of the JSON tail (`_do_backfill_misses` + `_bin_frame_streaming_response`) so the renderer shows a per-stage progress bar. Short-circuits (plain JSON) when the scan already has misses; a Helios reconstruction failure (too-sparse grid) returns an `error` field in the JSON tail rather than a 500 |
 | DELETE | `/api/cloud/session/{id}` | `main.py` | Free the session's in-RAM arrays (called when a cloud is removed from the scene) |
 
@@ -220,10 +258,10 @@ sessions from the array. All of it is file-read-free after import.
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/c2m/distance` | `main.py:4772` | Cloud-to-mesh distance |
-| POST | `/api/c2m/icp-register` | `main.py:4937` | Cloud-to-mesh ICP |
-| POST | `/api/c2c/icp-register` | `main.py:5064` | Cloud-to-cloud ICP |
-| POST | `/api/m2m/icp-register` | `main.py:5193` | Mesh-to-mesh ICP |
+| POST | `/api/c2m/distance` | `main.py` | Cloud-to-mesh distance |
+| POST | `/api/c2m/icp-register` | `main.py` | Cloud-to-mesh ICP |
+| POST | `/api/c2c/icp-register` | `main.py` | Cloud-to-cloud ICP |
+| POST | `/api/m2m/icp-register` | `main.py` | Mesh-to-mesh ICP |
 
 !!! note "Reading points from disk — the `source` descriptor (M4)"
     Octree-backed clouds keep no point positions in the renderer (the geometry
@@ -254,7 +292,7 @@ sessions from the array. All of it is file-read-free after import.
     passes the known `ascii_format` so column mapping isn't guessed.
 
 !!! tip "Live API docs"
-    FastAPI's interactive docs are exposed at
-    [http://127.0.0.1:8008/docs](http://127.0.0.1:8008/docs) while the
-    backend is running, with request/response schemas auto-generated from
-    the Pydantic models in `main.py`.
+    FastAPI's interactive docs are exposed at `/docs` on the backend's port
+    while it's running, with request/response schemas auto-generated from
+    the Pydantic models in `main.py`. In a dev session the port is printed in
+    the `[dev]` startup lines.

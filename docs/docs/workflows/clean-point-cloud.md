@@ -384,11 +384,17 @@ Use **Resample Point Cloud** (scatter icon) when a cloud is too large
 to work with interactively or
 when you want a uniformly sparser version for export.
 
-1. Click **Resample**.
-2. The fraction slider goes from 0.1 (keep 10%) to 1.0 (keep all).
-3. Quick presets: **10%**, **25%**, **50%**, **75%**.
-4. Live preview shows the resampled cloud before you commit.
-5. Click **Apply** to replace, or **Cancel** to keep the original.
+1. Click **Resample Point Cloud**.
+2. Type a **Keep fraction** between `0.001` and `1.0` (it's a number field, not
+   a slider).
+3. Quick presets: **100%**, **50%**, **25%**, **10%**, **5%**, **1%**.
+4. Click **Preview** to see the resampled cloud. The preview isn't live —
+   changing the fraction clears it, so press **Refresh Preview** to update.
+   **Cancel Preview** discards it.
+5. Click **Permanently Resample Point Cloud** to commit.
+
+Both buttons are disabled at a fraction of `1.0`, since keeping everything is a
+no-op.
 
 Resampling is uniform-random, not voxel-based. For voxel downsampling,
 export to `.ply` and use a tool like CloudCompare.
