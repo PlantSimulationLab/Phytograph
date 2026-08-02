@@ -1,6 +1,6 @@
 import { BrowserWindow, Menu, MenuItemConstructorOptions, app, shell } from 'electron';
 import { IPC, type MenuCommandPayload, type SnapViewDirection } from '../shared/ipc.js';
-import { REPO_URL } from '../shared/constants.js';
+import { DOCS_URL, REPO_URL } from '../shared/constants.js';
 import { TOOLS_MENU, CREATE_MENU, SIMULATE_MENU, type ToolMenuItem } from '../shared/toolMenu.js';
 import { checkForUpdatesManually } from './updater.js';
 
@@ -222,6 +222,13 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
     {
       label: 'Help',
       submenu: [
+        {
+          label: 'Phytograph Documentation',
+          click: () => {
+            void shell.openExternal(DOCS_URL);
+          },
+        },
+        { type: 'separator' },
         {
           label: 'Report a Bug…',
           click: () => send({ kind: 'feedback', mode: 'bug' }),

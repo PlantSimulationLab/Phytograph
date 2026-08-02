@@ -17,6 +17,10 @@ export const RENDERER_DEV_PORT = 1427;
 // pre-filled new-issue URL used by the in-app feedback dialog.
 export const REPO_URL = 'https://github.com/PlantSimulationLab/phytograph';
 
+// Published MkDocs site (docs/ → GitHub Pages via .github/workflows/docs.yml).
+// Base for the "Phytograph Documentation" Help-menu link.
+export const DOCS_URL = 'https://plantsimulationlab.github.io/Phytograph/';
+
 // Destination for the "Continue without a GitHub account" feedback path.
 export const FEEDBACK_EMAIL = 'baileylabshared@gmail.com';
 
