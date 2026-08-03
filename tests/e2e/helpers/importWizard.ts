@@ -25,6 +25,18 @@ export async function completeImportWizard(page: Page, opts: { timeout?: number 
   // Import enables once all previews have loaded and x/y/z are assigned (true
   // for any auto-detected fixture). Poll until enabled, then click.
   await expect(importBtn).toBeEnabled({ timeout });
+  // Let the layout settle before clicking. `toBeEnabled` is satisfied the
+  // moment the disabled attribute clears, but Playwright's click additionally
+  // waits for a STABLE bounding box — and the wizard is still reflowing as the
+  // preview's column table and shift block mount around the button. On CI that
+  // race timed out the click (30s) with the button plainly resolved and
+  // enabled, which reads as a broken button rather than a moving one. Seen on
+  // tiny.las while .ply/.pcd/.laz passed in 7-9s through this same helper, so
+  // it is timing, not a format-specific path. Two rAFs is enough for the
+  // mount-driven reflow to finish.
+  await page.evaluate(
+    () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+  );
   await importBtn.click();
   await expect(wizard).toBeHidden({ timeout });
 }
