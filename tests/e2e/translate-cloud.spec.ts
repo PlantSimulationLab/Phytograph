@@ -761,6 +761,31 @@ test.describe('translate cloud', () => {
   // center, not on it.
   const RING_PX = 12;
 
+  // Click the marker the way a HAND does: move onto it, let the pointer settle,
+  // then press and release without travelling.
+  //
+  // `page.mouse.click()` teleports the pointer from wherever it last was (here,
+  // a panel button hundreds of px away) and fires down/up with no intervening
+  // move. r3f then reports that jump as the event's `delta`, and the marker's
+  // own handler drops any click with `delta > 4` — the guard that stops the tail
+  // of a camera orbit from selecting whatever it lands on. So a teleported click
+  // is discarded even though the raycast hit the marker (the cursor does turn to
+  // 'pointer'), and the test fails while the feature works.
+  //
+  // Whether the teleport is coalesced into a move first is timing-dependent,
+  // which is why this passed on macOS and failed on CI's headless Linux for
+  // MONTHS of green runs before it started failing — nothing about the marker
+  // changed. Real users always generate the moves; only a synthetic click skips
+  // them.
+  async function clickMarkerAt(x: number, y: number) {
+    const { page } = session;
+    await page.mouse.move(x, y);
+    // A second move at rest zeroes the accumulated travel r3f reports as delta.
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.up();
+  }
+
   // The origin now always exists — with no user placement it sits at the scene
   // center, and its marker is up from the moment content loads. Guards against a
   // regression to "invisible until you set one", and against the default drifting
@@ -843,7 +868,7 @@ test.describe('translate cloud', () => {
     await openSceneOriginPanel({ armed: false });
     await expect(panel).toHaveAttribute('data-marker-visible', 'true');
     const loaded = await worldToScreen(await readOriginFields());
-    await page.mouse.click(loaded.x + RING_PX, loaded.y);
+    await clickMarkerAt(loaded.x + RING_PX, loaded.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
 
     await page.getByTestId('scene-origin-close').click();
@@ -934,14 +959,14 @@ test.describe('translate cloud', () => {
 
     // Visible: clicking the ring selects the origin (raises its gizmo).
     const p = await worldToScreen(origin);
-    await page.mouse.click(p.x + RING_PX, p.y);
+    await clickMarkerAt(p.x + RING_PX, p.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
 
     // Hiding the marker drops the selection AND the hit target...
     await page.getByTestId('scene-origin-show-marker').uncheck();
     await expect(panel).toHaveAttribute('data-marker-visible', 'false');
     await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
-    await page.mouse.click(p.x + RING_PX, p.y);
+    await clickMarkerAt(p.x + RING_PX, p.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
 
     // ...while the origin itself is untouched.
@@ -968,7 +993,7 @@ test.describe('translate cloud', () => {
 
     // Select the marker by clicking its ring band.
     const center = await worldToScreen(before);
-    await page.mouse.click(center.x + RING_PX, center.y);
+    await clickMarkerAt(center.x + RING_PX, center.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
 
     // Pick whichever axis projects longest on screen — the camera's default
