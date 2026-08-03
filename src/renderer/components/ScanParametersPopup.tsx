@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, Radio, FileUp, Pencil } from 'lucide-react';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import {
@@ -117,8 +117,20 @@ export function ScanParametersPopup({
 
   // Reset form (and clear any stale import error) whenever the popup is
   // reopened so editing the same scan twice doesn't carry over stale state.
+  //
+  // Keyed on the OPEN TRANSITION only, never on `initial`/`defaults`. The
+  // parent builds `initial` from an inline IIFE, so it is a fresh object on
+  // every viewer render; depending on it re-ran this effect *while the popup
+  // was open* and reseeded the form from the saved scan, silently discarding
+  // whatever the user had changed. Observed directly: a scanner model picked
+  // by hand read back correctly for ~750ms and then reverted to 'generic' on
+  // its own, with the dialog still open and no user action — so the edit was
+  // lost before submit, and an exported Helios XML carried no <scannerModel>.
+  // Whether a re-render lands inside the edit window is timing-dependent,
+  // which is why this reproduced on headless Linux but not on macOS.
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && !wasOpen.current) {
       const seeded = seedParams();
       setLabel(seedLabel());
       setParams(seeded);
@@ -127,8 +139,9 @@ export function ScanParametersPopup({
       setSubmitError(null);
       setRayInputMode('points');
     }
+    wasOpen.current = isOpen;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, initial, defaults]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
