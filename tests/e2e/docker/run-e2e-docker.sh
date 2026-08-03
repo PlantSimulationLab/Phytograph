@@ -21,6 +21,30 @@
 #
 # First run compiles Helios + the backend bundle and takes a while (tens of
 # minutes under x86_64 emulation on Apple silicon). Later runs reuse the volumes.
+#
+# SCOPE — use this for TARGETED specs, not the whole suite.
+#
+# Under x86_64 emulation on Apple silicon this runs several times slower than
+# CI's native runner, and the compute-heavy specs then blow their timeouts even
+# with the machine to itself (measured at load average ~50 on 12 cores, 415%
+# container CPU). Three that fail here and pass on real CI:
+#
+#     spec                          macOS    real CI    this container
+#     crop-polygon.spec.ts:193      4.0s ✓   11.5s ✓    41.6s ✘
+#     generate-dem.spec.ts:138      5.4s ✓   22.3s ✓    1.5m  ✘
+#     helios-triangulate-sphere:20  30.5s ✓  45.4s ✓    53.2s ✘
+#
+# So a failure here is only evidence of a real bug once you have checked how the
+# same spec behaves on CI — otherwise you are measuring the emulator. What this
+# environment IS good for is reproducing a known CI-only failure and iterating on
+# it in ~5 minutes instead of a 45-minute CI round trip; it reproduced eight of
+# them exactly. Do NOT use it as a green/red gate for the full suite: run
+# `npm run test:e2e` on the host for that, and let CI cover Linux.
+#
+# Also: do not run this at the same time as a host `npm run test:e2e`. Two
+# 2-worker suites (four Electron apps + four backends) starve each other, and
+# the resulting failures look like real ones — several came back in 55-182ms,
+# far too fast to have run.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
