@@ -417,6 +417,18 @@ test.describe('point picker', () => {
     // The label must also be anchored where the point is DRAWN, not at the
     // file coordinate: its leader-line dot has to land on the clicked pixel.
     // (Projecting `world` instead of `local` puts it millions of units away.)
+    //
+    // Wait for the anchor to be POSITIONED, not merely present. The dot is
+    // rendered with no cx/cy and `display: none`; a useFrame pass projects the
+    // anchor and writes them. The label element therefore exists — and every
+    // coordinate assertion above already passes — one or more frames before the
+    // dot has a position. Reading straight through gives `cx: null` → NaN.
+    // On macOS a frame has always landed by now; headless Linux renders slower
+    // and it has not, which is why this failed only on CI.
+    await expect.poll(async () => session.page.evaluate(() => {
+      const c = document.querySelector('[data-testid="picked-point-leaders"] circle');
+      return c?.getAttribute('cx') ?? null;
+    }), { timeout: 10_000, intervals: [50, 100, 250] }).not.toBeNull();
     const dot = await session.page.evaluate(() => {
       const c = document.querySelector('[data-testid="picked-point-leaders"] circle') as SVGCircleElement;
       return { cx: parseFloat(c.getAttribute('cx') ?? 'NaN'), cy: parseFloat(c.getAttribute('cy') ?? 'NaN') };
