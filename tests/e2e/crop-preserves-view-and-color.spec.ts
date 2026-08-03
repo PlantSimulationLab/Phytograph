@@ -103,9 +103,26 @@ test('applying a Segment crop leaves the camera exactly where it was', async () 
   await page.waitForTimeout(500);
 
   const after = await readCamera(page);
-  // Exact equality: nothing in an apply should nudge the camera at all.
-  expect(after.position).toEqual(before.position);
-  expect(after.target).toEqual(before.target);
+  // The regression this guards is a crop RE-FRAMING the view — a visible jump
+  // of order the scene size. Compare to a sub-micrometre tolerance rather than
+  // with toEqual: OrbitControls recomputes the camera from its spherical state
+  // every frame, so the doubles come back differing in the last bit or two
+  // (observed 1.7999999999999967 vs 1.7999999999999958, ~1e-15) without the
+  // camera having moved at all. Bit-exact equality is a property no float
+  // pipeline promises; on macOS the recompute happened to land on identical
+  // doubles, on headless Linux it did not. 1e-9 m is far below anything a
+  // re-frame could produce and far above float noise.
+  const EPS = 1e-9;
+  expect(after.position).toHaveLength(before.position.length);
+  for (let i = 0; i < before.position.length; i++) {
+    expect(Math.abs(after.position[i] - before.position[i])).toBeLessThan(EPS);
+  }
+  expect(after.target === null).toBe(before.target === null);
+  if (before.target && after.target) {
+    for (let i = 0; i < before.target.length; i++) {
+      expect(Math.abs(after.target[i] - before.target[i])).toBeLessThan(EPS);
+    }
+  }
 });
 
 test('a Segment cloud inherits its source scan colour', async () => {
