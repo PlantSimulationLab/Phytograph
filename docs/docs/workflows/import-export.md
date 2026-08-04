@@ -214,7 +214,21 @@ clouds, use [Stitch](register-compare.md#stitch) after import.
 
 While a large import is in progress a modal shows the file currently being
 read and overall progress, so you know the app is working — reading a
-multi-GB scan from disk can take 30 seconds or more.
+multi-GB scan from disk can take 30 seconds or more. The bar tracks the
+stage the import has reached (reading the source file, loading points into
+memory, building the octree), so it keeps moving even on a single file.
+
+**Cancel** stops the import. This genuinely halts the work — the app tells
+the backend to abandon the run and frees the memory it had allocated,
+rather than just hiding the dialog and letting the import finish out of
+sight. Use it if you picked the wrong file or an import is taking longer
+than you're willing to wait.
+
+When you cancel part-way through a **multi-file** import, the scans that
+already finished are kept (they're complete and correct); a notice tells you
+how many of the selected files made it. Cancelling a Helios scan **XML**
+import is all-or-nothing, matching how that pathway already treats a failed
+scan — nothing from the bundle is added.
 
 Importing a Helios scan **XML** (which can reference several scans at once)
 runs the same wizard, once the referenced point-cloud files are located.

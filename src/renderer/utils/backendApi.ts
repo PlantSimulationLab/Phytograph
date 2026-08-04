@@ -24,6 +24,35 @@ export interface BackendPointSource {
 // ==================== KILLABLE SEGMENTATION HELPER ====================
 
 /**
+ * Advisory workload estimate for a tree segmentation run. TreeIso's cost tracks
+ * the POST-DECIMATION voxel count, not raw point count (it decimates before every
+ * expensive stage), so `nodes` — not `points` — is what makes a run slow.
+ *
+ * Receiving one is a prompt, not a refusal: re-send the request with
+ * `acknowledge_cost: true` to run it anyway. There is no workload the backend
+ * will refuse outright, so a user willing to wait can always proceed (and Cancel
+ * mid-run).
+ */
+export interface TreeCostWarning {
+  nodes: number;           // voxels TreeIso will actually process
+  node_guideline: number;  // the advisory threshold that was exceeded
+  points: number;          // non-ground input points
+  decimate_res1: number;   // resolved stage-1 voxel size, metres
+  message: string;         // ready-to-display copy
+}
+
+/** Thrown when a segmentation endpoint wants explicit confirmation before
+ *  running an expensive job. Carries the estimate so the UI can prompt. */
+export class CostWarningError extends Error {
+  readonly costWarning: TreeCostWarning;
+  constructor(costWarning: TreeCostWarning) {
+    super(costWarning.message);
+    this.name = 'CostWarningError';
+    this.costWarning = costWarning;
+  }
+}
+
+/**
  * POST a JSON request to a (non-streaming) segmentation endpoint, with a 5-minute
  * safety timeout AND optional external cancellation. The external `signal` is the
  * Cancel button: aborting the fetch closes the TCP connection, the backend detects
@@ -52,7 +81,20 @@ async function postSegment<T>(path: string, request: unknown, signal?: AbortSign
     });
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+      const detail = errorData?.detail;
+      // A 409 carrying a structured `cost_warning` is a CONFIRMATION prompt, not
+      // a failure: the workload is above the cost guideline and the backend wants
+      // an explicit "run it anyway". Surface it as a typed error so callers can
+      // prompt and retry with `acknowledge_cost` instead of showing a raw
+      // stringified object to the user.
+      if (response.status === 409 && detail && typeof detail === 'object'
+          && (detail as { cost_warning?: TreeCostWarning }).cost_warning) {
+        throw new CostWarningError((detail as { cost_warning: TreeCostWarning }).cost_warning);
+      }
+      throw new Error(
+        (typeof detail === 'string' ? detail : (detail as { message?: string })?.message)
+        || `HTTP ${response.status}: ${response.statusText}`
+      );
     }
     return await response.json();
   } finally {
@@ -654,6 +696,11 @@ export interface TreeSegmentationRequest {
   source?: BackendPointSource;  // octree-backed clouds read from disk
   seed_points?: number[][];     // [[x, y, z], ...] trunk seeds (HITL)
   ground_class?: number[];      // per-point ground/plant labels (1=ground) to exclude
+  // Confirms an expensive run. When the workload is above the cost guideline the
+  // backend returns a `cost_warning` (inline) / 409 `CostWarningError` (session)
+  // instead of running; re-send with this true to proceed. Not a cap — purely a
+  // "are you sure" step, so any workload can ultimately run.
+  acknowledge_cost?: boolean;
 
   // TreeIso parameters (defaults match the backend / Xi & Hopkinson 2022).
   reg_strength1?: number;
@@ -677,6 +724,9 @@ export interface TreeSegmentationResponse {
   num_trees: number;
   num_points: number;
   ground_warning: boolean;
+  // Set (with success=false and no error) when the run needs confirmation.
+  // Re-send with `acknowledge_cost: true` to proceed.
+  cost_warning?: TreeCostWarning;
   error?: string;
 }
 
@@ -2525,6 +2575,19 @@ function toRequestBody(b: ArrayBuffer | Uint8Array): ArrayBuffer {
 // markers (see _bin_frame_streaming_response in backend-api/main.py).
 export type BinaryFrameProgress = (progress: number | null, message: string) => void;
 
+// Cancellation + progress plumbing for a point-cloud import. Importing a
+// multi-GB scan is a minute-scale operation the user must be able to abort, and
+// the abort has to be REAL: `cancelRun(runId)` tells the backend to stop and
+// free its memory (killing the PotreeConverter child), while `signal` tears down
+// the fetch. See `cancelImport` in App.tsx for the ordering.
+export interface ImportProgressOptions {
+  signal?: AbortSignal;
+  // Per-stage progress streamed as PHP1 markers ("Building octree…", 0.62).
+  onProgress?: BinaryFrameProgress;
+  // Fires once with the backend run id, which is what /api/cancel/{id} targets.
+  onRunId?: (runId: string) => void;
+}
+
 // Thrown when the backend reports a cancelled run (a terminal PHP1 `cancelled`
 // marker) instead of a frame. Callers catch this to treat the cancel as a
 // no-op-success (UI returns to idle) rather than surfacing an error toast.
@@ -3205,32 +3268,45 @@ export async function createCloudSession(
   // leaving them at far-field, matching a fresh synthetic scan. null when the
   // source carries no scanner geometry.
   origin?: [number, number, number] | null,
+  // Abort the import. Pair with `cancelRun(runId)` so the backend stops and
+  // frees its memory rather than finishing the work into the void.
+  signal?: AbortSignal,
+  // Per-stage progress from the endpoint's PHP1 markers.
+  onProgress?: BinaryFrameProgress,
+  // Receives the backend run id (first marker) — the /api/cancel/{id} target.
+  onRunId?: (runId: string) => void,
 ): Promise<CloudSessionMetadata> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/create`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    // The endpoint streams PHP1 progress markers ahead of its JSON tail, so it
+    // needs the streaming reader. That also replaces the old hand-rolled 300 s
+    // timeout: fetchJsonWithProgress refreshes its timeout on every chunk, so a
+    // legitimately slow (but actively streaming) import is no longer aborted
+    // mid-flight the way a >5 min import used to be.
+    const meta = await fetchJsonWithProgress<CloudSessionMetadata & { error?: string }>(
+      '/api/cloud/session/create',
+      {
         source_path: filePath,
         ascii_format: asciiFormat ?? null,
         column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
         world_shift: worldShift ?? null,
         miss_distance_threshold: missDistanceThreshold ?? null,
         origin: origin ?? null,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as CloudSessionMetadata;
+      },
+      signal,
+      600000,
+      onProgress,
+      onRunId,
+    );
+    // Failures raised after the response opened can't be an HTTP error status —
+    // the backend reports them in the JSON tail instead (a truncated body would
+    // otherwise surface as "Unexpected end of JSON input").
+    if (meta.error) throw new Error(meta.error);
+    return meta;
   } catch (error) {
-    clearTimeout(timeoutId);
+    // A cancel is not a failure: rethrow it untouched so callers can identify it
+    // by type. describeBackendError would mangle it into a generic backend
+    // error and every cancel would raise an error toast.
+    if (error instanceof ScanCancelledError) throw error;
     console.error('create_cloud_session failed:', error);
     throw describeBackendError(error, 'Import');
   }
@@ -3604,7 +3680,9 @@ export async function sessionSegmentWood(
  * and rebuild the octree from the arrays (no file read). Pass TreeIso tuning. */
 export async function sessionSegmentTrees(
   sessionId: string,
-  params: { [k: string]: number | number[][] | undefined; seed_points?: number[][] },
+  // `acknowledge_cost` (boolean) confirms an expensive run after the backend
+  // answered 409 with a cost advisory — hence the boolean in the index signature.
+  params: { [k: string]: number | number[][] | boolean | undefined; seed_points?: number[][]; acknowledge_cost?: boolean },
   signal?: AbortSignal,
 ): Promise<CloudSessionBakeResult> {
   return postSegment<CloudSessionBakeResult>(`/api/cloud/session/${sessionId}/segment_trees`, params, signal, 600000);

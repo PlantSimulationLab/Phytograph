@@ -31,7 +31,7 @@ def _install_fake_converter(monkeypatch, barrier=None):
     it writes a `metadata.json` into the staging dir (so the cache looks valid)
     after a small delay, optionally synchronised on a barrier so all in-flight
     builders overlap and actually contend for the staging dir."""
-    def fake(input_las: Path, out_dir: Path) -> None:
+    def fake(input_las: Path, out_dir: Path, cancel_event=None, poll: float = 0.2) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         if barrier is not None:
             # Force every builder to be mid-build simultaneously — without the

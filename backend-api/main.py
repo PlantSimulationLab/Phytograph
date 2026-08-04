@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.59.0"
+BACKEND_VERSION = "0.61.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -3655,14 +3655,33 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
 TREE_INSTANCE_SLUG = "tree_instance"
 TREE_INSTANCE_LABEL = "Tree instance"
 
-# TreeIso is CPU-only and O(n log n)+ with heavy constants; beyond a few million
-# points it crawls. Cap so the endpoints fail fast with an actionable message
-# instead of appearing to hang (the dense TLS benchmark plots are ~30M points).
-# Override via env for power users with patience / a big machine.
+# TreeIso is CPU-only and O(n log n)+ with heavy constants, BUT only the voxel
+# decimation itself runs at full N (a linear np.unique) — every expensive stage
+# (cut-pursuit k-NN graph + graph cut, the O(nGroups²) stage-3 merge) runs over
+# the DECIMATED node count. So raw input size is the wrong thing to gate on: a
+# 13 M-point cloud that decimates to ~1 M nodes is comfortably in TreeIso's
+# intended regime, while a 2.6 M-point ALS tile at the paper's 5 cm voxel
+# decimates to 2.6 M nodes (a 99.2% no-op) and hangs for 15-20 min.
+#
+# The real gate is therefore `_TREEISO_MAX_NODES`, checked against the exact
+# post-decimation node count (see `_count_treeiso_nodes`), AFTER
+# `_auto_treeiso_decimation` has resolved the voxel sizes from measured spacing.
+# `_TREEISO_MAX_POINTS` remains as a much looser backstop on raw input, because
+# the full-N steps that precede decimation (a cKDTree over every point, the
+# voxel np.unique) still cost real time and RAM.
 try:
-    _TREEISO_MAX_POINTS = int(os.environ.get("PHYTOGRAPH_TREEISO_MAX_POINTS", "5000000"))
+    _TREEISO_MAX_POINTS = int(os.environ.get("PHYTOGRAPH_TREEISO_MAX_POINTS", "50000000"))
 except (ValueError, TypeError):
-    _TREEISO_MAX_POINTS = 5_000_000
+    _TREEISO_MAX_POINTS = 50_000_000
+
+# Post-decimation node ceiling. `_auto_treeiso_decimation` already targets
+# ~1 M nodes (TARGET_DECIMATED_NODES); this allows 2× headroom before refusing,
+# so a cloud the auto-scaler handled always passes and only a genuinely
+# pathological one (user-pinned fine voxel on a huge tile) is rejected.
+try:
+    _TREEISO_MAX_NODES = int(os.environ.get("PHYTOGRAPH_TREEISO_MAX_NODES", "2000000"))
+except (ValueError, TypeError):
+    _TREEISO_MAX_NODES = 2_000_000
 
 # BFS skeleton extraction builds an in-RAM neighbour graph and runs BFS/cluster
 # passes over it; beyond a few million points the graph + Python passes get
@@ -3693,6 +3712,13 @@ class TreeSegmentationRequest(BaseModel):
     # TreeIso and returned as tree id 0. Ignored on the session endpoint, which
     # reads the persisted `ground_class` column directly.
     ground_class: Optional[List[float]] = None
+    # Set by the UI's "Segment Anyway" confirmation. When the estimated workload
+    # is above the cost guideline, the endpoint returns a `cost_warning` and does
+    # NOT run; the caller re-sends with this true to proceed. It is purely a
+    # confirmation step — there is no workload TreeIso will refuse outright, so a
+    # user willing to wait can always run (and Cancel mid-run). Non-UI callers
+    # (scripts, the eval harness) can set it up-front to never be interrupted.
+    acknowledge_cost: bool = False
     reg_strength1: float = 1.0
     min_nn1: int = 5
     decimate_res1: float = 0.05
@@ -3715,6 +3741,12 @@ class TreeSegmentationResponse(BaseModel):
     num_trees: int = 0
     num_points: int = 0
     ground_warning: bool = False
+    # Present (with success=False and no error) when the workload is above the
+    # cost guideline and the caller hasn't set `acknowledge_cost`. Carries
+    # `message` plus the raw numbers so the UI can compose its own copy. This is
+    # a confirmation prompt, not a refusal — re-send with `acknowledge_cost` to
+    # run it.
+    cost_warning: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
 
@@ -3744,6 +3776,151 @@ def _treeiso_params(request: "TreeSegmentationRequest"):
     )
 
 
+def _treeiso_spacing_probe(points: np.ndarray) -> Optional[Tuple[float, int]]:
+    """Median nearest-neighbour spacing of `points`, or None for a cloud too
+    small / degenerate to probe.
+
+    Returns `(spacing_m, n_finite)`. Shared by `_auto_treeiso_decimation` (which
+    sizes the voxels from it), so the spacing measurement lives in one place.
+
+    Clouds under 50k points early-out with None: they decimate fine at the paper
+    defaults and finish fast, so neither caller needs a measurement."""
+    from scipy.spatial import cKDTree
+
+    if len(points) < 50_000:
+        return None
+    pts = np.asarray(points, dtype=np.float64)[:, :3]
+    pts = pts[np.isfinite(pts).all(axis=1)]
+    if len(pts) < 50_000:
+        return None
+    # Median NN spacing on a sample (cKDTree k=2: [0] is the point itself,
+    # [1] its nearest neighbor). Sampling keeps the probe O(sample) on big tiles.
+    sample = pts
+    if len(pts) > 200_000:
+        idx = np.random.default_rng(0).choice(len(pts), 200_000, replace=False)
+        sample = pts[idx]
+    dist, _ = cKDTree(pts).query(sample, k=2, workers=-1)
+    nn = dist[:, 1]
+    nn = nn[np.isfinite(nn) & (nn > 0)]
+    if nn.size == 0:
+        return None
+    return float(np.median(nn)), int(len(pts))
+
+
+def _count_treeiso_nodes(points: np.ndarray, p) -> Optional[int]:
+    """Count the stage-1 nodes TreeIso will actually work on — i.e. how many
+    voxels survive `decimate_pcd(pcd, p.decimate_res1)` — or None when the voxel
+    size is unusable (non-finite / non-positive).
+
+    This is the number that drives TreeIso's cost: `_process_point_cloud`
+    decimates FIRST, then runs cut-pursuit and the O(nGroups²) merge over the
+    decimated cloud only. Gating on it rather than on raw input size is what lets
+    a 13 M-point cloud that collapses to ~1 M voxels through, while still
+    catching a fine-voxel-on-a-huge-tile request that would decimate to nothing.
+
+    EXACT, not modelled. A density model (points-per-voxel ~ (res/spacing)³) was
+    tried first and is not safe: it assumes uniform voxel occupancy, but real
+    clouds cluster, so it under-counted canopy-like data ~9× — the dangerous
+    direction for a guard. Measured against the real `decimate_pcd` it ranged
+    from 0.1× to 49× depending on cloud shape and voxel size.
+
+    Counting exactly costs one full-N pass. We fold the three floored int coords
+    into a single int64 key so it's `np.unique` over a 1-D array rather than
+    `axis=0` over an (N,3) — measured ~5 s on 13.5 M points vs ~14 s, which is
+    cheap against the 15-20 min hang this prevents. Falls back to the (N,3)
+    unique if the index space would overflow int64."""
+    res = float(getattr(p, "decimate_res1", 0.0) or 0.0)
+    if not np.isfinite(res) or res <= 0:
+        return None
+    pts = np.asarray(points, dtype=np.float64)[:, :3]
+    pts = pts[np.isfinite(pts).all(axis=1)]
+    if len(pts) == 0:
+        return 0
+    # Match `_process_point_cloud`, which mean-centres before `decimate_pcd` —
+    # the offset shifts where voxel boundaries fall, so skipping it mis-counts by
+    # a few percent.
+    pts = pts - np.mean(pts, axis=0)
+    q = np.floor(pts / res).astype(np.int64)
+    q -= q.min(axis=0)
+    dims = q.max(axis=0) + 1
+    # Only use the packed key when the product fits comfortably in int64.
+    if float(dims[0]) * float(dims[1]) * float(dims[2]) < 9.0e18:
+        key = (q[:, 0] * dims[1] + q[:, 1]) * dims[2] + q[:, 2]
+        return int(len(np.unique(key)))
+    return int(len(np.unique(q, axis=0)))
+
+
+def _treeiso_size_error(points: np.ndarray, param_dict: dict) -> Optional[str]:
+    """Return an actionable error string if TreeIso would be too expensive on
+    `points`, else None. `param_dict` is the request's tuning fields (the same
+    dict handed to the worker); it is NOT mutated.
+
+    Two gates, in cost order:
+
+    1. Raw input vs `_TREEISO_MAX_POINTS` — a loose backstop for the full-N work
+       that happens before decimation (cKDTree probe, voxel np.unique).
+    2. Post-decimation node count vs `_TREEISO_MAX_NODES` — the real gate,
+       evaluated against the SAME auto-scaled voxel size the worker will use, so
+       a cloud the auto-scaler rescues is never rejected for its raw size.
+
+    Resolving the params here duplicates the worker's `_auto_treeiso_decimation`
+    call, but on a copy: the worker re-derives them in-process from the identical
+    inputs (same deterministic seeded probe), so the two agree, and the endpoint
+    keeps sending unresolved params across the process boundary exactly as
+    before."""
+    n = len(points)
+    if n > _TREEISO_MAX_POINTS:
+        return (f"{n:,} points exceeds the {_TREEISO_MAX_POINTS:,}-point limit for "
+                "tree segmentation. Downsample or crop first.")
+    return None
+
+
+def _treeiso_cost_warning(points: np.ndarray, param_dict: dict) -> Optional[dict]:
+    """Return an ADVISORY dict when TreeIso's workload looks expensive, else None.
+
+    This is a warning, NOT a blocker: a user who is willing to wait must always
+    be able to run the tool (they can Cancel mid-run). The endpoints surface this
+    and refuse only until the caller sets `acknowledge_cost`, which the panel
+    sends on a second, explicit "Segment Anyway" click. Nothing here caps what
+    TreeIso can ultimately process.
+
+    `param_dict` is the request's tuning fields; it is NOT mutated.
+
+    The cost signal is the post-decimation node count, not raw input size —
+    TreeIso voxel-decimates before every expensive stage, so a 13 M-point cloud
+    that collapses to ~600 k voxels is unremarkable, while a fine voxel on a big
+    tile leaves millions of nodes and runs for 15-20 min. Returns the numbers as
+    fields so the UI can compose its own copy.
+
+    Resolving the params here duplicates the worker's `_auto_treeiso_decimation`
+    call, but on a copy: the worker re-derives them in-process from the identical
+    inputs (same deterministic seeded probe), so the two agree, and the endpoint
+    keeps sending unresolved params across the process boundary exactly as
+    before."""
+    try:
+        resolved = _treeiso_params_from_dict(dict(param_dict))
+    except Exception:
+        # TreeIso deps missing (no C-extension): let the worker raise the real,
+        # more specific import error rather than masking it with a cost probe.
+        return None
+    _auto_treeiso_decimation(points, resolved)
+    nodes = _count_treeiso_nodes(points, resolved)
+    if nodes is None or nodes <= _TREEISO_MAX_NODES:
+        return None
+    return {
+        "nodes": int(nodes),
+        "node_guideline": int(_TREEISO_MAX_NODES),
+        "points": int(len(points)),
+        "decimate_res1": float(resolved.decimate_res1),
+        "message": (
+            f"This cloud will run tree segmentation on {nodes:,} voxels after "
+            f"decimation, above the {_TREEISO_MAX_NODES:,} guideline "
+            f"({len(points):,} points at a {resolved.decimate_res1:g} m voxel "
+            "size). It may take 15 minutes or more. You can cancel while it runs."
+        ),
+    }
+
+
 def _auto_treeiso_decimation(points: np.ndarray, p) -> None:
     """Raise TreeIso's stage-1/2 voxel sizes in place when they're finer than the
     cloud's actual point spacing — otherwise voxel decimation is a no-op and
@@ -3762,30 +3939,10 @@ def _auto_treeiso_decimation(points: np.ndarray, p) -> None:
     seeded by the UI for a big tile, or chosen by a power user) is left alone, so
     this is idempotent with the frontend seed. Small clouds early-out and keep the
     paper defaults bit-for-bit."""
-    from scipy.spatial import cKDTree
-
-    n = len(points)
-    if n < 50_000:
-        # Small clouds decimate fine and finish fast; never probe, never bump.
+    probe = _treeiso_spacing_probe(points)
+    if probe is None:
         return
-    pts = np.asarray(points, dtype=np.float64)[:, :3]
-    finite = np.isfinite(pts).all(axis=1)
-    pts = pts[finite]
-    if len(pts) < 50_000:
-        return
-    # Median NN spacing on a sample (cKDTree k=2: [0] is the point itself,
-    # [1] its nearest neighbor). Sampling keeps the probe O(sample) on big tiles.
-    sample = pts
-    if len(pts) > 200_000:
-        idx = np.random.default_rng(0).choice(len(pts), 200_000, replace=False)
-        sample = pts[idx]
-    tree = cKDTree(pts)
-    dist, _ = tree.query(sample, k=2, workers=-1)
-    nn = dist[:, 1]
-    nn = nn[np.isfinite(nn) & (nn > 0)]
-    if nn.size == 0:
-        return
-    spacing = float(np.median(nn))
+    spacing, n_finite = probe
 
     # Aim for ~3× spacing so each stage-1 voxel pools a handful of points.
     target1 = 3.0 * spacing
@@ -3794,13 +3951,28 @@ def _auto_treeiso_decimation(points: np.ndarray, p) -> None:
     # bounded (~≤1 M nodes). Voxel count scales ~ (spacing / res)³ at constant
     # density, so res ∝ spacing · (n / target_nodes)^(1/3).
     TARGET_DECIMATED_NODES = 1_000_000
-    if len(pts) > TARGET_DECIMATED_NODES:
-        target1 = max(target1, spacing * (len(pts) / TARGET_DECIMATED_NODES) ** (1.0 / 3.0))
+    if n_finite > TARGET_DECIMATED_NODES:
+        target1 = max(target1, spacing * (n_finite / TARGET_DECIMATED_NODES) ** (1.0 / 3.0))
 
     # Only raise, and only when riding the paper default (gate a hair above 0.05 /
     # 0.1 for float tolerance — a UI-coarsened value is > 0.051 and no-ops here).
     if p.decimate_res1 <= 0.051 and target1 > p.decimate_res1:
         p.decimate_res1 = round(target1, 3)
+
+        # The (spacing/res)³ law above assumes a volume-filling cloud. Canopy is
+        # closer to a set of surfaces, so real voxel occupancy is far lower and
+        # the cube law under-shoots badly: a 13.5 M-point plot landed on
+        # res1 = 0.307 m and still produced 4.3 M voxels, 4× the intended target.
+        # So verify against the EXACT count and keep coarsening until we're
+        # actually under it. Each step is a cheap int64 np.unique; the ×1.26
+        # factor is 2^(1/3), i.e. one halving of node count per step under the
+        # cube law, so this converges in a handful of iterations.
+        for _ in range(12):
+            nodes = _count_treeiso_nodes(points, p)
+            if nodes is None or nodes <= TARGET_DECIMATED_NODES:
+                break
+            p.decimate_res1 = round(p.decimate_res1 * 1.26, 3)
+
     target2 = 2.0 * p.decimate_res1
     if p.decimate_res2 <= 0.101 and target2 > p.decimate_res2:
         p.decimate_res2 = round(target2, 3)
@@ -3922,12 +4094,21 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
                 error=f"Fewer than 10 points remain after dropping {reason} points.",
             )
 
-        if len(pts) > _TREEISO_MAX_POINTS:
+        ti_params_for_cost = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
+        size_error = _treeiso_size_error(pts, ti_params_for_cost)
+        if size_error:
             return TreeSegmentationResponse(
-                success=False, num_points=n_full,
-                error=(f"{len(pts):,} points exceeds the {_TREEISO_MAX_POINTS:,}-point "
-                       "limit for tree segmentation. Downsample or crop first."),
+                success=False, num_points=n_full, error=size_error,
             )
+        # Advisory cost check on the post-decimation node count (what actually
+        # drives TreeIso's runtime). Returns a confirmation prompt rather than an
+        # error — the caller re-sends with `acknowledge_cost` to run it anyway.
+        if not request.acknowledge_cost:
+            warning = _treeiso_cost_warning(pts, ti_params_for_cost)
+            if warning:
+                return TreeSegmentationResponse(
+                    success=False, num_points=n_full, cost_warning=warning,
+                )
 
         # Skip the advisory ground heuristic when the caller already handed us
         # ground labels to exclude — the ground is gone from `pts`.
@@ -18330,12 +18511,23 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
     )
 
 
-def _run_potree_converter(input_las: _Path, out_dir: _Path) -> None:
+def _run_potree_converter(
+    input_las: _Path,
+    out_dir: _Path,
+    cancel_event: "Optional[threading.Event]" = None,
+    poll: float = 0.2,
+) -> None:
     """Invoke PotreeConverter on input_las, writing to out_dir.
 
     PyInstaller-bundled Pythons inject DYLD_LIBRARY_PATH / LD_LIBRARY_PATH
     pointing at the bundle's libs. Those collide with PotreeConverter's
     expectation of system libs, so we scrub them before spawning the child.
+
+    Cancellation: this is the single longest step of an import (minutes on a
+    multi-GB scan), so it must be interruptible. We spawn with Popen and poll
+    instead of `subprocess.run` — run() retains no handle, so its child could
+    never be killed. When `cancel_event` fires we hard-kill the child and raise
+    ScanCancelled, which unwinds `_build_octree_from_las`'s staging cleanup.
     """
     converter = _resolve_potree_converter_path()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -18358,14 +18550,69 @@ def _run_potree_converter(input_las: _Path, out_dir: _Path) -> None:
         str(input_las),
         "-o", str(out_dir),
     ]
-    result = _subprocess.run(cmd, capture_output=True, text=True, env=env)
-    if result.returncode != 0:
-        # Surface the converter's stderr tail directly so failures are debuggable.
-        tail = (result.stderr or result.stdout or "")[-1500:]
+    # Output goes to a LOG FILE, not a pipe. `subprocess.run` could use pipes
+    # safely because it pumps them concurrently; a poll loop with PIPE and no
+    # reader deadlocks the moment PotreeConverter (which prints per-chunk
+    # indexing progress) fills the ~64 KB buffer. Same approach as
+    # `_spawn_seg_worker`'s `logf`.
+    log_path = out_dir.parent / (out_dir.name + ".converter.log")
+    # Spawn via `_SegProc` (os.posix_spawn) on POSIX rather than Popen, for the
+    # reason documented on that class: this backend has libhelios (GLFW via the
+    # lidar→visualizer plugin) and open3d's own GLFW loaded, and fork()+exec()
+    # crashes the child in the post-fork/pre-exec window (SIGSEGV, exit -11).
+    # posix_spawn never forks the loaded image. It also puts the child in its OWN
+    # process group, which is what lets `_kill_seg_worker` killpg the converter's
+    # subtree on cancel without ever signalling the backend's own group.
+    returncode: int
+    if hasattr(_os, "posix_spawn"):
+        proc = _SegProc(cmd, env, str(log_path))
+    else:
+        # Windows: no fork, so Popen is fine. A new process group is the closest
+        # equivalent (mirrors _spawn_seg_worker). NOTE: _kill_seg_worker falls
+        # back to a single-pid kill there, so converter grandchildren may survive
+        # a cancel on Windows — the same limitation the seg workers ship with.
+        logf = open(log_path, "wb")
+        try:
+            proc = _subprocess.Popen(
+                cmd, stdout=logf, stderr=_subprocess.STDOUT, env=env,
+                creationflags=getattr(_subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+        finally:
+            logf.close()
+    try:
+        while proc.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                # Reuse the seg-worker killer: it carries the killpg SAFETY guard
+                # (never kill a group that is the backend's own, which would
+                # SIGKILL the whole server if the setpgroup ever failed).
+                _kill_seg_worker(proc)
+                proc.wait()
+                raise ScanCancelled()
+            time.sleep(poll)
+        returncode = proc.poll()
+    finally:
+        if proc.poll() is None:
+            _kill_seg_worker(proc)
+            proc.wait()
+
+    if returncode != 0:
+        # Surface the converter's output tail directly so failures are debuggable.
+        try:
+            tail = log_path.read_text(errors="replace")[-1500:]
+        except OSError:
+            tail = ""
         raise HTTPException(
             status_code=500,
-            detail=f"PotreeConverter failed (exit {result.returncode}): {tail}",
+            detail=f"PotreeConverter failed (exit {returncode}): {tail}",
         )
+    # Success: the log has nothing left to say. (On failure/cancel we leave it
+    # for the error tail above; the staging cleanup in _build_octree_from_las
+    # removes the sibling staging dir, and this file is unlinked on the next
+    # build of the same key.)
+    try:
+        log_path.unlink()
+    except (FileNotFoundError, OSError):
+        pass
 
 
 # Sidecar JSON mapping LAS extra-dimension slugs to human-readable labels.
@@ -20215,12 +20462,17 @@ def _miss_positions_to_las(positions: np.ndarray, out_las: _Path) -> int:
 
 
 def _build_miss_octree(sess: "CloudSession",
-                       origin: Optional[List[float]]) -> Optional[str]:
+                       origin: Optional[List[float]],
+                       cancel_event: "Optional[threading.Event]" = None) -> Optional[str]:
     """Build a projected-miss octree for the session and return its cache id, or
     None when the session has no placeable misses. Failures are logged and
     swallowed (return None) — a miss-octree build must never abort the caller
     (session create, bake, or backfill); the hits octree and LAD are the
-    priority. Eager but cheap: when there are no misses, no PotreeConverter runs."""
+    priority. Eager but cheap: when there are no misses, no PotreeConverter runs.
+
+    A user CANCEL is not a failure and must NOT be swallowed: re-raise
+    ScanCancelled so the caller unwinds instead of reporting a successful import
+    with a silently missing miss overlay."""
     import tempfile
     try:
         positions, _radius = _gather_miss_positions(sess, origin)
@@ -20229,18 +20481,44 @@ def _build_miss_octree(sess: "CloudSession",
         with tempfile.TemporaryDirectory() as td:
             miss_las = _Path(td) / "octree_misses.las"
             _miss_positions_to_las(positions, miss_las)
-            cache_key, _cache_dir, _meta = _build_octree_from_las(miss_las, [])
+            cache_key, _cache_dir, _meta = _build_octree_from_las(
+                miss_las, [], cancel_event=cancel_event)
         return cache_key
+    except ScanCancelled:
+        raise
     except Exception:
         logger.exception("Miss octree build failed for session %s", sess.session_id)
         return None
 
 
-def _build_octree_from_las(las_path: _Path, extra_dims_meta: List[dict]) -> tuple[str, _Path, dict]:
+def _build_octree_from_las(
+    las_path: _Path,
+    extra_dims_meta: List[dict],
+    progress=None,
+    cancel_event: "Optional[threading.Event]" = None,
+    span: "Tuple[float, float]" = (0.0, 1.0),
+) -> tuple[str, _Path, dict]:
     """Run PotreeConverter on a LAS and atomically install it into the octree
     cache keyed by the LAS bytes' hash. Returns (cache_key, cache_dir, meta).
     Shared by create (initial) and bake (post-edit) — both now feed a LAS that
-    was produced WITHOUT re-reading the source file at edit time."""
+    was produced WITHOUT re-reading the source file at edit time.
+
+    `progress` (a _ProgressReporter) and `cancel_event` are optional so every
+    existing caller keeps working untouched. `span` maps this build's internal
+    0..1 onto the caller's overall bar (e.g. (0.62, 0.90) during an import).
+
+    CANCEL-SAFETY INVARIANT — do not add a checkpoint between the `rename` and
+    `_read_octree_metadata` below. The install is an atomic same-filesystem
+    rename that runs only after the converter returned 0, and the cache-hit gate
+    is `metadata.json` existing, so a cancelled build leaves an entry that is
+    either ABSENT or FULLY BUILT — never half. A checkpoint in that window would
+    break that and let a later import happily reuse a poisoned cache entry."""
+    def _report(frac: float, msg: str) -> None:
+        if progress is not None:
+            lo, hi = span
+            progress(lo + (hi - lo) * frac, msg)
+
+    _report(0.0, "Hashing point data…")
     h = _hashlib.sha1()
     with open(las_path, "rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
@@ -20253,24 +20531,31 @@ def _build_octree_from_las(las_path: _Path, extra_dims_meta: List[dict]) -> tupl
     # re-checked inside the lock so the first builder wins and the rest no-op.
     with _octree_build_lock(cache_key):
         if not (cache_dir / "metadata.json").is_file():
+            if cancel_event is not None and cancel_event.is_set():
+                raise ScanCancelled()
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
             staging_dir = cache_dir.parent / (cache_key + ".staging")
             if staging_dir.exists():
                 _shutil.rmtree(staging_dir)
             staging_dir.mkdir(parents=True)
             try:
-                _run_potree_converter(las_path, staging_dir)
+                _report(0.2, "Building octree…")
+                _run_potree_converter(las_path, staging_dir, cancel_event=cancel_event)
                 _write_octree_labels(staging_dir, extra_dims_meta)
+                _report(0.95, "Installing octree…")
                 if cache_dir.exists():
                     _shutil.rmtree(cache_dir)
                 staging_dir.rename(cache_dir)
             except Exception:
+                # Catches ScanCancelled too (it subclasses Exception), so a
+                # killed converter's partial output is always removed.
                 try:
                     _shutil.rmtree(staging_dir)
                 except (FileNotFoundError, OSError):
                     pass
                 raise
 
+    _report(1.0, "Reading octree metadata…")
     meta = _read_octree_metadata(cache_dir)
     return cache_key, cache_dir, meta
 
@@ -20335,21 +20620,26 @@ class BackfillMissesRequest(BaseModel):
     trajectory: Optional[PoseStream] = None
 
 
-@app.post("/api/cloud/session/create")
-async def create_cloud_session(request: CloudSessionCreateRequest):
-    """Load a source cloud FULLY into an in-RAM session (the complete source of
-    truth — positions + colours + intensity + every scalar extra-dim), build its
-    first octree, and return `{session_id, ...octree metadata}`. This is the ONLY
-    point the source FILE is read; every later edit/bake/op works on the arrays.
+def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _Path,
+                             progress=None, cancel_event=None) -> dict:
+    """The heavy worker behind `/api/cloud/session/create`, factored out so it can
+    run OFF the event loop under `_bin_frame_streaming_response` and report
+    per-stage progress via `progress(fraction, message)`.
 
-    The source is normalised to a LAS once via `_source_to_las` (handling
-    XYZ/PLY/PCD/LAS/LAZ + the wizard column_plan uniformly), that LAS is read
-    into the session arrays AND fed to PotreeConverter for the first octree."""
-    source_path = _Path(request.source_path).expanduser()
-    if not source_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+    Before this split the endpoint was an `async def` doing every blocking step
+    inline, which froze the whole backend for the duration of an import — a
+    concurrent `POST /api/cancel/{run_id}` could not even be serviced, so the
+    import was structurally uncancellable.
 
-    import time
+    Cancellation unwinds via `ScanCancelled` from `_cancel_checkpoint`. Cleanup is
+    inherent: the body runs inside a TemporaryDirectory, `_build_octree_from_las`
+    removes its own staging dir on any exception, and the session is registered in
+    `_cloud_sessions` only as the LAST statement — so a cancel leaves nothing
+    behind and nothing registered. Do NOT register the session early."""
+    def _report(fraction, message):
+        if progress is not None:
+            progress(fraction, message)
+
     session_id = uuid.uuid4().hex[:8]
 
     # Normalise to a LAS in a temp dir, read it fully into RAM, then build the
@@ -20357,9 +20647,13 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     import tempfile
     with tempfile.TemporaryDirectory() as _tmp:
         tmp_dir = _Path(_tmp)
+        _report(0.02, "Reading source file…")
+        _cancel_checkpoint(progress)
         las_path, las_is_temp, source_extra_dims, full_xyz, source_origins = _source_to_las(
             source_path, request.ascii_format, tmp_dir, request.column_plan,
         )
+        _report(0.25, "Loading points into memory…")
+        _cancel_checkpoint(progress)
         _las = _read_las_into_arrays(las_path)
         # The session array is the source of truth and must hold FULL precision
         # (it is never re-read from the file). For ASCII/XYZ imports the LAS we
@@ -20462,6 +20756,8 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             _miss_origin = list(request.origin)
         if _miss_origin is not None and world_shift_arr is not None:
             _miss_origin = (np.asarray(_miss_origin, dtype=np.float64) - world_shift_arr).tolist()
+        _report(0.45, "Detecting sky/miss points…")
+        _cancel_checkpoint(progress)
         autodetected_misses = _autodetect_misses(
             positions, extras, extra_dims_meta,
             origin=_miss_origin,
@@ -20475,6 +20771,8 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         # the file). Sky/miss points are excluded: they are projected ~1 km out
         # along the beam and would drag the percentile with them. Reported in the
         # same (post-world-shift) frame as `positions`, matching `tight_bounds`.
+        _report(0.52, "Computing bounds…")
+        _cancel_checkpoint(progress)
         _gz_mask = None
         if extras is not None and "is_miss" in extras:
             _gz_mask = np.asarray(extras["is_miss"]) == 0
@@ -20509,9 +20807,14 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         # Build the octree from a HITS-ONLY LAS so far-field misses (~20 km) don't
         # poison its bounding box / camera framing. Misses stay in the session
         # (is_miss + true coords) for LAD and the on-demand miss overlay.
+        _report(0.58, "Writing octree source…")
+        _cancel_checkpoint(progress)
         hits_las = tmp_dir / "octree_hits.las"
         _session_to_las(sess, hits_las, exclude_misses=True)
-        cache_key, cache_dir, meta = _build_octree_from_las(hits_las, extra_dims_meta)
+        cache_key, cache_dir, meta = _build_octree_from_las(
+            hits_las, extra_dims_meta, progress=progress,
+            cancel_event=cancel_event, span=(0.62, 0.90),
+        )
         sess.octree_cache_id = cache_key
         # Build a SECOND octree from the projected (or true-coord, when no origin)
         # misses, so the renderer streams them with LOD just like the hits —
@@ -20519,9 +20822,13 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         # `_miss_origin` is already in the session's frame (world_shift subtracted).
         # The projection radius is baked in here; bake reprojects from the stored
         # origin. None when the scan has no placeable misses.
+        _report(0.92, "Building miss overlay…")
+        _cancel_checkpoint(progress)
         sess.miss_octree_origin = _miss_origin
-        sess.miss_octree_cache_id = _build_miss_octree(sess, _miss_origin)
+        sess.miss_octree_cache_id = _build_miss_octree(
+            sess, _miss_origin, cancel_event=cancel_event)
 
+    _report(1.0, "Finalising…")
     _sweep_cloud_sessions()
     with _cloud_session_lock:
         _cloud_sessions[session_id] = sess
@@ -20636,6 +20943,49 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             "robust_bounds": robust_bounds,
             **miss_info, **meta}
 
+
+@app.post("/api/cloud/session/create")
+async def create_cloud_session(request: CloudSessionCreateRequest, http_request: Request):
+    """Load a source cloud FULLY into an in-RAM session (the complete source of
+    truth — positions + colours + intensity + every scalar extra-dim), build its
+    first octree, and return `{session_id, ...octree metadata}`. This is the ONLY
+    point the source FILE is read; every later edit/bake/op works on the arrays.
+
+    The source is normalised to a LAS once via `_source_to_las` (handling
+    XYZ/PLY/PCD/LAS/LAZ + the wizard column_plan uniformly), that LAS is read
+    into the session arrays AND fed to PotreeConverter for the first octree.
+
+    Streams PHP1 progress markers ahead of the JSON result and is CANCELLABLE via
+    `/api/cancel/{run_id}` — importing a multi-GB scan is a minute-scale operation
+    that can wedge on a bad file, and the user needs a way out that actually stops
+    the work (the PotreeConverter child is killed, not just detached)."""
+    # Validate before the stream opens: once the 200 + first chunk is out, an
+    # HTTPException can only reach the client as a truncated body.
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    run_id, cancel_event = _new_cancel_token()
+
+    def _build(progress):
+        try:
+            return json.dumps(_do_create_cloud_session(
+                request, source_path, progress=progress, cancel_event=cancel_event,
+            )).encode("utf-8")
+        except ScanCancelled:
+            raise
+        except BaseException as exc:
+            # The response stream is already open, so an exception here could only
+            # reach the client as a truncated body ("Unexpected end of JSON input").
+            # Report the failure IN the JSON tail instead, where the renderer can
+            # surface the real reason (an unsupported extension, a malformed column
+            # plan, a PotreeConverter crash).
+            logger.exception("create_cloud_session failed for %s", request.source_path)
+            detail = getattr(exc, "detail", None) or str(exc) or exc.__class__.__name__
+            return json.dumps({"error": str(detail)}).encode("utf-8")
+
+    return _bin_frame_streaming_response(
+        _build, request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=None) -> dict:
@@ -22038,11 +22388,6 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     # TreeIso sees only non-ground HIT points; ground AND misses stay id 0.
     plant_mask = (~is_ground) & is_hit
     n_plant = int(plant_mask.sum())
-    if n_plant > _TREEISO_MAX_POINTS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Tree segmentation is capped at {_TREEISO_MAX_POINTS:,} points; this cloud has {n_plant:,} non-ground points. Crop or downsample first.",
-        )
     if n_plant < 10:
         raise HTTPException(
             status_code=400,
@@ -22055,6 +22400,22 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     plant_pts = pts[plant_mask]
 
     ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
+    size_error = _treeiso_size_error(plant_pts, ti_param_dict)
+    if size_error:
+        raise HTTPException(status_code=400, detail=size_error)
+    # Advisory cost check on the post-decimation node count, not raw point count
+    # — TreeIso decimates before every expensive stage, so a big cloud that
+    # collapses to ~600 k voxels is unremarkable. This is a CONFIRMATION, not a
+    # cap: 409 + a structured `cost_warning` body tells the panel to prompt, and
+    # the retry carries `acknowledge_cost`. 409 (not 400) so the renderer can
+    # tell "needs confirmation" from a genuine bad request.
+    if not request.acknowledge_cost:
+        warning = _treeiso_cost_warning(plant_pts, ti_param_dict)
+        if warning:
+            raise HTTPException(
+                status_code=409,
+                detail={"cost_warning": warning, "message": warning["message"]},
+            )
     try:
         plant_labels = await _run_killable(
             "trees", plant_pts, ti_param_dict, http_request=http_request, seeds=seeds,

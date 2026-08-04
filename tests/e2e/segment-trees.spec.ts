@@ -131,3 +131,48 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
   expect(await sawSplitPill).toBe(true);
   await expect(splitPill).toHaveCount(0);
 });
+
+// --- Cost advisory: warns, then runs on confirmation ------------------------
+// A workload above the node guideline must WARN rather than block: a user
+// willing to wait has to be able to run it (Cancel stays available mid-run).
+// The guideline is a post-decimation VOXEL count, so triggering it honestly
+// would need a multi-million-point fixture; instead we pin
+// PHYTOGRAPH_TREEISO_MAX_NODES low for a dedicated app so the committed fixture
+// crosses it. Everything else is the real path — real backend, real UI clicks.
+test('warns before an expensive run, then segments when confirmed', async () => {
+  // Own app: the env override must not leak into the shared session above.
+  const solo = await launchApp({ PHYTOGRAPH_TREEISO_MAX_NODES: '10' });
+  try {
+    const { app, page } = solo;
+    await importFiles(app, page, 'import-point-cloud', FIXTURE);
+    await completeImportWizard(page);
+
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]');
+    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+    await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+
+    await page.getByTestId('tool-tree-segment').click();
+    await expect(page.getByTestId('tree-segment-panel')).toBeVisible();
+
+    // First click: the advisory appears and NOTHING is segmented.
+    await page.getByTestId('tree-segment-run-button').click();
+    const warning = page.getByTestId('tree-segment-cost-warning');
+    await expect(warning).toBeVisible({ timeout: 60_000 });
+    // It states the real workload and that the run is interruptible.
+    await expect(warning).toContainText('voxels');
+    await expect(warning).toContainText(/cancel/i);
+    // The button is now an explicit opt-in, and the panel stayed open.
+    const runButton = page.getByTestId('tree-segment-run-button');
+    await expect(runButton).toHaveText(/Segment Anyway/);
+    // Not a failure: no error toast, and the cloud is NOT yet recoloured.
+    await expect(page.getByTestId('scalar-overlay'))
+      .not.toHaveAttribute('data-active-scalar', 'tree_instance');
+
+    // Second click: the confirmed run actually segments.
+    await runButton.click();
+    await expect(page.getByTestId('scalar-overlay'))
+      .toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 180_000 });
+  } finally {
+    await solo?.close();
+  }
+});

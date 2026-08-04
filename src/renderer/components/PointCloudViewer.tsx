@@ -5,7 +5,7 @@ import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -855,6 +855,12 @@ export default function PointCloudViewer({
   const [showTreeSegmentPanel, setShowTreeSegmentPanel] = useState(false);
   const [treeSegmentInProgress, setTreeSegmentInProgress] = useState(false);
   const [treeSegmentError, setTreeSegmentError] = useState<string | null>(null);
+  // Advisory workload estimate from the backend. Non-null means the panel is
+  // showing "Segment Anyway": the next run re-sends with acknowledge_cost so the
+  // expensive job actually starts. Cleared whenever a run begins or succeeds, so
+  // a later (cheaper) cloud doesn't inherit a stale confirmation.
+  const [treeSegmentCostWarning, setTreeSegmentCostWarning] = useState<string | null>(null);
+  const treeCostAcknowledgedRef = useRef(false);
   // "Split into one cloud per tree" runs AFTER the panel (and its inline
   // spinner) has closed and the recoloured parent is already on screen, so
   // without this the user watches a finished-looking viewport while the backend
@@ -1106,6 +1112,7 @@ export default function PointCloudViewer({
       total: heliosScans.length,
       label: 'Preparing…',
     });
+    bulkImportCancelledRef.current = false;
     try {
       // Phase 1: resolve every referenced file FIRST (keeps the existing
       // missing-file prompt), and split scans into those with data
@@ -1181,8 +1188,17 @@ export default function PointCloudViewer({
         };
         if (p.resolved) {
           const r = byPath.get(p.resolved);
+          // A cancel stops the remaining scans too. This pathway is
+          // all-or-nothing (see the failures check below), so we bail out of the
+          // whole bundle rather than importing a partial set.
+          if (r && bulkImportCancelledRef.current) break;
           if (r) {
-            setBulkImportProgress({ current: attachedCount + 1, total: wizardPending.length, label: `Loading ${r.input.fileName}` });
+            const controller = new AbortController();   // fresh per scan
+            bulkImportAbortRef.current = controller;
+            setBulkImportProgress({
+              current: attachedCount + 1, total: wizardPending.length,
+              label: `Loading ${r.input.fileName}`, fraction: null,
+            });
             try {
               // Thread the scan's XML <origin> to the backend so re-imported scans
               // reproject their sky/miss points onto the display shell (otherwise
@@ -1194,7 +1210,13 @@ export default function PointCloudViewer({
                 o ? [o.x, o.y, o.z] : null;
               const data = await parsePointCloudFromPath(
                 p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs, r.worldShift,
-                r.continuousSlugs, null, scanOrigin);
+                r.continuousSlugs, null, scanOrigin,
+                {
+                  signal: controller.signal,
+                  onProgress: (fraction, message) =>
+                    setBulkImportProgress(b => (b ? { ...b, fraction, hint: message || undefined } : b)),
+                  onRunId: (runId) => { bulkImportRunIdRef.current = runId; },
+                });
               for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
               for (const slug of r.continuousSlugs) registerContinuousSlug(slug);
               scan.data = data;
@@ -1214,12 +1236,22 @@ export default function PointCloudViewer({
               }
               attachedCount += 1;
             } catch (err) {
+              // A cancel is the user's choice, not a load failure — it must not
+              // join `failures` (which raises an error toast below).
+              if (err instanceof ScanCancelledError || controller.signal.aborted
+                  || (err instanceof Error && err.name === 'AbortError')) {
+                bulkImportCancelledRef.current = true;
+                break;
+              }
               failures.push({ label: p.label, reason: err instanceof Error ? err.message : String(err) });
             }
           }
         }
         newScans.push(scan);
       }
+      // Cancelled: this pathway is all-or-nothing, so add NOTHING and return
+      // quietly. The modal closing is the feedback; no toast (nothing happened).
+      if (bulkImportCancelledRef.current) return;
       if (failures.length > 0) {
         const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
         const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
@@ -1258,6 +1290,8 @@ export default function PointCloudViewer({
     } finally {
       // Always clear the modal — leaving it up would lock the UI.
       setBulkImportProgress(null);
+      bulkImportAbortRef.current = null;
+      bulkImportRunIdRef.current = null;
     }
   }, [importMesh, onRequestImportWizard, onAddScans, scans]);
 
@@ -1529,6 +1563,20 @@ export default function PointCloudViewer({
   // Progress for a Helios XML bulk import in flight. The launching popup
   // closes immediately so the user sees this modal instead of an idle popup.
   const [bulkImportProgress, setBulkImportProgress] = useState<BulkImportProgressState | null>(null);
+  // Cancellation for that bulk import. Deliberately a second copy of App.tsx's
+  // trio rather than shared plumbing: this pathway owns its own progress modal
+  // and calls parsePointCloudFromPath directly, the two are never in flight at
+  // the same time, and threading one controller through the prop boundary costs
+  // more than the ~10 duplicated lines. Same ordering rule as App's
+  // cancelImport: tell the backend to stop, THEN tear down the fetch.
+  const bulkImportAbortRef = useRef<AbortController | null>(null);
+  const bulkImportRunIdRef = useRef<string | null>(null);
+  const bulkImportCancelledRef = useRef(false);
+  const cancelBulkImport = useCallback(() => {
+    bulkImportCancelledRef.current = true;
+    if (bulkImportRunIdRef.current) void cancelRun(bulkImportRunIdRef.current);
+    bulkImportAbortRef.current?.abort();
+  }, []);
   const [duplicateProgress, setDuplicateProgress] = useState<BulkImportProgressState | null>(null);
   // Per-row expansion state for the scans panel. Held in-memory only; resets
   // on app reload.
@@ -8721,6 +8769,13 @@ export default function PointCloudViewer({
     const abort = new AbortController();
     treeSegmentAbortRef.current = abort;
 
+    // Consume any pending "Segment Anyway" confirmation: this run carries the
+    // acknowledgement, and the armed state is cleared so a subsequent run on a
+    // different cloud prompts again rather than silently inheriting it.
+    const acknowledgeCost = treeCostAcknowledgedRef.current;
+    treeCostAcknowledgedRef.current = false;
+    setTreeSegmentCostWarning(null);
+
     const tiParams = {
       reg_strength1: treeRegStrength1,
       reg_strength2: treeRegStrength2,
@@ -8728,6 +8783,7 @@ export default function PointCloudViewer({
       decimate_res2: treeDecimateRes2,
       max_gap: treeMaxGap,
       max_outlier_gap: treeMaxOutlierGap,
+      acknowledge_cost: acknowledgeCost,
     };
     const seeds = treeSeedPoints.length > 0 ? treeSeedPoints.map(p => [p[0], p[1], p[2]]) : undefined;
 
@@ -8819,6 +8875,14 @@ export default function PointCloudViewer({
       }
 
       const response = await segmentTrees({ points, seed_points: seeds, ground_class: groundClass, ...tiParams }, abort.signal);
+      // Not a failure: the backend wants an explicit confirmation before an
+      // expensive run. Arm the panel's "Segment Anyway" and stop here — clicking
+      // again re-sends with acknowledge_cost.
+      if (!response.success && response.cost_warning) {
+        treeCostAcknowledgedRef.current = true;
+        setTreeSegmentCostWarning(response.cost_warning.message);
+        return;
+      }
       if (!response.success) {
         throw new Error(response.error || 'Tree segmentation failed');
       }
@@ -8898,6 +8962,13 @@ export default function PointCloudViewer({
       // cancel reached the backend worker) — not a failure.
       if (error instanceof DOMException && error.name === 'AbortError') return;
       if (error instanceof ScanCancelledError) return;
+      // Session path: a 409 cost advisory is a confirmation prompt, not an
+      // error. Arm "Segment Anyway" instead of surfacing a failure toast.
+      if (error instanceof CostWarningError) {
+        treeCostAcknowledgedRef.current = true;
+        setTreeSegmentCostWarning(error.costWarning.message);
+        return;
+      }
       console.error('Tree segmentation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Tree segmentation failed';
       setTreeSegmentError(errorMessage);
@@ -16491,6 +16562,7 @@ export default function PointCloudViewer({
           splitClouds={treeSplitClouds}
           inProgress={treeSegmentInProgress}
           error={treeSegmentError}
+          costWarning={treeSegmentCostWarning}
           hasTrees={!!clouds.find(cl => selectedIds.has(cl.id))?.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE]}
           mergeA={treeMergeA}
           mergeB={treeMergeB}
@@ -17833,7 +17905,7 @@ export default function PointCloudViewer({
         gridAvailable={pendingGridAvailable}
       />
 
-      <BulkImportProgress progress={bulkImportProgress} />
+      <BulkImportProgress progress={bulkImportProgress} onCancel={cancelBulkImport} />
       <BulkImportProgress
         progress={duplicateProgress}
         title="Duplicating scan…"

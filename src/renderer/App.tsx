@@ -8,8 +8,18 @@ import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./compon
 import { scanDisplayName, type Scan } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { shiftPoseStream } from "./lib/poseStream";
-import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree } from "./lib/pointCloudParsers";
-import { importTexturedMesh, type MeshImportResponse, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession } from "./utils/backendApi";
+import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
+import { importTexturedMesh, type MeshImportResponse, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError } from "./utils/backendApi";
+
+// A user cancel is not a failure: it must never land in the per-file `errors[]`
+// list or raise an error toast. Covers all three shapes the abort can take — the
+// backend's terminal `cancelled` marker, an already-aborted signal, and the
+// DOMException fetch throws when the request is torn down mid-flight.
+function isImportCancel(err: unknown, signal?: AbortSignal): boolean {
+  return err instanceof ScanCancelledError
+    || signal?.aborted === true
+    || (err instanceof Error && err.name === 'AbortError');
+}
 import { useScene } from "./state/sceneStore";
 import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
@@ -190,6 +200,23 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // File → Import menu) is in flight. Reuses BulkImportProgress so every
   // import pathway shows the same spinner + bar + filename modal.
   const [importProgress, setImportProgress] = useState<BulkImportProgressState | null>(null);
+  // Cancellation for the in-flight import. The abort tears down the fetch; the
+  // run id is what /api/cancel/{id} targets so the BACKEND actually stops (and
+  // kills its PotreeConverter child) instead of finishing the work into a
+  // dismissed dialog. `importCancelledRef` stops the sequential multi-file loop
+  // between files — aborting one file's fetch says nothing about the next.
+  const importAbortRef = useRef<AbortController | null>(null);
+  const importRunIdRef = useRef<string | null>(null);
+  const importCancelledRef = useRef(false);
+  const cancelImport = useCallback(() => {
+    importCancelledRef.current = true;
+    // Order matters (mirrors cancelScan in PointCloudViewer): tell the backend to
+    // stop and free its memory FIRST, then tear down the fetch. Aborting first
+    // can drop the connection before the cancel POST lands; the backend's own
+    // disconnect detection is the backstop either way.
+    if (importRunIdRef.current) void cancelRun(importRunIdRef.current);
+    importAbortRef.current?.abort();
+  }, []);
   // Progress shown over the viewer while a Stitch Clouds merge runs in the
   // backend (concatenate sessions + rebuild octree). Reuses the same modal.
   const [stitchProgress, setStitchProgress] = useState<BulkImportProgressState | null>(null);
@@ -335,6 +362,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   const buildScanFromWizardResult = useCallback(async (
     result: WizardResult,
     color: string,
+    // Cancellation + per-stage progress for this one file's import. Optional so
+    // callers that don't offer a cancel (none, currently) still work.
+    opts?: ImportProgressOptions,
   ): Promise<Scan> => {
     const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, worldShift } = result;
     // Far-field miss-detection threshold is a user setting; thread it into the
@@ -343,7 +373,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     const missDistanceThreshold = (await getSettings()).missDistanceThreshold;
     const data = await parsePointCloudFromPath(
       input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift, continuousSlugs,
-      missDistanceThreshold,
+      missDistanceThreshold, null, opts,
     );
     for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
     for (const slug of continuousSlugs) registerContinuousSlug(slug);
@@ -607,8 +637,24 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           setImportProgress(null);
           const results = await openImportWizard([{ path: sourcePath, fileName: file.name }]);
           if (!results || results.length === 0) return; // user cancelled
-          setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
-          const newScan = await buildScanFromWizardResult(results[0], getNextColor());
+          importCancelledRef.current = false;
+          const controller = new AbortController();
+          importAbortRef.current = controller;
+          setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, fraction: null });
+          let newScan: Scan;
+          try {
+            newScan = await buildScanFromWizardResult(results[0], getNextColor(), {
+              signal: controller.signal,
+              onProgress: (fraction, message) =>
+                setImportProgress(p => (p ? { ...p, fraction, hint: message || undefined } : p)),
+              onRunId: (runId) => { importRunIdRef.current = runId; },
+            });
+          } catch (err) {
+            // The user asked for this — no error toast. The modal closing (in
+            // the `finally` below) is the feedback.
+            if (isImportCancel(err, controller.signal)) return;
+            throw err;
+          }
           addScanTx(newScan, 'Import scan');
           setSelectedScanIds(new Set([newScan.id]));
           setSettingsOpen(false);
@@ -650,6 +696,8 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       showToast({ title: message, type: 'error' });
     } finally {
       setImportProgress(null);
+      importAbortRef.current = null;
+      importRunIdRef.current = null;
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
     }
@@ -861,15 +909,33 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // Walk path-backed point clouds through the wizard, then import each with
     // the user's choices. Clear the progress modal so it doesn't sit behind the
     // wizard; re-show per-scan during the actual import.
+    let cancelledAfter = -1;   // index of the file the user cancelled on, if any
     if (wizardFiles.length > 0) {
       setImportProgress(null);
       const results = await openImportWizard(wizardFiles);
       if (results) {
+        importCancelledRef.current = false;
         for (let i = 0; i < results.length; i++) {
-          setImportProgress({ current: i + 1, total: results.length, label: `Loading ${results[i].input.fileName}` });
+          // A cancel during file i must also stop files i+1.. — aborting one
+          // fetch says nothing about the next.
+          if (importCancelledRef.current) { cancelledAfter = i; break; }
+          // A FRESH controller per file: reusing one would leave every
+          // subsequent file's fetch born already-aborted after any cancel.
+          const controller = new AbortController();
+          importAbortRef.current = controller;
+          setImportProgress({
+            current: i + 1, total: results.length,
+            label: `Loading ${results[i].input.fileName}`, fraction: null,
+          });
           try {
-            newScans.push(await buildScanFromWizardResult(results[i], getColorForFile()));
+            newScans.push(await buildScanFromWizardResult(results[i], getColorForFile(), {
+              signal: controller.signal,
+              onProgress: (fraction, message) =>
+                setImportProgress(p => (p ? { ...p, fraction, hint: message || undefined } : p)),
+              onRunId: (runId) => { importRunIdRef.current = runId; },
+            }));
           } catch (err) {
+            if (isImportCancel(err, controller.signal)) { cancelledAfter = i; break; }
             errors.push(`${results[i].input.fileName}: ${err instanceof Error ? err.message : 'Failed to import'}`);
           }
         }
@@ -882,7 +948,19 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     }
 
     const loadedCount = newScans.length + meshCount + skeletonCount;
-    if (loadedCount > 0) {
+    if (cancelledAfter >= 0) {
+      // Scans imported before the cancel are KEPT — they're complete and correct,
+      // and their backend sessions/octrees are already built. Say so explicitly:
+      // "the modal vanished and 3 of 8 scans appeared" is otherwise
+      // indistinguishable from a partial failure.
+      if (loadedCount > 0) setSettingsOpen(false);
+      showToast({
+        title: newScans.length > 0
+          ? `Import cancelled — kept ${newScans.length} of ${wizardFiles.length} scan(s)`
+          : 'Import cancelled',
+        type: 'info',
+      });
+    } else if (loadedCount > 0) {
       setSettingsOpen(false);
       const parts = [];
       if (newScans.length > 0) parts.push(`${newScans.length} scan(s)`);
@@ -917,6 +995,8 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     }
 
     setImportProgress(null);
+    importAbortRef.current = null;
+    importRunIdRef.current = null;
     // Reset import type to auto after import
     pendingImportTypeRef.current = 'auto';
   }, [scans, openImportWizard, buildScanFromWizardResult, importScanXml, materializeDroppedFile]);
@@ -1742,8 +1822,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       {/* Import progress modal for imports (drag-drop or File → Import).
           Reuses the same BulkImportProgress
           component as the Helios XML and per-scan attach pathways so every
-          import shows an identical modal. */}
-      <BulkImportProgress progress={importProgress} />
+          import shows an identical modal. Cancel really stops the backend work
+          (kills the PotreeConverter child) — it does not just hide the dialog. */}
+      <BulkImportProgress progress={importProgress} onCancel={cancelImport} />
 
       {/* Stitch Clouds merge progress — reuses the same modal as imports, but
           with its own header (the default reads "Importing scans…"). */}

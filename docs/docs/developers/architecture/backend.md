@@ -102,6 +102,25 @@ decoder skips them. Helpers: `_bin_frame_bytes` / `_bin_frame_streaming_response
 point-cloud import path uses a similar fixed `PHX1` layout. Other endpoints
 (LAD, plant, QSM) stay JSON — their payloads are small or texture-dominated.
 
+`_bin_frame_streaming_response` also carries the **progress + cancellation**
+contract, and endpoints whose payload is JSON use it too (they just return
+`json.dumps(...).encode()` from their worker, so the body is PHP1 markers
+followed by a JSON tail — `fetchJsonWithProgress` on the renderer side). Three
+things come as a package, and a long-running endpoint wants all three:
+
+- The worker runs via `run_in_executor`, i.e. **off the event loop**. A handler
+  that blocks inline freezes the entire backend for its duration — which also
+  makes it uncancellable, since `POST /api/cancel/{run_id}` can't be serviced.
+- The `run_id` rides the first PHP1 marker, so the client can cancel; the stream
+  loop also watches for client disconnect.
+- Because the 200 is already out, an exception can only reach the client as a
+  truncated body. Report in-flight failures as `error` in the JSON tail instead.
+
+Native children that can't poll a cancel Event (PotreeConverter, the
+segmentation workers) are spawned via `os.posix_spawn` into their own process
+group and killed with `_kill_seg_worker` — `subprocess.Popen`'s fork path
+crashes the child on macOS when libhelios/open3d GLFW are loaded.
+
 ## When to rebuild
 
 - After any change to `backend-api/main.py` that you want reflected in `npm run dev` (unless you run uvicorn manually).

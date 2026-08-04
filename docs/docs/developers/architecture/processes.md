@@ -157,10 +157,44 @@ Heavy data never crosses IPC as JSON:
 ## Compute caps
 
 Several backend endpoints fail fast past a point cap instead of hanging on a
-pathological cloud — `_TREEISO_MAX_POINTS`, `_WOOD_SEGMENT_MAX_POINTS`, and
-`_SKELETON_MAX_POINTS` (`PHYTOGRAPH_SKELETON_MAX_POINTS`, default 3 M; the
-skeleton neighbour graph is built with a single batched KD-tree query rather
-than a per-point Python loop). All are environment-overridable.
+pathological cloud — `_WOOD_SEGMENT_MAX_POINTS` and `_SKELETON_MAX_POINTS`
+(`PHYTOGRAPH_SKELETON_MAX_POINTS`, default 3 M; the skeleton neighbour graph is
+built with a single batched KD-tree query rather than a per-point Python loop).
+All are environment-overridable.
+
+**Tree segmentation warns on voxels; it does not cap points.** TreeIso
+voxel-decimates *first*, then runs cut-pursuit and its O(nGroups²) merge over the
+decimated cloud only — so raw input size is the wrong cost proxy. A 13 M-point
+cloud that collapses to ~600 k voxels is well inside TreeIso's intended regime,
+while a 2.6 M-point ALS tile at the paper's 5 cm voxel decimates to 2.6 M nodes
+(a 99 % no-op) and runs for 15–20 min.
+
+The expensive case is a **confirmation prompt, not a refusal** — a user willing
+to wait must always be able to run it, and Cancel works mid-run:
+
+- `_treeiso_cost_warning` returns an advisory when the **exact** post-decimation
+  voxel count (`_count_treeiso_nodes`, at the same auto-scaled voxel size the
+  worker will use) exceeds `_TREEISO_MAX_NODES`
+  (`PHYTOGRAPH_TREEISO_MAX_NODES`, default 2 M). It is exact rather than
+  modelled: a `(res/spacing)³` density estimate ranged from 0.1× to 49× the true
+  count depending on cloud shape.
+- The inline endpoint returns `success: false` with a `cost_warning` (and **no**
+  `error`); the session endpoint raises **409** with
+  `{"cost_warning": …, "message": …}` — 409 so the renderer can distinguish
+  "needs confirmation" from a genuine bad request. `CostWarningError` in
+  `backendApi.ts` carries it to the panel, which shows an amber advisory and
+  turns the run button into **Segment Anyway**.
+- The retry sets `acknowledge_cost: true` and the run proceeds unconditionally.
+  Non-UI callers (scripts, the eval harness) can set it up-front.
+- `_TREEISO_MAX_POINTS` (`PHYTOGRAPH_TREEISO_MAX_POINTS`, default 50 M) is the
+  only hard stop left — a loose backstop for the full-N work preceding
+  decimation.
+
+`_auto_treeiso_decimation` picks that voxel size from measured median spacing,
+then *verifies* against the exact count and keeps coarsening until it is under
+its ~1 M node target — the cube-law guess alone under-shoots at scale (a 13.5 M
+plot landed on 4.3 M voxels), so most large clouds never trigger the advisory at
+all.
 
 ## Logging
 

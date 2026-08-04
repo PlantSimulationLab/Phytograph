@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import main
+from tests.binframe import decode_streamed_json
 
 # Reuse the stubbed-pyhelios fixture from the static LAD suite so pytest resolves
 # `stub_pyhelios` in this module too.
@@ -369,7 +370,7 @@ def test_create_session_trajectory_is_world_frame_under_shift(client, tmp_path, 
     res = client.post("/api/cloud/session/create",
                       json={"source_path": str(las_path), "world_shift": ws})
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
 
     sp = body.get("scan_params")
     assert sp is not None, "beam-origin LAS must surface scan_params"

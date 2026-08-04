@@ -1,4 +1,4 @@
-import { Sprout, Loader2, X } from 'lucide-react';
+import { Sprout, Loader2, X, AlertTriangle } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 
@@ -16,6 +16,11 @@ interface TreeSegmentPanelProps {
   splitClouds: boolean;
   inProgress: boolean;
   error: string | null;
+  // Set when the backend wants confirmation before an expensive run. Shows the
+  // estimate and turns the run button into "Segment Anyway"; clicking `onSegment`
+  // again re-sends with acknowledge_cost. Not a blocker — the run is always
+  // available, and Cancel still works once it starts.
+  costWarning: string | null;
   // True when the selected cloud already has a tree_instance field — enables the
   // Refine (merge/split) section.
   hasTrees: boolean;
@@ -47,6 +52,7 @@ export function TreeSegmentPanel({
   splitClouds,
   inProgress,
   error,
+  costWarning,
   hasTrees,
   mergeA,
   mergeB,
@@ -208,6 +214,18 @@ export function TreeSegmentPanel({
         </div>
       )}
 
+      {/* Cost advisory: amber, not red — the run is still available, it just
+          wants a deliberate second click. */}
+      {costWarning && !inProgress && (
+        <div
+          data-testid="tree-segment-cost-warning"
+          className="mb-3 p-2 bg-amber-900/30 border border-amber-600/50 rounded text-[10px] text-amber-200 flex gap-1.5"
+        >
+          <AlertTriangle className="w-3 h-3 shrink-0 mt-px" />
+          <span>{costWarning}</span>
+        </div>
+      )}
+
       {inProgress ? (
         <div className="flex gap-2">
           <button
@@ -231,10 +249,14 @@ export function TreeSegmentPanel({
         <button
           data-testid="tree-segment-run-button"
           onClick={onSegment}
-          className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
+          className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 text-white ${
+            costWarning
+              ? 'bg-amber-600 hover:bg-amber-500'
+              : 'bg-green-600 hover:bg-green-500'
+          }`}
         >
-          <Sprout className="w-3 h-3" />
-          Segment Trees
+          {costWarning ? <AlertTriangle className="w-3 h-3" /> : <Sprout className="w-3 h-3" />}
+          {costWarning ? 'Segment Anyway' : 'Segment Trees'}
         </button>
       )}
 

@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 import main
+from tests.binframe import decode_streamed_json
 
 
 # leafcube_multi.xyz: x y z timestamp target_index target_count. 9301 rows,
@@ -152,7 +153,7 @@ def test_import_autodetects_misses_and_keeps_bbox_tight(client, cache_root):
         json={"source_path": str(LEAFCUBE_XYZ), "ascii_format": LEAFCUBE_FORMAT},
     )
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
 
     # Misses were recovered (the scan carried no is_miss column).
     assert body["has_misses"] is True
@@ -185,10 +186,10 @@ def test_miss_overlay_projects_beyond_all_hits_as_thin_shell(client, cache_root)
     on the hit points" + "shell has thickness" bugs. The projection now feeds the
     miss octree via `_gather_miss_positions` (no /misses overlay endpoint), so we
     assert the geometry directly on that helper."""
-    create = client.post(
+    create = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(LEAFCUBE_XYZ), "ascii_format": LEAFCUBE_FORMAT},
-    ).json()
+    ).content)
     sid = create["session_id"]
 
     sess = main._cloud_sessions[sid]

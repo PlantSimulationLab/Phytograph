@@ -7,7 +7,10 @@ import {
   type OctreeMetadata,
   type ColumnPlan,
   type ScanParamsFromFile,
+  type ImportProgressOptions,
 } from '../utils/backendApi';
+
+export type { ImportProgressOptions };
 
 // Calculate bounds from position array
 function calculateBounds(positions: Float32Array, pointCount: number): PointCloudData['bounds'] {
@@ -768,6 +771,10 @@ export async function parsePointCloudFromPath(
   // <origin>, when known. Forwarded to createCloudSession so the backend can
   // reproject sky/miss points onto the display shell instead of far-field.
   origin?: [number, number, number] | null,
+  // Cancellation + progress for the (slow) octree import. Grouped into an
+  // options object rather than three more positionals — the list is already
+  // long. Only the octree path consumes them; the flat fallbacks are fast.
+  opts?: ImportProgressOptions,
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -782,6 +789,7 @@ export async function parsePointCloudFromPath(
     const meta = await createCloudSession(
       path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
       missDistanceThreshold ?? null, origin ?? null,
+      opts?.signal, opts?.onProgress, opts?.onRunId,
     );
     return buildPointCloudFromOctree(
       meta, path, name, asciiFormat, columnPlan, categoricalAttributes, meta.session_id,

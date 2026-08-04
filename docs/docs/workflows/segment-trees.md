@@ -100,6 +100,15 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
 - Segmentation runs in the background, so the rest of the app stays responsive
   while it works. Use the panel's **Cancel** button to stop a run — closing the
   panel does *not* cancel it.
+- Large clouds are fine. TreeIso works on a voxel-decimated copy, so a
+  multi-million-point plot is normally reduced to well under a million voxels
+  before the heavy work starts — Phytograph sizes those voxels from the cloud's
+  own point spacing.
+- If a run *would* be unusually expensive, the panel shows an amber warning with
+  the estimated workload and the button changes to **Segment Anyway**. This is
+  only a heads-up, never a block: click again to run it, and use **Cancel** if it
+  takes longer than you want. To make it faster instead, crop to a smaller area
+  or downsample first.
 
 ## See also
 

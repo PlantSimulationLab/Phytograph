@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 import main
+from tests.binframe import _create_session_direct
 
 pye57 = pytest.importorskip("pye57")
 laspy = pytest.importorskip("laspy")
@@ -227,7 +228,7 @@ async def test_create_session_keeps_misses_out_of_octree(tmp_path, monkeypatch):
     # and stub the converter (no native PotreeConverter needed for this check).
     captured = {}
 
-    def _fake_build(las_path, extra_dims_meta):
+    def _fake_build(las_path, extra_dims_meta, **kw):
         with laspy.open(str(las_path)) as r:
             las = r.read()
         # Create builds TWO octrees: the hits octree first (this capture), then a
@@ -245,7 +246,7 @@ async def test_create_session_keeps_misses_out_of_octree(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_build_octree_from_las", _fake_build)
 
     req = main.CloudSessionCreateRequest(source_path=str(src))
-    res = await main.create_cloud_session(req)
+    res = await _create_session_direct(req)
 
     # The octree got HITS ONLY (4), not the 2 far-field misses.
     assert captured["n"] == 4
@@ -272,10 +273,10 @@ async def test_misses_endpoint_projects_just_beyond_farthest_hit(tmp_path, monke
     _write_e57(src, with_misses=True)
     monkeypatch.setattr(
         main, "_build_octree_from_las",
-        lambda las_path, ed: ("fakecache", tmp_path / "cache", {"point_count": 0}),
+        lambda las_path, ed, **kw: ("fakecache", tmp_path / "cache", {"point_count": 0}),
     )
     req = main.CloudSessionCreateRequest(source_path=str(src))
-    res = await main.create_cloud_session(req)
+    res = await _create_session_direct(req)
     sid = res["session_id"]
 
     sess = main._cloud_sessions[sid]
@@ -301,9 +302,9 @@ async def test_misses_endpoint_no_origin_returns_true_coords(tmp_path, monkeypat
     _write_e57(src, with_misses=True)
     monkeypatch.setattr(
         main, "_build_octree_from_las",
-        lambda las_path, ed: ("fakecache", tmp_path / "cache", {"point_count": 0}),
+        lambda las_path, ed, **kw: ("fakecache", tmp_path / "cache", {"point_count": 0}),
     )
-    res = await main.create_cloud_session(main.CloudSessionCreateRequest(source_path=str(src)))
+    res = await _create_session_direct(main.CloudSessionCreateRequest(source_path=str(src)))
     sid = res["session_id"]
 
     sess = main._cloud_sessions[sid]
@@ -325,10 +326,10 @@ async def test_unplaceable_misses_warned_and_not_drawn(tmp_path, monkeypatch):
     _write_e57_zeroed_misses(src)
     monkeypatch.setattr(
         main, "_build_octree_from_las",
-        lambda las_path, ed: ("fakecache", tmp_path / "cache", {"point_count": 0}),
+        lambda las_path, ed, **kw: ("fakecache", tmp_path / "cache", {"point_count": 0}),
     )
 
-    res = await main.create_cloud_session(main.CloudSessionCreateRequest(source_path=str(src)))
+    res = await _create_session_direct(main.CloudSessionCreateRequest(source_path=str(src)))
     assert res["has_misses"] is True
     assert res["unplaceable_miss_count"] == 2
     assert res.get("warnings") and "could not be placed" in res["warnings"][0]
@@ -537,9 +538,9 @@ async def test_create_session_forwards_scan_params_origin(tmp_path, monkeypatch)
     _write_e57(src, with_misses=True)
     monkeypatch.setattr(
         main, "_build_octree_from_las",
-        lambda las_path, ed: ("fakecache", tmp_path / "cache", {"point_count": 0}),
+        lambda las_path, ed, **kw: ("fakecache", tmp_path / "cache", {"point_count": 0}),
     )
-    res = await main.create_cloud_session(main.CloudSessionCreateRequest(source_path=str(src)))
+    res = await _create_session_direct(main.CloudSessionCreateRequest(source_path=str(src)))
     assert "scan_params" in res
     assert np.allclose(res["scan_params"]["origin"], _ORIGIN)
 

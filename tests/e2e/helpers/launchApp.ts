@@ -54,7 +54,15 @@ function mainEntry(): string {
   return join(repoRoot, 'dist-main', 'main.js');
 }
 
-export async function launchApp(): Promise<LaunchedApp> {
+/**
+ * Launch the app. `extraEnv` adds environment variables for this launch, applied
+ * over the defaults below — used to exercise a backend threshold whose real
+ * trigger would need an impractically large fixture (e.g.
+ * PHYTOGRAPH_TREEISO_MAX_NODES to make a small cloud cross the cost guideline).
+ * The supervisor forwards its env to the spawned backend, so backend-side
+ * variables reach it.
+ */
+export async function launchApp(extraEnv?: Record<string, string>): Promise<LaunchedApp> {
   const backendBin = backendBinaryPath();
   if (!existsSync(backendBin)) {
     throw new Error(
@@ -109,6 +117,8 @@ export async function launchApp(): Promise<LaunchedApp> {
       PHYTOGRAPH_BACKEND_PORT: String(backendPort),
       // Private octree cache for this launch (see comment above).
       PHYTOGRAPH_OCTREE_CACHE_ROOT: octreeCacheRoot,
+      // Per-test overrides last so a spec can tune backend thresholds.
+      ...extraEnv,
     },
   });
   const page = await app.firstWindow();
