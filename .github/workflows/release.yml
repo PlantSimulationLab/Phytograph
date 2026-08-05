@@ -765,11 +765,46 @@ jobs:
           if (-not $m) { Write-Error 'FAIL: TrustedSigning module did not install'; exit 1 }
           Write-Host "TrustedSigning $($m.Version) at $($m.ModuleBase)"
 
-          # The module ships the signtool + Azure dlib payload it needs; confirm
-          # it actually landed, since a silent partial install is what produced
-          # the "cannot find the file specified" failure downstream.
-          Get-ChildItem -Recurse -Filter '*.dll' $m.ModuleBase |
-            Select-Object -First 10 Name | Format-Table -AutoSize
+          # At sign time the module shells out to signtool.exe from a NuGet
+          # package it downloads into %LOCALAPPDATA%\TrustedSigning. That
+          # download uses the same failing v2 feed, and its failure is SILENT:
+          # the module goes on to Start-Process a signtool.exe that was never
+          # written, giving "The system cannot find the file specified" followed
+          # by "SignTool failed with exit code" (with no code, because the
+          # process never started). Pre-populate both packages from the v3 API
+          # so the module finds them already present.
+          #
+          # Versions must match what TrustedSigning 0.4.1 looks for — they are
+          # baked into the module, not negotiated.
+          $root = Join-Path $env:LOCALAPPDATA 'TrustedSigning'
+          $pkgs = @(
+            @{ id = 'Microsoft.Windows.SDK.BuildTools'; ver = '10.0.22621.3233' },
+            @{ id = 'Microsoft.Trusted.Signing.Client'; ver = '1.0.53' }
+          )
+          foreach ($p in $pkgs) {
+            $dir = Join-Path $root "$($p.id)\$($p.id).$($p.ver)"
+            if (Test-Path (Join-Path $dir 'bin')) {
+              Write-Host "$($p.id) $($p.ver) already present"
+              continue
+            }
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $url = "https://api.nuget.org/v3-flatcontainer/$($p.id.ToLower())/$($p.ver)/$($p.id.ToLower()).$($p.ver).nupkg"
+            $nupkg = Join-Path $env:RUNNER_TEMP "$($p.id).$($p.ver).zip"
+            Write-Host "Fetching $url"
+            Invoke-WebRequest -Uri $url -OutFile $nupkg -UseBasicParsing
+            Expand-Archive -Path $nupkg -DestinationPath $dir -Force
+            Remove-Item $nupkg -Force
+          }
+
+          # Fail now if signtool.exe is absent — otherwise the build runs the
+          # full package step before dying on a missing file.
+          $st = Join-Path $root 'Microsoft.Windows.SDK.BuildTools\Microsoft.Windows.SDK.BuildTools.10.0.22621.3233\bin\10.0.22621.0\x64\signtool.exe'
+          if (-not (Test-Path $st)) {
+            Write-Error "FAIL: signtool.exe not found at $st"
+            Get-ChildItem -Recurse -Depth 4 $root | Select-Object FullName | Format-Table -AutoSize
+            exit 1
+          }
+          Write-Host "signtool.exe present: $st"
 
       - name: Build & publish app
         timeout-minutes: 45
