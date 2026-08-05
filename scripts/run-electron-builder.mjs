@@ -89,6 +89,17 @@ const AZURE_SIGN = {
   publisherName: 'Brian Bailey',
 };
 
+// electron-builder is spawned with `shell: true` on Windows (see the spawnSync
+// call below), which means cmd.exe re-tokenizes the argument list and splits any
+// value containing a space. Only the shell path needs the quotes; on macOS and
+// Linux the args reach execvp untouched and literal quotes would become part of
+// the value.
+function quoteIfNeeded(arg) {
+  if (process.platform !== 'win32' || !arg.includes(' ')) return arg;
+  const eq = arg.indexOf('=');
+  return `${arg.slice(0, eq + 1)}"${arg.slice(eq + 1)}"`;
+}
+
 function azureSigningArgs() {
   const haveCreds =
     process.env.AZURE_TENANT_ID &&
@@ -108,7 +119,11 @@ function azureSigningArgs() {
 
   console.log('[win-sign] Azure credentials present — Windows signing enabled.');
   return [
-    `-c.win.publisherName=${AZURE_SIGN.publisherName}`,
+    // publisherName holds a space ("Brian Bailey"). electron-builder is spawned
+    // with shell:true on Windows, so cmd.exe re-splits the argv and yargs sees
+    // the surname as a stray positional ("Unknown argument: Bailey"). Quoting
+    // keeps the value intact through the shell.
+    quoteIfNeeded(`-c.win.publisherName=${AZURE_SIGN.publisherName}`),
     `-c.win.azureSignOptions.endpoint=${AZURE_SIGN.endpoint}`,
     `-c.win.azureSignOptions.codeSigningAccountName=${AZURE_SIGN.codeSigningAccountName}`,
     `-c.win.azureSignOptions.certificateProfileName=${AZURE_SIGN.certificateProfileName}`,
