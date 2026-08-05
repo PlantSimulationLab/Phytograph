@@ -743,22 +743,33 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
-          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
-            Register-PSRepository -Default -InstallationPolicy Trusted
-          }
-          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-          # The v2 feed is what fails; make sure a working v3 source exists for
-          # the nested Microsoft.Trusted.Signing.Client download.
-          if (-not (Get-PackageSource -Name nugetv3 -ErrorAction SilentlyContinue)) {
-            Register-PackageSource -Name nugetv3 -Location 'https://api.nuget.org/v3/index.json' `
-              -ProviderName NuGet -Trusted -Force | Out-Null
-          }
-          Install-Module -Name TrustedSigning -RequiredVersion 0.4.1 -Force -Repository PSGallery -Scope CurrentUser
+
+          # Deliberately NOT Install-PackageProvider: bootstrapping the NuGet
+          # provider hits a Microsoft endpoint that fails on hosted runners
+          # ("No match was found for the specified search criteria for the
+          # provider 'NuGet'"). electron-builder wraps that same call in a
+          # try/catch for exactly this reason. PowerShellGet's Save-Module
+          # talks to PSGallery directly and needs no provider bootstrap.
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+
+          $dest = Join-Path $env:USERPROFILE 'Documents\PowerShell\Modules'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Save-Module -Name TrustedSigning -RequiredVersion 0.4.1 -Path $dest -Force
+
+          # Save-Module lays the module out where Install-Module would, so
+          # electron-builder's own `Install-Module -RequiredVersion 0.4.1`
+          # resolves it locally instead of re-downloading.
+          $env:PSModulePath = "$dest;$env:PSModulePath"
           $m = Get-Module -ListAvailable -Name TrustedSigning |
             Sort-Object Version -Descending | Select-Object -First 1
           if (-not $m) { Write-Error 'FAIL: TrustedSigning module did not install'; exit 1 }
-          Write-Host "TrustedSigning $($m.Version) installed at $($m.ModuleBase)"
+          Write-Host "TrustedSigning $($m.Version) at $($m.ModuleBase)"
+
+          # The module ships the signtool + Azure dlib payload it needs; confirm
+          # it actually landed, since a silent partial install is what produced
+          # the "cannot find the file specified" failure downstream.
+          Get-ChildItem -Recurse -Filter '*.dll' $m.ModuleBase |
+            Select-Object -First 10 Name | Format-Table -AutoSize
 
       - name: Build & publish app
         timeout-minutes: 45
