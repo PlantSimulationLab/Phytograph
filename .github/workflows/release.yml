@@ -764,8 +764,12 @@ jobs:
         # `--publish always`, which would create a GitHub Release that
         # electron-updater then offers to users as "Latest" — from a build whose
         # sidecars are stubs).
+        #
+        # Must go through an npm script: `node scripts/run-electron-builder.mjs`
+        # invoked directly does not get node_modules/.bin on PATH, so the
+        # spawned `electron-builder` is not found.
         run: ${{ inputs.signing_test
-          && 'npm run build && node scripts/run-electron-builder.mjs --win --publish never'
+          && 'npm run package:win -- --publish never'
           || format('npm run release {0}', startsWith(matrix.platform, 'macos') && format('-- --mac --{0}', matrix.arch) || '') }}
 
       # Each macOS job's electron-builder publish writes a `latest-mac.yml`
