@@ -41,6 +41,25 @@ it opens with a normal double-click — no security warning.
 3. Follow the installer prompts.
 4. Launch Phytograph from the Start menu.
 
+!!! note "If the browser blocks the download"
+    Edge and Chrome flag installers that few people have downloaded yet, and
+    the file stays in your Downloads folder as a partial `.crdownload` until
+    you explicitly keep it.
+
+    **Edge** — press ++ctrl+j++ to open Downloads, hover the Phytograph entry,
+    click the **…** menu, choose **Keep**, then **Show more → Keep anyway**.
+
+    **Chrome** — open `chrome://downloads`, find the entry, and click
+    **Keep** (it may sit behind a **…** menu on the warning bar).
+
+    Both take two clicks: the first expands the warning, the second releases
+    the download. Closing the panel in between leaves the partial file.
+
+!!! note "If Windows blocks the installer"
+    Right-click `Phytograph-Setup.exe` → **Properties** → tick **Unblock** at
+    the bottom of the General tab → **Apply**, then run it. This is only needed
+    when the **More info → Run anyway** link is hidden by a managed policy.
+
 ## Install on Linux
 
 Phytograph ships as an **AppImage**, which runs on most distributions
