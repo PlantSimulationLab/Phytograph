@@ -36,16 +36,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ⚠️ TEMPORARY — WINDOWS-ONLY WHILE BRINGING UP AZURE CODE SIGNING.
-          # The macOS arm64, macOS Intel, and Linux entries below are commented
-          # out so test tags don't burn runner minutes on platforms unaffected
-          # by the signing work. RESTORE ALL FOUR before cutting a real release:
-          # a release built from this matrix would publish a Windows-only
-          # GitHub Release and hand electron-updater a latest-mac.yml/
-          # latest-linux.yml that never got written.
-          # - platform: macos-14
-          #   arch: arm64
-          #   backend_name: phytograph_backend
+          - platform: macos-14
+            arch: arm64
+            backend_name: phytograph_backend
           # Intel macOS. This job exists because the PyInstaller backend (and
           # libhelios) must be compiled NATIVELY per architecture: v0.50.0
           # packaged both mac dmgs from the single arm64 runner, which put an
@@ -56,9 +49,9 @@ jobs:
           # x86_64 image and is scheduled to retire in August 2027, after which
           # Intel macs can no longer be supported on hosted runners — drop this
           # entry (and the x64 rows in docs/docs/guide/install.md) then.
-          # - platform: macos-15-intel
-          #   arch: x64
-          #   backend_name: phytograph_backend
+          - platform: macos-15-intel
+            arch: x64
+            backend_name: phytograph_backend
           # Pinned to windows-2022 (not windows-latest): PyHelios's CMake build
           # detects the "Visual Studio 17 2022" generator, but windows-latest
           # now ships VS 18, so the generator can't find a matching install and
@@ -73,9 +66,9 @@ jobs:
           # PyHelios's own CI builds on (pyhelios/.github/workflows/
           # pytest-linux.yml) and to avoid a surprise image bump (cf. the VS 18
           # break on windows-latest).
-          # - platform: ubuntu-24.04
-          #   arch: x64
-          #   backend_name: phytograph_backend
+          - platform: ubuntu-24.04
+            arch: x64
+            backend_name: phytograph_backend
 
     runs-on: ${{ matrix.platform }}
     # 150 min (not 75): macOS notarization waits on Apple's notary service,
@@ -938,25 +931,73 @@ jobs:
             Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { Write-Error 'FAIL: signtool.exe not found'; exit 1 }
 
-          # /pa  — use the Authenticode policy, not the driver policy
-          # /all — verify every signature present
-          # /tw  — warn (exit 2) when a signature is not timestamped
-          & $signtool.FullName verify /pa /v /all /tw $installer.FullName
-          $code = $LASTEXITCODE
-          if ($code -eq 2) {
-            Write-Error 'FAIL: signature verified but is NOT timestamped — it will expire within 72 hours.'
-            exit 1
-          }
-          if ($code -ne 0) { Write-Error "FAIL: signtool verify exited $code"; exit 1 }
+          $expectedCn = 'CN=Brian Bailey'
 
-          # The publisher CN must match `win.publisherName`, or electron-updater
-          # rejects (or silently stops verifying) every future update.
-          $cn = (Get-AuthenticodeSignature $installer.FullName).SignerCertificate.Subject
-          Write-Host "Certificate subject: $cn"
-          if ($cn -notmatch 'CN=Brian Bailey') {
-            Write-Error "FAIL: unexpected certificate subject — update win.publisherName in scripts/run-electron-builder.mjs to match."
+          # Verify one PE file: valid Authenticode chain, present timestamp, and
+          # the expected publisher.
+          #   /pa  — Authenticode policy, not the driver policy
+          #   /all — verify every signature present
+          #   /tw  — warn (exit 2) when a signature is not timestamped
+          function Assert-Signed([string]$path, [string]$label) {
+            Write-Host "== $label : $path"
+            & $signtool.FullName verify /pa /v /all /tw $path
+            $code = $LASTEXITCODE
+            if ($code -eq 2) {
+              Write-Error "FAIL: $label is signed but NOT timestamped — the signature dies with the 72-hour certificate."
+              return $false
+            }
+            if ($code -ne 0) {
+              Write-Error "FAIL: signtool verify exited $code for $label"
+              return $false
+            }
+            $cn = (Get-AuthenticodeSignature $path).SignerCertificate.Subject
+            Write-Host "   subject: $cn"
+            if ($cn -notmatch [regex]::Escape($expectedCn)) {
+              Write-Error "FAIL: $label has unexpected subject '$cn' — update win.publisherName in scripts/run-electron-builder.mjs to match."
+              return $false
+            }
+            return $true
+          }
+
+          $ok = $true
+          if (-not (Assert-Signed $installer.FullName 'installer')) { $ok = $false }
+
+          # The two sidecars ship inside the installer via extraResources.
+          # electron-builder signs every .exe it packages (winPackager
+          # shouldFile/shouldSignFile walks the whole output tree), but that is
+          # exactly the kind of thing that silently stops being true — the macOS
+          # job signs its sidecars in explicit steps, so assert the Windows
+          # equivalent rather than trusting the walk. Checked in win-unpacked/,
+          # which holds the same bits NSIS compresses into the installer.
+          $unpacked = Join-Path $outDir 'win-unpacked'
+          if (-not (Test-Path $unpacked)) {
+            Write-Error "FAIL: $unpacked not found — cannot verify sidecar signatures."
             exit 1
           }
+          $sidecars = @(
+            @{ path = 'resources\resources\phytograph_backend\phytograph_backend.exe'; label = 'backend sidecar' },
+            @{ path = 'resources\resources\potree_converter\PotreeConverter.exe';      label = 'PotreeConverter sidecar' }
+          )
+          foreach ($s in $sidecars) {
+            $full = Join-Path $unpacked $s.path
+            if (-not (Test-Path $full)) {
+              # Locate it rather than guessing: the extraResources nesting has
+              # moved before, and a silent miss here defeats the whole check.
+              $leaf = Split-Path $s.path -Leaf
+              $found = Get-ChildItem -Path $unpacked -Filter $leaf -Recurse -File -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if (-not $found) {
+                Write-Error "FAIL: $($s.label) ($leaf) not found under $unpacked"
+                $ok = $false
+                continue
+              }
+              $full = $found.FullName
+            }
+            if (-not (Assert-Signed $full $s.label)) { $ok = $false }
+          }
+
+          if (-not $ok) { exit 1 }
+          Write-Host 'All Windows artifacts signed, timestamped, and correctly attributed.'
 
       # ---------------- Verify macOS notarization ----------------
       # The afterSign hook (scripts/notarize.cjs) *submits* to Apple but
