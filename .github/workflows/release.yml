@@ -184,7 +184,7 @@ jobs:
       # the image. The arm64 runner gets prebuilt wheels for all three and
       # needs none of this.
       - name: Install sdist build deps (macOS Intel)
-        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: |
           set -euo pipefail
           brew install xerces-c swig
@@ -245,7 +245,7 @@ jobs:
       # Installed BEFORE requirements.txt so pip sees the requirement already
       # satisfied and never reaches for the broken sdist.
       - name: Install cut_pursuit_py from source (macOS Intel)
-        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         shell: bash
         env:
           VERSION_OVERRIDE: "1.0.12"
@@ -311,7 +311,7 @@ jobs:
       # disk is already tight (see the swap step below), so reclaim preinstalled
       # bloat the build never uses before installing.
       - name: Free disk space for CUDA (Linux)
-        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: false   # keep Python/Node toolchains the build needs
@@ -332,7 +332,7 @@ jobs:
       # libs give a driver-free toolkit (network method is required for sub-package
       # selection on Linux).
       - name: Install CUDA Toolkit (Linux)
-        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
           cuda: '12.6.3'
@@ -353,7 +353,7 @@ jobs:
           use-local-cache: true
 
       - name: Verify CUDA (Windows + Linux)
-        if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: nvcc -V
 
       # The CUDA apt install above REMOVES the mesa/GLVND/X11 dev packages (apt
@@ -364,7 +364,7 @@ jobs:
       # CUDA so they're present when libhelios configures. (The earlier "Install
       # Linux build dependencies" step installs them too, but CUDA runs after it.)
       - name: Re-install GL/X11 dev headers after CUDA (Linux)
-        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         # Re-install the SAME set the "Install Linux build dependencies" step did
         # (CUDA's apt transaction removed them). Must include xvfb + libtbb-dev,
         # not just the GL headers: xvfb-run wraps the packaged-backend smoke test
@@ -409,7 +409,7 @@ jobs:
       # swapon. 8 GB swap now fits and gives headroom over the 7.8 GB RAM.
       # `set -x` keeps any failure visible in this step's log.
       - name: Free disk + add swap for PyInstaller (Linux)
-        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: |
           set -x
           echo "== disk BEFORE cleanup =="
@@ -435,7 +435,7 @@ jobs:
 
       - name: Report memory after backend build (Linux)
         # always() so we capture peak/leftover state even if the build failed.
-        if: always() && runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: always() && runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: free -h || true; df -h / || true
 
       - name: Verify backend binary
@@ -577,7 +577,7 @@ jobs:
           key: potree-${{ runner.os }}-${{ matrix.arch }}-pr686-${{ steps.potree-key-unix.outputs.key || steps.potree-key-win.outputs.key }}
 
       - name: Install TBB (macOS)
-        if: steps.potree-cache.outputs.cache-hit != 'true' && startsWith(matrix.platform, 'macos')
+        if: steps.potree-cache.outputs.cache-hit != 'true' && startsWith(matrix.platform, 'macos') && !inputs.signing_test
         run: brew install tbb
 
       - name: Build PotreeConverter
