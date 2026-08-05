@@ -718,6 +718,48 @@ jobs:
       # libfuse2t64 as a belt. timeout-minutes is the safety net the old note
       # asked for: a future stall fails loudly (flushing the step log) instead of
       # burning the whole job budget.
+      # electron-builder 25.1.8 bootstraps Azure signing by running
+      # `Install-Module -Name TrustedSigning -RequiredVersion 0.4.1`, and that
+      # module then pulls its Microsoft.Trusted.Signing.Client payload over
+      # NuGet's legacy v2 endpoint. On hosted runners that download fails
+      #   WARNING: Source Location 'https://www.nuget.org/api/v2/package/
+      #            Microsoft.Trusted.Signing.Client/1.0.53' is not valid.
+      #   ... failed to be installed because: Value cannot be null.
+      # which leaves the SDK BuildTools dir (and signtool.exe) absent, so the
+      # eventual Start-Process dies with "The system cannot find the file
+      # specified" and the build fails AFTER the whole native chain has run
+      # (electron-builder#8828).
+      #
+      # Registering the NuGet v3 feed and pre-installing the same pinned
+      # version makes electron-builder's own Install-Module a cache hit. Keep
+      # the version in lockstep with the hardcoded 0.4.1 in
+      # app-builder-lib/out/codeSign/windowsSignAzureManager.js — a newer
+      # module does NOT satisfy its -RequiredVersion pin. This whole step goes
+      # away on electron-builder v26+.
+      - name: Pre-install TrustedSigning PowerShell module (Windows)
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+            Register-PSRepository -Default -InstallationPolicy Trusted
+          }
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          # The v2 feed is what fails; make sure a working v3 source exists for
+          # the nested Microsoft.Trusted.Signing.Client download.
+          if (-not (Get-PackageSource -Name nugetv3 -ErrorAction SilentlyContinue)) {
+            Register-PackageSource -Name nugetv3 -Location 'https://api.nuget.org/v3/index.json' `
+              -ProviderName NuGet -Trusted -Force | Out-Null
+          }
+          Install-Module -Name TrustedSigning -RequiredVersion 0.4.1 -Force -Repository PSGallery -Scope CurrentUser
+          $m = Get-Module -ListAvailable -Name TrustedSigning |
+            Sort-Object Version -Descending | Select-Object -First 1
+          if (-not $m) { Write-Error 'FAIL: TrustedSigning module did not install'; exit 1 }
+          Write-Host "TrustedSigning $($m.Version) installed at $($m.ModuleBase)"
+
       - name: Build & publish app
         timeout-minutes: 45
         env:
