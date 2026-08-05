@@ -163,9 +163,13 @@ asks for confirmation **once** for the whole batch, rather than once per
 entry. The same multi-select + header buttons work for **Meshes**,
 **Skeletons**, and **QSM** results.
 
-The **colormap legend** in the bottom-right shows the current
-scalar-to-color mapping (e.g., height in meters → viridis). Different
-color modes change the legend.
+The **legend stack** in the bottom-right shows one entry per
+pseudocolored object, each naming the geometry it describes and the
+variable it maps (e.g. *Oak scan 3* → *Z Height [m]*). Objects sharing a
+mapping merge into one entry; past three entries the rest collapse into a
+clickable list. Clicking an entry's caption opens an inline colormap
+picker for that object. See
+[Color modes](../reference/color-modes.md#the-legend-stack).
 
 ## Bottom status bar
 

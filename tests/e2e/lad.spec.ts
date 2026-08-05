@@ -159,10 +159,19 @@ test('Computes per-voxel leaf area density for the leaf-cube fixture', async () 
     expect(cbMax).toBeGreaterThan(1.5);
     expect(cbMax).toBeLessThan(2.7);
 
-    // Switching the colormap from the LAD row keeps the colorbar present.
+    // Switching the colormap from the LAD row sets a PER-RESULT override (it
+    // used to drive the one global colormap for every object in the scene).
     await ladRow.click();
-    await page.getByTestId('lad-colormap').selectOption('magma');
+    const ladColormap = page.getByTestId('lad-colormap');
+    await expect(ladColormap).toHaveAttribute('data-overridden', 'false');
+    await ladColormap.selectOption('magma');
+    await expect(ladColormap).toHaveValue('magma');
+    await expect(ladColormap).toHaveAttribute('data-overridden', 'true');
     await expect(colorbar).toBeVisible();
+    // Reset drops the override so the result follows the scene default again.
+    await page.getByTestId('lad-colormap-reset').click();
+    await expect(ladColormap).toHaveAttribute('data-overridden', 'false');
+    await expect(page.getByTestId('lad-colormap-reset')).toHaveCount(0);
 
     // Selecting the row (done above) expands it; the group-scale Pimont CI
     // summary is shown. For the uniform leaf cube the interval is valid and

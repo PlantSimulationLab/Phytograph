@@ -398,7 +398,10 @@ interface MeshesListPanelProps {
   meshRotations: Map<string, Vec3>;
   meshPositions: Map<string, Vec3>;
   meshScales: Map<string, Vec3>;
-  colormap: ColormapName;
+  // This mesh's EFFECTIVE colormap (its own override, else the scene default),
+  // and whether it carries an override at all (drives the "Reset" affordance).
+  colormapFor: (id: string) => ColormapName;
+  isColormapOverridden: (id: string) => boolean;
   meshWireframe: boolean;
   // Default opacity to surface for a mesh with no explicit per-mesh override.
   defaultOpacityFor: (mesh: MeshEntry) => number;
@@ -432,7 +435,9 @@ interface MeshesListPanelProps {
   // Receives the raw select value: a bare MeshColorMode, or `layer:<name>` for a
   // DTM band. The parent decodes the layer form.
   onColorModeChange: (id: string, value: string) => void;
-  onColormapChange: (name: ColormapName) => void;
+  // Sets this mesh's colormap override; `undefined` clears it back to inheriting
+  // the scene default.
+  onColormapChange: (id: string, name: ColormapName | undefined) => void;
   onOpacityChange: (id: string, value: number) => void;
   onWireframeChange: (v: boolean) => void;
   // Open the leaf-angle distribution plot for a Helios mesh.
@@ -470,7 +475,8 @@ export function MeshesListPanel({
   meshRotations,
   meshPositions,
   meshScales,
-  colormap,
+  colormapFor,
+  isColormapOverridden,
   meshWireframe,
   defaultOpacityFor,
   isTextured,
@@ -906,18 +912,35 @@ export function MeshesListPanel({
                     <option value="scan">Source scan</option>
                   )}
                 </select>
-                {/* Colormap picker applies only to the scalar gradient modes. */}
+                {/* Colormap picker applies only to the scalar gradient modes.
+                    This is now a genuine PER-MESH setting: it writes an override
+                    for this mesh only, leaving every other object on the scene
+                    default. "Reset" clears the override so the mesh follows the
+                    Display panel's default again. */}
                 {!['solid', 'scan'].includes(colorMode) && (
-                  <select
-                    data-testid="mesh-color-colormap"
-                    value={colormap}
-                    onChange={(e) => onColormapChange(e.target.value as ColormapName)}
-                    className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
-                  >
-                    {COLORMAP_NAMES.map(name => (
-                      <option key={name} value={name}>{name}</option>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-1">
+                    <select
+                      data-testid="mesh-color-colormap"
+                      data-overridden={isColormapOverridden(mesh.id) ? 'true' : 'false'}
+                      value={colormapFor(mesh.id)}
+                      onChange={(e) => onColormapChange(mesh.id, e.target.value as ColormapName)}
+                      className="flex-1 min-w-0 bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+                    >
+                      {COLORMAP_NAMES.map(name => (
+                        <option key={name} value={name}>{name}</option>
+                      ))}
+                    </select>
+                    {isColormapOverridden(mesh.id) && (
+                      <button
+                        data-testid="mesh-colormap-reset"
+                        onClick={(e) => { e.stopPropagation(); onColormapChange(mesh.id, undefined); }}
+                        className="text-[10px] text-neutral-400 hover:text-blue-400 transition-colors shrink-0 px-1"
+                        title="Follow the scene default colormap"
+                      >
+                        Reset
+                      </button>
+                    )}
+                  </div>
                 )}
                 </div>
                 )}

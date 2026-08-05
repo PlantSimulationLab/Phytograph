@@ -118,8 +118,13 @@ import {
 } from '../lib/pointCloudHelpers';
 import { applyTriangleFilter, computeTriangleMetrics, triangleFilterCounts } from '../lib/triangleFilter';
 import type { TriangleFilterEstimate } from '../lib/triangleFilter';
-import { Colorbar } from './viewer/Colorbar';
-import { ClassLegend } from './viewer/ClassLegend';
+import { LegendStack } from './viewer/LegendStack';
+import {
+  buildLegendEntries,
+  cssColorToRgb,
+  type ChannelDescriptor,
+  type LegendEntry,
+} from '../lib/colorChannel';
 import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
@@ -627,12 +632,77 @@ export default function PointCloudViewer({
   // unlit materials and are unaffected. Default 1.0 reproduces the prior
   // 1.125 intensity (= 0.75 base × 1.5).
   const [lightIntensity, setLightIntensity] = useState(1.0);
+  // The SCENE-DEFAULT cloud color mode. Clouds without their own entry in
+  // `cloudColorModes` follow this, so the Display panel keeps behaving as the
+  // "set everything" control it has always been.
   const [colorMode, setColorMode] = useState<ColorMode>('per-scan');
   const [selectedScalarField, setSelectedScalarField] = useState<string | undefined>(undefined);
+  // Per-cloud color mode + scalar field overrides, keyed by cloud id. Absent
+  // entry ⇒ follow the scene default above.
+  //
+  // Why per-cloud: a scalar field like `wood_class` only exists on the cloud a
+  // segmentation produced. Holding the selection globally meant deleting that
+  // cloud (or merely selecting another one) left `colorMode='scalar'` pointing
+  // at a field nothing carries — the renderer fell back to a flat gray ramp and
+  // the dropdown showed a value that wasn't in its own option list. That's the
+  // recurring "imports go gray / wrong color mode after delete" bug, previously
+  // papered over by a validation effect that reset the global selection.
+  // Storing the selection on the cloud that owns the field makes it die with
+  // that cloud, which removes the failure mode rather than detecting it.
+  const [cloudColorModes, setCloudColorModes] = useState<
+    Map<string, { mode: ColorMode; field?: string }>
+  >(new Map());
+  // Resolve a cloud's effective color mode: its own override, else the scene
+  // default. Mirrors colormapFor / resolveChannel.
+  const colorModeFor = useCallback(
+    (cloudId: string): { mode: ColorMode; field?: string } =>
+      cloudColorModes.get(cloudId) ?? { mode: colorMode, field: selectedScalarField },
+    [cloudColorModes, colorMode, selectedScalarField],
+  );
+  // Set (or clear, with `undefined`) one cloud's color-mode override.
+  const setCloudColorMode = useCallback(
+    (cloudId: string, next: { mode: ColorMode; field?: string } | undefined) => {
+      setCloudColorModes(prev => {
+        const map = new Map(prev);
+        if (next === undefined) map.delete(cloudId);
+        else map.set(cloudId, next);
+        return map;
+      });
+    },
+    [],
+  );
+  // The SCENE DEFAULT colormap. Objects inherit it unless they carry their own
+  // override in `colormapOverrides` — so changing this repaints everything the
+  // user hasn't explicitly overridden, which is what the global picker has
+  // always appeared to do.
   const [colormap, setColormap] = useState<ColormapName>('viridis');
+  // Per-object colormap overrides, keyed by object id (mesh id / LAD result id).
+  // Absent entry ⇒ inherit `colormap`. This is what makes the per-instance
+  // pickers real: before, the mesh-row and LAD-panel selects were both wired
+  // straight to setColormap, so "per-instance" changed every object at once.
+  const [colormapOverrides, setColormapOverrides] = useState<Map<string, ColormapName>>(new Map());
+  // Legend overlay interaction: which collapsed sliver the user promoted to
+  // full size, and which entry has its inline colormap editor open.
+  const [promotedLegendKey, setPromotedLegendKey] = useState<string | undefined>(undefined);
+  const [legendEditorKey, setLegendEditorKey] = useState<string | null>(null);
+  // Resolve an object's effective colormap: its own override, else the scene
+  // default. Mirrors resolveChannel() in lib/colorChannel.ts.
+  const colormapFor = useCallback(
+    (objectId: string): ColormapName => colormapOverrides.get(objectId) ?? colormap,
+    [colormapOverrides, colormap],
+  );
+  // Set (or clear, with `undefined`) one object's colormap override.
+  const setColormapOverride = useCallback((objectId: string, name: ColormapName | undefined) => {
+    setColormapOverrides(prev => {
+      const next = new Map(prev);
+      if (name === undefined) next.delete(objectId);
+      else next.set(objectId, name);
+      return next;
+    });
+  }, []);
   // One-shot remount generation per octree cacheId. An OctreePointCloud that
   // MOUNTS directly into a gradient mode (height/scalar) — e.g. a freshly
-  // imported cloud while the global colorMode is already 'height' — compiles
+  // imported cloud while the scene-default colorMode is already 'height' — compiles
   // its colour shader before any tiles exist, so the first tiles render with a
   // stale (grayscale) program until something forces a recompile. The
   // colorMode/field remount key only fires on a *change*, not on mount-into.
@@ -7931,8 +8001,7 @@ export default function PointCloudViewer({
         const meta = await sessionSegmentGround(sessionId, csfParams, abort.signal);
         // The parent keeps ALL points, classified + coloured by ground_class.
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
-        setColorMode('scalar');
-        setSelectedScalarField(GROUND_CLASS_ATTRIBUTE);
+        setCloudColorMode(id, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
         setShowGroundSegmentPanel(false);
 
         // Optional split: extract each class into its own child session (parent
@@ -7990,8 +8059,7 @@ export default function PointCloudViewer({
         [GROUND_CLASS_ATTRIBUTE]: { values: labels, min: 1, max: 2 },
       };
       onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
-      setColorMode('scalar');
-      setSelectedScalarField(GROUND_CLASS_ATTRIBUTE);
+      setCloudColorMode(id, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
       setShowGroundSegmentPanel(false);
 
       // Optional split into ground / plant child clouds.
@@ -8212,8 +8280,7 @@ export default function PointCloudViewer({
         if (wantHAG && result.cacheId && result.rawMeta) {
           onUpdateCloud(id, buildSessionOctreeData(result.rawMeta as unknown as OctreeMetadata, octreeInfo, baseName));
           registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
-          setColorMode('scalar');
-          setSelectedScalarField(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+          setCloudColorMode(id, { mode: 'scalar', field: HEIGHT_ABOVE_GROUND_ATTRIBUTE });
         }
         return result;
       }
@@ -8256,8 +8323,7 @@ export default function PointCloudViewer({
             [HEIGHT_ABOVE_GROUND_ATTRIBUTE]: { values: hag, min: hmin, max: hmax },
           },
         });
-        setColorMode('scalar');
-        setSelectedScalarField(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+        setCloudColorMode(id, { mode: 'scalar', field: HEIGHT_ABOVE_GROUND_ATTRIBUTE });
       }
       return result;
     };
@@ -8530,8 +8596,9 @@ export default function PointCloudViewer({
             });
           }
 
-          setColorMode('scalar');
-          setSelectedScalarField(WOOD_CLASS_ATTRIBUTE);
+          // Joint segmentation: every participating cloud carries the new
+          // wood_class field, so each gets the mode (not just one of them).
+          for (const o of order) setCloudColorMode(o.id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
           setShowWoodSegmentPanel(false);
           showToast({
             type: 'success',
@@ -8603,8 +8670,7 @@ export default function PointCloudViewer({
         } else {
           // Label in place; the parent keeps ALL points, coloured by wood_class.
           onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
-          setColorMode('scalar');
-          setSelectedScalarField(WOOD_CLASS_ATTRIBUTE);
+          setCloudColorMode(id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
         }
         setShowWoodSegmentPanel(false);
 
@@ -8732,8 +8798,7 @@ export default function PointCloudViewer({
           [WOOD_CLASS_ATTRIBUTE]: { values: woodLabels, min: 1, max: 2 },
         };
         onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
-        setColorMode('scalar');
-        setSelectedScalarField(WOOD_CLASS_ATTRIBUTE);
+        setCloudColorMode(id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
         if (woodMode === 'split') {
           makeChild(WOOD, 'wood', '#67421f', false);
           makeChild(LEAF, 'leaf', '#4caf50', false);
@@ -8805,8 +8870,7 @@ export default function PointCloudViewer({
         }, abort.signal);
         // The parent keeps ALL points, coloured by tree_instance.
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
-        setColorMode('scalar');
-        setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
+        setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
         setShowTreeSegmentPanel(false);
         setTreeSeedMode(false);
 
@@ -8895,8 +8959,7 @@ export default function PointCloudViewer({
         [TREE_INSTANCE_ATTRIBUTE]: { values: labels, min: 0, max: response.num_trees },
       };
       onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
-      setColorMode('scalar');
-      setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
+      setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
       setShowTreeSegmentPanel(false);
       setTreeSeedMode(false);
 
@@ -9008,8 +9071,7 @@ export default function PointCloudViewer({
           [TREE_INSTANCE_ATTRIBUTE]: { values: newLabels, min: 0, max: maxId },
         },
       });
-      setColorMode('scalar');
-      setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
+      setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
       showToast({ type: 'success', title: actionLabel, message: `${maxId} trees now.` });
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Refine failed';
@@ -11429,11 +11491,15 @@ export default function PointCloudViewer({
       // For a DEM 'layer' mode, resolve the selected layer's per-vertex values.
       const layerName = mode === 'layer' ? (selectedMeshLayer.get(mesh.id) ?? 'elevation') : undefined;
       const layer = layerName ? mesh.demLayers?.[layerName] : undefined;
+      // This mesh's OWN colormap (its override, else the scene default). Must be
+      // per-mesh here: keying the cache on the scene default would leave an
+      // overridden mesh painted with the previous map.
+      const meshColormap = colormapFor(mesh.id);
 
       // Full cache hit: same geometry, mode, colormap, and (for layers) layer.
       const cached = cache.get(mesh.id);
       if (cached && cached.data === mesh.data && cached.mode === mode &&
-          cached.colormap === colormap && cached.layer === layerName) {
+          cached.colormap === meshColormap && cached.layer === layerName) {
         out.set(mesh.id, cached.result);
         continue;
       }
@@ -11448,12 +11514,12 @@ export default function PointCloudViewer({
         const colors = buildMeshScanColors(mesh.data);
         if (colors) result = { positions, colors };
       } else {
-        const built = buildMeshTriangleColors(mesh.data, mode, colormap, undefined, layer?.vertexValues);
+        const built = buildMeshTriangleColors(mesh.data, mode, meshColormap, undefined, layer?.vertexValues);
         if (built) result = { positions, colors: built.colors, min: built.min, max: built.max };
       }
 
       if (result) {
-        cache.set(mesh.id, { data: mesh.data, mode, colormap, layer: layerName, result });
+        cache.set(mesh.id, { data: mesh.data, mode, colormap: meshColormap, layer: layerName, result });
         out.set(mesh.id, result);
       }
     }
@@ -11463,67 +11529,56 @@ export default function PointCloudViewer({
       if (!liveIds.has(id)) cache.delete(id);
     }
     return out;
-  }, [meshes, meshColorModes, selectedMeshLayer, colormap]);
+  }, [meshes, meshColorModes, selectedMeshLayer, colormapFor]);
 
-  // Gradient colorbar range for the selected mesh's scalar pseudocolor mode
-  // (inclination/azimuth/area). Null for 'solid' and the categorical 'scan'
-  // mode (which gets a legend instead).
-  // The mesh whose pseudocolor readout (colorbar or scan legend) is shown. A
-  // legend should be visible whenever a mesh is being pseudocolored, not only
-  // while it's selected — so prefer the selected mesh if it has an active mode,
-  // otherwise fall back to any mesh that does (typically just one at a time).
-  const activeColorMesh = useMemo(() => {
-    const hasMode = (m: MeshEntry) => {
-      const mode = meshColorModes.get(m.id);
-      return !!mode && mode !== 'solid';
+  // Drop colormap overrides whose object is gone (mesh or LAD result deleted).
+  // Without this the map grows unboundedly across a session, and — worse — a
+  // recycled id would silently inherit the dead object's colormap.
+  useEffect(() => {
+    setColormapOverrides(prev => {
+      if (prev.size === 0) return prev;
+      const live = new Set<string>([
+        ...meshes.map(m => m.id),
+        ...ladResults.map(r => r.id),
+      ]);
+      let changed = false;
+      const next = new Map(prev);
+      for (const id of prev.keys()) {
+        if (!live.has(id)) { next.delete(id); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [meshes, ladResults]);
+
+  // Test hook: the mean RGB of each mesh's per-triangle color buffer — the
+  // exact bytes handed to the GPU. E2E can't assert on rendered pixels (the
+  // launcher hides the window, and an offscreen Electron WebGL context reads
+  // back black — see tests/e2e/visual/capture-plant.mjs), so this exposes the
+  // color data itself, which is what a per-instance colormap regression would
+  // actually corrupt. Sampled, not summed over every triangle, to stay cheap.
+  useEffect(() => {
+    (window as any).__meshColorSignature = () => {
+      const out: Record<string, { r: number; g: number; b: number; n: number }> = {};
+      for (const [id, built] of meshTriangleColors) {
+        const c = built.colors;
+        const stride = Math.max(3, Math.floor(c.length / 3000) * 3);
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i + 2 < c.length; i += stride) {
+          r += c[i]; g += c[i + 1]; b += c[i + 2]; n++;
+        }
+        out[id] = n ? { r: r / n, g: g / n, b: b / n, n } : { r: 0, g: 0, b: 0, n: 0 };
+      }
+      return out;
     };
-    if (selectedMesh && hasMode(selectedMesh)) return selectedMesh;
-    return meshes.find(hasMode) ?? null;
-  }, [selectedMesh, meshes, meshColorModes]);
-
-  // Gradient colorbar range for the active mesh's scalar mode
-  // (inclination/azimuth/area). Null for 'solid' and the categorical 'scan'
-  // mode (which gets a legend instead).
-  const activeMeshColorInfo = useMemo(() => {
-    if (!activeColorMesh) return null;
-    const mode = meshColorModes.get(activeColorMesh.id);
-    if (!mode || mode === 'solid' || mode === 'scan') return null;
-    // Reuse the range already computed while building the color buffer, rather
-    // than running the O(triangles) scalar pass a second time just for the
-    // colorbar (a needless full pass that doubled the freeze on large meshes).
-    const built = meshTriangleColors.get(activeColorMesh.id);
-    if (!built || built.min === undefined || built.max === undefined) return null;
-    // For a 'layer' mode the caption is the selected layer's stored label; else the
-    // geometric-mode label.
-    let label = meshColorModeLabel(mode);
-    if (mode === 'layer') {
-      const name = selectedMeshLayer.get(activeColorMesh.id) ?? 'elevation';
-      label = activeColorMesh.demLayers?.[name]?.label ?? name;
-    }
-    return { mode, min: built.min, max: built.max, label };
-  }, [activeColorMesh, meshColorModes, selectedMeshLayer, meshTriangleColors]);
-
-  // The LAD result whose colorbar is shown: the explicitly-selected one, else
-  // the most recent visible result. Its LAD range (override-aware) drives the
-  // colorbar domain.
-  const activeLadInfo = useMemo(() => {
-    if (ladResults.length === 0) return null;
-    const result =
-      ladResults.find(r => r.id === selectedLadId && r.visible) ??
-      [...ladResults].reverse().find(r => r.visible);
-    if (!result) return null;
-    const auto = ladRange(result.voxels);
-    const min = result.ladMinOverride ?? auto.min;
-    const max = result.ladMaxOverride ?? auto.max;
-    return { result, min, max };
-  }, [ladResults, selectedLadId]);
+    return () => { delete (window as any).__meshColorSignature; };
+  }, [meshTriangleColors]);
 
   // Per-scan legend entries (color + count) when the active mesh is colored by
   // source scan. Null otherwise.
-  const activeMeshScanLegend = useMemo(() => {
-    if (!activeColorMesh) return null;
-    if (meshColorModes.get(activeColorMesh.id) !== 'scan') return null;
-    const { triangleScanIds, scanColors } = activeColorMesh.data;
+  // Per-scan legend entries (color + triangle count) for ANY mesh carrying
+  // per-triangle scan provenance. Null when the mesh has none.
+  const meshScanLegendFor = useCallback((mesh: MeshEntry) => {
+    const { triangleScanIds, scanColors } = mesh.data;
     if (!triangleScanIds || !scanColors) return null;
     const counts = new Array(scanColors.length).fill(0);
     for (let i = 0; i < triangleScanIds.length; i++) {
@@ -11532,7 +11587,7 @@ export default function PointCloudViewer({
     }
     return scanColors.map((color, i) => ({ color, count: counts[i], index: i }))
       .filter(e => e.count > 0);
-  }, [activeColorMesh, meshColorModes]);
+  }, []);
 
   // Handle Helios triangulation as a background task with cancel support.
   // `scanColors` is aligned 1:1 with request.scans so we can stash per-triangle
@@ -13240,25 +13295,13 @@ export default function PointCloudViewer({
     setOriginSelected(false);
   }, [showOriginMarker, sceneHasContent, editMode, treeSeedMode, trajectoryEditor]);
 
-  // Color modes that benefit from a colormap + colorbar (continuous scalars).
-  const isScalarColorMode = (
-    colorMode === 'x' ||
-    colorMode === 'y' ||
-    colorMode === 'height' ||
-    colorMode === 'intensity' ||
-    colorMode === 'scalar'
-  );
-
-  // Stable key for the active continuous mode (so per-mode min/max overrides
-  // don't leak across different fields/axes).
-  const colorRangeKey =
-    colorMode === 'scalar' && selectedScalarField
-      ? `scalar:${selectedScalarField}`
-      : colorMode;
-
   // Compute the data-derived default min/max for the active mode against a
   // representative cloud (the first visible selected cloud, or the first
   // visible cloud overall). Returns null if no defaults apply.
+  // The cloud the Display panel edits: strictly the user's selection (first
+  // visible selected, else the first visible cloud). It must NOT wander to some
+  // other cloud — the panel has to describe what the user just clicked, or the
+  // "Color by" dropdown would report a mode for a scan they aren't looking at.
   const colorbarSourceCloud = useMemo(() => {
     const firstSelected = Array.from(selectedIds)
       .map(id => clouds.find(c => c.id === id))
@@ -13267,68 +13310,304 @@ export default function PointCloudViewer({
     return clouds.find(c => c.visible) ?? null;
   }, [clouds, selectedIds]);
 
-  // Guard against a stale 'scalar' selection surviving across cloud changes.
-  // colorMode/selectedScalarField are GLOBAL across all clouds, but a scalar
-  // field (e.g. wood_class from a segmentation) only exists on the cloud that
-  // produced it. When that cloud is deleted — or a different cloud without the
-  // field becomes the representative — the dropdown drops the option but the
-  // mode stays 'scalar', so the renderer falls back to a flat gray ramp (and
-  // the dropdown shows a non-existent value). This is the recurring "imports
-  // gray / wrong color mode after delete" bug. Rather than reset color mode in
-  // every delete/import/segment path (the patch that keeps regressing), we
-  // validate the selection here against the SAME available-fields computation
-  // the dropdown uses, and fall back to the default when it's orphaned.
-  useEffect(() => {
-    if (colorMode !== 'scalar' || !selectedScalarField) return;
-    const cloud = colorbarSourceCloud;
-    // No visible cloud at all → nothing to validate against; leave state as-is
-    // so re-selecting the source cloud restores the mode.
-    if (!cloud) return;
-    const available = cloud.data.octree
-      ? octreeScalarFieldOptions(
-          cloud.data.octree.attributeRanges,
-          cloud.data.octree.attributeLabels,
-        ).map(o => o.value)
-      : Object.keys(cloud.data.scalarFields ?? {});
-    if (!available.includes(selectedScalarField)) {
-      setColorMode('per-scan');
-      setSelectedScalarField(undefined);
-    }
-  }, [colorMode, selectedScalarField, colorbarSourceCloud]);
+  // The cloud the class legend / colorbar describes. This one MAY fall back
+  // past the selection: splitting a segmented cloud selects the freshly-created
+  // children, which carry only positions/colors and so map nothing — without a
+  // fallback the legend the still-visible segmented parent is displaying would
+  // vanish the moment the split completed. Kept separate from
+  // colorbarSourceCloud precisely so this fallback can't leak into the panel.
+  const legendSourceCloud = useMemo(() => {
+    const mapsAScalar = (c: PointCloudEntry) => colorModeFor(c.id).mode === 'scalar';
+    const selected = Array.from(selectedIds)
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => !!c?.visible);
+    return selected.find(mapsAScalar)
+      ?? clouds.find(c => c.visible && mapsAScalar(c))
+      ?? selected[0]
+      ?? clouds.find(c => c.visible)
+      ?? null;
+  }, [clouds, selectedIds, colorModeFor]);
 
-  const dataRange = useMemo<{ min: number; max: number; label: string } | null>(() => {
-    if (!colorbarSourceCloud || !isScalarColorMode) return null;
-    const d = colorbarSourceCloud.data;
-    if (colorMode === 'x') return { min: d.bounds.min.x, max: d.bounds.max.x, label: 'X' };
-    if (colorMode === 'y') return { min: d.bounds.min.y, max: d.bounds.max.y, label: 'Y' };
-    if (colorMode === 'height') return { min: d.bounds.min.z, max: d.bounds.max.z, label: 'Z (Height)' };
-    if (colorMode === 'intensity') return { min: 0, max: 1, label: 'Intensity' };
-    if (colorMode === 'scalar' && selectedScalarField) {
+  // The scalar attribute the overlay reports via `data-active-scalar`. The
+  // legend content itself now comes from legendEntries; this stays as the
+  // stable test hook several specs assert on to identify the active field.
+  const legendColorMode = legendSourceCloud
+    ? colorModeFor(legendSourceCloud.id).mode
+    : colorMode;
+  const legendScalarField = legendSourceCloud
+    ? colorModeFor(legendSourceCloud.id).field
+    : selectedScalarField;
+
+  // The mode the Display panel edits: the SELECTED cloud's own mode (its
+  // override, else the scene default). Reading it from that cloud — rather than
+  // from global state — is what makes the panel show what the user is actually
+  // looking at once clouds can differ from each other.
+  const activeColorMode = colorbarSourceCloud
+    ? colorModeFor(colorbarSourceCloud.id).mode
+    : colorMode;
+  const activeScalarField = colorbarSourceCloud
+    ? colorModeFor(colorbarSourceCloud.id).field
+    : selectedScalarField;
+
+  // Color modes that benefit from a colormap + colorbar (continuous scalars).
+  const isScalarColorMode = (
+    activeColorMode === 'x' ||
+    activeColorMode === 'y' ||
+    activeColorMode === 'height' ||
+    activeColorMode === 'intensity' ||
+    activeColorMode === 'scalar'
+  );
+
+  // Stable key for the active continuous mode (so per-mode min/max overrides
+  // don't leak across different fields/axes).
+  const colorRangeKey =
+    activeColorMode === 'scalar' && activeScalarField
+      ? `scalar:${activeScalarField}`
+      : activeColorMode;
+
+  // Drop per-cloud color-mode overrides whose cloud is gone, and any whose
+  // scalar field the cloud no longer carries.
+  //
+  // This REPLACES the old global-selection validation effect. That one existed
+  // because colorMode/selectedScalarField were global: a field like wood_class
+  // lives on exactly one cloud, so deleting that cloud (or selecting a
+  // different one) left the global mode pointing at a field nothing had — the
+  // renderer painted a flat gray ramp and the dropdown showed a value absent
+  // from its own options. The selection now lives on the cloud that owns the
+  // field, so deleting the cloud removes the selection with it; every other
+  // cloud is unaffected because it never shared the selection in the first
+  // place. What remains here is ordinary garbage collection, not a workaround:
+  // it also covers a field disappearing from a surviving cloud (e.g. an undo
+  // that rolls back a segmentation).
+  useEffect(() => {
+    setCloudColorModes(prev => {
+      if (prev.size === 0) return prev;
+      const byId = new Map(clouds.map(c => [c.id, c]));
+      let changed = false;
+      const next = new Map(prev);
+      for (const [id, entry] of prev) {
+        const cloud = byId.get(id);
+        if (!cloud) { next.delete(id); changed = true; continue; }
+        if (entry.mode !== 'scalar' || !entry.field) continue;
+        const available = cloud.data.octree
+          ? octreeScalarFieldOptions(
+              cloud.data.octree.attributeRanges,
+              cloud.data.octree.attributeLabels,
+            ).map(o => o.value)
+          : Object.keys(cloud.data.scalarFields ?? {});
+        if (!available.includes(entry.field)) { next.delete(id); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [clouds]);
+
+  // Data-derived min/max + caption for a given cloud under a given mode.
+  // Returns null when the mode maps nothing (rgb / single / per-scan) or the
+  // cloud doesn't carry the field.
+  const dataRangeFor = useCallback((
+    cloud: PointCloudEntry | null,
+    mode: ColorMode,
+    field: string | undefined,
+  ): { min: number; max: number; label: string } | null => {
+    if (!cloud) return null;
+    const d = cloud.data;
+    if (mode === 'x') return { min: d.bounds.min.x, max: d.bounds.max.x, label: 'X' };
+    if (mode === 'y') return { min: d.bounds.min.y, max: d.bounds.max.y, label: 'Y' };
+    if (mode === 'height') return { min: d.bounds.min.z, max: d.bounds.max.z, label: 'Z (Height)' };
+    if (mode === 'intensity') return { min: 0, max: 1, label: 'Intensity' };
+    if (mode === 'scalar' && field) {
       // Flat clouds carry per-field min/max in scalarFields; octree clouds
       // carry it in octree.attributeRanges (keyed by on-disk slug). Prefer
       // the human-readable label for the colorbar caption when we have one.
-      if (d.scalarFields?.[selectedScalarField]) {
-        const f = d.scalarFields[selectedScalarField];
-        return { min: f.min, max: f.max, label: selectedScalarField };
+      if (d.scalarFields?.[field]) {
+        const f = d.scalarFields[field];
+        return { min: f.min, max: f.max, label: field };
       }
-      const r = d.octree?.attributeRanges?.[selectedScalarField];
+      const r = d.octree?.attributeRanges?.[field];
       if (r && r.min.length > 0 && r.max.length > 0) {
-        const label = d.octree?.attributeLabels?.[selectedScalarField] ?? selectedScalarField;
+        const label = d.octree?.attributeLabels?.[field] ?? field;
         return { min: r.min[0], max: r.max[0], label };
       }
     }
     return null;
-  }, [colorbarSourceCloud, colorMode, selectedScalarField, isScalarColorMode]);
+  }, []);
 
-  // The actual min/max being applied to the colormap (override → fallback).
-  const activeRange = useMemo<{ min: number; max: number } | null>(() => {
-    if (!dataRange) return null;
-    const override = colorRanges[colorRangeKey];
-    return {
-      min: override?.min ?? dataRange.min,
-      max: override?.max ?? dataRange.max,
-    };
-  }, [dataRange, colorRanges, colorRangeKey]);
+  // The min/max actually applied to a cloud's colormap: the user's range
+  // override for that mode/field, else the data-derived range.
+  const rangeForCloud = useCallback((cloud: PointCloudEntry): { min: number; max: number } | null => {
+    const { mode, field } = colorModeFor(cloud.id);
+    const base = dataRangeFor(cloud, mode, field);
+    if (!base) return null;
+    const key = mode === 'scalar' && field ? `scalar:${field}` : mode;
+    const override = colorRanges[key];
+    return { min: override?.min ?? base.min, max: override?.max ?? base.max };
+  }, [colorModeFor, dataRangeFor, colorRanges]);
+
+  // The selected cloud's range, driving the Display panel's range inputs.
+  const dataRange = useMemo(
+    () => dataRangeFor(colorbarSourceCloud, activeColorMode, activeScalarField),
+    [dataRangeFor, colorbarSourceCloud, activeColorMode, activeScalarField],
+  );
+
+  // Every pseudocolored object's contribution to the legend stack, in scene
+  // order (clouds → meshes → LAD grids). buildLegendEntries folds identical
+  // channels together and drops the ones that map nothing, so this list is
+  // deliberately permissive: describe what each object is doing and let the
+  // selector decide what deserves a legend.
+  const legendDescriptors = useMemo<ChannelDescriptor[]>(() => {
+    const out: ChannelDescriptor[] = [];
+
+    for (const cloud of clouds) {
+      if (!cloud.visible) continue;
+      const { mode, field } = colorModeFor(cloud.id);
+      const range = dataRangeFor(cloud, mode, field);
+      // No mapped range ⇒ rgb / per-scan / single: nothing to put on a scale.
+      if (!range) continue;
+      const scan = scans.find(s => s.id === cloud.id);
+      out.push({
+        objectId: cloud.id,
+        objectName: scan ? scanDisplayName(scan) : (cloud.data.fileName ?? 'Scan'),
+        objectKindPlural: 'scans',
+        variableLabel: range.label,
+        channel: {
+          mode,
+          field,
+          colormap: colormapFor(cloud.id),
+          range: rangeForCloud(cloud) ?? undefined,
+        },
+        dataRange: range,
+        selected: selectedIds.has(cloud.id),
+        origin: 'cloud',
+      });
+    }
+
+    for (const mesh of meshes) {
+      if (!mesh.visible) continue;
+      const mode = meshColorModes.get(mesh.id);
+      if (!mode || mode === 'solid') continue;
+      if (mode === 'scan') {
+        // Source-scan colouring is categorical, but its palette is the mesh's
+        // own per-scan swatches rather than a registered classification
+        // scheme — so hand the scheme in explicitly.
+        const legend = meshScanLegendFor(mesh);
+        if (!legend || legend.length === 0) continue;
+        out.push({
+          objectId: mesh.id,
+          objectName: displayNameOfMesh(mesh),
+          objectKindPlural: 'meshes',
+          variableLabel: 'Source scan',
+          channel: { mode: 'scan', field: `scan:${mesh.id}`, colormap: colormapFor(mesh.id) },
+          scheme: {
+            attribute: `scan:${mesh.id}`,
+            classes: legend.map(e => ({
+              value: e.index,
+              label: `Scan ${e.index + 1}`,
+              color: cssColorToRgb(e.color),
+            })),
+          },
+          selected: selectedMeshIds.has(mesh.id),
+          origin: 'mesh',
+        });
+        continue;
+      }
+      const built = meshTriangleColors.get(mesh.id);
+      if (!built || built.min === undefined || built.max === undefined) continue;
+      let label = meshColorModeLabel(mode);
+      if (mode === 'layer') {
+        const name = selectedMeshLayer.get(mesh.id) ?? 'elevation';
+        label = mesh.demLayers?.[name]?.label ?? name;
+      }
+      out.push({
+        objectId: mesh.id,
+        objectName: displayNameOfMesh(mesh),
+        objectKindPlural: 'meshes',
+        variableLabel: label,
+        channel: { mode, colormap: colormapFor(mesh.id) },
+        dataRange: { min: built.min, max: built.max },
+        selected: selectedMeshIds.has(mesh.id),
+        origin: 'mesh',
+      });
+    }
+
+    for (const result of ladResults) {
+      if (!result.visible) continue;
+      const auto = ladRange(result.voxels);
+      const min = result.ladMinOverride ?? auto.min;
+      const max = result.ladMaxOverride ?? auto.max;
+      out.push({
+        objectId: result.id,
+        objectName: `LAD ${result.nx}×${result.ny}×${result.nz}`,
+        objectKindPlural: 'LAD grids',
+        variableLabel: 'LAD [m²/m³]',
+        channel: { mode: 'lad', colormap: colormapFor(result.id), range: { min, max } },
+        dataRange: { min, max },
+        selected: selectedLadId === result.id,
+        origin: 'lad',
+      });
+    }
+
+    return out;
+  }, [
+    clouds, scans, selectedIds, colorModeFor, dataRangeFor, rangeForCloud, colormapFor,
+    meshes, meshColorModes, meshTriangleColors, selectedMeshLayer, selectedMeshIds,
+    displayNameOfMesh, meshScanLegendFor,
+    ladResults, selectedLadId,
+  ]);
+
+  const legendEntries = useMemo(
+    () => buildLegendEntries(legendDescriptors),
+    [legendDescriptors],
+  );
+
+  // Inline editor for a legend entry: change the colormap (and reset to the
+  // scene default) for every object folded into it. Putting the control on the
+  // legend means it sits next to the thing it affects, rather than only in the
+  // object panels.
+  //
+  // A grouped entry ("5 scans") applies the change to all its members, which is
+  // exactly what the caption promises. Categorical entries get no colormap
+  // picker — their colours come from the classification scheme, not a ramp.
+  const renderLegendEditor = useCallback((entry: LegendEntry) => {
+    if (entry.kind !== 'continuous') {
+      return (
+        <div className="text-[10px] text-neutral-500 leading-snug">
+          Class colors come from the classification scheme.
+        </div>
+      );
+    }
+    const overridden = entry.objectIds.some(id => colormapOverrides.has(id));
+    return (
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] text-neutral-400">Colormap</span>
+          {overridden && (
+            <button
+              data-testid="legend-colormap-reset"
+              onClick={() => { for (const id of entry.objectIds) setColormapOverride(id, undefined); }}
+              className="text-[10px] text-neutral-400 hover:text-blue-400 transition-colors"
+              title="Follow the scene default colormap"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+        <select
+          data-testid="legend-colormap"
+          data-overridden={overridden ? 'true' : 'false'}
+          value={entry.colormap}
+          onChange={(e) => {
+            const name = e.target.value as ColormapName;
+            for (const id of entry.objectIds) setColormapOverride(id, name);
+          }}
+          className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+        >
+          {COLORMAP_NAMES.map(name => (
+            <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }, [colormapOverrides, setColormapOverride]);
 
   return (
     <div
@@ -13409,6 +13688,10 @@ export default function PointCloudViewer({
           if (!cloud.visible) return null;
           const editState = getEditState(cloud.id);
           const isSelected = selectedIds.has(cloud.id);
+          // This cloud's OWN color mode (its override, else the scene default).
+          // Every colour decision below reads these, not the global state, so
+          // two clouds can sit in different modes at once.
+          const { mode: cloudColorMode, field: cloudScalarField } = colorModeFor(cloud.id);
           // Keep the crop preview (hidden to-be-cropped points) alive while
           // the apply's backend round-trip is in flight. handleApplyCrop
           // flips editMode to 'none' immediately (to hide the box handles +
@@ -13471,7 +13754,7 @@ export default function PointCloudViewer({
                   // just the colour mode — switching the field needs a fresh
                   // material + BindingStates so the new attribute's buffer
                   // (swapped into `intensity`) binds correctly.
-                  key={`octree-${colorMode}-${selectedScalarField ?? ''}-${sourceData.octree ? (octreePaintGen[sourceData.octree.cacheId] ?? 0) : 0}`}
+                  key={`octree-${cloudColorMode}-${cloudScalarField ?? ''}-${sourceData.octree ? (octreePaintGen[sourceData.octree.cacheId] ?? 0) : 0}`}
                   data={sourceData}
                   // The octree attaches to the scene root, NOT inside the parent
                   // <group position> above, so the group's translation never
@@ -13505,17 +13788,17 @@ export default function PointCloudViewer({
                   // clean octree equivalent yet (no axis-scalar shader),
                   // so they fall through to 'height' which colours by Z.
                   colorMode={
-                    colorMode === 'per-scan'
+                    cloudColorMode === 'per-scan'
                       ? 'single'
-                      : colorMode === 'x' || colorMode === 'y'
+                      : cloudColorMode === 'x' || cloudColorMode === 'y'
                         ? 'height'
-                        : colorMode
+                        : cloudColorMode
                   }
-                  selectedScalarField={selectedScalarField}
-                  singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
-                  colormap={colormap}
-                  rangeMin={activeRange?.min}
-                  rangeMax={activeRange?.max}
+                  selectedScalarField={cloudScalarField}
+                  singleColor={cloudColorMode === 'per-scan' ? cloud.color : undefined}
+                  colormap={colormapFor(cloud.id)}
+                  rangeMin={rangeForCloud(cloud)?.min}
+                  rangeMax={rangeForCloud(cloud)?.max}
                   // Live crop preview: pass the current crop box only in
                   // box mode while a crop is being drawn AND this cloud
                   // is in the selection. Polygon mode falls back to the
@@ -13597,13 +13880,13 @@ export default function PointCloudViewer({
                     pointSize={pointSize}
                     // 'per-scan' is rendered as 'single' with the cloud's own
                     // swatch color — keeps PointCloud unaware of multi-cloud state.
-                    colorMode={colorMode === 'per-scan' ? 'single' : colorMode}
-                    singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
-                    selectedScalarField={selectedScalarField}
+                    colorMode={cloudColorMode === 'per-scan' ? 'single' : cloudColorMode}
+                    singleColor={cloudColorMode === 'per-scan' ? cloud.color : undefined}
+                    selectedScalarField={cloudScalarField}
                     filters={cloudFilters.get(cloud.id)}
-                    colormap={colormap}
-                    rangeMin={activeRange?.min}
-                    rangeMax={activeRange?.max}
+                    colormap={colormapFor(cloud.id)}
+                    rangeMin={rangeForCloud(cloud)?.min}
+                    rangeMax={rangeForCloud(cloud)?.max}
                   />
                 );
                 if (!hasRot || hasResamplePreview) return cloudEl;
@@ -13902,7 +14185,7 @@ export default function PointCloudViewer({
                 voxels={result.voxels}
                 rotationDeg={result.gridRotationDeg ?? 0}
                 gridCenter={result.gridCenter}
-                colormap={colormap}
+                colormap={colormapFor(result.id)}
                 min={min}
                 max={max}
                 opacity={result.opacity}
@@ -15588,7 +15871,8 @@ export default function PointCloudViewer({
             meshRotations={meshRotations}
             meshPositions={meshPositions}
             meshScales={meshScales}
-            colormap={colormap}
+            colormapFor={colormapFor}
+            isColormapOverridden={(id) => colormapOverrides.has(id)}
             meshWireframe={meshWireframe}
             defaultOpacityFor={defaultMeshOpacity}
             isTextured={isTexturedMesh}
@@ -15640,7 +15924,7 @@ export default function PointCloudViewer({
                 return next;
               });
             }}
-            onColormapChange={setColormap}
+            onColormapChange={setColormapOverride}
             onOpacityChange={(id, value) => setMeshOpacities(prev => new Map(prev).set(id, value))}
             onWireframeChange={setMeshWireframe}
             onOpenLeafAngles={setShowLeafAngleMeshId}
@@ -15838,12 +16122,13 @@ export default function PointCloudViewer({
           <LADResultsPanel
             ladResults={ladResults}
             selectedLadId={selectedLadId}
-            colormap={colormap}
+            colormapFor={colormapFor}
+            isOverridden={(id) => colormapOverrides.has(id)}
             onSelect={setSelectedLadId}
             onToggleVisible={toggleLadVisible}
             onRemove={removeLadResult}
             onUpdate={updateLadResult}
-            onColormapChange={setColormap}
+            onColormapChange={setColormapOverride}
           />
         )}
 
@@ -17043,99 +17328,17 @@ export default function PointCloudViewer({
           without overlapping each other. */}
       <div
         data-testid="scalar-overlay"
-        data-active-scalar={colorMode === 'scalar' ? selectedScalarField ?? '' : ''}
-        className="absolute bottom-4 right-[296px] z-20 flex flex-row items-end gap-3 pointer-events-none"
+        data-active-scalar={legendColorMode === 'scalar' ? legendScalarField ?? '' : ''}
+        className="absolute bottom-4 right-[296px] z-20 pointer-events-none"
       >
-        {/* Tree instance ids are arbitrary nominal labels — a per-tree legend
-            would list every tree (Tree 1…Tree N), filling the viewport height,
-            and a continuous colorbar would be meaningless. So show neither when
-            coloring by tree_instance; the points stay colored, just no overlay. */}
-        {selectedScalarField === TREE_INSTANCE_ATTRIBUTE ? null :
-         isScalarColorMode && colorMode === 'scalar' && selectedScalarField &&
-         dataRange && categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max]) ? (
-          <div
-            data-testid="class-legend"
-            data-legend-attribute={selectedScalarField}
-          >
-            <ClassLegend
-              scheme={categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max])!}
-              label={dataRange.label}
-            />
-          </div>
-        ) : isScalarColorMode && activeRange && dataRange && (
-          <div
-            data-testid="colorbar"
-            data-colorbar-label={dataRange.label}
-            data-colorbar-min={activeRange.min}
-            data-colorbar-max={activeRange.max}
-          >
-            <Colorbar
-              colormap={colormap}
-              min={activeRange.min}
-              max={activeRange.max}
-              label={dataRange.label}
-            />
-          </div>
-        )}
-
-        {/* Mesh pseudocolor colorbar — when a mesh is colored by
-            inclination/azimuth/area. */}
-        {activeMeshColorInfo && (
-          <div
-            data-testid="mesh-colorbar"
-            data-colorbar-label={activeMeshColorInfo.label}
-            data-colorbar-min={activeMeshColorInfo.min}
-            data-colorbar-max={activeMeshColorInfo.max}
-          >
-            <Colorbar
-              colormap={colormap}
-              min={activeMeshColorInfo.min}
-              max={activeMeshColorInfo.max}
-              label={activeMeshColorInfo.label}
-            />
-          </div>
-        )}
-
-        {/* Source-scan legend — when a mesh is colored by scan. */}
-        {activeMeshScanLegend && activeMeshScanLegend.length > 0 && (
-          <div
-            data-testid="mesh-scan-legend"
-            data-scan-count={activeMeshScanLegend.length}
-          >
-            <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg px-2.5 py-2 border border-neutral-700/50 select-none max-w-[200px]">
-              <div className="text-[10px] text-neutral-300 mb-1.5">Source scan</div>
-              <div className="space-y-1 max-h-[200px] overflow-y-auto">
-                {activeMeshScanLegend.map(entry => (
-                  <div key={entry.index} className="flex items-center gap-2 text-[10px] text-neutral-300">
-                    <span
-                      className="w-3 h-3 rounded-sm border border-neutral-600 flex-shrink-0"
-                      style={{ backgroundColor: entry.color }}
-                    />
-                    <span className="flex-1 truncate">Scan {entry.index + 1}</span>
-                    <span className="text-neutral-500">{entry.count.toLocaleString()}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Leaf area density colorbar — when an LAD result is visible. */}
-        {activeLadInfo && (
-          <div
-            data-testid="lad-colorbar"
-            data-colorbar-label="LAD"
-            data-colorbar-min={activeLadInfo.min}
-            data-colorbar-max={activeLadInfo.max}
-          >
-            <Colorbar
-              colormap={colormap}
-              min={activeLadInfo.min}
-              max={activeLadInfo.max}
-              label="LAD [m²/m³]"
-            />
-          </div>
-        )}
+        <LegendStack
+          entries={legendEntries}
+          promotedKey={promotedLegendKey}
+          onPromote={setPromotedLegendKey}
+          onEdit={(entry) => setLegendEditorKey(k => (k === entry.key ? null : entry.key))}
+          editingKey={legendEditorKey}
+          renderEditor={renderLegendEditor}
+        />
       </div>
 
       {/* LAD voxel hover readout — the value of the cell under the cursor. */}
@@ -17170,7 +17373,11 @@ export default function PointCloudViewer({
         {/* Collapsible Content */}
         {!displayPanelCollapsed && (
           <div className="px-3 pb-3 space-y-2">
-            {/* Color by — global across all clouds. Options are derived from a
+            {/* Color by. Applies to the SELECTED clouds when there is a
+                selection, else sets the scene default that unselected clouds
+                follow — so the long-standing "change it for everything"
+                behaviour is what you get with nothing selected, and picking a
+                scan first scopes the change to it. Options are derived from a
                 representative cloud (first selected-visible, else first
                 visible): X/Y are hidden for octree clouds, and that cloud's
                 scalar fields are offered as additional modes. */}
@@ -17203,22 +17410,41 @@ export default function PointCloudViewer({
               // Encode scalar selections as `scalar:<field>` so the single
               // <select> can drive both colorMode and selectedScalarField.
               const selectValue =
-                colorMode === 'scalar' && selectedScalarField
-                  ? `scalar:${selectedScalarField}`
-                  : colorMode;
+                activeColorMode === 'scalar' && activeScalarField
+                  ? `scalar:${activeScalarField}`
+                  : activeColorMode;
+              // Clouds this change applies to: the visible selection, else
+              // nothing (which means "set the scene default" below).
+              const targetIds = clouds
+                .filter(c => c.visible && selectedIds.has(c.id))
+                .map(c => c.id);
               return (
                 <div>
-                  <label className="text-[10px] text-neutral-400 block mb-1">Color by</label>
+                  <label className="text-[10px] text-neutral-400 block mb-1">
+                    {targetIds.length > 0
+                      ? `Color by (${targetIds.length} selected)`
+                      : 'Color by (all scans)'}
+                  </label>
                   <select
                     data-testid="display-color-mode"
+                    data-target-count={targetIds.length}
                     value={selectValue}
                     onChange={(e) => {
                       const v = e.target.value;
-                      if (v.startsWith('scalar:')) {
-                        setColorMode('scalar');
-                        setSelectedScalarField(v.slice('scalar:'.length));
+                      const next = v.startsWith('scalar:')
+                        ? { mode: 'scalar' as ColorMode, field: v.slice('scalar:'.length) }
+                        : { mode: v as ColorMode, field: undefined };
+                      if (targetIds.length > 0) {
+                        // Scoped edit: override just the selected clouds.
+                        for (const id of targetIds) setCloudColorMode(id, next);
                       } else {
-                        setColorMode(v as ColorMode);
+                        // No selection → move the scene default, and clear the
+                        // per-cloud overrides so the change is visible on every
+                        // cloud (otherwise an earlier scoped edit would pin a
+                        // cloud and the "all scans" label would be a lie).
+                        setColorMode(next.mode);
+                        setSelectedScalarField(next.field);
+                        setCloudColorModes(new Map());
                       }
                     }}
                     className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
@@ -17235,14 +17461,21 @@ export default function PointCloudViewer({
                     )}
                   </select>
 
-                  {/* Colormap + range — only for continuous (scalar) modes. */}
+                  {/* Colormap + range — only for continuous (scalar) modes.
+                      This picker is the SCENE DEFAULT: every object follows it
+                      until the user overrides that object individually (from
+                      its own row in the Meshes / LAD panels), so changing it
+                      here repaints everything still inheriting. */}
                   {isScalarColorMode && (
                     <>
+                      <label className="text-[10px] text-neutral-400 block mt-1.5 mb-1">
+                        Default colormap
+                      </label>
                       <select
                         data-testid="display-colormap"
                         value={colormap}
                         onChange={(e) => setColormap(e.target.value as ColormapName)}
-                        className="w-full mt-1 bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+                        className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
                       >
                         {COLORMAP_NAMES.map((name) => (
                           <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>

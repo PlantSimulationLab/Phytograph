@@ -1,8 +1,16 @@
 # Color modes
 
-Point-cloud color mode is **global** — it applies to every loaded cloud
-at once. Change it from the **Color by** dropdown in the Display panel
-(lower-right corner of the viewer).
+Set a point cloud's color mode from the **Color by** dropdown in the
+Display panel (lower-right corner of the viewer). What it applies to
+depends on your selection:
+
+- **Nothing selected** — the dropdown reads *Color by (all scans)* and
+  sets the scene default. Every cloud follows it.
+- **One or more scans selected** — the dropdown reads *Color by (N
+  selected)* and changes only those scans, leaving the rest alone.
+
+That means two clouds can sit in different modes at once — a segmented
+scan showing its wood/leaf classes beside a raw scan colored by height.
 
 ## Per-cloud color modes
 
@@ -14,16 +22,55 @@ at once. Change it from the **Color by** dropdown in the Display panel
 | **Y Axis** | Color by Y position | Same, for Y. Not offered for octree-streamed clouds. |
 | **Intensity** | Color by LiDAR intensity scalar | Distinguishing reflective leaves from less reflective wood (species-dependent). |
 | **RGB** | Original per-point color from the file | Scans co-registered with photography. |
-| **Solid Color** | A single flat color applied to every cloud | When you want the data out of the way to focus on a mesh or skeleton overlay. |
+| **Solid Color** | A single flat color | When you want the data out of the way to focus on a mesh or skeleton overlay. |
 | **Scalar Field** | Color by any custom per-point scalar carried in the source file | Imported clouds with extra columns — reflectance, deviation, timestamp, target index, custom metrics. |
 
 When a scalar mode is active, a colormap selector becomes available in
 the right panel: viridis (default), plasma, inferno, magma, turbo, jet,
 coolwarm, grayscale.
 
-The color mode is **global** — it applies to every cloud at once, not per
-scan. (Per-scan color is the exception: it draws each cloud in its own
-swatch color.)
+## The legend stack
+
+Every pseudocolored object contributes one entry to a single legend stack
+in the lower-right corner of the viewer. Each entry names **the geometry
+it describes** on the first line and the **variable** on the second, so a
+scene holding a segmented scan, a DEM mesh and an LAD grid reads
+unambiguously instead of stacking anonymous colorbars.
+
+- **Objects sharing a mapping merge.** Five scans all colored by height
+  produce one entry captioned *5 scans*, not five identical colorbars.
+  Give one of them its own colormap and it splits out into its own entry,
+  captioned by name.
+- **The stack stops growing at three.** Beyond that, the remaining
+  entries collapse into a compact list of one-line rows; click a row to
+  expand it. The selected object keeps a full-size entry, outlined in
+  blue.
+- **Click an entry's caption to edit it.** An inline **Colormap** picker
+  appears, applying to every object that entry covers — including all
+  members of a merged group. Categorical entries have no picker, since
+  their colors come from the classification scheme rather than a ramp.
+
+Colouring by `tree_instance` deliberately shows no legend: tree ids are
+arbitrary labels and a scene routinely holds 100+ of them, so neither a
+gradient nor a class list would be readable. The points stay colored.
+
+## Colormaps: one default, per-object overrides
+
+The **Default colormap** picker in the Display panel sets the palette for
+the whole scene. Individual objects can then override it, either from
+their own row — a mesh's **Color by** section, or a Leaf Area Density
+result's **Colormap** field — or straight from the legend entry (click
+its caption). Both surfaces edit the same setting. An overridden object
+stops following the default and shows a **Reset** link that puts it back.
+
+Changing the default repaints everything still inheriting it, leaving
+overridden objects alone. This lets you compare two objects under
+different palettes — say a DEM mesh in plasma against an LAD grid in
+turbo — without one picker dragging the other along.
+
+A scalar field selection belongs to the cloud that carries it, so
+deleting a segmented scan removes its mode with it; other clouds are
+unaffected.
 
 ### Scalar fields on imported clouds
 
@@ -170,12 +217,12 @@ dims the rest.
 ## Leaf area density voxels
 
 A [leaf area density](../concepts/leaf-area-density.md) result is a grid
-of voxel cells, each colored by its LAD value (m²/m³) through the shared
-scalar colormap. A colorbar labelled **LAD [m²/m³]** shows the range.
+of voxel cells, each colored by its LAD value (m²/m³). A colorbar
+labelled **LAD [m²/m³]** shows the range.
 
 | Control | What it does |
 |---|---|
-| **Colormap** | Same palette set as scalar fields (viridis default). Shared with the other scalar colorbars. |
+| **Colormap** | Same palette set as scalar fields. Follows the scene default until you change it here, which overrides it for this result only (**Reset** restores the default). |
 | **Opacity** | Cell translucency, so you can see through the grid into the canopy. |
 | **Hide empty voxels** | On by default — voxels with no returns (LAD ≤ 0) are hidden so only foliage-bearing cells draw. Turn off to see the full grid faintly. |
 
