@@ -11,6 +11,21 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      # Bring-up switch for Windows code signing. The native chain (CUDA
+      # toolkit 17 min + PyHelios 7 min + PyInstaller 4.5 min) dominates a
+      # release build and has nothing to do with whether Authenticode signing
+      # works, so this replaces the sidecars with stub .exe files and packages
+      # against them: ~5 min per iteration instead of ~35.
+      #
+      # The stubs ARE signed (electron-builder signs every .exe it packages),
+      # so this exercises the real Azure signing path, the real timestamp
+      # parameters, and the real certificate — just not the real backend.
+      # It never publishes. Always finish with one normal run before shipping.
+      signing_test:
+        description: 'Signing bring-up: stub the sidecars, skip the native build, do not publish'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -128,8 +143,11 @@ jobs:
         run: |
           echo "sha=$(git -C pyhelios rev-parse HEAD)-$(git -C pyhelios/helios-core rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # Skipped in signing_test mode: restoring a real backend bundle would
+      # collide with the stubs written below (and mask what is being tested).
       - name: Cache PyInstaller backend
         id: backend-cache
+        if: '!inputs.signing_test'
         uses: actions/cache@v4
         with:
           path: resources/${{ matrix.backend_name }}
@@ -254,7 +272,7 @@ jobs:
             assert hasattr(cut_pursuit_py, 'perform_cut_pursuit')"
 
       - name: Install Python dependencies
-        if: steps.backend-cache.outputs.cache-hit != 'true'
+        if: steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         working-directory: backend-api
         shell: bash
         run: |
@@ -326,7 +344,7 @@ jobs:
       # Windows: the full network install works there (no apt/driver dpkg step),
       # and building the CUDA path wants the standard toolkit layout.
       - name: Install CUDA Toolkit (Windows)
-        if: runner.os == 'Windows' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Windows' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
           cuda: '12.6.2'
@@ -372,7 +390,7 @@ jobs:
       # that masquerades as GPU-capable. macOS has no CUDA, so it never gets the
       # flag.
       - name: Build PyHelios from source
-        if: steps.backend-cache.outputs.cache-hit != 'true'
+        if: steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: node scripts/build-pyhelios.mjs ${{ runner.os != 'macOS' && '--require-gpu' || '' }}
 
       # Free disk + enlarge swap on Linux before the PyInstaller backend build.
@@ -412,7 +430,7 @@ jobs:
           df -h / || true
 
       - name: Build Python backend
-        if: steps.backend-cache.outputs.cache-hit != 'true'
+        if: steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: node scripts/build-backend.mjs
 
       - name: Report memory after backend build (Linux)
@@ -421,6 +439,7 @@ jobs:
         run: free -h || true; df -h / || true
 
       - name: Verify backend binary
+        if: '!inputs.signing_test'
         shell: bash
         run: |
           ls -la resources/${{ matrix.backend_name }}
@@ -481,7 +500,7 @@ jobs:
           echo "PASS: packaged backend launched and reported version $got"
 
       - name: Smoke-test backend (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.signing_test
         shell: pwsh
         env:
           PHYTOGRAPH_BACKEND_PORT: '8123'
@@ -549,6 +568,7 @@ jobs:
 
       - name: Cache PotreeConverter binary
         id: potree-cache
+        if: '!inputs.signing_test'
         uses: actions/cache@v4
         with:
           path: resources/potree_converter
@@ -561,7 +581,7 @@ jobs:
         run: brew install tbb
 
       - name: Build PotreeConverter
-        if: steps.potree-cache.outputs.cache-hit != 'true'
+        if: steps.potree-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/build-potree-converter.mjs
@@ -597,7 +617,7 @@ jobs:
           echo "PASS: PotreeConverter launches"
 
       - name: Verify PotreeConverter binary (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.signing_test
         shell: pwsh
         run: |
           $bin = Get-ChildItem -Path resources/potree_converter -Recurse -Filter 'PotreeConverter.exe' | Select-Object -First 1
@@ -662,6 +682,30 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Signing bring-up only: stand in for the sidecars the native chain would
+      # have produced. electron-builder's extraResources globs
+      # (resources/phytograph_backend/**, resources/potree_converter/**) match
+      # nothing when those dirs are absent, and NSIS then packages an installer
+      # with no sidecar .exe to sign — which would make a green run prove less
+      # than it appears to. These stubs are real PE binaries so signtool has
+      # something to sign and the extraResources signing path is exercised.
+      - name: Stub sidecar binaries (signing test)
+        if: inputs.signing_test && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path resources/phytograph_backend | Out-Null
+          New-Item -ItemType Directory -Force -Path resources/potree_converter | Out-Null
+          # Copy a genuine signed-nothing PE rather than fabricating one: an
+          # invalid PE makes signtool fail for reasons unrelated to Azure.
+          Copy-Item "$env:SystemRoot\System32\where.exe" `
+            resources/phytograph_backend/phytograph_backend.exe
+          Copy-Item "$env:SystemRoot\System32\where.exe" `
+            resources/potree_converter/PotreeConverter.exe
+          Write-Host 'Stub sidecars created:'
+          Get-ChildItem -Recurse resources/phytograph_backend, resources/potree_converter |
+            Select-Object FullName, Length | Format-Table -AutoSize
+
       # Linux ships AppImage (squashfs-compressed; the .deb was uncompressed and
       # exceeded GitHub's 2 GiB release-asset limit for this GPU/open3d/torch
       # bundle). The v0.19.0 AppImage hang was electron-builder's appimagetool
@@ -715,7 +759,14 @@ jobs:
         # cross-package an x64 dmg again — cross-packaging is exactly what
         # shipped an arm64 backend inside the x64 dmg in v0.50.0 (extraResources
         # copies resources/phytograph_backend verbatim; it is not arch-aware).
-        run: npm run release ${{ startsWith(matrix.platform, 'macos') && format('-- --mac --{0}', matrix.arch) || '' }}
+        #
+        # signing_test builds with `--publish never` (npm run release hardcodes
+        # `--publish always`, which would create a GitHub Release that
+        # electron-updater then offers to users as "Latest" — from a build whose
+        # sidecars are stubs).
+        run: ${{ inputs.signing_test
+          && 'npm run build && node scripts/run-electron-builder.mjs --win --publish never'
+          || format('npm run release {0}', startsWith(matrix.platform, 'macos') && format('-- --mac --{0}', matrix.arch) || '') }}
 
       # Each macOS job's electron-builder publish writes a `latest-mac.yml`
       # updater manifest listing ONLY that job's arch files, and both jobs
@@ -751,8 +802,10 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then launcher="xvfb-run -a"; fi
           $launcher npm run test:smoke-packaged
 
+      # Skipped in signing_test mode: the stub sidecars are not a real
+      # backend, so the app cannot boot. Signing is what's under test here.
       - name: Smoke-test packaged app (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.signing_test
         run: npm run test:smoke-packaged
 
       # ---------------- Verify Windows signature ----------------
