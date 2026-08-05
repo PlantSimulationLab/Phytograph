@@ -2442,6 +2442,13 @@ export interface ProgressMarker {
   // run carries cancelled:true in place of a frame. Both optional on other markers.
   runId?: string;
   cancelled?: boolean;
+  // The terminal marker of a FAILED run carries the error message in place of a
+  // frame. These endpoints stream, so the backend has already sent `200 OK` and
+  // its headers before the worker runs — a later exception cannot change the
+  // status code, so the failure has to travel in-band. Without this the client
+  // saw a 200 with a truncated body and reported a decode error instead of the
+  // real cause.
+  error?: string;
 }
 
 function isWhitespaceByte(b: number): boolean {
@@ -2485,6 +2492,7 @@ export function parseProgressMarkers(
         message: parsed.message ?? '',
         runId: parsed.run_id,
         cancelled: parsed.cancelled,
+        error: parsed.error,
       });
     } catch {
       // Ignore a malformed marker rather than wedging the stream.
@@ -2492,6 +2500,24 @@ export function parseProgressMarkers(
     o += 8 + jsonLen;
   }
   return { markers, consumed: o - offset };
+}
+
+/**
+ * Throw if a buffered (non-streaming) response body carries a terminal
+ * `cancelled` / `error` marker in place of its payload.
+ *
+ * The streaming readers check each marker as it arrives, but the buffered
+ * fallbacks (`!onProgress` / `!response.body`) read the whole body at once and
+ * would otherwise skip straight past a terminal marker to decode a payload that
+ * was never written — turning a real backend error into a confusing "frame too
+ * short" / JSON parse failure.
+ */
+function throwIfTerminalMarker(bytes: Uint8Array): void {
+  const { markers } = parseProgressMarkers(bytes, 0);
+  for (const m of markers) {
+    if (m.cancelled) throw new ScanCancelledError();
+    if (m.error) throw new Error(m.error);
+  }
 }
 
 export function decodeBinaryFrame(buf: ArrayBuffer): BinaryFrame {
@@ -2636,7 +2662,9 @@ export async function fetchBinaryFrame(
     }
     if (!onProgress || !response.body) {
       clearTimeout(timeoutId);
-      return decodeBinaryFrame(await response.arrayBuffer());
+      const buf = await response.arrayBuffer();
+      throwIfTerminalMarker(new Uint8Array(buf));
+      return decodeBinaryFrame(buf);
     }
 
     // Streaming path: accumulate bytes, draining leading PHP1 markers as they
@@ -2659,6 +2687,10 @@ export async function fetchBinaryFrame(
           // there is no frame to decode. Surface it as a typed abort so callers
           // can distinguish a user cancel from a real failure.
           if (m.cancelled) throw new ScanCancelledError();
+          // An `error` marker means the worker raised after the 200 was already
+          // committed. Throw the backend's own message rather than falling
+          // through to decode a frame that was never written.
+          if (m.error) throw new Error(m.error);
           onProgress(m.progress, m.message);
         }
         pending = merged.subarray(consumed);
@@ -2733,6 +2765,7 @@ export async function fetchJsonWithProgress<T>(
       // the buffered bytes, then parse the JSON tail.
       clearTimeout(timeoutId);
       const all = new Uint8Array(await response.arrayBuffer());
+      throwIfTerminalMarker(all);
       const { consumed } = parseProgressMarkers(all, 0);
       return JSON.parse(new TextDecoder().decode(all.subarray(consumed))) as T;
     }
@@ -2751,6 +2784,7 @@ export async function fetchJsonWithProgress<T>(
         for (const m of markers) {
           if (m.runId && onRunId) onRunId(m.runId);
           if (m.cancelled) throw new ScanCancelledError();
+          if (m.error) throw new Error(m.error);
           if (onProgress) onProgress(m.progress, m.message);
         }
         pending = merged.subarray(consumed);

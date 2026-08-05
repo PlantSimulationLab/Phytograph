@@ -1196,6 +1196,42 @@ describe('parseProgressMarkers', () => {
     expect(markers[0].cancelled).toBe(true);
     expect(markers[0].message).toBe('Cancelled');
   });
+
+  // These endpoints stream, so `200 OK` and the headers are already on the wire
+  // before the worker runs — a later exception can't change the status code. The
+  // backend therefore reports the failure in-band as a terminal `error` marker
+  // (see _pack_progress_marker). Previously a crashed worker produced a 200 with
+  // a truncated body, and the renderer reported a decode error instead of the
+  // real cause.
+  it('surfaces the terminal error marker', () => {
+    const failed = buildPhp1Marker(null, '', {
+      error: "Helios triangulation needs an ASCII point file, but 'scan.las' is a binary .las file.",
+    });
+    const { markers } = parseProgressMarkers(failed, 0);
+    expect(markers[0].error).toContain('scan.las');
+    expect(markers[0].cancelled).toBeUndefined();
+  });
+
+  it('keeps progress reported before a failure', () => {
+    // A worker can report progress and then raise; both must reach the client,
+    // in order, so the UI can show where it got to.
+    const p = buildPhp1Marker(0.3, 'Reading points');
+    const failed = buildPhp1Marker(null, '', { error: 'boom' });
+    const { markers } = parseProgressMarkers(concat(p, failed), 0);
+    expect(markers).toHaveLength(2);
+    expect(markers[0].message).toBe('Reading points');
+    expect(markers[0].error).toBeUndefined();
+    expect(markers[1].error).toBe('boom');
+  });
+
+  it('distinguishes an error marker from a cancellation', () => {
+    // The two map to different client types (Error vs ScanCancelledError), so a
+    // user cancel must never be reported as a crash or vice versa.
+    const cancelled = buildPhp1Marker(null, 'Cancelled', { cancelled: true });
+    const failed = buildPhp1Marker(null, '', { error: 'boom' });
+    expect(parseProgressMarkers(cancelled, 0).markers[0].error).toBeUndefined();
+    expect(parseProgressMarkers(failed, 0).markers[0].cancelled).toBeUndefined();
+  });
 });
 
 describe('decodeBinaryFrame with leading progress markers', () => {

@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.61.0"
+BACKEND_VERSION = "0.61.1"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -4575,8 +4575,49 @@ class LADComputeResponse(BaseModel):
     error: Optional[str] = None
 
 
+def _is_binary_scan_file(file_path: str) -> bool:
+    """True when `file_path` is a BINARY point-cloud container (LAS/LAZ/PLY/PCD)
+    rather than an ASCII column file.
+
+    Decided by extension, not by sniffing bytes: the extension is what
+    `_load_pointcloud_arrays` itself dispatches on, so this stays consistent with
+    how the file will actually be read. (A `.ply` may be ascii-encoded, but its
+    header is still not the bare column layout the ASCII readers expect, so it
+    belongs on the binary side of this split either way.)
+    """
+    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+    return ext in (_OPEN3D_EXTENSIONS | _LAS_EXTENSIONS)
+
+
+def _require_ascii_scan_file(file_path: str, what: str) -> None:
+    """Raise a legible error when an ASCII-only reader is handed a binary file.
+
+    The ASCII readers below (`_detect_ascii_format`, `_file_xyz_bounds`,
+    `_file_to_lad_arrays`, `_read_scan_columns_from_file`) all open the file in
+    TEXT mode and split lines on whitespace. Handed a LAS/LAZ/PLY/PCD they died
+    with a raw `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xd5 in
+    position 90` (byte 90 is inside the LAS public header block) — a decoder
+    message that named neither the file nor the real problem, and which reached
+    users verbatim as "Helios triangulation failed: 'utf-8' codec can't decode…".
+
+    This is the last-resort guard: callers that CAN handle a binary file should
+    route it to `_load_pointcloud_arrays` instead of reaching here.
+    """
+    if _is_binary_scan_file(file_path):
+        ext = os.path.splitext(file_path)[1].lower().lstrip('.') or '?'
+        raise ValueError(
+            f"{what} needs an ASCII point file, but '{os.path.basename(file_path)}' "
+            f"is a binary .{ext} file. Re-import the scan so it is backed by a live "
+            f"cloud session, or export it to an ASCII format (.xyz/.txt/.csv) first."
+        )
+
+
 def _detect_ascii_format(file_path: str) -> str:
-    """Auto-detect the ASCII column format of a scan file."""
+    """Auto-detect the ASCII column format of a scan file.
+
+    Binary containers are rejected up front — see `_require_ascii_scan_file`.
+    """
+    _require_ascii_scan_file(file_path, "ASCII column-format detection")
     with open(file_path) as f:
         for line in f:
             line = line.strip()
@@ -4631,6 +4672,7 @@ def _file_xyz_bounds(file_path: str, ascii_format: Optional[str] = None):
     (count, None, None) if no coordinates were found.
     """
     import math
+    _require_ascii_scan_file(file_path, "Scan bounds scanning")
     xi, yi, zi = _xyz_column_indices(ascii_format)
     need = max(xi, yi, zi) + 1
     n = 0
@@ -5311,15 +5353,47 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                     scan_entry, xyz.shape[0], theta_max - theta_min, phi_max - phi_min)
                 fp = pts_path
             elif scan_entry.file_path:
-                # File-path mode: pyhelios reads the scan file directly from disk.
+                # File-path mode. Helios itself can only read ASCII scan files,
+                # so a BINARY container (.las/.laz/.ply/.pcd) can't be handed to
+                # it directly — it has to be decoded to a temp x-y-z file first,
+                # exactly as the session branch above does.
+                #
+                # This branch is the restart fallback: it runs when a scan's
+                # session is gone (backend restarted since import) but the entry
+                # still carries a sourcePath. Since the app imports LAS/LAZ as a
+                # first-class format, that path is routinely binary — and before
+                # this, every reader below assumed text and blew up on the LAS
+                # header with a raw UnicodeDecodeError (see
+                # _require_ascii_scan_file).
                 fp = scan_entry.file_path
                 if not fp or not os.path.isfile(fp):
                     raise ValueError(f"Scan file not found: {fp}")
-                fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
-                n_points, lo, hi = _file_xyz_bounds(fp, fmt)
-                if lo is not None:
-                    bb_lo = np.minimum(bb_lo, lo)
-                    bb_hi = np.maximum(bb_hi, hi)
+                if _is_binary_scan_file(fp):
+                    # Decode via the shared loader, which dispatches by extension
+                    # and drops sky/miss points (is_miss != 0) — mandatory before
+                    # any triangulation, since a miss is projected ~1 km out and
+                    # inflates the extent ~1000x, which HANGS the reconstruction
+                    # rather than erroring.
+                    src = PointSource(source_path=fp, ascii_format=scan_entry.ascii_format)
+                    xyz, _colors, _intensity = _read_points_from_source(src)
+                    if xyz.shape[0] == 0:
+                        raise ValueError(
+                            f"'{os.path.basename(fp)}' has no hit points to "
+                            "triangulate (empty file, or only sky/miss returns).")
+                    bb_lo = np.minimum(bb_lo, xyz.min(axis=0))
+                    bb_hi = np.maximum(bb_hi, xyz.max(axis=0))
+                    pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
+                    # %.8g for the same precision reason as the session branch.
+                    np.savetxt(pts_path, xyz, fmt="%.8g", delimiter=" ")
+                    fmt = "x y z"
+                    n_points = xyz.shape[0]
+                    fp = pts_path
+                else:
+                    fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
+                    n_points, lo, hi = _file_xyz_bounds(fp, fmt)
+                    if lo is not None:
+                        bb_lo = np.minimum(bb_lo, lo)
+                        bb_hi = np.maximum(bb_hi, hi)
                 n_theta, n_phi = _resolution(
                     scan_entry, n_points, theta_max - theta_min, phi_max - phi_min)
             elif scan_entry.session_id is not None:
@@ -6234,13 +6308,67 @@ def _inline_to_lad_arrays(points: list, scalar_columns: Optional[dict], origin):
     return xyz, dirs, labels, vals, flags
 
 
+def _las_to_lad_arrays(file_path: str, origin):
+    """LAD arrays from a BINARY LAS/LAZ scan file.
+
+    The ASCII sibling below locates the per-pulse columns by tokenizing the
+    format string; a LAS file instead names its dimensions, so the multi-return
+    and miss columns are read straight off the point record (this app writes
+    `is_miss` as a first-class LAS extra dim — see `_session_to_las`). Without
+    this, a session-less LAS scan reached the text reader and died on the LAS
+    header with a UnicodeDecodeError.
+
+    Note LAD is the ONE tool that must KEEP sky/miss points — they are the
+    Beer's-law transmission denominator — so this deliberately does not filter
+    them, matching the ASCII path.
+    """
+    import numpy as np
+    import laspy
+
+    las = laspy.read(file_path)
+    xyz = np.column_stack([las.x, las.y, las.z]).astype(np.float64, copy=False)
+    dims = set(las.point_format.dimension_names)
+
+    # Map LAD's slugs onto the LAS dimensions that carry them. LAS spells the
+    # per-return fields differently from our ASCII tokens, so accept either the
+    # app's own slug (round-tripped exports) or the LAS-standard name.
+    aliases = {
+        'timestamp': ('timestamp', 'gps_time'),
+        'target_index': ('target_index', 'return_number'),
+        'target_count': ('target_count', 'number_of_returns'),
+        _MISS_SLUG: (_MISS_SLUG,),
+    }
+    cache: dict = {}
+    for slug, names in aliases.items():
+        for name in names:
+            if name in dims:
+                try:
+                    cache[slug] = np.asarray(las[name]).astype(np.float64)
+                except Exception:  # noqa: BLE001 - a missing/odd dim is just "absent"
+                    continue
+                break
+
+    dirs = _directions_from_origin(xyz, origin)
+    labels, vals, flags = _lad_labels_vals(lambda slug: cache.get(slug), xyz.shape[0])
+    return xyz, dirs, labels, vals, flags
+
+
 def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
-    """Legacy fallback: read an ASCII scan file once into LAD arrays (used only
+    """Legacy fallback: read a scan file once into LAD arrays (used only
     when a scan has neither a live session nor inline points — e.g. a stale
     session id that fell back to the source file). Locates x/y/z plus any
     timestamp/target/miss columns via the format string; never re-read after this.
+
+    A binary LAS/LAZ source is delegated to `_las_to_lad_arrays`; other binary
+    containers (PLY/PCD) carry no per-pulse columns and are rejected with a
+    legible error rather than a decoder crash.
     """
     import numpy as np
+
+    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+    if ext in _LAS_EXTENSIONS:
+        return _las_to_lad_arrays(file_path, origin)
+    _require_ascii_scan_file(file_path, "Leaf-area-density's file fallback")
 
     fmt = ascii_format or _detect_ascii_format(file_path)
     tokens = fmt.split()
@@ -8149,12 +8277,64 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
     raise ValueError(f"Unsupported scan export format: {fmt}")
 
 
+def _read_las_columns(file_path: str) -> dict:
+    """Extra (non-geometry, non-colour) columns from a LAS/LAZ, as
+    slug -> (N,) float64, for the export column picker.
+
+    Reads the standard export scalars off the point record, accepting either the
+    app's own slug (round-tripped exports write `is_miss`/`target_index` as extra
+    dims) or the LAS-standard spelling. Any read problem for one dimension just
+    omits that column — an export must not fail over a missing scalar.
+    """
+    import numpy as np
+
+    try:
+        import laspy
+        las = laspy.read(file_path)
+    except Exception:  # noqa: BLE001 - unreadable LAS => no extra columns
+        return {}
+
+    dims = set(las.point_format.dimension_names)
+    aliases = {
+        'is_miss': ('is_miss',),
+        'timestamp': ('timestamp', 'gps_time'),
+        'target_index': ('target_index', 'return_number'),
+        'target_count': ('target_count', 'number_of_returns'),
+        'intensity': ('intensity',),
+    }
+    out: dict = {}
+    for slug, names in aliases.items():
+        for name in names:
+            if name in dims:
+                try:
+                    out[slug] = np.asarray(las[name]).astype(np.float64)
+                except Exception:  # noqa: BLE001
+                    continue
+                break
+    return out
+
+
 def _read_scan_columns_from_file(file_path: str, ascii_format: Optional[str]) -> dict:
     """Read every NON-geometry column the ASCII_format declares into a
     slug -> (N,) float array dict. The export column picker may request any
     column the file carries (reflectance, row, column, r/g/b, …), so we read all
-    of them — not just the LAD subset — keyed by their format token."""
+    of them — not just the LAD subset — keyed by their format token.
+
+    Binary sources are handled separately: a LAS/LAZ names its dimensions rather
+    than declaring a column order, so its extra dims are read directly; other
+    binary containers simply carry no such columns and yield {}. Both callers
+    already load the GEOMETRY via `_load_pointcloud_arrays` (which reads binary
+    fine) and use this only for the extra scalars, so returning {} degrades the
+    export to geometry+colour rather than failing it — which is what happened
+    before, when a LAS path reached the text reader and raised UnicodeDecodeError.
+    """
     import numpy as np
+
+    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+    if ext in _LAS_EXTENSIONS:
+        return _read_las_columns(file_path)
+    if _is_binary_scan_file(file_path):
+        return {}
 
     fmt = ascii_format or _detect_ascii_format(file_path)
     tokens = fmt.split()
@@ -16392,18 +16572,32 @@ def _bin_frame_bytes(meta: dict, buffers: "list[tuple]") -> bytes:
 _PROGRESS_MARKER_MAGIC = b"PHP1"
 
 
-def _pack_progress_marker(progress, message: str, *, run_id=None, cancelled=False) -> bytes:
+def _pack_progress_marker(progress, message: str, *, run_id=None, cancelled=False,
+                          error=None) -> bytes:
     """Pack one PHP1 progress marker. `progress` is a 0..1 fraction or None.
 
     `run_id` (when set) rides the first marker so the renderer learns the
     cancellation token before any heavy work starts; `cancelled` rides the
-    terminal marker emitted in place of a frame when a run is cancelled."""
+    terminal marker emitted in place of a frame when a run is cancelled;
+    `error` rides the terminal marker when the worker RAISED.
+
+    Why `error` exists: these endpoints are StreamingResponses, so `200 OK` and
+    the headers are already on the wire before the off-thread worker has done
+    any work. An exception raised after that point CANNOT change the status code
+    — Starlette has nothing left to set it on — so the client saw a 200 with a
+    truncated body and had to guess. (A user-reported Helios triangulation crash
+    was logged server-side as a full traceback while the access log cheerfully
+    recorded `POST /api/triangulate/helios 200`.) Carrying the failure in-band,
+    exactly as `cancelled` already does, is the only way to report it on a
+    stream that has already committed its status line."""
     import struct
     obj = {"progress": progress, "message": message}
     if run_id is not None:
         obj["run_id"] = run_id
     if cancelled:
         obj["cancelled"] = True
+    if error is not None:
+        obj["error"] = error
     payload = json.dumps(obj).encode("utf-8")
     payload += b" " * ((-len(payload)) % 4)  # keep total marker a 4-byte multiple
     return _PROGRESS_MARKER_MAGIC + struct.pack("<I", len(payload)) + payload
@@ -16931,6 +17125,18 @@ def _bin_frame_streaming_response(
                 # Cooperative cancel landed: the worker unwound its Context/
                 # LiDARCloud (memory freed). Tell the client instead of a frame.
                 yield _pack_progress_marker(None, "Cancelled", cancelled=True)
+            except Exception as e:  # noqa: BLE001
+                # The worker raised. We are mid-body: the 200 status line and
+                # headers went out before the executor was even scheduled, so
+                # the status CANNOT be changed to a 5xx here. Report the failure
+                # in-band as a terminal marker (the same mechanism `cancelled`
+                # uses) so the client raises a real error instead of trying to
+                # decode a truncated frame and reporting something misleading.
+                # Still log the traceback: the server-side record is what makes
+                # a user's attached log actionable.
+                import traceback
+                traceback.print_exc()
+                yield _pack_progress_marker(None, "", error=str(e) or e.__class__.__name__)
         finally:
             if run_id is not None:
                 _clear_run(run_id)
