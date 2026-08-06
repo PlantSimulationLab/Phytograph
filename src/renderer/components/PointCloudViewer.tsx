@@ -1926,6 +1926,12 @@ export default function PointCloudViewer({
   }
   const transformModalRef = useRef<TransformModalState | null>(null);
   const [transformModal, setTransformModal] = useState<TransformModalState | null>(null);
+  // Last known cursor position, used as the anchor when a t/s/r modal starts.
+  // MUST live outside the keyboard-modal effect: that effect re-subscribes on
+  // every selection change, so an effect-local `{ set: false }` was being reset
+  // by the very click that selects the object — `t` then no-op'd (startModal
+  // bails when unset) until the user jiggled the mouse to fire a mousemove.
+  const lastMouseRef = useRef({ x: 0, y: 0, set: false });
 
   // ---- Manual trajectory editor session ----------------------------------
   // When set, the right-docked pose table is open and the targeted scan's
@@ -10365,7 +10371,7 @@ export default function PointCloudViewer({
       return false;
     };
 
-    const lastMouse = { x: 0, y: 0, set: false };
+    const lastMouse = lastMouseRef.current;
 
     const getCanvas = (): HTMLCanvasElement | null =>
       (document.querySelector('canvas[data-engine]') as HTMLCanvasElement | null) ||
@@ -10951,6 +10957,12 @@ export default function PointCloudViewer({
     };
 
     const handleMouseDown = (e: MouseEvent) => {
+      // A click anchors the cursor too, not just a move — otherwise a pointer
+      // that was never moved (or moved only before mount) leaves `set` false
+      // and the t/s/r modal silently refuses to start.
+      lastMouse.x = e.clientX;
+      lastMouse.y = e.clientY;
+      lastMouse.set = true;
       if (!transformModalRef.current) return;
       e.preventDefault();
       e.stopPropagation();
