@@ -8825,6 +8825,44 @@ def _derive_moving_scan_grid(n_theta: int, n_phi_per_rev: int, pulse_rate_hz: fl
     }
 
 
+def _texture_has_alpha(texture_path: Optional[str]) -> bool:
+    """Whether a texture file actually carries an alpha channel.
+
+    Drives alpha-test cutout rendering in the viewer, so it must reflect the real
+    image: Helios plant assets mix alpha PNG leaves with opaque JPG bark, and
+    assuming alpha makes the renderer cut out a solid texture. Reads the PNG
+    header's color-type byte (4 = grey+alpha, 6 = RGBA); anything else, including
+    every JPEG, has no alpha. Falls back to the extension if the file can't be
+    read, since callers only hold a path at that point.
+    """
+    if not texture_path:
+        return False
+    try:
+        with open(texture_path, "rb") as fh:
+            head = fh.read(26)
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            # IHDR color type is byte 25; bit 2 (value 4) marks an alpha channel.
+            return bool(head[25] & 4)
+        return False
+    except Exception:
+        return texture_path.lower().endswith(".png")
+
+
+def _image_ext_from_bytes(data: bytes) -> Optional[str]:
+    """Return the file extension matching an image buffer's magic number.
+
+    Helios selects its image decoder from the file suffix, so a texture written
+    under the wrong extension is a hard error, not a fallback. Returns ``None``
+    for anything that isn't a format Helios can read, so the caller can skip the
+    material instead of handing Helios a file it will reject.
+    """
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    return None
+
+
 def _load_scan_mesh(ctx, mesh: "LidarScanMesh", tmpdir: str) -> None:
     """Load one scan mesh into the Helios ``ctx``, honoring textured materials.
 
@@ -8876,9 +8914,17 @@ def _load_scan_mesh(ctx, mesh: "LidarScanMesh", tmpdir: str) -> None:
                 img_bytes = base64.b64decode(mat.texture_data)
             except Exception:
                 continue
-            # Decode to a real file; keep the original extension so Helios reads
-            # the alpha channel correctly (PNG carries alpha; JPG does not).
-            ext = ".png" if mat.has_alpha else ".jpg"
+            # Decode to a real file; the extension must match the *actual* bytes,
+            # because Helios picks its decoder from the suffix and its PNG reader
+            # hard-errors ("PNGHasAlpha: not a valid PNG file") on JPEG content.
+            # Sniff the magic number rather than trusting `has_alpha` or the
+            # source filename: the plant-generation path marks every textured
+            # material has_alpha=True, but woody species carry .jpg bark
+            # (AlmondBark.jpg, AppleBark.jpg, GrapeBark.jpg, OliveBark.jpg, …),
+            # which previously got written to a .png path and killed the scan.
+            ext = _image_ext_from_bytes(img_bytes)
+            if ext is None:
+                continue
             slot = len(texture_files)
             tex_path = os.path.join(tmpdir, f"scan_tex_{id(mesh) & 0xffffff}_{slot}{ext}")
             try:
@@ -13205,7 +13251,9 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
                 materials_dict[mat_label] = PlantMaterial(
                     name=mat_label,
                     texture_name=texture_name,
-                    has_alpha=True,
+                    # From the file itself — leaves are alpha PNGs but bark is
+                    # opaque JPG. See _texture_has_alpha.
+                    has_alpha=_texture_has_alpha(texture_path),
                 )
                 material_groups_dict[mat_label] = []
                 texture_files[texture_name] = texture_path
@@ -14071,7 +14119,9 @@ async def generate_plant_model(request: PlantGenerationRequest):
                             materials_dict[mat_label] = PlantMaterial(
                                 name=mat_label,
                                 texture_name=texture_name,
-                                has_alpha=True  # Leaf textures use alpha
+                                # From the file itself — leaves are alpha PNGs but
+                                # bark is opaque JPG. See _texture_has_alpha.
+                                has_alpha=_texture_has_alpha(texture_path),
                             )
                             material_groups_dict[mat_label] = []
                             texture_files[texture_name] = texture_path
@@ -14291,7 +14341,9 @@ def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -
                 materials_dict[mat_label] = PlantMaterial(
                     name=mat_label,
                     texture_name=texture_name,
-                    has_alpha=True,
+                    # From the file itself — leaves are alpha PNGs but bark is
+                    # opaque JPG. See _texture_has_alpha.
+                    has_alpha=_texture_has_alpha(texture_path),
                 )
                 material_groups_dict[mat_label] = []
                 texture_files[texture_name] = texture_path

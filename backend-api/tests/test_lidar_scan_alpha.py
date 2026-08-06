@@ -58,6 +58,15 @@ def _alpha_disk_png(size=128, disk_frac=_DISK_FRAC):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _opaque_jpeg(size=64):
+    """A fully opaque JPEG (base64) — no alpha channel, as bark textures are."""
+    Image = pytest.importorskip("PIL.Image")
+    img = Image.new("RGB", (size, size), (120, 90, 60))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def _overhead_scanner(scanner_id="s0"):
     # Scanner 3 m above the patch, full upper-hemisphere sweep (theta 0..180) so
     # the cone covers the whole 1 m patch. Dense raster for a stable hit count.
@@ -147,4 +156,49 @@ class TestAlphaMaskedScan:
         )
         assert r_alpha.mean() < r_opaque.mean(), (
             "alpha hits are not pulled toward the opaque center"
+        )
+
+
+class TestJpegTextureScan:
+    """A JPEG texture scans even when the material claims has_alpha=True.
+
+    Regression: the texture file was written with an extension chosen from the
+    `has_alpha` flag (".png" if set) rather than from the image bytes. The plant
+    generation path hardcodes has_alpha=True for every textured material, but
+    every woody species uses a .jpg bark texture (AlmondBark.jpg, AppleBark.jpg,
+    GrapeBark.jpg, OliveBark.jpg, WesternRedbudBark.jpg). Those JPEG bytes landed
+    at a .png path, and Helios's PNG reader aborted the whole scan with
+    "ERROR (PNGHasAlpha): ... is not a valid PNG file" — so scanning any tree was
+    impossible. The extension now comes from the magic number.
+    """
+
+    def _jpeg_mesh(self, has_alpha):
+        return {
+            "vertices": _QUAD_VERTS,
+            "triangles": _QUAD_TRIS,
+            "colors": [[0.5, 0.4, 0.3]] * 4,
+            "uv_coordinates": _QUAD_UVS,
+            "materials": [{
+                "name": "bark",
+                "texture_data": _opaque_jpeg(),
+                # The lying flag is the point of the test: JPEG bytes, has_alpha
+                # True, exactly what plant generation sends for bark.
+                "has_alpha": has_alpha,
+                "triangle_indices": [0, 1],
+            }],
+        }
+
+    @pytest.mark.parametrize("has_alpha", [True, False])
+    def test_jpeg_texture_scans(self, client, has_alpha):
+        pytest.importorskip("pyhelios")
+        n, pts = _scan(client, self._jpeg_mesh(has_alpha))
+        # A JPEG is fully opaque, so it must scan like the solid control: a dense
+        # return covering the whole patch, not an aborted scan.
+        assert n > 500, (
+            f"JPEG texture (has_alpha={has_alpha}) returned {n} hits; "
+            "the scan likely failed instead of loading the texture"
+        )
+        r = np.sqrt(pts[:, 0] ** 2 + pts[:, 1] ** 2)
+        assert r.max() > _H * 0.9, (
+            "JPEG-textured patch did not return hits across its full extent"
         )
