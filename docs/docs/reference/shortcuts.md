@@ -119,7 +119,7 @@ is what commits the move):
 |---|---|
 | <kbd>T</kbd> | Translate |
 | <kbd>S</kbd> | Scale (meshes only) |
-| <kbd>R</kbd> | Rotate (meshes only) |
+| <kbd>R</kbd> | Rotate (meshes and scan positions) |
 | <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> | Lock to axis |
 | <kbd>Shift</kbd> + <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> | Lock to the perpendicular plane |
 | Press the same axis again | Return to free movement |
@@ -128,15 +128,51 @@ is what commits the move):
 | <kbd>Enter</kbd> / click | Set the value |
 | <kbd>Esc</kbd> / right-click | Cancel this entry |
 
-The <kbd>T</kbd> translate gesture works on point clouds, skeletons, and
-meshes; the <kbd>S</kbd>/<kbd>R</kbd> scale and rotate gestures apply to
-the selected mesh. To **rotate a point cloud**, use the Transform panel's
-Rotation fields or its rotation rings (see below).
+The <kbd>T</kbd> translate gesture works on point clouds, skeletons, scan
+positions, and meshes. <kbd>S</kbd> scales the selected mesh only.
+<kbd>R</kbd> rotates the selected mesh or scan position. To **rotate a point
+cloud**, use the Transform panel's Rotation fields or its rotation rings
+(see below).
 
 For a **point cloud**, this gesture only sets the pending position in the
 Transform panel — it does not apply the move. Click **OK** in the panel to
 apply it (or **Cancel** to discard). See
 [Clean a point cloud → Transform](../workflows/clean-point-cloud.md#transform-translate-and-rotate).
+
+### Scan positions
+
+Select a scanner — click its marker in the viewport, or its row in the
+**Scans** panel — and the gesture moves the *instrument*, not the points.
+Each key writes the field the **Scan Parameters** dialog shows, so the
+result is the same as typing there:
+
+| Gesture | Scan Parameters field |
+|---|---|
+| <kbd>T</kbd> <kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> | Origin X / Y / Z |
+| <kbd>R</kbd> <kbd>X</kbd> | Scanner tilt → Roll |
+| <kbd>R</kbd> <kbd>Y</kbd> | Scanner tilt → Pitch |
+
+So <kbd>T</kbd> <kbd>X</kbd> `5` moves the scanner 5 m along +X, and
+<kbd>R</kbd> <kbd>Y</kbd> `10` leans it 10° in pitch. <kbd>S</kbd> does
+nothing — a scanner has no size — and rotation is limited to tilt, so
+<kbd>R</kbd> <kbd>Z</kbd> has no effect; set the scanner's heading in the
+dialog's **Scanner heading** field.
+
+Two cases where the gesture deliberately stands aside:
+
+- **While the Transform Point Cloud tool is open**, <kbd>T</kbd> keeps its
+  usual meaning of moving the selected cloud's points. Close the tool to
+  move the scanner instead.
+- **Moving-platform scans** (those carrying a trajectory) take their
+  position and attitude from their per-pose path, which is why the dialog
+  shows their origin read-only and hides the tilt fields. Edit individual
+  poses in the trajectory editor, where <kbd>T</kbd> and <kbd>R</kbd> act on
+  the selected pose.
+
+The move applies as soon as you confirm it — there is no separate panel
+**OK** step the way there is for a point cloud. <kbd>Esc</kbd> cancels and
+puts the scanner back. Note that a scan transform is **not** covered by
+Undo.
 
 ## Selection (Scene panel)
 

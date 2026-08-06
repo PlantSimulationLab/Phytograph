@@ -64,7 +64,7 @@ import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import StatusPill from './StatusPill';
-import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams } from '../lib/scanParameters';
+import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams, isMovingScan } from '../lib/scanParameters';
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
 import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
@@ -1906,10 +1906,19 @@ export default function PointCloudViewer({
     axis: TransformAxis;
     startScreen: { x: number; y: number };
     pivot: { x: number; y: number; z: number };
-    target: 'mesh' | 'skeleton' | 'cloud' | 'pose';
+    target: 'mesh' | 'skeleton' | 'cloud' | 'pose' | 'scan';
     meshId?: string;
     skeletonId?: string;
     cloudIds?: string[];
+    // Scan position (scanner marker). `t` drives params.origin and `r` drives
+    // the scanner tilt — the same fields the Scan Parameters dialog edits.
+    // The whole params object is captured up front so apply* can spread a new
+    // origin/tilt onto it and cancel can write the original back verbatim:
+    // onUpdateScanParams takes a full params object rather than a functional
+    // updater, so keeping the original here avoids any stale-read window (and
+    // the parallel `*Ref` maps meshes need for the same reason).
+    scanId?: string;
+    originalScanParams?: ScanParameters;
     // Manual trajectory editor: the pose (row) index being transformed, plus its
     // original position + Euler orientation, so translate/rotate apply a delta
     // onto the originals (and cancel restores them).
@@ -1965,6 +1974,15 @@ export default function PointCloudViewer({
     useState<TrajectoryEditorSession | null>(null);
   const trajectoryEditorRef = useRef<TrajectoryEditorSession | null>(null);
   trajectoryEditorRef.current = trajectoryEditor;
+
+  // Same render-time-ref idiom as trajectoryEditorRef above, and for the same
+  // reason: the modal transform effect needs the current scan params, but a
+  // scan-position gesture WRITES params on every mouse move. Listing
+  // scansWithParams in that effect's deps would tear down and re-add all four
+  // window listeners on every frame of a drag; the ref keeps the subscription
+  // stable while still reading fresh values.
+  const scansWithParamsRef = useRef<(Scan & { params: ScanParameters })[]>([]);
+  scansWithParamsRef.current = scansWithParams;
   // The manual trajectory editor draws interactive content in the viewport (and
   // opens before its scan exists when building for a new scan), so it must
   // suppress the empty-state import hint that would otherwise obscure it. Report
@@ -10377,6 +10395,23 @@ export default function PointCloudViewer({
       (document.querySelector('canvas[data-engine]') as HTMLCanvasElement | null) ||
       (document.querySelector('canvas') as HTMLCanvasElement | null);
 
+    // The scan position (scanner marker) a t/r gesture acts on: the first
+    // selected scan carrying params. A MOVING scan is excluded — its origin is
+    // only a derived anchor and its tilt is forced to zero, because attitude
+    // comes from the trajectory's per-pose quaternions and the backend's
+    // addScanMoving rejects a static tilt (see applyTrajectoryToParams). That
+    // is the same reason the Scan Parameters dialog shows origin read-only and
+    // hides the tilt fields for one; per-pose edits go through the manual
+    // trajectory editor, which has its own t/r on a selected pose.
+    const scanTransformTarget = (): (Scan & { params: ScanParameters }) | null => {
+      for (const scan of scansWithParamsRef.current) {
+        if (!selectedIds.has(scan.id)) continue;
+        if (isMovingScan(scan.params)) continue;
+        return scan;
+      }
+      return null;
+    };
+
     const computePivot = (): { x: number; y: number; z: number } | null => {
       // Manual trajectory editor takes precedence: pivot on the selected pose.
       // Drafts are WORLD-frame but the poses render in the scan's stored frame
@@ -10419,6 +10454,22 @@ export default function PointCloudViewer({
         }
         cx /= pointCount; cy /= pointCount; cz /= pointCount;
         return { x: cx + pos.x, y: cy + pos.y, z: cz + pos.z };
+      }
+      // Scan position. Must precede the cloud branch below: a data-bearing scan
+      // is in BOTH sets (selectedIds is the scan selection set), and when the
+      // Transform tool isn't open a t/r gesture targets the scanner, not the
+      // points. params.origin is WORLD-frame but the marker renders in the
+      // scan's stored frame (world − worldShift), and startModal subtracts
+      // displayOffset afterwards — so fold in worldShift here exactly as the
+      // pose branch above does, or the pivot's screen projection drifts away
+      // from the drawn marker on a cloud with a non-zero shift.
+      if (editMode !== 'translate') {
+        const scan = scanTransformTarget();
+        if (scan) {
+          const ws = scan.data?.octree?.worldShift ?? [0, 0, 0];
+          const o = scan.params.origin;
+          return { x: o.x - ws[0], y: o.y - ws[1], z: o.z - ws[2] };
+        }
       }
       if (selectedIds.size > 0) {
         let cx = 0, cy = 0, cz = 0, n = 0;
@@ -10562,6 +10613,24 @@ export default function PointCloudViewer({
     };
 
     const applyRotate = (modal: TransformModalState, angleDeg: number) => {
+      if (modal.target === 'scan') {
+        if (!modal.scanId || !modal.originalScanParams) return;
+        // Rotation for a scan position IS its scanner tilt — the same two
+        // fields the Scan Parameters dialog exposes. X locks roll, Y locks
+        // pitch, and free defaults to roll (the component the dialog applies
+        // first). Z is deliberately inert: tilt has no Z, and the dialog's
+        // separate heading field (azimuthOffsetDeg) is out of scope here.
+        const orig = modal.originalScanParams;
+        let roll = orig.tiltRollDeg, pitch = orig.tiltPitchDeg;
+        if (modal.axis === 'y') pitch = orig.tiltPitchDeg + angleDeg;
+        else if (modal.axis === 'x' || modal.axis === 'free') roll = orig.tiltRollDeg + angleDeg;
+        else if (modal.axis === 'xy' || modal.axis === 'yz' || modal.axis === 'xz') {
+          roll = orig.tiltRollDeg + angleDeg;
+          pitch = orig.tiltPitchDeg + angleDeg;
+        }
+        onUpdateScanParams(modal.scanId, { ...orig, tiltRollDeg: roll, tiltPitchDeg: pitch });
+        return;
+      }
       if (modal.target === 'pose') {
         if (modal.poseIndex == null || !modal.originalPoseRot) return;
         const orig = modal.originalPoseRot;
@@ -10599,6 +10668,21 @@ export default function PointCloudViewer({
     };
 
     const applyTranslate = (modal: TransformModalState, delta: THREE.Vector3) => {
+      if (modal.target === 'scan') {
+        if (!modal.scanId || !modal.originalScanParams) return;
+        // Writes params.origin — the dialog's Origin X/Y/Z fields. The delta is
+        // already axis-masked by computeTranslateDelta, so x/y/z locking maps
+        // straight onto the three fields. Always relative to the captured
+        // originals, so repeated updates during the drag don't compound.
+        const orig = modal.originalScanParams;
+        const origin = {
+          x: orig.origin.x + delta.x,
+          y: orig.origin.y + delta.y,
+          z: orig.origin.z + delta.z,
+        };
+        onUpdateScanParams(modal.scanId, { ...orig, origin });
+        return;
+      }
       if (modal.target === 'pose') {
         if (modal.poseIndex == null || !modal.originalPosePos) return;
         const orig = modal.originalPosePos;
@@ -10715,6 +10799,18 @@ export default function PointCloudViewer({
     const cancelModal = () => {
       const modal = transformModalRef.current;
       if (!modal) return;
+      if (modal.target === 'scan') {
+        // The captured params ARE the pre-gesture state, so writing them back
+        // restores origin and tilt in one shot — nothing to reconstruct.
+        if (modal.scanId && modal.originalScanParams) {
+          onUpdateScanParams(modal.scanId, modal.originalScanParams);
+        }
+        pendingHistoryRef.current = null;
+        transformModalRef.current = null;
+        setTransformModal(null);
+        setGizmoDragging(false);
+        return;
+      }
       if (modal.target === 'pose') {
         if (modal.poseIndex != null && modal.originalPosePos && modal.originalPoseRot) {
           const idx = modal.poseIndex;
@@ -10785,7 +10881,12 @@ export default function PointCloudViewer({
       // path and can't disagree. No undo history is recorded for the draft (the
       // eventual bake is non-undoable). Meshes/skeletons keep their render-only
       // transform and DO record history as before.
-      if (isCloudTranslate) {
+      // A scan transform writes params straight through onUpdateScanParams and
+      // records no history: 'scan' isn't a kind pendingHistoryRef/captureTransform
+      // can represent, and handleUpdateScanParams dispatches the non-undoable
+      // replaceCollection. Same gap pose edits already have. Explicit rather
+      // than relying on commitHistoryEntry's no-pending early return.
+      if (isCloudTranslate || modal.target === 'scan') {
         pendingHistoryRef.current = null;  // drop the BEFORE from startModal
       } else {
         commitHistoryEntry();
@@ -10809,6 +10910,7 @@ export default function PointCloudViewer({
       const pivot = { x: worldPivot.x - off.x, y: worldPivot.y - off.y, z: worldPivot.z - off.z };
 
       let state: TransformModalState | null = null;
+      const scanTarget = scanTransformTarget();
 
       const ed = trajectoryEditorRef.current;
       if (ed && ed.selectedIndex != null) {
@@ -10854,6 +10956,24 @@ export default function PointCloudViewer({
           numericBuffer: '',
         };
         startHistoryEntry('skeleton', selectedSkeleton.id);
+      } else if (op !== 'scale' && editMode !== 'translate' && scanTarget) {
+        // Scan position. Ahead of the cloud branch and gated on the Transform
+        // tool being closed: with it OPEN, `t` keeps its existing meaning of
+        // moving the point cloud, so no existing gesture changes behavior.
+        // Scale is skipped for the same reason a pose skips it — a scanner has
+        // no size. No history entry: 'scan' isn't a representable history kind
+        // (see commitModal), matching how pose edits behave today.
+        const scan = scanTarget;
+        state = {
+          op,
+          axis: 'free',
+          startScreen: { x: lastMouse.x, y: lastMouse.y },
+          pivot,
+          target: 'scan',
+          scanId: scan.id,
+          originalScanParams: scan.params,
+          numericBuffer: '',
+        };
       } else if (op === 'translate' && selectedIds.size > 0) {
         const originals = new Map<string, { x: number; y: number; z: number }>();
         const ids: string[] = [];
@@ -10897,9 +11017,16 @@ export default function PointCloudViewer({
         // draft with nowhere to apply it. Mesh/skeleton transforms (s/r, and t
         // on a selected mesh/skeleton) are unaffected: they still commit their
         // own render-only transform directly and don't use the panel.
+        //
+        // A selected SCAN POSITION is the exception carved out here: with the
+        // Transform tool closed, `t` moves the scanner's origin (a direct
+        // params write with its own commit, no panel involved), so this guard
+        // must not swallow the key. With the tool OPEN, editMode === 'translate'
+        // already falsifies the guard and the cloud keeps the gesture.
         const cloudTranslateBlocked =
           k === 't' && editMode !== 'translate' &&
-          selectedIds.size > 0 && !selectedMesh && !selectedSkeleton;
+          selectedIds.size > 0 && !selectedMesh && !selectedSkeleton &&
+          !scanTransformTarget();
         if (cloudTranslateBlocked) return;
         if (k === 't') { e.preventDefault(); startModal('translate'); }
         else if (k === 's') { e.preventDefault(); startModal('scale'); }
@@ -10993,6 +11120,11 @@ export default function PointCloudViewer({
     editMode,
     startHistoryEntry,
     commitHistoryEntry,
+    // Scan-position transforms. The scan list itself is read through
+    // scansWithParamsRef, NOT listed here — a gesture rewrites params on every
+    // mouse move, so depending on it would re-subscribe all four listeners per
+    // frame. onUpdateScanParams is a stable useCallback([]) in App.tsx.
+    onUpdateScanParams,
   ]);
 
   // Determine what type of object is selected

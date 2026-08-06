@@ -106,6 +106,15 @@ You need geometry in the scene to scan: typically a generated
    campaign places scanners 1.5–2 m above ground, 3–5 m from the
    plant.
 
+    !!! tip "Nudge a placed scanner without reopening this dialog"
+
+        Once the scan exists, select its marker in the 3D view (or its row
+        in the **Scans** panel) and press <kbd>T</kbd> to slide it, or
+        <kbd>R</kbd> to adjust its tilt — <kbd>X</kbd>/<kbd>Y</kbd>/<kbd>Z</kbd>
+        constrain the axis, and you can type an exact amount. The keys write
+        these very fields. See
+        [Transform gestures → Scan positions](../reference/shortcuts.md#scan-positions).
+
 6. **Scan size** and **angular sweep** — what you enter here depends on
    the pattern:
 
@@ -200,6 +209,8 @@ You need geometry in the scene to scan: typically a generated
     Leave both at `0` for a perfectly level scanner. Tilt is a property
     of the scan (it describes the instrument), so it's stored on the scan
     and editable later — useful even for documenting a real scan's pose.
+    <kbd>R</kbd> <kbd>X</kbd> and <kbd>R</kbd> <kbd>Y</kbd> on a selected
+    scan set roll and pitch directly in the 3D view.
 
 9. **Scanner heading** — the initial azimuth the scanner faces in the
    horizontal plane, in degrees (`0` is the default heading; counter-clockwise
