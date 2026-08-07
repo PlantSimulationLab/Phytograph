@@ -80,6 +80,46 @@ below is `http://127.0.0.1:<resolved-port>`:
 | Dev (no venv) | Supervisor spawns `resources/phytograph_backend/phytograph_backend` |
 | Packaged build | Bundled binary alongside the app |
 
+## Concurrency model
+
+One process, one asyncio event loop. What keeps it responsive is **how handlers
+are declared**:
+
+- **`def` (not `async def`) for anything that blocks.** FastAPI runs a sync
+  handler in anyio's worker threadpool, so the loop stays free to accept and
+  answer other requests while it works. numpy / open3d / laspy / laszip release
+  the GIL in their heavy sections, so those genuinely run in parallel. This is
+  the default for a Phytograph endpoint — the compute *is* the endpoint.
+- **`async def` only when the handler actually awaits**: a streaming response, an
+  `UploadFile` read, or `_run_killable`'s disconnect poll. Then every blocking
+  section inside it must go through `await run_in_threadpool(...)` — an
+  `async def` handler owns the loop between its awaits.
+
+An `async def` handler with no `await` in its body is always a bug: it holds the
+loop from first statement to last. `tests/test_event_loop_not_blocked.py` fails
+the build on one, and measures the property directly against a live uvicorn
+(a 1 s handler must not delay a concurrent `/health`).
+
+This was learned the hard way. Every handler used to be `async def` with its
+compute inline, so the backend served exactly one request at a time: a 7 M-point
+LAZ export whose real cost is ~1–2 s died on its 2-minute client deadline, and
+`/api/pointcloud/preview` calls that measure 3–70 ms timed out at 60 s, purely
+from starvation. Nothing was slow; everything was queued.
+
+Two consequences worth knowing:
+
+- **Peak memory is no longer capped at one operation.** Serialization used to
+  bound it implicitly. The worker threadpool is sized to
+  `max(8, min(16, cpu_count))`, overridable with `PHYTOGRAPH_MAX_WORKER_THREADS`.
+- **Shared state needs its lock.** `_cloud_sessions`, `_plant_sessions`,
+  `_SEG_WORKERS`, `_CANCEL_REGISTRY` and the octree build locks each have a
+  `threading.Lock`, and session read-modify-write runs entirely inside it. Never
+  hold one across an `await` — a coroutine parked on a threadpool call while
+  holding a lock that the threadpool's own threads need is a deadlock.
+- **Response serialization still happens on the loop.** A multi-hundred-MB JSON
+  body blocks it regardless of how the handler is declared; that is what the
+  binary-frame transport below is for.
+
 ## Wire format: JSON vs binary frames
 
 Most endpoints exchange JSON. The **large array responses** — Helios + Open3D

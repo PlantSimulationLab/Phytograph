@@ -973,11 +973,11 @@ class TestMultiReturnImportColumnMapping:
             # persist them in the session, the way the UI step does. The endpoint
             # streams PHP1 markers + a JSON tail; drain it to the result dict.
             import json as _json
-            resp = asyncio.run(main.backfill_cloud_misses(
+            resp = main.backfill_cloud_misses(
                 "testmr01",
                 main.BackfillMissesRequest(
                     origin=_FIXTURE_ORIGIN, n_theta=800, n_phi=1600,
-                    theta_min=0, theta_max=180, phi_min=0, phi_max=360)))
+                    theta_min=0, theta_max=180, phi_min=0, phi_max=360))
 
             async def _collect():
                 return b"".join([c if isinstance(c, (bytes, bytearray)) else c.encode()

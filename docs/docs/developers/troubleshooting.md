@@ -71,6 +71,38 @@ returns that cached value. If requests are going to the wrong place, the
 resolution step is what to inspect — don't edit `getBackendUrl()`. To pin a
 specific port for both ends, set `PHYTOGRAPH_BACKEND_PORT`.
 
+## A tool fails with "… timed out. The backend did not respond within …"
+
+Every request the renderer makes carries a client-side deadline (2 min for an
+export, 5 min for a session op or a plant generate, 10 min for an import). When
+one expires, `abortOnTimeout()` in `src/renderer/utils/backendApi.ts` aborts the
+fetch with a `BackendTimeoutError` naming the endpoint and the budget, and that
+message is what the toast shows.
+
+The backend logs any request over 5 s, so start there:
+
+```
+[slow] POST /api/pointcloud/export took 143.2s, 2 other request(s) already in flight
+```
+
+Lower the threshold with `PHYTOGRAPH_SLOW_REQUEST_SECONDS` (in dev the line goes
+to the `npm run dev` terminal alongside uvicorn's access log). If the request
+isn't in the log at all it never arrived; if it's there and never finished, the
+operation is stuck — restart the backend.
+
+The trailing in-flight count should be **uncorrelated** with slowness. It wasn't
+always: every handler used to be `async def` doing blocking work inline on the
+single event loop, so one long operation starved every other request behind it —
+a 7 M-point LAZ export (≈1–2 s of real work) died on its 2-minute deadline while
+60 ms preview calls timed out at 60 s. Blocking handlers are now `def` and run in
+the worker threadpool. If you see slow requests correlating with a high in-flight
+count again, something has regressed — see
+[Concurrency model](architecture/backend.md#concurrency-model).
+
+A **user cancel** is deliberately different: it aborts with no reason, stays a
+plain `AbortError`, and callers swallow it silently. Don't collapse the two, or
+a real timeout goes back to being invisible.
+
 ## Plant generation / Helios features fail in dev only
 
 PyHelios is built from the source submodule, not a pip wheel. Its native lib

@@ -1,3 +1,59 @@
+// ==================== REQUEST TIMEOUTS ====================
+
+/**
+ * Thrown when a backend request exceeds its client-side deadline.
+ *
+ * Every fetch helper below guards itself with an `AbortController` + `setTimeout`.
+ * Aborting with NO reason makes `fetch` reject with Chromium's own DOMException,
+ * whose message is the useless `"signal is aborted without reason"` — which is
+ * what users saw in the Export Failed toast: no operation, no endpoint, no
+ * duration, no hint at what to do. `AbortController.abort(reason)` lets us supply
+ * the rejection value ourselves, so the error that reaches the catch block (and
+ * therefore the toast) is already a self-describing message.
+ *
+ * Just as important: it is DISTINGUISHABLE from a user cancel. Several callers
+ * treat `DOMException`/`name === 'AbortError'` as "the user pressed Cancel" and
+ * silently swallow it — so before this, a genuine timeout on those paths showed
+ * the user nothing at all. A cancel still aborts with no reason (a plain
+ * AbortError); only the deadline produces this type.
+ */
+export class BackendTimeoutError extends Error {
+  readonly endpoint: string;
+  readonly timeoutMs: number;
+  constructor(endpoint: string, timeoutMs: number) {
+    const secs = timeoutMs >= 60000
+      ? `${Math.round(timeoutMs / 60000)} min`
+      : `${Math.round(timeoutMs / 1000)} s`;
+    super(
+      `The backend did not respond within ${secs} (POST ${endpoint}). ` +
+      `Requests run concurrently, so this is not another tool holding it up — the ` +
+      `operation itself is either still working on an unusually large cloud or it ` +
+      `is stuck. The backend logs a "[slow]" line naming any request over 5 s; if ` +
+      `nothing is progressing there, restart the backend.`,
+    );
+    this.name = 'BackendTimeoutError';
+    this.endpoint = endpoint;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Arm a request deadline. Returns the timer id to `clearTimeout` on completion.
+ * Prefer this over a bare `setTimeout(() => controller.abort(), ms)` — the reason
+ * is what the user ends up reading. `endpoint` is the route (a `:id` placeholder
+ * is fine; it is for the human, not for parsing).
+ */
+export function abortOnTimeout(
+  controller: AbortController,
+  timeoutMs: number,
+  endpoint: string,
+): ReturnType<typeof setTimeout> {
+  return setTimeout(
+    () => controller.abort(new BackendTimeoutError(endpoint, timeoutMs)),
+    timeoutMs,
+  );
+}
+
 // ==================== SHARED POINT SOURCE ====================
 
 /**
@@ -57,14 +113,16 @@ export class CostWarningError extends Error {
  * safety timeout AND optional external cancellation. The external `signal` is the
  * Cancel button: aborting the fetch closes the TCP connection, the backend detects
  * the disconnect and SIGKILLs its worker subprocess (see `_run_killable`). The
- * fetch aborts when EITHER the timeout fires OR the external signal aborts; on
- * abort, `fetch` throws a DOMException named 'AbortError', which callers
- * distinguish from a real failure (user cancel ≠ error).
+ * fetch aborts when EITHER the timeout fires OR the external signal aborts — and
+ * the two are deliberately distinguishable at the catch site: a cancel aborts with
+ * no reason (a plain DOMException 'AbortError', which callers swallow as user
+ * intent), the deadline aborts with a `BackendTimeoutError` (a real failure that
+ * must surface).
  */
 async function postSegment<T>(path: string, request: unknown, signal?: AbortSignal, timeoutMs = 300000): Promise<T> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId = abortOnTimeout(controller, timeoutMs, path);
   // Mirror the external signal into our controller so the fetch aborts on either
   // the timeout or a user-initiated cancel. `once` keeps the listener from leaking.
   const onExternalAbort = () => controller.abort();
@@ -224,8 +282,15 @@ export function describeBackendError(error: unknown, action: string): Error {
           `or it crashed processing this file). Check the backend status and try again.`,
       );
     }
+    // A deadline abort already carries the endpoint, the elapsed budget and what
+    // to do about it (see BackendTimeoutError) — only prefix the operation name.
+    if (error instanceof BackendTimeoutError) {
+      return new Error(`${action} timed out. ${error.message}`);
+    }
+    // A reason-less AbortError is a user-initiated cancel (the Cancel button
+    // mirrors its signal into the request's controller without a reason).
     if (error.name === 'AbortError') {
-      return new Error(`${action} timed out. The file may be too large, or the backend is stuck.`);
+      return new Error(`${action} was cancelled.`);
     }
     return error;
   }
@@ -557,7 +622,7 @@ export async function exportDemRaster(
 ): Promise<{ success: boolean; format: string; data_base64: string }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/dem/export-raster');
   try {
     const response = await fetch(`${baseUrl}/api/dem/export-raster`, {
       method: 'POST',
@@ -589,7 +654,7 @@ export async function parseTrajectory(
 ): Promise<unknown> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/trajectory/parse'); // 2 minutes
 
   try {
     const response = await fetch(`${baseUrl}/api/trajectory/parse`, {
@@ -1352,7 +1417,7 @@ export async function generatePlantModel(
 
   // Use AbortController for 5 minute timeout (plant generation can be slow)
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/plant/generate'); // 5 minutes
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/generate`, {
@@ -1394,7 +1459,7 @@ export async function generatePlantCanopy(
 
   // Canopies build N plants, so allow the full 5 minute timeout.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/plant/canopy/generate'); // 5 minutes
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/canopy/generate`, {
@@ -1572,7 +1637,7 @@ export async function createPlantSession(
   console.log('Creating plant session:', request.plant_type, 'initial_age:', request.initial_age);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = abortOnTimeout(controller, 60000, '/api/plant/session/create');
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/session/create`, {
@@ -1608,7 +1673,7 @@ export async function advancePlantSession(
   console.log('Advancing plant session:', sessionId, 'dt:', dt);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = abortOnTimeout(controller, 60000, '/api/plant/session/:id/advance');
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/session/${sessionId}/advance`, {
@@ -1771,7 +1836,7 @@ export async function morphPlant(
   console.log('Morphing plant:', request.plant_type);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/plant/morph'); // 5 minutes
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/morph`, {
@@ -2042,7 +2107,8 @@ export async function exportPointCloudLasLaz(
 
   // Use AbortController for timeout
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/pointcloud/export'); // 2 minutes
+  const t0 = performance.now();
 
   try {
     const response = await fetch(`${baseUrl}/api/pointcloud/export`, {
@@ -2064,8 +2130,8 @@ export async function exportPointCloudLasLaz(
     return await response.json();
   } catch (error) {
     clearTimeout(timeoutId);
-    console.error('LAS/LAZ export failed:', error);
-    throw error;
+    console.error(`LAS/LAZ export failed after ${Math.round(performance.now() - t0)} ms:`, error);
+    throw describeBackendError(error, 'Export');
   }
 }
 
@@ -2151,7 +2217,7 @@ export async function exportScanXml(
 ): Promise<ScanExportResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/scan/export-xml');
 
   try {
     const response = await fetch(`${baseUrl}/api/scan/export-xml`, {
@@ -2259,7 +2325,7 @@ export async function previewPointCloud(
 ): Promise<PointCloudPreviewResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = abortOnTimeout(controller, 60000, '/api/pointcloud/preview');
   try {
     const response = await fetch(`${baseUrl}/api/pointcloud/preview`, {
       method: 'POST',
@@ -2299,7 +2365,7 @@ export async function importPointCloudByPath(
   // 10 minute timeout: a multi-GB scan takes tens of seconds to parse and
   // additional time to stream back. Matches the triangulation budget.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000);
+  const timeoutId = abortOnTimeout(controller, 600000, '/api/pointcloud/import_by_path');
   try {
     const response = await fetch(`${baseUrl}/api/pointcloud/import_by_path`, {
       method: 'POST',
@@ -2356,7 +2422,7 @@ export interface MeshImportResponse {
 export async function importTexturedMesh(filePath: string): Promise<MeshImportResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/mesh/import');
   try {
     const response = await fetch(`${baseUrl}/api/mesh/import`, {
       method: 'POST',
@@ -2642,10 +2708,10 @@ export async function fetchBinaryFrame(
 ): Promise<BinaryFrame> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  let timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let timeoutId = abortOnTimeout(controller, timeoutMs, path);
   const refreshTimeout = () => {
     clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    timeoutId = abortOnTimeout(controller, timeoutMs, path);
   };
   if (signal) signal.addEventListener('abort', () => controller.abort());
   try {
@@ -2742,10 +2808,10 @@ export async function fetchJsonWithProgress<T>(
 ): Promise<T> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  let timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let timeoutId = abortOnTimeout(controller, timeoutMs, path);
   const refreshTimeout = () => {
     clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    timeoutId = abortOnTimeout(controller, timeoutMs, path);
   };
   if (signal) signal.addEventListener('abort', () => controller.abort());
   try {
@@ -2812,7 +2878,7 @@ export async function importPointCloudLasLaz(
 
   // Use AbortController for timeout
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/pointcloud/import'); // 2 minutes
 
   try {
     const formData = new FormData();
@@ -3417,7 +3483,7 @@ export async function bakeCloudSession(
 ): Promise<CloudSessionBakeResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/bake');
   try {
     const response = await fetch(
       `${baseUrl}/api/cloud/session/${sessionId}/bake`,
@@ -3447,7 +3513,7 @@ export async function sessionFilter(
 ): Promise<CloudSessionBakeResult & { rebuilt: boolean }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/filter');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/filter`, {
       method: 'POST',
@@ -3485,7 +3551,7 @@ export async function sessionTransform(
 ): Promise<CloudSessionBakeResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/transform');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/transform`, {
       method: 'POST',
@@ -3526,7 +3592,7 @@ export async function sessionSplit(
 ): Promise<CloudSessionSplitResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/split');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/split`, {
       method: 'POST',
@@ -3559,7 +3625,7 @@ export async function sessionExtract(
 ): Promise<{ session_id: string; extracted: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/extract');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/extract`, {
       method: 'POST',
@@ -3637,7 +3703,7 @@ export async function duplicateCloudSession(
 ): Promise<{ session_id: string; duplicate: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/duplicate');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/duplicate`, {
       method: 'POST',
@@ -3667,7 +3733,7 @@ export async function sessionMerge(
 ): Promise<{ merged: OctreeMetadata & { session_id: string; point_count: number; cache_id: string; world_shift?: [number, number, number] | null; has_misses?: boolean; miss_octree_cache_id?: string | null } }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/merge');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/merge`, {
       method: 'POST',
@@ -3963,7 +4029,7 @@ export async function detectPhyllotaxis(
 ): Promise<QSMPhyllotaxisResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000); // 1 minute
+  const timeoutId = abortOnTimeout(controller, 60000, '/api/qsm/phyllotaxis'); // 1 minute
   try {
     const response = await fetch(`${baseUrl}/api/qsm/phyllotaxis`, {
       method: 'POST',
@@ -3987,7 +4053,7 @@ export async function detectPhyllotaxis(
 export async function addQSMLeaves(request: QSMLeavesRequest): Promise<QSMLeavesResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/qsm/leaves'); // 5 minutes
   try {
     const response = await fetch(`${baseUrl}/api/qsm/leaves`, {
       method: 'POST',
@@ -4067,7 +4133,7 @@ export async function adjustQSMLeafAngles(
 ): Promise<QSMLeavesResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/qsm/adjust-leaf-angles'); // 5 minutes
   try {
     const response = await fetch(`${baseUrl}/api/qsm/adjust-leaf-angles`, {
       method: 'POST',

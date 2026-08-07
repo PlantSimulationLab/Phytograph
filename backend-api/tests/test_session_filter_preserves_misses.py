@@ -84,7 +84,7 @@ def test_spatial_filter_does_not_delete_misses(miss_session):
         region=main.CropOctreeRegion(kind="box", min=[-1, -1, -1], max=[5.5, 1, 1]),
         rebuild=False,
     )
-    asyncio.run(main.session_filter(miss_session.session_id, req))
+    main.session_filter(miss_session.session_id, req)
 
     misses, hits = _surviving(miss_session)
     assert misses == N_MISSES, "spatial filter destroyed sky/miss points"
@@ -97,7 +97,7 @@ def test_spatial_filter_still_deletes_the_hits_it_should(miss_session):
         region=main.CropOctreeRegion(kind="box", min=[-1, -1, -1], max=[2.5, 1, 1]),
         rebuild=False,
     )
-    asyncio.run(main.session_filter(miss_session.session_id, req))
+    main.session_filter(miss_session.session_id, req)
 
     misses, hits = _surviving(miss_session)
     assert misses == N_MISSES          # sky intact
@@ -111,7 +111,7 @@ def test_scalar_filter_does_not_delete_misses(miss_session):
         scalar_filters=[main.ScalarFilter(slug="wood_class", values=[2])],
         rebuild=False,
     )
-    asyncio.run(main.session_filter(miss_session.session_id, req))
+    main.session_filter(miss_session.session_id, req)
 
     misses, hits = _surviving(miss_session)
     assert misses == N_MISSES, "scalar filter destroyed sky/miss points"
@@ -125,7 +125,7 @@ def test_filter_keeping_no_hits_still_reports_empty(miss_session):
         region=main.CropOctreeRegion(kind="box", min=[500, -1, -1], max=[600, 1, 1]),
         rebuild=False,
     )
-    res = asyncio.run(main.session_filter(miss_session.session_id, req))
+    res = main.session_filter(miss_session.session_id, req)
 
     assert res["point_count"] == 0
     assert res["rebuilt"] is False

@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.61.1"
+BACKEND_VERSION = "0.62.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -268,6 +268,96 @@ app.add_middleware(
 )
 
 
+# ==================== SLOW-REQUEST / CONTENTION LOGGING ====================
+#
+# uvicorn's access log says a request happened; it does NOT say how long it took
+# or what else was running at the time. That gap made a real failure undiagnosable:
+# an LAZ export died on its 2-minute client deadline with nothing in any log to
+# say whether the backend had even started it — and the export itself measures at
+# ~1-2 s for a 7 M-point cloud, so the time went somewhere else.
+#
+# It had gone to CONTENTION: every route handler was `async def` doing its blocking
+# CPU work inline on the single event loop, so one long operation stalled every
+# other request behind it. Blocking handlers are now declared `def` and run in the
+# worker threadpool (see the worker-thread budget below), which removes that stall
+# — this logger stays as the instrument that proves it, and as the way to catch a
+# regression. `queued` is the number of requests already in flight when this one
+# arrived: it should now be uncorrelated with a request being slow.
+#
+# Written as raw ASGI, NOT `@app.middleware("http")`: Starlette's BaseHTTPMiddleware
+# wraps the response in its own task group and is known to swallow client-disconnect
+# propagation. `_run_killable` depends on that disconnect to SIGKILL its worker when
+# the user hits Cancel, so wrapping send/receive here is not an option. This passes
+# `receive`/`send` through untouched and only reads the clock.
+_SLOW_REQUEST_SECONDS = float(os.environ.get("PHYTOGRAPH_SLOW_REQUEST_SECONDS", "5"))
+
+
+class SlowRequestLogger:
+    """Log any request that takes longer than PHYTOGRAPH_SLOW_REQUEST_SECONDS."""
+
+    _in_flight = 0
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        queued = SlowRequestLogger._in_flight
+        SlowRequestLogger._in_flight += 1
+        started = time.perf_counter()
+        try:
+            return await self.app(scope, receive, send)
+        finally:
+            SlowRequestLogger._in_flight -= 1
+            elapsed = time.perf_counter() - started
+            if elapsed >= _SLOW_REQUEST_SECONDS:
+                contention = (
+                    f", {queued} other request(s) already in flight" if queued else ""
+                )
+                print(
+                    f"[slow] {scope.get('method', '?')} {scope.get('path', '?')} "
+                    f"took {elapsed:.1f}s{contention}",
+                    flush=True,
+                )
+
+
+app.add_middleware(SlowRequestLogger)
+
+
+# ==================== WORKER-THREAD BUDGET ====================
+#
+# Route handlers that do blocking CPU work are declared `def`, not `async def`,
+# so FastAPI runs them in anyio's worker threadpool and the event loop stays free
+# to accept and answer everything else. (See `SlowRequestLogger` above for what
+# the previous all-`async def` arrangement cost.) numpy / open3d / laspy / laszip
+# release the GIL for their heavy sections, so those genuinely run in parallel.
+#
+# Starlette's default limiter is 40 threads. Serialized execution used to cap peak
+# memory at one operation's working set; true parallelism removes that cap, and
+# these operations are hundreds of MB each — 40 concurrent bakes would OOM the
+# machine long before they'd finish faster. Bound it to something a desktop can
+# actually hold, while staying well above the handful of requests the renderer
+# has in flight at once, so nothing queues in practice.
+try:
+    _MAX_WORKER_THREADS = int(os.environ.get("PHYTOGRAPH_MAX_WORKER_THREADS", "0")) or None
+except (ValueError, TypeError):
+    _MAX_WORKER_THREADS = None
+if _MAX_WORKER_THREADS is None:
+    _MAX_WORKER_THREADS = max(8, min(16, (os.cpu_count() or 4)))
+
+
+@app.on_event("startup")
+async def _bound_worker_threadpool() -> None:
+    """Size the threadpool that every `def` handler runs in (needs a live loop)."""
+    try:
+        import anyio.to_thread
+
+        anyio.to_thread.current_default_thread_limiter().total_tokens = _MAX_WORKER_THREADS
+    except Exception as e:  # pragma: no cover - never fail startup over a knob
+        print(f"[startup] could not size the worker threadpool: {e}", flush=True)
+
+
 # Centralized error logging. The ~38 per-endpoint try/except blocks already call
 # traceback.print_exc() and raise HTTPException(500, str(e)); this handler is the
 # safety net for anything that DOESN'T (future endpoints, errors outside a try).
@@ -278,6 +368,7 @@ app.add_middleware(
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 from fastapi.exception_handlers import http_exception_handler
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
@@ -298,7 +389,7 @@ async def _log_unhandled_exception(request: Request, exc: Exception):
 
 
 @app.get("/")
-async def root():
+def root():
     return {"message": "Phytograph API is running", "version": BACKEND_VERSION}
 
 
@@ -420,42 +511,45 @@ async def fit_model(
         # Read the uploaded file
         contents = await file.read()
 
-        # Parse CSV
-        if file.filename.endswith('.csv') or file.filename.endswith('.txt'):
-            df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
-        elif file.filename.endswith('.xlsx'):
-            df = pd.read_excel(io.BytesIO(contents))
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
+        # Everything past the upload — parse, model lookup, fit — is blocking CPU
+        # work, so it runs in the threadpool instead of on the event loop.
+        def _parse_and_fit():
+            # Parse CSV
+            if file.filename.endswith('.csv') or file.filename.endswith('.txt'):
+                df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
+            elif file.filename.endswith('.xlsx'):
+                df = pd.read_excel(io.BytesIO(contents))
+            else:
+                raise HTTPException(status_code=400, detail="Unsupported file format")
 
-        # Convert to dict of numpy arrays
-        data = {col: df[col].values for col in df.columns}
+            # Convert to dict of numpy arrays
+            data = {col: df[col].values for col in df.columns}
 
-        # Get the model
-        model = get_model(model_category, model_type)
+            # Get the model
+            model = get_model(model_category, model_type)
 
-        # Fit options
-        options = {
-            "method": method if method else "auto",
-            "max_iterations": max_iterations,
-            "verbose": False
-        }
+            # Fit options
+            options = {
+                "method": method if method else "auto",
+                "max_iterations": max_iterations,
+                "verbose": False
+            }
 
-        # Import and run fit
-        from phytorch import fit
-        result = fit(model, data, options)
+            # Import and run fit
+            from phytorch import fit
+            result = fit(model, data, options)
 
-        # Format response
-        response = {
-            "success": True,
-            "parameters": {k: float(v) if isinstance(v, (np.floating, float)) else v
-                         for k, v in result.parameters.items()},
-            "r_squared": float(result.r_squared) if hasattr(result, 'r_squared') else None,
-            "loss": float(result.loss) if hasattr(result, 'loss') else None,
-            "converged": bool(result.converged) if hasattr(result, 'converged') else True,
-        }
+            # Format response
+            return {
+                "success": True,
+                "parameters": {k: float(v) if isinstance(v, (np.floating, float)) else v
+                             for k, v in result.parameters.items()},
+                "r_squared": float(result.r_squared) if hasattr(result, 'r_squared') else None,
+                "loss": float(result.loss) if hasattr(result, 'loss') else None,
+                "converged": bool(result.converged) if hasattr(result, 'converged') else True,
+            }
 
-        return response
+        return await run_in_threadpool(_parse_and_fit)
 
     except Exception as e:
         import traceback
@@ -654,7 +748,7 @@ def create_model_function(equation: str, param_names: List[str], input_symbols: 
 
 
 @app.post("/api/fit/custom")
-async def fit_custom_model(request: FitRequest):
+def fit_custom_model(request: FitRequest):
     """
     Fit a custom or built-in model to data.
     """
@@ -1022,7 +1116,7 @@ def python_to_latex(equation: str, output_symbol: str = "y", equation_type: str 
 
 
 @app.post("/api/latex")
-async def convert_to_latex(request: LatexRequest):
+def convert_to_latex(request: LatexRequest):
     """
     Convert a Python equation to LaTeX format.
     """
@@ -1038,7 +1132,7 @@ async def convert_to_latex(request: LatexRequest):
 
 
 @app.get("/api/latex")
-async def convert_to_latex_get(equation: str, output_symbol: str = "y", equation_type: str = "explicit"):
+def convert_to_latex_get(equation: str, output_symbol: str = "y", equation_type: str = "explicit"):
     """
     Convert a Python equation to LaTeX format (GET version for easy testing).
     """
@@ -1079,7 +1173,7 @@ class ExportRequest(BaseModel):
 
 
 @app.post("/api/export")
-async def export_fit_results(request: ExportRequest):
+def export_fit_results(request: ExportRequest):
     """
     Export fit results to an Excel file with Parameters, Data, and Metadata sheets.
     """
@@ -1527,7 +1621,7 @@ def fit_prospect_d(
 
 
 @app.post("/api/fit/prospect")
-async def fit_prospect_model(request: ProspectFitRequest):
+def fit_prospect_model(request: ProspectFitRequest):
     """
     Fit PROSPECT-D radiative transfer model to spectral reflectance data.
 
@@ -2249,7 +2343,7 @@ def _pack_mesh_frame(result: dict, *, index_key: str = "triangles") -> bytes:
 
 
 @app.post("/api/triangulate")
-async def triangulate_point_cloud(request: TriangulationRequest, http_request: Request):
+def triangulate_point_cloud(request: TriangulationRequest, http_request: Request):
     """Triangulate a point cloud (Open3D). Returns a PHB1 binary frame."""
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
@@ -2404,7 +2498,7 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
 
 
 @app.post("/api/fit/crown")
-async def fit_crown_endpoint(request: CrownFitRequest, http_request: Request):
+def fit_crown_endpoint(request: CrownFitRequest, http_request: Request):
     """Fit crown shapes + metrics. Streams progress then a JSON tail (one entry
     per fitted crown), cancelable via the run-id token."""
     run_id, cancel_event = _new_cancel_token()
@@ -2477,7 +2571,7 @@ async def segment_ground_points(request: GroundSegmentationRequest, http_request
     panel's Cancel button can SIGKILL it mid-run; on client disconnect a cancelled
     response is returned at once."""
     try:
-        points = _resolve_segmentation_points(request)
+        points = await run_in_threadpool(_resolve_segmentation_points, request)
 
         if len(points) < 10:
             return GroundSegmentationResponse(
@@ -3368,7 +3462,7 @@ def _do_dem(request: "DemRequest", progress=None) -> dict:
 
 
 @app.post("/api/dem")
-async def generate_dem(request: DemRequest, http_request: Request):
+def generate_dem(request: DemRequest, http_request: Request):
     """Generate a DEM from a flat cloud (inline points / source). Returns a PHB1
     binary frame (heightmap mesh + regular grid)."""
     run_id, cancel_event = _new_cancel_token()
@@ -3441,7 +3535,7 @@ def _dem_geotiff_bytes(grid: np.ndarray, minx: float, miny: float, cell: float,
 
 
 @app.post("/api/dem/export-raster")
-async def export_dem_raster(request: DemRasterExportRequest):
+def export_dem_raster(request: DemRasterExportRequest):
     """Write a DEM grid to ESRI ASCII (.asc) or GeoTIFF (.tif); returns base64."""
     import base64
     if request.nx <= 0 or request.ny <= 0 or len(request.grid_z) != request.nx * request.ny:
@@ -3582,7 +3676,7 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
             refl_parts: List[Optional[np.ndarray]] = []
             for s in request.sources:
                 full = s.model_copy(update={"max_points": None})  # full resolution
-                pts, _, inten = _read_points_from_source(full)
+                pts, _, inten = await run_in_threadpool(_read_points_from_source, full)
                 parts.append(np.asarray(pts, dtype=np.float64))
                 refl_parts.append(
                     np.asarray(inten, dtype=np.float64) if inten is not None else None
@@ -3595,7 +3689,7 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
                 reflectance = np.concatenate(refl_parts, axis=0)
         elif request.source is not None:
             src = request.source.model_copy(update={"max_points": None})
-            points, _, inten = _read_points_from_source(src)
+            points, _, inten = await run_in_threadpool(_read_points_from_source, src)
             points = np.asarray(points, dtype=np.float64)
             reflectance = np.asarray(inten, dtype=np.float64) if inten is not None else None
         elif request.points is not None:
@@ -4063,8 +4157,9 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
     harness (`scripts/eval_tree_segmentation.py`) reads GT straight from the
     file. There is no GT consumer on this endpoint."""
     try:
-        points = _resolve_segmentation_points(
-            GroundSegmentationRequest(points=request.points, source=request.source)
+        points = await run_in_threadpool(
+            _resolve_segmentation_points,
+            GroundSegmentationRequest(points=request.points, source=request.source),
         )
         n_full = len(points)
 
@@ -5811,7 +5906,7 @@ def _pack_helios_triangulation(result: dict) -> bytes:
 
 
 @app.post("/api/triangulate/helios")
-async def helios_triangulate(request: HeliosTriangulationRequest, http_request: Request):
+def helios_triangulate(request: HeliosTriangulationRequest, http_request: Request):
     """Triangulate point cloud data using PyHelios spherical Delaunay triangulation.
 
     Returns a PHB1 binary frame (see _bin_frame_bytes) so multi-million-triangle
@@ -7734,7 +7829,7 @@ class SnapGridResponse(BaseModel):
 
 
 @app.post("/api/lad/snap-grid", response_model=SnapGridResponse)
-async def lad_snap_grid(request: SnapGridRequest):
+def lad_snap_grid(request: SnapGridRequest):
     """Sample a DEM under each voxel column so the grid can be displaced to follow
     the ground. Returns the authoritative per-column offsets the UI both renders
     and feeds to the LAD inversion (HeliosGrid.column_offsets)."""
@@ -7764,7 +7859,7 @@ class TrajectoryParseRequest(BaseModel):
 
 
 @app.post("/api/trajectory/parse")
-async def trajectory_parse(request: TrajectoryParseRequest):
+def trajectory_parse(request: TrajectoryParseRequest):
     """Parse a binary trajectory (currently SBET .sbet/.out) into the canonical
     PoseStream wire dict the renderer's poseStreamFromWire consumes. Text trajectories
     (.csv/.txt/.tsv/.traj) are parsed client-side and never hit this endpoint.
@@ -8557,7 +8652,7 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str) -> dict:
 
 
 @app.post("/api/scan/export-xml")
-async def scan_export_xml(request: "ScanExportRequest"):
+def scan_export_xml(request: "ScanExportRequest"):
     """Export scans to a Helios XML + per-scan ASCII bundle (base64 files)."""
     return _do_scan_export(request)
 
@@ -9730,7 +9825,7 @@ def _pack_lidar_scan(result: dict) -> bytes:
 
 
 @app.post("/api/lidar/scan")
-async def lidar_scan(request: LidarScanRequest, http_request: Request):
+def lidar_scan(request: LidarScanRequest, http_request: Request):
     """Ray-traced synthetic LiDAR scan. Returns a PHB1 binary frame (points +
     scalars per scanner can be millions of values)."""
     run_id, cancel_event = _new_cancel_token()
@@ -9740,7 +9835,7 @@ async def lidar_scan(request: LidarScanRequest, http_request: Request):
 
 
 @app.post("/api/cancel/{run_id}")
-async def cancel_run(run_id: str):
+def cancel_run(run_id: str):
     """Cancel an in-flight streaming op (synthetic scan / triangulation / LAD).
 
     The streaming endpoints emit their run_id as the first PHP1 marker; the
@@ -12325,7 +12420,7 @@ async def extract_stem_skeleton(request: SkeletonRequest, http_request: Request)
     try:
         if request.source is not None:
             # Octree-backed cloud: read (and downsample) from the source file.
-            points, _, _ = _read_points_from_source(request.source)
+            points, _, _ = await run_in_threadpool(_read_points_from_source, request.source)
         else:
             points = np.array(request.points or [], dtype=np.float64)
         points_original_count = len(points)
@@ -12781,7 +12876,7 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
 
 
 @app.post("/api/qsm/build")
-async def build_qsm(request: QSMBuildRequest):
+def build_qsm(request: QSMBuildRequest):
     """Build a true QSM, streaming per-stage progress as PHP1 markers ahead of the
     JSON result (mirrors triangulation / backfill). The renderer's
     fetchJsonWithProgress drains the markers and parses the trailing JSON, which is
@@ -12871,7 +12966,7 @@ def _qsm_from_request(cylinders: List[QSMCylinder], shoots: List[QSMShoot]):
 
 
 @app.post("/api/qsm/phyllotaxis", response_model=QSMPhyllotaxisResponse)
-async def detect_qsm_phyllotaxis(request: QSMPhyllotaxisRequest):
+def detect_qsm_phyllotaxis(request: QSMPhyllotaxisRequest):
     """Auto-detect the phyllotactic angle from the QSM's branching geometry.
 
     Branches follow the phyllotaxis of leaves (modulo unbroken buds), so the
@@ -12949,7 +13044,7 @@ def _build_leaf_geometry(placements, obj_template, texture_name, texture_b64):
 
 
 @app.post("/api/qsm/leaves", response_model=QSMLeavesResponse)
-async def add_qsm_leaves(request: QSMLeavesRequest):
+def add_qsm_leaves(request: QSMLeavesRequest):
     """Place leaves on the terminal shoots of a QSM and return a textured mesh."""
     from qsm.leaves import LeafPlacementOptions, place_leaves
 
@@ -12984,7 +13079,7 @@ async def add_qsm_leaves(request: QSMLeavesRequest):
 
 
 @app.get("/api/qsm/leaf-textures")
-async def get_qsm_leaf_textures():
+def get_qsm_leaf_textures():
     """List the curated built-in leaf textures available for QSM leaf placement."""
     from qsm.leaves import CURATED_LEAF_TEXTURES
 
@@ -13047,7 +13142,7 @@ class QSMAdjustLeafAnglesRequest(QSMLeavesRequest):
 
 
 @app.post("/api/qsm/adjust-leaf-angles", response_model=QSMLeavesResponse)
-async def adjust_qsm_leaf_angles(request: QSMAdjustLeafAnglesRequest):
+def adjust_qsm_leaf_angles(request: QSMAdjustLeafAnglesRequest):
     """Adjust a QSM's leaf angles to match a measured per-cell distribution."""
     import numpy as np
     from qsm.leaves import LeafPlacementOptions, place_leaves
@@ -13130,7 +13225,7 @@ async def adjust_qsm_leaf_angles(request: QSMAdjustLeafAnglesRequest):
 
 
 @app.get("/api/plant/models")
-async def get_available_plant_models():
+def get_available_plant_models():
     """Get list of available plant models from pyhelios library"""
     try:
         from pyhelios import Context, PlantArchitecture
@@ -13345,7 +13440,7 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
 
 
 @app.post("/api/plant/session/create", response_model=PlantSessionCreateResponse)
-async def create_plant_session(request: PlantSessionCreateRequest):
+def create_plant_session(request: PlantSessionCreateRequest):
     """
     Create a new plant session for incremental growth simulation.
     The session keeps the pyhelios context alive for efficient time stepping.
@@ -13452,7 +13547,7 @@ async def create_plant_session(request: PlantSessionCreateRequest):
 
 
 @app.post("/api/plant/session/{session_id}/advance", response_model=PlantSessionAdvanceResponse)
-async def advance_plant_session(session_id: str, request: PlantSessionAdvanceRequest):
+def advance_plant_session(session_id: str, request: PlantSessionAdvanceRequest):
     """
     Advance time for a plant session and return updated geometry.
     """
@@ -13520,7 +13615,7 @@ async def advance_plant_session(session_id: str, request: PlantSessionAdvanceReq
 
 
 @app.get("/api/plant/session/{session_id}", response_model=PlantSessionStatusResponse)
-async def get_plant_session_status(session_id: str):
+def get_plant_session_status(session_id: str):
     """Get the current status of a plant session."""
     try:
         with _session_lock:
@@ -13554,7 +13649,7 @@ async def get_plant_session_status(session_id: str):
 
 
 @app.delete("/api/plant/session/{session_id}")
-async def delete_plant_session(session_id: str):
+def delete_plant_session(session_id: str):
     """Delete a plant session and free resources."""
     try:
         with _session_lock:
@@ -13582,7 +13677,7 @@ async def delete_plant_session(session_id: str):
 
 
 @app.get("/api/plant/sessions")
-async def list_plant_sessions():
+def list_plant_sessions():
     """List all active plant sessions."""
     with _session_lock:
         sessions = []
@@ -13817,7 +13912,7 @@ class PlantMorphResponse(BaseModel):
 
 
 @app.post("/api/plant/morph/parse", response_model=PlantMorphParseResponse)
-async def parse_plant_morph_parameters(request: PlantMorphParseRequest):
+def parse_plant_morph_parameters(request: PlantMorphParseRequest):
     """Parse a plant structure XML string into editable parameters."""
     try:
         parsed = _parse_plant_xml(request.helios_xml)
@@ -13848,7 +13943,7 @@ async def parse_plant_morph_parameters(request: PlantMorphParseRequest):
 
 
 @app.post("/api/plant/morph", response_model=PlantMorphResponse)
-async def morph_plant(request: PlantMorphRequest):
+def morph_plant(request: PlantMorphRequest):
     """Rebuild a plant from modified structure XML."""
     import time
     import tempfile
@@ -13968,7 +14063,7 @@ async def morph_plant(request: PlantMorphRequest):
 
 
 @app.post("/api/plant/generate", response_model=PlantGenerationResponse)
-async def generate_plant_model(request: PlantGenerationRequest):
+def generate_plant_model(request: PlantGenerationRequest):
     """
     Generate a procedural plant model using pyhelios PlantArchitecture.
 
@@ -14429,7 +14524,7 @@ def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -
 
 
 @app.post("/api/plant/canopy/generate", response_model=PlantGenerationResponse)
-async def generate_plant_canopy(request: PlantCanopyRequest):
+def generate_plant_canopy(request: PlantCanopyRequest):
     """
     Generate a canopy of regularly spaced plants using pyhelios PlantArchitecture.
 
@@ -14921,7 +15016,7 @@ def _import_ply_mesh(ply_path: Path) -> MeshImportResponse:
 
 
 @app.post("/api/mesh/import", response_model=MeshImportResponse)
-async def import_textured_mesh(request: MeshImportRequest):
+def import_textured_mesh(request: MeshImportRequest):
     """Parse an OBJ (+ MTL + texture images) from disk into textured geometry."""
     from qsm.obj_loader import load_obj_template
 
@@ -15122,7 +15217,7 @@ def _format_points_as_text(
 
 
 @app.post("/api/pointcloud/export", response_model=PointCloudExportResponse)
-async def export_point_cloud_las(request: PointCloudExportRequest):
+def export_point_cloud_las(request: PointCloudExportRequest):
     """
     Export a point cloud.
 
@@ -15309,8 +15404,14 @@ async def import_point_cloud_las(file: UploadFile = File(...)):
         tmp.write(content)
         tmp_path = tmp.name
     try:
-        positions, colors, intensity = _load_las_arrays(tmp_path)
-        return _pack_pointcloud_response(positions, colors, intensity)
+        # laspy decode + the binary pack are the whole cost here and they are
+        # pure CPU, so they run in the threadpool rather than on the event loop —
+        # a multi-hundred-MB LAZ would otherwise stall every other request.
+        def _decode():
+            positions, colors, intensity = _load_las_arrays(tmp_path)
+            return _pack_pointcloud_response(positions, colors, intensity)
+
+        return await run_in_threadpool(_decode)
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -16973,14 +17074,20 @@ async def _run_killable(
 
     loop = asyncio.get_event_loop()
     with tempfile.TemporaryDirectory(prefix="phyto_seg_") as workdir:
-        # Stage inputs.
-        np.save(os.path.join(workdir, "input.npy"), np.ascontiguousarray(points))
-        if reflectance is not None:
-            np.save(os.path.join(workdir, "reflectance.npy"), np.asarray(reflectance))
-        if seeds is not None and len(seeds) > 0:
-            np.save(os.path.join(workdir, "seeds.npy"), np.asarray(seeds))
-        with open(os.path.join(workdir, "request.json"), "w") as f:
-            json.dump({"tool": tool, "params": params}, f)
+        # Stage inputs OFF the event loop. `points` is the full cloud — writing
+        # 7 M points is ~170 MB of np.save, seconds of blocking that would stall
+        # every other request in the process (see SlowRequestLogger). The awaits
+        # further down already yield; this is the part that did not.
+        def _stage() -> None:
+            np.save(os.path.join(workdir, "input.npy"), np.ascontiguousarray(points))
+            if reflectance is not None:
+                np.save(os.path.join(workdir, "reflectance.npy"), np.asarray(reflectance))
+            if seeds is not None and len(seeds) > 0:
+                np.save(os.path.join(workdir, "seeds.npy"), np.asarray(seeds))
+            with open(os.path.join(workdir, "request.json"), "w") as f:
+                json.dump({"tool": tool, "params": params}, f)
+
+        await run_in_threadpool(_stage)
 
         # Scrub the bundle's lib-path vars (mirrors _run_potree_converter) so the
         # child resolves libs the same way the parent did at its own launch.
@@ -17019,17 +17126,22 @@ async def _run_killable(
                 err = f"worker exited {proc.returncode}"
             raise RuntimeError(err)
 
-        # Collect results.
-        out_path = os.path.join(workdir, "output.npy")
-        res_path = os.path.join(workdir, "result.json")
-        result_dict = None
-        if os.path.exists(res_path):
-            with open(res_path, "r") as f:
-                result_dict = json.load(f)
+        # Collect results off the event loop, for the same reason as staging:
+        # `output.npy` is one label per point.
+        def _collect() -> "tuple[Optional[dict], Optional[np.ndarray]]":
+            res_path = os.path.join(workdir, "result.json")
+            rd = None
+            if os.path.exists(res_path):
+                with open(res_path, "r") as f:
+                    rd = json.load(f)
+            if tool == "skeleton":
+                return rd, None
+            return rd, np.load(os.path.join(workdir, "output.npy"))
+
+        result_dict, labels = await run_in_threadpool(_collect)
 
         if tool == "skeleton":
             return result_dict if result_dict is not None else {}
-        labels = np.load(out_path)
         if tool == "wood":
             return labels, (result_dict or {"warnings": []})
         if tool == "ground":
@@ -17580,7 +17692,7 @@ def _read_points_from_source(
 
 
 @app.post("/api/pointcloud/import_by_path")
-async def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
+def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
     """Parse a point-cloud file from disk and stream back a packed binary
     representation. Dispatches by extension:
 
@@ -19588,7 +19700,7 @@ def _suggest_global_shift(file_path: str,
 
 
 @app.post("/api/pointcloud/preview")
-async def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewResponse:
+def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewResponse:
     """Cheaply inspect a point-cloud file for the import wizard.
 
     Reads only enough of the file to show the wizard what was auto-detected and
@@ -21203,7 +21315,7 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
 
 
 @app.post("/api/cloud/session/create")
-async def create_cloud_session(request: CloudSessionCreateRequest, http_request: Request):
+def create_cloud_session(request: CloudSessionCreateRequest, http_request: Request):
     """Load a source cloud FULLY into an in-RAM session (the complete source of
     truth — positions + colours + intensity + every scalar extra-dim), build its
     first octree, and return `{session_id, ...octree metadata}`. This is the ONLY
@@ -21419,7 +21531,7 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
 
 
 @app.post("/api/cloud/session/{session_id}/backfill-misses")
-async def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest):
+def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest):
     """Explicitly recover sky/miss points for a session and persist them.
 
     LAD needs miss points (beams that returned nothing) for the Beer's-law
@@ -21479,7 +21591,7 @@ async def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest)
 
 
 @app.post("/api/cloud/session/{session_id}/delete_region")
-async def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
+def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
     """Set the per-point deleted mask for points inside `region`. No rebuild."""
     sess = _get_cloud_session(session_id)
     region_dict = request.region.model_dump()
@@ -21543,7 +21655,7 @@ class ResetCloudEditsRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/reset_edits")
-async def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
+def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
     """Restore the deleted mask to an earlier snapshot (undo)."""
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
@@ -21566,7 +21678,7 @@ async def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
 
 
 @app.post("/api/cloud/session/{session_id}/bake")
-async def bake_cloud_session(session_id: str):
+def bake_cloud_session(session_id: str):
     """Permanently apply deletions by rebuilding the octree FROM THE IN-RAM
     ARRAYS — the survivors (positions[~deleted] + colours + intensity + every
     scalar extra-dim) are written to a LAS via `_session_to_las` and fed to
@@ -21790,7 +21902,7 @@ class SessionSplitRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/split")
-async def session_split(session_id: str, request: SessionSplitRequest):
+def session_split(session_id: str, request: SessionSplitRequest):
     """Keep the filter-passing points on this session; move the excluded points
     to a NEW leftover session. Rebuilds both octrees from arrays. Returns
     {kept: {...octree}, leftover: {session_id, ...octree}} (leftover null if
@@ -21861,7 +21973,7 @@ class SessionExtractRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/extract")
-async def session_extract(session_id: str, request: SessionExtractRequest):
+def session_extract(session_id: str, request: SessionExtractRequest):
     """Create a NEW child session from the filter-selected points (parent
     untouched). Returns {session_id, ...octree} or null if the selection is
     empty. No source file read."""
@@ -22006,7 +22118,7 @@ def _do_session_extract_by_column(session_id: str, request: SessionExtractByColu
 
 
 @app.post("/api/cloud/session/{session_id}/extract_by_column")
-async def session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest,
+def session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest,
                                     http_request: Request):
     """Fan a categorical column out into one child session per distinct value
     (parent untouched). Returns {session_id, children: [{value, ...octree}]}
@@ -22036,7 +22148,7 @@ async def session_extract_by_column(session_id: str, request: SessionExtractByCo
 
 
 @app.post("/api/cloud/session/{session_id}/duplicate")
-async def session_duplicate(session_id: str):
+def session_duplicate(session_id: str):
     """Copy a session's SURVIVING points into a NEW independent session (parent
     untouched) and build its octree. This is the keep-everything degenerate case
     of `extract`: a pure array copy via `_session_subset` — NO source file read,
@@ -22227,7 +22339,7 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
 
 
 @app.post("/api/cloud/session/merge")
-async def session_merge(request: SessionMergeRequest):
+def session_merge(request: SessionMergeRequest):
     """Concatenate the surviving points of >=2 sessions into one new session and
     build its octree (+ a projected-miss octree when any input carried misses).
     Reconciles differing global shifts and unions scalar extra-dim columns. No
@@ -22329,7 +22441,7 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
-    cache_key, cache_dir, meta = _session_rebuild(sess)
+    cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key,
             "cache_dir": str(cache_dir), **meta,
             "class_threshold_used": gmeta.get("class_threshold"),
@@ -22512,7 +22624,7 @@ def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress
 
 
 @app.post("/api/cloud/session/{session_id}/dem")
-async def session_generate_dem(session_id: str, request: SessionDemRequest, http_request: Request):
+def session_generate_dem(session_id: str, request: SessionDemRequest, http_request: Request):
     """DEM from a session's in-RAM survivors (ground-aware). Returns a PHB1 frame
     (heightmap mesh + grid). When `add_height_column`, also appends a
     `height_above_ground` scalar and rebuilds the octree (cache_id in meta)."""
@@ -22602,7 +22714,7 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
     labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
-    cache_key, cache_dir, meta = _session_rebuild(sess)
+    cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "warnings": warns, **meta}
 
 
@@ -22687,7 +22799,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     labels[plant_mask] = np.asarray(plant_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
-    cache_key, cache_dir, meta = _session_rebuild(sess)
+    cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     # Number of distinct trees (max tree id; ground/misses are 0). The renderer
     # uses this to iterate ids 1..num_trees when "split into one cloud per tree"
     # is enabled, extracting each into its own child session.
@@ -22706,7 +22818,7 @@ class SessionTransformRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/transform")
-async def session_transform(session_id: str, request: SessionTransformRequest):
+def session_transform(session_id: str, request: SessionTransformRequest):
     """Bake a rigid 4x4 transform into the session's in-RAM geometry and rebuild
     the octree. The matrix acts in WORLD coordinates; the session stores points
     with `world_shift` subtracted, so we conjugate by the shift:
@@ -22792,7 +22904,7 @@ class SessionFilterRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/filter")
-async def session_filter(session_id: str, request: SessionFilterRequest):
+def session_filter(session_id: str, request: SessionFilterRequest):
     """Delete the points a spatial+scalar filter excludes, on the in-RAM arrays."""
     sess = _get_cloud_session(session_id)
     region_dict = request.region.model_dump() if request.region else None
@@ -22859,7 +22971,7 @@ async def session_filter(session_id: str, request: SessionFilterRequest):
 
 
 @app.delete("/api/cloud/session/{session_id}")
-async def delete_cloud_session(session_id: str):
+def delete_cloud_session(session_id: str):
     """Free a cloud session's in-RAM arrays."""
     with _cloud_session_lock:
         existed = _cloud_sessions.pop(session_id, None) is not None
@@ -23127,7 +23239,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
 
 
 @app.post("/api/c2m/distance")
-async def compute_c2m_distance(request: C2MDistanceRequest, http_request: Request):
+def compute_c2m_distance(request: C2MDistanceRequest, http_request: Request):
     """
     Compute Cloud-to-Mesh (C2M) distance statistics.
 
@@ -23480,7 +23592,7 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
 
 
 @app.post("/api/c2m/icp-register")
-async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest, http_request: Request):
+def icp_register_mesh_to_cloud(request: ICPRegistrationRequest, http_request: Request):
     """
     Perform ICP (Iterative Closest Point) registration to align a mesh to a point cloud.
 
@@ -23642,7 +23754,7 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
 
 
 @app.post("/api/c2c/icp-register")
-async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_request: Request):
+def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_request: Request):
     """
     Perform ICP (Iterative Closest Point) registration to align one point cloud to another.
 
@@ -23798,7 +23910,7 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
 
 
 @app.post("/api/m2m/icp-register")
-async def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest, http_request: Request):
+def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest, http_request: Request):
     """
     Perform ICP (Iterative Closest Point) registration to align one mesh to another.
 

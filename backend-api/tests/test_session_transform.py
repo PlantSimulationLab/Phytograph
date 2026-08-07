@@ -247,7 +247,7 @@ def test_transform_euler_xyz_about_pivot_readback(tmp_path, monkeypatch):
     pivot = np.array([0.45, 0.45, 0.45])
     t = np.array([2.0, -1.0, 0.5])
     req = main.SessionTransformRequest(matrix=_pivot_matrix(R, pivot, t))
-    asyncio.new_event_loop().run_until_complete(main.session_transform(sid, req))
+    main.session_transform(sid, req)
 
     after = main._read_points_from_source(src)[0]  # world frame
     expected = (before - pivot) @ R.T + pivot + t
@@ -281,7 +281,7 @@ def test_transform_conjugates_world_shift(tmp_path, monkeypatch):
     R = _rot_z(45.0)
     t = np.array([2.0, 3.0, -1.0])
     req = main.SessionTransformRequest(matrix=_matrix(R, t))
-    asyncio.new_event_loop().run_until_complete(main.session_transform(sid, req))
+    main.session_transform(sid, req)
 
     after = main._read_points_from_source(src)[0]  # world frame
     np.testing.assert_allclose(after, before @ R.T + t, atol=1e-6)
@@ -333,7 +333,7 @@ def test_transform_moves_backfilled_misses_and_flags_stale(tmp_path, monkeypatch
 
     t = np.array([10.0, 0.0, 0.0])
     req = main.SessionTransformRequest(matrix=_matrix(np.eye(3), t))
-    asyncio.new_event_loop().run_until_complete(main.session_transform(sid, req))
+    main.session_transform(sid, req)
 
     sess = main._cloud_sessions[sid]
     np.testing.assert_allclose(sess.backfilled_misses["positions"], miss_pos + t, atol=1e-6)

@@ -30,6 +30,9 @@ import {
   triangulatePointCloud,
   decodeBinaryFrame,
   parseProgressMarkers,
+  abortOnTimeout,
+  BackendTimeoutError,
+  describeBackendError,
 } from './backendApi';
 
 // Silence the production console.* calls — they're informational and just
@@ -670,6 +673,30 @@ describe('point cloud LAS/LAZ import/export', () => {
     await expect(
       exportPointCloudLasLaz({ points: [], format: 'laz' }),
     ).rejects.toThrow('lazrs missing');
+  });
+
+  // Regression: a request that outlived its deadline used to reject with
+  // Chromium's own "signal is aborted without reason", which reached the Export
+  // Failed toast verbatim — no operation, no endpoint, no duration, no next step.
+  it('exportPointCloudLasLaz reports a timeout with the endpoint, budget and a next step', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          const signal = (init as RequestInit).signal as AbortSignal;
+          signal.addEventListener('abort', () => reject(signal.reason));
+        }),
+    );
+    vi.useFakeTimers();
+    try {
+      const pending = exportPointCloudLasLaz({ points: [], format: 'laz' });
+      const assertion = expect(pending).rejects.toThrow(
+        /Export timed out\..*within 2 min \(POST \/api\/pointcloud\/export\).*\[slow\].*restart the backend/s,
+      );
+      await vi.advanceTimersByTimeAsync(120000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('exportScanXml POSTs to /api/scan/export-xml with the scan bundle request', async () => {
@@ -1341,5 +1368,54 @@ describe('getDeviceInfo', () => {
   it('throws on a non-ok response', async () => {
     mockFetchError(500, { detail: 'boom' });
     await expect(getDeviceInfo()).rejects.toThrow(/device-info failed: 500/);
+  });
+});
+
+describe('request deadlines', () => {
+  it('aborts with a BackendTimeoutError naming the endpoint and the budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      abortOnTimeout(controller, 300000, '/api/cloud/session/:id/split');
+      expect(controller.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(300000);
+      expect(controller.signal.aborted).toBe(true);
+      const reason = controller.signal.reason as BackendTimeoutError;
+      expect(reason).toBeInstanceOf(BackendTimeoutError);
+      expect(reason.endpoint).toBe('/api/cloud/session/:id/split');
+      expect(reason.timeoutMs).toBe(300000);
+      expect(reason.message).toContain('5 min');
+      expect(reason.message).toContain('/api/cloud/session/:id/split');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('renders sub-minute budgets in seconds', () => {
+    expect(new BackendTimeoutError('/api/pointcloud/preview', 60000).message).toContain('1 min');
+    expect(new BackendTimeoutError('/api/pointcloud/preview', 30000).message).toContain('30 s');
+  });
+
+  // The two aborts must stay distinguishable: several viewer catch blocks
+  // swallow a user cancel silently, so a deadline that presented as a plain
+  // AbortError would fail with no message shown at all.
+  it('distinguishes a deadline from a user cancel', () => {
+    const timedOut = describeBackendError(
+      new BackendTimeoutError('/api/segment/wood', 300000),
+      'Wood segmentation',
+    );
+    expect(timedOut.message).toMatch(/^Wood segmentation timed out\./);
+    expect(timedOut.message).toContain('/api/segment/wood');
+
+    const cancelled = describeBackendError(
+      new DOMException('signal is aborted without reason', 'AbortError'),
+      'Wood segmentation',
+    );
+    expect(cancelled.message).toBe('Wood segmentation was cancelled.');
+  });
+
+  it('still rewrites an unreachable backend', () => {
+    const e = describeBackendError(new TypeError('Failed to fetch'), 'Import');
+    expect(e.message).toMatch(/could not reach the backend/);
   });
 });
