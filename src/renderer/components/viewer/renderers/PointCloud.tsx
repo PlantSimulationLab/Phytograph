@@ -50,6 +50,26 @@ export interface PointCloudProps {
 // colorMode) doesn't recompute it. For 'rgb' we share data.colors; for
 // 'single'/'per-scan' we skip the attribute entirely and let
 // material.color carry the swatch.
+//
+// COLOR SPACE: three.js ColorManagement (on by default since r152) treats
+// vertex colors as being in the LINEAR working space and applies the
+// linear->sRGB encode at output. But sampleColormap / colorForClassValue /
+// treeInstanceColor all return sRGB *display* values — the same values the
+// colourbar and legend show. Writing those straight into the attribute meant
+// they got encoded a second time and rendered washed out, while the
+// material.color path (THREE.Color('#hex'), which decodes sRGB->linear on
+// input) rendered the same colour correctly. A cloud coloured by
+// tree_instance and a per-scan child cloud split out of it therefore drew the
+// same tree in two visibly different shades — the parent too pale, the child
+// too saturated. So every generated stop is converted to linear here; the
+// octree renderer solves the same problem the other way (it bypasses
+// outputColorSpace entirely and pre-encodes uniforms), and both now land on
+// the same pixels. NOTE: the 'rgb' branch is exempt — it SHARES data.colors
+// with no copy (the 50M-point memory guarantee above), and those are already
+// the file's own values, so it must not be converted in place.
+export const srgbToLinear = (c: number) =>
+  c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+
 export function PointCloud({
   data,
   pointSize = 2,
@@ -155,7 +175,7 @@ export function PointCloud({
       for (let i = 0; i < count; i++) {
         const t = (data.intensities[i] - lo) / span;
         const [r, g, b] = sampleColormap(colormap, t);
-        colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
+        colors[i * 3] = srgbToLinear(r); colors[i * 3 + 1] = srgbToLinear(g); colors[i * 3 + 2] = srgbToLinear(b);
       }
     } else if (colorMode === 'scalar' && selectedScalarField && data.scalarFields?.[selectedScalarField]) {
       const field = data.scalarFields[selectedScalarField];
@@ -164,7 +184,7 @@ export function PointCloud({
         // Categorical attribute (e.g. ground_class): discrete per-class colors.
         for (let i = 0; i < count; i++) {
           const [r, g, b] = colorForClassValue(scheme, field.values[i]);
-          colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
+          colors[i * 3] = srgbToLinear(r); colors[i * 3 + 1] = srgbToLinear(g); colors[i * 3 + 2] = srgbToLinear(b);
         }
       } else {
         const lo = rangeMin ?? field.min;
@@ -173,7 +193,7 @@ export function PointCloud({
         for (let i = 0; i < count; i++) {
           const t = (field.values[i] - lo) / span;
           const [r, g, b] = sampleColormap(colormap, t);
-          colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
+          colors[i * 3] = srgbToLinear(r); colors[i * 3 + 1] = srgbToLinear(g); colors[i * 3 + 2] = srgbToLinear(b);
         }
       }
     } else if (colorMode === 'x' || colorMode === 'y' || colorMode === 'height') {
@@ -188,7 +208,7 @@ export function PointCloud({
         const v = data.positions[i * 3 + axis];
         const t = (v - lo) / span;
         const [r, g, b] = sampleColormap(colormap, t);
-        colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
+        colors[i * 3] = srgbToLinear(r); colors[i * 3 + 1] = srgbToLinear(g); colors[i * 3 + 2] = srgbToLinear(b);
       }
     } else {
       // Fallback: solid singleColor as a vertex attribute. Only happens
