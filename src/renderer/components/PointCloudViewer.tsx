@@ -1690,32 +1690,6 @@ export default function PointCloudViewer({
   // state and blocks a second commit).
   const [isApplyingTranslate, setIsApplyingTranslate] = useState(false);
 
-  // Lower the octree point budget while a crop box is being previewed, restore
-  // when it ends. potree clips with a fragment `discard` (no early-Z), so the
-  // GPU can't cull occluded points during preview and overdraw goes quadratic
-  // with on-screen point density — concentrating the crop box pins the frame
-  // rate to single digits on a large cloud. Fewer points ⇒ proportionally fewer
-  // fragment invocations. Apply re-converts at full resolution, so the reduced
-  // preview detail never reaches the saved cloud.
-  //
-  // The budget is global to the shared potree manager and is spent across ALL
-  // visible clouds in one pass (PotreeFrameDriver), so this caps total on-screen
-  // points during preview no matter how many scans are selected — which is the
-  // quantity the overdraw cost actually tracks. Crop is emphatically not a
-  // single-cloud mode (it applies to every selected scan); an earlier version
-  // assumed it was and let each cloud claim this budget independently, which
-  // multiplied resident points by the cloud count and thrashed the node LRU.
-  const cropPreviewActive = editMode === 'crop' || isApplyingCrop;
-  useEffect(() => {
-    const budget = cropPreviewActive ? CROP_PREVIEW_POINT_BUDGET : DEFAULT_POINT_BUDGET;
-    setPointBudget(budget);
-    // E2E hook: lets a test confirm the preview budget engages/restores.
-    (window as { __pointBudget?: number }).__pointBudget = budget;
-    return () => {
-      setPointBudget(DEFAULT_POINT_BUDGET);
-      (window as { __pointBudget?: number }).__pointBudget = DEFAULT_POINT_BUDGET;
-    };
-  }, [cropPreviewActive]);
   // Cloud edit states (translation + erased indices + pending deletes) now live
   // in the scene store. Reads keep `.get(id)`; writes keep `setEditStates(prev => ...)`.
   const editStates = scene.state.editStates;
@@ -1811,6 +1785,54 @@ export default function PointCloudViewer({
   // in-region points (normal crop) and the cropped-out (inverse) points
   // become a brand-new cloud added to the scene — no points are discarded.
   const [cropSegment, setCropSegment] = useState(false);
+
+  // Lower the octree point budget while a crop box is being previewed, restore
+  // when it ends. potree clips with a fragment `discard` (no early-Z), so the
+  // GPU can't cull occluded points during preview and overdraw goes quadratic
+  // with on-screen point density — concentrating the crop box pins the frame
+  // rate to single digits on a large cloud. Fewer points ⇒ proportionally fewer
+  // fragment invocations. Apply re-converts at full resolution, so the reduced
+  // preview detail never reaches the saved cloud.
+  //
+  // The budget is global to the shared potree manager and is spent across ALL
+  // visible clouds in one pass (PotreeFrameDriver), so this caps total on-screen
+  // points during preview no matter how many scans are selected — which is the
+  // quantity the overdraw cost actually tracks. Crop is emphatically not a
+  // single-cloud mode (it applies to every selected scan); an earlier version
+  // assumed it was and let each cloud claim this budget independently, which
+  // multiplied resident points by the cloud count and thrashed the node LRU.
+  //
+  // Only for a CLIP-VOLUME preview, though — the reason above is specific to
+  // the fragment `discard`, and a screen-space (cropMask) preview doesn't use
+  // one. Its rejected points are dropped by an index buffer, so they are never
+  // submitted and cost no fragments at all; there is no overdraw to guard
+  // against. Charging it the same budget was a real bug: the cloud fell from
+  // 1.7M points (186 tiles) to 143k (3 tiles) the instant the polygon closed,
+  // which looks exactly like the crop having deleted most of the cloud — the
+  // reported "it removed 2/3 of the points" symptom, none of it the crop.
+  // (Tested inline rather than via `octreeCropMask`, which is built further
+  // down from buildCropPredicate — reading it here would be a use-before-
+  // declaration. These are the same conditions that make it non-null.)
+  // Keyed on the MODE, not on whether a region is closed yet. Gating on the
+  // closed region left the budget dropping the moment Crop opened and lifting
+  // again on Enter, so the cloud visibly collapsed to a fraction of its tiles
+  // while the user was still placing vertices and then re-streamed underneath
+  // them. Screen-space modes never use a clip volume at any stage, so they
+  // never need the overdraw guard.
+  const screenSpaceRegionActive =
+    !cropSegment && (cropMode === 'polygon' || cropMode === 'rect');
+  const cropVolumePreviewActive =
+    (editMode === 'crop' || isApplyingCrop) && !screenSpaceRegionActive;
+  useEffect(() => {
+    const budget = cropVolumePreviewActive ? CROP_PREVIEW_POINT_BUDGET : DEFAULT_POINT_BUDGET;
+    setPointBudget(budget);
+    // E2E hook: lets a test confirm the preview budget engages/restores.
+    (window as { __pointBudget?: number }).__pointBudget = budget;
+    return () => {
+      setPointBudget(DEFAULT_POINT_BUDGET);
+      (window as { __pointBudget?: number }).__pointBudget = DEFAULT_POINT_BUDGET;
+    };
+  }, [cropVolumePreviewActive]);
   // When true, Apply leaves the source cloud untouched (hidden, so the viewport
   // looks the same) and puts the kept points in a new "… (cropped)" cloud. The
   // octree path routes through session `extract` (parent untouched) instead of

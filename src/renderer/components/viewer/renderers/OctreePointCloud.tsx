@@ -790,11 +790,15 @@ export function OctreePointCloud({
   // re-renders at full resolution. `cropPreviewActive` is a stable boolean so
   // this fires only on enter/exit, not on every box move. Restored to unlimited
   // (Infinity) when the box clears.
-  // A screen-space (cropMask) preview needs the cap for a second reason on top
-  // of even density: its predicate runs on the CPU over every loaded point, so
-  // the cap is also what bounds that work to the preview budget instead of the
-  // whole cloud.
-  const cropPreviewActive = !!clipBox || !!cropMask;
+  // Deliberately keyed on `clipBox` ALONE, not on `cropMask`. The cap pays for
+  // itself when the BOX gizmo is dragging: the volume changes every frame, so
+  // potree is re-deciding visibility continuously and a shallower tree keeps
+  // that responsive. A screen-space region is closed and frozen — it re-masks
+  // once, not per frame — so the cap buys nothing there and costs a lot: it
+  // dropped this cloud from 42 loaded tiles to 3 (722k points to 143k), which
+  // reads as the crop having eaten ~80% of the cloud that it never touched.
+  // The masking work is bounded by the point budget regardless of depth.
+  const cropPreviewActive = !!clipBox;
   useEffect(() => {
     if (!octree) return;
     (octree as any).maxLevel = cropPreviewActive ? CROP_PREVIEW_MAX_LEVEL : Infinity;

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
+import { resetToFreshScene } from './helpers/resetApp';
 
 // Closing a polygon (or an off-axis rect) must PREVIEW the crop on an octree
 // cloud — the points that Apply would remove disappear immediately, the way the
@@ -31,6 +32,9 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await session?.close();
 });
+test.beforeEach(async () => {
+  await resetToFreshScene(session.app, session.page);
+});
 
 /**
  * Points the loaded octree tiles will actually draw (`drawn`) against how many
@@ -53,6 +57,74 @@ async function waitForTiles(page: LaunchedApp['page']) {
     .poll(async () => (await readDrawState(page)).tiles, { timeout: 60_000 })
     .toBeGreaterThan(0);
 }
+
+test('closing a polygon does not thin the rest of the cloud', async () => {
+  const { app, page } = session;
+
+  // Regression: the preview used to inherit the CLIP-VOLUME preview's cost
+  // controls — the 150k point budget and the level-4 LOD cap. Both exist for a
+  // dragging box gizmo (potree's fragment `discard` defeats early-Z, so a live
+  // clip volume overdraws quadratically). A mask preview has neither problem:
+  // its hidden points are dropped by an index buffer, never submitted.
+  //
+  // Charged anyway, the cloud collapsed from 1.7M loaded points across 186
+  // tiles to 143k across 3 the instant the polygon closed. That reads as the
+  // crop having deleted most of the cloud, and it survived the sibling test
+  // below because `drawn < full` stays true when `full` itself collapses —
+  // so this asserts on the LOADED total, which the crop must not touch.
+  await importFiles(app, page, 'import-auto', LAZ);
+  await completeImportWizard(page);
+  await expect(page.locator('[data-testid="scan-row"]').first()).toBeVisible({ timeout: 120_000 });
+  await waitForTiles(page);
+  // Let streaming settle so the baseline is the cloud's real resident set.
+  await expect
+    .poll(async () => (await readDrawState(page)).tiles, { timeout: 30_000 })
+    .toBeGreaterThan(20);
+  const before = await readDrawState(page);
+
+  await page.getByTestId('tool-crop').click();
+  await page.getByTestId('crop-shape-polygon').click();
+  await page.getByRole('button', { name: 'Keep Outside' }).click();
+
+  // Crop opens in Box mode, which legitimately drops the budget for its clip
+  // volume and evicts tiles. Selecting Polygon must hand the budget straight
+  // back — wait for the cloud to re-stream before measuring, so what follows
+  // tests the polygon preview rather than box mode's leftovers.
+  await expect
+    .poll(async () => await page.evaluate(() => (window as any).__pointBudget), { timeout: 30_000 })
+    .toBe(2_000_000);
+  await expect
+    .poll(async () => (await readDrawState(page)).tiles, { timeout: 60_000 })
+    .toBeGreaterThanOrEqual(before.tiles * 0.9);
+
+  // A small polygon in the middle of the cloud body — the case where thinning
+  // the whole cloud is most visible, and most easily mistaken for the crop.
+  const box = await page.getByTestId('crop-polygon-overlay').boundingBox();
+  if (!box) throw new Error('no overlay box');
+  const cx = box.x + box.width * 0.5;
+  const cy = box.y + box.height * 0.56;
+  const r = Math.min(box.width, box.height) * 0.09;
+  for (const [dx, dy] of [[-r, -r], [r, -r], [r, r], [-r, r]] as const) {
+    await page.mouse.click(cx + dx, cy + dy);
+  }
+  await page.keyboard.press('Enter');
+
+  await expect
+    .poll(async () => (await readDrawState(page)).maskedTiles, { timeout: 30_000 })
+    .toBeGreaterThan(0);
+
+  const after = await readDrawState(page);
+  // The resident cloud must not shrink: same tiles, same loaded points. A
+  // small tolerance absorbs ordinary LOD churn, not a 92% collapse.
+  expect(after.tiles).toBeGreaterThanOrEqual(before.tiles * 0.9);
+  expect(after.full).toBeGreaterThanOrEqual(before.full * 0.9);
+  // The full-detail budget stays in force — the mask needs no overdraw guard.
+  expect(await page.evaluate(() => (window as any).__pointBudget)).toBe(2_000_000);
+  // And the crop really did hide the polygon's interior.
+  expect(after.drawn).toBeLessThan(after.full);
+
+  await page.keyboard.press('Escape');
+});
 
 test('a closed polygon hides exactly the points it excludes, and cancel restores them', async () => {
   const { app, page } = session;

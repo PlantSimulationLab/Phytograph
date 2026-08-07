@@ -214,11 +214,9 @@ fine and doesn't change the result. The preview stays pinned to the
 points the crop will remove, so orbiting to inspect it from another
 angle won't shift the selection.
 
-!!! tip "The preview is a preview, not the result"
-    On a large cloud the preview draws at a reduced level of detail, so it
-    looks sparser than the cloud does normally. The *shape* is exact — those
-    are the points Apply will keep — but the density isn't. Applying
-    re-renders at full resolution.
+Unlike Box mode, the polygon and rectangle previews keep the cloud at full
+detail — only the points the crop removes disappear. If the rest of the
+cloud visibly thins out, that's a bug, not the crop.
 
 !!! note "Panels block the draw"
     The floating panels (Crop, the scan/mesh stack on the right, Display,
