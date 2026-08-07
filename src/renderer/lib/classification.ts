@@ -325,6 +325,24 @@ export function colorForClassValue(scheme: CategoricalScheme, value: number): RG
   return cls ? cls.color : UNKNOWN_CLASS_COLOR;
 }
 
+// sRGB 0-1 triple → "#rrggbb". Lives here (rather than in each consumer) so the
+// scan-swatch hexes and the rendered point colors are produced by one function.
+export function rgbToHex([r, g, b]: readonly [number, number, number]): string {
+  const to255 = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)));
+  const h = (v: number) => to255(v).toString(16).padStart(2, '0');
+  return `#${h(r)}${h(g)}${h(b)}`;
+}
+
+// The swatch hex for a fixed categorical class — so a child cloud split out by
+// class (ground/non-ground, wood/leaf) carries exactly the colour the viewer
+// paints that class, and a scheme tweak can never leave the two out of sync.
+// Returns null for a slug with no registered scheme, so callers can fall back.
+export function classColorHex(attribute: string, value: number): string | null {
+  const scheme = categoricalSchemeFor(attribute);
+  if (!scheme) return null;
+  return rgbToHex(colorForClassValue(scheme, value));
+}
+
 // potree-core bakes the stop array into a 64-texel CanvasGradient sampled with
 // LinearFilter, and the shader samples class value v at t = (v-lo)/span. Two
 // failure modes to avoid:

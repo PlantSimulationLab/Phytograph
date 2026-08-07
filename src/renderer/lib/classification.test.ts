@@ -3,11 +3,14 @@ import {
   GROUND_CLASS_ATTRIBUTE,
   MISS_ATTRIBUTE,
   MISS_COLOR,
+  WOOD_CLASS_ATTRIBUTE,
   buildCategoricalGradientStops,
   buildGenericCategoricalScheme,
   categoricalSchemeFor,
   categoricalSchemeForRange,
+  classColorHex,
   colorForClassValue,
+  rgbToHex,
   hasRegisteredScheme,
   isCategoricalAttribute,
   registerCategoricalSlug,
@@ -117,6 +120,49 @@ describe('colorForClassValue', () => {
 
   it('falls back to gray for unknown class values', () => {
     expect(colorForClassValue(scheme, 7)).toEqual([0.6, 0.6, 0.6]);
+  });
+});
+
+describe('rgbToHex', () => {
+  it('formats an sRGB 0-1 triple as #rrggbb', () => {
+    expect(rgbToHex([0, 0, 0])).toBe('#000000');
+    expect(rgbToHex([1, 1, 1])).toBe('#ffffff');
+    // Single-digit channels are zero-padded, not truncated to 5 chars.
+    expect(rgbToHex([0.04, 0, 0])).toBe('#0a0000');
+  });
+
+  it('clamps out-of-range channels instead of emitting garbage hex', () => {
+    expect(rgbToHex([-1, 2, 0.5])).toBe('#00ff80');
+  });
+});
+
+// The scan-list swatch for a child cloud split out by class must be the SAME
+// colour the viewer paints that class — these assertions derive the expected
+// hex from the scheme rather than hardcoding it, so the two can never drift.
+describe('classColorHex', () => {
+  it('returns the ground_class scheme colour for each class', () => {
+    const scheme = categoricalSchemeFor(GROUND_CLASS_ATTRIBUTE)!;
+    expect(classColorHex(GROUND_CLASS_ATTRIBUTE, 1))
+      .toBe(rgbToHex(colorForClassValue(scheme, 1)));
+    expect(classColorHex(GROUND_CLASS_ATTRIBUTE, 2))
+      .toBe(rgbToHex(colorForClassValue(scheme, 2)));
+    // Ground and non-ground are visually distinct swatches.
+    expect(classColorHex(GROUND_CLASS_ATTRIBUTE, 1))
+      .not.toBe(classColorHex(GROUND_CLASS_ATTRIBUTE, 2));
+  });
+
+  it('returns the wood_class scheme colour for each class', () => {
+    const scheme = categoricalSchemeFor(WOOD_CLASS_ATTRIBUTE)!;
+    expect(classColorHex(WOOD_CLASS_ATTRIBUTE, 1))
+      .toBe(rgbToHex(colorForClassValue(scheme, 1)));
+    expect(classColorHex(WOOD_CLASS_ATTRIBUTE, 2))
+      .toBe(rgbToHex(colorForClassValue(scheme, 2)));
+    expect(classColorHex(WOOD_CLASS_ATTRIBUTE, 1))
+      .not.toBe(classColorHex(WOOD_CLASS_ATTRIBUTE, 2));
+  });
+
+  it('returns null for a slug with no registered scheme, so callers can fall back', () => {
+    expect(classColorHex('nonexistent_slug', 1)).toBeNull();
   });
 });
 

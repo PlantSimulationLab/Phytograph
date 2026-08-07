@@ -26,6 +26,7 @@ import {
   WOOD_CLASS_ATTRIBUTE,
   TREE_INSTANCE_ATTRIBUTE,
   treeInstanceColor,
+  rgbToHex,
 } from './classification';
 
 // The four crown shapes the backend can fit. Matches the backend Literal.
@@ -219,17 +220,11 @@ export function coerceCrownFitOptions(stored: unknown): CrownFitOptions {
 
 // ==================== Crown mesh colors ====================
 
-// sRGB 0-1 triple → "#rrggbb".
-function rgbToHex([r, g, b]: readonly [number, number, number]): string {
-  const to255 = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)));
-  const h = (v: number) => to255(v).toString(16).padStart(2, '0');
-  return `#${h(r)}${h(g)}${h(b)}`;
-}
-
-// The tree-instance color for a crown, matching the `tree_instance` scalar
-// colormap used in the viewer — so a crown fit from a segmented cloud reads with
-// the same colour as its tree. Returns null for the sentinel id 0 (whole-cloud
-// single tree), where there is no tree-instance colour to match.
+// The tree-instance color for a tree id, matching the `tree_instance` scalar
+// colormap used in the viewer — so anything derived from a segmented cloud (a
+// fitted crown, a cloud split out per tree) reads with the same colour as its
+// tree. Returns null for the sentinel id 0 (whole-cloud single tree) and for
+// unassigned/negative ids, where there is no tree-instance colour to match.
 export function crownColorForTreeId(treeId: number): string | null {
   if (treeId <= 0) return null;
   return rgbToHex(treeInstanceColor(treeId));

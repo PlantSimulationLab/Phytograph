@@ -5,6 +5,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { treeInstanceColor, rgbToHex } from '../../src/renderer/lib/classification';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'multi_tree.xyz');
 
@@ -126,6 +127,31 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
     sum += parseInt((await childRows.nth(i).getAttribute('data-point-count')) ?? '0', 10);
   }
   expect(sum).toBeLessThanOrEqual(EXPECTED_POINTS);
+
+  // Each child carries ITS TREE's swatch colour, matching the tree_instance
+  // colormap the parent is recoloured with. The regression: every child used to
+  // get the same hardcoded green, so the scan list gave the user no way to tell
+  // which row was which tree.
+  const swatches: string[] = [];
+  for (let i = 0; i < childCount; i++) {
+    const row = childRows.nth(i);
+    const name = (await row.getAttribute('data-scan-name')) ?? '';
+    const color = (await row.getAttribute('data-scan-color')) ?? '';
+    // Not the old hardcoded green.
+    expect(color).not.toBe('#4caf50');
+    // The colour is the one the viewer paints tree N — parsed from the row's
+    // own "(tree N)" name, so this ties the swatch to the parent's colormap
+    // rather than just asserting "some colour was assigned".
+    const treeId = parseInt(name.match(/\(tree (\d+)\)/)?.[1] ?? '', 10);
+    expect(Number.isFinite(treeId), `child "${name}" has no (tree N) suffix`).toBe(true);
+    expect(color, `child "${name}" should carry tree ${treeId}'s colour`)
+      .toBe(rgbToHex(treeInstanceColor(treeId)));
+    swatches.push(color);
+  }
+  // All distinct — this is what actually proves per-tree colouring; a second
+  // hardcoded colour would satisfy the "not green" check above but not this.
+  expect(new Set(swatches).size, `swatches were not distinct: ${swatches.join(', ')}`)
+    .toBe(childCount);
 
   // The pill was shown while the children were being built, and is gone now.
   expect(await sawSplitPill).toBe(true);

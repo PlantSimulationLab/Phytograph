@@ -127,7 +127,7 @@ import {
   type ChannelDescriptor,
   type LegendEntry,
 } from '../lib/colorChannel';
-import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
@@ -8194,8 +8194,10 @@ export default function PointCloudViewer({
               });
             }
           };
-          await addClassCloud(1, 'ground', '#8c6643');
-          await addClassCloud(2, 'non-ground', '#4caf50');
+          // Swatch colours come from the ground_class scheme itself, so a child
+          // cloud reads as the class the viewer paints and the two can't drift.
+          await addClassCloud(1, 'ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 1) ?? '#8c6643');
+          await addClassCloud(2, 'non-ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 2) ?? '#4caf50');
         }
 
         showToast({
@@ -8278,8 +8280,9 @@ export default function PointCloudViewer({
             color,
           });
         };
-        makeChild(1, 'ground', '#8c6643');
-        makeChild(2, 'non-ground', '#4caf50');
+        // Scheme-derived swatches — see the session path above.
+        makeChild(1, 'ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 1) ?? '#8c6643');
+        makeChild(2, 'non-ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 2) ?? '#4caf50');
       }
 
       showToast({
@@ -8863,8 +8866,10 @@ export default function PointCloudViewer({
               });
             }
           };
-          await addClassCloud(WOOD, 'wood', '#67421f');
-          await addClassCloud(LEAF, 'leaf', '#4caf50');
+          // Swatch colours come from the wood_class scheme itself, so a child
+          // cloud reads as the class the viewer paints and the two can't drift.
+          await addClassCloud(WOOD, 'wood', classColorHex(WOOD_CLASS_ATTRIBUTE, WOOD) ?? '#67421f');
+          await addClassCloud(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50');
         }
 
         showToast({
@@ -8960,7 +8965,7 @@ export default function PointCloudViewer({
 
       if (woodMode === 'remove') {
         // Replace the cloud in place with just the leaf points.
-        makeChild(LEAF, 'leaf', '#4caf50', true);
+        makeChild(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50', true);
       } else {
         // Full-length (misses = 0, outside the 1..2 wood/leaf range) so the
         // scalar field stays aligned to positions.
@@ -8971,8 +8976,9 @@ export default function PointCloudViewer({
         onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
         setCloudColorMode(id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
         if (woodMode === 'split') {
-          makeChild(WOOD, 'wood', '#67421f', false);
-          makeChild(LEAF, 'leaf', '#4caf50', false);
+          // Scheme-derived swatches — see the session path above.
+          makeChild(WOOD, 'wood', classColorHex(WOOD_CLASS_ATTRIBUTE, WOOD) ?? '#67421f', false);
+          makeChild(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50', false);
         }
       }
 
@@ -9074,7 +9080,11 @@ export default function PointCloudViewer({
               { diverged: true },
             ),
             visible: true,
-            color: '#4caf50',
+            // Each child carries ITS TREE's colour from the tree_instance
+            // colormap, so the scan-list swatches match the recoloured parent
+            // (a single shared green told the user nothing about which row is
+            // which tree). `value` is the tree id; ids <= 0 are excluded above.
+            color: crownColorForTreeId(c.value) ?? '#4caf50',
           }));
           for (const e of childEntries) suppressFrameCloudIdsRef.current.add(e.id);
           for (const e of childEntries) onAddCloud(e);
@@ -9179,7 +9189,9 @@ export default function PointCloudViewer({
               fileName: `${baseName} (tree ${treeId})`,
             },
             visible: true,
-            color: '#4caf50',
+            // Match the tree_instance colormap — see the session path above.
+            // The loop skips treeId <= 0, so the fallback is unreachable.
+            color: crownColorForTreeId(treeId) ?? '#4caf50',
           });
         }
       }
