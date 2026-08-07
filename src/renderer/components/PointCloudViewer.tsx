@@ -10309,20 +10309,38 @@ export default function PointCloudViewer({
     return qsm.sourceLabel || clouds.find(c => c.id === qsm.sourceCloudId)?.data.fileName || 'QSM';
   }, [clouds]);
 
-  // Export the selected QSMs, one file per QSM, into a user-picked folder.
+  // Export the selected QSMs. One QSM → a Save dialog pre-filled with a suggested
+  // name the user can edit (matching the point-cloud / raster exporters); several
+  // QSMs → one folder picker, then a file per QSM named after its label.
   const handleExportQSMs = useCallback(async (qsmIds: string[], format: QSMExportFormat) => {
     const targets = qsms.filter(q => qsmIds.includes(q.id));
     if (targets.length === 0) return;
 
-    // Pick the output folder. Falls back to a single save dialog when running
+    const ext = qsmExtForFormat(format);
+    // Suggested name for the single-QSM Save dialog: the QSM's display label,
+    // filesystem-sanitised, with the format's extension.
+    const suggestedName = `${sanitizeQsmFilename(qsmDisplayLabel(targets[0]))}.${ext}`;
+
+    // Where the files go. Single export resolves to an explicit, user-editable
+    // path; multi-export resolves to a folder. Falls back to anchor-downloads
     // outside Electron (e.g. vite dev in a plain browser) — there we can only
     // export one file, so require a single selection.
     let dir: string | null = null;
+    let singlePath: string | null = null;
     if (window.electronAPI) {
-      // directory:true returns a single folder path (or null when cancelled).
-      const picked = await window.electronAPI.dialog.open({ directory: true, title: 'Choose export folder' });
-      dir = typeof picked === 'string' ? picked : null;
-      if (!dir) return; // cancelled
+      if (targets.length === 1) {
+        singlePath = await window.electronAPI.dialog.save({
+          defaultPath: suggestedName,
+          title: `Export QSM (${format.toUpperCase()})`,
+          filters: [{ name: `QSM ${format.toUpperCase()}`, extensions: [ext] }],
+        });
+        if (!singlePath) return; // cancelled
+      } else {
+        // directory:true returns a single folder path (or null when cancelled).
+        const picked = await window.electronAPI.dialog.open({ directory: true, title: 'Choose export folder' });
+        dir = typeof picked === 'string' ? picked : null;
+        if (!dir) return; // cancelled
+      }
     } else if (targets.length > 1) {
       showToast({ type: 'error', title: 'Export', message: 'Select a single QSM to export in browser mode.' });
       return;
@@ -10330,7 +10348,6 @@ export default function PointCloudViewer({
 
     setQSMExporting(true);
     try {
-      const ext = qsmExtForFormat(format);
       const usedNames = new Set<string>();
       let written = 0;
       for (const qsm of targets) {
@@ -10342,7 +10359,10 @@ export default function PointCloudViewer({
         usedNames.add(name);
 
         const content = serializeQsm(qsm, format);
-        if (window.electronAPI && dir) {
+        if (window.electronAPI && singlePath) {
+          // Exactly the path the user typed — no renaming behind their back.
+          await window.electronAPI.fs.writeText(singlePath, content);
+        } else if (window.electronAPI && dir) {
           const sep = dir.includes('\\') ? '\\' : '/';
           const path = dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
           await window.electronAPI.fs.writeText(path, content);

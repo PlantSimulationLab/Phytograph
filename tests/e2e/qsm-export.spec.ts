@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
-import { stubOpenDialog } from './helpers/stubOpenDialog';
+import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
 
 const TREE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
 
@@ -18,8 +18,10 @@ const CSV_HEADER =
 // Build a QSM through the real UI, then export it via the export dialog. Drives
 // the LIVE backend (no mocks) and reads the WRITTEN FILE back off disk to assert
 // the contents are correct — not merely that a file appeared. The only thing
-// stubbed is the native folder-picker, redirected to a tmp dir (we can't click
-// an OS-native dialog; the rest of the flow is real).
+// stubbed is the native Save dialog, redirected to a tmp dir (we can't click an
+// OS-native dialog; the rest of the flow is real). The stub also captures the
+// options the renderer passed, which is how we assert the dialog offers an
+// editable default filename rather than naming the file behind the user's back.
 test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
   const { app, page, close } = await launchApp();
   const outDir = mkdtempSync(join(tmpdir(), 'qsm-export-'));
@@ -27,10 +29,9 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
   try {
     await expect(page.getByTestId('backend-splash')).toHaveCount(0, { timeout: 60_000 });
 
-    // Import a tree and build a QSM through the real UI. (importFiles installs
-    // its own one-shot `dialog:open` handler for the import file picker, which
-    // returns null on any later call — so the export's folder picker is stubbed
-    // separately, AFTER the import, just before the export step below.)
+    // Import a tree and build a QSM through the real UI. The import uses the
+    // `dialog:open` picker; the export below uses `dialog:save`, stubbed
+    // separately once we get there.
     await importFiles(app, page, 'import-point-cloud', [TREE]);
     await completeImportWizard(page);
 
@@ -49,22 +50,13 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
     const cylinderCount = parseInt((await qsmRow.first().getAttribute('data-cylinder-count'))!, 10);
     expect(cylinderCount).toBeGreaterThan(10);
 
-    // Now redirect the export's folder picker to our tmp dir. stubOpenDialog
-    // replaces the `dialog:open` handler (overriding importFiles' exhausted
-    // one-shot), and the export handler reads back the returned path as the
-    // folder. stubOpenDialog seeds the allowlist as a *file* though, whereas the
-    // real `dialog:open` handler authorizes a chosen *directory* for writes
-    // (allowPath(dir, 'directory')) — so authorize the export folder for writes
-    // the same way, or the real `fs.writeText` into it is denied and the export
-    // silently bails (panel stays open).
-    await stubOpenDialog(app, outDir);
-    await app.evaluate((_electron, dir) => {
-      (globalThis as unknown as {
-        __phytographAllowPath?: (p: string, kind?: 'file' | 'saveFile' | 'directory') => void;
-      }).__phytographAllowPath?.(dir, 'directory');
-    }, outDir);
+    // --- Export CSV, accepting the suggested filename ---
+    // Redirect the native Save dialog to a path inside our tmp dir. The returned
+    // path stands in for what the user would confirm in the dialog; the options
+    // the renderer passed are recorded so we can check the suggested default.
+    const csvPath = join(outDir, 'suggested.csv');
+    await stubSaveDialog(app, csvPath);
 
-    // --- Open the export dialog ---
     await page.getByTestId('qsm-export-open').click();
     await expect(page.getByTestId('qsm-export-panel')).toBeVisible();
     // The dialog lists the built QSM with a checkbox (pre-selected).
@@ -72,14 +64,19 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
     await expect(checkbox).toHaveCount(1);
     await expect(checkbox.first()).toBeChecked();
 
-    // --- Export CSV ---
     await page.getByTestId('qsm-export-format-csv').click();
     await page.getByTestId('qsm-export-confirm').click();
     await expect(page.getByTestId('qsm-export-panel')).toHaveCount(0, { timeout: 30_000 });
 
+    // The Save dialog fired, and it offered an editable default name derived
+    // from the QSM's source scan — not a name chosen silently by the exporter.
+    const csvCalls = (await getSaveDialogCalls(app)) as { defaultPath?: string }[];
+    expect(csvCalls).toHaveLength(1);
+    expect(csvCalls[0].defaultPath).toBe('tree.csv');
+
     const csvFiles = readdirSync(outDir).filter(f => f.endsWith('.csv'));
-    expect(csvFiles).toHaveLength(1);
-    const csv = readFileSync(join(outDir, csvFiles[0]), 'utf-8');
+    expect(csvFiles).toEqual(['suggested.csv']);
+    const csv = readFileSync(csvPath, 'utf-8');
     const csvLines = csv.trim().split('\n');
     // Header is exactly the SimpleForest layout.
     expect(csvLines[0]).toBe(CSV_HEADER);
@@ -89,16 +86,24 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
     const dataRows = csvLines.slice(1).map(l => l.split(','));
     expect(dataRows.some(r => r[1] === '-1')).toBe(true);
 
-    // --- Export OBJ (re-open the dialog) ---
+    // --- Export OBJ under a name the "user" typed instead of the suggestion ---
+    const renamedObj = join(outDir, 'my-custom-name.obj');
+    await stubSaveDialog(app, renamedObj);
+
     await page.getByTestId('qsm-export-open').click();
     await expect(page.getByTestId('qsm-export-panel')).toBeVisible();
     await page.getByTestId('qsm-export-format-obj').click();
     await page.getByTestId('qsm-export-confirm').click();
     await expect(page.getByTestId('qsm-export-panel')).toHaveCount(0, { timeout: 30_000 });
 
+    const objCalls = (await getSaveDialogCalls(app)) as { defaultPath?: string }[];
+    expect(objCalls).toHaveLength(1);
+    // Suggestion tracks the chosen format's extension...
+    expect(objCalls[0].defaultPath).toBe('tree.obj');
+    // ...but the file lands at the name the user chose, not the suggestion.
     const objFiles = readdirSync(outDir).filter(f => f.endsWith('.obj'));
-    expect(objFiles).toHaveLength(1);
-    const obj = readFileSync(join(outDir, objFiles[0]), 'utf-8');
+    expect(objFiles).toEqual(['my-custom-name.obj']);
+    const obj = readFileSync(renamedObj, 'utf-8');
     expect(obj).toMatch(/^v /m); // has vertex lines
     expect(obj).toMatch(/^f /m); // has face lines
   } finally {

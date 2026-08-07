@@ -176,8 +176,11 @@ or take it into other tooling.
 2. In the export dialog, pick a **format**, then tick which QSMs to write
    (all are selected by default — use **Select all / Select none** to
    toggle).
-3. Click **Export** and choose a **folder**. One file is written per
-   selected QSM, named after the source scan.
+3. Click **Export**. For a **single** QSM you get a save dialog with a
+   suggested filename (the source scan's name, with the format's
+   extension) — edit it to whatever you like before saving. When you
+   selected **several** QSMs, you choose a **folder** instead and one file
+   is written per QSM, each named after its source scan.
 
 | Format | What it is | Use it for |
 |---|---|---|

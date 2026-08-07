@@ -219,6 +219,15 @@ describe('sanitizeQsmFilename', () => {
     expect(sanitizeQsmFilename('///')).toBe('qsm');
     expect(sanitizeQsmFilename('')).toBe('qsm');
   });
+  it('drops a trailing source extension so the export ext is not doubled up', () => {
+    expect(sanitizeQsmFilename('tree.xyz')).toBe('tree');
+    expect(sanitizeQsmFilename('plot_3.laz')).toBe('plot_3');
+    // Only the LAST extension goes; a dotted stem keeps its earlier dots.
+    expect(sanitizeQsmFilename('scan.2024.las')).toBe('scan.2024');
+  });
+  it('keeps a trailing dot-segment that is not extension-shaped', () => {
+    expect(sanitizeQsmFilename('oak.north_plot')).toBe('oak.north_plot');
+  });
 });
 
 describe('qsmExtForFormat / serializeQsm', () => {

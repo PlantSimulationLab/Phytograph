@@ -26,9 +26,13 @@ export function qsmExtForFormat(fmt: QSMExportFormat): string {
 }
 
 // Strip characters that are unsafe in filenames across macOS/Windows, collapse
-// whitespace, and trim. Empty result falls back to 'qsm'.
+// whitespace, and trim. Also drops a trailing source extension (labels are often
+// a source file name like 'tree.xyz', and the export appends its own .csv/.obj/
+// .ply — so keeping it would suggest 'tree.xyz.csv'). Empty result falls back to
+// 'qsm'.
 export function sanitizeQsmFilename(name: string): string {
   const cleaned = name
+    .replace(/\.[A-Za-z0-9]{1,5}$/, '') // trailing source extension, if any
     .replace(/[/\\:*?"<>|]/g, '_') // path separators + Windows-reserved chars
     .replace(/\s+/g, '_')
     .replace(/_+/g, '_')
