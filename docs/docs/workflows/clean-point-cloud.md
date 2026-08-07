@@ -178,6 +178,8 @@ to Box. Unlike the world-space box, it works from any camera angle.
    anchored to the view.
 2. **Click-drag** in the viewport from one corner to the opposite corner.
    A dashed preview rectangle follows the cursor; release to commit it.
+   (The floating panels can't take the pointer — see the note under
+   [Polygon mode](#polygon-mode).)
 3. Click **Apply** in the panel, or use **Redraw rectangle** to start over.
    <kbd>Esc</kbd> cancels.
 
@@ -205,6 +207,21 @@ want isn't a tidy box.
 Because the polygon lives in screen space, the in/out test uses the
 camera as it was when you closed the polygon — orbiting afterwards is
 fine and doesn't change the result.
+
+!!! note "Panels block the draw"
+    The floating panels (Crop, the scan/mesh stack on the right, Display,
+    and any toast) sit *over* the viewport, so they take the click before the
+    lasso or rectangle can. Vertices can't land on a panel, a drag can't start
+    on one, and the preview line stops at the panel's edge (turning amber, with
+    a ⊘ at the cursor) instead of following the pointer underneath it. Only the
+    panels themselves block — the empty space around them in the right-hand
+    column is ordinary viewport you can draw through.
+
+    The panels stay clickable while you draw — that's the trade. To reach
+    scene behind them, orbit or pan the view first, or collapse the panels
+    (the Display bubble collapses from its header; the crop panel's **×**
+    exits Crop). A rectangle drag released over a panel still commits, at the
+    clamped edge point.
 
 ### Segment mode (keep both halves)
 

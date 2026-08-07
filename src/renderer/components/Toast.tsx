@@ -171,7 +171,14 @@ export function ToastContainer() {
     // buttons would be clipped out of reach. justify-end keeps a short stack
     // pinned to the bottom corner. The wrapper stays pointer-events-none so
     // empty space around the cards remains click-through.
-    <div className="fixed bottom-4 right-4 top-4 z-[110] flex flex-col justify-end gap-2 max-w-md overflow-y-auto overscroll-contain pointer-events-none">
+    // data-blocks-viewport: toast cards are pointer-events-auto and float over
+    // the 3D viewport from OUTSIDE its DOM subtree, so they swallow clicks meant
+    // for the screen-space crop tools. lib/viewportBlockers.ts reads this marker
+    // to include the live cards in the "can't draw here" zone.
+    <div
+      data-blocks-viewport
+      className="fixed bottom-4 right-4 top-4 z-[110] flex flex-col justify-end gap-2 max-w-md overflow-y-auto overscroll-contain pointer-events-none"
+    >
       {toasts.map(toast => (
         <Toast key={toast.id} toast={toast} onClose={removeToast} />
       ))}

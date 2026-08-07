@@ -84,6 +84,8 @@ import {
   worldBoundsUnion,
   polygonRegionFromCamera,
 } from '../lib/cropGeometry';
+import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
+import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
 import { pendingDeletesToClipBoxes } from '../lib/deletePreview';
 import {
   computeBoundsFromPositions,
@@ -451,6 +453,23 @@ function buildHeliosTriParams(
 // meaningful knob to turn. The Lmax / aspect controls are therefore Helios-only;
 // Open3D meshes carry no `triangleFilter` / `unfilteredMesh`, so the Meshes panel
 // hides those controls for them.
+
+// The 4 corners (TL, TR, BR, BL) of the axis-aligned rect spanned by two
+// diagonal canvas-pixel points. Shared by the rect overlay's rubber-band and
+// the commit path (which also runs from a window-level mouseup, so this can't
+// live inside the overlay's render closure).
+function rectCornersOf(a: { x: number; y: number }, b: { x: number; y: number }) {
+  const minX = Math.min(a.x, b.x);
+  const minY = Math.min(a.y, b.y);
+  const maxX = Math.max(a.x, b.x);
+  const maxY = Math.max(a.y, b.y);
+  return [
+    { x: minX, y: minY },
+    { x: maxX, y: minY },
+    { x: maxX, y: maxY },
+    { x: minX, y: maxY },
+  ];
+}
 
 export default function PointCloudViewer({
   scans,
@@ -1820,12 +1839,14 @@ export default function PointCloudViewer({
   // stable even if they orbit afterwards.
   const polygonCameraRef = useRef<THREE.Camera | null>(null);
   const polygonCanvasSizeRef = useRef<{ width: number; height: number } | null>(null);
-  // Live canvas-pixel position of the mouse while drawing a polygon —
-  // used to render the "next segment" preview line from the last vertex
-  // to the cursor. Stored on a ref since it updates on every mousemove
-  // and we don't want to re-render the panel for it.
-  const polygonCursorRef = useRef<{ x: number; y: number } | null>(null);
-  const [polygonCursorTick, setPolygonCursorTick] = useState(0);
+  // The screen-space overlays (crop lasso/rect, trunk seeding) sit at z-10,
+  // under every floating panel (crop/tree panel z-20, right stack z-30, display
+  // bubble z-55, toasts z-110), so those panels swallow their clicks and
+  // mousemoves. `useViewportBlockZone` (below, one per tool) tracks the pointer
+  // on the window instead, measures the blockers off this root, and clamps the
+  // preview to their edge; `ViewportBlockedZone` marks the cursor with a ⊘ at
+  // the moment a click would be refused.
+  const viewerRootRef = useRef<HTMLDivElement | null>(null);
   // Rect-drag state (canvas-pixel space). A rectangle crop is a screen-space
   // drag that works from any view; on mouse-up its 4 corners are frozen into
   // cropPolygon, so it reuses the entire polygon project-and-test pipeline.
@@ -4889,6 +4910,68 @@ export default function PointCloudViewer({
   );
   const displayOffsetRef = useRef<Vec3Like>(displayOffset);
   displayOffsetRef.current = displayOffset;
+
+  // ── Screen-space crop draws: pointer tracking that survives the panels ────
+  //
+  // Freeze a rect drag's two diagonal corners into `cropPolygon` (the same
+  // camera-frozen region the lasso produces). Hoisted out of the overlay's JSX
+  // so the window-level mouseup below can commit a drag that was RELEASED over
+  // a floating panel — the overlay never sees that mouseup, so before this the
+  // drag simply got stuck mid-rubber-band.
+  const commitRectDrag = useCallback((start: { x: number; y: number }, end: { x: number; y: number }) => {
+    // Ignore zero-area drags (a click without movement).
+    if (Math.abs(end.x - start.x) < 3 || Math.abs(end.y - start.y) < 3) {
+      setRectDragStart(null);
+      rectDragCurrentRef.current = null;
+      setCropDrawState('idle');
+      return;
+    }
+    if (polygonCameraRef.current && polygonCanvasSizeRef.current) {
+      const region = polygonRegionFromCamera(
+        rectCornersOf(start, end),
+        polygonCameraRef.current,
+        polygonCanvasSizeRef.current,
+        false,
+        displayOffsetRef.current,
+      );
+      setCropPolygon({
+        points: region.points,
+        projection: region.projection,
+        view: region.view,
+        canvasSize: region.canvasSize,
+      });
+    }
+    setRectDragStart(null);
+    rectDragCurrentRef.current = null;
+    setCropDrawState('idle');
+  }, []);
+
+  // Pointer tracking + blocked-zone geometry for the crop draws. The overlays
+  // can't see the pointer over a floating panel (they're z-10, the panels are
+  // above), so this runs on the window: the rubber-band keeps following —
+  // clamped to the panel edge — and `blocked` says a click right now would be
+  // swallowed. Panels stay interactive; the ⊘ cursor marker says so.
+  const cropDrawing = cropDrawState === 'drawing-polygon' || cropDrawState === 'drawing-rect';
+  const cropZone = useViewportBlockZone(cropDrawing, viewerRootRef, {
+    onMove: (p) => {
+      if (rectDragStart) {
+        rectDragCurrentRef.current = p;
+        setRectDragTick(t => t + 1);
+      }
+    },
+    // A rect drag released anywhere — including over a panel, which the overlay
+    // never sees — commits at the clamped corner instead of hanging mid-drag.
+    onRelease: (p) => {
+      if (cropDrawState === 'drawing-rect' && rectDragStart) commitRectDrag(rectDragStart, p);
+    },
+  });
+
+  // Same treatment for TreeIso trunk seeding, which drives the identical kind of
+  // z-10 click overlay: while seeding, the panels that cover the viewport can't
+  // take a seed, so mark them instead of letting clicks vanish there. Seeding
+  // has no rubber-band, so the ⊘ at the clamped cursor is the whole feedback.
+  const treeSeedActive = showTreeSegmentPanel && treeSeedMode && selectedIds.size === 1;
+  const seedZone = useViewportBlockZone(treeSeedActive, viewerRootRef);
 
   // Is anything actually loaded? Drives the camera's framing decision and the
   // scene-origin marker's visibility. Note this is false in exactly the cases
@@ -13755,6 +13838,9 @@ export default function PointCloudViewer({
 
   return (
     <div
+      // Measured while a crop lasso/rect is drawn, to find the floating panels
+      // that occlude the overlays (see readBlockedRects).
+      ref={viewerRootRef}
       // min-h-0/min-w-0: as a flex item this root must be allowed to shrink
       // below the R3F canvas's current pixel size, or the canvas's intrinsic
       // height makes the viewer ratchet to its largest-ever size and window
@@ -14971,8 +15057,11 @@ export default function PointCloudViewer({
           unprojects onto the cloud's ground plane (via the live camera) and
           records a world-space seed; right-click removes the last one. Markers
           are drawn at their projected screen positions. The overlay captures
-          pointer events, so the camera is effectively fixed while seeding. */}
-      {showTreeSegmentPanel && treeSeedMode && selectedIds.size === 1 && (() => {
+          pointer events, so the camera is effectively fixed while seeding.
+          Like the crop overlays it's z-10, so the floating panels above it take
+          the click first — see the ViewportBlockedZone rendered below, which
+          marks the cursor when a seed would be refused. */}
+      {treeSeedActive && (() => {
         const cam = mainCameraRef.current;
         const cloud = clouds.find(c => selectedIds.has(c.id));
         const groundZ = cloud?.data.groundZ ?? cloud?.data.bounds?.min.z ?? 0;
@@ -15031,10 +15120,20 @@ export default function PointCloudViewer({
         );
       })()}
 
+      {/* "Can't seed here" zone — the panels covering the trunk-seed overlay. */}
+      {treeSeedActive && (
+        <ViewportBlockedZone
+          testId="tree-seed-blocked-zone"
+          rects={seedZone.rects}
+          cursor={seedZone.cursor}
+          blocked={seedZone.blocked}
+        />
+      )}
+
       {editMode === 'crop' && cropMode === 'polygon' && (cropDrawState === 'drawing-polygon' || cropPolygon) && (() => {
         const isDrawing = cropDrawState === 'drawing-polygon';
         const points = isDrawing ? polygonInProgress : (cropPolygon?.points ?? []);
-        const cursor = isDrawing ? polygonCursorRef.current : null;
+        const cursor = isDrawing ? cropZone.cursor : null;
 
         const handleClick = (e: React.MouseEvent<SVGSVGElement>) => {
           if (!isDrawing) return;
@@ -15049,22 +15148,14 @@ export default function PointCloudViewer({
           e.preventDefault();
           setPolygonInProgress(prev => prev.slice(0, -1));
         };
-        const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-          if (!isDrawing) return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          polygonCursorRef.current = {
-            x: e.clientX - rect.left,
-            y: e.clientY - rect.top,
-          };
-          // Bump the tick so the cursor preview line re-renders. Cheap —
-          // the overlay's only a handful of SVG elements.
-          setPolygonCursorTick(t => t + 1);
-        };
+        // NOTE: no onMouseMove here. The cursor comes from useViewportBlockZone,
+        // which tracks it on the window, so the preview keeps following —
+        // clamped — when the pointer slides under a floating panel, where this
+        // SVG receives no events at all.
+        const cursorBlocked = isDrawing && cropZone.blocked;
 
         const polylinePoints = points.map(p => `${p.x},${p.y}`).join(' ');
         const closedPoints = !isDrawing && points.length >= 3 ? polylinePoints : null;
-        // Suppress unused-state warning — we read polygonCursorTick to force re-render.
-        void polygonCursorTick;
 
         return (
           <svg
@@ -15086,7 +15177,6 @@ export default function PointCloudViewer({
             }}
             onClick={handleClick}
             onContextMenu={handleContextMenu}
-            onMouseMove={handleMouseMove}
           >
             {closedPoints && (
               <polygon
@@ -15104,13 +15194,17 @@ export default function PointCloudViewer({
                   stroke="#22c55e"
                   strokeWidth={2}
                 />
+                {/* Pending-segment preview. Turns amber while the pointer is
+                    parked on a panel: the segment is drawn to the CLAMPED point
+                    (the edge of the blocker), and the colour change says a
+                    click there would be refused rather than placed. */}
                 {cursor && (
                   <line
                     x1={points[points.length - 1].x}
                     y1={points[points.length - 1].y}
                     x2={cursor.x}
                     y2={cursor.y}
-                    stroke="#22c55e"
+                    stroke={cursorBlocked ? '#f59e0b' : '#22c55e'}
                     strokeWidth={1}
                     strokeDasharray="4 4"
                   />
@@ -15121,7 +15215,7 @@ export default function PointCloudViewer({
                     y1={cursor.y}
                     x2={points[0].x}
                     y2={points[0].y}
-                    stroke="#22c55e"
+                    stroke={cursorBlocked ? '#f59e0b' : '#22c55e'}
                     strokeWidth={1}
                     strokeDasharray="2 4"
                     opacity={0.5}
@@ -15154,56 +15248,18 @@ export default function PointCloudViewer({
         // Read the tick so the rubber-band re-renders as the cursor moves.
         void rectDragTick;
 
-        // Build the 4 corners (TL, TR, BR, BL) of the axis-aligned rect
-        // spanned by two diagonal canvas-pixel points.
-        const cornersOf = (a: { x: number; y: number }, b: { x: number; y: number }) => {
-          const minX = Math.min(a.x, b.x);
-          const minY = Math.min(a.y, b.y);
-          const maxX = Math.max(a.x, b.x);
-          const maxY = Math.max(a.y, b.y);
-          return [
-            { x: minX, y: minY },
-            { x: maxX, y: minY },
-            { x: maxX, y: maxY },
-            { x: minX, y: maxY },
-          ];
-        };
-
         let corners: { x: number; y: number }[] | null = null;
         if (isDrawing && rectDragStart && rectDragCurrentRef.current) {
-          corners = cornersOf(rectDragStart, rectDragCurrentRef.current);
+          corners = rectCornersOf(rectDragStart, rectDragCurrentRef.current);
         } else if (!isDrawing && cropPolygon && cropPolygon.points.length >= 3) {
           corners = cropPolygon.points;
         }
 
-        const commit = (start: { x: number; y: number }, end: { x: number; y: number }) => {
-          // Ignore zero-area drags (a click without movement).
-          if (Math.abs(end.x - start.x) < 3 || Math.abs(end.y - start.y) < 3) {
-            setRectDragStart(null);
-            rectDragCurrentRef.current = null;
-            setCropDrawState('idle');
-            return;
-          }
-          if (polygonCameraRef.current && polygonCanvasSizeRef.current) {
-            const region = polygonRegionFromCamera(
-              cornersOf(start, end),
-              polygonCameraRef.current,
-              polygonCanvasSizeRef.current,
-              false,
-              displayOffsetRef.current,
-            );
-            setCropPolygon({
-              points: region.points,
-              projection: region.projection,
-              view: region.view,
-              canvasSize: region.canvasSize,
-            });
-          }
-          setRectDragStart(null);
-          rectDragCurrentRef.current = null;
-          setCropDrawState('idle');
-        };
-
+        // Only mousedown lives here: the drag's move and release are tracked on
+        // the window (see the crop pointer-tracking effect) so a drag that runs
+        // under — or is released over — a floating panel still rubber-bands
+        // (clamped to the panel edge) and still commits. This SVG is at z-10 and
+        // sees no events at all over those panels.
         const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
           if (!isDrawing || e.button !== 0) return;
           const rect = e.currentTarget.getBoundingClientRect();
@@ -15211,17 +15267,6 @@ export default function PointCloudViewer({
           setRectDragStart(p);
           rectDragCurrentRef.current = p;
           setRectDragTick(t => t + 1);
-        };
-        const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-          if (!isDrawing || !rectDragStart) return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          rectDragCurrentRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-          setRectDragTick(t => t + 1);
-        };
-        const handleMouseUp = (e: React.MouseEvent<SVGSVGElement>) => {
-          if (!isDrawing || e.button !== 0 || !rectDragStart) return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          commit(rectDragStart, { x: e.clientX - rect.left, y: e.clientY - rect.top });
         };
 
         const polyPoints = corners ? corners.map(p => `${p.x},${p.y}`).join(' ') : '';
@@ -15239,8 +15284,6 @@ export default function PointCloudViewer({
               cursor: isDrawing ? 'crosshair' : 'default',
             }}
             onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
           >
             {corners && (
               <polygon
@@ -15265,6 +15308,17 @@ export default function PointCloudViewer({
           </svg>
         );
       })()}
+
+      {/* "Can't draw here" feedback for the crop draws — the ⊘ cursor marker
+          shown while the pointer is over a panel that occludes the overlays. */}
+      {editMode === 'crop' && cropDrawing && (
+        <ViewportBlockedZone
+          testId="crop-blocked-zone"
+          rects={cropZone.rects}
+          cursor={cropZone.cursor}
+          blocked={cropZone.blocked}
+        />
+      )}
 
       {/* Crop apply status indicator. Mirrors the Helios pill but without a
           cancel button — the crop apply isn't cancelable today. Shown while
@@ -15562,7 +15616,18 @@ export default function PointCloudViewer({
           overflow-y-auto scrolls the column as one unit; `pr-1` keeps the
           scrollbar off panel content; `overflow-x-visible` keeps leftward-
           opening color/transform popovers from clipping. */}
-      <div className="absolute top-4 bottom-[4.5rem] right-4 z-30 flex flex-col gap-2 overflow-y-auto overflow-x-visible pr-1">
+      {/* This column is pinned top-and-bottom, so it is full-height however few
+          panels it holds — with one scan loaded, ~400px of it is empty. It used
+          to swallow every click in that dead space: orbiting, and the crop/seed
+          tools, were refused down the whole right edge for no visible reason.
+          `pointer-events-none` + `[&>*]:pointer-events-auto` passes the empty
+          area through while each panel stays interactive (the same pattern as
+          left-toolbar-column). data-viewport-panel-stack makes readBlockedRects
+          measure the panels INSIDE rather than this box. */}
+      <div
+        data-viewport-panel-stack
+        className="absolute top-4 bottom-[4.5rem] right-4 z-30 flex flex-col gap-2 overflow-y-auto overflow-x-visible pr-1 pointer-events-none [&>*]:pointer-events-auto"
+      >
         {/* Unified Scans Panel — shows every scan whether it has data, params,
             or both. Per-row actions adapt to which fields are present. */}
         <div data-testid="scans-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col shrink-0">

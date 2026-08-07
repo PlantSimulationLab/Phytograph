@@ -73,7 +73,16 @@ export function TreeSegmentPanel({
   onSplit,
 }: TreeSegmentPanelProps) {
   return (
-    <div data-testid="tree-segment-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto">
+    <div
+      data-testid="tree-segment-panel"
+      // z-20 keeps the panel above the trunk-seed overlay (z-10), which fills the
+      // whole viewport while "Seed trunks" is on. Without it the transparent SVG
+      // swallowed this panel's own controls — including the checkbox that turns
+      // seeding off and "Clear seeds", which left the mode with no way out.
+      // (Same reason CropPanel carries z-20.) Being above the overlay also makes
+      // the panel a genuine blocker, so ViewportBlockedZone hatches it.
+      className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto z-20"
+    >
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <Sprout className="w-3 h-3" />
@@ -171,9 +180,16 @@ export function TreeSegmentPanel({
           />
         </label>
         {seedMode && (
-          <div className="text-[10px] text-neutral-500 mb-1">
-            Click trunks in the view (camera locked); right-click removes the last seed.
-          </div>
+          <>
+            <div className="text-[10px] text-neutral-500 mb-1">
+              Click trunks in the view (camera locked); right-click removes the last seed.
+            </div>
+            <div data-testid="tree-seed-blocked-hint" className="text-[10px] text-amber-400/90 leading-tight mb-1">
+              ⊘ These panels sit over the viewport and take the click
+              themselves — seeds can&apos;t land on them. Orbit or pan (turn
+              seeding off first) to bring those trunks into the open.
+            </div>
+          </>
         )}
         <div className="flex items-center justify-between text-[10px] text-neutral-500">
           <span data-testid="tree-seed-count">{seedCount} seed{seedCount === 1 ? '' : 's'}</span>

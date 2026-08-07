@@ -81,6 +81,15 @@ For tricky scenes you can guide the result by marking trunks yourself:
 3. Click **Segment Trees**. Each seed yields exactly one tree, and ambiguous
    segments are assigned to their nearest seed.
 
+!!! note "Panels block seeding"
+    The floating panels (Tree Segmentation, the scan/mesh stack on the right,
+    Display, and any toast) sit *over* the viewport, so they take the click
+    before the seeding overlay can. While **Seed trunks** is on, moving onto one
+    puts a ⊘ at the cursor — a seed can't land there. Only the panels themselves
+    block; the empty space around them in the right-hand column is ordinary
+    viewport. The panels stay usable while seeding; to reach a trunk behind one,
+    turn seeding off, orbit or pan it into the open, and turn seeding back on.
+
 ## Refining the result
 
 Once a cloud is segmented (flat clouds), a **Refine** section appears:
