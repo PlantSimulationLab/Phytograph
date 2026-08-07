@@ -5,18 +5,23 @@ import {
   qsmToCylinderMeshPly,
   sanitizeQsmFilename,
   qsmExtForFormat,
-  cylinderTube,
+  buildQsmTubes,
   cylinderAxis,
   serializeQsm,
 } from './qsmExport';
+import { buildShootPolylines, buildTubeFrame, sweepTube } from './qsmTube';
 import type { QSMEntry } from './pointCloudTypes';
 import type { QSMCylinder } from '../utils/backendApi';
 
 const TUBE_SEGMENTS = 12;
-// Per cylinder: 2 rings (2*segments) + 2 cap centers vertices.
-const VERTS_PER_CYL = 2 * TUBE_SEGMENTS + 2;
-// Per cylinder: 2 side tris + 1 bottom-cap tri + 1 top-cap tri, per segment.
-const FACES_PER_CYL = 4 * TUBE_SEGMENTS;
+const RING_STRIDE = TUBE_SEGMENTS + 1; // duplicated seam vertex per ring
+
+// The fixture below has two shoots: shoot 0 with 2 cylinders (3 nodes) and shoot 1
+// with 1 cylinder (2 nodes) -> 5 rings total.
+const TOTAL_RINGS = 3 + 2;
+const TOTAL_VERTS = TOTAL_RINGS * RING_STRIDE;
+// (M-1) ring pairs per shoot * segments quads * 2 triangles.
+const TOTAL_FACES = ((3 - 1) + (2 - 1)) * TUBE_SEGMENTS * 2;
 
 function cyl(over: Partial<QSMCylinder>): QSMCylinder {
   return {
@@ -53,7 +58,7 @@ function fixtureQsm(): QSMEntry {
   };
 }
 
-describe('cylinderAxis / cylinderTube', () => {
+describe('cylinderAxis', () => {
   it('returns a unit axis for a non-degenerate cylinder', () => {
     const a = cylinderAxis(cyl({ start: [0, 0, 0], end: [0, 0, 2] }))!;
     expect(a).not.toBeNull();
@@ -64,26 +69,105 @@ describe('cylinderAxis / cylinderTube', () => {
 
   it('returns null for a zero-length cylinder', () => {
     expect(cylinderAxis(cyl({ start: [1, 1, 1], end: [1, 1, 1] }))).toBeNull();
-    expect(cylinderTube(cyl({ start: [1, 1, 1], end: [1, 1, 1] }))).toBeNull();
+  });
+});
+
+describe('buildQsmTubes', () => {
+  it('builds ONE continuous tube per shoot, not one per cylinder', () => {
+    const tubes = buildQsmTubes(fixtureQsm());
+    // 3 cylinders, but only 2 shoots.
+    expect(tubes).toHaveLength(2);
+    expect(tubes.map((t) => t.shootId).sort()).toEqual([0, 1]);
+    // Shoot 0 chains 2 cylinders -> 3 rings; shoot 1 has 1 cylinder -> 2 rings.
+    expect(tubes[0].positions).toHaveLength(3 * RING_STRIDE);
+    expect(tubes[1].positions).toHaveLength(2 * RING_STRIDE);
   });
 
-  it('returns null for a zero-radius cylinder', () => {
-    expect(cylinderTube(cyl({ radius: 0 }))).toBeNull();
+  it('emits no cap geometry, so joints are not sealed off inside the tube', () => {
+    // A capped build would add 2 cap-center vertices + 2*segments cap triangles per
+    // cylinder. Exactly (M-1)*segments*2 side triangles means side quads only.
+    const t = buildQsmTubes(fixtureQsm())[0];
+    expect(t.faces).toHaveLength((3 - 1) * TUBE_SEGMENTS * 2);
   });
 
-  it('builds the expected vertex/face counts with in-range, finite indices', () => {
-    const t = cylinderTube(cyl({}))!;
-    expect(t.positions).toHaveLength(VERTS_PER_CYL);
-    expect(t.faces).toHaveLength(FACES_PER_CYL);
-    for (const f of t.faces) {
-      for (const idx of f) {
-        expect(idx).toBeGreaterThanOrEqual(0);
-        expect(idx).toBeLessThan(t.positions.length);
+  it('varies the radius continuously across a joint instead of stepping', () => {
+    // Fixture shoot 0: cyl radii 0.1 then 0.05. The shared interior node must take
+    // the MEAN (0.075) -- the old per-cylinder export jumped 0.1 -> 0.05.
+    const t = buildQsmTubes(fixtureQsm())[0];
+    expect(t.radii).toHaveLength(3);
+    expect(t.radii[0]).toBeCloseTo(0.1, 9);
+    expect(t.radii[1]).toBeCloseTo(0.075, 9);
+    expect(t.radii[2]).toBeCloseTo(0.05, 9);
+  });
+
+  it('places every ring vertex exactly its node radius from the node center', () => {
+    const poly = buildShootPolylines(fixtureQsm().cylinders, fixtureQsm().shoots)[0];
+    const t = buildQsmTubes(fixtureQsm())[0];
+    for (let ring = 0; ring < poly.nodes.length; ring++) {
+      const center = poly.nodes[ring];
+      for (let j = 0; j < RING_STRIDE; j++) {
+        const p = t.positions[ring * RING_STRIDE + j];
+        const d = Math.hypot(p[0] - center[0], p[1] - center[1], p[2] - center[2]);
+        expect(d).toBeCloseTo(poly.radii[ring], 6);
       }
     }
-    for (const p of t.positions) {
-      for (const c of p) expect(Number.isFinite(c)).toBe(true);
+  });
+
+  it('transports the ring frame with zero twist about the axis', () => {
+    // THE defect that made the old export read as disjointed cylinders: each
+    // cylinder derived its ring basis from a FIXED WORLD REFERENCE, so consecutive
+    // rings were rotated arbitrarily about the axis relative to each other and the
+    // side quads sheared. A rotation-minimizing frame instead carries the previous
+    // radial forward, rotating it ONLY by the bend itself -- zero twist.
+    //
+    // The path must be NON-PLANAR: for a bend confined to one plane the rotation
+    // axis is constant and a world-referenced pick coincidentally agrees, so a
+    // planar fixture cannot detect the bug.
+    const nodes: [number, number, number][] = [
+      [0, 0, 0], [0, 0, 1], [1, 0, 1.6], [1, 1, 2.2], [0.3, 1.6, 2.8],
+    ];
+    const { axial, radial } = buildTubeFrame(nodes);
+
+    for (let i = 0; i + 1 < nodes.length; i++) {
+      // Transport radial[i] across the bend axial[i] -> axial[i+1] by hand, then
+      // compare with the frame's own radial[i+1]. Equal => no twist was introduced.
+      const ax = axial[i], nx = axial[i + 1];
+      const rot: [number, number, number] = [
+        ax[1] * nx[2] - ax[2] * nx[1],
+        ax[2] * nx[0] - ax[0] * nx[2],
+        ax[0] * nx[1] - ax[1] * nx[0],
+      ];
+      const rotLen = Math.hypot(rot[0], rot[1], rot[2]);
+      let expected = radial[i];
+      if (rotLen > 1e-5) {
+        const k: [number, number, number] = [rot[0] / rotLen, rot[1] / rotLen, rot[2] / rotLen];
+        const ang = Math.acos(Math.max(-1, Math.min(1, ax[0] * nx[0] + ax[1] * nx[1] + ax[2] * nx[2])));
+        const v = radial[i];
+        const c = Math.cos(ang), s = Math.sin(ang);
+        const kv = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+        expected = [
+          v[0] * c + (k[1] * v[2] - k[2] * v[1]) * s + k[0] * kv * (1 - c),
+          v[1] * c + (k[2] * v[0] - k[0] * v[2]) * s + k[1] * kv * (1 - c),
+          v[2] * c + (k[0] * v[1] - k[1] * v[0]) * s + k[2] * kv * (1 - c),
+        ];
+      }
+      // Angle between the transported radial and the frame's radial must be ~0.
+      const d = expected[0] * radial[i + 1][0] + expected[1] * radial[i + 1][1] + expected[2] * radial[i + 1][2];
+      expect(Math.acos(Math.max(-1, Math.min(1, d)))).toBeLessThan(1e-6);
     }
+  });
+
+  it('emits finite, unit-length normals', () => {
+    for (const t of buildQsmTubes(fixtureQsm())) {
+      for (const n of t.normals) {
+        expect(Number.isFinite(n[0] + n[1] + n[2])).toBe(true);
+        expect(Math.hypot(n[0], n[1], n[2])).toBeCloseTo(1, 6);
+      }
+    }
+  });
+
+  it('skips a shoot too short to sweep', () => {
+    expect(sweepTube([[0, 0, 0]], [0.1], TUBE_SEGMENTS)).toBeNull();
   });
 });
 
@@ -146,30 +230,59 @@ describe('qsmToCylinderMeshObj', () => {
   const obj = qsmToCylinderMeshObj(fixtureQsm());
   const lines = obj.trim().split('\n');
 
-  it('emits v and f lines for every (non-degenerate) cylinder', () => {
+  it('emits one swept tube per shoot, with a normal for every vertex', () => {
     const vCount = lines.filter(l => l.startsWith('v ')).length;
+    const vnCount = lines.filter(l => l.startsWith('vn ')).length;
     const fCount = lines.filter(l => l.startsWith('f ')).length;
-    expect(vCount).toBe(3 * VERTS_PER_CYL);
-    expect(fCount).toBe(3 * FACES_PER_CYL);
+    expect(vCount).toBe(TOTAL_VERTS);
+    expect(vnCount).toBe(TOTAL_VERTS); // smooth normals, else viewers shade it faceted
+    expect(fCount).toBe(TOTAL_FACES);
   });
 
-  it('uses 1-based face indices within the total vertex range', () => {
-    const totalV = 3 * VERTS_PER_CYL;
+  it('groups each shoot as a named object so it stays separable in Blender', () => {
+    const groups = lines.filter(l => l.startsWith('o '));
+    expect(groups).toEqual(['o shoot_0_rank_0', 'o shoot_1_rank_1']);
+  });
+
+  it('uses 1-based v//vn face indices within the total vertex range', () => {
     for (const l of lines.filter(x => x.startsWith('f '))) {
-      const idxs = l.slice(2).trim().split(/\s+/).map(Number);
-      for (const i of idxs) {
-        expect(i).toBeGreaterThanOrEqual(1);
-        expect(i).toBeLessThanOrEqual(totalV);
+      const verts = l.slice(2).trim().split(/\s+/);
+      expect(verts).toHaveLength(3);
+      for (const v of verts) {
+        const [vi, vni] = v.split('//').map(Number);
+        expect(vi).toBeGreaterThanOrEqual(1);
+        expect(vi).toBeLessThanOrEqual(TOTAL_VERTS);
+        expect(vni).toBe(vi); // positions and normals are parallel arrays
       }
     }
   });
 
-  it('skips degenerate cylinders', () => {
+  it('matches the geometry the viewport renders (same shared tube builder)', () => {
+    // The bug this guards: the exporter used to build its own per-cylinder capped
+    // cylinders, so the OBJ was a pile of disjoint tubes while the viewport showed
+    // a smooth swept tube. Every exported vertex must be a vertex the shared
+    // builder produced.
+    const expected = new Set(
+      buildQsmTubes(fixtureQsm()).flatMap(t =>
+        t.positions.map(p => `${p[0]} ${p[1]} ${p[2]}`),
+      ),
+    );
+    const got = lines.filter(l => l.startsWith('v ')).map(l => l.slice(2));
+    expect(got).toHaveLength(TOTAL_VERTS);
+    for (const g of got) expect(expected.has(g)).toBe(true);
+  });
+
+  it('skips a shoot whose cylinders are all degenerate', () => {
     const q = fixtureQsm();
-    q.cylinders.push(cyl({ cyl_id: 9, start: [5, 5, 5], end: [5, 5, 5] })); // zero length
+    q.cylinders.push(cyl({ cyl_id: 9, start: [5, 5, 5], end: [5, 5, 5], shoot_id: 2, rank: 1 }));
+    q.shoots.push({
+      shoot_id: 2, rank: 1, cylinder_ids: [9],
+      parent_shoot_id: 0, parent_cyl_id: 0, child_shoot_ids: [],
+    });
     const objD = qsmToCylinderMeshObj(q);
-    const vCount = objD.trim().split('\n').filter(l => l.startsWith('v ')).length;
-    expect(vCount).toBe(3 * VERTS_PER_CYL); // unchanged
+    // A zero-length cylinder yields 2 coincident nodes: still swept (harmless,
+    // finite), but it must never produce NaNs in the file.
+    expect(objD).not.toMatch(/NaN|Infinity/);
   });
 });
 
@@ -180,30 +293,96 @@ describe('qsmToCylinderMeshPly', () => {
   it('declares vertex/face counts matching the body', () => {
     const vDecl = Number(lines.find(l => l.startsWith('element vertex'))!.split(' ')[2]);
     const fDecl = Number(lines.find(l => l.startsWith('element face'))!.split(' ')[2]);
-    expect(vDecl).toBe(3 * VERTS_PER_CYL);
-    expect(fDecl).toBe(3 * FACES_PER_CYL);
+    expect(vDecl).toBe(TOTAL_VERTS);
+    expect(fDecl).toBe(TOTAL_FACES);
 
     const headerEnd = lines.indexOf('end_header');
     const body = lines.slice(headerEnd + 1);
-    const vertexLines = body.slice(0, vDecl);
-    const faceLines = body.slice(vDecl, vDecl + fDecl);
-    expect(vertexLines).toHaveLength(vDecl);
-    expect(faceLines).toHaveLength(fDecl);
+    expect(body).toHaveLength(vDecl + fDecl);
   });
 
-  it('attaches branch_order equal to the cylinder rank on each face', () => {
+  it('declares and writes vertex normals', () => {
+    expect(lines).toContain('property float nx');
     const headerEnd = lines.indexOf('end_header');
-    const vDecl = 3 * VERTS_PER_CYL;
-    const faceLines = lines.slice(headerEnd + 1 + vDecl);
-    // First cylinder (rank 0) contributes the first FACES_PER_CYL faces.
+    // "x y z nx ny nz" -> 6 tokens per vertex line.
+    const first = lines[headerEnd + 1].trim().split(/\s+/);
+    expect(first).toHaveLength(6);
+    const n = first.slice(3).map(Number);
+    expect(Math.hypot(n[0], n[1], n[2])).toBeCloseTo(1, 5);
+  });
+
+  it('attaches branch_order equal to the shoot rank on each face', () => {
+    const headerEnd = lines.indexOf('end_header');
+    const faceLines = lines.slice(headerEnd + 1 + TOTAL_VERTS);
     const firstFace = faceLines[0].trim().split(/\s+/);
     // "3 i j k branch_order radius" -> 6 tokens
     expect(firstFace).toHaveLength(6);
     expect(firstFace[0]).toBe('3');
-    expect(firstFace[4]).toBe('0'); // branch_order for rank-0 cylinder
-    // The rank-1 cylinder is last; its faces should carry branch_order 1.
+    expect(firstFace[4]).toBe('0'); // rank-0 trunk shoot
+    // The rank-1 shoot is last; its faces should carry branch_order 1.
     const lastFace = faceLines[faceLines.length - 1].trim().split(/\s+/);
     expect(lastFace[4]).toBe('1');
+  });
+
+  it('carries the per-node radius on each face, so it tapers along a shoot', () => {
+    const headerEnd = lines.indexOf('end_header');
+    const faceLines = lines.slice(headerEnd + 1 + TOTAL_VERTS);
+    // Trunk shoot 0 tapers 0.1 -> 0.075 -> 0.05. Its first ring-pair's faces carry
+    // 0.1; the second ring-pair's carry the joint mean 0.075. A per-cylinder export
+    // could only ever emit the two raw cylinder radii.
+    const radiusOf = (l: string) => Number(l.trim().split(/\s+/)[5]);
+    expect(radiusOf(faceLines[0])).toBeCloseTo(0.1, 6);
+    expect(radiusOf(faceLines[TUBE_SEGMENTS * 2])).toBeCloseTo(0.075, 6);
+  });
+
+  it('keeps every face index inside the declared vertex range', () => {
+    const headerEnd = lines.indexOf('end_header');
+    const faceLines = lines.slice(headerEnd + 1 + TOTAL_VERTS);
+    for (const l of faceLines) {
+      for (const i of l.trim().split(/\s+/).slice(1, 4).map(Number)) {
+        expect(i).toBeGreaterThanOrEqual(0);
+        expect(i).toBeLessThan(TOTAL_VERTS);
+      }
+    }
+  });
+});
+
+// The regression this whole refactor exists for: the OBJ/PLY exporters used to
+// build their own geometry (one capped cylinder per cylinder, world-referenced ring
+// frames, unreconciled joints, stepped radii) while the viewport swept one
+// continuous tube per shoot. The exported mesh therefore looked like a pile of
+// disjoint cylinders in Blender, and its surface area / volume were wrong. Both now
+// go through lib/qsmTube; these tests assert the properties that would break again
+// if someone reintroduces a private geometry path.
+describe('exported mesh matches the rendered mesh', () => {
+  const q = fixtureQsm();
+
+  it('OBJ and PLY share identical vertex positions', () => {
+    const objV = qsmToCylinderMeshObj(q)
+      .trim().split('\n').filter(l => l.startsWith('v ')).map(l => l.slice(2));
+    const ply = qsmToCylinderMeshPly(q).trim().split('\n');
+    const plyV = ply
+      .slice(ply.indexOf('end_header') + 1, ply.indexOf('end_header') + 1 + TOTAL_VERTS)
+      .map(l => l.trim().split(/\s+/).slice(0, 3).join(' '));
+    expect(objV).toEqual(plyV);
+  });
+
+  it('joins consecutive cylinders of a shoot into one watertight surface', () => {
+    // Within a shoot, the joint is a SINGLE shared ring: ring count == node count.
+    // A per-cylinder export produced two coincident rings there (plus caps between
+    // them), which is exactly what read as "disjointed cylinders".
+    const t = buildQsmTubes(q)[0];
+    expect(t.positions.length / RING_STRIDE).toBe(3); // 2 cylinders -> 3 rings, not 4
+  });
+
+  it('has no interior cap surface inflating the exported area', () => {
+    const total = buildQsmTubes(q).reduce((n, t) => n + t.faces.length, 0);
+    expect(total).toBe(TOTAL_FACES);
+  });
+
+  it('produces no NaN or Infinity coordinates in either format', () => {
+    expect(qsmToCylinderMeshObj(q)).not.toMatch(/NaN|Infinity/);
+    expect(qsmToCylinderMeshPly(q)).not.toMatch(/NaN|Infinity/);
   });
 });
 

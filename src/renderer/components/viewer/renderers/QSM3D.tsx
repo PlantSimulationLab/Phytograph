@@ -1,6 +1,11 @@
 import { useMemo, useEffect } from 'react';
 import * as THREE from 'three';
 import type { QSMCylinder, QSMShoot } from '../../../utils/backendApi';
+import {
+  buildShootPolylines as buildShootPolylinesPlain,
+  sweepTube,
+} from '../../../lib/qsmTube';
+import type { ShootPolyline as PlainShootPolyline } from '../../../lib/qsmTube';
 
 // QSM (Quantitative Structure Model) visualization. Each SHOOT is drawn as ONE
 // CONTINUOUS TUBE: a single shared ring of vertices per node, swept along the
@@ -9,6 +14,12 @@ import type { QSMCylinder, QSMShoot } from '../../../utils/backendApi';
 // Helios' plant-architecture plugin uses (one tube per branch, branches overlap at
 // forks; no miter geometry). This replaces the older per-cylinder capped-frustum
 // rendering, which showed seams + radius steps at every joint.
+//
+// The geometry itself lives in `lib/qsmTube` (three.js-free) so the OBJ/PLY
+// exporters produce the SAME surface the user sees here. This module keeps the
+// three.js-flavored wrappers (THREE.Vector3 nodes, merged BufferGeometry, color) --
+// don't reimplement sweeping/framing here, or the viewport and the exports drift
+// apart again.
 //
 // Two color modes make the headline feature legible:
 //   - 'rank'  : color by shoot rank (trunk=0, scaffolds=1, ...) -- the structure.
@@ -80,8 +91,6 @@ export function shootColor(shootId: number): THREE.Color {
   return new THREE.Color().setHSL(hue, 0.7, lightness);
 }
 
-const MIN_RADIUS = 1e-5;
-
 // One shoot reduced to a continuous polyline: M = (cylinders + 1) nodes, each with
 // a radius. The headline color (rank/shoot) is constant per shoot, but radius (and
 // later, per-node fields like surf_cov) is carried per node.
@@ -92,57 +101,20 @@ export interface ShootPolyline {
   radii: number[]; // length === nodes.length
 }
 
-function midpoint(
-  a: readonly [number, number, number],
-  b: readonly [number, number, number]
-): THREE.Vector3 {
-  return new THREE.Vector3(
-    (a[0] + b[0]) * 0.5,
-    (a[1] + b[1]) * 0.5,
-    (a[2] + b[2]) * 0.5
-  );
-}
-
-// Reduce each shoot's ordered cylinder chain to a single node polyline. Consecutive
-// cylinders are MEANT to share a node, but after the backend's per-cylinder axis fit
-// the shared point can drift apart by ~1cm; we reconcile by averaging the two sides
-// into one node so the tube meets exactly. A K-cylinder shoot -> K+1 nodes. Each
-// interior node's radius is the mean of its two adjoining cylinders (single shared
-// ring => continuous radius); endpoints take their one adjoining cylinder's radius.
+// Shared polyline reduction (see lib/qsmTube), lifted into THREE.Vector3 nodes for
+// the renderer's convenience. The reconciliation rules -- averaging a drifted joint
+// into one shared node, meaning each interior radius -- live in the shared module so
+// the exports get exactly the same centerline.
 export function buildShootPolylines(
   cylinders: QSMCylinder[],
   shoots: QSMShoot[]
 ): ShootPolyline[] {
-  const byId = new Map<number, QSMCylinder>();
-  for (const c of cylinders) byId.set(c.cyl_id, c);
-
-  const out: ShootPolyline[] = [];
-  for (const s of shoots) {
-    // Resolve the ordered (base->tip) cylinders; defensively skip missing ids.
-    const cyls = s.cylinder_ids
-      .map((id) => byId.get(id))
-      .filter((c): c is QSMCylinder => c != null);
-    if (cyls.length === 0) continue;
-
-    const nodes: THREE.Vector3[] = [];
-    const radii: number[] = [];
-
-    nodes.push(new THREE.Vector3(cyls[0].start[0], cyls[0].start[1], cyls[0].start[2]));
-    radii.push(Math.max(cyls[0].radius, MIN_RADIUS));
-
-    for (let i = 1; i < cyls.length; i++) {
-      // Interior shared node: average the (possibly drifted) joint position + radius.
-      nodes.push(midpoint(cyls[i - 1].end, cyls[i].start));
-      radii.push(Math.max(0.5 * (cyls[i - 1].radius + cyls[i].radius), MIN_RADIUS));
-    }
-
-    const last = cyls[cyls.length - 1];
-    nodes.push(new THREE.Vector3(last.end[0], last.end[1], last.end[2]));
-    radii.push(Math.max(last.radius, MIN_RADIUS));
-
-    out.push({ shootId: s.shoot_id, rank: s.rank, nodes, radii });
-  }
-  return out;
+  return buildShootPolylinesPlain(cylinders, shoots).map((p: PlainShootPolyline) => ({
+    shootId: p.shootId,
+    rank: p.rank,
+    nodes: p.nodes.map((n) => new THREE.Vector3(n[0], n[1], n[2])),
+    radii: p.radii,
+  }));
 }
 
 // The per-node color for one shoot. Color is constant along the shoot (rank or
@@ -189,92 +161,29 @@ export function appendTube(
   // positions shift.
   offset: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 }
 ): void {
-  const m = nodes.length;
-  if (m < 2) return;
+  const swept = sweepTube(
+    nodes.map((v) => [v.x, v.y, v.z] as [number, number, number]),
+    radii,
+    n,
+    [offset.x, offset.y, offset.z]
+  );
+  if (!swept) return;
 
-  // 1) Per-node axial direction (central difference at interior nodes), with a
-  //    fallback to the previous valid axial when a segment is degenerate.
-  const axial: THREE.Vector3[] = new Array(m);
-  let prevValid = new THREE.Vector3(0, 0, 1);
-  for (let i = 0; i < m; i++) {
-    const a = new THREE.Vector3();
-    if (i === 0) {
-      a.subVectors(nodes[1], nodes[0]);
-    } else if (i === m - 1) {
-      a.subVectors(nodes[m - 1], nodes[m - 2]);
-    } else {
-      const f = new THREE.Vector3().subVectors(nodes[i], nodes[i - 1]);
-      const g = new THREE.Vector3().subVectors(nodes[i + 1], nodes[i]);
-      a.addVectors(f, g).multiplyScalar(0.5);
-    }
-    if (a.length() < 1e-8) a.copy(prevValid);
-    else {
-      a.normalize();
-      prevValid = a;
-    }
-    axial[i] = a;
-  }
-
-  // Pick an initial radial direction at node 0 not parallel to the axis.
-  const pickInitial = (ax: THREE.Vector3): THREE.Vector3 => {
-    let init = new THREE.Vector3(1, 0, 0);
-    if (Math.abs(ax.dot(init)) > 0.95) init = new THREE.Vector3(0, 1, 0);
-    if (Math.abs(ax.z) > 0.95) init = new THREE.Vector3(1, 0, 0);
-    return new THREE.Vector3().crossVectors(ax, init).normalize();
-  };
-
-  // 2) Parallel-transport the radial frame node to node.
-  const radial: THREE.Vector3[] = new Array(m);
-  radial[0] = pickInitial(axial[0]);
-  for (let i = 1; i < m; i++) {
-    const r = radial[i - 1].clone();
-    const rotAxis = new THREE.Vector3().crossVectors(axial[i - 1], axial[i]);
-    if (rotAxis.length() > 1e-5) {
-      const angle = Math.acos(Math.max(-1, Math.min(1, axial[i - 1].dot(axial[i]))));
-      r.applyAxisAngle(rotAxis.normalize(), angle);
-    }
-    // Re-orthogonalize against the new axial to kill drift / the parallel case.
-    r.addScaledVector(axial[i], -r.dot(axial[i]));
-    if (r.length() < 1e-6) r.copy(pickInitial(axial[i])); // collapsed (180deg kink)
-    radial[i] = r.normalize();
-  }
-
-  // 3) Emit rings (N+1 verts each) + 4) connect consecutive rings.
   const base = arrays.indexOffset.value;
-  const orthogonal = new THREE.Vector3();
-  for (let i = 0; i < m; i++) {
-    orthogonal.crossVectors(radial[i], axial[i]).normalize();
-    const col = colorPerNode[i];
-    const r = radii[i];
-    for (let j = 0; j <= n; j++) {
-      const theta = (2 * Math.PI * j) / n;
-      const c = Math.cos(theta);
-      const s = Math.sin(theta);
-      const nx = c * radial[i].x + s * orthogonal.x;
-      const ny = c * radial[i].y + s * orthogonal.y;
-      const nz = c * radial[i].z + s * orthogonal.z;
-      arrays.positions.push(
-        nodes[i].x + r * nx - offset.x,
-        nodes[i].y + r * ny - offset.y,
-        nodes[i].z + r * nz - offset.z
-      );
-      arrays.normals.push(nx, ny, nz);
-      arrays.colors.push(col.r, col.g, col.b);
-    }
+  for (let i = 0; i < swept.positions.length; i++) {
+    const p = swept.positions[i];
+    const nrm = swept.normals[i];
+    arrays.positions.push(p[0], p[1], p[2]);
+    arrays.normals.push(nrm[0], nrm[1], nrm[2]);
+    // Color is per-NODE, and each node owns one ring of `ringStride` vertices.
+    const col = colorPerNode[Math.floor(i / swept.ringStride)];
+    arrays.colors.push(col.r, col.g, col.b);
   }
-  for (let i = 0; i < m - 1; i++) {
-    const ringA = base + i * (n + 1);
-    const ringB = base + (i + 1) * (n + 1);
-    for (let j = 0; j < n; j++) {
-      const a = ringA + j;
-      const b = ringA + j + 1;
-      const cc = ringB + j;
-      const d = ringB + j + 1;
-      arrays.indices.push(a, cc, b);
-      arrays.indices.push(b, cc, d);
-    }
+  // sweepTube's face indices are local to this tube; rebase into the merged buffer.
+  for (const f of swept.faces) {
+    arrays.indices.push(base + f[0], base + f[1], base + f[2]);
   }
-  arrays.indexOffset.value += m * (n + 1);
+  arrays.indexOffset.value += swept.positions.length;
 }
 
 export function QSM3D({

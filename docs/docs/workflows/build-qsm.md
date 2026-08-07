@@ -185,12 +185,25 @@ or take it into other tooling.
 | Format | What it is | Use it for |
 |---|---|---|
 | **CSV** | One row per cylinder — `ID, parentID, branchID, branchOrder, segmentID, parentSegmentID`, start/end coordinates, axis, radius, length, plus surface-coverage and fit residual. Uses the **SimpleForest** column layout. | Analysis and round-tripping into the standard QSM ecosystem: it follows the SimpleForest schema that [rTwig](https://aidanmorales.github.io/rTwig/) and [aRchi](https://github.com/umr-amap/aRchi) read (the TreeQSM-compatible path). The column set is validated against rTwig's importer. |
-| **OBJ** | Triangulated cylinder mesh. | Viewing the model anywhere — Blender, CloudCompare, MeshLab, Rhino. |
-| **PLY** | The same cylinder mesh, with each face tagged by **branch order** and **radius**. | Viewing with attribute-based coloring (color faces by branching order in CloudCompare/Blender). |
+| **OBJ** | Triangulated tube mesh with smooth vertex normals — the same geometry the viewport draws. Each shoot is one named object (`shoot_<id>_rank_<n>`), so the tree arrives separable. | Viewing the model anywhere — Blender, CloudCompare, MeshLab, Rhino. |
+| **PLY** | The same tube mesh plus vertex normals, with each face tagged by **branch order** and **radius**. | Viewing with attribute-based coloring (color faces by branching order in CloudCompare/Blender). |
 
 !!! note "Coordinates and units"
     Exports are in the cloud's **world coordinates**, in **metres**. The
     CSV root cylinder has `parentID = -1`.
+
+!!! note "The mesh exports match the viewport"
+    OBJ and PLY are built from the **same geometry the viewer renders**: each
+    shoot is swept as one continuous tube, so the surface is seamless and the
+    radius varies smoothly through each joint rather than stepping. There are no
+    end caps — a shoot simply overlaps its parent at the fork, exactly as in the
+    viewport — which also keeps the exported surface area from being inflated by
+    cap faces buried inside the joints.
+
+    Consequently the mesh formats carry **per-node** radii, not one radius per
+    cylinder. If you need the raw fitted cylinder parameters (each with its own
+    single radius, start, and end), export **CSV** — that's the format that
+    preserves them.
 
 ## How it works
 

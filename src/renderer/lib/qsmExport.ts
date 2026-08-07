@@ -8,18 +8,31 @@
 //           (read_QSM model="simpleforest") read this layout. Readers ignore
 //           unknown trailing columns, so the surf-cov / mad quality columns are
 //           safe extras beyond the SimpleForest core.
-//   - obj : triangulated cylinder mesh, for Blender / CloudCompare / MeshLab.
+//   - obj : triangulated tube mesh (with normals), for Blender / CloudCompare /
+//           MeshLab.
 //   - ply : same geometry as OBJ, ASCII, with per-face branch_order + radius
 //           so downstream viewers can color by branching order.
+//
+// The OBJ/PLY geometry is built by the SHARED tube builder in ./qsmTube, the same
+// one the viewport renderer uses — so the exported mesh is the mesh the user saw.
+// Previously these exporters emitted an independent capped cylinder per cylinder
+// (world-referenced ring frames, unreconciled joints, stepped radii), which read as
+// a pile of disjoint cylinders in Blender while the viewport showed a smooth tube.
 
 import type { QSMEntry } from './pointCloudTypes';
-import type { QSMCylinder } from '../utils/backendApi';
+import { buildShootPolylines, cylinderAxis, cylinderLength, sweepTube } from './qsmTube';
+import type { Vec3 } from './qsmTube';
 
 export type QSMExportFormat = 'csv' | 'obj' | 'ply';
 
-// Radial segments per cylinder tube. 12 is a good balance of fidelity vs file
-// size for the visualization exports.
+// Radial segments per exported tube ring. Higher than the viewport's default 8:
+// the viewport trades roundness for interactive framerate on a whole tree, while an
+// export is written once and then lives in Blender/CloudCompare, where the extra
+// fidelity is worth the file size.
 const TUBE_SEGMENTS = 12;
+
+// Re-exported for callers that already import these from here.
+export { cylinderAxis, cylinderLength };
 
 export function qsmExtForFormat(fmt: QSMExportFormat): string {
   return fmt; // 'csv' | 'obj' | 'ply' all double as the extension
@@ -43,98 +56,42 @@ export function sanitizeQsmFilename(name: string): string {
 
 // --- geometry ---------------------------------------------------------------
 
-function sub(a: readonly number[], b: readonly number[]): [number, number, number] {
-  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-}
-
-function norm(v: readonly number[]): number {
-  return Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-}
-
-function cross(a: readonly number[], b: readonly number[]): [number, number, number] {
-  return [
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0],
-  ];
-}
-
-function normalize(v: readonly number[]): [number, number, number] {
-  const n = norm(v);
-  if (n === 0) return [0, 0, 0];
-  return [v[0] / n, v[1] / n, v[2] / n];
-}
-
-// Unit cylinder axis from start->end. Returns null for degenerate cylinders.
-export function cylinderAxis(c: QSMCylinder): [number, number, number] | null {
-  const d = sub(c.end, c.start);
-  const n = norm(d);
-  if (n === 0) return null;
-  return [d[0] / n, d[1] / n, d[2] / n];
-}
-
-export function cylinderLength(c: QSMCylinder): number {
-  return norm(sub(c.end, c.start));
-}
-
-interface TubeMesh {
-  positions: [number, number, number][];
-  // 1-based-agnostic triangle indices into `positions` (0-based here).
+/**
+ * One shoot's swept tube, plus the per-ring attributes the PLY needs. Rings map
+ * 1:1 to polyline nodes, so a face's attributes come from the ring it starts on.
+ */
+interface ShootTube {
+  positions: Vec3[];
+  normals: Vec3[];
   faces: [number, number, number][];
+  ringStride: number;
+  shootId: number;
+  rank: number;
+  /** Per-node radius, indexed by ring. */
+  radii: number[];
 }
 
-// Build a capped tube between start and end with the given radius. Returns null
-// for degenerate cylinders (zero length or non-positive radius).
-export function cylinderTube(
-  c: QSMCylinder,
-  segments = TUBE_SEGMENTS,
-): TubeMesh | null {
-  const axis = cylinderAxis(c);
-  if (!axis || c.radius <= 0) return null;
-
-  // Two perpendiculars to the axis form the ring basis. Pick a reference that
-  // isn't parallel to the axis.
-  const ref: [number, number, number] =
-    Math.abs(axis[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
-  const u = normalize(cross(axis, ref));
-  const v = normalize(cross(axis, u));
-
-  const positions: [number, number, number][] = [];
-  // Ring vertices: bottom ring [0..segments-1], top ring [segments..2*segments-1].
-  for (const center of [c.start, c.end]) {
-    for (let i = 0; i < segments; i++) {
-      const a = (2 * Math.PI * i) / segments;
-      const cosA = Math.cos(a) * c.radius;
-      const sinA = Math.sin(a) * c.radius;
-      positions.push([
-        center[0] + u[0] * cosA + v[0] * sinA,
-        center[1] + u[1] * cosA + v[1] * sinA,
-        center[2] + u[2] * cosA + v[2] * sinA,
-      ]);
-    }
+/**
+ * Build the export geometry for a whole QSM: one continuous tube per shoot, via the
+ * same shared builder the viewport renders. Shoots whose polyline is too short to
+ * sweep are skipped.
+ */
+export function buildQsmTubes(qsm: QSMEntry, segments = TUBE_SEGMENTS): ShootTube[] {
+  const out: ShootTube[] = [];
+  for (const poly of buildShootPolylines(qsm.cylinders, qsm.shoots)) {
+    const swept = sweepTube(poly.nodes, poly.radii, segments);
+    if (!swept) continue;
+    out.push({
+      positions: swept.positions,
+      normals: swept.normals,
+      faces: swept.faces,
+      ringStride: swept.ringStride,
+      shootId: poly.shootId,
+      rank: poly.rank,
+      radii: poly.radii,
+    });
   }
-  // Cap centers.
-  const bottomCenter = positions.length;
-  positions.push([c.start[0], c.start[1], c.start[2]]);
-  const topCenter = positions.length;
-  positions.push([c.end[0], c.end[1], c.end[2]]);
-
-  const faces: [number, number, number][] = [];
-  for (let i = 0; i < segments; i++) {
-    const next = (i + 1) % segments;
-    const b0 = i;
-    const b1 = next;
-    const t0 = segments + i;
-    const t1 = segments + next;
-    // Side quad -> two triangles (outward winding).
-    faces.push([b0, t0, t1]);
-    faces.push([b0, t1, b1]);
-    // Bottom cap fan.
-    faces.push([bottomCenter, b1, b0]);
-    // Top cap fan.
-    faces.push([topCenter, t0, t1]);
-  }
-  return { positions, faces };
+  return out;
 }
 
 // --- CSV --------------------------------------------------------------------
@@ -195,22 +152,32 @@ export function qsmToCylinderCsv(qsm: QSMEntry): string {
 
 // --- OBJ --------------------------------------------------------------------
 
+// Each shoot becomes one OBJ group `o shoot_<id>_rank_<n>`, so the tree arrives in Blender
+// as separable objects rather than one anonymous soup. Vertex normals are written
+// (`vn` + `f v//vn`) because they're the smooth swept normals from the tube frame —
+// without them a viewer computes flat per-face normals and the tube looks faceted
+// even though the geometry is smooth.
 export function qsmToCylinderMeshObj(qsm: QSMEntry): string {
+  const tubes = buildQsmTubes(qsm);
   const lines: string[] = [
-    `# Phytograph QSM cylinder mesh`,
-    `# cylinders: ${qsm.cylinders.length}`,
+    `# Phytograph QSM tube mesh`,
+    `# one continuous tube per shoot (matches the Phytograph viewport)`,
+    `# cylinders: ${qsm.cylinders.length}  shoots: ${tubes.length}`,
   ];
-  let vOffset = 0; // OBJ vertex indices are 1-based and accumulate across cylinders
-  for (const c of qsm.cylinders) {
-    const tube = cylinderTube(c);
-    if (!tube) continue;
-    for (const p of tube.positions) {
-      lines.push(`v ${p[0]} ${p[1]} ${p[2]}`);
+  // OBJ v/vn indices are 1-based and accumulate across the whole file. Positions
+  // and normals are parallel arrays here, so one offset serves both.
+  let vOffset = 0;
+  for (const t of tubes) {
+    lines.push(`o shoot_${t.shootId}_rank_${t.rank}`);
+    for (const p of t.positions) lines.push(`v ${p[0]} ${p[1]} ${p[2]}`);
+    for (const nrm of t.normals) lines.push(`vn ${nrm[0]} ${nrm[1]} ${nrm[2]}`);
+    for (const f of t.faces) {
+      const a = f[0] + 1 + vOffset;
+      const b = f[1] + 1 + vOffset;
+      const c = f[2] + 1 + vOffset;
+      lines.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`);
     }
-    for (const f of tube.faces) {
-      lines.push(`f ${f[0] + 1 + vOffset} ${f[1] + 1 + vOffset} ${f[2] + 1 + vOffset}`);
-    }
-    vOffset += tube.positions.length;
+    vOffset += t.positions.length;
   }
   return lines.join('\n') + '\n';
 }
@@ -218,32 +185,42 @@ export function qsmToCylinderMeshObj(qsm: QSMEntry): string {
 // --- PLY --------------------------------------------------------------------
 
 export function qsmToCylinderMeshPly(qsm: QSMEntry): string {
-  const allPositions: [number, number, number][] = [];
-  // Each face carries the branch order + radius of the cylinder it came from.
+  const tubes = buildQsmTubes(qsm);
+  const allPositions: Vec3[] = [];
+  const allNormals: Vec3[] = [];
+  // Each face carries the branch order of its shoot + the radius at the ring it
+  // starts on. Radius is now per-node (it varies continuously along a shoot), so
+  // unlike the old per-cylinder export there is no single radius for a whole tube.
   const allFaces: { tri: [number, number, number]; order: number; radius: number }[] = [];
   let vOffset = 0;
-  for (const c of qsm.cylinders) {
-    const tube = cylinderTube(c);
-    if (!tube) continue;
-    for (const p of tube.positions) allPositions.push(p);
-    for (const f of tube.faces) {
+  for (const t of tubes) {
+    for (const p of t.positions) allPositions.push(p);
+    for (const nrm of t.normals) allNormals.push(nrm);
+    for (const f of t.faces) {
+      // Faces are emitted ring-pair by ring-pair; the lowest vertex index of a
+      // triangle always lies on its starting ring.
+      const ring = Math.floor(Math.min(f[0], f[1], f[2]) / t.ringStride);
       allFaces.push({
         tri: [f[0] + vOffset, f[1] + vOffset, f[2] + vOffset],
-        order: c.rank,
-        radius: c.radius,
+        order: t.rank,
+        radius: t.radii[Math.min(ring, t.radii.length - 1)],
       });
     }
-    vOffset += tube.positions.length;
+    vOffset += t.positions.length;
   }
 
   const header = [
     'ply',
     'format ascii 1.0',
-    'comment Phytograph QSM cylinder mesh',
+    'comment Phytograph QSM tube mesh',
+    'comment one continuous tube per shoot (matches the Phytograph viewport)',
     `element vertex ${allPositions.length}`,
     'property float x',
     'property float y',
     'property float z',
+    'property float nx',
+    'property float ny',
+    'property float nz',
     `element face ${allFaces.length}`,
     'property list uchar int vertex_indices',
     'property uchar branch_order',
@@ -251,7 +228,11 @@ export function qsmToCylinderMeshPly(qsm: QSMEntry): string {
     'end_header',
   ];
   const body: string[] = [];
-  for (const p of allPositions) body.push(`${p[0]} ${p[1]} ${p[2]}`);
+  for (let i = 0; i < allPositions.length; i++) {
+    const p = allPositions[i];
+    const nrm = allNormals[i];
+    body.push(`${p[0]} ${p[1]} ${p[2]} ${nrm[0]} ${nrm[1]} ${nrm[2]}`);
+  }
   for (const f of allFaces) {
     // branch_order is a uchar; clamp to [0,255] defensively.
     const order = Math.max(0, Math.min(255, Math.round(f.order)));
