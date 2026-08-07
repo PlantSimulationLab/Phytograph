@@ -33,6 +33,9 @@ test.afterAll(async () => {
   await session?.close();
 });
 test.beforeEach(async () => {
+  // Clear the pixel-test seam first: a test that failed mid-diff would
+  // otherwise leave the cloud hidden for the next one.
+  await session.page.evaluate(() => { (window as any).__hideCloudForPixelTest = false; });
   await resetToFreshScene(session.app, session.page);
 });
 
@@ -56,6 +59,67 @@ async function waitForTiles(page: LaunchedApp['page']) {
   await expect
     .poll(async () => (await readDrawState(page)).tiles, { timeout: 60_000 })
     .toBeGreaterThan(0);
+}
+
+/**
+ * The page-space bounding box of the CLOUD's own pixels, found by differencing
+ * two screenshots of the same frame — one normal, one with the cloud hidden.
+ *
+ * A single screenshot cannot answer this. The crop overlay tints its interior
+ * and the panels carry their own blues, so an absolute colour threshold counts
+ * chrome as cloud (it reported a "leftover" that was really the overlay fill).
+ * Differencing cancels everything that is not the cloud, whatever its colour.
+ *
+ * `limit` restricts the comparison to a page-space rect. Pass the open part of
+ * the viewport: the floating panels are translucent, so hiding the cloud also
+ * changes the pixels showing through them, which would otherwise be counted as
+ * cloud hundreds of px away from the polygon.
+ *
+ * Returns null when the cloud contributes no pixels at all.
+ */
+async function cloudPixelBounds(
+  page: LaunchedApp['page'],
+  limit: { x0: number; y0: number; x1: number; y1: number },
+): Promise<{ x0: number; y0: number; x1: number; y1: number; n: number } | null> {
+  const withCloud = await page.screenshot();
+  await page.evaluate(() => { (window as any).__hideCloudForPixelTest = true; });
+  // Two frames: one to apply the flag, one to present the result.
+  await page.waitForTimeout(600);
+  const withoutCloud = await page.screenshot();
+  await page.evaluate(() => { (window as any).__hideCloudForPixelTest = false; });
+  // Wait for the tiles to actually come back — returning while they are still
+  // hidden leaks the blank state into whatever the caller measures next.
+  await expect
+    .poll(async () => page.evaluate(() => (window as any).__octreeCropMask?.tiles ?? 0), { timeout: 30_000 })
+    .toBeGreaterThan(0);
+
+  return page.evaluate(async ([a, b, lim]: any) => {
+    const decode = async (bytes: number[]) => {
+      const bmp = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }));
+      const c = document.createElement('canvas');
+      c.width = bmp.width; c.height = bmp.height;
+      c.getContext('2d')!.drawImage(bmp, 0, 0);
+      return c.getContext('2d')!.getImageData(0, 0, c.width, c.height);
+    };
+    const A = await decode(a), B = await decode(b);
+    const dpr = window.devicePixelRatio || 1;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, n = 0;
+    for (let y = Math.round(lim.y0 * dpr); y < Math.min(A.height, Math.round(lim.y1 * dpr)); y++) {
+      for (let x = Math.round(lim.x0 * dpr); x < Math.min(A.width, Math.round(lim.x1 * dpr)); x++) {
+        const i = (y * A.width + x) * 4;
+        // Any channel differing meaningfully means the cloud drew here.
+        if (Math.abs(A.data[i] - B.data[i]) > 12 ||
+            Math.abs(A.data[i + 1] - B.data[i + 1]) > 12 ||
+            Math.abs(A.data[i + 2] - B.data[i + 2]) > 12) {
+          n++;
+          const cx = x / dpr, cy = y / dpr;
+          if (cx < x0) x0 = cx; if (cx > x1) x1 = cx;
+          if (cy < y0) y0 = cy; if (cy > y1) y1 = cy;
+        }
+      }
+    }
+    return n === 0 ? null : { x0, y0, x1, y1, n };
+  }, [Array.from(withCloud), Array.from(withoutCloud), limit] as const);
 }
 
 test('closing a polygon does not thin the rest of the cloud', async () => {
@@ -122,6 +186,80 @@ test('closing a polygon does not thin the rest of the cloud', async () => {
   expect(await page.evaluate(() => (window as any).__pointBudget)).toBe(2_000_000);
   // And the crop really did hide the polygon's interior.
   expect(after.drawn).toBeLessThan(after.full);
+
+  await page.keyboard.press('Escape');
+});
+
+test('the cloud draws only inside the polygon, in both Keep modes', async () => {
+  const { app, page } = session;
+
+  // Asserts on the RENDERED IMAGE, not on point counts. Counts stay
+  // self-consistent even when the wrong pixels are lit (a stale camera or an
+  // unmasked draw would keep the arithmetic right), so this measures where the
+  // cloud actually appears and compares it to the polygon the user drew.
+  await importFiles(app, page, 'import-auto', LAZ);
+  await completeImportWizard(page);
+  await expect(page.locator('[data-testid="scan-row"]').first()).toBeVisible({ timeout: 120_000 });
+  await waitForTiles(page);
+
+  await page.getByTestId('tool-crop').click();
+  await page.getByTestId('crop-shape-polygon').click();
+
+  const ob = await page.getByTestId('crop-polygon-overlay').boundingBox();
+  if (!ob) throw new Error('no overlay box');
+  // Polygon over the middle of the cloud body, so there are points on every
+  // side of it — otherwise "nothing leaked outside" is vacuously true.
+  const cx = ob.x + ob.width * 0.5;
+  const cy = ob.y + ob.height * 0.56;
+  const r = Math.min(ob.width, ob.height) * 0.09;
+  for (const [dx, dy] of [[-r, -r], [r, -r], [r, r], [-r, r]] as const) {
+    await page.mouse.click(cx + dx, cy + dy);
+  }
+  await page.keyboard.press('Enter');
+  await expect
+    .poll(async () => (await readDrawState(page)).maskedTiles, { timeout: 30_000 })
+    .toBeGreaterThan(0);
+
+  // Keep Inside: every cloud pixel must fall within the polygon. Tolerance is
+  // a few px for the point splat and the polygon's own 2px stroke.
+  const pad = 6;
+  // The crop panel starts around 58% of the viewport width; stay clear of it
+  // and of the left toolbar.
+  const panel = await page.getByTestId('crop-panel').boundingBox();
+  if (!panel) throw new Error('no crop panel box');
+  // Everything left of the crop panel, inset past the left toolbar. The
+  // polygon sits inside this window, so a leak on either side is visible.
+  const openArea = { x0: ob.x + 160, y0: ob.y + 10, x1: panel.x - 8, y1: ob.y + ob.height - 10 };
+  expect(cx + r + 8).toBeLessThan(openArea.x1); // polygon must fit in the window
+  const inside = await cloudPixelBounds(page, openArea);
+  expect(inside).not.toBeNull();
+  expect(inside!.n).toBeGreaterThan(500);
+  expect(inside!.x0).toBeGreaterThanOrEqual(cx - r - pad);
+  expect(inside!.x1).toBeLessThanOrEqual(cx + r + pad);
+  expect(inside!.y0).toBeGreaterThanOrEqual(cy - r - pad);
+  expect(inside!.y1).toBeLessThanOrEqual(cy + r + pad);
+
+  // Keep Outside: the complement. The cloud must now extend well beyond the
+  // polygon, and must not fill its interior.
+  const insideDrawn = (await readDrawState(page)).drawn;
+  await page.getByRole('button', { name: 'Keep Outside' }).click();
+  await expect
+    .poll(async () => (await readDrawState(page)).drawn, { timeout: 30_000 })
+    .toBeGreaterThan(insideDrawn);
+  const outside = await cloudPixelBounds(page, openArea);
+  expect(outside).not.toBeNull();
+  expect(outside!.x0).toBeLessThan(cx - r - pad);
+
+  // Toggling back must restore exactly the Keep Inside framing, not leave a
+  // half-applied mask — the reported symptom was points surviving outside.
+  await page.getByRole('button', { name: 'Keep Inside' }).click();
+  await expect
+    .poll(async () => (await readDrawState(page)).drawn, { timeout: 30_000 })
+    .toBe(insideDrawn);
+  const again = await cloudPixelBounds(page, openArea);
+  expect(again).not.toBeNull();
+  expect(again!.x0).toBeGreaterThanOrEqual(cx - r - pad);
+  expect(again!.x1).toBeLessThanOrEqual(cx + r + pad);
 
   await page.keyboard.press('Escape');
 });

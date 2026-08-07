@@ -39,6 +39,10 @@ import * as THREE from 'three';
 // module added and never one that legitimately belongs to a geometry.
 const CROP_MASK_FLAG = '__phytographCropMask';
 
+// Scratch for composing a tile's world transform. Reused across the masking
+// loop — this runs per tile, per re-mask.
+const _tileWorld = new THREE.Matrix4();
+
 /** A world-space inclusion test. Matches PointCloudViewer's buildCropPredicate. */
 export type CropPredicate = (wx: number, wy: number, wz: number) => boolean;
 
@@ -125,15 +129,32 @@ export function applyCropMaskToVisibleNodes(
 ): void {
   const visible = octree?.visibleNodes;
   if (!Array.isArray(visible)) return;
+  // The octree root DOES use position/quaternion (applyOctreePose writes them,
+  // or sets `matrix` with matrixAutoUpdate off), so refreshing it is both safe
+  // and necessary — the pose may have changed since the last render.
+  octree.updateWorldMatrix?.(true, false);
   for (const node of visible) {
     const sn = node?.sceneNode;
     const geom = sn?.geometry;
     if (!geom) continue;
     if (geom[CROP_MASK_FLAG + 'Key'] === maskKey) continue;
-    // The node's world matrix is maintained by three.js during render; a tile
-    // that arrived this frame may not have been updated yet.
-    sn.updateWorldMatrix(true, false);
-    applyCropMaskToGeometry(geom, sn.matrixWorld, displayOffset, predicate, invert);
+    // Compose this tile's world transform WITHOUT touching its matrices.
+    //
+    // potree sets `matrixAutoUpdate = false` on every tile and writes
+    // `sceneNode.matrix` itself (the node-local re-origin baked at tiling
+    // time); `position`/`quaternion` are never populated to match. So
+    // `updateMatrix()` would overwrite potree's matrix with an identity built
+    // from that empty TRS, and `updateWorldMatrix()` refreshes ancestors but
+    // leaves `matrixWorld` stale for a tile potree just repositioned —
+    // measured 93 world-units off in X on an ALS scan, which is ~70px on
+    // screen. Points then tested at the wrong place, passed the polygon test,
+    // and drew as a band of "uncropped" cloud outside the lasso.
+    //
+    // Multiplying the octree's own (correct, live) world matrix by the tile's
+    // own (potree-authored) matrix reproduces exactly the transform three.js
+    // will compose at render time, and mutates nothing.
+    _tileWorld.multiplyMatrices(octree.matrixWorld, sn.matrix);
+    applyCropMaskToGeometry(geom, _tileWorld, displayOffset, predicate, invert);
     geom[CROP_MASK_FLAG + 'Key'] = maskKey;
   }
   publishCropMaskStats(octree);
@@ -166,24 +187,38 @@ export function clearCropMaskFromVisibleNodes(octree: any): void {
  * publishing a narrow fact rather than handing out the scene graph.
  */
 export function publishCropMaskStats(octree: any): void {
-  const visible = octree?.visibleNodes;
-  if (!Array.isArray(visible)) return;
+  if (!octree) return;
+  // E2E seam: hide only the point tiles, leaving the crop overlay and all other
+  // chrome untouched. A test screenshots with and without this and diffs the
+  // two, which is the only reliable way to isolate the CLOUD's pixels — the
+  // overlay tints the crop interior and the panels have blues of their own, so
+  // an absolute colour threshold on a single frame counts chrome as cloud.
+  // Re-applied every frame because potree resets node visibility as it streams.
+  if ((globalThis as any).__hideCloudForPixelTest) {
+    octree.traverse?.((o: any) => { if (o.isPoints) o.visible = false; });
+  }
   let drawn = 0;
   let full = 0;
   let maskedTiles = 0;
   let tiles = 0;
-  for (const node of visible) {
-    const geom = node?.sceneNode?.geometry;
-    const count = geom?.attributes?.position?.count;
-    if (typeof count !== 'number') continue;
+  // Walk what the renderer will actually DRAW — the octree's scene subtree —
+  // rather than `visibleNodes`. Measuring the same list the masking loop walks
+  // would be self-confirming: a tile that renders but is absent from
+  // visibleNodes is exactly the failure this needs to be able to see, and it
+  // would go uncounted. Anything visible and unindexed here is a tile drawing
+  // at full length, i.e. showing points the crop should have hidden.
+  octree.traverse?.((obj: any) => {
+    if (!obj?.isPoints || obj.visible === false) return;
+    const count = obj.geometry?.attributes?.position?.count;
+    if (typeof count !== 'number') return;
     tiles++;
     full += count;
-    if (isMaskedGeometry(geom)) {
+    if (isMaskedGeometry(obj.geometry)) {
       maskedTiles++;
-      drawn += geom.index.count;
+      drawn += obj.geometry.index.count;
     } else {
       drawn += count;
     }
-  }
+  });
   (globalThis as any).__octreeCropMask = { drawn, full, maskedTiles, tiles };
 }

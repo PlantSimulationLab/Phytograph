@@ -22,16 +22,16 @@ function makeGeometry(points: Array<[number, number, number]>) {
   return geom;
 }
 
-function makeNode(geom: any, matrixWorld = new THREE.Matrix4()) {
-  return {
-    sceneNode: {
-      geometry: geom,
-      matrixWorld,
-      updateWorldMatrix() {
-        /* matrix supplied directly in tests */
-      },
-    },
-  };
+// potree tiles carry `matrixAutoUpdate = false` and a directly-authored
+// `matrix`; position/quaternion are never populated. The mask composes
+// octree.matrixWorld * sceneNode.matrix, so the fake mirrors that shape.
+function makeNode(geom: any, matrix = new THREE.Matrix4()) {
+  return { sceneNode: { geometry: geom, matrix, matrixAutoUpdate: false } };
+}
+
+/** Minimal stand-in for the PointCloudOctree root. */
+function makeOctree(nodes: any[], matrixWorld = new THREE.Matrix4()) {
+  return { visibleNodes: nodes, matrixWorld, updateWorldMatrix() {} };
 }
 
 const identity = new THREE.Matrix4();
@@ -151,7 +151,7 @@ describe('applyCropMaskToVisibleNodes', () => {
   it('masks every loaded tile', () => {
     const a = makeGeometry([[0, 0, 0], [1, 0, 0]]);
     const b = makeGeometry([[0.1, 0, 0], [2, 0, 0]]);
-    const octree = { visibleNodes: [makeNode(a), makeNode(b)] };
+    const octree: any = makeOctree([makeNode(a), makeNode(b)]);
     applyCropMaskToVisibleNodes(octree, undefined, keepLowX, false, 'k1');
     expect(Array.from(a.index.array)).toEqual([0]);
     expect(Array.from(b.index.array)).toEqual([0]);
@@ -164,7 +164,7 @@ describe('applyCropMaskToVisibleNodes', () => {
       calls++;
       return x < 0.5;
     };
-    const octree = { visibleNodes: [makeNode(geom)] };
+    const octree: any = makeOctree([makeNode(geom)]);
     applyCropMaskToVisibleNodes(octree, undefined, counting, false, 'k1');
     const afterFirst = calls;
     applyCropMaskToVisibleNodes(octree, undefined, counting, false, 'k1');
@@ -173,7 +173,7 @@ describe('applyCropMaskToVisibleNodes', () => {
 
   it('re-masks when the key changes (the region was redrawn)', () => {
     const geom = makeGeometry([[0, 0, 0], [1, 0, 0]]);
-    const octree = { visibleNodes: [makeNode(geom)] };
+    const octree: any = makeOctree([makeNode(geom)]);
     applyCropMaskToVisibleNodes(octree, undefined, keepLowX, false, 'k1');
     expect(Array.from(geom.index.array)).toEqual([0]);
     // New region: keep the high-x point instead.
@@ -183,7 +183,7 @@ describe('applyCropMaskToVisibleNodes', () => {
 
   it('masks a tile that streams in after the region was set', () => {
     const first = makeGeometry([[0, 0, 0], [1, 0, 0]]);
-    const octree: any = { visibleNodes: [makeNode(first)] };
+    const octree: any = makeOctree([makeNode(first)]);
     applyCropMaskToVisibleNodes(octree, undefined, keepLowX, false, 'k1');
     // A newly arrived tile appears under the SAME key — it must still be
     // masked, or its cropped-away points render.
@@ -194,7 +194,7 @@ describe('applyCropMaskToVisibleNodes', () => {
   });
 
   it('tolerates nodes with no geometry yet', () => {
-    const octree = { visibleNodes: [{ sceneNode: null }, { sceneNode: {} }] };
+    const octree: any = makeOctree([{ sceneNode: null }, { sceneNode: {} }]);
     expect(() =>
       applyCropMaskToVisibleNodes(octree, undefined, keepLowX, false, 'k1'),
     ).not.toThrow();
@@ -204,12 +204,40 @@ describe('applyCropMaskToVisibleNodes', () => {
 describe('clearCropMaskFromVisibleNodes', () => {
   it('restores full density and allows a later re-mask', () => {
     const geom = makeGeometry([[0, 0, 0], [1, 0, 0]]);
-    const octree = { visibleNodes: [makeNode(geom)] };
+    const octree: any = makeOctree([makeNode(geom)]);
     applyCropMaskToVisibleNodes(octree, undefined, keepLowX, false, 'k1');
     clearCropMaskFromVisibleNodes(octree);
     expect(geom.index).toBeNull();
     // The key was forgotten, so the SAME key must re-apply rather than skip.
     applyCropMaskToVisibleNodes(octree, undefined, keepLowX, false, 'k1');
     expect(Array.from(geom.index.array)).toEqual([0]);
+  });
+});
+
+describe('invert re-masking (regression)', () => {
+  it('re-masks an already-masked tile when only invert flips', () => {
+    // Keep Outside after Keep Inside must select the COMPLEMENT. The counts
+    // can look right while the wrong points are selected, so assert the
+    // actual indices.
+    const geom = makeGeometry([[0, 0, 0], [1, 0, 0], [0.2, 0, 0], [2, 0, 0]]);
+    const octree: any = makeOctree([makeNode(geom)]);
+    applyCropMaskToVisibleNodes(octree, undefined, keepLowX, false, 'poly|false');
+    expect(Array.from(geom.index.array)).toEqual([0, 2]);
+    applyCropMaskToVisibleNodes(octree, undefined, keepLowX, true, 'poly|true');
+    expect(Array.from(geom.index.array)).toEqual([1, 3]);
+  });
+
+  it('re-masks a tile whose geometry was left unindexed by the previous mode', () => {
+    // The trap: under Keep Inside every point survived, so the tile was left
+    // UNINDEXED (the all-survive fast path). Flipping to Keep Outside must
+    // then hide all of them — if the key were not consulted, or the fast path
+    // marked it done, the tile would keep drawing at full length.
+    const geom = makeGeometry([[0, 0, 0], [0.1, 0, 0]]);
+    const octree: any = makeOctree([makeNode(geom)]);
+    applyCropMaskToVisibleNodes(octree, undefined, keepLowX, false, 'poly|false');
+    expect(geom.index).toBeNull();
+    applyCropMaskToVisibleNodes(octree, undefined, keepLowX, true, 'poly|true');
+    expect(geom.index).not.toBeNull();
+    expect(geom.index.array.length).toBe(0);
   });
 });
