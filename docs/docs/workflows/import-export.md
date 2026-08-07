@@ -35,6 +35,8 @@ Three entry points. All accept the same set of formats — see
     - **Mesh** — force, e.g., a vertex-only `.obj` to be read as a mesh
     - **Skeleton** — for `.json` skeleton graphs
     - **Scan XML** — for Helios `.xml` scan/grid definitions
+    - **QSM CSV** — for `.csv` cylinder tables (see
+      [Importing a QSM](#importing-a-qsm))
 
     Use a specific format when auto-detection picks the wrong type. As with
     drag-and-drop, point clouds open the [import wizard](#the-import-wizard)
@@ -288,6 +290,32 @@ no header). The [import wizard](#the-import-wizard) is where you correct that
 mapping when the file uses a non-standard column order, RGB stored as 0–1
 floats, or a class column that should be categorical. You can color the cloud
 by any scalar field later — see **[Color modes](../reference/color-modes.md)**.
+
+### Importing a QSM
+
+A QSM cylinder CSV — one Phytograph exported, or one from another
+SimpleForest/TreeQSM-family tool — can be imported back as a QSM. It appears in
+the QSM results panel exactly as a freshly built one does, with its shoots and
+ranks intact, so you can color it by **Shoot rank** or **Shoot id**, add leaves,
+or re-export it.
+
+**Export a QSM to CSV and re-import it and you get the same model back** — same
+cylinders, same shoot topology, and the same trunk diameter, height, woody
+volume, and max rank in the results panel. The whole-tree metrics aren't columns
+in the file; they're recomputed from the cylinders when you import.
+
+`.csv` is shared with point clouds, so Phytograph looks at the header row to
+tell them apart: a cylinder table has `branchID` and `branchOrder` columns,
+which no point-cloud CSV does. Drag-and-drop and **Open With** route on that
+automatically. Use **File → Import → QSM CSV…** to skip the check and force a
+file to be read as a QSM — useful for an unusual dialect whose header isn't
+recognized.
+
+An imported QSM has no source point cloud, so it's listed under the file's name
+rather than a scan's, and its coordinates are used exactly as they appear in the
+file. See
+[File formats: QSM cylinder CSV](../reference/file-formats.md#qsm-cylinder-csv)
+for the columns and the requirements on a hand-edited file.
 
 ### Importing scans with sky/miss points
 

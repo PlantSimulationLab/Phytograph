@@ -62,6 +62,7 @@ The tables are grouped by feature area. To find a handler, grep `^@app\.` in
 | Method | Path | Source | Purpose |
 |---|---|---|---|
 | POST | `/api/qsm/build` | `main.py` | Reconstruct a dormant tree as connected cylinders with radii + topology, segment continuous shoots, and classify them by **shoot rank** (trunk=0, scaffolds=1, …) |
+| POST | `/api/qsm/import` | `main.py` | Read a QSM back from a per-cylinder CSV (`qsm/csv_io.py`), reconstructing the shoot table and recomputing metrics. Returns the same `QSMBuildResponse` shape as `/api/qsm/build`, so an imported QSM needs no separate renderer path |
 | POST | `/api/qsm/phyllotaxis` | `main.py` | Auto-detect the phyllotactic angle from the QSM's branching geometry (child-shoot azimuths around each parent). Returns a canonical angle + pattern + leaves-per-node + confidence; pre-fills the Add Leaves modal |
 | POST | `/api/qsm/leaves` | `main.py` | Place leaves on the QSM's terminal shoots and return a textured mesh |
 | GET | `/api/qsm/leaf-textures` | `main.py` | List the curated built-in leaf textures available for QSM leaf placement |

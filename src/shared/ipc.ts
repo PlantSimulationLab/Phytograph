@@ -151,6 +151,7 @@ export type MenuCommandPayload =
   | { kind: 'import-mesh' }
   | { kind: 'import-skeleton' }
   | { kind: 'import-scan-xml' }
+  | { kind: 'import-qsm' }
   | { kind: 'save' }
   | { kind: 'export' }
   | { kind: 'undo' }

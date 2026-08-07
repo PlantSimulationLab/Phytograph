@@ -9,7 +9,8 @@ import { scanDisplayName, type Scan } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { shiftPoseStream } from "./lib/poseStream";
 import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
-import { importTexturedMesh, type MeshImportResponse, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError } from "./utils/backendApi";
+import { importTexturedMesh, importQSMCsv, type MeshImportResponse, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError } from "./utils/backendApi";
+import { isQsmCsvFile } from "./lib/qsmImport";
 
 // A user cancel is not a failure: it must never land in the per-file `errors[]`
 // list or raise an error toast. Covers all three shapes the abort can take — the
@@ -40,7 +41,7 @@ import type { FeedbackMode } from "./lib/feedback";
 const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57']);
 import logoImage from "./assets/logo.png";
 
-type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton' | 'scanxml';
+type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton' | 'scanxml' | 'qsm';
 
 // Optional overrides for an import. Menu-driven imports (which go through the
 // native Electron dialog, not the renderer dropzone) pass the import type and
@@ -448,6 +449,76 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     await importRefsRef.current.bulkImportScans(parsed.scans, parsed.grids, path);
   }, []);
 
+  // The worldShift an imported QSM should be placed against. Point clouds loaded
+  // from projected/UTM sources are stored shifted toward the origin (for float
+  // precision) and rendered in that shifted frame, while QSM cylinders are always
+  // world-frame — so a QSM dropped into such a scene has to subtract the same
+  // shift or it lands hundreds of kilometres away. Every shifted scan in a scene
+  // shares one shift (it's per-scene georeferencing, not per-file), so the first
+  // non-zero one is the scene's frame. Returns null for an unshifted scene, which
+  // renders unchanged.
+  const qsmWorldShiftForScene = useCallback((): [number, number, number] | null => {
+    for (const scan of scans) {
+      const ws = scan.data?.octree?.worldShift;
+      if (ws && (ws[0] !== 0 || ws[1] !== 0 || ws[2] !== 0)) {
+        return [ws[0], ws[1], ws[2]];
+      }
+    }
+    return null;
+  }, [scans]);
+
+  // Import a QSM from a per-cylinder CSV (the inverse of the QSM CSV export).
+  // The backend parses the table and recomputes the metrics, returning the same
+  // shape /api/qsm/build does, so the entry we build here is indistinguishable
+  // from a freshly built one — including the shoot id / rank the viewer colors by.
+  // Needs an on-disk `path` because the parsing happens backend-side.
+  // Returns true when a QSM was added, so the multi-file loop can count it.
+  const importQsmCsv = useCallback(async (file: File, path: string | undefined): Promise<boolean> => {
+    if (!importRefsRef.current) {
+      showToast({ title: 'Viewer not ready for QSM import', type: 'error' });
+      return false;
+    }
+    if (!path) {
+      showToast({
+        title: `Can't import ${file.name}: no file path available. A QSM CSV must be ` +
+          `opened from disk.`,
+        type: 'error',
+        duration: 0,
+      });
+      return false;
+    }
+    try {
+      const resp = await importQSMCsv(path);
+      if (!resp.success) throw new Error(resp.error || 'QSM import failed');
+      importRefsRef.current.importQSM({
+        // No originating scan: the CSV carries absolute world-frame coordinates
+        // and no provenance, so anchor to the same 'imported' sentinel meshes use
+        // and show the file name instead of a source cloud's.
+        sourceCloudId: 'imported',
+        sourceLabel: baseNameForLabel(file.name),
+        // Cylinders are world-frame, but a scene loaded from projected/UTM data
+        // renders in a SHIFTED frame — so without this an imported QSM lands
+        // hundreds of km from the cloud it describes. There's no source scan to
+        // read the shift from, so take it from the scene the QSM is landing in.
+        worldShift: qsmWorldShiftForScene(),
+        cylinders: resp.cylinders,
+        shoots: resp.shoots,
+        metrics: resp.metrics ?? null,
+        visible: true,
+      });
+      setSettingsOpen(false);
+      showToast({
+        title: `Loaded QSM with ${resp.n_cylinders.toLocaleString()} cylinders from ${file.name}`,
+        type: 'success',
+      });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast({ title: `QSM import failed: ${msg}`, type: 'error', duration: 0 });
+      return false;
+    }
+  }, [qsmWorldShiftForScene]);
+
   const handleFileUpload = useCallback(async (file: File, opts?: ImportOptions) => {
     setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
 
@@ -471,6 +542,24 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           catch { xmlPath = undefined; }
         }
         await importScanXml(file, xmlPath);
+        return; // handled — the finally{} below still resets pendingImportTypeRef
+      }
+
+      // QSM CSV short-circuit. `.csv` is an ambiguous container already claimed by
+      // the point-cloud path, so an auto-detected import sniffs the header (the
+      // same trick .ply uses via plyHasFaces) — a cylinder table has branchID +
+      // branchOrder, which no point-cloud CSV carries. A forced 'qsm' import skips
+      // the sniff so a non-standard dialect can still be opened deliberately.
+      const csvExt = file.name.toLowerCase().split('.').pop() ?? '';
+      if (importType === 'qsm'
+        || (importType === 'auto' && csvExt === 'csv' && (await isQsmCsvFile(file)))) {
+        setImportProgress(null);
+        let qsmPath: string | undefined = explicitPath;
+        if (!qsmPath) {
+          try { qsmPath = window.electronAPI?.getPathForFile?.(file) || undefined; }
+          catch { qsmPath = undefined; }
+        }
+        await importQsmCsv(file, qsmPath);
         return; // handled — the finally{} below still resets pendingImportTypeRef
       }
 
@@ -701,7 +790,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
     }
-  }, [getNextColor, openImportWizard, buildScanFromWizardResult, importScanXml, materializeDroppedFile]);
+  }, [getNextColor, openImportWizard, buildScanFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
 
   // Handle multiple files
   const handleMultipleFiles = useCallback(async (files: File[], opts?: ImportOptions) => {
@@ -713,6 +802,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     const materialsDroppedFiles: string[] = [];
     let meshCount = 0;
     let skeletonCount = 0;
+    let qsmCount = 0;
     let colorIndex = 0;
 
     const importType = opts?.importType ?? pendingImportTypeRef.current;
@@ -753,6 +843,21 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             catch { xmlPath = undefined; }
           }
           await importScanXml(file, xmlPath);
+          continue;
+        }
+
+        // QSM CSV (forced 'qsm', or an auto-detected `.csv` whose header is a
+        // cylinder table). Imported inline like meshes/skeletons and counted for
+        // the summary toast, so it never reaches the point-cloud wizard below.
+        const csvExt = file.name.toLowerCase().split('.').pop() ?? '';
+        if (importType === 'qsm'
+          || (importType === 'auto' && csvExt === 'csv' && (await isQsmCsvFile(file)))) {
+          let qsmPath: string | undefined = explicitPaths?.[fileIdx];
+          if (!qsmPath) {
+            try { qsmPath = window.electronAPI?.getPathForFile?.(file) || undefined; }
+            catch { qsmPath = undefined; }
+          }
+          if (await importQsmCsv(file, qsmPath)) qsmCount++;
           continue;
         }
 
@@ -947,7 +1052,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       setSelectedScanIds(new Set(newScans.map(e => e.id)));
     }
 
-    const loadedCount = newScans.length + meshCount + skeletonCount;
+    // qsmCount counts toward "something imported" (so a QSM-only drop isn't
+    // reported as a failure) but is left out of the summary parts below, since
+    // importQsmCsv already toasts each QSM with its cylinder count.
+    const loadedCount = newScans.length + meshCount + skeletonCount + qsmCount;
     if (cancelledAfter >= 0) {
       // Scans imported before the cancel are KEPT — they're complete and correct,
       // and their backend sessions/octrees are already built. Say so explicitly:
@@ -966,7 +1074,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       if (newScans.length > 0) parts.push(`${newScans.length} scan(s)`);
       if (meshCount > 0) parts.push(`${meshCount} mesh(es)`);
       if (skeletonCount > 0) parts.push(`${skeletonCount} skeleton(s)`);
-      showToast({ title: `Loaded ${parts.join(', ')}`, type: 'success' });
+      // Empty only when the drop was QSMs alone, which already toasted per file.
+      if (parts.length > 0) {
+        showToast({ title: `Loaded ${parts.join(', ')}`, type: 'success' });
+      }
     }
 
     if (materialsDroppedFiles.length > 0) {
@@ -999,7 +1110,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     importRunIdRef.current = null;
     // Reset import type to auto after import
     pendingImportTypeRef.current = 'auto';
-  }, [scans, openImportWizard, buildScanFromWizardResult, importScanXml, materializeDroppedFile]);
+  }, [scans, openImportWizard, buildScanFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setIsDragOver(false);
@@ -1468,6 +1579,8 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           return [{ name: 'Skeletons', extensions: skel }];
         case 'scanxml':
           return [{ name: 'Helios Scan XML', extensions: ['xml'] }];
+        case 'qsm':
+          return [{ name: 'QSM CSV', extensions: ['csv'] }];
         default:
           return [{ name: 'Supported Files', extensions: [...new Set([...pc, ...mesh, ...skel, 'xml'])] }];
       }
@@ -1556,6 +1669,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           break;
         case 'import-scan-xml':
           void handleMenuImport('scanxml');
+          break;
+        case 'import-qsm':
+          void handleMenuImport('qsm');
           break;
         case 'save':
         case 'export':

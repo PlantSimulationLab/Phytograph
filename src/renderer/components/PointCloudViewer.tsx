@@ -316,6 +316,9 @@ const isDescendantOfGridGroup = (
 export interface ImportRefs {
   importMesh: (mesh: Omit<MeshEntry, 'id'>) => void;
   importSkeleton: (skeleton: Omit<SkeletonEntry, 'id'>) => void;
+  // Import a QSM parsed from a cylinder CSV by the backend. The entry is already
+  // in /api/qsm/build's response shape, so it renders exactly like a built one.
+  importQSM: (qsm: Omit<QSMEntry, 'id'>) => void;
   // Import scans + grids parsed from a Helios scan XML (File → Import / drop
   // zone reach the same flow the Add-Scan popup uses). xmlPath is the on-disk
   // path of the XML so relative <filename> references resolve; null when none.
@@ -1120,6 +1123,14 @@ export default function PointCloudViewer({
     addSkeleton(newSkeleton, 'Import skeleton');
   }, [addSkeleton]);
 
+  const importQSM = useCallback((qsm: Omit<QSMEntry, 'id'>) => {
+    const newQSM: QSMEntry = {
+      ...qsm,
+      id: crypto.randomUUID(),
+    };
+    addQSM(newQSM, 'Import QSM');
+  }, [addQSM]);
+
   // Bulk-import scans + grids parsed from a Helios scan XML. This is the shared
   // workhorse behind every XML entry point: the Add-Scan popup's "Import from
   // XML file" button, the File → Import menu, and the viewport drop zone (the
@@ -1387,9 +1398,9 @@ export default function PointCloudViewer({
   // Expose import functions to parent
   useEffect(() => {
     if (importRefsCallback) {
-      importRefsCallback({ importMesh, importSkeleton, bulkImportScans });
+      importRefsCallback({ importMesh, importSkeleton, importQSM, bulkImportScans });
     }
-  }, [importRefsCallback, importMesh, importSkeleton, bulkImportScans]);
+  }, [importRefsCallback, importMesh, importSkeleton, importQSM, bulkImportScans]);
 
   // Report whether the viewer holds any non-scan content (meshes, skeletons, or
   // QSMs) so App can dismiss the empty-state hint when e.g. a plant is generated
@@ -4324,6 +4335,31 @@ export default function PointCloudViewer({
     };
   }, []);
 
+  // The worldShift a QSM's cylinders are expressed against. Cylinders are always
+  // WORLD-frame, but clouds render in their STORED (shifted) frame, so anything
+  // that positions or measures a QSM has to subtract this. A built QSM reads it
+  // from its source scan; an imported one carries its own (there is no source
+  // scan to ask). Zero for an unshifted scene.
+  const qsmWorldShift = useCallback((qsm: QSMEntry): [number, number, number] => {
+    const ws = qsm.worldShift
+      ?? clouds.find(c => c.id === qsm.sourceCloudId)?.data?.octree?.worldShift;
+    return ws ? [ws[0], ws[1], ws[2]] : [0, 0, 0];
+  }, [clouds]);
+
+  // A QSM's AABB in the frame it RENDERS in (world minus its worldShift). The
+  // framing/fit-to-selection code compares this against cloud bounds, which are
+  // stored-frame — mixing the two aims the camera hundreds of km off on a UTM
+  // scene, so never feed raw qsmAabb() into a bounds calculation.
+  const qsmDisplayAabb = useCallback((qsm: QSMEntry) => {
+    const box = qsmAabb(qsm);
+    if (!box) return null;
+    const ws = qsmWorldShift(qsm);
+    return {
+      min: [box.min[0] - ws[0], box.min[1] - ws[1], box.min[2] - ws[2]] as [number, number, number],
+      max: [box.max[0] - ws[0], box.max[1] - ws[1], box.max[2] - ws[2]] as [number, number, number],
+    };
+  }, [qsmWorldShift]);
+
   // Calculate combined bounds (including clouds, meshes, and skeletons)
   const combinedBounds = useMemo(() => {
     // A scan with params (scanner marker / moving-platform trajectory) carries no
@@ -4410,10 +4446,11 @@ export default function PointCloudViewer({
       }
     }
 
-    // Include QSM bounds (cylinder endpoints, already world-space)
+    // Include QSM bounds, in the frame the QSM renders in (world − worldShift),
+    // so they're comparable with the stored-frame cloud bounds above.
     for (const qsm of qsms) {
       if (!qsm.visible) continue;
-      const box = qsmAabb(qsm);
+      const box = qsmDisplayAabb(qsm);
       if (!box) continue;
       min.x = Math.min(min.x, box.min[0]); max.x = Math.max(max.x, box.max[0]);
       min.y = Math.min(min.y, box.min[1]); max.y = Math.max(max.y, box.max[1]);
@@ -4522,7 +4559,7 @@ export default function PointCloudViewer({
       : [center.x, center.y, center.z];
 
     return { min, max, center, size, groundZ, robustExtent, contentCenter };
-  }, [clouds, meshes, skeletons, qsms, scansWithParams, meshPositions, meshScales, meshRotations, getEditState]);
+  }, [clouds, meshes, skeletons, qsms, qsmDisplayAabb, scansWithParams, meshPositions, meshScales, meshRotations, getEditState]);
 
   // Open the add-scan popup with sensible defaults: next label and current
   // scene center as origin. Shared by the toolbar Radio button (Create
@@ -5641,11 +5678,12 @@ export default function PointCloudViewer({
       }
     }
 
-    // QSMs — cylinder endpoints are already world-space (no per-QSM translation).
+    // QSMs — cylinder endpoints are world-space, so shift them into the rendered
+    // frame (no per-QSM translation otherwise).
     for (const id of selectedQSMIds) {
       const qsm = qsms.find(q => q.id === id);
       if (!qsm) continue;
-      const box = qsmAabb(qsm);
+      const box = qsmDisplayAabb(qsm);
       if (!box) continue;
       grow(box.min[0], box.min[1], box.min[2]);
       grow(box.max[0], box.max[1], box.max[2]);
@@ -5684,7 +5722,7 @@ export default function PointCloudViewer({
       center: new THREE.Vector3(0, 0, 0),
       size: new THREE.Vector3(2, 2, 2)
     };
-  }, [selectedMeshIds, selectedSkeletonIds, selectedQSMIds, selectedIds, meshes, skeletons, qsms, clouds, meshPositions, skeletonPositions, getEditState, scansWithParams, selectedScanIds, scanWorldBounds]);
+  }, [selectedMeshIds, selectedSkeletonIds, selectedQSMIds, selectedIds, meshes, skeletons, qsms, qsmDisplayAabb, clouds, meshPositions, skeletonPositions, getEditState, scansWithParams, selectedScanIds, scanWorldBounds]);
 
   // Frame the current selection (or everything, if nothing is selected) without
   // changing the viewing angle. Wired into zoomToSelectionRef (declared earlier)
@@ -14477,7 +14515,9 @@ export default function PointCloudViewer({
           // leaves (the compute reads world-frame points), but the cloud renders in
           // its STORED frame; subtract the source cloud's worldShift on the outer
           // group so the QSM lands on the cloud. No-op without a shift.
-          const qsmWs = clouds.find(c => c.id === qsm.sourceCloudId)?.data?.octree?.worldShift ?? [0, 0, 0];
+          // An imported QSM has no source cloud to read the shift from, so it
+          // carries its own (resolved at import from the scene it lands in).
+          const qsmWs = qsmWorldShift(qsm);
           return (
             <group key={qsm.id} position={[-qsmWs[0], -qsmWs[1], -qsmWs[2]]}>
               {/* QSM3D subtracts displayOffset in its own float64 vertex build

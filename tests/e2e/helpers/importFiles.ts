@@ -2,7 +2,7 @@ import type { ElectronApplication, Page } from '@playwright/test';
 
 // File→Import menu command kinds (mirror of MenuCommandPayload's import
 // variants in src/shared/ipc.ts).
-export type ImportKind = 'import-auto' | 'import-point-cloud' | 'import-mesh' | 'import-skeleton';
+export type ImportKind = 'import-auto' | 'import-point-cloud' | 'import-mesh' | 'import-skeleton' | 'import-qsm';
 
 // Imports files through the File→Import menu pathway — the real one a user hits.
 //

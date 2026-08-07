@@ -3903,6 +3903,39 @@ export async function buildQSM(
   );
 }
 
+/**
+ * Import a QSM from a per-cylinder CSV on disk — the inverse of the CSV export in
+ * lib/qsmExport.ts. The backend parses the table and recomputes the metrics (which
+ * aren't in the file but are a pure function of the model), returning the same
+ * QSMBuildResponse shape /api/qsm/build does, so a re-imported QSM needs no
+ * separate data path in the renderer.
+ *
+ * Not streamed: parsing a cylinder table is milliseconds, unlike a QSM build.
+ */
+export async function importQSMCsv(filePath: string): Promise<QSMBuildResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/qsm/import');
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('QSM CSV import failed:', error);
+    throw error;
+  }
+}
+
 // ==================== CROWN FITTING ====================
 
 // Per-crown metrics computed by /api/fit/crown. Coordinates are WORLD-frame

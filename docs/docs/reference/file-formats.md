@@ -246,6 +246,57 @@ Use `.json` for downstream analysis in Python/R, and to round-trip a skeleton
 back into Phytograph. Use `.obj` or `.ply` for visualization in Blender or
 MeshLab.
 
+## QSMs
+
+| Format | Import | Export | Notes |
+|---|---|---|---|
+| `.csv` | ✅ | ✅ | One row per cylinder. The only importable QSM format, and the one that round-trips. |
+| `.obj` | ❌ | ✅ | Triangulated cylinder mesh, for Blender / CloudCompare / MeshLab. |
+| `.ply` | ❌ | ✅ | Same geometry as OBJ, with per-face `branch_order` and `radius`. |
+
+### QSM cylinder CSV
+
+The CSV uses the SimpleForest column layout, which
+[rTwig](https://cran.r-project.org/package=rTwig) (`import_qsm`) and aRchi
+(`read_QSM(model = "simpleforest")`) both read. Columns:
+
+| Column | Meaning |
+|---|---|
+| `ID` | Cylinder id. |
+| `parentID` | Parent cylinder's `ID`; `-1` at the trunk base. |
+| `branchID` | The continuous shoot (botanical axis) this cylinder belongs to. |
+| `branchOrder` | Shoot rank — trunk `0`, scaffolds `1`, and so on. |
+| `segmentID` | Same as `branchID`; written for reader compatibility. |
+| `parentSegmentID` | The parent shoot's id; `-1` for the trunk. |
+| `startX/Y/Z`, `endX/Y/Z` | Cylinder axis endpoints, meters. |
+| `axisX/Y/Z` | Unit axis direction. Derived — recomputed on import. |
+| `radius` | Cylinder radius, meters. |
+| `length` | Axial length, meters. Derived — recomputed on import. |
+| `surfaceCoverage` | Fit quality in `[0, 1]`; low means the points covered one side only. Blank when unknown. |
+| `meanAbsDeviation` | Mean point-to-surface distance, meters. Blank when unknown. |
+
+Two things worth knowing:
+
+- **Coordinates are absolute world-frame**, in the same coordinate system as
+  the source scan (which for a projected cloud means real UTM values). The file
+  records no CRS, so keep track of it separately.
+- **Row order matters.** Cylinders are written base-to-tip within each shoot,
+  and that ordering is what tells Phytograph how to draw each branch as a
+  continuous tube. If you edit the file, don't re-sort the rows.
+
+Everything Phytograph needs is in the file, so **a QSM CSV round-trips**: export
+one, re-import it, and you get back the same model — same cylinders, same shoot
+topology, and the same numbers in the results panel. Whole-tree metrics (trunk
+diameter, height, woody volume) aren't stored as columns because they are
+recomputed from the cylinders on import.
+
+The importer is tolerant of the wider SimpleForest/TreeQSM family: column names
+match regardless of case or separators (`parentID`, `parent_id`, and `Parent Id`
+are equivalent), comma/semicolon/tab delimiters all work, unknown columns are
+ignored, and files with no `segmentID`/`branchID` have their shoots derived from
+the parent chain. Only `ID`, `parentID`, `branchOrder`, the six start/end
+coordinates, and `radius` are strictly required.
+
 ## Scan position files
 
 For the [Helios Triangulation](../workflows/triangulate.md#helios-method)

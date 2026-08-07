@@ -578,6 +578,12 @@ export interface QSMEntry {
   // Display name override. Set for aggregate QSMs ("scanA + N more"); when
   // absent the results panel falls back to the source scan's fileName.
   sourceLabel?: string;
+  // The worldShift the cylinder coordinates are expressed against, for a QSM with
+  // no source scan to read it from (i.e. one imported from a CSV — a built QSM
+  // resolves it through sourceCloudId instead). Cylinders are always WORLD-frame;
+  // the renderer subtracts this to place them in the scene's stored frame. Without
+  // it an imported QSM built from a UTM cloud renders ~thousands of km away.
+  worldShift?: [number, number, number] | null;
   // Raw backend response payload (cylinders, shoots, metrics, counts).
   cylinders: import('../utils/backendApi').QSMCylinder[];
   shoots: import('../utils/backendApi').QSMShoot[];

@@ -168,8 +168,10 @@ registration.
 ## Export
 
 A QSM lives in the current viewer session and is **not** persisted when
-you close the app — but you can **export it to a file** to keep the model
-or take it into other tooling.
+you close the app — so **export it to a file** to keep the model, take it
+into other tooling, or load it again later. Exporting to **CSV** is the way
+to keep a QSM: that file imports straight back into Phytograph (see
+[Re-importing a QSM](#re-importing-a-qsm)).
 
 1. Click the **Export** (download) icon at the top of the **QSM** results
    panel.
@@ -184,7 +186,7 @@ or take it into other tooling.
 
 | Format | What it is | Use it for |
 |---|---|---|
-| **CSV** | One row per cylinder — `ID, parentID, branchID, branchOrder, segmentID, parentSegmentID`, start/end coordinates, axis, radius, length, plus surface-coverage and fit residual. Uses the **SimpleForest** column layout. | Analysis and round-tripping into the standard QSM ecosystem: it follows the SimpleForest schema that [rTwig](https://aidanmorales.github.io/rTwig/) and [aRchi](https://github.com/umr-amap/aRchi) read (the TreeQSM-compatible path). The column set is validated against rTwig's importer. |
+| **CSV** | One row per cylinder — `ID, parentID, branchID, branchOrder, segmentID, parentSegmentID`, start/end coordinates, axis, radius, length, plus surface-coverage and fit residual. Uses the **SimpleForest** column layout. | Keeping the model — **this is the only format Phytograph can read back**. Also analysis and round-tripping into the standard QSM ecosystem: it follows the SimpleForest schema that [rTwig](https://aidanmorales.github.io/rTwig/) and [aRchi](https://github.com/umr-amap/aRchi) read (the TreeQSM-compatible path). The column set is validated against rTwig's importer. |
 | **OBJ** | Triangulated tube mesh with smooth vertex normals — the same geometry the viewport draws. Each shoot is one named object (`shoot_<id>_rank_<n>`), so the tree arrives separable. | Viewing the model anywhere — Blender, CloudCompare, MeshLab, Rhino. |
 | **PLY** | The same tube mesh plus vertex normals, with each face tagged by **branch order** and **radius**. | Viewing with attribute-based coloring (color faces by branching order in CloudCompare/Blender). |
 
@@ -204,6 +206,25 @@ or take it into other tooling.
     cylinder. If you need the raw fitted cylinder parameters (each with its own
     single radius, start, and end), export **CSV** — that's the format that
     preserves them.
+
+### Re-importing a QSM
+
+An exported **CSV** loads straight back in — drag it onto the window, or use
+**File → Import → QSM CSV…**. You get the same model you exported: the same
+cylinders and shoots, colorable by **Shoot rank** or **Shoot id**, and the same
+trunk diameter, height, woody volume, and max rank in the results panel. (Those
+metrics aren't stored in the file; they're recomputed from the cylinders.) You
+can add leaves to a re-imported QSM just as you would a freshly built one.
+
+CSVs written by other SimpleForest/TreeQSM-family tools import too. See
+[Importing a QSM](import-export.md#importing-a-qsm) for how Phytograph tells a
+QSM CSV apart from a point-cloud CSV, and
+[File formats](../reference/file-formats.md#qsm-cylinder-csv) for the columns.
+
+The **OBJ** and **PLY** exports are visualization outputs and can't be
+re-imported as QSMs — they're triangle meshes, with the cylinder topology
+already baked away. Bringing one back into Phytograph gives you a mesh, not a
+QSM, so keep the CSV if you want the model itself.
 
 ## How it works
 

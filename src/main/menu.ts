@@ -89,6 +89,7 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
             { label: 'Mesh…', click: () => send({ kind: 'import-mesh' }) },
             { label: 'Skeleton…', click: () => send({ kind: 'import-skeleton' }) },
             { label: 'Scan XML…', click: () => send({ kind: 'import-scan-xml' }) },
+            { label: 'QSM CSV…', click: () => send({ kind: 'import-qsm' }) },
           ],
         },
         { type: 'separator' },

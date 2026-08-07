@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.62.0"
+BACKEND_VERSION = "0.63.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -12905,6 +12905,57 @@ class QSMBuildResponse(BaseModel):
     error: Optional[str] = None
 
 
+def _qsm_to_response(qsm, m, points_used: int = 0) -> QSMBuildResponse:
+    """Map the qsm.model dataclasses + metrics onto the wire response.
+
+    Shared by /api/qsm/build and /api/qsm/import so a built QSM and a re-imported
+    one are serialized identically -- the round trip is only lossless if both ends
+    agree on this mapping, so there is exactly one copy of it.
+    """
+    return QSMBuildResponse(
+        success=True,
+        points_used=points_used,
+        n_cylinders=len(qsm.cylinders),
+        n_shoots=len(qsm.shoots),
+        cylinders=[
+            QSMCylinder(
+                cyl_id=c.cyl_id, start=c.start.tolist(), end=c.end.tolist(),
+                radius=c.radius, parent_id=c.parent_id, shoot_id=c.shoot_id,
+                rank=c.rank, surf_cov=c.surf_cov, mad=c.mad,
+            )
+            for c in qsm.cylinders
+        ],
+        shoots=[
+            QSMShoot(
+                shoot_id=s.shoot_id, rank=s.rank, cylinder_ids=s.cylinder_ids,
+                parent_shoot_id=s.parent_shoot_id, parent_cyl_id=s.parent_cyl_id,
+                child_shoot_ids=s.child_shoot_ids,
+            )
+            for s in qsm.shoots
+        ],
+        metrics=QSMMetricsResponse(
+            tcsa_m2=m.tcsa_m2, trunk_diameter_mm=m.trunk_diameter_mm,
+            tree_height_m=m.tree_height_m, n_scaffolds=m.n_scaffolds,
+            n_shoots_total=m.n_shoots_total, max_rank=m.max_rank,
+            total_woody_volume_m3=m.total_woody_volume_m3,
+            stem_volume_m3=m.stem_volume_m3, branch_volume_m3=m.branch_volume_m3,
+            total_length_m=m.total_length_m, canopy_width_m=m.canopy_width_m,
+            canopy_height_m=m.canopy_height_m,
+            per_rank=[
+                QSMRankMetrics(
+                    rank=pr.rank, n_shoots=pr.n_shoots,
+                    total_length_m=pr.total_length_m,
+                    mean_shoot_length_m=pr.mean_shoot_length_m,
+                    woody_volume_m3=pr.woody_volume_m3,
+                    mean_diameter_mm=pr.mean_diameter_mm,
+                    mean_branch_angle_deg=pr.mean_branch_angle_deg,
+                )
+                for pr in m.per_rank
+            ],
+        ),
+    )
+
+
 def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
     """Build a true QSM from a dormant-tree point cloud, returning the dict form
     of QSMBuildResponse. `progress(fraction, message)` (optional) is called as the
@@ -12982,48 +13033,7 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
         m = compute_metrics(qsm)
 
         _report(1.0, "Done")
-        return QSMBuildResponse(
-            success=True,
-            points_used=len(points),
-            n_cylinders=len(qsm.cylinders),
-            n_shoots=len(qsm.shoots),
-            cylinders=[
-                QSMCylinder(
-                    cyl_id=c.cyl_id, start=c.start.tolist(), end=c.end.tolist(),
-                    radius=c.radius, parent_id=c.parent_id, shoot_id=c.shoot_id,
-                    rank=c.rank, surf_cov=c.surf_cov, mad=c.mad,
-                )
-                for c in qsm.cylinders
-            ],
-            shoots=[
-                QSMShoot(
-                    shoot_id=s.shoot_id, rank=s.rank, cylinder_ids=s.cylinder_ids,
-                    parent_shoot_id=s.parent_shoot_id, parent_cyl_id=s.parent_cyl_id,
-                    child_shoot_ids=s.child_shoot_ids,
-                )
-                for s in qsm.shoots
-            ],
-            metrics=QSMMetricsResponse(
-                tcsa_m2=m.tcsa_m2, trunk_diameter_mm=m.trunk_diameter_mm,
-                tree_height_m=m.tree_height_m, n_scaffolds=m.n_scaffolds,
-                n_shoots_total=m.n_shoots_total, max_rank=m.max_rank,
-                total_woody_volume_m3=m.total_woody_volume_m3,
-                stem_volume_m3=m.stem_volume_m3, branch_volume_m3=m.branch_volume_m3,
-                total_length_m=m.total_length_m, canopy_width_m=m.canopy_width_m,
-                canopy_height_m=m.canopy_height_m,
-                per_rank=[
-                    QSMRankMetrics(
-                        rank=pr.rank, n_shoots=pr.n_shoots,
-                        total_length_m=pr.total_length_m,
-                        mean_shoot_length_m=pr.mean_shoot_length_m,
-                        woody_volume_m3=pr.woody_volume_m3,
-                        mean_diameter_mm=pr.mean_diameter_mm,
-                        mean_branch_angle_deg=pr.mean_branch_angle_deg,
-                    )
-                    for pr in m.per_rank
-                ],
-            ),
-        ).dict()
+        return _qsm_to_response(qsm, m, points_used=len(points)).dict()
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -13039,6 +13049,41 @@ def build_qsm(request: QSMBuildRequest):
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(_do_qsm_build(request, progress)).encode("utf-8")
     )
+
+
+class QSMImportRequest(BaseModel):
+    """Request to import a QSM from a per-cylinder CSV on disk."""
+    path: str  # Absolute path to the .csv file
+
+
+@app.post("/api/qsm/import", response_model=QSMBuildResponse)
+def import_qsm_csv(request: QSMImportRequest):
+    """Read a QSM back from a cylinder CSV (the inverse of the renderer's export).
+
+    Returns the same QSMBuildResponse shape /api/qsm/build does, so the renderer
+    needs no separate data path for an imported QSM. Metrics aren't in the file --
+    compute_metrics is a pure function of the model, so they're recomputed here and
+    come back identical to the pre-export values.
+    """
+    from qsm.csv_io import QSMCsvError, read_qsm_csv
+    from qsm.metrics import compute_metrics
+
+    csv_path = Path(request.path)
+    if not csv_path.is_file():
+        raise HTTPException(status_code=404, detail=f"QSM file not found: {request.path}")
+    if csv_path.suffix.lower() != '.csv':
+        raise HTTPException(status_code=400, detail="Only .csv files are supported for QSM import")
+
+    try:
+        qsm = read_qsm_csv(csv_path)
+    except QSMCsvError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"QSM import failed: {e}")
+
+    return _qsm_to_response(qsm, compute_metrics(qsm))
 
 
 # ==================== QSM LEAF RECONSTRUCTION (Phase 1) ====================
