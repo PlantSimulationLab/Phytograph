@@ -69,6 +69,30 @@ const SLOPE_THRESHOLD = 0.5;
 // a sensible geometric break between "essentially flat" and "needs to conform".
 const SLOPE_RELIEF_RATIO = 0.2;
 
+// ...but the relief ratio is computed from the cloud's BOUNDING BOX, which
+// measures the tallest OBJECT, not the terrain. A single tree fills the box
+// vertically regardless of how flat the ground under it is: the `tree_1`
+// reference is a 8.4 m tree on a 9.2 m footprint of ground that is flat to
+// within 47 cm, and scores 0.915 — deep in "sloped" territory, so it got the
+// steep-terrain recipe (rigidness 1 + slope-smooth) purely because a tree is
+// tall. That recipe makes the cloth conform to local structure, which is
+// exactly wrong here: a conforming cloth climbs the trunk. Measured, it costs
+// 43k extra misclassified trunk points versus the flat recipe.
+//
+// A tall isolated object and genuine terrain relief are separable by ASPECT:
+// terrain that rises 0.44x its own width is a slope spanning the whole tile,
+// while a tree is tall relative to its footprint but occupies a small part of
+// it. Without per-point data (the panel only has bounds) the usable proxy is
+// that a slope's relief is bounded by its run, whereas vegetation's is not —
+// so a relief ratio ABOVE this is read as "something tall standing on the
+// ground" rather than terrain, and falls back to the flat recipe. BR04's 0.44
+// (a real ~15 deg slope) stays below it; tree_1's 0.915 and tree_4's 1.303 are
+// both caught. A 1.0 ratio would be a 45 deg terrain slope sustained across the
+// entire tile, which is far outside anything these tools target — note tree_4
+// EXCEEDS that on bounding box alone while its ground is flat to 1.9 deg, which
+// is the clearest demonstration that the box measures the tree, not the ground.
+const VEGETATION_RELIEF_RATIO = 0.7;
+
 function clampRound(value: number, lo: number, hi: number): number {
   const clamped = Math.max(lo, Math.min(hi, value));
   // 3 decimals keeps seeded values clean (0.5, 0.237) without float noise.
@@ -81,6 +105,10 @@ function clampRound(value: number, lo: number, hi: number): number {
  * `verticalReliefM` is the Z span (optional — omit / pass 0 for the historical
  * flat-terrain behaviour). Falls back to the plant-scale default for a
  * non-finite or non-positive extent.
+ *
+ * Note the relief is the cloud's bounding-box height, so a tall plant reads as
+ * "relief" it did not create; ratios above VEGETATION_RELIEF_RATIO are treated
+ * as vegetation over flat ground rather than terrain (see the constant).
  */
 export function groundSegmentDefaultsForExtent(
   horizontalExtentM: number,
@@ -90,7 +118,7 @@ export function groundSegmentDefaultsForExtent(
   const relief = Number.isFinite(verticalReliefM) && verticalReliefM > 0 ? verticalReliefM : 0;
   const reliefRatio = relief / ext;
 
-  if (reliefRatio >= SLOPE_RELIEF_RATIO) {
+  if (reliefRatio >= SLOPE_RELIEF_RATIO && reliefRatio < VEGETATION_RELIEF_RATIO) {
     // Sloped / undulating terrain: fine, low-rigidness, slope-smoothed cloth so
     // it conforms to the slope rather than bridging onto the valley floor.
     const cloth = Math.min(ext * SLOPE_CLOTH_FRACTION, SLOPE_CLOTH_MAX);

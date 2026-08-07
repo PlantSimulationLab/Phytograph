@@ -9942,6 +9942,73 @@ GROUND_CLASS_GROUND = 1
 GROUND_CLASS_PLANT = 2
 
 
+# A snagged cloth node sits this many robust deviations above its local
+# neighbourhood, or this far above it in absolute terms — whichever is larger.
+# The absolute floor matters because on a very flat, densely-sampled scene the
+# residual's spread is near zero, so a purely relative test flags harmless
+# millimetre ripples as snags.
+_SNAG_MAD_FACTOR = 4.0
+_SNAG_MIN_RISE = 0.03
+# Neighbourhood width (in nodes) for the local median. Wide enough to span a
+# trunk's footprint on the cloth grid so the median stays on true ground.
+_SNAG_MEDIAN_WIDTH = 15
+
+
+def _desnag_cloth(cloth_nodes: np.ndarray) -> "tuple[np.ndarray, int]":
+    """Pull cloth nodes that snagged on vegetation back down to their local
+    terrain level. Returns (nodes, n_fixed) — the input unchanged when the grid
+    is degenerate or nothing is snagged.
+
+    WHY. CSF's cloth is supposed to settle onto the ground, but a node can hang
+    up on a trunk and stay there. On the `tree_1` reference this is dramatic and
+    extremely localised: 19 of 29,920 nodes (0.06%) ride up to 1.19 m while the
+    rest sit at -0.08 m. Because `_height_above_cloth` interpolates BILINEARLY,
+    each bad node corrupts its whole cell neighbourhood, so those 19 nodes are
+    what put ~125k trunk points into the ground class as one contiguous column
+    ~1.7 m tall — a glaring visual defect that barely moves aggregate accuracy
+    (99.56%), which is why it survived so long.
+
+    Note this is NOT the classic "no ground returns beneath the canopy" case:
+    the ground under that trunk is sampled at 192k pts/m2, near the scene mean.
+    The cloth simply caught and never fell through.
+
+    HOW. A snag is a node standing well ABOVE its neighbourhood, so compare each
+    node to a local median and pull down the outliers. The test is one-sided by
+    construction: a node sitting LOW is either true terrain or a harmless
+    over-drape, and flattening those would erase real relief (which is exactly
+    what would break the sloped-terrain datasets). Robust scale via MAD, so a
+    handful of snagged nodes cannot inflate the threshold that catches them."""
+    from scipy.ndimage import median_filter
+
+    nodes = np.asarray(cloth_nodes, dtype=np.float64)
+    if nodes.ndim != 2 or nodes.shape[1] < 3:
+        return cloth_nodes, 0
+    xs = np.unique(nodes[:, 0])
+    ys = np.unique(nodes[:, 1])
+    if len(xs) < 3 or len(ys) < 3 or len(xs) * len(ys) != len(nodes):
+        return cloth_nodes, 0
+
+    grid = np.full((len(xs), len(ys)), np.nan, dtype=np.float64)
+    grid[np.searchsorted(xs, nodes[:, 0]), np.searchsorted(ys, nodes[:, 1])] = nodes[:, 2]
+    if not np.isfinite(grid).all():
+        return cloth_nodes, 0
+
+    width = min(_SNAG_MEDIAN_WIDTH, (min(len(xs), len(ys)) // 2) * 2 - 1)
+    if width < 3:
+        return cloth_nodes, 0
+    local = median_filter(grid, size=width, mode="nearest")
+    resid = grid - local
+    mad = float(np.median(np.abs(resid - np.median(resid))) * 1.4826)
+    snag = resid > max(_SNAG_MAD_FACTOR * mad, _SNAG_MIN_RISE)
+    n_fixed = int(snag.sum())
+    if not n_fixed:
+        return cloth_nodes, 0
+
+    fixed = np.where(snag, local, grid)
+    out = np.column_stack([np.repeat(xs, len(ys)), np.tile(ys, len(xs)), fixed.ravel()])
+    return out, n_fixed
+
+
 def _height_above_cloth(points: np.ndarray, cloth_nodes: np.ndarray) -> np.ndarray:
     """Signed height of every point above CSF's settled cloth, by bilinear
     interpolation of the cloth grid.
@@ -9985,6 +10052,37 @@ def _height_above_cloth(points: np.ndarray, cloth_nodes: np.ndarray) -> np.ndarr
 # see the comment at the search itself.
 _KNEE_PERSIST_SPANS = 3
 _KNEE_RISE_FACTOR = 1.25
+
+# A knee must sit at a density that is still a MEANINGFUL FRACTION of the ground
+# mode. On a CLEANLY SEPARATED scene (sharp ground band, empty air above it,
+# canopy far overhead) the histogram decays monotonically with no valley below
+# the canopy, so the walk runs on until canopy mass finally turns it upward and
+# reports a "knee" sitting in near-empty air — 0.76 m on the tree_1 reference
+# against an oracle 0.225 m, which swept ~100k trunk points into the ground
+# class. Below this floor the density is tail, not structure, and `tail` (which
+# already handles the monotonic shape) should decide instead.
+#
+# Calibrated on the real fixtures: the bean scan's TRUE knee sits at 3.9% of
+# peak, while tree_1's spurious canopy knee sits at 0.025% — a 160x gap, so 0.5%
+# separates them with two orders of magnitude of margin on both sides. Note this
+# is a FLOOR on where a knee may be accepted, not the valley-DEPTH test the
+# docstring rejects: depth is still never required, so BR04's shallow
+# never-empties valley is unaffected (it resolves via `tail` regardless).
+_KNEE_MIN_PEAK_FRACTION = 0.005
+
+# Band floor: keeps the cut from landing INSIDE a sharp ground mode. Calibrated
+# on the three reference datasets (see the comment at the use site).
+#   - SHARP_HWHM: a mode narrower than this many cloth resolutions is "sharp".
+#     tree_1 sits at 0.2 (hwhm 0.010 / cloth 0.05); Mission1 at 0.30 and BR04 at
+#     0.40 are broad and must not be touched, so 0.25 separates them.
+#   - PEAK_FRACTION: density level marking the end of the band's skirt. 0.001
+#     puts tree_1's floor at 0.117 m, comfortably clear of a band reaching
+#     0.084 m (99.5th pct) and below the 0.20 m oracle optimum.
+#   - MAX_HWHM: hard cap in units of the mode's own width, so a long sparse tail
+#     cannot drag the floor far from the band.
+_BAND_FLOOR_SHARP_HWHM = 0.25
+_BAND_FLOOR_PEAK_FRACTION = 0.001
+_BAND_FLOOR_MAX_HWHM = 20.0
 
 
 def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
@@ -10084,6 +10182,13 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
         # differently and caught it.
         if smooth[k] > smooth[k - span]:
             continue                      # not a local minimum at all
+        # ...and it must sit where there is still real density. On a cleanly
+        # separated scene the curve decays monotonically and the only turning
+        # point is up in the canopy, so without this the walk reports a knee in
+        # near-empty air (see _KNEE_MIN_PEAK_FRACTION). Falling through to
+        # `tail` is the right answer for that shape.
+        if smooth[k] < _KNEE_MIN_PEAK_FRACTION * smooth[peak]:
+            break                         # into the tail — let the tail rule decide
         fwd = smooth[k + 1:min(k + _KNEE_PERSIST_SPANS * span + 1, len(smooth))]
         if len(fwd) < 2 * span:
             continue                      # too close to the end to judge
@@ -10102,11 +10207,55 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
         return float(fallback), meta
 
     # Never cut inside the ground mode itself, and stay inside the panel's range.
-    threshold = float(np.clip(max(knee, centres[peak] + hwhm), 0.02, 5.0))
+    #
+    # The `centres[peak] + hwhm` floor is not enough on its own for a SHARP mode.
+    # On tree_1 the ground band has HWHM 0.010 m but a real spread reaching
+    # 0.084 m (99.5th percentile) — sensor noise and soil roughness put a thin
+    # skirt well outside the half-maximum width. The `tail` rule keys off where
+    # density hits 1% of peak, which for a mode that tall arrives at 0.032 m,
+    # inside the band: that discards 260k genuine ground points (1.7% of the
+    # ground) in coherent patches — the same "ground labelled non-ground for no
+    # visible reason" this estimator exists to prevent, just from the other side.
+    #
+    # So floor the cut where the ground mode's density has genuinely decayed,
+    # rather than where it hits a fixed fraction of a peak whose height depends
+    # on how sharp the mode is. Walk up from the mode until the density stops
+    # falling steeply — the end of the band's skirt. Measured against the
+    # mirrored below-cloth side would be wrong here: the cloth is a lower
+    # ENVELOPE, so that sample is censored (it reads 0.017 on tree_1 where the
+    # true band reaches 0.050) — the same reason the docstring rejects mirroring
+    # for the estimate itself.
+    #
+    # This only ever RAISES a cut off the band; it never lowers one that the
+    # knee/tail rule already placed higher, so a scene with dense low vegetation
+    # (where the band and the vegetation genuinely merge) is unaffected.
+    # Applies ONLY to a sharp mode. That is the case the tail rule mishandles:
+    # when the mode is tall and narrow, "1% of peak" is reached while still
+    # inside the band. A broad mode (Mission1 hwhm 0.15 m, BR04 0.37 m) already
+    # has its tail cut in the right place, and raising it there would sweep low
+    # canopy into the ground — measured, it moves BR04's ground fraction from
+    # 14.6% to 19.0%, outside its calibrated 10-18% range. Sharpness is measured
+    # against the cloth's own resolution so the test is scale-free.
+    # Only rescues the `tail` case. When `knee` fired, a real turning point was
+    # found between ground and vegetation and that is better evidence than any
+    # density heuristic — on the bean fixture (low plants continuous with the
+    # soil) the skirt being measured here IS vegetation, and the floor would
+    # override a correct 0.051 knee with 0.100.
+    band_floor = 0.0
+    if meta["method"] == "tail" and hwhm < _BAND_FLOOR_SHARP_HWHM * cloth_resolution:
+        tail_lvl = _BAND_FLOOR_PEAK_FRACTION * smooth[peak]
+        reached = np.flatnonzero((centres > centres[peak]) & (smooth < tail_lvl))
+        if reached.size:
+            # Cap relative to the mode's own width: on a cloud with a long
+            # sparse tail the density fraction alone can run far away from the
+            # band (51 m on BR04) before it is reached.
+            band_floor = min(float(centres[reached[0]]), _BAND_FLOOR_MAX_HWHM * hwhm)
+    threshold = float(np.clip(max(knee, centres[peak] + hwhm, band_floor), 0.02, 5.0))
     meta.update({
         "class_threshold": threshold,
         "mode": float(centres[peak]),
         "mode_hwhm": float(hwhm),
+        "band_floor": band_floor,
         "bin_width": binw,
         "smooth_bins": nsm,
     })
@@ -10187,9 +10336,15 @@ def segment_ground(
 
     if auto_class_threshold and cloth_nodes is not None and cloth_nodes.ndim == 2:
         try:
+            # Pull nodes that hung up on vegetation back to local terrain first:
+            # the threshold is read off this cloth, so a snagged node biases both
+            # the estimate and the classification. Auto path only — the manual
+            # path must keep reproducing CSF's own labels bit-for-bit.
+            cloth_nodes, n_desnagged = _desnag_cloth(cloth_nodes)
             height = _height_above_cloth(points[:, :3].astype(np.float64), cloth_nodes)
             threshold, est = _estimate_class_threshold(
                 height, float(cloth_resolution), float(class_threshold))
+            est["desnagged_nodes"] = n_desnagged
             labels = np.where(np.abs(height) < threshold,
                               GROUND_CLASS_GROUND, GROUND_CLASS_PLANT).astype(np.int32)
             if meta is not None:

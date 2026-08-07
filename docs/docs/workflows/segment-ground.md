@@ -21,7 +21,10 @@ labels the points the cloth settles onto as ground.
    cloth, but a large *sloped* tile (e.g. an aerial scan of a hillside forest)
    gets a **finer cloth, low rigidness, and slope smoothing on** so the cloth
    can bend to follow the slope instead of draping flat and catching only the
-   valley floor.
+   valley floor. Relief that is very large compared with the footprint — a
+   single tall tree standing on flat ground, say — is read as *vegetation*
+   rather than terrain, and keeps the flat-ground recipe: a conforming cloth
+   would climb the trunk.
    (CSF's parameters are absolute distances, so a fixed default that suits a
    1 m plant scan would label nearly everything as non-ground on a 50 m
    field — and a coarse, stiff cloth tuned for a flat field bridges over a
@@ -51,7 +54,8 @@ labels the points the cloth settles onto as ground.
     - **Slope smoothing** — enables CSF's slope-handling pass. Leave it off for
       flat ground; turn it on (together with a low rigidness) for undulating or
       steep terrain. It's auto-enabled when the cloud's vertical relief is
-      large relative to its footprint.
+      large relative to its footprint — but not when it's so large that the
+      height clearly comes from vegetation rather than terrain.
 4. (Optional) Tick **Split into ground + plant clouds** to also produce two
    new clouds — ground and non-ground — alongside the classified original.
 5. Click **Segment Ground**. While it runs, the button shows a spinner and a
@@ -113,6 +117,13 @@ disagree badly on field-scale tiles.
 off the draped cloth and cuts where the ground returns end and vegetation
 begins. Because the measurement is taken relative to the cloth, terrain slope
 is already accounted for — it works the same on a hillside as on flat ground.
+
+It also handles the opposite extreme. On a clean scan of a single tree over
+flat ground the ground returns form a very thin band with empty air above it,
+and the nearest thing that looks like the "top" of the band is the canopy
+metres overhead — which would place the cut far too high and swallow the
+bottom of the trunk into the ground class. The measurement recognises that
+shape and keeps the cut on the ground band where it belongs.
 
 If you'd rather set it by hand, look at the point where the ground stops and
 the canopy starts: a tolerance anywhere in that empty gap gives the same
