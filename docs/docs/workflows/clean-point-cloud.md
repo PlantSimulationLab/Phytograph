@@ -180,7 +180,9 @@ to Box. Unlike the world-space box, it works from any camera angle.
    A dashed preview rectangle follows the cursor; release to commit it.
    (The floating panels can't take the pointer — see the note under
    [Polygon mode](#polygon-mode).)
-3. Click **Apply** in the panel, or use **Redraw rectangle** to start over.
+3. On release the cloud redraws with the cropped-away points hidden, the
+   same live preview described under [Polygon mode](#polygon-mode).
+4. Click **Apply** in the panel, or use **Redraw rectangle** to start over.
    <kbd>Esc</kbd> cancels.
 
 Like the polygon, the rectangle lives in screen space, so the in/out test
@@ -201,12 +203,22 @@ want isn't a tidy box.
 2. Click in the viewport to add vertices. Right-click or
    <kbd>Backspace</kbd> removes the last vertex.
 3. Press <kbd>Enter</kbd> to close the polygon. A filled preview shows
-   what will be kept (green) or removed (red).
+   what will be kept (green) or removed (red), and the cloud itself
+   redraws with the cropped-away points hidden — so you see the actual
+   result before committing to it.
 4. Click **Apply** in the panel, or use **Redraw polygon** to start over.
 
 Because the polygon lives in screen space, the in/out test uses the
 camera as it was when you closed the polygon — orbiting afterwards is
-fine and doesn't change the result.
+fine and doesn't change the result. The preview stays pinned to the
+points the crop will remove, so orbiting to inspect it from another
+angle won't shift the selection.
+
+!!! tip "The preview is a preview, not the result"
+    On a large cloud the preview draws at a reduced level of detail, so it
+    looks sparser than the cloud does normally. The *shape* is exact — those
+    are the points Apply will keep — but the density isn't. Applying
+    re-renders at full resolution.
 
 !!! note "Panels block the draw"
     The floating panels (Crop, the scan/mesh stack on the right, Display,

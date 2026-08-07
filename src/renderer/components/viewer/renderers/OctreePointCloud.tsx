@@ -8,6 +8,11 @@ import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
 import { getPotreeManager, OctreeRequestManager, registerOctreeForFrame } from '../potreeManager';
 import { applyOctreePose } from './octreePose';
+import {
+  applyCropMaskToVisibleNodes,
+  clearCropMaskFromVisibleNodes,
+  publishCropMaskStats,
+} from './octreeCropMask';
 
 // =====================================================================
 // Octree streaming (0.3.0+)
@@ -84,6 +89,22 @@ export interface OctreePointCloudProps {
   // over `clipMode`. We take the box transform matrix and derive the inverse the
   // shader needs here, keeping potree-core's IClipBox detail out of the parent.
   clipBoxes?: Array<{ matrix: THREE.Matrix4 }> | null;
+  // Exact per-point crop preview for a SCREEN-SPACE region (freeform polygon,
+  // or a rect drawn from an arbitrary camera). Those regions aren't boxes, so
+  // the GPU clip volume above can't express them and potree's material has no
+  // per-point discard to drive — the predicate runs on the CPU over the loaded
+  // tiles instead, and rejected points are hidden with an index buffer (see
+  // octreeCropMask.ts). Box crops keep using `clipBox`: it's exact for an AABB
+  // and runs on the GPU at frame rate, which matters while the gizmo drags.
+  //
+  // `predicate` takes WORLD coordinates and returns "inside the region";
+  // `invert` flips it for Keep-Outside. `key` changes whenever the region
+  // changes and is what triggers a re-mask — pass a stable string.
+  cropMask?: {
+    predicate: (wx: number, wy: number, wz: number) => boolean;
+    invert: boolean;
+    key: string;
+  } | null;
   // World-space translation for this cloud (the Translate tool / T-modal value).
   // The PointCloudOctree is attached directly to the scene root (not inside the
   // parent's React `<group position>`), so the group transform does NOT reach it
@@ -219,6 +240,7 @@ export function OctreePointCloud({
   rangeMax,
   clipBox = null,
   clipBoxes = null,
+  cropMask = null,
   translation,
   rotation,
   pivot,
@@ -739,6 +761,27 @@ export function OctreePointCloud({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [octree, materialVersion, clipBoxesKey]);
 
+  // Exact per-point preview for a screen-space crop region. Masks the tiles
+  // that are already loaded; tiles that stream in afterwards are caught by the
+  // per-frame afterUpdate below (same pattern as the scalar→intensity swap).
+  // Keyed on cropMask.key so redrawing the polygon re-masks and clearing it
+  // restores full density. The cleanup runs on unmount and on every key change,
+  // which is what un-hides points when the region changes rather than leaving
+  // an earlier polygon's mask behind.
+  const cropMaskKey = cropMask ? `${cropMask.key}|${cropMask.invert}` : '';
+  useEffect(() => {
+    if (!octree) return;
+    if (!cropMask) {
+      clearCropMaskFromVisibleNodes(octree);
+      return;
+    }
+    applyCropMaskToVisibleNodes(
+      octree, displayOffset, cropMask.predicate, cropMask.invert, cropMaskKey,
+    );
+    return () => clearCropMaskFromVisibleNodes(octree);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [octree, cropMaskKey, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
+
   // Cap the octree LOD level while a crop box is previewing so potree spreads
   // the (reduced) budget across a shallower, cheaper, more even part of the tree
   // instead of deeply refining a few high-priority nodes and leaving others
@@ -747,7 +790,11 @@ export function OctreePointCloud({
   // re-renders at full resolution. `cropPreviewActive` is a stable boolean so
   // this fires only on enter/exit, not on every box move. Restored to unlimited
   // (Infinity) when the box clears.
-  const cropPreviewActive = !!clipBox;
+  // A screen-space (cropMask) preview needs the cap for a second reason on top
+  // of even density: its predicate runs on the CPU over every loaded point, so
+  // the cap is also what bounds that work to the preview budget instead of the
+  // whole cloud.
+  const cropPreviewActive = !!clipBox || !!cropMask;
   useEffect(() => {
     if (!octree) return;
     (octree as any).maxLevel = cropPreviewActive ? CROP_PREVIEW_MAX_LEVEL : Infinity;
@@ -765,9 +812,11 @@ export function OctreePointCloud({
   // octree alone and doesn't churn every render.
   const frameStateRef = useRef({
     clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
+    cropMask, cropMaskKey, displayOffset,
   });
   frameStateRef.current = {
     clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
+    cropMask, cropMaskKey, displayOffset,
   };
 
   useEffect(() => {
@@ -801,6 +850,7 @@ export function OctreePointCloud({
         const {
           data: d, colorMode: cm, selectedScalarField: field,
           onFirstTilesReady: onReady,
+          cropMask: mask, cropMaskKey: maskKey, displayOffset: offset,
         } = frameStateRef.current;
         const cur = octree.material;
         const visible = (octree as any).visibleNodes;
@@ -822,6 +872,19 @@ export function OctreePointCloud({
           if (scalarActive && sn?.geometry) {
             swapScalarIntoIntensity(sn.geometry, field!);
           }
+        }
+        // Mask tiles that streamed in (or were evicted and reloaded) since the
+        // crop effect ran — without this they render their cropped-away points
+        // as the LOD fills in. Skips any tile already masked under this key, so
+        // the steady-state cost is one string compare per visible node.
+        if (mask) {
+          applyCropMaskToVisibleNodes(
+            octree, offset, mask.predicate, mask.invert, maskKey,
+          );
+        } else {
+          // Keep the E2E stats hook truthful while no mask is active, so a test
+          // can read a real "nothing hidden" baseline before drawing.
+          publishCropMaskStats(octree);
         }
       },
     });

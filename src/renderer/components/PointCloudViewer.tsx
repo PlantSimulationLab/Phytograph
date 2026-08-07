@@ -2578,6 +2578,34 @@ export default function PointCloudViewer({
     return null;
   }, [cropMode, cropBox, cropPolygon]);
 
+  // The screen-space crop preview handed to octree clouds (OctreePointCloud's
+  // `cropMask`). Box crops are excluded on purpose — an AABB is exactly what
+  // the GPU clip volume already does, at frame rate and without touching
+  // geometry, which matters while the gizmo drags. This covers what the clip
+  // volume CAN'T express: a closed polygon or a rect drawn off-axis.
+  //
+  // Gated on a CLOSED region (cropPolygon exists) — while the user is still
+  // clicking vertices there's no region to test against. Segment mode is
+  // excluded because neither half is discarded, so nothing should be hidden.
+  //
+  // `key` is what drives re-masking: it changes whenever the polygon geometry
+  // or the frozen camera changes, so redrawing re-tests, and orbiting after
+  // the polygon closed does NOT (the region is camera-frozen by design — the
+  // preview must stay pinned to the same points the apply will remove).
+  const octreeCropMask = useMemo(() => {
+    if (cropSegment) return null;
+    if (cropMode !== 'polygon' && cropMode !== 'rect') return null;
+    if (!cropPolygon || cropPolygon.points.length < 3) return null;
+    const predicate = buildCropPredicate();
+    if (!predicate) return null;
+    const pts = cropPolygon.points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(';');
+    return {
+      predicate,
+      invert: cropInvert,
+      key: `${cropMode}|${pts}|${cropPolygon.canvasSize.width}x${cropPolygon.canvasSize.height}`,
+    };
+  }, [cropSegment, cropMode, cropPolygon, cropInvert, buildCropPredicate]);
+
   // Apply the active crop region to every selected scan. Multi-scan crop
   // produces N cropped scans — one per input — preserving per-scan
   // identity (id, fileName, scan params live elsewhere). Translation is
@@ -14031,10 +14059,9 @@ export default function PointCloudViewer({
                   rangeMax={rangeForCloud(cloud)?.max}
                   // Live crop preview: pass the current crop box only in
                   // box mode while a crop is being drawn AND this cloud
-                  // is in the selection. Polygon mode falls back to the
-                  // overlay-only preview (the gizmo-screen polygon is
-                  // already drawn); the apply still runs full polygon
-                  // through the backend. Segment mode never clips — both
+                  // is in the selection. Screen-space modes (polygon /
+                  // rect) aren't boxes, so they preview through `cropMask`
+                  // below instead. Segment mode never clips — both
                   // halves survive, so the whole cloud stays visible and
                   // only the CropBox wireframe marks the split.
                   clipBox={
@@ -14046,6 +14073,13 @@ export default function PointCloudViewer({
                         }
                       : null
                   }
+                  // Exact per-point preview for a screen-space crop region.
+                  // Only for a CLOSED polygon/rect (the predicate needs the
+                  // frozen camera), never in segment mode (both halves
+                  // survive, so nothing is hidden). Same predicate the apply
+                  // sends to the backend, so the preview matches the result
+                  // by construction rather than by a parallel implementation.
+                  cropMask={showCropPreview ? octreeCropMask : null}
                   // GPU clip-volume union (CLIP_INSIDE) combining:
                   //  - committed but unbaked deletes for THIS cloud (the
                   //    persistent instant-delete preview — points stay hidden
