@@ -202,7 +202,8 @@ want isn't a tidy box.
    anchored to the view.
 2. Click in the viewport to add vertices. Right-click or
    <kbd>Backspace</kbd> removes the last vertex.
-3. Press <kbd>Enter</kbd> to close the polygon. A filled preview shows
+3. **Double-click** the last vertex, or press <kbd>Enter</kbd>, to close
+   the polygon. A filled preview shows
    what will be kept (green) or removed (red), and the cloud itself
    redraws with the cropped-away points hidden — so you see the actual
    result before committing to it.

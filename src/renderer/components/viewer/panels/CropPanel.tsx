@@ -290,7 +290,7 @@ export function CropPanel({
           {cropDrawState === 'drawing-polygon' ? (
             <>
               <div className="font-medium text-neutral-200 mb-1">Drawing polygon</div>
-              Click in the viewport to add vertices. Right-click or Backspace removes the last. Press Enter to close, Esc to cancel.
+              Click in the viewport to add vertices. Right-click or Backspace removes the last. Double-click or press Enter to close, Esc to cancel.
               <div className="mt-2 text-neutral-400">Vertices: {polygonVertexCount}</div>
               <div data-testid="crop-blocked-hint" className="mt-2 text-amber-400/90 leading-tight">
                 ⊘ These panels sit over the viewport and take the click

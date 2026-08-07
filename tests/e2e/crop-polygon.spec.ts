@@ -250,3 +250,73 @@ test('polygon lasso crop: half-viewport lasso keeps a strict subset of points', 
   expect(kept).toBeGreaterThan(0);
   expect(kept).toBeLessThan(60);
 });
+
+// Double-click is the second way to close a lasso, alongside Enter. The trap
+// it has to avoid: the browser fires dblclick AFTER both of its click events,
+// so the closing double-click has already appended a vertex on top of the
+// previous one. Left in, the committed polygon carries a duplicate vertex and
+// a degenerate zero-length edge.
+//
+// The geometry here is deliberately identical to the Enter-closed
+// half-viewport test above, so the two paths are directly comparable: same
+// four corners, so the same points must survive.
+test('polygon lasso crop: double-click closes the polygon, matching Enter', async () => {
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
+
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await expect(row).toHaveAttribute('data-point-count', '60');
+  await expect(row).toHaveAttribute('data-selected', 'true');
+
+  await page.getByTestId('tool-crop').click();
+  const panel = page.getByTestId('crop-panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('crop-shape-polygon').click();
+  await expect(panel).toHaveAttribute('data-crop-mode', 'polygon');
+
+  const overlay = page.getByTestId('crop-polygon-overlay');
+  await expect(overlay).toBeVisible();
+  const box = await overlay.boundingBox();
+  if (!box) throw new Error('crop-polygon-overlay has no bounding box');
+
+  const inset = 8;
+  const midX = box.x + box.width / 2;
+  const corners = [
+    { x: box.x + inset, y: box.y + inset },
+    { x: midX, y: box.y + inset },
+    { x: midX, y: box.y + box.height - inset },
+    { x: box.x + inset, y: box.y + box.height - inset },
+  ];
+  // Place the first three with single clicks…
+  for (let i = 0; i < 3; i++) {
+    await page.mouse.click(corners[i].x, corners[i].y);
+    await expect(overlay.locator('circle')).toHaveCount(i + 1);
+  }
+  // …then place the fourth AND close, in one double-click.
+  await page.mouse.dblclick(corners[3].x, corners[3].y);
+
+  // Closed without Enter: the panel now reports a committed region.
+  await expect(panel).toContainText('Polygon (4 vertices)');
+  // Exactly four — the dblclick's duplicate vertex must have been dropped.
+  await expect(overlay.locator('circle')).toHaveCount(4);
+
+  const applyBtn = page.getByTestId('crop-apply');
+  await expect(applyBtn).toBeEnabled();
+  await applyBtn.click();
+
+  await expect(panel).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.getByText('Cropping…')).toHaveCount(0, { timeout: 10_000 });
+
+  await expect
+    .poll(async () => {
+      if ((await row.count()) === 0) return -1;
+      return Number(await row.getAttribute('data-point-count'));
+    }, { timeout: 8_000 })
+    .toBeGreaterThan(0);
+  const kept = Number(await row.getAttribute('data-point-count'));
+  expect(kept).toBeGreaterThan(0);
+  expect(kept).toBeLessThan(60);
+});

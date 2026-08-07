@@ -4173,6 +4173,36 @@ export default function PointCloudViewer({
     }
     clearFilterStateForCloud(cloud.id);
   }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, onAddCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
+  // Close the in-progress lasso into a committed region. Shared by the two ways
+  // a user can finish one — Enter, and double-click on the last vertex — so the
+  // camera freeze and the region shape can't drift between them.
+  //
+  // Takes the vertex list explicitly rather than reading `polygonInProgress`:
+  // the double-click path has just filtered out the duplicate vertex that the
+  // dblclick's own second click added, and that filtered list is the one to
+  // close on. Returns whether it closed, so a caller can decide (the lasso
+  // needs at least a triangle).
+  const closePolygonFrom = useCallback((verts: { x: number; y: number }[]): boolean => {
+    if (verts.length < 3) return false;
+    if (!polygonCameraRef.current || !polygonCanvasSizeRef.current) return false;
+    const region = polygonRegionFromCamera(
+      verts,
+      polygonCameraRef.current,
+      polygonCanvasSizeRef.current,
+      false,
+      displayOffsetRef.current,
+    );
+    setCropPolygon({
+      points: region.points,
+      projection: region.projection,
+      view: region.view,
+      canvasSize: region.canvasSize,
+    });
+    setPolygonInProgress([]);
+    setCropDrawState('idle');
+    return true;
+  }, []);
+
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -4223,23 +4253,7 @@ export default function PointCloudViewer({
         if (editMode === 'crop') {
           if (cropDrawState === 'drawing-polygon') {
             e.preventDefault();
-            if (polygonInProgress.length >= 3 && polygonCameraRef.current && polygonCanvasSizeRef.current) {
-              const region = polygonRegionFromCamera(
-                polygonInProgress,
-                polygonCameraRef.current,
-                polygonCanvasSizeRef.current,
-                false,
-                displayOffsetRef.current,
-              );
-              setCropPolygon({
-                points: region.points,
-                projection: region.projection,
-                view: region.view,
-                canvasSize: region.canvasSize,
-              });
-              setPolygonInProgress([]);
-              setCropDrawState('idle');
-            }
+            closePolygonFrom(polygonInProgress);
             return;
           }
           // Crop mode + not drawing a polygon: don't preventDefault here
@@ -4292,7 +4306,7 @@ export default function PointCloudViewer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode, originSelected]);
+  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode, originSelected, closePolygonFrom]);
 
   // Track shift key state for mixed selection (cloud + mesh)
   useEffect(() => {
@@ -15204,6 +15218,25 @@ export default function PointCloudViewer({
           e.preventDefault();
           setPolygonInProgress(prev => prev.slice(0, -1));
         };
+        // Double-click closes the lasso, the same as Enter.
+        //
+        // The browser fires dblclick AFTER both of its click events, so by the
+        // time we get here the second click has already appended a vertex on
+        // top of the first — a duplicate at (or within a pixel or two of) the
+        // same spot. Drop it, or the committed polygon carries a degenerate
+        // zero-length edge. The tolerance is a few px because a real
+        // double-click drifts slightly between the two presses.
+        const handleDoubleClick = (e: React.MouseEvent<SVGSVGElement>) => {
+          if (!isDrawing) return;
+          e.preventDefault();
+          const rect = e.currentTarget.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          const verts = [...polygonInProgress];
+          const last = verts[verts.length - 1];
+          if (last && Math.abs(last.x - x) <= 3 && Math.abs(last.y - y) <= 3) verts.pop();
+          closePolygonFrom(verts);
+        };
         // NOTE: no onMouseMove here. The cursor comes from useViewportBlockZone,
         // which tracks it on the window, so the preview keeps following —
         // clamped — when the pointer slides under a floating panel, where this
@@ -15232,6 +15265,7 @@ export default function PointCloudViewer({
               cursor: isDrawing ? 'crosshair' : 'default',
             }}
             onClick={handleClick}
+            onDoubleClick={handleDoubleClick}
             onContextMenu={handleContextMenu}
           >
             {closedPoints && (

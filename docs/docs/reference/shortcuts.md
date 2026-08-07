@@ -66,6 +66,7 @@ apply to them.)
 | Left-click | Add a polygon vertex |
 | Right-click | Remove the last vertex |
 | <kbd>Backspace</kbd> | Remove the last vertex |
+| Double-click | Close the polygon |
 | <kbd>Enter</kbd> | Close the polygon |
 | <kbd>Esc</kbd> | Cancel the polygon |
 
