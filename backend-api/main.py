@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.64.0"
+BACKEND_VERSION = "0.64.1"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -8921,24 +8921,49 @@ def _derive_moving_scan_grid(n_theta: int, n_phi_per_rev: int, pulse_rate_hz: fl
 
 
 def _texture_has_alpha(texture_path: Optional[str]) -> bool:
-    """Whether a texture file actually carries an alpha channel.
+    """Whether a texture file actually carries transparency.
 
     Drives alpha-test cutout rendering in the viewer, so it must reflect the real
-    image: Helios plant assets mix alpha PNG leaves with opaque JPG bark, and
-    assuming alpha makes the renderer cut out a solid texture. Reads the PNG
-    header's color-type byte (4 = grey+alpha, 6 = RGBA); anything else, including
-    every JPEG, has no alpha. Falls back to the extension if the file can't be
-    read, since callers only hold a path at that point.
+    image: Helios plant assets mix transparent PNG leaves with opaque JPG bark,
+    and assuming transparency makes the renderer cut out a solid texture.
+
+    PNG encodes transparency two ways and BOTH must be detected. The IHDR
+    color-type byte covers only the first (4 = grey+alpha, 6 = RGBA); indexed
+    (color type 3) and plain grey/truecolour images instead carry a ``tRNS``
+    chunk holding per-palette-entry alpha or a single transparent colour key.
+    Roughly a quarter of the plantarchitecture leaf textures are palette PNGs
+    with tRNS — BeanLeaf_tip, TomatoLeaf_centered, RedbudLeaf, OliveLeaf_* and
+    friends — so testing the color type alone silently renders those leaves as
+    opaque rectangles while their RGBA siblings on the same plant cut out fine.
+
+    Every JPEG has no transparency. Falls back to the extension if the file
+    can't be read, since callers only hold a path at that point.
     """
     if not texture_path:
         return False
     try:
         with open(texture_path, "rb") as fh:
             head = fh.read(26)
-        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
+                return False
             # IHDR color type is byte 25; bit 2 (value 4) marks an alpha channel.
-            return bool(head[25] & 4)
-        return False
+            if head[25] & 4:
+                return True
+            # Otherwise scan the chunk stream for tRNS. It must precede the first
+            # IDAT, so stop there rather than reading a multi-megabyte image.
+            fh.seek(8)
+            while True:
+                header = fh.read(8)
+                if len(header) < 8:
+                    return False
+                length = int.from_bytes(header[:4], "big")
+                ctype = header[4:8]
+                if ctype == b"tRNS":
+                    return True
+                if ctype in (b"IDAT", b"IEND"):
+                    return False
+                # Skip the chunk payload plus its 4-byte CRC.
+                fh.seek(length + 4, 1)
     except Exception:
         return texture_path.lower().endswith(".png")
 
