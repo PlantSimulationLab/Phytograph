@@ -30,8 +30,9 @@
     "test:unit:watch": "vitest",
     "test:unit:coverage": "vitest run --coverage",
     "test:backend": "cd backend-api && ./venv/bin/pytest",
-    "test:e2e": "playwright test",
-    "test:e2e:profile": "node scripts/monitor-resources.mjs --timeline perf/e2e-timeline.jsonl -- npx playwright test",
+    "check:backend": "node scripts/check-backend-bundle.mjs",
+    "test:e2e": "npm run check:backend && playwright test",
+    "test:e2e:profile": "npm run check:backend && node scripts/monitor-resources.mjs --timeline perf/e2e-timeline.jsonl -- npx playwright test",
     "test:smoke-packaged": "node scripts/smoke-packaged-app.mjs",
     "test": "npm run typecheck && npm run test:unit && npm run test:backend && npm run test:e2e"
   },

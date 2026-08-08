@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { waitForBackend } from './waitForBackend';
 // @ts-expect-error -- plain .mjs helper, shared with the standalone harness scripts
 import { ensureHeadlessElectron } from '../../../scripts/headless-electron.mjs';
+// @ts-expect-error -- plain .mjs helper, shared with scripts/check-backend-bundle.mjs
+import { checkBackendBundle, readExpectedBackendVersion } from '../../../scripts/backend-version.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = join(__dirname, '..', '..', '..');
@@ -63,14 +65,16 @@ function mainEntry(): string {
  * variables reach it.
  */
 export async function launchApp(extraEnv?: Record<string, string>): Promise<LaunchedApp> {
+  // Verify the built backend BEFORE spawning anything. A bundle whose version
+  // doesn't match EXPECTED_BACKEND_VERSION still boots and still answers
+  // /version — the renderer just refuses it, so the splash never clears and the
+  // spec dies ~30s later at whatever locator it was waiting on, with a stack
+  // trace that names an unrelated helper. This check is a file read: it costs
+  // nothing and it names the actual problem and its one-line fix.
+  const bundle = checkBackendBundle();
+  if (!bundle.ok) throw new Error(bundle.message);
+
   const backendBin = backendBinaryPath();
-  if (!existsSync(backendBin)) {
-    throw new Error(
-      `Backend binary missing at ${backendBin}.\n` +
-        `Run \`npm run build:backend\` before E2E. ` +
-        `Mocks are not allowed — see CLAUDE.md Testing rule #1.`,
-    );
-  }
   const main = mainEntry();
   if (!existsSync(main)) {
     throw new Error(
@@ -127,6 +131,23 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
   // process spawns it on backendPort in startBackend(); we don't proceed until
   // it answers.
   const { version } = await waitForBackend(backendPort);
+
+  // Belt-and-braces on top of the pre-launch stamp check: assert the version the
+  // backend ACTUALLY served. The stamp describes the bundle on disk, but the
+  // supervisor can reuse a compatible backend already on the port, and
+  // PHYTOGRAPH_DEV_BACKEND makes it stand down entirely — so what answers here
+  // isn't always what we stamped. The renderer demands an exact match before it
+  // will clear the splash, so anything else is a guaranteed 30s-per-spec hang.
+  const expected = readExpectedBackendVersion();
+  if (version !== expected) {
+    await app.close().catch(() => {});
+    throw new Error(
+      `Backend version mismatch — the app will never clear its splash screen.\n` +
+        `  backend serving on port ${backendPort} = ${version}\n` +
+        `  EXPECTED_BACKEND_VERSION              = ${expected}\n` +
+        `Fix: npm run build:backend  (or stop the stale backend still on this port).`,
+    );
+  }
 
   const close = async (): Promise<void> => {
     const proc = app.process();
