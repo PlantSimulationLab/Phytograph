@@ -4119,6 +4119,62 @@ export async function getLeafTextures(): Promise<string[]> {
   }
 }
 
+// ==================== QSM BARK TEXTURES ====================
+// Bark images for the QSM viewer's "Color by > Texture" mode. The renderer can't
+// read the PyInstaller bundle directly, so the backend resolves and base64s them.
+// Authoritative list comes from GET /api/qsm/bark-textures; this is the fallback.
+export const CURATED_BARK_TEXTURES: string[] = [
+  'AlmondBark.jpg',
+  'AppleBark.jpg',
+  'GrapeBark.jpg',
+  'OliveBark.jpg',
+  'WesternRedbudBark.jpg',
+];
+
+export interface QSMBarkTextureResponse {
+  success: boolean;
+  name?: string;
+  data_base64?: string;
+  mime?: string;
+  error?: string;
+}
+
+export async function getBarkTextures(): Promise<string[]> {
+  const baseUrl = getBackendUrl();
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/bark-textures`);
+    if (!response.ok) return CURATED_BARK_TEXTURES;
+    const body = await response.json();
+    return Array.isArray(body.textures) && body.textures.length ? body.textures : CURATED_BARK_TEXTURES;
+  } catch {
+    return CURATED_BARK_TEXTURES;
+  }
+}
+
+/** Fetch one bark image as base64, from the builtin library or an uploaded path. */
+export async function getBarkTexture(
+  source: { builtinName: string } | { texturePath: string }
+): Promise<QSMBarkTextureResponse> {
+  const baseUrl = getBackendUrl();
+  const body =
+    'builtinName' in source
+      ? { builtin_name: source.builtinName }
+      : { texture_path: source.texturePath };
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/bark-texture`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      return { success: false, error: `HTTP ${response.status}: ${response.statusText}` };
+    }
+    return await response.json();
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 // ==================== QSM LEAF-ANGLE ADJUSTMENT (Phase 2) ====================
 // Rotate a QSM's procedurally-placed leaves so each voxel cell's leaf-angle
 // distribution matches a target measured from a leaf-on Helios triangulation.

@@ -133,8 +133,9 @@ file** — see [Export](#export) below.
 
 ### Switch the coloring
 
-The **Color by** dropdown at the bottom of the QSM panel offers two
-modes:
+The **Color by** dropdown at the bottom of the QSM panel offers four
+modes. The first two encode *data* as color; the last two are about
+*appearance*.
 
 - **Shoot rank** (default) — colors by branching order: a wood-tan trunk
   (rank 0), red-orange scaffolds (rank 1), then blue, green, violet, pink
@@ -142,8 +143,37 @@ modes:
 - **Shoot id** — gives every shoot its own distinct color, so each
   continuous axis reads as one object regardless of rank. Best for
   *seeing the shoots themselves*.
+- **Color** — one flat color for the whole tree, picked from the swatch
+  or typed as a hex value. Useful for figures where the QSM is context
+  rather than the subject, or to match a house style.
+- **Texture** — wraps a bark image around every branch, for a
+  presentation-ready tree.
 
 ![The same QSM colored by shoot id](../assets/screenshots/qsm-03-shoot.png)
+
+#### Bark textures
+
+In **Texture** mode two extra controls appear:
+
+- **Bark** — the bark image. The dropdown lists the five bark textures
+  that ship with the Helios plant-architecture library (almond, apple,
+  grape, olive, western redbud). **Upload** picks your own JPEG or PNG
+  instead — a photograph of the species you actually scanned, for
+  example. A texture that tiles seamlessly gives the best result.
+- **Tile (m)** — the real-world size of one bark tile, in metres
+  (default `0.25`). *Smaller* values make the bark pattern finer and
+  repeat more often; *larger* values make it coarser. This is a
+  physical size, not a repeat count.
+
+Because the tile is defined in world units, the bark stays at a
+consistent physical scale everywhere on the tree: the pattern on a thick
+trunk looks the same size as the pattern on a thin branch, instead of
+being stretched wider as the branch thickens. Only very thin twigs
+(under a couple of centimetres across) narrow the pattern, where the
+detail is too small to see anyway.
+
+The bark images are read from the backend, so the first switch into
+Texture mode may take a moment while the image loads.
 
 See [Color modes → QSM](../reference/color-modes.md#qsm-color-modes) for
 the full palette.

@@ -4,8 +4,10 @@ import type { QSMCylinder, QSMShoot } from '../../../utils/backendApi';
 import {
   buildShootPolylines as buildShootPolylinesPlain,
   sweepTube,
+  DEFAULT_TEXTURE_TILE_SIZE,
 } from '../../../lib/qsmTube';
 import type { ShootPolyline as PlainShootPolyline } from '../../../lib/qsmTube';
+import { useImageTexture } from './useImageTexture';
 
 // QSM (Quantitative Structure Model) visualization. Each SHOOT is drawn as ONE
 // CONTINUOUS TUBE: a single shared ring of vertices per node, swept along the
@@ -21,14 +23,29 @@ import type { ShootPolyline as PlainShootPolyline } from '../../../lib/qsmTube';
 // don't reimplement sweeping/framing here, or the viewport and the exports drift
 // apart again.
 //
-// Two color modes make the headline feature legible:
-//   - 'rank'  : color by shoot rank (trunk=0, scaffolds=1, ...) -- the structure.
-//   - 'shoot' : a distinct color per shoot id, so each continuous shoot reads as
-//               ONE object -- directly demonstrates the continuous-shoot output.
+// Four color modes:
+//   - 'rank'    : color by shoot rank (trunk=0, scaffolds=1, ...) -- the structure.
+//   - 'shoot'   : a distinct color per shoot id, so each continuous shoot reads as
+//                 ONE object -- directly demonstrates the continuous-shoot output.
+//   - 'color'   : one flat user-picked RGB for the whole tree.
+//   - 'texture' : a tiled bark image (Helios library or user upload). See qsmTube's
+//                 `wrapsForRadius` for the UV scheme that keeps bark from stretching.
 // A selected shoot is highlighted (brightened) and the others dimmed so clicking a
 // shoot shows the whole continuous axis.
 
-export type QSMColorMode = 'rank' | 'shoot';
+export type QSMColorMode = 'rank' | 'shoot' | 'color' | 'texture';
+
+// 'rank' and 'shoot' encode DATA as hue, so they get the emissive lift that keeps
+// categorical colors legible against the dark viewport. 'color' and 'texture' are
+// APPEARANCE modes -- the lift would wash a bark photo out into milky pastel -- so
+// they render under normal lighting instead.
+function isCategoricalMode(mode: QSMColorMode): boolean {
+  return mode === 'rank' || mode === 'shoot';
+}
+
+// Fallback when texture mode is selected but no image has loaded yet (or it failed):
+// a neutral bark brown, so the tree never flashes white or black mid-load.
+const BARK_FALLBACK = '#8b6f47';
 
 export interface QSM3DProps {
   cylinders: QSMCylinder[];
@@ -36,8 +53,18 @@ export interface QSM3DProps {
   shoots: QSMShoot[];
   colorMode?: QSMColorMode;
   opacity?: number;
-  /** number of sides of each cross-section ring (more = rounder, costlier). */
+  /**
+   * number of sides of each cross-section ring (more = rounder, costlier).
+   * Defaults to 8 for the categorical modes; texture mode overrides to
+   * TEXTURE_RADIAL_SEGMENTS, where facets are far more obvious.
+   */
   radialSegments?: number;
+  /** Flat tree color for colorMode='color' (hex, e.g. '#8b6f47'). */
+  solidColor?: string;
+  /** Base64 bark image + its MIME type, for colorMode='texture'. */
+  barkTexture?: { data: string; mime: string } | null;
+  /** World-space edge length (m) of one bark tile. Defaults to 0.25 m (Helios' value). */
+  textureTileSize?: number;
   /**
    * Render-only display offset (Layer 2 precision safety net). Subtracted from
    * tube vertices at build time (float64) so large UTM coordinates render near
@@ -120,13 +147,41 @@ export function buildShootPolylines(
 // The per-node color for one shoot. Color is constant along the shoot (rank or
 // shoot-id hue). Returned as a length-M array so future per-node coloring is a
 // drop-in.
+//
+// Exhaustive switch, not a ternary: the `never` check makes the compiler reject a
+// newly-added QSMColorMode that forgets a case here, rather than silently falling
+// through to rank coloring.
+export function shootNodeColor(
+  poly: ShootPolyline,
+  colorMode: QSMColorMode,
+  solidColor: string
+): THREE.Color {
+  switch (colorMode) {
+    case 'rank':
+      return rankColor(poly.rank);
+    case 'shoot':
+      return shootColor(poly.shootId);
+    case 'color':
+      return new THREE.Color(solidColor);
+    case 'texture':
+      // White so the diffuse map shows its true colors -- the vertex color
+      // multiplies the map, and anything but white would tint the bark.
+      return new THREE.Color(1, 1, 1);
+    default: {
+      const _exhaustive: never = colorMode;
+      void _exhaustive;
+      return rankColor(poly.rank);
+    }
+  }
+}
+
 function shootNodeColors(
   poly: ShootPolyline,
   colorMode: QSMColorMode,
-  m: number
+  m: number,
+  solidColor: string
 ): THREE.Color[] {
-  const col =
-    colorMode === 'shoot' ? shootColor(poly.shootId) : rankColor(poly.rank);
+  const col = shootNodeColor(poly, colorMode, solidColor);
   return Array.from({ length: m }, () => col);
 }
 
@@ -136,6 +191,8 @@ export interface MeshArrays {
   positions: number[];
   normals: number[];
   colors: number[];
+  /** Texture coordinates (2 per vertex), parallel to `positions`. */
+  uvs: number[];
   indices: number[];
   indexOffset: { value: number };
 }
@@ -159,13 +216,16 @@ export function appendTube(
   // float32). Defaults to origin (small-coord scenes unaffected). The frame
   // (axial/radial directions) is offset-invariant — only the emitted vertex
   // positions shift.
-  offset: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 }
+  offset: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 },
+  // World-space edge length (m) of one texture tile. Only affects `arrays.uvs`.
+  tileSize: number = DEFAULT_TEXTURE_TILE_SIZE
 ): void {
   const swept = sweepTube(
     nodes.map((v) => [v.x, v.y, v.z] as [number, number, number]),
     radii,
     n,
-    [offset.x, offset.y, offset.z]
+    [offset.x, offset.y, offset.z],
+    tileSize
   );
   if (!swept) return;
 
@@ -175,6 +235,8 @@ export function appendTube(
     const nrm = swept.normals[i];
     arrays.positions.push(p[0], p[1], p[2]);
     arrays.normals.push(nrm[0], nrm[1], nrm[2]);
+    const uv = swept.uvs[i];
+    arrays.uvs.push(uv[0], uv[1]);
     // Color is per-NODE, and each node owns one ring of `ringStride` vertices.
     const col = colorPerNode[Math.floor(i / swept.ringStride)];
     arrays.colors.push(col.r, col.g, col.b);
@@ -186,26 +248,43 @@ export function appendTube(
   arrays.indexOffset.value += swept.positions.length;
 }
 
+// Cross-section sides in texture mode. The categorical modes get away with 8 (flat
+// color hides facets), but a tiled bark image makes an octagonal trunk obvious.
+const TEXTURE_RADIAL_SEGMENTS = 16;
+
 export function QSM3D({
   cylinders,
   shoots,
   colorMode = 'rank',
   opacity = 1.0,
-  radialSegments = 8,
+  radialSegments,
   displayOffset,
+  solidColor = BARK_FALLBACK,
+  barkTexture,
+  textureTileSize = DEFAULT_TEXTURE_TILE_SIZE,
 }: QSM3DProps) {
   const offX = displayOffset?.x ?? 0;
   const offY = displayOffset?.y ?? 0;
   const offZ = displayOffset?.z ?? 0;
+  const textured = colorMode === 'texture';
+  // Explicit prop wins; otherwise texture mode buys extra roundness.
+  const segments = radialSegments ?? (textured ? TEXTURE_RADIAL_SEGMENTS : 8);
+
+  const texture = useImageTexture(
+    textured ? barkTexture?.data : undefined,
+    barkTexture?.mime ?? 'image/jpeg'
+  );
+
   const geometry = useMemo(() => {
     if (!cylinders || cylinders.length === 0) return null;
     if (!shoots || shoots.length === 0) return null;
 
-    const n = Math.max(3, radialSegments); // a tube needs >= 3 sides
+    const n = Math.max(3, segments); // a tube needs >= 3 sides
     const arrays: MeshArrays = {
       positions: [],
       normals: [],
       colors: [],
+      uvs: [],
       indices: [],
       indexOffset: { value: 0 },
     };
@@ -217,8 +296,11 @@ export function QSM3D({
     for (const poly of polylines) {
       const m = poly.nodes.length;
       if (m < 2) continue; // a 1-cylinder shoot still yields M=2
-      const colorPerNode = shootNodeColors(poly, colorMode, m);
-      appendTube(arrays, poly.nodes, poly.radii, colorPerNode, n, { x: offX, y: offY, z: offZ });
+      const colorPerNode = shootNodeColors(poly, colorMode, m, solidColor);
+      appendTube(
+        arrays, poly.nodes, poly.radii, colorPerNode, n,
+        { x: offX, y: offY, z: offZ }, textureTileSize
+      );
     }
 
     if (arrays.positions.length === 0) return null;
@@ -227,34 +309,48 @@ export function QSM3D({
     geo.setAttribute('position', new THREE.Float32BufferAttribute(arrays.positions, 3));
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(arrays.normals, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(arrays.colors, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(arrays.uvs, 2));
     geo.setIndex(arrays.indices);
     return geo;
     // opacity is intentionally NOT a dep: it affects only the material (its own
     // useMemo), so including it would force a needless geometry rebuild.
-  }, [cylinders, shoots, colorMode, radialSegments, offX, offY, offZ]);
+  }, [cylinders, shoots, colorMode, segments, offX, offY, offZ, solidColor, textureTileSize]);
 
   const material = useMemo(() => {
     const mat = new THREE.MeshStandardMaterial({
       vertexColors: true,
       transparent: opacity < 1,
       opacity,
-      roughness: 0.6,
-      metalness: 0.05,
+      // Bark is matte; the categorical modes keep their slightly glossier look.
+      roughness: textured ? 0.9 : 0.6,
+      metalness: textured ? 0.0 : 0.05,
     });
+
+    if (textured && texture) {
+      mat.map = texture;
+    }
+
     // Self-illuminate the tubes a bit so they don't render dark when the scene
     // lights are dimmed (the QSM has no dedicated light). three's flat `emissive`
     // is a single color and would wash out the per-shoot/rank hues, so instead we
     // inject a fraction of the per-vertex color into the emissive term via a tiny
     // shader patch -- each tube keeps its own color but gets a baseline glow that
     // lifts it off the dark background regardless of scene lighting.
-    mat.onBeforeCompile = (shader) => {
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <emissivemap_fragment>',
-        '#include <emissivemap_fragment>\n  totalEmissiveRadiance += vColor.rgb * 0.25;'
-      );
-    };
+    //
+    // ONLY for the categorical modes. In 'texture' mode vColor is white, so this
+    // would add a flat 25% white glow that washes the bark out to milky pastel; in
+    // 'color' mode it visibly lightens the exact RGB the user picked. Both are
+    // appearance modes where fidelity beats legibility, so they light normally.
+    if (isCategoricalMode(colorMode)) {
+      mat.onBeforeCompile = (shader) => {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <emissivemap_fragment>',
+          '#include <emissivemap_fragment>\n  totalEmissiveRadiance += vColor.rgb * 0.25;'
+        );
+      };
+    }
     return mat;
-  }, [opacity]);
+  }, [opacity, colorMode, textured, texture]);
 
   useEffect(() => () => geometry?.dispose(), [geometry]);
   useEffect(() => () => material.dispose(), [material]);

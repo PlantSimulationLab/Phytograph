@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.63.0"
+BACKEND_VERSION = "0.64.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -13284,6 +13284,66 @@ def get_qsm_leaf_textures():
     from qsm.leaves import CURATED_LEAF_TEXTURES
 
     return {"textures": CURATED_LEAF_TEXTURES}
+
+
+# ==================== QSM BARK TEXTURES ====================
+# Bark images for the QSM viewer's "Color by > Texture" mode. The renderer can't
+# read the PyInstaller bundle (or the Helios source tree) directly, so — exactly as
+# with plant/leaf textures — the backend resolves the file and hands back base64.
+
+
+@app.get("/api/qsm/bark-textures")
+def get_qsm_bark_textures():
+    """List the curated built-in bark textures available for QSM texturing."""
+    from qsm.leaves import CURATED_BARK_TEXTURES
+
+    return {"textures": CURATED_BARK_TEXTURES}
+
+
+class QSMBarkTextureRequest(BaseModel):
+    """Fetch one bark image: a curated builtin name OR an uploaded file path."""
+
+    builtin_name: Optional[str] = None
+    texture_path: Optional[str] = None
+
+
+class QSMBarkTextureResponse(BaseModel):
+    success: bool
+    name: Optional[str] = None
+    data_base64: Optional[str] = None
+    mime: Optional[str] = None
+    error: Optional[str] = None
+
+
+@app.post("/api/qsm/bark-texture", response_model=QSMBarkTextureResponse)
+def get_qsm_bark_texture(request: QSMBarkTextureRequest):
+    """Return one bark image as base64, from the builtin library or an upload.
+
+    A plain ``def`` (not ``async def``): this reads a file off disk, and a blocking
+    handler belongs in the threadpool rather than on the event loop.
+    """
+    from qsm.leaves import resolve_builtin_bark, read_bark_texture_file
+
+    try:
+        # An explicit upload path wins over a builtin name, matching the precedence
+        # _resolve_leaf_texture uses for leaves.
+        if request.texture_path:
+            name, b64, mime = read_bark_texture_file(Path(request.texture_path))
+        elif request.builtin_name:
+            name, b64, mime = resolve_builtin_bark(request.builtin_name)
+        else:
+            return QSMBarkTextureResponse(
+                success=False, error="No bark texture specified"
+            )
+        return QSMBarkTextureResponse(
+            success=True, name=name, data_base64=b64, mime=mime
+        )
+    except ValueError as e:
+        return QSMBarkTextureResponse(success=False, error=str(e))
+    except Exception as e:
+        return QSMBarkTextureResponse(
+            success=False, error=f"Failed to read bark texture: {e}"
+        )
 
 
 # ==================== QSM LEAF-ANGLE ADJUSTMENT (Phase 2) ====================

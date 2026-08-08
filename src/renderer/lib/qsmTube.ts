@@ -28,6 +28,36 @@ export type Vec3 = [number, number, number];
 // Radii below this collapse the ring to a point and produce degenerate normals.
 const MIN_RADIUS = 1e-5;
 
+/**
+ * Default world-space edge length of one texture tile, in metres. Matches the
+ * `texture_repeat_length` Helios' plant-architecture plugin uses for bark
+ * (PlantArchitecture.cpp), so a QSM tube tiles at the same physical scale as a
+ * Helios-generated plant.
+ */
+export const DEFAULT_TEXTURE_TILE_SIZE = 0.25;
+
+/**
+ * How many times the texture wraps around a ring of radius `r`.
+ *
+ * Both UV axes are measured in the SAME world units (metres / tileSize), which is
+ * what keeps a bark tile roughly SQUARE at every girth. Helios instead wraps
+ * exactly ONCE around regardless of radius (Context_object.cpp assigns the
+ * circumferential coordinate as j/radial_subdivisions), so its tile aspect scales
+ * with girth — ~0.25:1 on a 1cm twig vs ~7.5:1 on a 30cm trunk, a ~30x swing that
+ * reads as badly stretched bark on a trunk. Helios can't do better: its
+ * Tube::appendTubeSegment hard-errors if the coordinate leaves [0,1]. three.js has
+ * no such limit (RepeatWrapping), so we tile proportionally instead.
+ *
+ * The count is ROUNDED to an integer so the pattern closes seamlessly: the ring's
+ * duplicated seam vertex lands on an integer u, which coincides with u=0 under
+ * RepeatWrapping. A fractional count would leave a visible vertical seam stripe
+ * down every tube. Floored at 1 so a hair-thin twig still gets a whole tile.
+ */
+export function wrapsForRadius(radius: number, tileSize: number): number {
+  if (!(tileSize > 0)) return 1;
+  return Math.max(1, Math.round((2 * Math.PI * radius) / tileSize));
+}
+
 // --- small vector helpers ----------------------------------------------------
 
 function sub(a: readonly number[], b: readonly number[]): Vec3 {
@@ -224,6 +254,13 @@ export interface SweptTube {
   positions: Vec3[];
   /** Outward unit normals, parallel to `positions`. */
   normals: Vec3[];
+  /**
+   * Texture coordinates, parallel to `positions`. `u` runs AROUND the tube and
+   * `v` runs ALONG it (note Helios uses the opposite convention internally).
+   * Both are in tile units and deliberately EXCEED [0,1] — the material must use
+   * RepeatWrapping. See `wrapsForRadius` for why this doesn't stretch.
+   */
+  uvs: [number, number][];
   /** Triangles as 0-based indices into `positions`. */
   faces: [number, number, number][];
   /** Ring count (M) and per-ring vertex count (N+1), for callers that index rings. */
@@ -244,24 +281,45 @@ export interface SweptTube {
  * No end caps: shoots overlap their parent at forks, so caps would be buried inside
  * the joint, adding phantom interior surface (and inflating exported surface area).
  * Returns null if the polyline is too short to sweep.
+ *
+ * `tileSize` is the world-space edge length (metres) of one texture tile, used only
+ * to derive `uvs`. Geometry is unaffected by it.
  */
 export function sweepTube(
   nodes: Vec3[],
   radii: number[],
   segments: number,
-  offset: Vec3 = [0, 0, 0]
+  offset: Vec3 = [0, 0, 0],
+  tileSize: number = DEFAULT_TEXTURE_TILE_SIZE
 ): SweptTube | null {
   const m = nodes.length;
   if (m < 2) return null;
   const n = Math.max(3, segments);
+  const tile = tileSize > 0 ? tileSize : DEFAULT_TEXTURE_TILE_SIZE;
 
   const { axial, radial } = buildTubeFrame(nodes);
 
+  // Cumulative arc length along the centerline, in tile units. This is what makes
+  // the texture advance at a constant PHYSICAL rate down the shoot rather than
+  // being squeezed into a fixed 0..1 span (which would stretch long shoots and
+  // compress short ones).
+  const vAlong: number[] = new Array(m);
+  let arc = 0;
+  vAlong[0] = 0;
+  for (let i = 1; i < m; i++) {
+    arc += norm(sub(nodes[i], nodes[i - 1]));
+    vAlong[i] = arc / tile;
+  }
+
   const positions: Vec3[] = [];
   const normals: Vec3[] = [];
+  const uvs: [number, number][] = [];
   for (let i = 0; i < m; i++) {
     const orthogonal = normalize(cross(radial[i], axial[i]));
     const r = radii[i];
+    // Wrap count is per-ring, so a tapering shoot keeps a consistent tile scale as
+    // it thins. Rounded => the seam vertex lands on an integer u and closes cleanly.
+    const wraps = wrapsForRadius(r, tile);
     for (let j = 0; j <= n; j++) {
       const theta = (2 * Math.PI * j) / n;
       const c = Math.cos(theta);
@@ -275,6 +333,7 @@ export function sweepTube(
         nodes[i][2] + r * nz - offset[2],
       ]);
       normals.push([nx, ny, nz]);
+      uvs.push([(j / n) * wraps, vAlong[i]]);
     }
   }
 
@@ -292,5 +351,5 @@ export function sweepTube(
     }
   }
 
-  return { positions, normals, faces, ringCount: m, ringStride: n + 1 };
+  return { positions, normals, uvs, faces, ringCount: m, ringStride: n + 1 };
 }

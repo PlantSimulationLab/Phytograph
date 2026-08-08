@@ -63,6 +63,49 @@ test('builds a QSM with shoot ranks from a plant cloud via the UI', async () => 
     await page.getByTestId('qsm-color-mode').selectOption('shoot');
     await expect(page.getByTestId('qsm-color-mode')).toHaveValue('shoot');
 
+    // --- Appearance color modes: flat Color and tiled bark Texture ---
+    // Each mode reveals its own controls; the categorical modes reveal neither.
+    const modeSel = page.getByTestId('qsm-color-mode');
+    await expect(page.getByTestId('qsm-color-controls')).toHaveCount(0);
+    await expect(page.getByTestId('qsm-texture-controls')).toHaveCount(0);
+
+    // Color: the swatch and the hex field are two views of ONE value, so typing
+    // a hex must drive the swatch (they previously desynced).
+    await modeSel.selectOption('color');
+    await expect(page.getByTestId('qsm-color-controls')).toBeVisible();
+    const hexField = page.getByTestId('qsm-solid-color-hex');
+    await hexField.fill('#e63946');
+    await expect(page.getByTestId('qsm-solid-color')).toHaveValue('#e63946');
+    // A partial hex must NOT commit (the render path never sees a broken value).
+    await hexField.fill('#e6');
+    await expect(page.getByTestId('qsm-solid-color')).toHaveValue('#e63946');
+    await hexField.fill('#3366cc');
+    await expect(page.getByTestId('qsm-solid-color')).toHaveValue('#3366cc');
+
+    // Texture: the bark list is served by the backend (GET /api/qsm/bark-textures),
+    // so a populated dropdown proves that endpoint answered.
+    await modeSel.selectOption('texture');
+    await expect(page.getByTestId('qsm-texture-controls')).toBeVisible();
+    const barkSel = page.getByTestId('qsm-bark-texture');
+    await expect(barkSel.locator('option')).toHaveCount(5);
+    await expect(barkSel.locator('option').first()).toHaveText('AlmondBark');
+    // Selecting a different bark must load without error — the error line only
+    // renders when the fetch/resolve failed.
+    await barkSel.selectOption('OliveBark.jpg');
+    await expect(barkSel).toHaveValue('OliveBark.jpg');
+    await expect(page.getByTestId('qsm-bark-error')).toHaveCount(0);
+    // The tile-size knob commits through DebouncedNumberInput.
+    const tile = page.getByTestId('qsm-texture-tile');
+    await expect(tile).toHaveValue('0.25');
+    await tile.fill('0.5');
+    await tile.press('Enter');
+    await expect(tile).toHaveValue('0.5');
+
+    // Back to a categorical mode: the appearance controls disappear again.
+    await modeSel.selectOption('rank');
+    await expect(page.getByTestId('qsm-color-controls')).toHaveCount(0);
+    await expect(page.getByTestId('qsm-texture-controls')).toHaveCount(0);
+
     // --- Deleting the source scan must NOT bring back the import overlay ---
     // The QSM outlives its source scan; with the scan gone the scene is still
     // non-empty, so the empty-viewer hint must stay hidden.

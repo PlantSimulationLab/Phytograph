@@ -196,6 +196,13 @@ scene.
 |---|---|---|
 | **Shoot rank** | Color by branching order (trunk = 0, scaffolds = 1, …) | Default. Reading structure — which axis is the trunk vs. a scaffold. |
 | **Shoot id** | A distinct color per shoot, so each continuous axis reads as one object | Seeing the shoots themselves, independent of rank. |
+| **Color** | One flat color for the whole tree, from a swatch or hex field | Figures where the QSM is context, or to match a house style. |
+| **Texture** | A bark image wrapped around every branch | Presentation-ready renders. |
+
+The first two modes encode *data* as color and get a slight self-glow so
+the hues stay legible against the dark viewport. **Color** and
+**Texture** are *appearance* modes and light normally, so a picked color
+renders as exactly that color and a bark photo keeps its true tones.
 
 The **Shoot rank** palette is fixed and chosen so adjacent ranks stay
 clearly distinguishable:
@@ -213,6 +220,15 @@ In **Shoot id** mode each shoot's color comes from a perceptually-spaced
 hue rotation, so neighbouring shoots don't collide. In either mode,
 clicking a shoot in the results list **highlights that whole axis** and
 dims the rest.
+
+**Texture** mode adds a **Bark** picker — the five bark images from the
+Helios plant-architecture library, or your own uploaded JPEG/PNG — and a
+**Tile (m)** size that sets how large one bark tile is in the real
+world (default `0.25` m; smaller = finer pattern). Because the tile is
+measured in world units rather than as a fixed number of wraps, the bark
+holds a consistent physical scale from trunk to twig instead of
+stretching wider as a branch thickens. See
+[Build a QSM](../workflows/build-qsm.md#switch-the-coloring).
 
 ## Leaf area density voxels
 

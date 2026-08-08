@@ -129,6 +129,8 @@ import {
 } from '../lib/colorChannel';
 import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
+import { CURATED_BARK_TEXTURES, getBarkTextures, getBarkTexture } from '../utils/backendApi';
+import { DEFAULT_TEXTURE_TILE_SIZE } from '../lib/qsmTube';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { MissOctree } from './viewer/renderers/MissOctree';
@@ -1075,6 +1077,75 @@ export default function PointCloudViewer({
   // The QSM id whose Adjust-Leaf-Angles modal is open (null = closed).
   const [adjustLeavesQSMId, setAdjustLeavesQSMId] = useState<string | null>(null);
   const [qsmColorMode, setQSMColorMode] = useState<QSMColorMode>('rank');
+  // Appearance settings for the two non-categorical QSM color modes. Global (one
+  // setting drives every QSM), matching how qsmColorMode itself already behaves.
+  const [qsmSolidColor, setQSMSolidColor] = useState('#8b6f47'); // bark brown
+  // Hex text draft while that field has focus (null = show the committed color).
+  const [qsmColorHexDraft, setQSMColorHexDraft] = useState<string | null>(null);
+  // Which bark image is selected: a curated builtin name, or an uploaded file path.
+  const [qsmBarkSource, setQSMBarkSource] = useState<
+    { mode: 'builtin'; name: string } | { mode: 'upload'; path: string }
+  >({ mode: 'builtin', name: CURATED_BARK_TEXTURES[0] });
+  // The decoded image for that selection (base64 + MIME), fetched from the backend.
+  const [qsmBarkTexture, setQSMBarkTexture] = useState<{ data: string; mime: string } | null>(null);
+  const [qsmBarkNames, setQSMBarkNames] = useState<string[]>(CURATED_BARK_TEXTURES);
+  const [qsmBarkError, setQSMBarkError] = useState<string | null>(null);
+  // World-space edge length (m) of one bark tile — the knob that makes bark read
+  // coarser or finer without ever stretching it (see qsmTube's wrapsForRadius).
+  const [qsmTextureTile, setQSMTextureTile] = useState(DEFAULT_TEXTURE_TILE_SIZE);
+
+  // Ask the backend for the authoritative bark list the first time the user opens
+  // texture mode (the hardcoded CURATED_BARK_TEXTURES is only the fallback). Runs
+  // once, and silently keeps the fallback if the backend can't answer.
+  const barkListLoaded = useRef(false);
+  useEffect(() => {
+    if (qsmColorMode !== 'texture' || barkListLoaded.current) return;
+    barkListLoaded.current = true;
+    let cancelled = false;
+    getBarkTextures()
+      .then((names) => { if (!cancelled && names.length) setQSMBarkNames(names); })
+      .catch(() => { /* keep the fallback list */ });
+    return () => { cancelled = true; };
+  }, [qsmColorMode]);
+
+  // Fetch the selected bark image (base64 + MIME). Only while texture mode is
+  // active, so the ~500KB payload isn't pulled for users who never texture a QSM.
+  useEffect(() => {
+    if (qsmColorMode !== 'texture') return;
+    let cancelled = false;
+    setQSMBarkError(null);
+    const source =
+      qsmBarkSource.mode === 'builtin'
+        ? { builtinName: qsmBarkSource.name }
+        : { texturePath: qsmBarkSource.path };
+    getBarkTexture(source)
+      .then((resp) => {
+        if (cancelled) return;
+        if (resp.success && resp.data_base64) {
+          setQSMBarkTexture({ data: resp.data_base64, mime: resp.mime || 'image/jpeg' });
+        } else {
+          // Leave any previously-loaded bark in place rather than flashing the
+          // tree to untextured; surface the reason instead.
+          setQSMBarkError(resp.error || 'Failed to load bark texture');
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setQSMBarkError(e instanceof Error ? e.message : String(e));
+      });
+    return () => { cancelled = true; };
+  }, [qsmColorMode, qsmBarkSource]);
+
+  // Pick a bark image off disk. Mirrors AddLeavesPopup's handlePickPng.
+  const handlePickBarkImage = useCallback(async () => {
+    const picked = await window.electronAPI.dialog.open({
+      title: 'Choose bark texture image',
+      filters: [{ name: 'Bark texture', extensions: ['jpg', 'jpeg', 'png'] }],
+    });
+    if (!picked) return;
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    setQSMBarkSource({ mode: 'upload', path });
+  }, []);
+
   // QSM-entry multi-selection (for the panel header bulk actions).
   const [selectedQSMIds, setSelectedQSMIds] = useState<Set<string>>(new Set());
   // Stable "zoom to selection" entry point. The implementation closes over
@@ -14529,6 +14600,9 @@ export default function PointCloudViewer({
                 shoots={qsm.shoots}
                 colorMode={qsmColorMode}
                 displayOffset={displayOffset}
+                solidColor={qsmSolidColor}
+                barkTexture={qsmBarkTexture}
+                textureTileSize={qsmTextureTile}
               />
               {qsm.leaves && qsm.leavesVisible !== false && (
                 <group position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
@@ -16472,18 +16546,107 @@ export default function PointCloudViewer({
                 );
               })}
             </div>
-            {/* Display settings: color mode. */}
-            <div className="p-2 border-t border-neutral-700 flex items-center gap-2">
-              <span className="text-[10px] text-neutral-400">Color by</span>
-              <select
-                data-testid="qsm-color-mode"
-                value={qsmColorMode}
-                onChange={(e) => setQSMColorMode(e.target.value as QSMColorMode)}
-                className="flex-1 bg-neutral-700 text-neutral-200 text-[10px] rounded px-1 py-0.5 border border-neutral-600"
-              >
-                <option value="rank">Shoot rank</option>
-                <option value="shoot">Shoot id</option>
-              </select>
+            {/* Display settings: color mode, plus the controls each mode needs. */}
+            <div className="p-2 border-t border-neutral-700 flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-neutral-400">Color by</span>
+                <select
+                  data-testid="qsm-color-mode"
+                  value={qsmColorMode}
+                  onChange={(e) => setQSMColorMode(e.target.value as QSMColorMode)}
+                  className="flex-1 bg-neutral-700 text-neutral-200 text-[10px] rounded px-1 py-0.5 border border-neutral-600"
+                >
+                  <option value="rank">Shoot rank</option>
+                  <option value="shoot">Shoot id</option>
+                  <option value="color">Color</option>
+                  <option value="texture">Texture</option>
+                </select>
+              </div>
+
+              {/* Flat color: native picker + hex field, the same pairing the mesh
+                  and scan color popovers use. Only a COMPLETE hex is committed so
+                  the render path never sees a partial value mid-typing. */}
+              {qsmColorMode === 'color' && (
+                <div className="flex items-center gap-2" data-testid="qsm-color-controls">
+                  <span className="text-[10px] text-neutral-400">Color</span>
+                  <input
+                    type="color"
+                    data-testid="qsm-solid-color"
+                    value={qsmSolidColor}
+                    onChange={(e) => setQSMSolidColor(e.target.value)}
+                    className="w-8 h-6 rounded cursor-pointer bg-transparent border-0 p-0"
+                    title="Pick QSM color"
+                  />
+                  <input
+                    type="text"
+                    data-testid="qsm-solid-color-hex"
+                    // Controlled by a DRAFT while focused, by the committed color
+                    // otherwise. A raw controlled input bound to qsmSolidColor
+                    // would fight the user mid-typing (a partial "#e6" isn't a
+                    // valid color); an uncontrolled defaultValue instead goes
+                    // STALE when the swatch changes the color. The draft gives
+                    // free typing and still follows the picker.
+                    value={qsmColorHexDraft ?? qsmSolidColor}
+                    onFocus={() => setQSMColorHexDraft(qsmSolidColor)}
+                    onBlur={() => setQSMColorHexDraft(null)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setQSMColorHexDraft(v);
+                      if (/^#[0-9a-fA-F]{6}$/.test(v)) setQSMSolidColor(v);
+                    }}
+                    className="w-20 px-1.5 py-0.5 text-[10px] bg-neutral-800 border border-neutral-600 rounded text-neutral-200 font-mono"
+                    maxLength={7}
+                  />
+                </div>
+              )}
+
+              {/* Bark: curated library + upload, mirroring the Add Leaves picker.
+                  An uploaded file shows as a synthetic selected <option>. */}
+              {qsmColorMode === 'texture' && (
+                <div className="flex flex-col gap-1.5" data-testid="qsm-texture-controls">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-neutral-400">Bark</span>
+                    <select
+                      data-testid="qsm-bark-texture"
+                      value={qsmBarkSource.mode === 'builtin' ? qsmBarkSource.name : ''}
+                      onChange={(e) => setQSMBarkSource({ mode: 'builtin', name: e.target.value })}
+                      className="flex-1 bg-neutral-700 text-neutral-200 text-[10px] rounded px-1 py-0.5 border border-neutral-600"
+                    >
+                      {qsmBarkSource.mode === 'upload' && (
+                        <option value="">{qsmBarkSource.path.split(/[\\/]/).pop()}</option>
+                      )}
+                      {qsmBarkNames.map((t) => (
+                        <option key={t} value={t}>{t.replace(/\.(jpg|jpeg|png)$/i, '')}</option>
+                      ))}
+                    </select>
+                    <button
+                      data-testid="qsm-bark-upload"
+                      onClick={handlePickBarkImage}
+                      title="Upload a bark image"
+                      className="px-1.5 py-0.5 text-[10px] bg-neutral-700 hover:bg-neutral-600 border border-neutral-600 rounded text-neutral-200"
+                    >
+                      Upload
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-neutral-400" title="World size of one bark tile. Smaller = finer bark pattern.">
+                      Tile (m)
+                    </span>
+                    <DebouncedNumberInput
+                      data-testid="qsm-texture-tile"
+                      value={qsmTextureTile}
+                      onCommit={setQSMTextureTile}
+                      min={0.01}
+                      max={5}
+                      step={0.05}
+                      className="w-20 px-1.5 py-0.5 text-[10px] bg-neutral-800 border border-neutral-600 rounded text-neutral-200"
+                    />
+                  </div>
+                  {qsmBarkError && (
+                    <p className="text-[9px] text-red-400" data-testid="qsm-bark-error">{qsmBarkError}</p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
