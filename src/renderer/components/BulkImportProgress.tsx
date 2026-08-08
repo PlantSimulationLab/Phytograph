@@ -17,6 +17,10 @@ export interface BulkImportProgressState {
   // pathways set their own wording here. Takes precedence over the component's
   // `hint` prop when present.
   hint?: string;
+  // Per-import override for the header, for the same reason as `hint`: the
+  // default reads "Importing scans…", which is simply wrong when the thing being
+  // imported is a mesh or a skeleton. Takes precedence over the `title` prop.
+  title?: string;
   // 0..1 progress WITHIN the current item, from the backend's streamed PHP1
   // stage markers. Without it a single-file import shows a permanently empty
   // bar — `current - 1` of `total` is structurally 0 for `{current: 1, total: 1}`.
@@ -84,7 +88,9 @@ export function BulkImportProgress({
       <div className="bg-neutral-800 rounded-xl border border-neutral-700 shadow-2xl p-6 min-w-[360px] max-w-md">
         <div className="flex items-center gap-3 mb-4">
           <Loader2 className="h-5 w-5 animate-spin text-blue-400 shrink-0" />
-          <span className="text-sm font-medium text-white">{title}</span>
+          <span data-testid="bulk-import-progress-title" className="text-sm font-medium text-white">
+            {progress.title ?? title}
+          </span>
         </div>
         {progress.label && (
           <div

@@ -126,6 +126,10 @@ Two sources produce textured meshes:
   applies them. Faces whose material has no image fall back to that material's
   diffuse color.
 
+Either way, the textures survive an export: writing a textured mesh to `.obj`
+also writes its `.mtl` and the images it names, so the mesh re-imports textured
+(see [Import & export](../workflows/import-export.md#mesh-formats)).
+
 Wireframe applies to textured meshes too. Opacity does not: textured plants
 draw their leaf textures as crisp alpha cut-outs that ignore a blend factor, so
 the per-mesh **Opacity** slider is hidden for them — it would have no visible

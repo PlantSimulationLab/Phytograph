@@ -154,14 +154,33 @@ neither, the inversion warns that its result is likely to be inaccurate.
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.obj` | ✅ | ✅ | Vertices + faces + normals + vertex colors. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied. |
+| `.obj` | ✅ | ✅ | Vertices + faces + normals + UVs + materials. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied; on export, that `.mtl` and its texture images are written back alongside the `.obj`. |
 | `.ply` | ✅ | ✅ | Vertices + faces + normals + per-vertex color. ASCII **and** binary on import (read via open3d). No textures. |
 | `.stl` | ✅ | ✅ | Triangles only — no color or topology metadata. |
 
 Polygonal faces with more than three vertices are triangulated on
 import. Textured `.obj` import reads UV coordinates (`vt`) and per-material
-diffuse color (`Kd`) and texture (`map_Kd`); textures are **not** written on
-export.
+diffuse color (`Kd`) and texture (`map_Kd`).
+
+Exporting a textured mesh to `.obj` writes a **bundle**, not a single file:
+
+- `<name>.obj` — the geometry, with `vt` texture coordinates and a `usemtl`
+  group per material, referencing the material library via `mtllib`.
+- `<name>.mtl` — the material library: `Kd` diffuse color per material, plus
+  `map_Kd` for textured ones (and `map_d` where the texture carries an alpha
+  cutout, so leaf silhouettes survive).
+- `<name>_<material>.png` / `.jpg` — one image per textured material. The
+  extension follows the image's actual format, not its name.
+
+Organs with **no** image texture — petioles, internodes, stems, flowers — carry
+their color per vertex rather than in a material. OBJ has no portable per-vertex
+color, so on export they are grouped by color into generated materials
+(`color_0`, `color_1`, …) and written as `Kd`, which is the channel the importer
+reads back. A plant typically needs only a handful (a 20-day bean uses three).
+
+Keep the three together: an `.obj` moved away from its `.mtl` and images
+re-imports as untextured geometry. Meshes without materials (a triangulated
+point cloud, a DEM surface) export as a single `.obj`, with no `.mtl`.
 
 A [DEM](../workflows/generate-dem.md) is stored as a surface mesh, so it
 exports through the same OBJ / PLY / STL formats.

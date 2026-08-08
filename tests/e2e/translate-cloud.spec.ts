@@ -1,10 +1,13 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
+import { stubSaveDialog } from './helpers/stubSaveDialog';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // A Helios scan XML that carries a defined scanner origin (0.5, -1.0, 0.25) and
@@ -45,6 +48,27 @@ test.describe('translate cloud', () => {
   test.beforeEach(async () => {
     await resetToFreshScene(session.app, session.page);
   });
+
+  // Export the selected mesh to OBJ through the real Export dialog and return
+  // the file's text. Mesh export writes through the native Save dialog + the
+  // real fs IPC, so we redirect the dialog to a tmp file (an OS-native window
+  // can't be clicked) and read back the bytes actually written.
+  async function exportMeshObj(stem: string): Promise<string> {
+    const { app, page } = session;
+    const dir = mkdtempSync(join(tmpdir(), 'translate-export-'));
+    try {
+      const objPath = join(dir, `${stem}.obj`);
+      await stubSaveDialog(app, objPath);
+      await page.evaluate(() => (window as any).__openExportPanel?.());
+      await expect(page.getByTestId('export-modal')).toBeVisible();
+      await page.getByTestId('export-mesh-obj').click();
+      await expect(page.getByTestId('toast-title').filter({ hasText: 'Export Complete' }))
+        .toBeVisible({ timeout: 20_000 });
+      return readFileSync(objPath, 'utf8');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 
   // Import the fixture and wait for its octree to stream in.
   async function importTiny() {
@@ -315,30 +339,6 @@ test.describe('translate cloud', () => {
   test('a translated cloud triangulates at its translated position', async () => {
     const { page } = session;
 
-    // Capture the export blob (mesh OBJ export goes through a blob + anchor
-    // click, not the Electron save dialog). Same interception as export-mesh.spec.
-    await page.evaluate(() => {
-      const textByUrl = new Map<string, Promise<string>>();
-      const captured: { name: string; text: string }[] = [];
-      (window as unknown as { __exportedBlobs: typeof captured }).__exportedBlobs = captured;
-
-      const origCreate = URL.createObjectURL;
-      URL.createObjectURL = function (obj: Blob | MediaSource): string {
-        const url = origCreate.call(URL, obj);
-        if (obj instanceof Blob) textByUrl.set(url, obj.text());
-        return url;
-      };
-      const origAnchorClick = HTMLAnchorElement.prototype.click;
-      HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
-        if (this.download) {
-          const textPromise = textByUrl.get(this.href);
-          if (textPromise) textPromise.then((text) => { captured.push({ name: this.download, text }); });
-          return;  // suppress the real download
-        }
-        return origAnchorClick.call(this);
-      };
-    });
-
     const cloudRow = await importTiny();
 
     const before = await readEntryWhenReady();
@@ -369,21 +369,10 @@ test.describe('translate cloud', () => {
     const meshRow = page.getByTestId('mesh-row').first();
     await expect(meshRow).toBeVisible({ timeout: 60_000 });
 
-    // Export the mesh to OBJ and read its real vertex coordinates.
+    // Export the mesh to OBJ and read its real vertex coordinates off disk.
     await meshRow.click();
     await expect(meshRow).toHaveAttribute('data-selected', 'true');
-    await page.evaluate(() => (window as any).__openExportPanel?.());
-    await expect(page.getByTestId('export-modal')).toBeVisible();
-    await page.getByTestId('export-mesh-obj').click();
-
-    await expect.poll(async () => page.evaluate(
-      () => ((window as unknown as { __exportedBlobs?: unknown[] }).__exportedBlobs ?? []).length,
-    ), { timeout: 15_000, intervals: [100, 250, 500] }).toBeGreaterThan(0);
-
-    const obj = await page.evaluate(
-      () => (window as unknown as { __exportedBlobs: { name: string; text: string }[] })
-        .__exportedBlobs[0].text,
-    );
+    const obj = await exportMeshObj('translated');
 
     const xs = obj.split('\n')
       .filter((l) => l.startsWith('v '))
@@ -531,28 +520,6 @@ test.describe('translate cloud', () => {
   test('a rotated cloud (about a scene origin) triangulates at its rotated pose', async () => {
     const { page } = session;
 
-    // Capture the mesh OBJ export blob (same interception as the translate test).
-    await page.evaluate(() => {
-      const textByUrl = new Map<string, Promise<string>>();
-      const captured: { name: string; text: string }[] = [];
-      (window as unknown as { __exportedBlobs: typeof captured }).__exportedBlobs = captured;
-      const origCreate = URL.createObjectURL;
-      URL.createObjectURL = function (obj: Blob | MediaSource): string {
-        const url = origCreate.call(URL, obj);
-        if (obj instanceof Blob) textByUrl.set(url, obj.text());
-        return url;
-      };
-      const origAnchorClick = HTMLAnchorElement.prototype.click;
-      HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
-        if (this.download) {
-          const textPromise = textByUrl.get(this.href);
-          if (textPromise) textPromise.then((text) => { captured.push({ name: this.download, text }); });
-          return;
-        }
-        return origAnchorClick.call(this);
-      };
-    });
-
     const cloudRow = await importTiny();
 
     // Set a scene origin at (2, 0, 0) — well off the cylinder (centered at origin,
@@ -584,18 +551,7 @@ test.describe('translate cloud', () => {
 
     await meshRow.click();
     await expect(meshRow).toHaveAttribute('data-selected', 'true');
-    await page.evaluate(() => (window as any).__openExportPanel?.());
-    await expect(page.getByTestId('export-modal')).toBeVisible();
-    await page.getByTestId('export-mesh-obj').click();
-
-    await expect.poll(async () => page.evaluate(
-      () => ((window as unknown as { __exportedBlobs?: unknown[] }).__exportedBlobs ?? []).length,
-    ), { timeout: 15_000, intervals: [100, 250, 500] }).toBeGreaterThan(0);
-
-    const obj = await page.evaluate(
-      () => (window as unknown as { __exportedBlobs: { name: string; text: string }[] })
-        .__exportedBlobs[0].text,
-    );
+    const obj = await exportMeshObj('rotated');
     const verts = obj.split('\n')
       .filter((l) => l.startsWith('v '))
       .map((l) => l.slice(2).trim().split(/\s+/).map(Number))

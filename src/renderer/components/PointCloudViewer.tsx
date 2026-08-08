@@ -245,6 +245,7 @@ export type {
 } from '../lib/pointCloudTypes';
 import { plantResponseToMeshData } from '../lib/plantMeshData';
 import { serializeQsm, sanitizeQsmFilename, qsmExtForFormat, type QSMExportFormat } from '../lib/qsmExport';
+import { serializeMeshObj, serializeMeshPly, serializeMeshStl, sanitizeMeshName } from '../lib/meshExport';
 
 // Grid plane options
 type GridPlane = 'z-up' | 'y-up';
@@ -7012,98 +7013,117 @@ export default function PointCloudViewer({
     }
   }, [clouds, buildScanExportEntry]);
 
-  // Export mesh in various formats
-  const exportMesh = useCallback((meshId: string, format: 'obj' | 'ply' | 'stl') => {
+  // Export mesh in various formats.
+  //
+  // The user picks the destination FIRST (native Save dialog), then the files are
+  // written and only then does the success toast fire — so the toast always
+  // describes a write that actually happened. An OBJ goes out as a bundle: the
+  // .obj plus its .mtl and texture images, written as siblings of the chosen
+  // path, so a textured plant round-trips back through mesh import with its
+  // materials intact.
+  const exportMesh = useCallback(async (meshId: string, format: 'obj' | 'ply' | 'stl') => {
     const mesh = meshes.find(m => m.id === meshId);
     if (!mesh) return;
 
     const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
     // Use plant name if it's a plant, otherwise use source cloud filename
-    const baseName = mesh.isPlant
+    const defaultBase = mesh.isPlant
       ? `${mesh.plantType}_plant_age${mesh.plantAge}`
       : (sourceCloud?.data.fileName?.replace(/\.[^.]+$/, '') || 'mesh');
-    const { vertices, indices, normals } = mesh.data;
+    const suggestedName = `${sanitizeMeshName(defaultBase)}_mesh.${format}`;
+    const comments = mesh.isPlant
+      ? [`Helios Plant: ${mesh.plantType}, Age: ${mesh.plantAge} days`]
+      : [];
 
-    if (format === 'obj') {
-      const lines: string[] = [`# Mesh exported from Phytograph`, `# ${mesh.data.vertexCount} vertices, ${mesh.data.triangleCount} triangles`];
-      if (mesh.isPlant) {
-        lines.push(`# Helios Plant: ${mesh.plantType}, Age: ${mesh.plantAge} days`);
-      }
-      for (let i = 0; i < mesh.data.vertexCount; i++) {
-        lines.push(`v ${vertices[i * 3].toFixed(6)} ${vertices[i * 3 + 1].toFixed(6)} ${vertices[i * 3 + 2].toFixed(6)}`);
-      }
-      if (normals) {
-        for (let i = 0; i < mesh.data.vertexCount; i++) {
-          lines.push(`vn ${normals[i * 3].toFixed(6)} ${normals[i * 3 + 1].toFixed(6)} ${normals[i * 3 + 2].toFixed(6)}`);
-        }
-      }
-      for (let i = 0; i < mesh.data.triangleCount; i++) {
-        const i0 = indices[i * 3] + 1;
-        const i1 = indices[i * 3 + 1] + 1;
-        const i2 = indices[i * 3 + 2] + 1;
-        if (normals) {
-          lines.push(`f ${i0}//${i0} ${i1}//${i1} ${i2}//${i2}`);
-        } else {
-          lines.push(`f ${i0} ${i1} ${i2}`);
-        }
-      }
-      downloadFile(lines.join('\n'), `${baseName}_mesh.obj`);
-    } else if (format === 'ply') {
-      const lines: string[] = [
-        'ply',
-        'format ascii 1.0',
-        `comment Mesh exported from Phytograph`,
-        ...(mesh.isPlant ? [`comment Helios Plant: ${mesh.plantType}, Age: ${mesh.plantAge} days`] : []),
-        `element vertex ${mesh.data.vertexCount}`,
-        'property float x',
-        'property float y',
-        'property float z',
-        `element face ${mesh.data.triangleCount}`,
-        'property list uchar int vertex_indices',
-        'end_header',
-      ];
-      for (let i = 0; i < mesh.data.vertexCount; i++) {
-        lines.push(`${vertices[i * 3].toFixed(6)} ${vertices[i * 3 + 1].toFixed(6)} ${vertices[i * 3 + 2].toFixed(6)}`);
-      }
-      for (let i = 0; i < mesh.data.triangleCount; i++) {
-        lines.push(`3 ${indices[i * 3]} ${indices[i * 3 + 1]} ${indices[i * 3 + 2]}`);
-      }
-      downloadFile(lines.join('\n'), `${baseName}_mesh.ply`);
-    } else if (format === 'stl') {
-      const lines: string[] = [`solid mesh`];
-      for (let i = 0; i < mesh.data.triangleCount; i++) {
-        const i0 = indices[i * 3], i1 = indices[i * 3 + 1], i2 = indices[i * 3 + 2];
-        const v0 = [vertices[i0 * 3], vertices[i0 * 3 + 1], vertices[i0 * 3 + 2]];
-        const v1 = [vertices[i1 * 3], vertices[i1 * 3 + 1], vertices[i1 * 3 + 2]];
-        const v2 = [vertices[i2 * 3], vertices[i2 * 3 + 1], vertices[i2 * 3 + 2]];
-        // Calculate normal
-        const u = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
-        const v = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
-        const n = [u[1]*v[2] - u[2]*v[1], u[2]*v[0] - u[0]*v[2], u[0]*v[1] - u[1]*v[0]];
-        const len = Math.sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]) || 1;
-        lines.push(`  facet normal ${(n[0]/len).toFixed(6)} ${(n[1]/len).toFixed(6)} ${(n[2]/len).toFixed(6)}`);
-        lines.push(`    outer loop`);
-        lines.push(`      vertex ${v0[0].toFixed(6)} ${v0[1].toFixed(6)} ${v0[2].toFixed(6)}`);
-        lines.push(`      vertex ${v1[0].toFixed(6)} ${v1[1].toFixed(6)} ${v1[2].toFixed(6)}`);
-        lines.push(`      vertex ${v2[0].toFixed(6)} ${v2[1].toFixed(6)} ${v2[2].toFixed(6)}`);
-        lines.push(`    endloop`);
-        lines.push(`  endfacet`);
-      }
-      lines.push(`endsolid mesh`);
-      downloadFile(lines.join('\n'), `${baseName}_mesh.stl`);
+    // Ask where to save before doing any work. Cancelling here must leave no
+    // trace — no files, no toast.
+    let savePath: string | null = null;
+    if (window.electronAPI) {
+      savePath = await window.electronAPI.dialog.save({
+        defaultPath: suggestedName,
+        title: `Export mesh (${format.toUpperCase()})`,
+        filters: [{ name: `${format.toUpperCase()} mesh`, extensions: [format] }],
+      });
+      if (!savePath) return; // cancelled
     }
 
-    // For Helios plants, also export the plant structure XML
-    if (mesh.isPlant && mesh.heliosXml) {
-      // Small delay to ensure browser can handle multiple downloads
-      setTimeout(() => {
-        downloadFile(mesh.heliosXml!, `${baseName}_helios.xml`);
-        showToast({ title: `Exported ${format.toUpperCase()} mesh and Helios XML`, type: 'success' });
-      }, 100);
+    try {
+      // Split the chosen path into the directory the sibling files go in and the
+      // stem the bundle is named from.
+      const sep = savePath?.includes('\\') ? '\\' : '/';
+      const slash = savePath ? savePath.lastIndexOf(sep) : -1;
+      const dir = savePath && slash >= 0 ? savePath.slice(0, slash) : '';
+      const chosenFile = savePath ? savePath.slice(slash + 1) : suggestedName;
+      const baseName = chosenFile.replace(/\.[^.]+$/, '') || sanitizeMeshName(defaultBase);
+
+      if (format === 'obj') {
+        const files = serializeMeshObj(mesh.data, {
+          baseName,
+          materials: mesh.plantMaterials,
+          comments,
+        });
+        if (window.electronAPI && savePath) {
+          for (const [i, f] of files.entries()) {
+            // The first file is the OBJ itself: write it to EXACTLY the path the
+            // user typed (extension and all), so we never rename behind their
+            // back. The .mtl / textures are siblings named from the same stem.
+            const target = i === 0 ? savePath : `${dir}${dir ? sep : ''}${f.name}`;
+            if (f.bytes) {
+              await window.electronAPI.fs.writeBinary(target, f.bytes.buffer.slice(0) as ArrayBuffer);
+            } else {
+              await window.electronAPI.fs.writeText(target, f.text ?? '');
+            }
+          }
+        } else {
+          // Browser fallback (vite dev outside Electron): anchor-download each file.
+          for (const f of files) {
+            downloadFile(f.bytes ? new Blob([f.bytes.buffer.slice(0) as ArrayBuffer]) : (f.text ?? ''), f.name);
+          }
+        }
+        const extras = files.length - 1;
+        showToast({
+          title: 'Export Complete',
+          type: 'success',
+          message: extras > 0
+            ? `Wrote ${baseName}.obj with its .mtl and ${extras - 1} texture${extras - 1 === 1 ? '' : 's'}.`
+            : `Wrote ${baseName}.obj (${mesh.data.triangleCount.toLocaleString()} triangles).`,
+        });
+      } else {
+        const content = format === 'ply'
+          ? serializeMeshPly(mesh.data, { comments })
+          : serializeMeshStl(mesh.data);
+        if (window.electronAPI && savePath) {
+          await window.electronAPI.fs.writeText(savePath, content);
+        } else {
+          downloadFile(content, `${baseName}.${format}`);
+        }
+        showToast({
+          title: 'Export Complete',
+          type: 'success',
+          message: `Wrote ${baseName}.${format} (${mesh.data.triangleCount.toLocaleString()} triangles).`,
+        });
+      }
+
+      // For Helios plants, also write the plant structure XML beside the mesh.
+      if (mesh.isPlant && mesh.heliosXml) {
+        const xmlName = `${baseName}_helios.xml`;
+        if (window.electronAPI && savePath) {
+          await window.electronAPI.fs.writeText(`${dir}${dir ? sep : ''}${xmlName}`, mesh.heliosXml);
+        } else {
+          downloadFile(mesh.heliosXml, xmlName);
+        }
+      }
+    } catch (error) {
+      showToast({
+        title: 'Export Failed',
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return;
     }
 
     setShowExportPanel(false);
-  }, [meshes, clouds, downloadFile]);
+  }, [meshes, clouds, downloadFile, showToast]);
 
   // Export a DEM surface's raster LAYERS as GIS files (.asc / GeoTIFF). A DTM
   // carries several bands (elevation / density / intensity / hillshade / slope /
@@ -12004,6 +12024,34 @@ export default function PointCloudViewer({
     };
     return () => { delete (window as any).__meshColorSignature; };
   }, [meshTriangleColors]);
+
+  // Test hook: the distinct per-vertex colours on the selected mesh (or the only
+  // mesh), quantised and capped. Complements __meshColorSignature above, which
+  // only sees meshes with a built per-triangle colour buffer — a textured plant
+  // renders through TexturedPlantMesh and never gets one, so its vertex colours
+  // (the ONLY thing colouring untextured organs like petioles and internodes)
+  // are invisible to that hook. A mean would hide the failure this guards: a
+  // handful of correct leaf colours averaged with grey organs still looks
+  // plausible, so we expose the palette and let the test assert on membership.
+  useEffect(() => {
+    (window as any).__meshVertexColorPalette = (meshId?: string) => {
+      const mesh = meshId
+        ? meshes.find(m => m.id === meshId)
+        : (meshes.length === 1 ? meshes[0] : meshes.find(m => selectedMeshIds.has(m.id)));
+      const c = mesh?.data.vertexColors;
+      if (!c) return [];
+      const seen = new Set<string>();
+      const out: [number, number, number][] = [];
+      for (let i = 0; i + 2 < c.length && out.length < 64; i += 3) {
+        const key = `${Math.round(c[i] * 100)},${Math.round(c[i + 1] * 100)},${Math.round(c[i + 2] * 100)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push([c[i], c[i + 1], c[i + 2]]);
+      }
+      return out;
+    };
+    return () => { delete (window as any).__meshVertexColorPalette; };
+  }, [meshes, selectedMeshIds]);
 
   // Per-scan legend entries (color + count) when the active mesh is colored by
   // source scan. Null otherwise.
@@ -17830,7 +17878,6 @@ export default function PointCloudViewer({
           meshName={selectedMesh ? displayNameOfMesh(selectedMesh) : ''}
           meshTriangleCount={selectedMesh?.data.triangleCount ?? 0}
           meshIsDem={selectedMesh?.method === 'dem' && !!selectedMesh?.demGrid}
-          isScanning={isScanning}
           skeletonSelected={!!selectedSkeleton}
           skeletonName={selectedSkeleton ? (clouds.find(c => c.id === selectedSkeleton.sourceCloudId)?.data.fileName || '') : ''}
           skeletonNodeCount={selectedSkeleton?.data.pointCount ?? 0}
@@ -17840,7 +17887,6 @@ export default function PointCloudViewer({
           onExportMesh={(format) => { if (selectedMesh) exportMesh(selectedMesh.id, format); }}
           onExportDEMRaster={(format) => { if (selectedMesh) handleExportDEMRaster(selectedMesh.id, format); }}
           onExportSkeleton={(format) => { if (selectedSkeleton) exportSkeleton(selectedSkeleton.id, format); }}
-          onRunScan={() => handleRunScan()}
         />
       )}
 

@@ -439,11 +439,30 @@ count when the write finishes — there's no need to click Export twice.
 
 ### Mesh formats
 
+Click a format and pick the destination in the save dialog; the file is written
+when you confirm, and a toast reports what was saved.
+
 | Format | Carries |
 |---|---|
-| `.obj` | Vertices, faces, normals, vertex colors |
-| `.ply` | Same as `.obj` plus arbitrary per-vertex scalars |
+| `.obj` | Vertices, faces, normals, UVs and materials (see below) |
+| `.ply` | Vertices, faces and per-vertex color |
 | `.stl` | Triangles only (no color or topology metadata) |
+
+A textured mesh — a generated plant, or an OBJ you imported with its materials —
+exports to `.obj` as a **bundle**: the `.obj`, a `.mtl` material library, and one
+image per textured material, all written together in the folder you chose. That
+is what lets the model round-trip: re-importing the `.obj` picks the `.mtl` and
+its images back up and the plant comes back textured. Move the three together;
+an `.obj` on its own re-imports as plain grey geometry.
+
+Organs with no texture (petioles, internodes, stems) keep their color too — they
+are grouped by color into materials in the same `.mtl`, since OBJ has no portable
+per-vertex color. A mesh with only vertex colors and no textures therefore still
+exports an `.obj` + `.mtl` pair; one with no color information at all exports as
+a single `.obj`.
+
+Generated plants also write their Helios structure XML (`<name>_helios.xml`)
+beside the mesh.
 
 ### Skeleton formats
 

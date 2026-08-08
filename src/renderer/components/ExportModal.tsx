@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Download, FileCode, GripVertical, Loader2, Radio, X } from 'lucide-react';
+import { Download, FileCode, GripVertical, X } from 'lucide-react';
 import {
   lockGeometryForScanXml,
   reorderColumns,
@@ -49,7 +49,6 @@ export interface ExportModalProps {
   // True when the single selected mesh is a DEM surface (method === 'dem'),
   // which unlocks the GIS raster export row.
   meshIsDem: boolean;
-  isScanning: boolean;
   skeletonSelected: boolean;
   skeletonName: string;
   skeletonNodeCount: number;
@@ -73,7 +72,6 @@ export interface ExportModalProps {
   // DEM raster export (mesh.method === 'dem' only): ESRI ASCII grid or GeoTIFF.
   onExportDEMRaster: (format: 'asc' | 'tif') => void;
   onExportSkeleton: (format: 'obj' | 'ply' | 'json') => void;
-  onRunScan: () => void;
 }
 
 // Per-scan data-only formats (Data only mode). ASCII formats (xyz/csv/txt) get
@@ -102,7 +100,6 @@ export function ExportModal({
   meshName,
   meshTriangleCount,
   meshIsDem,
-  isScanning,
   skeletonSelected,
   skeletonName,
   skeletonNodeCount,
@@ -113,7 +110,6 @@ export function ExportModal({
   onExportScanXml,
   onExportMesh,
   onExportSkeleton,
-  onRunScan,
 }: ExportModalProps) {
   // ---- Point-cloud export state -------------------------------------------
   const [cloudFormat, setCloudFormat] = useState<'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj'>('las');
@@ -465,10 +461,6 @@ export function ExportModal({
                   </div>
                 </div>
               )}
-              <button onClick={onRunScan} disabled={isScanning}
-                className="mt-2 w-full px-2 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-600 disabled:cursor-not-allowed rounded text-xs text-white flex items-center justify-center gap-1.5">
-                {isScanning ? <><Loader2 className="w-3 h-3 animate-spin" />Scanning…</> : <><Radio className="w-3 h-3" />Synthetic LiDAR Scan</>}
-              </button>
             </div>
           )}
 

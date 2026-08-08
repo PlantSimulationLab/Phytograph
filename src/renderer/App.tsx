@@ -589,9 +589,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       }
 
       if (shouldImportAsMesh) {
-        // The default hint talks about "large scans" — wrong for a mesh. Swap
-        // in mesh wording while keeping the same in-flight label.
-        setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, hint: 'Reading mesh from disk…' });
+        // The default header and hint both talk about scans — wrong for a mesh.
+        // Swap in mesh wording while keeping the same in-flight label.
+        setImportProgress({
+          current: 1, total: 1, label: `Loading ${file.name}`,
+          title: 'Importing mesh…', hint: 'Reading mesh from disk…',
+        });
         if (!importRefsRef.current) {
           showToast({ title: 'Viewer not ready for mesh import', type: 'error' });
         } else {
@@ -675,8 +678,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           }
         }
       } else if (shouldImportAsSkeleton) {
-        // Mesh-style hint; "large scans" wording is wrong for a skeleton too.
-        setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, hint: 'Reading skeleton from disk…' });
+        // Mesh-style header/hint; the scan wording is wrong for a skeleton too.
+        setImportProgress({
+          current: 1, total: 1, label: `Loading ${file.name}`,
+          title: 'Importing skeleton…', hint: 'Reading skeleton from disk…',
+        });
         // Parse as skeleton
         const skeletonData = await parseSkeleton(file);
         if (importRefsRef.current) {
@@ -884,6 +890,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         }
 
         if (shouldImportAsMesh) {
+          // Now that the file's type is known, correct the header the loop set
+          // generically above — "Importing scans…" is wrong for a mesh. A mixed
+          // batch retitles per file as it moves through them.
+          setImportProgress(p => (p ? { ...p, title: 'Importing mesh…' } : p));
           // Path-backed PLY/OBJ prefer the backend importer (binary PLY + per-vertex
           // color for PLY; MTL/textures for OBJ); everything else parses locally.
           const ext = file.name.toLowerCase().split('.').pop() ?? '';
@@ -944,6 +954,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             }
           }
         } else if (shouldImportAsSkeleton) {
+          setImportProgress(p => (p ? { ...p, title: 'Importing skeleton…' } : p));
           // Parse as skeleton
           const skeletonData = await parseSkeleton(file);
           if (importRefsRef.current) {
