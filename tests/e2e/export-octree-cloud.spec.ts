@@ -84,6 +84,13 @@ test('exports an octree-backed cloud to XYZ via the backend', async () => {
           .__exportedBlobs[0],
     );
 
+    // A finished export must announce itself — a silent one reads as a no-op and
+    // gets re-triggered. Assert the success toast names the file and the real
+    // point count, not just that some toast appeared.
+    const successToast = page.getByTestId('toast-success').filter({ hasText: 'Export Complete' });
+    await expect(successToast).toBeVisible({ timeout: 30_000 });
+    await expect(successToast.getByTestId('toast-message')).toHaveText('Wrote tiny.xyz (60 points).');
+
     expect(captured.name).toBe('tiny.xyz');
     // Every non-empty line is one "x y z" point — the count must match the
     // source cloud, proving the backend streamed all points from the source.

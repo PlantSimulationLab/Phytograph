@@ -378,6 +378,12 @@ ASCII readers (CloudCompare included) skip the `#` line as a comment.
 If you need to round-trip with full fidelity, use `.ply` — it preserves
 everything Phytograph knows about the cloud.
 
+After you click **Export** the dialog closes and a small **progress pill**
+appears at the top of the viewer while the cloud is written (a cloud of a few
+million points takes a few seconds). The pill clears and a toast reports the
+file name and point count when the write finishes — there's no need to click
+Export twice.
+
 ### Exporting scans
 
 Whenever the scene holds **scans** — clouds that carry scanner parameters

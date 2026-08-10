@@ -1487,10 +1487,11 @@ export default function PointCloudViewer({
 
   // Export panel state
   const [showExportPanel, setShowExportPanel] = useState(false);
-  // Scan-export in flight. The backend serializes every scan's points to base64
-  // (5-10 s for a large bundle) with no streaming progress, so we close the modal
-  // and show an indeterminate StatusPill for the duration — otherwise the user
-  // stares at a frozen dialog and re-clicks Export.
+  // Export in flight — covers BOTH the scan bundle and a plain point-cloud
+  // export. Either one serializes millions of points to base64 (5-10 s for a
+  // large cloud) with no streaming progress, so we close the modal and show an
+  // indeterminate StatusPill for the duration — otherwise the user stares at a
+  // frozen dialog and re-clicks Export.
   const [isExportingScan, setIsExportingScan] = useState(false);
 
   // Global app settings (persisted via electron-store, edited in SettingsDialog).
@@ -6548,7 +6549,12 @@ export default function PointCloudViewer({
   // Inner worker: does the actual per-format serialize/encode/download for a
   // resolved cloud. Defined before exportPointCloud so the latter can list it as a
   // dependency without a temporal-dead-zone reference. Keeps its own early returns.
-  const exportPointCloudInner = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null, cloud: PointCloudEntry) => {
+  //
+  // Returns the written file name + point count on success, or null when the
+  // export failed (having already shown its own error toast). The caller owns the
+  // single success toast so every format reports completion the same way — an
+  // export that finishes silently reads as one that never ran.
+  const exportPointCloudInner = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null, cloud: PointCloudEntry): Promise<{ fileName: string; pointCount: number } | null> => {
     const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
 
     // Octree-backed cloud: it has no renderer positions to format, so every
@@ -6577,13 +6583,13 @@ export default function PointCloudViewer({
           a.click();
           document.body.removeChild(a);
           URL.revokeObjectURL(url);
-        } else {
-          showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
+          return { fileName: response.filename, pointCount: response.point_count };
         }
+        showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
       } catch (error) {
         showToast({ title: 'Export Failed', message: error instanceof Error ? error.message : 'Unknown error', type: 'error' });
       }
-      return;
+      return null;
     }
 
     const data = ps.data;
@@ -6637,15 +6643,15 @@ export default function PointCloudViewer({
           a.click();
           document.body.removeChild(a);
           URL.revokeObjectURL(url);
-        } else {
-          console.error('LAZ export failed:', response.error);
-          showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
+          return { fileName: response.filename, pointCount: response.point_count };
         }
+        console.error('LAZ export failed:', response.error);
+        showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
       } catch (error) {
         console.error('LAZ export failed:', error);
         showToast({ title: 'Export Failed', message: error instanceof Error ? error.message : 'Unknown error', type: 'error' });
       }
-      return;
+      return null;
     }
 
     if (format === 'xyz' || format === 'txt' || format === 'csv') {
@@ -6668,6 +6674,7 @@ export default function PointCloudViewer({
       const headerPrefix = format === 'csv' ? '' : '# ';
       const text = buildAsciiExport(data, slugs, delimiter, headerPrefix);
       downloadFile(text, `${baseName}.${format}`);
+      return { fileName: `${baseName}.${format}`, pointCount: data.pointCount };
     } else if (format === 'ply') {
       const hasColors = !!data.colors;
       const lines: string[] = [
@@ -6690,12 +6697,14 @@ export default function PointCloudViewer({
         lines.push(line);
       }
       downloadFile(lines.join('\n'), `${baseName}.ply`);
+      return { fileName: `${baseName}.ply`, pointCount: data.pointCount };
     } else if (format === 'obj') {
       const lines: string[] = [`# Point cloud exported from Phytograph`, `# ${data.pointCount} points`];
       for (let i = 0; i < data.pointCount; i++) {
         lines.push(`v ${data.positions[i * 3].toFixed(6)} ${data.positions[i * 3 + 1].toFixed(6)} ${data.positions[i * 3 + 2].toFixed(6)}`);
       }
       downloadFile(lines.join('\n'), `${baseName}.obj`);
+      return { fileName: `${baseName}.obj`, pointCount: data.pointCount };
     } else if (format === 'las') {
       // Export as LAS 1.2 format (binary)
       const hasColors = !!data.colors;
@@ -6829,7 +6838,10 @@ export default function PointCloudViewer({
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      return { fileName: `${baseName}.las`, pointCount: data.pointCount };
     }
+
+    return null;
   }, [getDisplayData, buildPointSource, downloadFile]);
 
   const exportPointCloud = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null = null) => {
@@ -6845,7 +6857,22 @@ export default function PointCloudViewer({
     setShowExportPanel(false);
     setIsExportingScan(true);
     try {
-      await exportPointCloudInner(format, columns, cloud);
+      // Yield a frame before starting. The ASCII/PLY/OBJ/LAS branches serialize
+      // millions of points synchronously on the main thread, so without this the
+      // pill's state update and its clear land in the same task and React never
+      // paints it — the user sees a multi-second freeze and no progress at all.
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      const result = await exportPointCloudInner(format, columns, cloud);
+      if (result) {
+        showToast({
+          title: 'Export Complete',
+          type: 'success',
+          message: `Wrote ${result.fileName} (${result.pointCount.toLocaleString()} points).`,
+        });
+      }
+    } catch (error) {
+      showToast({ title: 'Export Failed', type: 'error',
+        message: error instanceof Error ? error.message : 'Unknown error' });
     } finally {
       setIsExportingScan(false);
     }
@@ -15610,7 +15637,7 @@ export default function PointCloudViewer({
           the to-be-cropped points stay hidden via isApplyingCrop. */}
       {isApplyingCrop && <StatusPill label="Cropping…" />}
 
-      {isExportingScan && <StatusPill testId="scan-export-running" label="Exporting scan…" />}
+      {isExportingScan && <StatusPill testId="scan-export-running" label="Exporting…" />}
 
       {/* Open3D triangulation status indicator (ball pivoting / poisson / etc.) */}
       {triangulationInProgress && !isHeliosRunning && (
