@@ -3515,6 +3515,139 @@ export async function resetCloudEdits(
   }
 }
 
+/** One replayable label edit. Mirrors LabelStroke in backend-api/main.py. */
+export interface LabelStrokeRequest {
+  region: CropOctreeRegion;
+  to_class: number;
+  /** Omit for "any visible" — no class gate. */
+  from_classes?: number[];
+  stroke_id: string;
+}
+
+export interface LabelStrokeResult {
+  stroke_id: string;
+  selected_count: number;
+  changed_count: number;
+}
+
+export interface LabelRegionResult {
+  session_id: string;
+  slug: string;
+  created_column: boolean;
+  applied: LabelStrokeResult[];
+  /** value -> count, over EDITABLE points only (no deleted rows, no misses). */
+  class_counts: Record<string, number>;
+  value_range: [number, number];
+  /** Surviving history length — the renderer trims its stroke list to match. */
+  label_edit_count: number;
+}
+
+/**
+ * Repaint points. Instant: mutates the in-RAM label column with NO octree
+ * rebuild, so the viewport relies on the renderer's client-side label overlay
+ * until an explicit commit.
+ *
+ * Strokes are applied IN ORDER and atomically, so a whole brush drag goes in
+ * one call rather than one request per stamp.
+ */
+export async function labelCloudRegion(
+  sessionId: string,
+  strokes: LabelStrokeRequest[],
+  slug?: string,
+  label?: string,
+): Promise<LabelRegionResult> {
+  const baseUrl = getBackendUrl();
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/label_region`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strokes, ...(slug ? { slug } : {}), ...(label ? { label } : {}) }),
+      },
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as LabelRegionResult;
+  } catch (error) {
+    console.error('label_cloud_region failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Undo: roll the label column back, keeping the first `editCount` edits. Omit
+ * to clear all labelling on the slug. No rebuild.
+ */
+export async function resetCloudLabelEdits(
+  sessionId: string,
+  editCount?: number,
+  slug?: string,
+): Promise<Omit<LabelRegionResult, 'created_column' | 'applied'>> {
+  const baseUrl = getBackendUrl();
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/reset_label_edits`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(editCount === undefined ? {} : { edit_count: editCount }),
+          ...(slug ? { slug } : {}),
+        }),
+      },
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('reset_cloud_label_edits failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Bake the label column into the octree so it colours without the client-side
+ * overlay. One PotreeConverter run — the slow step.
+ *
+ * DISPLAY ONLY: every backend op reads the in-RAM arrays, so split / filter /
+ * extract / LAS export already see fresh labels with no commit. Do not call
+ * this defensively before those.
+ */
+export async function commitCloudLabels(
+  sessionId: string,
+  slug?: string,
+): Promise<OctreeMetadata & { slug: string; class_counts: Record<string, number> }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = abortOnTimeout(controller, 600000, '/api/cloud/session/commit_labels');
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/commit_labels`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(slug ? { slug } : {}),
+        signal: controller.signal,
+      },
+    );
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('commit_cloud_labels failed:', error);
+    throw error;
+  }
+}
+
 /**
  * Permanently apply deletions: rebuild the octree from the survivors (one
  * PotreeConverter run) and clear the mask. The deliberately-slow step. Returns

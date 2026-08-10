@@ -183,6 +183,29 @@ describe('readBlockedRects', () => {
 
     expect(readBlockedRects(root).map(r => r.x)).toEqual([728, 496, 792]);
   });
+
+  it('a tool panel with NO z-index blocks nothing — the regression', () => {
+    // A floating panel that forgets its z-index is invisible to this scan AND
+    // paints below the z-10 lasso overlay, so the overlay swallows every click
+    // over it: the panel cannot be used or even closed, and each click just
+    // drops another lasso vertex on top of it. This bit the labelling panel.
+    const root = makeRoot();
+    addChild(root, { position: 'absolute' }, {
+      left: ROOT.left + 700, top: ROOT.top + 16, width: 256, height: 400,
+    });
+    expect(readBlockedRects(root)).toEqual([]);
+
+    // With z-20 (what CropPanel and LabelPanel both carry) it is measured, so
+    // the lasso refuses clicks there instead of eating them.
+    const root2 = makeRoot();
+    addChild(root2, { position: 'absolute', zIndex: '20' }, {
+      left: ROOT.left + 700, top: ROOT.top + 16, width: 256, height: 400,
+    });
+    const rects = readBlockedRects(root2);
+    expect(rects).toEqual([{ x: 700, y: 16, width: 256, height: 400 }]);
+    // ...and a click in the middle of it is refused.
+    expect(isPointBlocked({ x: 800, y: 200 }, rects)).toBe(true);
+  });
 });
 
 describe('isPointBlocked', () => {

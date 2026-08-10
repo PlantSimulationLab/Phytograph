@@ -3,9 +3,9 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, describeBackendError, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -85,6 +85,9 @@ import {
   polygonRegionFromCamera,
 } from '../lib/cropGeometry';
 import { projectionKindOf } from '../lib/cameraRay';
+import { makePreset, type ClassPalette } from '../lib/classPalettes';
+import { LabelPanel } from './viewer/panels/LabelPanel';
+import { MANUAL_CLASS_ATTRIBUTE } from '../lib/classification';
 import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
 import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
 import { pendingDeletesToClipBoxes } from '../lib/deletePreview';
@@ -217,6 +220,8 @@ import type {
   PointCloudEntry,
   CloudEditState,
   PendingDeleteRegion,
+  LabelStroke,
+  LabelEditState,
   MeshData,
   MeshEntry,
   SkeletonData,
@@ -1999,6 +2004,24 @@ export default function PointCloudViewer({
   const [erasePreviewBoxes, setErasePreviewBoxes] = useState<THREE.Matrix4[]>([]);
   // Camera-facing square indicator transform that follows the cursor.
   const [eraseBrushMatrix, setEraseBrushMatrix] = useState<THREE.Matrix4 | null>(null);
+
+  // ── Manual labelling ──────────────────────────────────────────────────────
+  // The tool paints a per-point class column. Phase 1 reuses the EXISTING
+  // polygon lasso as its selection primitive (draw → close → the region becomes
+  // a stroke), so there is no new selection code here; the slab and the brush
+  // land in later phases.
+  const [showLabelPanel, setShowLabelPanel] = useState(false);
+  // Palette bound to the labelled cloud. Seeded from the cloud's OctreeRef when
+  // the tool opens, else from the wood/leaf preset (the common correction case).
+  const [labelPalette, setLabelPalette] = useState<ClassPalette | null>(null);
+  const [labelActiveClass, setLabelActiveClass] = useState(0);
+  const [labelVisibleClasses, setLabelVisibleClasses] = useState<Set<number>>(new Set());
+  // null = "Any visible" (no class gate) — see LabelPanel.
+  const [labelFromClasses, setLabelFromClasses] = useState<Set<number> | null>(null);
+  const [labelStrokes, setLabelStrokes] = useState<LabelStroke[]>([]);
+  const [labelClassCounts, setLabelClassCounts] = useState<Record<number, number>>({});
+  const [labelDirty, setLabelDirty] = useState(false);
+  const [labelBusy, setLabelBusy] = useState(false);
   // Live PointCloudOctree of EVERY mounted octree cloud, keyed by cloud id and
   // handed up by OctreePointCloud (which also reports null on unmount).
   //
@@ -2365,6 +2388,9 @@ export default function PointCloudViewer({
     // Closing the picker only disarms it — placed labels persist, so they can
     // still be read while another tool is open.
     if (except !== 'point-pick') { setShowPointPickerPanel(false); setPointPickMode(false); }
+    // Closing the label tool only hides the panel — uncommitted strokes persist
+    // so they are not lost by opening another tool (same as point-pick).
+    if (except !== 'label') setShowLabelPanel(false);
   }, []);
 
   // Get edit state for a cloud
@@ -3700,6 +3726,227 @@ export default function PointCloudViewer({
     setEditMode('none');
   }, [editMode, selectedIds, clouds, editStates, onUpdateCloud, eraseFrame, eraseBrushPx]);
 
+  // ── Manual labelling ──────────────────────────────────────────────────────
+
+  // The cloud being labelled (single selection, session-backed).
+  const labelTargetCloud = useMemo(() => {
+    if (!showLabelPanel || selectedIds.size !== 1) return null;
+    const cloud = clouds.find(c => selectedIds.has(c.id));
+    return cloud?.data.octree?.sessionId ? cloud : null;
+  }, [showLabelPanel, selectedIds, clouds]);
+
+  // Read through a ref so the polygon-close callback (created once) can tell
+  // whether the lasso should paint rather than crop, without re-creating itself
+  // on every state change.
+  const labelModeRef = useRef(false);
+  useEffect(() => { labelModeRef.current = !!labelTargetCloud; }, [labelTargetCloud]);
+
+  const labelPaletteRef = useRef<ClassPalette | null>(null);
+  useEffect(() => { labelPaletteRef.current = labelPalette; }, [labelPalette]);
+
+  // Uncommitted-stroke guard.
+  //
+  // Phytograph has no project save/load — File > Save opens the export panel and
+  // the scene lives only in React state plus backend session RAM. For every
+  // other tool that is survivable: a triangulation re-runs in seconds. A
+  // labelling session is IRREPLACEABLE hand-made work, so losing it to a stray
+  // File > New or a window close is a different class of harm.
+  //
+  // Guard the exits we can. Real autosave/session restore is separate design
+  // work; this is the cheap part that prevents the worst outcome.
+  // Deliberately NOT a `beforeunload` handler. In Electron that raises a native
+  // Chromium dialog which the app cannot style, cannot dismiss programmatically,
+  // and which wedges an automated quit (it hung Playwright's worker teardown for
+  // the full 180 s timeout). The in-app warnings below — the File > New dialog
+  // and the panel's own unsaved-strokes hint — cover the paths a user actually
+  // takes, without hijacking window close.
+  //
+  // The File>New confirm dialog and E2E read this to know whether work is at risk.
+  useEffect(() => {
+    (window as any).__uncommittedLabelStrokes = labelStrokes.length;
+    return () => { (window as any).__uncommittedLabelStrokes = 0; };
+  }, [labelStrokes.length]);
+
+  // Opening the label tool arms the POLYGON LASSO. Phase 1 has no selection
+  // machinery of its own: it drives the crop tool's draw state, and
+  // closePolygonFrom routes a closed polygon to paintLabelStroke instead of
+  // setCropPolygon (see labelModeRef there). Every gate on the overlay, the
+  // blocked-zone clamping, the camera freeze and the Escape/Backspace cascade
+  // therefore works unchanged.
+  useEffect(() => {
+    if (labelTargetCloud) {
+      setEditMode('crop');
+      setCropMode('polygon');
+      setCropDrawState('drawing-polygon');
+      setPolygonInProgress([]);
+      setCropPolygon(null);
+    } else if (labelModeRef.current) {
+      // Tool closed: leave draw mode so the crop overlay does not linger.
+      setCropDrawState('idle');
+      setPolygonInProgress([]);
+      setEditMode('none');
+    }
+  }, [labelTargetCloud]);
+
+  // After a stroke lands, re-arm the lasso so the user can paint again without
+  // re-entering the tool.
+  useEffect(() => {
+    if (labelTargetCloud && !labelBusy && cropDrawState === 'idle') {
+      setCropDrawState('drawing-polygon');
+      setPolygonInProgress([]);
+    }
+  }, [labelTargetCloud, labelBusy, cropDrawState]);
+
+  // Seed the palette when the tool opens on a cloud: prefer one already bound to
+  // this cloud (so re-opening keeps the user's own classes), else the wood/leaf
+  // preset — the common correction case for this app's data.
+  useEffect(() => {
+    if (!labelTargetCloud) return;
+    const bound = labelTargetCloud.data.octree?.classPalettes?.[MANUAL_CLASS_ATTRIBUTE];
+    const palette = bound ?? makePreset('wood_leaf', MANUAL_CLASS_ATTRIBUTE, Date.now());
+    setLabelPalette(palette);
+    setLabelVisibleClasses(new Set(palette.classes.map(c => c.value)));
+    // Start on the first non-Unclassified class: painting "Unclassified" by
+    // accident is a silent no-op the user would have to debug.
+    setLabelActiveClass(palette.classes.find(c => c.value !== 0)?.value ?? 0);
+    setLabelFromClasses(null);
+    // Only when the TARGET changes — re-running on every palette edit would
+    // clobber the user's in-progress class list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [labelTargetCloud?.id]);
+
+  /**
+   * Paint one stroke: POST it, then record it locally.
+   *
+   * The order matters — the stroke is only appended to the renderer's list on
+   * SUCCESS, so the invariant `strokes.length === backend label_edit_count`
+   * cannot drift on a failed request (the backend applies a batch under one
+   * lock, so there is no partial-apply case to reconcile).
+   */
+  const paintLabelStroke = useCallback(async (region: PendingDeleteRegion) => {
+    const cloud = labelTargetCloud;
+    const sessionId = cloud?.data.octree?.sessionId;
+    const palette = labelPaletteRef.current;
+    if (!cloud || !sessionId || !palette) return;
+
+    const strokeId = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    const stroke: LabelStroke = {
+      strokeId,
+      region,
+      toClass: labelActiveClass,
+      fromClasses: labelFromClasses ? [...labelFromClasses] : undefined,
+    };
+    setLabelBusy(true);
+    try {
+      const res = await labelCloudRegion(sessionId, [{
+        region: region as CropOctreeRegion,
+        to_class: stroke.toClass,
+        ...(stroke.fromClasses ? { from_classes: stroke.fromClasses } : {}),
+        stroke_id: strokeId,
+      }]);
+
+      const before: LabelEditState = {
+        strokes: labelStrokes,
+        activeClass: labelActiveClass,
+        visibleClasses: [...labelVisibleClasses],
+        paletteId: palette.id,
+        dirty: labelDirty,
+      };
+      const nextStrokes = [...labelStrokes, stroke];
+      const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
+
+      setLabelStrokes(nextStrokes);
+      setLabelClassCounts(
+        Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
+      );
+      setLabelDirty(true);
+      scene.commit({
+        label: 'label points',
+        actions: [{ t: 'labelEdit', id: cloud.id, slug: res.slug, before, after }],
+      });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Labelling').message, type: 'error' });
+    } finally {
+      setLabelBusy(false);
+    }
+  }, [labelTargetCloud, labelActiveClass, labelFromClasses, labelStrokes,
+      labelVisibleClasses, labelDirty, scene, showToast]);
+
+  // closePolygonFrom is created once, so it must reach the CURRENT painter
+  // through a ref rather than a captured closure.
+  const paintLabelStrokeRef = useRef<typeof paintLabelStroke | null>(null);
+  useEffect(() => { paintLabelStrokeRef.current = paintLabelStroke; }, [paintLabelStroke]);
+
+  /** Undo the most recent stroke, keeping renderer and backend in lock-step. */
+  const handleLabelUndo = useCallback(async () => {
+    const cloud = labelTargetCloud;
+    const sessionId = cloud?.data.octree?.sessionId;
+    if (!cloud || !sessionId || labelStrokes.length === 0) return;
+    const keep = labelStrokes.length - 1;
+    setLabelBusy(true);
+    try {
+      const res = await resetCloudLabelEdits(sessionId, keep);
+      // Trust the BACKEND's surviving count: its history is byte-bounded and may
+      // have evicted older entries, in which case the renderer's list is longer
+      // than anything it can still undo.
+      setLabelStrokes(prev => prev.slice(0, Math.min(keep, res.label_edit_count)));
+      setLabelClassCounts(
+        Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
+      );
+      setLabelDirty(true);
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Undo').message, type: 'error' });
+    } finally {
+      setLabelBusy(false);
+    }
+  }, [labelTargetCloud, labelStrokes, showToast]);
+
+  /**
+   * Commit: bake the label column into the octree so it colours without the
+   * client-side overlay. The slow step (one PotreeConverter run).
+   *
+   * The strokes are NOT cleared until the new octree is mounted. Clearing them
+   * here would drop the overlay while the OLD octree — which does not carry the
+   * labels yet — is still on screen, and every painted point would visibly
+   * revert. Same discipline pendingDeletes follows for its clip preview.
+   */
+  const handleLabelCommit = useCallback(async () => {
+    const cloud = labelTargetCloud;
+    const octreeInfo = cloud?.data.octree;
+    const sessionId = octreeInfo?.sessionId;
+    if (!cloud || !octreeInfo || !sessionId) return;
+    setLabelBusy(true);
+    try {
+      const res = await commitCloudLabels(sessionId);
+      const palette = labelPaletteRef.current;
+      const newData = buildSessionOctreeData(
+        res, octreeInfo, cloud.data.fileName ?? cloud.id,
+      );
+      if (newData.octree && palette) {
+        newData.octree.classPalettes = {
+          ...(octreeInfo.classPalettes ?? {}),
+          [res.slug]: palette,
+        };
+        newData.octree.categoricalAttributes = Array.from(
+          new Set([...(octreeInfo.categoricalAttributes ?? []), res.slug]),
+        );
+      }
+      onUpdateCloud(cloud.id, newData);
+      setCloudColorMode(cloud.id, { mode: 'scalar', field: res.slug });
+      // Now the octree carries the labels — safe to drop the overlay.
+      setLabelStrokes([]);
+      setLabelDirty(false);
+      setLabelClassCounts(
+        Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
+      );
+      showToast({ title: 'Labels saved to the point cloud', type: 'success' });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Commit labels').message, type: 'error' });
+    } finally {
+      setLabelBusy(false);
+    }
+  }, [labelTargetCloud, buildSessionOctreeData, onUpdateCloud, setCloudColorMode, showToast]);
+
   // Permanently apply (bake) a session cloud's pending deletions: rebuild the
   // octree from the survivors and clear the in-session mask + the accumulated
   // delete stack. The deliberately-slow step (one PotreeConverter run). After
@@ -4296,6 +4543,25 @@ export default function PointCloudViewer({
       false,
       displayOffsetRef.current,
     );
+    // The LABEL tool reuses this same lasso as its selection primitive: a closed
+    // polygon becomes a paint stroke rather than a crop region. Routing here
+    // (instead of duplicating the draw/close/freeze machinery) is what lets
+    // Phase 1 ship with zero new selection code.
+    if (labelModeRef.current) {
+      // Through a ref: closePolygonFrom is deliberately created ONCE (empty dep
+      // array, so the two close paths can't drift), which would otherwise freeze
+      // the first render's paintLabelStroke and silently drop every stroke.
+      void paintLabelStrokeRef.current?.({
+        kind: 'polygon',
+        points: region.points.map((p) => [p.x, p.y] as [number, number]),
+        projection: region.projection,
+        view: region.view,
+        canvas: { width: region.canvasSize.width, height: region.canvasSize.height },
+      });
+      setPolygonInProgress([]);
+      setCropDrawState('idle');
+      return true;
+    }
     setCropPolygon({
       points: region.points,
       projection: region.projection,
@@ -4305,6 +4571,8 @@ export default function PointCloudViewer({
     setPolygonInProgress([]);
     setCropDrawState('idle');
     return true;
+    // paintLabelStroke is stable (useCallback); labelModeRef is a ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
 
@@ -5407,6 +5675,7 @@ export default function PointCloudViewer({
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true },
 
       // ── Segmentation ────────────────────────────────────────────────
+      { id: 'cloud-label', name: 'Label Points', keywords: ['label', 'classify', 'classification', 'class', 'paint', 'annotate', 'ground truth', 'manual'], action: () => { closeAllToolPanels('label'); setShowLabelPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel },
       { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Layers, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
       { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GitBranch, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
@@ -16968,7 +17237,10 @@ export default function PointCloudViewer({
 
       {/* Crop Panel — single panel handles Box, Rect, and Polygon modes
           and applies to every selected scan when N > 1. */}
-      {editMode === 'crop' && selectedIds.size > 0 && (() => {
+      {/* The label tool borrows crop's polygon draw state for its lasso, so
+          suppress crop's OWN panel while labelling — otherwise two panels stack
+          at the same position and the top one swallows the other's clicks. */}
+      {editMode === 'crop' && selectedIds.size > 0 && !labelTargetCloud && (() => {
         const closeCropPanel = () => {
           setEditMode('none');
           setCropDrawState('idle');
@@ -17464,6 +17736,47 @@ export default function PointCloudViewer({
       />
 
       {/* Ground Segmentation Panel */}
+      {labelTargetCloud && labelPalette && (
+        <LabelPanel
+          classes={labelPalette.classes}
+          paletteName={labelPalette.name}
+          activeClass={labelActiveClass}
+          classCounts={labelClassCounts}
+          visibleClasses={labelVisibleClasses}
+          fromClasses={labelFromClasses}
+          pendingStrokes={labelStrokes.length}
+          dirty={labelDirty}
+          busy={labelBusy}
+          onSelectClass={setLabelActiveClass}
+          onToggleVisible={(v) => setLabelVisibleClasses(prev => {
+            const next = new Set(prev);
+            if (next.has(v)) next.delete(v); else next.add(v);
+            return next;
+          })}
+          onToggleFromClass={(v) => setLabelFromClasses(prev => {
+            const next = new Set(prev ?? []);
+            if (next.has(v)) next.delete(v); else next.add(v);
+            // An empty selection means "no restriction", i.e. back to Any visible.
+            return next.size === 0 ? null : next;
+          })}
+          onSetFromAnyVisible={() => setLabelFromClasses(null)}
+          onUndoStroke={handleLabelUndo}
+          onCommit={handleLabelCommit}
+          // Phase 1 cycles the three built-in presets. A full palette editor
+          // (add/rename/recolour, save to the shared library) is the natural
+          // next increment — the data model and persistence already support it.
+          onEditPalette={() => {
+            const order: Array<'wood_leaf' | 'organ' | 'asprs'> = ['wood_leaf', 'organ', 'asprs'];
+            const i = order.indexOf((labelPalette.preset ?? 'wood_leaf') as typeof order[number]);
+            const next = makePreset(order[(i + 1) % order.length], MANUAL_CLASS_ATTRIBUTE, Date.now());
+            setLabelPalette(next);
+            setLabelVisibleClasses(new Set(next.classes.map(c => c.value)));
+            setLabelActiveClass(next.classes.find(c => c.value !== 0)?.value ?? 0);
+            setLabelFromClasses(null);
+          }}
+          onClose={() => setShowLabelPanel(false)}
+        />
+      )}
       {showGroundSegmentPanel && selectedIds.size === 1 && (
         <GroundSegmentPanel
           clothResolution={groundClothResolution}

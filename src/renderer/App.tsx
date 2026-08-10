@@ -1993,13 +1993,27 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-sm mx-4 p-6"
           >
             <h2 className="text-lg font-semibold text-white mb-2">New project</h2>
-            <p className="text-sm text-neutral-300 mb-6">
+            <p className="text-sm text-neutral-300 mb-4">
               This clears everything — all point clouds, meshes, skeletons, plant
               models, scans, and analysis results — and resets the app to a fresh
               start. This can&rsquo;t be undone.
             </p>
+            {/* Hand-made labels are the one thing here that cannot be recomputed,
+                so call them out specifically rather than relying on the generic
+                "clears everything" line. */}
+            {((window as any).__uncommittedLabelStrokes ?? 0) > 0 && (
+              <p
+                data-testid="new-confirm-label-warning"
+                className="text-sm text-amber-400 mb-6"
+              >
+                You have {(window as any).__uncommittedLabelStrokes} unsaved
+                labelling stroke(s). They will be lost — commit them first to keep
+                them.
+              </p>
+            )}
             <div className="flex justify-end gap-2">
               <button
+                data-testid="new-confirm-cancel"
                 onClick={() => setNewConfirmOpen(false)}
                 className="px-4 py-2 bg-neutral-700 hover:bg-neutral-600 text-neutral-100 rounded-lg transition-colors text-sm"
               >
