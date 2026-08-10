@@ -51,12 +51,18 @@ const GROUND_SCHEME: CategoricalScheme = {
 // confused when both are present.
 export const WOOD_CLASS_ATTRIBUTE = 'wood_class';
 
+// Exported so the manual-labelling tool's "Wood / leaf" preset palette is
+// literally the same class list the automatic segmentation writes — a user
+// correcting segment_wood's output by hand works in one vocabulary, and a
+// colour tweak here can never leave the two out of sync.
+export const WOOD_SCHEME_CLASSES: ClassDef[] = [
+  { value: 1, label: 'Wood', color: [0.40, 0.26, 0.13] },
+  { value: 2, label: 'Leaf', color: [0.30, 0.69, 0.31] },
+];
+
 const WOOD_SCHEME: CategoricalScheme = {
   attribute: WOOD_CLASS_ATTRIBUTE,
-  classes: [
-    { value: 1, label: 'Wood', color: [0.40, 0.26, 0.13] },
-    { value: 2, label: 'Leaf', color: [0.30, 0.69, 0.31] },
-  ],
+  classes: WOOD_SCHEME_CLASSES,
 };
 
 // Tree instance segmentation (TreeIso) writes a `tree_instance` attribute:
@@ -170,17 +176,23 @@ const MISS_SCHEME: CategoricalScheme = {
 // fruit, gray for unlabeled.
 export const ORGAN_ATTRIBUTE = 'organ';
 
+// Exported so the labelling tool's "Plant organs" preset reuses these exact
+// values and colours. That makes hand labels directly comparable with the
+// organ tags a Helios synthetic scan carries — one vocabulary for measured and
+// simulated ground truth.
+export const ORGAN_SCHEME_CLASSES: ClassDef[] = [
+  { value: 0, label: 'Unknown', color: [0.55, 0.55, 0.55] },
+  { value: 1, label: 'Leaf', color: [0.30, 0.69, 0.31] },
+  { value: 2, label: 'Petiole', color: [0.65, 0.72, 0.30] },
+  { value: 3, label: 'Shoot', color: [0.45, 0.30, 0.15] },
+  { value: 4, label: 'Peduncle', color: [0.78, 0.60, 0.32] },
+  { value: 5, label: 'Fruit', color: [0.82, 0.26, 0.24] },
+  { value: 6, label: 'Petiolule', color: [0.40, 0.60, 0.45] },
+];
+
 const ORGAN_SCHEME: CategoricalScheme = {
   attribute: ORGAN_ATTRIBUTE,
-  classes: [
-    { value: 0, label: 'Unknown', color: [0.55, 0.55, 0.55] },
-    { value: 1, label: 'Leaf', color: [0.30, 0.69, 0.31] },
-    { value: 2, label: 'Petiole', color: [0.65, 0.72, 0.30] },
-    { value: 3, label: 'Shoot', color: [0.45, 0.30, 0.15] },
-    { value: 4, label: 'Peduncle', color: [0.78, 0.60, 0.32] },
-    { value: 5, label: 'Fruit', color: [0.82, 0.26, 0.24] },
-    { value: 6, label: 'Petiolule', color: [0.40, 0.60, 0.45] },
-  ],
+  classes: ORGAN_SCHEME_CLASSES,
 };
 
 // Registry of known categorical schemes, keyed by attribute slug. Future
@@ -312,6 +324,54 @@ export function categoricalSchemeFor(attribute: string | undefined | null): Cate
 
 export function isCategoricalAttribute(attribute: string | undefined | null): boolean {
   return categoricalSchemeFor(attribute) !== null || isDynamicCategoricalAttribute(attribute);
+}
+
+// The manual labelling tool's column. Declared here (rather than only in
+// classPalettes.ts) so the resolution helpers can special-case it, and MIRRORED
+// from MANUAL_CLASS_SLUG in backend-api/main.py — keep them in sync.
+export const MANUAL_CLASS_ATTRIBUTE = 'manual_class';
+
+/**
+ * Resolve a categorical scheme for an attribute ON A SPECIFIC CLOUD, honouring
+ * that cloud's user-defined palette.
+ *
+ * Why this exists as a separate, additive function rather than a change to
+ * `categoricalSchemeForRange`: the three registries above (`SCHEMES`,
+ * `DYNAMIC_CATEGORICAL`, `FORCE_CONTINUOUS`) are module-level and therefore
+ * PROCESS-WIDE. That is fine for by-name defaults and even for the import
+ * wizard's flags — the file already documents its global-winner tie-break for
+ * those ("if two clouds disagree on the same slug, continuous wins").
+ *
+ * It is NOT fine for user palettes. Two clouds with different palettes bound to
+ * `manual_class` is the normal case, not an edge case: a rose labelled with
+ * organ classes and a plot labelled with ASPRS classes, both open at once. A
+ * process-wide Set can only pick one winner and would silently mis-colour the
+ * other cloud's points and legend. So the palette is threaded explicitly from
+ * the cloud that owns it.
+ *
+ * Resolution order — the palette sits immediately after the explicit
+ * "show me a gradient" override and before every by-name default, because a
+ * palette the user attached to THIS cloud is a more explicit statement than any
+ * default keyed on the slug:
+ *
+ *   FORCE_CONTINUOUS → user palette → tree_instance → SCHEMES → generic → null
+ *
+ * `categoricalSchemeForRange` remains the unchanged fallback tail, so every
+ * existing call site keeps working and consumers migrate incrementally.
+ */
+export function categoricalSchemeForCloud(
+  attribute: string | undefined | null,
+  range: [number, number] | undefined | null,
+  palettes: Record<string, { slug: string; classes: ClassDef[] }> | undefined | null,
+): CategoricalScheme | null {
+  if (!attribute) return null;
+  const key = attribute.toLowerCase();
+  if (FORCE_CONTINUOUS.has(key)) return null;
+  const palette = palettes?.[key];
+  if (palette && palette.classes.length > 0) {
+    return { attribute: key, classes: palette.classes };
+  }
+  return categoricalSchemeForRange(attribute, range);
 }
 
 const UNKNOWN_CLASS_COLOR: RGB = [0.6, 0.6, 0.6];
