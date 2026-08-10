@@ -85,7 +85,11 @@ import {
   polygonRegionFromCamera,
 } from '../lib/cropGeometry';
 import { projectionKindOf } from '../lib/cameraRay';
-import { makePreset, type ClassPalette } from '../lib/classPalettes';
+import {
+  makePreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
+  type ClassPalette,
+} from '../lib/classPalettes';
+import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
 import { LabelPanel } from './viewer/panels/LabelPanel';
 import { MANUAL_CLASS_ATTRIBUTE } from '../lib/classification';
 import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
@@ -255,7 +259,7 @@ import { serializeMeshObj, serializeMeshPly, serializeMeshStl, sanitizeMeshName 
 
 // Grid plane options
 type GridPlane = 'z-up' | 'y-up';
-type EditMode = 'none' | 'translate' | 'crop' | 'rotate' | 'erase';
+type EditMode = 'none' | 'translate' | 'crop' | 'rotate' | 'erase' | 'label';
 
 // Tuning fields threaded from handleWoodSegment to each per-cloud worker. The
 // optional `reflectance_weight_max` (>0) and `scalar_slug` enable the reflectance
@@ -3775,7 +3779,12 @@ export default function PointCloudViewer({
   // therefore works unchanged.
   useEffect(() => {
     if (labelTargetCloud) {
-      setEditMode('crop');
+      // Its OWN mode. Borrowing editMode==='crop' made the label tool literally
+      // BE the crop tool: the Crop toolbar button lit up as active, the crop
+      // box gizmo mounted behind the panel, and — worse — showCropPreview went
+      // true, so octreeCropMask started hiding points with an index buffer on
+      // the very tiles the label overlay was painting.
+      setEditMode('label');
       setCropMode('polygon');
       setCropDrawState('drawing-polygon');
       setPolygonInProgress([]);
@@ -3876,6 +3885,88 @@ export default function PointCloudViewer({
   // through a ref rather than a captured closure.
   const paintLabelStrokeRef = useRef<typeof paintLabelStroke | null>(null);
   useEffect(() => { paintLabelStrokeRef.current = paintLabelStroke; }, [paintLabelStroke]);
+
+  // World-space membership test for a committed region, mirroring exactly what
+  // the backend's `_region_mask` does for the same payload — the preview and
+  // the applied result therefore agree by construction rather than by two
+  // parallel implementations. (Same reasoning as buildCropPredicate above; this
+  // one takes the wire-format region so a stored stroke can be replayed.)
+  const buildRegionPredicate = useCallback((region: PendingDeleteRegion) => {
+    if (region.kind === 'box') {
+      const [nx, ny, nz] = region.min;
+      const [xx, xy, xz] = region.max;
+      return (wx: number, wy: number, wz: number) =>
+        wx >= nx && wx <= xx && wy >= ny && wy <= xy && wz >= nz && wz <= xz;
+    }
+    if (region.kind === 'polygon') {
+      const { points, projection, view, canvas } = region;
+      const canvasSize = { width: canvas.width, height: canvas.height };
+      const poly = points.map(([x, y]) => ({ x, y }));
+      return (wx: number, wy: number, wz: number) => {
+        const pixel = projectWorldToCanvasPixel(
+          { x: wx, y: wy, z: wz }, projection, view, canvasSize,
+        );
+        return pixel ? pointInPolygon(pixel, poly) : false;
+      };
+    }
+    // squares_union (the erase brush's shape) — not produced by the label tool
+    // in Phase 1, but replayable if a stroke ever carries one.
+    const { centers, half_sizes, projection, view, canvas } = region;
+    const canvasSize = { width: canvas.width, height: canvas.height };
+    return (wx: number, wy: number, wz: number) => {
+      const p = projectWorldToCanvasPixel(
+        { x: wx, y: wy, z: wz }, projection, view, canvasSize,
+      );
+      if (!p) return false;
+      for (let i = 0; i < centers.length; i++) {
+        const h = half_sizes[i];
+        if (Math.abs(p.x - centers[i][0]) <= h && Math.abs(p.y - centers[i][1]) <= h) {
+          return true;
+        }
+      }
+      return false;
+    };
+  }, []);
+
+  // ── Live label preview ────────────────────────────────────────────────────
+  //
+  // Turn the pending stroke list into the per-tile overlay the octree renderer
+  // paints. Without this the user paints and sees nothing change until Commit
+  // rebuilds the octree (minutes) — the tool would not feel like a paint tool
+  // at all. See octreeLabelOverlay.ts for why the octree cannot show it itself.
+  //
+  // Strokes carry a class VALUE, but the overlay paints a dense palette INDEX:
+  // potree bakes its step gradient into 64 texels, so a palette living at
+  // 64..255 would blend into one colour on screen.
+  const labelOverlayRef = useRef<LabelOverlayState | null>(null);
+  const labelOverlayState = useMemo<LabelOverlayState | null>(() => {
+    if (!labelTargetCloud || !labelPalette) return null;
+    const { valueToIndex } = paletteIndexMaps(labelPalette);
+    const unlabeledIndex = valueToIndex.get(UNCLASSIFIED_VALUE) ?? 0;
+    const strokes = labelStrokes.map((s) => {
+      const predicate = buildRegionPredicate(s.region);
+      const toIndex = valueToIndex.get(s.toClass) ?? unlabeledIndex;
+      const fromIndices = s.fromClasses
+        ? new Set(s.fromClasses.map((v) => valueToIndex.get(v) ?? -1))
+        : null;
+      return { predicate, aabb: null, toIndex, fromIndices };
+    });
+    return {
+      strokes,
+      // Changes whenever the stroke list does, which is what re-triggers the
+      // per-tile replay. Stroke ids are unique and ordered, so this is enough.
+      key: `${labelPalette.id}|${labelStrokes.map((s) => s.strokeId).join(',')}`,
+      unlabeledIndex,
+    };
+  }, [labelTargetCloud, labelPalette, labelStrokes]);
+  useEffect(() => { labelOverlayRef.current = labelOverlayState; }, [labelOverlayState]);
+
+  // The categorical scheme the overlay's INDEX values colour through, so the
+  // legend and the points agree while previewing.
+  const labelIndexScheme = useMemo(
+    () => (labelPalette ? paletteToIndexScheme(labelPalette) : null),
+    [labelPalette],
+  );
 
   /** Undo the most recent stroke, keeping renderer and backend in lock-step. */
   const handleLabelUndo = useCallback(async () => {
@@ -4622,7 +4713,8 @@ export default function PointCloudViewer({
       // after typing a coordinate. In other edit modes (translate,
       // erase…) Enter still exits the mode.
       if (e.key === 'Enter' && editMode !== 'none') {
-        if (editMode === 'crop') {
+        // 'label' shares the polygon lasso, so Enter must close it there too.
+        if (editMode === 'crop' || editMode === 'label') {
           if (cropDrawState === 'drawing-polygon') {
             e.preventDefault();
             closePolygonFrom(polygonInProgress);
@@ -4639,7 +4731,7 @@ export default function PointCloudViewer({
       // Escape: cancel polygon-in-progress, or exit edit mode.
       if (e.key === 'Escape' && editMode !== 'none') {
         e.preventDefault();
-        if (editMode === 'crop' && cropDrawState === 'drawing-polygon') {
+        if ((editMode === 'crop' || editMode === 'label') && cropDrawState === 'drawing-polygon') {
           setPolygonInProgress([]);
           setCropDrawState('idle');
           return;
@@ -4671,7 +4763,7 @@ export default function PointCloudViewer({
         setPointPickMode(false);
       }
       // Backspace: pop the last polygon vertex while drawing.
-      if (e.key === 'Backspace' && editMode === 'crop' && cropDrawState === 'drawing-polygon') {
+      if (e.key === 'Backspace' && (editMode === 'crop' || editMode === 'label') && cropDrawState === 'drawing-polygon') {
         e.preventDefault();
         setPolygonInProgress(prev => prev.slice(0, -1));
       }
@@ -14704,6 +14796,14 @@ export default function PointCloudViewer({
                   // sends to the backend, so the preview matches the result
                   // by construction rather than by a parallel implementation.
                   cropMask={showCropPreview ? octreeCropMask : null}
+                  // Live labelling preview — only for the cloud being labelled.
+                  labelOverlayRef={
+                    labelTargetCloud?.id === cloud.id ? labelOverlayRef : null
+                  }
+                  labelCommittedSlug={MANUAL_CLASS_ATTRIBUTE}
+                  labelIndexScheme={
+                    labelTargetCloud?.id === cloud.id ? labelIndexScheme : null
+                  }
                   // GPU clip-volume union (CLIP_INSIDE) combining:
                   //  - committed but unbaked deletes for THIS cloud (the
                   //    persistent instant-delete preview — points stay hidden
@@ -15242,7 +15342,7 @@ export default function PointCloudViewer({
         {/* Snapshots the camera/size for the polygon- and rect-crop in/out
             test. Both freeze the camera at draw time, so the snapshotter
             lives whenever either screen-space shape could be active. */}
-        {editMode === 'crop' && (cropMode === 'polygon' || cropMode === 'rect') && (
+        {(editMode === 'crop' || editMode === 'label') && (cropMode === 'polygon' || cropMode === 'rect') && (
           <PolygonCameraSnapshotter
             cameraRef={polygonCameraRef}
             sizeRef={polygonCanvasSizeRef}
@@ -15793,7 +15893,7 @@ export default function PointCloudViewer({
         />
       )}
 
-      {editMode === 'crop' && cropMode === 'polygon' && (cropDrawState === 'drawing-polygon' || cropPolygon) && (() => {
+      {(editMode === 'crop' || editMode === 'label') && cropMode === 'polygon' && (cropDrawState === 'drawing-polygon' || cropPolygon) && (() => {
         const isDrawing = cropDrawState === 'drawing-polygon';
         const points = isDrawing ? polygonInProgress : (cropPolygon?.points ?? []);
         const cursor = isDrawing ? cropZone.cursor : null;

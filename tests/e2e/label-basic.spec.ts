@@ -107,6 +107,52 @@ test('painting a lasso labels the enclosed points with the active class', async 
   expect(c[String(active)]).toBe(60);
 });
 
+test('painted points recolour IMMEDIATELY, without waiting for a commit', async () => {
+  // The property the whole client-side overlay exists for. Asserting the panel
+  // counts is NOT enough: those come straight from the backend response and are
+  // fully green even when the overlay is never wired to the renderer at all —
+  // which is exactly the bug this test was added for. Read the overlay's own
+  // published fact instead.
+  const { page, panel } = await openLabelTool();
+
+  const before = await page.evaluate(() => (window as any).__labelOverlay);
+  expect(before?.painted ?? 0).toBe(0);
+
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+
+  // Every loaded tile point carries the painted class in the GPU-bound label
+  // column — with NO commit and no octree rebuild.
+  await expect.poll(
+    async () => (await page.evaluate(() => (window as any).__labelOverlay))?.painted ?? 0,
+    { timeout: 15_000 },
+  ).toBeGreaterThan(0);
+
+  const stats = await page.evaluate(() => (window as any).__labelOverlay);
+  expect(stats.tiles).toBeGreaterThan(0);
+  expect(stats.painted).toBe(stats.total);   // full-viewport lasso covers all of them
+  await expect(panel).toHaveAttribute('data-label-dirty', 'true');
+});
+
+test('undo removes the preview immediately too', async () => {
+  const { page, panel } = await openLabelTool();
+  await paintWholeViewport(page);
+  await expect.poll(
+    async () => (await page.evaluate(() => (window as any).__labelOverlay))?.painted ?? 0,
+    { timeout: 15_000 },
+  ).toBeGreaterThan(0);
+
+  await page.getByTestId('label-undo').click();
+  await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 15_000 });
+
+  // The overlay replays the (now empty) stroke list from scratch, so the paint
+  // disappears without a rebuild.
+  await expect.poll(
+    async () => (await page.evaluate(() => (window as any).__labelOverlay))?.painted ?? 0,
+    { timeout: 15_000 },
+  ).toBe(0);
+});
+
 test('switching the active class repaints — counts move rather than accumulate', async () => {
   const { page, panel } = await openLabelTool();
   await paintWholeViewport(page);

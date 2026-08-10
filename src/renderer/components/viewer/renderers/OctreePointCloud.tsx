@@ -13,6 +13,11 @@ import {
   clearCropMaskFromVisibleNodes,
   publishCropMaskStats,
 } from './octreeCropMask';
+import {
+  applyLabelOverlayToVisibleNodes,
+  clearLabelOverlayFromVisibleNodes,
+  type LabelOverlayState,
+} from './octreeLabelOverlay';
 
 // =====================================================================
 // Octree streaming (0.3.0+)
@@ -107,6 +112,25 @@ export interface OctreePointCloudProps {
     invert: boolean;
     key: string;
   } | null;
+  /**
+   * Live manual-labelling preview, read through a REF.
+   *
+   * A label change cannot be shown the way a deletion can: deletions are a GPU
+   * clip volume, but class values are baked into octree.bin at conversion time,
+   * so a repaint is invisible until a rebuild (minutes). The overlay paints a
+   * per-tile label column client-side instead — see octreeLabelOverlay.ts.
+   *
+   * A ref, not a prop value, because the hover/stroke list changes far more
+   * often than this 900-line component should re-render — the same reason
+   * `frameStateRef` exists.
+   */
+  labelOverlayRef?: React.MutableRefObject<LabelOverlayState | null> | null;
+  /** Octree attribute holding COMMITTED labels, so a post-commit tile starts
+   *  from the baked values rather than blank. */
+  labelCommittedSlug?: string | null;
+  /** Categorical scheme for the overlay's dense INDEX values, so the points and
+   *  the legend agree while previewing. Null when not labelling. */
+  labelIndexScheme?: { attribute: string; classes: Array<{ value: number; label: string; color: [number, number, number] }> } | null;
   // World-space translation for this cloud (the Translate tool / T-modal value).
   // The PointCloudOctree is attached directly to the scene root (not inside the
   // parent's React `<group position>`), so the group transform does NOT reach it
@@ -242,6 +266,9 @@ export function OctreePointCloud({
   rangeMax,
   clipBox = null,
   clipBoxes = null,
+  labelOverlayRef = null,
+  labelCommittedSlug = null,
+  labelIndexScheme = null,
   cropMask = null,
   translation,
   rotation,
@@ -637,10 +664,17 @@ export function OctreePointCloud({
       // against `effectiveRange` (the shader's actual t-mapping). They differ
       // only for a constant column, where effectiveRange is widened to avoid a
       // zero divisor; using it here keeps the sampled t inside the right band.
-      const bandRange = effectiveRange ?? (scalarRange ? [scalarRange.min[0], scalarRange.max[0]] : null);
-      const categorical = scalarActive && scalarRange
+      // While the labelling overlay is active it OWNS the intensity slot and
+      // writes dense palette indices, so the gradient must be built from the
+      // palette's index scheme over [0, n-1] — not from the octree attribute's
+      // own range, which describes the (stale) committed column.
+      const labelScheme = labelIndexScheme ?? null;
+      const bandRange = labelScheme
+        ? [0, Math.max(0, labelScheme.classes.length - 1)] as [number, number]
+        : effectiveRange ?? (scalarRange ? [scalarRange.min[0], scalarRange.max[0]] : null);
+      const categorical = labelScheme ?? (scalarActive && scalarRange
         ? categoricalSchemeForRange(selectedScalarField, [scalarRange.min[0], scalarRange.max[0]])
-        : null;
+        : null);
       if (categorical && bandRange) {
         const stops = buildCategoricalGradientStops(categorical, [bandRange[0], bandRange[1]]);
         (m as any).gradient = stops.map(([t, [r, g, b]]) => [t, new THREE.Color(r, g, b)]);
@@ -672,7 +706,7 @@ export function OctreePointCloud({
     m.needsUpdate = true;
 
     setMaterialVersion(v => v + 1);
-  }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax]);
+  }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax, labelIndexScheme]);
 
   // ── Clip arbitration ──────────────────────────────────────────────────────
   //
@@ -836,13 +870,16 @@ export function OctreePointCloud({
   // The hooks close over props that change on most renders (clipBox, colorMode,
   // …), so they read through a ref — the registration itself stays keyed on the
   // octree alone and doesn't churn every render.
+  // Tracks whether the overlay was active last frame, so it is torn down
+  // exactly once when the tool closes rather than every frame after.
+  const labelOverlayWasActiveRef = useRef(false);
   const frameStateRef = useRef({
     clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
-    cropMask, cropMaskKey, displayOffset,
+    cropMask, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
   });
   frameStateRef.current = {
     clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
-    cropMask, cropMaskKey, displayOffset,
+    cropMask, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
   };
 
   useEffect(() => {
@@ -889,13 +926,34 @@ export function OctreePointCloud({
         }
         const scalarActive =
           cm === 'scalar' && !!field && !!d.octree?.attributeRanges?.[field];
+        // Manual-labelling overlay. Runs BEFORE the scalar swap decision below
+        // because while the tool is open the label column OWNS the intensity
+        // slot — you cannot paint classes while colouring by reflectance and
+        // have any idea what you painted. Tiles already built for this stroke
+        // key are skipped, so steady state is a string compare per node.
+        // Through frameStateRef: this callback is registered ONCE (deps are
+        // [octree]), so a prop read from the closure is frozen at its mount
+        // value — labelOverlayRef was null then, and the overlay never ran.
+        const overlay = frameStateRef.current.labelOverlayRef?.current ?? null;
+        if (overlay) {
+          applyLabelOverlayToVisibleNodes(
+            octree, offset, overlay, frameStateRef.current.labelCommittedSlug ?? null,
+          );
+        } else if (labelOverlayWasActiveRef.current) {
+          // Tool closed / committed: drop the overlay so the octree's own
+          // attribute (or whatever scalar the user picked) colours again.
+          clearLabelOverlayFromVisibleNodes(octree);
+        }
+        labelOverlayWasActiveRef.current = !!overlay;
+
         for (const node of visible) {
           const sn = (node as any).sceneNode;
           if (sn && sn.material !== cur) sn.material = cur;
           // Re-apply the scalar→intensity buffer swap to tiles that streamed
           // in since the last material effect. Cheap and idempotent (a
           // reference compare short-circuits already-swapped geometries).
-          if (scalarActive && sn?.geometry) {
+          // Suppressed while the label overlay owns the intensity slot.
+          if (!overlay && scalarActive && sn?.geometry) {
             swapScalarIntoIntensity(sn.geometry, field!);
           }
         }
