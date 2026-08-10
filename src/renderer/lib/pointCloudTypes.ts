@@ -233,6 +233,53 @@ export type PendingDeleteRegion =
       invert?: boolean;
     };
 
+/**
+ * One manual-labelling edit: "inside `region`, points whose current class is in
+ * `fromClasses` become `toClass`".
+ *
+ * Reuses `PendingDeleteRegion` rather than defining a parallel region union, so
+ * crop, erase and labelling share ONE region vocabulary — a new region kind
+ * lands in `_canonical_region`/`_region_mask` once and every tool gets it.
+ *
+ * `fromClasses` is TerraScan's From-class gate, and `undefined` means "any
+ * visible" — deliberately NOT the same as listing every palette value, because
+ * a point holding a class the palette doesn't define (imported data, or a class
+ * the user deleted) must still be repaintable.
+ *
+ * `strokeId` is generated renderer-side and is the join key to the backend's
+ * label history, so undo can truncate both to the same point.
+ */
+export interface LabelStroke {
+  strokeId: string;
+  region: PendingDeleteRegion;
+  toClass: number;
+  fromClasses?: number[];
+}
+
+/**
+ * A cloud's pre-commit labelling state.
+ *
+ * A SIBLING of CloudEditState, never a field on it: CloudEditState is
+ * deep-cloned on every transform drag, so piggybacking a several-hundred-stroke
+ * list would copy the whole labelling session on every camera-adjacent gesture.
+ * The two also have different boundary rules — bake clears both, but committing
+ * labels clears neither.
+ */
+export interface LabelEditState {
+  /** Ordered; the undo cursor is simply `strokes.length`. */
+  strokes: LabelStroke[];
+  /** Class the next stroke paints. */
+  activeClass: number;
+  /** Classes currently shown; drives the "any visible" From gate. */
+  visibleClasses?: number[];
+  /** Classes protected from edits. */
+  lockedClasses?: number[];
+  /** Which palette the cloud's classes come from. */
+  paletteId?: string;
+  /** True when the octree is behind the label column (needs a commit). */
+  dirty?: boolean;
+}
+
 // (Undo/redo history types now live in src/renderer/state/sceneActions.ts —
 // the old HistoryEntry/ObjectState snapshots were replaced by the unified
 // scene-store action model.)

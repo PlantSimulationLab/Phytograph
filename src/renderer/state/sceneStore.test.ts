@@ -6,7 +6,9 @@ import {
   type SceneState,
 } from './sceneStore';
 import type { HistoryTransaction, SceneAction } from './sceneActions';
-import type { CloudEditState, MeshEntry } from '../lib/pointCloudTypes';
+import type {
+  CloudEditState, LabelEditState, LabelStroke, MeshEntry,
+} from '../lib/pointCloudTypes';
 import type { Scan } from '../lib/scan';
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -226,6 +228,79 @@ describe('maskEdit action', () => {
 
     s = run(s, { c: 'undo' });
     expect([...s.editStates.get('c1')!.erasedIndices]).toEqual([1]);
+  });
+});
+
+describe('labelEdit action', () => {
+  const stroke = (id: string, toClass: number): LabelStroke => ({
+    strokeId: id,
+    region: { kind: 'box', min: [0, 0, 0], max: [1, 1, 1] },
+    toClass,
+  });
+
+  const labelState = (strokes: LabelStroke[], activeClass = 0): LabelEditState => ({
+    strokes, activeClass,
+  });
+
+  it('round-trips the stroke stack and preserves order', () => {
+    // Order is load-bearing: labelling is not commutative, so undo must restore
+    // the exact sequence rather than a set.
+    let s = makeInitialSceneState();
+    const before = labelState([stroke('s1', 1)]);
+    const after = labelState([stroke('s1', 1), stroke('s2', 2), stroke('s3', 3)], 3);
+
+    s = run(s, { c: 'commit', tx: tx('paint', [{ t: 'labelEdit', id: 'c1', slug: 'manual_class', before, after }]) });
+    const got = s.labelStates.get('c1')!;
+    expect(got.strokes.map((x) => x.strokeId)).toEqual(['s1', 's2', 's3']);
+    expect(got.activeClass).toBe(3);
+
+    s = run(s, { c: 'undo' });
+    expect(s.labelStates.get('c1')!.strokes.map((x) => x.strokeId)).toEqual(['s1']);
+
+    s = run(s, { c: 'redo' });
+    expect(s.labelStates.get('c1')!.strokes).toHaveLength(3);
+  });
+
+  it('deep-clones strokes so a snapshot cannot mutate with the live list', () => {
+    // The same trap cloneCloudEditState guards against for its Set: sharing the
+    // array reference would make undo restore the mutated state.
+    let s = makeInitialSceneState();
+    const live = labelState([stroke('s1', 1)]);
+    s = run(s, { c: 'commit', tx: tx('paint', [{ t: 'labelEdit', id: 'c1', slug: 'manual_class', before: labelState([]), after: live }]) });
+
+    live.strokes.push(stroke('sneaky', 9));
+    (live.strokes[0].region as { min: number[] }).min[0] = 99;
+
+    const got = s.labelStates.get('c1')!;
+    expect(got.strokes).toHaveLength(1);
+    expect((got.strokes[0].region as { min: number[] }).min[0]).toBe(0);
+  });
+
+  it('does NOT ride on editStates (a transform drag must not copy the session)', () => {
+    let s = makeInitialSceneState();
+    s = run(s, { c: 'commit', tx: tx('paint', [{ t: 'labelEdit', id: 'c1', slug: 'manual_class', before: labelState([]), after: labelState([stroke('s1', 1)]) }]) });
+    expect(s.editStates.get('c1')).toBeUndefined();
+    expect(s.labelStates.get('c1')!.strokes).toHaveLength(1);
+  });
+
+  it('keeps label and mask edits independent on the same cloud', () => {
+    let s = makeInitialSceneState();
+    s = run(s, { c: 'commit', tx: tx('paint', [{ t: 'labelEdit', id: 'c1', slug: 'manual_class', before: labelState([]), after: labelState([stroke('s1', 1)]) }]) });
+    s = run(s, { c: 'commit', tx: tx('erase', [{ t: 'maskEdit', id: 'c1', before: editState([]), after: editState([7]) }]) });
+
+    // Undoing the erase must leave the labelling alone.
+    s = run(s, { c: 'undo' });
+    expect([...s.editStates.get('c1')!.erasedIndices]).toEqual([]);
+    expect(s.labelStates.get('c1')!.strokes).toHaveLength(1);
+  });
+
+  it('carries fromClasses (the From-class gate) through undo', () => {
+    let s = makeInitialSceneState();
+    const gated: LabelStroke = { ...stroke('s1', 2), fromClasses: [1] };
+    s = run(s, { c: 'commit', tx: tx('paint', [{ t: 'labelEdit', id: 'c1', slug: 'manual_class', before: labelState([]), after: labelState([gated]) }]) });
+    expect(s.labelStates.get('c1')!.strokes[0].fromClasses).toEqual([1]);
+    s = run(s, { c: 'undo' });
+    expect(s.labelStates.get('c1')!.strokes).toHaveLength(0);
   });
 });
 

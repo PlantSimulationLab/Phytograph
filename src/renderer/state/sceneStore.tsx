@@ -16,6 +16,7 @@ import React, { createContext, useContext, useMemo, useReducer, useRef } from 'r
 import type {
   CloudEditState,
   CloudFilters,
+  LabelEditState,
   MeshColorMode,
   MeshEntry,
   QSMEntry,
@@ -25,6 +26,7 @@ import type {
 import type { Scan } from '../lib/scan';
 import {
   cloneCloudEditState,
+  cloneLabelEditState,
   cloneTransform,
   invertTransaction,
   type HistoryTransaction,
@@ -52,6 +54,10 @@ export interface SceneState {
   skeletonPositions: Map<string, Vec3>;
   // Cloud edit state (translation + erased indices + pending deletes), keyed by scan id.
   editStates: Map<string, CloudEditState>;
+  // Manual-labelling state (the ordered stroke stack + palette binding), keyed by
+  // scan id. Separate from editStates because that map is deep-cloned on every
+  // transform drag and a labelling session's stroke list would ride along.
+  labelStates: Map<string, LabelEditState>;
   // Undoable per-object display props.
   meshOpacities: Map<string, number>;
   meshColorModes: Map<string, MeshColorMode>;
@@ -73,6 +79,7 @@ export function makeInitialSceneState(): SceneState {
     meshScales: new Map(),
     skeletonPositions: new Map(),
     editStates: new Map(),
+    labelStates: new Map(),
     meshOpacities: new Map(),
     meshColorModes: new Map(),
     cloudFilters: new Map(),
@@ -115,6 +122,11 @@ function applyAction(state: SceneState, action: SceneAction): SceneState {
       const editStates = new Map(state.editStates);
       editStates.set(action.id, cloneCloudEditState(action.after));
       return { ...state, editStates };
+    }
+    case 'labelEdit': {
+      const labelStates = new Map(state.labelStates);
+      labelStates.set(action.id, cloneLabelEditState(action.after));
+      return { ...state, labelStates };
     }
     case 'replaceObject':
       return applyReplaceObject(state, action.kind, action.id, action.after);
