@@ -17,6 +17,8 @@
     "build": "npm run gen:version && npm run build:renderer && npm run build:main && npm run build:preload && npm run dropbox:ignore",
     "build:backend": "node scripts/build-backend.mjs",
     "dropbox:ignore": "node scripts/dropbox-ignore.mjs",
+    "prune:releases": "node scripts/prune-release-assets.mjs",
+    "prune:releases:dry": "node scripts/prune-release-assets.mjs --dry-run",
     "build:potree-converter": "node scripts/build-potree-converter.mjs",
     "start": "electron .",
     "build:output-dir": "node scripts/build-output-dir.mjs",

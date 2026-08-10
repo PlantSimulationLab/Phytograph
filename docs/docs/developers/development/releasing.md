@@ -32,6 +32,42 @@ Publishing flags the release "Latest" — which is what makes
 `https://github.com/PlantSimulationLab/Phytograph/releases/latest` (the
 link the lab website points at) resolve to it.
 
+## Storage pruning (automatic)
+
+Each release ships roughly **3.6 GB** of installers, and unlike Actions
+artifacts — which self-expire after 30 days — **release assets never
+expire**. Four releases were enough to consume the organization's entire
+20 GB shared-storage quota. Worse, once over quota GitHub meters the
+overage *daily* regardless of activity, so storage warnings can arrive
+during a week when no workflow ran at all.
+
+The `prune-old-releases` job in `release.yml` runs last on every real
+release and keeps the installers for the **newest two releases** (the
+current one plus a rollback target), deleting the large binaries
+(`.dmg`, `.zip`, `.exe`, `.AppImage`) from anything older. Older
+releases keep their tag, release notes, and the small updater metadata
+(`latest*.yml`, `.blockmap` — about 3 MB), so their pages stay
+meaningful and electron-updater manifests remain readable.
+
+Prereleases and drafts are never pruned and never consume a "keep" slot.
+Signing bring-up runs (`signing_test`) skip pruning entirely, since they
+don't publish. The job is `continue-on-error` — reclaiming storage must
+never fail a release that already built successfully; a missed prune is
+picked up by the next release.
+
+Run it manually against the live repo:
+
+```bash
+npm run prune:releases:dry      # show what would be deleted, change nothing
+npm run prune:releases          # apply the default keep=2 policy
+node scripts/prune-release-assets.mjs --dry-run --keep=3   # custom retention
+```
+
+Deleting a release asset is **irreversible** — GitHub keeps no copy, and
+because these binaries are signed and notarized, recreating one means
+re-running the full release pipeline against the old tag. Always dry-run
+first when changing the policy.
+
 ## Required GitHub Secrets
 
 | Secret | Purpose |

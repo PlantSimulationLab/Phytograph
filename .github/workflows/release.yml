@@ -1142,3 +1142,30 @@ jobs:
           tag="v$(node -p "require('./package.json').version")"
           echo "Uploading to release $tag"
           gh release upload "$tag" latest-mac.yml --clobber
+
+  # Each release ships ~3.6 GB of installers and release assets NEVER expire
+  # (unlike Actions artifacts, which self-expire in 30 days). Four releases
+  # filled the org's entire 20 GB shared-storage quota — and GitHub then meters
+  # the overage every day whether or not anything runs, so an idle weekend
+  # still burns allowance. This keeps the newest two releases' binaries (the
+  # current one plus a rollback target) and strips the binaries from older
+  # ones, leaving their tags, notes, and updater manifests intact.
+  #
+  # `needs: merge-latest-mac` so pruning is the last thing to happen, and the
+  # signing_test guard keeps a non-publishing bring-up run from deleting
+  # anything. `continue-on-error` because reclaiming storage must never fail a
+  # release that already built and published successfully — a missed prune is
+  # picked up by the next one.
+  prune-old-releases:
+    needs: merge-latest-mac
+    if: always() && !inputs.signing_test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Delete installer binaries from releases older than the newest two
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/prune-release-assets.mjs --keep=2
