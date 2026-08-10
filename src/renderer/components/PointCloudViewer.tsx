@@ -84,6 +84,7 @@ import {
   worldBoundsUnion,
   polygonRegionFromCamera,
 } from '../lib/cropGeometry';
+import { projectionKindOf } from '../lib/cameraRay';
 import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
 import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
 import { pendingDeletesToClipBoxes } from '../lib/deletePreview';
@@ -2788,12 +2789,14 @@ export default function PointCloudViewer({
       { ...result, cache_dir: result.cache_dir ?? '', cached: false },
       octreeInfo.sourceXyzPath,
       fileName,
-      octreeInfo.asciiFormat ?? null,
-      octreeInfo.columnPlan ?? null,
-      octreeInfo.categoricalAttributes,
-      sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
-      octreeInfo.worldShift ?? null,
-      octreeInfo.continuousAttributes,
+      {
+        asciiFormat: octreeInfo.asciiFormat ?? null,
+        columnPlan: octreeInfo.columnPlan ?? null,
+        categoricalAttributes: octreeInfo.categoricalAttributes,
+        sessionId: sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
+        worldShift: octreeInfo.worldShift ?? null,
+        continuousAttributes: octreeInfo.continuousAttributes,
+      },
     );
     // A bake/filter/segment result carries the new hits octree (+ miss octree id)
     // but NOT has_misses/scanOrigin/scanParams — those are scan-level facts set at
@@ -3723,12 +3726,14 @@ export default function PointCloudViewer({
         },
         octreeInfo.sourceXyzPath,
         cloud.data.fileName ?? cloud.id,
-        octreeInfo.asciiFormat ?? null,
-        octreeInfo.columnPlan ?? null,
-        octreeInfo.categoricalAttributes,
-        sessionId,
-        octreeInfo.worldShift ?? null,
-        octreeInfo.continuousAttributes,
+        {
+          asciiFormat: octreeInfo.asciiFormat ?? null,
+          columnPlan: octreeInfo.columnPlan ?? null,
+          categoricalAttributes: octreeInfo.categoricalAttributes,
+          sessionId,
+          worldShift: octreeInfo.worldShift ?? null,
+          continuousAttributes: octreeInfo.continuousAttributes,
+        },
       );
       onUpdateCloud(cloud.id, newData);
       // Clear the pending-delete stack + history for this cloud now that the
@@ -16990,15 +16995,11 @@ export default function PointCloudViewer({
         const cropBoxMaxStr = cropBox
           ? `${cropBox.max.x.toFixed(3)},${cropBox.max.y.toFixed(3)},${cropBox.max.z.toFixed(3)}`
           : '';
-        // Projection kind of a committed screen-space region (rect / polygon). An
-        // orthographic projection matrix has m[15]=1, m[11]=0; a perspective one
-        // has m[15]=0, m[11]=-1. The Rect tool draws orthographically so its
-        // extrusion is a true prism — exposed for the trapezoid-regression test.
+        // Projection kind of a committed screen-space region (rect / polygon).
+        // The Rect tool draws orthographically so its extrusion is a true prism
+        // — exposed for the trapezoid-regression test. See lib/cameraRay.ts.
         const cropProjectionKind = cropPolygon
-          ? (Math.abs(cropPolygon.projection[15] - 1) < 1e-6 &&
-             Math.abs(cropPolygon.projection[11]) < 1e-6
-              ? 'orthographic' as const
-              : 'perspective' as const)
+          ? projectionKindOf(cropPolygon.projection)
           : '' as const;
 
         return (
@@ -17091,14 +17092,11 @@ export default function PointCloudViewer({
         const flatStep = (flatMax - flatMin) / 100;
 
         // Projection kind of the painted frame. Erase runs under an orthographic
-        // override so the square cuts a straight prism whose footprint matches the
-        // brush outline (ortho ⇒ m[15]=1, m[11]=0). Asserted by the regression
-        // test guarding against the center-biased perspective trapezoid.
+        // override so the square cuts a straight prism whose footprint matches
+        // the brush outline. Asserted by the regression test guarding against
+        // the center-biased perspective trapezoid. See lib/cameraRay.ts.
         const eraseProjectionKind = eraseFrame
-          ? (Math.abs(eraseFrame.projection[15] - 1) < 1e-6 &&
-             Math.abs(eraseFrame.projection[11]) < 1e-6
-              ? 'orthographic' as const
-              : 'perspective' as const)
+          ? projectionKindOf(eraseFrame.projection)
           : '' as const;
         const cloud = firstSelectedCloud;
 

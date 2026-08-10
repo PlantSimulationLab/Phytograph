@@ -46,6 +46,41 @@ const _tileWorld = new THREE.Matrix4();
 /** A world-space inclusion test. Matches PointCloudViewer's buildCropPredicate. */
 export type CropPredicate = (wx: number, wy: number, wz: number) => boolean;
 
+/**
+ * Compose a tile's node→scene transform into `out`, WITHOUT touching any matrix.
+ *
+ * Every per-tile CPU pass needs this, and getting it wrong is subtle and
+ * expensive, so it lives in one place:
+ *
+ * potree sets `matrixAutoUpdate = false` on every tile and writes
+ * `sceneNode.matrix` itself (the node-local re-origin baked at tiling time);
+ * `position`/`quaternion` are never populated to match. So `updateMatrix()`
+ * would overwrite potree's matrix with an identity built from that empty TRS,
+ * and `updateWorldMatrix()` refreshes ancestors but leaves `matrixWorld` stale
+ * for a tile potree just repositioned — measured 93 world-units off in X on an
+ * ALS scan, which is ~70px on screen. Points then tested at the wrong place.
+ *
+ * Multiplying the octree's own (correct, live) world matrix by the tile's own
+ * (potree-authored) matrix reproduces exactly the transform three.js will
+ * compose at render time, and mutates nothing.
+ *
+ * The caller is responsible for refreshing the OCTREE ROOT first — the root
+ * does use position/quaternion (applyOctreePose writes them), so
+ * `octree.updateWorldMatrix(true, false)` on it is both safe and necessary.
+ * Hoist that out of per-tile loops; it only needs doing once per pass.
+ *
+ * NOTE the frame this lands in: the result takes a node-local position to the
+ * DISPLAY frame (world − displayOffset), so a world-space predicate must add
+ * the display offset back. See `applyCropMaskToGeometry`.
+ */
+export function composeTileWorldMatrix(
+  octree: any,
+  sceneNode: any,
+  out: THREE.Matrix4,
+): THREE.Matrix4 {
+  return out.multiplyMatrices(octree.matrixWorld, sceneNode.matrix);
+}
+
 function isMaskedGeometry(geometry: any): boolean {
   return !!geometry?.index?.[CROP_MASK_FLAG];
 }
@@ -138,22 +173,10 @@ export function applyCropMaskToVisibleNodes(
     const geom = sn?.geometry;
     if (!geom) continue;
     if (geom[CROP_MASK_FLAG + 'Key'] === maskKey) continue;
-    // Compose this tile's world transform WITHOUT touching its matrices.
-    //
-    // potree sets `matrixAutoUpdate = false` on every tile and writes
-    // `sceneNode.matrix` itself (the node-local re-origin baked at tiling
-    // time); `position`/`quaternion` are never populated to match. So
-    // `updateMatrix()` would overwrite potree's matrix with an identity built
-    // from that empty TRS, and `updateWorldMatrix()` refreshes ancestors but
-    // leaves `matrixWorld` stale for a tile potree just repositioned —
-    // measured 93 world-units off in X on an ALS scan, which is ~70px on
-    // screen. Points then tested at the wrong place, passed the polygon test,
-    // and drew as a band of "uncropped" cloud outside the lasso.
-    //
-    // Multiplying the octree's own (correct, live) world matrix by the tile's
-    // own (potree-authored) matrix reproduces exactly the transform three.js
-    // will compose at render time, and mutates nothing.
-    _tileWorld.multiplyMatrices(octree.matrixWorld, sn.matrix);
+    // Compose this tile's world transform WITHOUT touching its matrices — see
+    // composeTileWorldMatrix's docstring for why updateWorldMatrix is not an
+    // option here (measured 93 world-units of drift on an ALS scan).
+    composeTileWorldMatrix(octree, sn, _tileWorld);
     applyCropMaskToGeometry(geom, _tileWorld, displayOffset, predicate, invert);
     geom[CROP_MASK_FLAG + 'Key'] = maskKey;
   }

@@ -1478,12 +1478,14 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         { ...merged, cache_dir: merged.cache_dir ?? '', cached: false },
         firstOctree.sourceXyzPath,
         newFileName,
-        firstOctree.asciiFormat ?? null,
-        firstOctree.columnPlan ?? null,
-        firstOctree.categoricalAttributes,
-        merged.session_id,
-        merged.world_shift ?? null,
-        firstOctree.continuousAttributes,
+        {
+          asciiFormat: firstOctree.asciiFormat ?? null,
+          columnPlan: firstOctree.columnPlan ?? null,
+          categoricalAttributes: firstOctree.categoricalAttributes,
+          sessionId: merged.session_id,
+          worldShift: merged.world_shift ?? null,
+          continuousAttributes: firstOctree.continuousAttributes,
+        },
       );
       if (newData.octree) {
         newData.octree.hasMisses = merged.has_misses;

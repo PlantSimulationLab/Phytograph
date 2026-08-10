@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useThree } from '@react-three/fiber';
 import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
 import * as THREE from 'three';
@@ -85,9 +85,11 @@ export interface OctreePointCloudProps {
   // "inside" if it falls within ANY box); under CLIP_INSIDE it culls them on the
   // GPU at frame rate, matching the screen-space squares the strokes commit on
   // Apply (crop_octree squares_union region). Mutually exclusive with `clipBox`
-  // in practice — crop and erase are different edit modes — so they never fight
-  // over `clipMode`. We take the box transform matrix and derive the inverse the
-  // shader needs here, keeping potree-core's IClipBox detail out of the parent.
+  // — the material has one `clipMode`, so the two are resolved into a single
+  // `clipState` (crop box wins) by the clip-arbitration memo below, which is
+  // the ONLY place clipMode is written. We take the box transform matrix and
+  // derive the inverse the shader needs there, keeping potree-core's IClipBox
+  // detail out of the parent.
   clipBoxes?: Array<{ matrix: THREE.Matrix4 }> | null;
   // Exact per-point crop preview for a SCREEN-SPACE region (freeform polygon,
   // or a rect drawn from an arbitrary camera). Those regions aren't boxes, so
@@ -672,26 +674,41 @@ export function OctreePointCloud({
     setMaterialVersion(v => v + 1);
   }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax]);
 
-  // Live crop preview: attach an IClipBox to the cloud's material when a
-  // crop region is being drawn. The shader discards points outside the
-  // box at GPU level — no tile re-fetch, no JS-side iteration, runs at
-  // frame rate even on 100M-point clouds. When `clipBox` is null, clear
-  // the clip volume and put the material back into DISABLED clip mode so
-  // the cloud renders fully.
+  // ── Clip arbitration ──────────────────────────────────────────────────────
   //
-  // `createClipBox(size, position)` takes a SIZE vector (not min/max) and
-  // a CENTER position; the box is rendered as a unit cube transformed by
-  // (scale=size, translate=position). The min/max-to-size+center
-  // conversion is done here to keep the prop API symmetric with the rest
-  // of the codebase's crop-box state.
+  // ONE effect owns the material's clip state. This is not tidiness: the
+  // material has exactly ONE `clipMode` uniform, and its volume lists combine
+  // as (boxes ∪ spheres) ∩ planes. Two independent effects writing `clipMode`
+  // can only ever race, and each has to defensively guess what the other is
+  // doing (the old erase effect literally checked `!clipBox` before clearing).
   //
-  // `invert` flips ClipMode.CLIP_OUTSIDE (keep inside) → CLIP_INSIDE
-  // (keep outside) so the preview matches the "remove points inside the
-  // box" UX when the user enables invert.
-  useEffect(() => {
-    if (!octree) return;
-    const m = octree.material;
+  // So the props are resolved into a single discriminated `clipState` here, and
+  // the effect below is the only place that calls setClipBoxes / writes
+  // clipMode. Adding a new clip volume kind (e.g. a cross-section slab on clip
+  // PLANES) means adding a variant here — a type error if you forget a case —
+  // rather than bolting on a fourth effect that fights the other three.
+  //
+  // Precedence: crop box wins over the erase/delete union. They belong to
+  // different edit modes and never legitimately coexist, but a stale prop
+  // during a mode switch must resolve deterministically rather than by
+  // whichever effect happened to run last.
+  type ClipState =
+    | { mode: 'none' }
+    | { mode: 'crop-box'; boxes: any[]; invert: boolean }
+    | { mode: 'delete-union'; boxes: any[] };
+
+  // Identity key for the oriented-box union, so the effect re-runs only when
+  // the boxes actually move (matrices are new objects every parent render).
+  const clipBoxesKey = (clipBoxes ?? [])
+    .map(b => b.matrix.elements.map(e => e.toFixed(4)).join(','))
+    .join('|');
+
+  const clipState = useMemo<ClipState>(() => {
     if (clipBox) {
+      // `createClipBox(size, position)` takes a SIZE vector (not min/max) and a
+      // CENTER; the box renders as a unit cube transformed by (scale=size,
+      // translate=position). Converting here keeps the prop API symmetric with
+      // the rest of the codebase's crop-box state.
       const size = new THREE.Vector3(
         clipBox.max.x - clipBox.min.x,
         clipBox.max.y - clipBox.min.y,
@@ -705,61 +722,66 @@ export function OctreePointCloud({
         (clipBox.min.y + clipBox.max.y) / 2 - (displayOffset?.y ?? 0),
         (clipBox.min.z + clipBox.max.z) / 2 - (displayOffset?.z ?? 0),
       );
-      const box = createClipBox(size, center);
-      (m as any).setClipBoxes([box]);
-      (m as any).clipMode = clipBox.invert
-        ? ClipMode.CLIP_INSIDE
-        : ClipMode.CLIP_OUTSIDE;
-    } else if ((m as any).numClipBoxes > 0 || (m as any).clipMode !== ClipMode.DISABLED) {
-      // Only clear when there's actually a clip volume to clear. Calling
-      // setClipBoxes([]) on a material that already has zero clip boxes
-      // unconditionally triggers updateShaderSource() (the `t` flag in
-      // its body fires when going 0↔non-zero), which thrashes the
-      // shader cache for no reason and can leave the per-tile draw
-      // calls in a state where they bind a freshly-recompiling program
-      // that hasn't finished — symptom: the cloud disappears entirely.
-      (m as any).setClipBoxes([]);
-      (m as any).clipMode = ClipMode.DISABLED;
+      return {
+        mode: 'crop-box',
+        boxes: [createClipBox(size, center)],
+        invert: !!clipBox.invert,
+      };
     }
-  }, [octree, materialVersion, clipBox?.min.x, clipBox?.min.y, clipBox?.min.z,
-       clipBox?.max.x, clipBox?.max.y, clipBox?.max.z, clipBox?.invert,
-       displayOffset?.x, displayOffset?.y, displayOffset?.z]);
-
-  // Live erase-brush preview. The brush paints camera-aligned, view-extruded
-  // boxes (square cross-section); we hand their world→box transforms to the
-  // material as clip boxes and set CLIP_INSIDE so any point inside ANY box is
-  // culled on the GPU (the shader ORs them). The shader uses each box's inverse
-  // matrix to map a world point into the unit cube [-0.5, 0.5]^3, so we derive
-  // the inverse from the transform here. When the list is empty, clear and
-  // restore DISABLED, with the same "only clear if non-empty" guard the crop
-  // box effect uses to avoid thrashing the shader cache.
-  const clipBoxesKey = (clipBoxes ?? [])
-    .map(b => b.matrix.elements.map(e => e.toFixed(4)).join(','))
-    .join('|');
-  useEffect(() => {
-    if (!octree) return;
-    const m = octree.material;
     if (clipBoxes && clipBoxes.length > 0) {
-      const boxes = clipBoxes.map(b => {
+      // Erase-brush / committed-delete preview: camera-aligned, view-extruded
+      // boxes. The shader maps a world point into each box's unit cube via the
+      // box's INVERSE matrix, so derive it here and keep potree-core's IClipBox
+      // shape out of the parent. Only `inverse.elements` is read by
+      // setClipBoxes; the rest is bookkeeping.
+      const boxes = (clipBoxes ?? []).map(b => {
         const matrix = b.matrix.clone();
         const inverse = matrix.clone().invert();
         const position = new THREE.Vector3().setFromMatrixPosition(matrix);
-        // Shape matches potree-core's IClipBox; only `inverse.elements` is read
-        // by setClipBoxes, the rest are bookkeeping.
-        return { box: new THREE.Box3(
-          new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5),
-        ), inverse, matrix, position };
+        return {
+          box: new THREE.Box3(
+            new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5),
+          ),
+          inverse, matrix, position,
+        };
       });
-      (m as any).setClipBoxes(boxes);
-      (m as any).clipMode = ClipMode.CLIP_INSIDE;
-    } else if ((m as any).numClipBoxes > 0 && !clipBox) {
-      // Don't clobber an active crop clip box; only clear when erase owns the
-      // boxes (crop and erase never run together, but be defensive).
-      (m as any).setClipBoxes([]);
-      (m as any).clipMode = ClipMode.DISABLED;
+      return { mode: 'delete-union', boxes };
     }
+    return { mode: 'none' };
+    // clipBoxesKey stands in for the clipBoxes array identity; the individual
+    // clipBox scalars are listed so a gizmo drag re-derives the volume.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [octree, materialVersion, clipBoxesKey]);
+  }, [clipBox?.min.x, clipBox?.min.y, clipBox?.min.z,
+      clipBox?.max.x, clipBox?.max.y, clipBox?.max.z, clipBox?.invert,
+      clipBoxesKey, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
+
+  useEffect(() => {
+    if (!octree) return;
+    const m = octree.material as any;
+    if (clipState.mode === 'none') {
+      // Only clear when there's actually something to clear. Calling
+      // setClipBoxes([]) on a material that already has zero clip boxes
+      // unconditionally triggers updateShaderSource() (the `t` flag in its body
+      // fires when going 0↔non-zero), which thrashes the shader cache for no
+      // reason and can leave per-tile draw calls binding a freshly-recompiling
+      // program that hasn't finished — symptom: the cloud disappears entirely.
+      if (m.numClipBoxes > 0 || m.clipMode !== ClipMode.DISABLED) {
+        m.setClipBoxes([]);
+        m.clipMode = ClipMode.DISABLED;
+      }
+      return;
+    }
+    m.setClipBoxes(clipState.boxes);
+    // crop-box: CLIP_OUTSIDE keeps what's inside the box; `invert` flips it to
+    // "discard what's inside", matching the Crop tool's Keep-Outside checkbox.
+    // delete-union: always CLIP_INSIDE — a point inside ANY painted box is
+    // culled (the shader ORs the volumes).
+    m.clipMode = clipState.mode === 'crop-box'
+      ? (clipState.invert ? ClipMode.CLIP_INSIDE : ClipMode.CLIP_OUTSIDE)
+      : ClipMode.CLIP_INSIDE;
+    // materialVersion: the material is recreated on colour/size changes, so the
+    // clip state has to be re-applied to the new one.
+  }, [octree, materialVersion, clipState]);
 
   // Exact per-point preview for a screen-space crop region. Masks the tiles
   // that are already loaded; tiles that stream in afterwards are caught by the

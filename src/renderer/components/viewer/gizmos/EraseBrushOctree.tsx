@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { PointCloudOctree } from 'potree-core';
+import { rayForNdc, worldPerPixelAt } from '../../../lib/cameraRay';
 
 // Frozen camera + the painted square stamps for one erase session, in the
 // exact shape crop_octree's `squares_union` region wants on Apply. `centers`
@@ -105,25 +106,12 @@ export function EraseBrushOctree({
     // backend's screen-space square test is the exact source of truth.
     const worldHalfXYAt = (worldPoint: THREE.Vector3): { hx: number; hy: number } => {
       const rect = gl.domElement.getBoundingClientRect();
-      const P = camera.projectionMatrix.elements;
-      // Detect projection kind from the matrix, NOT the camera instance flag:
-      // erase mode overrides a PerspectiveCamera's matrix to orthographic, so
-      // isPerspectiveCamera stays true while the matrix is ortho. Ortho ⇒ the
-      // bottom row is (0,0,0,1) so m[15] (P[15]) ≈ 1 and P[11] ≈ 0; perspective
-      // has P[15] ≈ 0, P[11] ≈ -1.
-      const isOrtho = Math.abs(P[15] - 1) < 1e-6 && Math.abs(P[11]) < 1e-6;
-      if (isOrtho) {
-        // Constant world-per-pixel: P[0]=2/(r-l), P[5]=2/(t-b).
-        const worldPerPxX = P[0] !== 0 ? (2 / P[0]) / rect.width : 0;
-        const worldPerPxY = P[5] !== 0 ? (2 / P[5]) / rect.height : 0;
-        return { hx: brushHalfPx * worldPerPxX, hy: brushHalfPx * worldPerPxY };
-      }
-      // Perspective: P[5] = 1/tan(fov/2); world height at distance d is
-      // 2*d/P[5]; per-pixel = that / viewport-height.
-      const dist = Math.max(worldPoint.distanceTo(camera.position), 1e-3);
-      const worldPerPxY = (2 * dist) / P[5] / rect.height;
-      const worldPerPxX = (2 * dist) / P[0] / rect.width;
-      return { hx: brushHalfPx * worldPerPxX, hy: brushHalfPx * worldPerPxY };
+      // Branches on the projection MATRIX, not the camera instance — erase mode
+      // overrides a PerspectiveCamera's matrix to orthographic, so
+      // isPerspectiveCamera stays true while the matrix is ortho. See
+      // lib/cameraRay.ts.
+      const wpp = worldPerPixelAt(camera, worldPoint, rect.width, rect.height);
+      return { hx: brushHalfPx * wpp.x, hy: brushHalfPx * wpp.y };
     };
 
     const boxMatrix = (worldCenter: THREE.Vector3): THREE.Matrix4 => {
@@ -135,32 +123,16 @@ export function EraseBrushOctree({
       return trans.multiply(rot).multiply(scale);
     };
 
-    // Build the pick ray for the cursor. Erase mode runs under an orthographic
-    // projection override, but the camera is still a PerspectiveCamera instance,
-    // so THREE.Raycaster.setFromCamera() would use the perspective ray math
-    // (all rays through the eye) and every pick would collapse toward the view
-    // center. We instead construct the ray straight from the OVERRIDDEN matrices:
-    //   origin = unproject (ndc.x, ndc.y, -1) through projectionMatrixInverse
-    //            then the camera world matrix (the near-plane point under the
-    //            cursor), and
-    //   direction = the camera's forward (-Z) in world space.
-    // Under ortho this gives the correct parallel ray; it also stays correct if
-    // the projection is perspective (origin lands on the near plane, direction
-    // points into the scene through the cursor — good enough for picking).
-    const rayForNdc = (ndc: THREE.Vector2): THREE.Ray => {
-      const origin = new THREE.Vector3(ndc.x, ndc.y, -1)
-        .applyMatrix4(camera.projectionMatrixInverse)
-        .applyMatrix4(camera.matrixWorld);
-      const dir = new THREE.Vector3(0, 0, -1)
-        .transformDirection(camera.matrixWorld)
-        .normalize();
-      return new THREE.Ray(origin, dir);
-    };
-
     // Anchor for the preview/indicator depth: the hovered surface point, else
     // the cursor ray projected to the cloud-center distance.
+    //
+    // `rayForNdc` (lib/cameraRay.ts) is used rather than
+    // THREE.Raycaster.setFromCamera because erase mode runs under an
+    // orthographic projection override while the camera is still a
+    // PerspectiveCamera instance — setFromCamera would apply perspective ray
+    // math and collapse every pick toward the view center.
     const anchorAt = (mouseNdc: THREE.Vector2): THREE.Vector3 => {
-      const ray = rayForNdc(mouseNdc);
+      const ray = rayForNdc(camera, mouseNdc);
       if (octree) {
         try {
           const hit = octree.pick(gl, camera, ray, {

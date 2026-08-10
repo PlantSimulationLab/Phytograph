@@ -791,10 +791,14 @@ export async function parsePointCloudFromPath(
       missDistanceThreshold ?? null, origin ?? null,
       opts?.signal, opts?.onProgress, opts?.onRunId,
     );
-    return buildPointCloudFromOctree(
-      meta, path, name, asciiFormat, columnPlan, categoricalAttributes, meta.session_id,
-      meta.world_shift ?? null, continuousAttributes,
-    );
+    return buildPointCloudFromOctree(meta, path, name, {
+      asciiFormat,
+      columnPlan,
+      categoricalAttributes,
+      sessionId: meta.session_id,
+      worldShift: meta.world_shift ?? null,
+      continuousAttributes,
+    });
   }
 
   if (BACKEND_PATH_EXTENSIONS.has(ext)) {
@@ -817,17 +821,31 @@ export async function parsePointCloudFromPath(
  * `sourceXyzPath` is preserved so M3's crop-apply can re-run the
  * converter against the original file with an AABB filter.
  */
+export interface BuildOctreeCloudOptions {
+  asciiFormat?: string | null;
+  columnPlan?: ColumnPlan | null;
+  /** Slugs the user marked categorical ("Label") in the import wizard. */
+  categoricalAttributes?: string[];
+  sessionId?: string | null;
+  worldShift?: [number, number, number] | null;
+  /** Slugs the user forced continuous ("Scalar") over a registered scheme. */
+  continuousAttributes?: string[];
+}
+
 export function buildPointCloudFromOctree(
   meta: OctreeMetadata,
   sourceXyzPath: string,
   fileName: string,
-  asciiFormat?: string | null,
-  columnPlan?: ColumnPlan | null,
-  categoricalAttributes?: string[],
-  sessionId?: string | null,
-  worldShift?: [number, number, number] | null,
-  continuousAttributes?: string[],
+  options: BuildOctreeCloudOptions = {},
 ): PointCloudData {
+  const {
+    asciiFormat,
+    columnPlan,
+    categoricalAttributes,
+    sessionId,
+    worldShift,
+    continuousAttributes,
+  } = options;
   // Prefer the tight data extent over the cube-padded octree bounds.
   // Crop-box init, fit-to-bounds camera framing, and the bounds shown in
   // the right-pane scan list all expect "where the data actually lives"
