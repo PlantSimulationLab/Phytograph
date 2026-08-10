@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.64.1"
+BACKEND_VERSION = "0.64.7"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -1665,8 +1665,15 @@ def fit_prospect_model(request: ProspectFitRequest):
 
 class PointSource(BaseModel):
     """Tell a downstream endpoint to read points from a live cloud SESSION
-    (in-RAM, source of truth) or — only as a fallback — a file on disk, instead
-    of an inline `points` array.
+    (in-RAM, the source of truth) instead of an inline `points` array.
+
+    **Compute and export require `session_id`.** A cloud's file is read exactly
+    once, at import; every edit after that (deletions, translation, filtering,
+    segmentation labels) lives only in the session arrays. Reading the file again
+    would compute on pre-edit data and return a silently wrong answer, so
+    `_read_points_from_source` rejects a file-only source unless the caller sets
+    `allow_file_source` — the deliberate opt-in for files that are not live
+    clouds (unit tests driving the loaders, external files).
 
     Octree-backed clouds keep no positions in the renderer (the geometry lives
     only in the on-disk Potree octree, streamed to the GPU), so skeleton /
@@ -1710,6 +1717,13 @@ class PointSource(BaseModel):
     # positions and leaves colours/intensity as None (the session DOES hold them;
     # they're simply not surfaced here).
     session_id: Optional[str] = None
+    # Opt-in escape hatch for reading points from `source_path` with no session.
+    # OFF by default and never set by the app: computing from a file means
+    # computing on pre-edit data (see the rejection in _read_points_from_source),
+    # which is silently wrong rather than an error. Set it only when the file is
+    # genuinely not a live cloud — unit tests driving the loaders directly, and
+    # any future read of an external file.
+    allow_file_source: bool = False
 
 
 class TriangulationGrid(BaseModel):
@@ -15220,45 +15234,39 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
     )
 
 
-# ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
-# Parses an OBJ (with its sibling MTL and texture images) from a disk path and
-# returns geometry + real per-vertex UVs + base64 textures, in the same shape
-# the renderer already consumes for plant models (so the same textured renderer
-# handles both). Triangles are emitted non-indexed (3 vertices each), matching
-# the plant path's expanded-geometry convention.
+# ============ MESH IMPORT (OBJ + MTL, and PLY polygon meshes) ============
+# Parses an OBJ (with its sibling MTL and texture images) or a PLY polygon mesh
+# from a disk path and returns geometry + real per-vertex UVs + base64 textures,
+# in the same shape the renderer already consumes for plant models (so the same
+# textured renderer handles both). OBJ triangles are emitted non-indexed (3
+# vertices each), matching the plant path's expanded-geometry convention; PLY
+# keeps open3d's indexed geometry.
 
 class MeshImportRequest(BaseModel):
-    """Request to import a textured mesh from a file on disk."""
-    path: str  # Absolute path to the .obj file
+    """Request to import a mesh from a file on disk."""
+    path: str  # Absolute path to the .obj / .ply file
 
 
-class MeshImportResponse(BaseModel):
-    """Imported mesh geometry + textures (mirrors PlantGenerationResponse)."""
-    success: bool
-    vertices: List[List[float]] = []          # [[x, y, z], ...]
-    indices: List[List[int]] = []             # [[v0, v1, v2], ...]
-    normals: Optional[List[List[float]]] = None
-    colors: Optional[List[List[float]]] = None        # per-vertex (from Kd)
-    uv_coordinates: Optional[List[List[float]]] = None  # [[u, v], ...] V-flipped
-    materials: Optional[List[PlantMaterial]] = None
-    material_groups: Optional[List[PlantMaterialGroup]] = None
-    textures: Optional[Dict[str, str]] = None         # {basename: base64 png/jpg}
-    vertex_count: int = 0
-    triangle_count: int = 0
-    filename: Optional[str] = None
-    has_textures: bool = False
-    error: Optional[str] = None
+# The response is a PHB1 binary frame, not a Pydantic model — see the
+# `/api/mesh/import` handler for why JSON can't carry a scanner-grade mesh.
+# Geometry rides in the frame's buffers (`vertices`, `indices`, and optional
+# `normals`/`colors`/`uv_coordinates`); scalars, materials, material_groups and
+# base64 textures ride in its JSON meta.
 
 
-def _import_ply_mesh(ply_path: Path) -> MeshImportResponse:
-    """Read a polygon-mesh PLY (ASCII or binary) into MeshImportResponse geometry.
+def _import_ply_mesh(ply_path: Path) -> dict:
+    """Read a polygon-mesh PLY (ASCII or binary) into a mesh result dict.
 
     PLY is an ambiguous container — it may hold a point cloud (vertices only) or a
     polygon mesh (vertices + faces). The caller has already decided this is a mesh
     (the frontend sniffs the header for `element face`); here we require triangles
     and reject a vertices-only PLY. open3d's read_triangle_mesh transparently
     handles ascii / binary_little_endian / binary_big_endian. PLY meshes carry no
-    MTL or textures, so the textured fields stay empty."""
+    MTL or textures, so the textured fields stay empty.
+
+    Returns the dict shape `_pack_mesh_frame` expects — arrays stay as numpy so
+    they're packed straight into the binary frame without a .tolist() round-trip
+    (a 3 M-vertex mesh is ~700 MB as JSON, over V8's 512 MB string cap)."""
     import open3d as o3d
 
     try:
@@ -15280,29 +15288,44 @@ def _import_ply_mesh(ply_path: Path) -> MeshImportResponse:
     normals = np.asarray(mesh.vertex_normals, dtype=float)
     colors_arr = np.asarray(mesh.vertex_colors, dtype=float)  # 0-1, per vertex
 
-    out_colors = colors_arr.tolist() if colors_arr.shape[0] == vertices.shape[0] else None
-    out_normals = normals.tolist() if normals.shape[0] == vertices.shape[0] else None
+    out_colors = colors_arr if colors_arr.shape[0] == vertices.shape[0] else None
+    out_normals = normals if normals.shape[0] == vertices.shape[0] else None
 
-    return MeshImportResponse(
-        success=True,
-        vertices=vertices.tolist(),
-        indices=triangles.tolist(),
-        normals=out_normals,
-        colors=out_colors,
-        uv_coordinates=None,
-        materials=None,
-        material_groups=None,
-        textures=None,
-        vertex_count=int(vertices.shape[0]),
-        triangle_count=int(triangles.shape[0]),
-        filename=ply_path.name,
-        has_textures=False,
+    return {
+        "success": True,
+        "vertices": vertices,
+        "indices": triangles,
+        "normals": out_normals,
+        "colors": out_colors,
+        "uv_coordinates": None,
+        "materials": None,
+        "material_groups": None,
+        "textures": None,
+        "vertex_count": int(vertices.shape[0]),
+        "triangle_count": int(triangles.shape[0]),
+        "filename": ply_path.name,
+        "has_textures": False,
+    }
+
+
+@app.post("/api/mesh/import")
+def import_textured_mesh(request: MeshImportRequest):
+    """Parse an OBJ (+ MTL + texture images) or PLY from disk into textured geometry.
+
+    Returns a PHB1 binary frame, not JSON. A scanner-grade mesh is easily
+    millions of triangles, and as JSON that body exceeds V8's ~512 MB
+    string-length cap — `response.json()` then throws ERR_STRING_TOO_LONG in the
+    renderer no matter how long it waits. The binary frame is ~6x smaller and
+    decodes as zero-copy typed arrays. Materials/textures ride in the frame's
+    JSON meta, which stays small (base64 images only)."""
+    return Response(
+        content=_pack_mesh_frame(_do_mesh_import(request), index_key="indices"),
+        media_type="application/octet-stream",
     )
 
 
-@app.post("/api/mesh/import", response_model=MeshImportResponse)
-def import_textured_mesh(request: MeshImportRequest):
-    """Parse an OBJ (+ MTL + texture images) from disk into textured geometry."""
+def _do_mesh_import(request: MeshImportRequest) -> dict:
+    """Load an OBJ/PLY mesh from disk into the `_pack_mesh_frame` dict shape."""
     from qsm.obj_loader import load_obj_template
 
     obj_path = Path(request.path)
@@ -15366,25 +15389,51 @@ def import_textured_mesh(request: MeshImportRequest):
 
     has_textures = bool(textures_data) and bool(material_groups_list)
 
-    return MeshImportResponse(
-        success=True,
-        vertices=out_vertices,
-        indices=out_faces,
-        normals=out_normals if has_any_normals else None,
-        colors=out_colors,
-        uv_coordinates=out_uvs if has_textures else None,
-        materials=materials_list or None,
-        material_groups=material_groups_list or None,
-        textures=textures_data or None,
-        vertex_count=len(out_vertices),
-        triangle_count=len(out_faces),
-        filename=obj_path.name,
-        has_textures=has_textures,
-    )
+    return {
+        "success": True,
+        "vertices": out_vertices,
+        "indices": out_faces,
+        "normals": out_normals if has_any_normals else None,
+        "colors": out_colors,
+        "uv_coordinates": out_uvs if has_textures else None,
+        # Pydantic models don't survive the frame's JSON meta — send plain dicts.
+        "materials": [m.model_dump() for m in materials_list] or None,
+        "material_groups": [g.model_dump() for g in material_groups_list] or None,
+        "textures": textures_data or None,
+        "vertex_count": len(out_vertices),
+        "triangle_count": len(out_faces),
+        "filename": obj_path.name,
+        "has_textures": has_textures,
+    }
 
 
 # ==================== POINT CLOUD LAS/LAZ IMPORT/EXPORT ====================
 # Uses laspy for reading and writing LAS/LAZ files with compression support
+
+
+def _resolve_export_dest(dest_path: str) -> Path:
+    """Validate an export destination the renderer picked via its save dialog.
+
+    The backend binds to 127.0.0.1 only, and the path always originates from the
+    user's own native Save-As — but this endpoint still takes a filesystem path
+    from a request body, so validate rather than trust: require an absolute path
+    (no cwd-relative surprises), resolve it (collapsing any `..`), and require
+    the parent directory to already exist. We deliberately do NOT create parent
+    directories: the save dialog always yields an existing folder, so a missing
+    one means the path isn't what we think it is.
+    """
+    p = Path(dest_path).expanduser()
+    if not p.is_absolute():
+        raise HTTPException(status_code=400, detail=f"Export path must be absolute: {dest_path}")
+    p = p.resolve()
+    if not p.parent.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Export directory does not exist: {p.parent}",
+        )
+    if p.is_dir():
+        raise HTTPException(status_code=400, detail=f"Export path is a directory: {p}")
+    return p
 
 class PointCloudExportRequest(BaseModel):
     """Request for exporting a point cloud.
@@ -15392,14 +15441,29 @@ class PointCloudExportRequest(BaseModel):
     Flat clouds send inline `points` (+ optional `colors`) and `format` in
     {"las","laz"}. Octree-backed clouds send `source` instead — and may request
     any of {"las","laz","xyz","txt","csv","ply"} since the renderer has no
-    positions to format text from. The backend reads the source file, applies
-    pending translation, and returns base64-encoded output in all cases.
+    positions to format text from. The backend reads the source file and applies
+    pending translation in all cases.
+
+    Output goes one of two ways:
+
+    * `dest_path` set — the backend writes the file itself and returns only
+      metadata. This is the path the app uses, and the only one that works at
+      scale: a base64-in-JSON body is ~1.8x the file size, and a 25 M-point XYZ
+      export lands near 1 GB, well past V8's ~512 MB string cap. The renderer
+      then fails in `response.json()` with "Unexpected end of JSON input" no
+      matter how long it waits. Writing server-side avoids the base64 inflation,
+      the giant JSON body, and holding another full copy in renderer memory.
+    * `dest_path` omitted — legacy base64-in-`data` response, kept for callers
+      with no filesystem destination (tests, a browser context). Only safe for
+      small clouds, for the reason above.
     """
     points: Optional[List[List[float]]] = None  # [[x, y, z], ...]
     colors: Optional[List[List[float]]] = None  # [[r, g, b], ...] in 0-1 range
     source: Optional[PointSource] = None         # octree-backed clouds read from disk
     format: str = "laz"  # las | laz | xyz | txt | csv | ply
     filename: Optional[str] = None  # Optional filename for the export
+    # Absolute path the backend writes to. When set, `data` comes back null.
+    dest_path: Optional[str] = None
 
 
 class PointCloudExportResponse(BaseModel):
@@ -15424,11 +15488,21 @@ class PointCloudImportResponse(BaseModel):
     error: Optional[str] = None
 
 
+# Rows formatted per np.savetxt call. Formatting dominates a text export (~97%
+# of wall time; the disk write is ~3%), and np.savetxt is one opaque call with no
+# interior progress hook — so it is chunked to make progress reportable. Measured
+# on 8 M points: monolithic 9.2 s vs chunked 9.4 s (+2%) for byte-identical
+# output, with a progress tick every ~0.6 s. Smaller chunks would tick more often
+# but add per-call overhead; larger ones make the bar jumpy.
+_TEXT_EXPORT_CHUNK_ROWS = 500_000
+
+
 def _format_points_as_text(
     fmt: str,
     points: np.ndarray,
     colors: Optional[np.ndarray],
     intensity: Optional[np.ndarray],
+    progress=None,
 ) -> str:
     """Format an (N,3) point array (+ optional 0-1 colors, intensity) as XYZ /
     TXT / CSV / PLY / OBJ text. Column conventions match the renderer's flat
@@ -15439,6 +15513,10 @@ def _format_points_as_text(
     on a multi-million-point octree cloud the old loop dominated export time and
     held the whole formatted string list in RAM. Output is byte-identical to the
     previous loop (same precision, separators, headers, and no trailing newline).
+
+    `progress(fraction, message)` is called between chunks so the UI can show a
+    real percentage instead of an indeterminate spinner. Chunking is what makes
+    that possible at all — see `_TEXT_EXPORT_CHUNK_ROWS`.
     """
     import io
 
@@ -15448,11 +15526,40 @@ def _format_points_as_text(
     rgb = np.clip(np.rint(colors * 255.0), 0, 255).astype(int) if has_colors else None
 
     def _savetxt(cols: list, fmts: list, sep: str) -> str:
-        """np.savetxt the column-stacked `cols` with per-column `fmts`, joined by
-        `sep`, returning the body WITHOUT the trailing newline savetxt appends."""
-        buf = io.StringIO()
-        np.savetxt(buf, np.column_stack(cols), fmt=sep.join(fmts), delimiter=sep)
-        return buf.getvalue().rstrip("\n")
+        """Format the column-stacked `cols` with per-column `fmts`, joined by
+        `sep`, returning the body WITHOUT a trailing newline.
+
+        Deliberately NOT np.savetxt: that loops row-by-row in Python (profiling a
+        1 M-row export showed ~4 M interpreter calls — `write_normal` + `asunicode`
+        + `write` per row), so its cost is per-row dispatch, not the formatting.
+        Applying ONE `%` over a whole chunk's flattened values does all the
+        conversion inside CPython's C formatter with a single dispatch, which
+        measured 2.0x faster on 8 M points (8.84 s -> 4.42 s) for byte-identical
+        output. Vectorised alternatives were tried and are SLOWER than savetxt:
+        np.char.mod + join (0.57x) and pandas.to_csv (0.45x).
+
+        Chunking serves two purposes: it lets `progress` report a real
+        percentage, and it bounds the transient. `row_fmt * n % tuple(flat)`
+        materialises a Python tuple of every value, which peaks around 5x the
+        output size — chunking held peak RSS to 133 MB vs savetxt's 751 MB on the
+        same 8 M-point export. Joining chunks is byte-identical to one pass: each
+        row carries its own newline and only the final one is stripped.
+        """
+        stacked = np.column_stack(cols)
+        total = len(stacked)
+        row_fmt = sep.join(fmts) + "\n"
+
+        parts: list = []
+        for start in range(0, total, _TEXT_EXPORT_CHUNK_ROWS):
+            chunk = stacked[start:start + _TEXT_EXPORT_CHUNK_ROWS]
+            flat = chunk.ravel()
+            # `.item()`-free: tuple() on a 1-D array yields numpy scalars, which
+            # %-format identically to their Python counterparts.
+            parts.append(row_fmt * len(chunk) % tuple(flat))
+            if progress is not None:
+                done = min(start + _TEXT_EXPORT_CHUNK_ROWS, total)
+                progress(done / total, f"Formatting {done:,} / {total:,} points")
+        return "".join(parts).rstrip("\n")
 
     pos_fmt = ["%.6f", "%.6f", "%.6f"]
 
@@ -15501,10 +15608,143 @@ def _format_points_as_text(
     raise HTTPException(status_code=400, detail=f"Unsupported text export format: {fmt}")
 
 
-@app.post("/api/pointcloud/export", response_model=PointCloudExportResponse)
-def export_point_cloud_las(request: PointCloudExportRequest):
+def _text_export_layout(fmt, points, colors, intensity):
+    """Resolve one text format into (header_lines, columns, per-column formats,
+    separator) — the single description both the string and streaming writers
+    build from, so they cannot drift."""
+    n = len(points)
+    has_colors = colors is not None and len(colors) == n
+    has_int = intensity is not None and len(intensity) == n
+    rgb = np.clip(np.rint(colors * 255.0), 0, 255).astype(int) if has_colors else None
+    pos = [points[:, 0], points[:, 1], points[:, 2]]
+    pos_fmt = ["%.6f", "%.6f", "%.6f"]
+
+    if fmt == "xyz":
+        return [], pos, pos_fmt, " "
+
+    if fmt in ("txt", "csv"):
+        sep = "," if fmt == "csv" else " "
+        head, cols, fmts = ["X", "Y", "Z"], list(pos), list(pos_fmt)
+        if has_colors:
+            head += ["R", "G", "B"]
+            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
+            fmts += ["%d", "%d", "%d"]
+        if has_int:
+            head += ["Intensity"]
+            cols += [np.asarray(intensity, dtype=np.float64)]
+            fmts += ["%.4f"]
+        return [sep.join(head)], cols, fmts, sep
+
+    if fmt == "ply":
+        header = ["ply", "format ascii 1.0", f"element vertex {n}",
+                  "property float x", "property float y", "property float z"]
+        cols, fmts = list(pos), list(pos_fmt)
+        if has_colors:
+            header += ["property uchar red", "property uchar green", "property uchar blue"]
+            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
+            fmts += ["%d", "%d", "%d"]
+        header.append("end_header")
+        return header, cols, fmts, " "
+
+    if fmt == "obj":
+        header = ["# Point cloud exported from Phytograph", f"# {n} points"]
+        # The 'v ' prefix is the first format field (a literal column).
+        return header, list(pos), ["v %.6f", "%.6f", "%.6f"], " "
+
+    raise HTTPException(status_code=400, detail=f"Unsupported text export format: {fmt}")
+
+
+def _write_points_as_text(
+    dest: Path,
+    fmt: str,
+    points: np.ndarray,
+    colors: Optional[np.ndarray],
+    intensity: Optional[np.ndarray],
+    progress=None,
+) -> None:
+    """Format and write a point cloud to `dest` WITHOUT building the whole file
+    in memory first.
+
+    `_format_points_as_text` returns one string — for a 25 M-point export that is
+    a 780 MB object, and joining the per-chunk pieces transiently holds both the
+    pieces and the joined copy (measured +849 MB -> +1538 MB peak RSS). Writing
+    each chunk straight through keeps the transient at roughly one chunk.
+
+    Output is byte-identical to `_format_points_as_text`: both build from
+    `_text_export_layout`, and the trailing newline is suppressed the same way
+    (the string version strips the joined result; here the final chunk is
+    written without its last newline).
     """
-    Export a point cloud.
+    header, cols, fmts, sep = _text_export_layout(fmt, points, colors, intensity)
+    stacked = np.column_stack(cols) if len(points) else None
+    total = len(points)
+    row_fmt = sep.join(fmts) + "\n"
+
+    # Write to a sibling temp file and rename only on success. Streaming means
+    # bytes hit the disk before the export is complete, so a cancel (or a crash)
+    # would otherwise leave a TRUNCATED file at the user's chosen path that looks
+    # like a finished export. The rename is atomic within a filesystem, and the
+    # temp file is a sibling so it lands on the same one.
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as fh:
+            if header:
+                fh.write("\n".join(header))
+            if total:
+                if header:
+                    fh.write("\n")
+                for start in range(0, total, _TEXT_EXPORT_CHUNK_ROWS):
+                    chunk = stacked[start:start + _TEXT_EXPORT_CHUNK_ROWS]
+                    piece = row_fmt * len(chunk) % tuple(chunk.ravel())
+                    is_last = start + _TEXT_EXPORT_CHUNK_ROWS >= total
+                    fh.write(piece[:-1] if is_last else piece)
+                    if progress is not None:
+                        done = min(start + _TEXT_EXPORT_CHUNK_ROWS, total)
+                        progress(done / total, f"Formatting {done:,} / {total:,} points")
+        os.replace(tmp, dest)
+    except BaseException:
+        # Cancel, error, or interrupt: leave nothing behind at the real path.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+@app.post("/api/pointcloud/export")
+def export_point_cloud_las(request: PointCloudExportRequest, http_request: Request):
+    """Export a point cloud, streaming PHP1 progress ahead of a JSON tail.
+
+    Formatting a multi-million-point text export is ~97% of its wall time and was
+    previously one opaque blocking call, so the UI could only show an
+    indeterminate spinner. `_do_point_cloud_export` reports per-chunk progress
+    through the same streaming wrapper the triangulate/DEM/crown-fit endpoints
+    use, which also makes the export CANCELLABLE via /api/cancel/{run_id} — a
+    25 M-point export is a ~30 s operation the user needs a way out of.
+
+    The JSON tail is the same PointCloudExportResponse shape as before; only the
+    transport changed (progress markers now precede it).
+    """
+    # Validate the destination BEFORE the stream opens: once the 200 + first
+    # chunk is out, an HTTPException can only reach the client as a truncated
+    # body, so a bad path would surface as a decode error instead of its own
+    # message. Resolving here also means the worker's later call is a no-op.
+    if request.dest_path:
+        _resolve_export_dest(request.dest_path)
+
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_point_cloud_export(request, progress=progress, cancel_event=cancel_event)
+        ).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+def _do_point_cloud_export(
+    request: PointCloudExportRequest, progress=None, cancel_event=None
+) -> dict:
+    """
+    Export a point cloud. Returns the PointCloudExportResponse dict.
 
     Flat clouds export LAS/LAZ via laspy. Octree-backed clouds send a `source`
     descriptor and may export any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ — the backend
@@ -15527,14 +15767,46 @@ def export_point_cloud_las(request: PointCloudExportRequest):
         # Export preserves whatever the user imported, sky/misses included — the
         # compute consumers drop them, but an export should round-trip the cloud.
         src.include_misses = True
+        if progress is not None:
+            progress(0.02, "Reading points")
+        _cancel_checkpoint(progress)
         points, src_colors, src_intensity = _read_points_from_source(src)
         if fmt in ("xyz", "txt", "csv", "ply", "obj"):
             try:
-                text = _format_points_as_text(fmt, points, src_colors, src_intensity)
-            except HTTPException:
+                # Formatting is ~97% of a text export's wall time; report it as
+                # the bulk of the bar, leaving a small head for the read above
+                # and a small tail for the disk write below.
+                # Also the cancellation checkpoint: the reporter's __call__ only
+                # QUEUES a marker, it never raises, so without this poll a cancel
+                # would not land until formatting finished — which for a 25 M-point
+                # export is the entire operation. Raising here unwinds before the
+                # file is written, so a cancelled export leaves nothing behind.
+                def _fmt_progress(frac, msg):
+                    if progress is not None:
+                        progress(0.05 + 0.90 * frac, msg)
+                        _cancel_checkpoint(progress)
+                _cancel_checkpoint(progress)
+                # Stream straight to the destination when we have one: the
+                # string form of a 25 M-point export is 780 MB, and joining its
+                # chunks transiently doubles that. Only the legacy base64 path
+                # (no dest_path) needs the whole thing in memory.
+                dest = _resolve_export_dest(request.dest_path) if request.dest_path else None
+                if dest is not None:
+                    _write_points_as_text(
+                        dest, fmt, points, src_colors, src_intensity,
+                        progress=_fmt_progress)
+                    text = None
+                else:
+                    text = _format_points_as_text(
+                        fmt, points, src_colors, src_intensity, progress=_fmt_progress)
+            except (HTTPException, ScanCancelled):
+                # ScanCancelled is a plain Exception, so the broad handler below
+                # would swallow it and report a user cancel as "Export failed".
+                # It must reach the streaming wrapper, which turns it into the
+                # terminal `cancelled` marker the renderer expects.
                 raise
             except Exception as e:
-                return PointCloudExportResponse(
+                return dict(
                     success=False, data=None, filename="", point_count=0,
                     has_colors=False, format=request.format,
                     error=f"Export failed: {e}",
@@ -15543,7 +15815,18 @@ def export_point_cloud_las(request: PointCloudExportRequest):
             filename = request.filename or f"pointcloud{ext}"
             if not filename.endswith(ext):
                 filename = filename.rsplit(".", 1)[0] + ext
-            return PointCloudExportResponse(
+            # Preferred path: write the file here. Base64-in-JSON inflates the
+            # body ~1.8x and a large cloud then blows the renderer's string cap.
+            if dest is not None:
+                # Already written above, chunk by chunk.
+                if progress is not None:
+                    progress(1.0, "Done")
+                return dict(
+                    success=True, data=None, filename=dest.name,
+                    point_count=int(len(points)),
+                    has_colors=src_colors is not None, format=request.format,
+                )
+            return dict(
                 success=True,
                 data=base64.b64encode(text.encode("utf-8")).decode("utf-8"),
                 filename=filename,
@@ -15556,7 +15839,7 @@ def export_point_cloud_las(request: PointCloudExportRequest):
     try:
         import laspy
     except ImportError:
-        return PointCloudExportResponse(
+        return dict(
             success=False,
             data=None,
             filename="",
@@ -15577,7 +15860,7 @@ def export_point_cloud_las(request: PointCloudExportRequest):
             colors_arr = np.array(request.colors) if has_colors else None
 
         if len(points) == 0:
-            return PointCloudExportResponse(
+            return dict(
                 success=False,
                 data=None,
                 filename="",
@@ -15590,25 +15873,40 @@ def export_point_cloud_las(request: PointCloudExportRequest):
         # Choose point format: 0 = XYZ only, 2 = XYZ + RGB
         point_format = 2 if has_colors else 0
 
-        # Create LAS header
-        header = laspy.LasHeader(point_format=point_format, version="1.2")
+        # Assembling the LAS is NOT free, despite each step being vectorised: at
+        # 25 M points the stages below total ~5 s (bounds ~0.5 s, the quantising
+        # x/y/z assignment ~1.5 s, colour clip+scale ~0.6 s, laspy.write ~1 s).
+        # They used to run between the "Reading points" and "Writing file"
+        # markers, so the pill sat at 2% for the whole time and then jumped to
+        # 90% — reading as a hang. Report each stage instead. The fractions are
+        # rough shares of that measured breakdown, not a uniform split.
+        def _stage(frac, msg):
+            if progress is not None:
+                progress(frac, msg)
+                _cancel_checkpoint(progress)
 
-        # Calculate offsets and scales for precision
+        # Each marker is emitted BEFORE the work it names, so the label the user
+        # sees always describes the step currently running.
+        _stage(0.10, "Computing bounds")
+        header = laspy.LasHeader(point_format=point_format, version="1.2")
         min_coords = points.min(axis=0)
         max_coords = points.max(axis=0)
-
         header.offsets = min_coords
         header.scales = [0.001, 0.001, 0.001]  # 1mm precision
-
-        # Create LAS data
         las = laspy.LasData(header)
+
+        # Each assignment quantises to the header scale (the 1 mm grid), which is
+        # where the bulk of the per-axis cost is. X carries the one-off setup, so
+        # it is consistently the slowest of the three.
+        _stage(0.20, "Packing coordinates")
         las.x = points[:, 0]
         las.y = points[:, 1]
+        _stage(0.55, "Packing coordinates")
         las.z = points[:, 2]
 
         # Add colors if available (convert from 0-1 to 16-bit)
         if has_colors:
-            # Ensure colors are in 0-1 range and convert to 16-bit
+            _stage(0.65, "Packing colours")
             colors = np.clip(np.asarray(colors_arr, dtype=np.float64), 0, 1)
             las.red = (colors[:, 0] * 65535).astype(np.uint16)
             las.green = (colors[:, 1] * 65535).astype(np.uint16)
@@ -15619,6 +15917,24 @@ def export_point_cloud_las(request: PointCloudExportRequest):
         filename = request.filename or f"pointcloud{ext}"
         if not filename.endswith(ext):
             filename = filename.rsplit('.', 1)[0] + ext
+
+        # Preferred path: laspy writes straight to the user's chosen file. No
+        # temp copy, no base64 (which inflates the body ~1.8x), no giant JSON.
+        if request.dest_path:
+            # laspy.write() is one opaque call with no interior hook, so this
+            # last stage is necessarily a single step — but it is only ~1 s of
+            # the ~5 s assembly (and LAZ compression is most of that), so the bar
+            # no longer sits still for the bulk of the export.
+            _stage(0.85, "Compressing and writing" if ext == ".laz" else "Writing file")
+            dest = _resolve_export_dest(request.dest_path)
+            las.write(str(dest))
+            if progress is not None:
+                progress(1.0, "Done")
+            return dict(
+                success=True, data=None, filename=dest.name,
+                point_count=len(points), has_colors=has_colors,
+                format=request.format,
+            )
 
         # Write to temporary file
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
@@ -15631,7 +15947,7 @@ def export_point_cloud_las(request: PointCloudExportRequest):
             with open(tmp_path, 'rb') as f:
                 file_data = base64.b64encode(f.read()).decode('utf-8')
 
-            return PointCloudExportResponse(
+            return dict(
                 success=True,
                 data=file_data,
                 filename=filename,
@@ -15644,10 +15960,14 @@ def export_point_cloud_las(request: PointCloudExportRequest):
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
+    except (HTTPException, ScanCancelled):
+        # Same reason as the text branch: a cancel is not a failure, and a bad
+        # dest_path must keep its own 400 rather than become a generic error.
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return PointCloudExportResponse(
+        return dict(
             success=False,
             data=None,
             filename="",
@@ -17934,8 +18254,30 @@ def _read_points_from_source(
             raise HTTPException(
                 status_code=400,
                 detail=("Point source has neither a session_id nor a source_path. "
-                        "A session-backed cloud must send its session_id; a "
-                        "file-backed cloud must send source_path."),
+                        "A session-backed cloud must send its session_id."),
+            )
+        # A cloud's file is read ONCE, at import (/api/cloud/session/create); from
+        # then on the session's in-RAM arrays are the source of truth. They carry
+        # every edit — deletions, translation, filtering, segmentation labels —
+        # that the file on disk does not. So computing from a file path means
+        # computing on PRE-EDIT data, silently producing a wrong answer rather
+        # than an error. Reject it here, at the one chokepoint every compute and
+        # export path reads through, so the rule holds for every caller rather
+        # than depending on each one guarding itself.
+        #
+        # `allow_file_source` is the deliberate opt-in for the cases that
+        # genuinely have no session: unit tests exercising the loaders directly,
+        # and any future read of a file that is not a live cloud.
+        if not src.allow_file_source:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Refusing to compute from the file {src.source_path!r}: a cloud is "
+                    "read from disk only at import, and its in-RAM session is the source "
+                    "of truth thereafter. The file does not reflect edits (deletions, "
+                    "translation, filtering, labels), so this would compute on stale data. "
+                    "Send session_id instead."
+                ),
             )
         positions, colors, intensity = _load_pointcloud_arrays(
             src.source_path, src.ascii_format

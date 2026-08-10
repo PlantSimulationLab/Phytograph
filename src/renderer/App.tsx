@@ -9,7 +9,7 @@ import { scanDisplayName, type Scan } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { shiftPoseStream } from "./lib/poseStream";
 import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
-import { importTexturedMesh, importQSMCsv, type MeshImportResponse, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError } from "./utils/backendApi";
+import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError } from "./utils/backendApi";
 import { isQsmCsvFile } from "./lib/qsmImport";
 
 // A user cancel is not a failure: it must never land in the per-file `errors[]`
@@ -22,7 +22,6 @@ function isImportCancel(err: unknown, signal?: AbortSignal): boolean {
     || (err instanceof Error && err.name === 'AbortError');
 }
 import { useScene } from "./state/sceneStore";
-import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
 import { registerCategoricalSlug, registerContinuousSlug } from "./lib/classification";
 import { parseHeliosScanXml, HeliosXmlParseError } from "./lib/heliosScanXml";
@@ -614,10 +613,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             }
           }
 
-          let backendMesh: MeshImportResponse | null = null;
+          let backendMesh: MeshImportResult | null = null;
           // True when the backend importer was attempted for a materials-capable
-          // file (OBJ/PLY with a disk path) but threw, so the local fallback
-          // below will produce geometry without the embedded materials.
+          // file (OBJ/PLY with a disk path) but the backend was UNREACHABLE, so
+          // the local fallback below will produce geometry without the embedded
+          // materials. A backend that answered with an error is not this case.
           let materialsDropped = false;
           if ((ext === 'obj' || ext === 'ply') && objPath) {
             try {
@@ -629,25 +629,31 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               // whenever it succeeds; fall back locally only on error.
               if (resp.success) backendMesh = resp;
             } catch (e) {
-              console.warn('Backend mesh import failed, falling back to local parse:', e);
+              // Only a genuinely unreachable backend justifies the silent local
+              // fallback. If the backend answered and failed, surface THAT error:
+              // swallowing it here used to report "the backend was unavailable"
+              // for a backend that was up, then cascade into a second, unrelated
+              // error from the local parser (binary PLY can't be parsed in-
+              // renderer at all, so the fallback could never have succeeded).
+              if (!isBackendUnreachable(e)) throw e;
+              console.warn('Backend unreachable, falling back to local mesh parse:', e);
               materialsDropped = true;
             }
           }
 
           if (backendMesh) {
-            const { data, plantMaterials } = plantResponseToMeshData(backendMesh);
             importRefsRef.current.importMesh({
               sourceCloudId: 'imported',
-              data,
-              plantMaterials,
+              data: backendMesh.data,
+              plantMaterials: backendMesh.plantMaterials,
               visible: true,
               color: getNextColor(),
               method: 'delaunay',
               name: baseNameForLabel(file.name),
             });
             setSettingsOpen(false);
-            const texturedLabel = backendMesh.has_textures ? 'textured mesh' : 'mesh';
-            showToast({ title: `Loaded ${texturedLabel} with ${backendMesh.triangle_count.toLocaleString()} triangles from ${file.name}`, type: 'success' });
+            const texturedLabel = backendMesh.hasTextures ? 'textured mesh' : 'mesh';
+            showToast({ title: `Loaded ${texturedLabel} with ${backendMesh.data.triangleCount.toLocaleString()} triangles from ${file.name}`, type: 'success' });
           } else {
             const meshData = await parseMesh(file);
             importRefsRef.current.importMesh({
@@ -668,7 +674,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             setSettingsOpen(false);
             if (materialsDropped) {
               showToast({
-                title: `Imported geometry from ${file.name}, but couldn't load its materials — the backend was unavailable. Re-import to apply colors/textures.`,
+                title: `Imported geometry from ${file.name}, but couldn't load its materials — could not reach the backend. Re-import once it's running to apply colors/textures.`,
                 type: 'warning',
                 duration: 0,
               });
@@ -906,7 +912,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             }
           }
 
-          let backendMesh: MeshImportResponse | null = null;
+          let backendMesh: MeshImportResult | null = null;
           if ((ext === 'obj' || ext === 'ply') && meshPath) {
             try {
               const resp = await importTexturedMesh(meshPath);
@@ -915,17 +921,22 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               // colors, textures, binary PLY). Local parse is the fallback.
               if (resp.success) backendMesh = resp;
             } catch (e) {
-              console.warn('Backend mesh import failed, falling back to local parse:', e);
+              // Only an unreachable backend falls back locally; a backend that
+              // answered with an error rethrows so the per-file catch reports
+              // the REAL cause instead of the misleading "backend unavailable"
+              // warning plus a cascaded local-parser error. See the single-file
+              // path above for the full rationale.
+              if (!isBackendUnreachable(e)) throw e;
+              console.warn('Backend unreachable, falling back to local mesh parse:', e);
               materialsDroppedFiles.push(file.name);
             }
           }
 
           if (backendMesh && importRefsRef.current) {
-            const { data, plantMaterials } = plantResponseToMeshData(backendMesh);
             importRefsRef.current.importMesh({
               sourceCloudId: 'imported',
-              data,
-              plantMaterials,
+              data: backendMesh.data,
+              plantMaterials: backendMesh.plantMaterials,
               visible: true,
               color: getColorForFile(),
               method: 'delaunay',
@@ -1093,10 +1104,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
 
     if (materialsDroppedFiles.length > 0) {
       // The geometry imported, but the backend (the only path that reads MTL
-      // colors/textures and per-vertex PLY color) was unavailable, so these
-      // came in without their materials. Warn so the user knows to re-import.
+      // colors/textures and per-vertex PLY color) could not be REACHED, so these
+      // came in without their materials. Only a genuine connection failure gets
+      // here — a backend that answered with an error rethrows and is reported
+      // with its own message. Warn so the user knows to re-import.
       showToast({
-        title: `Imported ${materialsDroppedFiles.length} mesh(es) without materials — the backend was unavailable. Re-import to apply colors/textures.`,
+        title: `Imported ${materialsDroppedFiles.length} mesh(es) without materials — could not reach the backend. Re-import once it's running to apply colors/textures.`,
         message: materialsDroppedFiles.join('\n'),
         type: 'warning',
         duration: 0,

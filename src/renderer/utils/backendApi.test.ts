@@ -33,6 +33,7 @@ import {
   abortOnTimeout,
   BackendTimeoutError,
   describeBackendError,
+  isBackendUnreachable,
 } from './backendApi';
 
 // Silence the production console.* calls — they're informational and just
@@ -430,26 +431,97 @@ describe('generatePlantStreaming', () => {
 });
 
 describe('importTexturedMesh', () => {
-  it('POSTs the disk path to /api/mesh/import', async () => {
-    const expected = {
-      success: true,
-      vertices: [[0, 0, 0]],
-      indices: [[0, 1, 2]],
-      vertex_count: 6,
-      triangle_count: 2,
-      has_textures: true,
-    };
-    const spy = mockFetchOk(expected);
-    const res = await importTexturedMesh('/abs/path/model.obj');
+  it('POSTs the disk path and decodes the binary frame into typed arrays', async () => {
+    // Two triangles sharing an edge, with per-vertex colors — the shape a PLY
+    // mesh import returns. Geometry rides in the frame's buffers, not JSON.
+    const spy = mockFetchBinaryFrame(
+      { success: true, vertex_count: 4, triangle_count: 2, filename: 'model.ply', has_textures: false },
+      [
+        { name: 'vertices', dtype: 'f32', data: [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0] },
+        { name: 'indices', dtype: 'u32', data: [0, 1, 2, 0, 2, 3] },
+        { name: 'colors', dtype: 'f32', data: [1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0] },
+      ],
+    );
+    const res = await importTexturedMesh('/abs/path/model.ply');
     const [url, init] = spy.mock.calls[0];
     expect(url).toBe('http://127.0.0.1:8008/api/mesh/import');
-    expect(JSON.parse(init?.body as string)).toEqual({ path: '/abs/path/model.obj' });
-    expect(res.has_textures).toBe(true);
+    expect(JSON.parse(init?.body as string)).toEqual({ path: '/abs/path/model.ply' });
+
+    expect(res.success).toBe(true);
+    expect(res.hasTextures).toBe(false);
+    expect(res.data.vertexCount).toBe(4);
+    expect(res.data.triangleCount).toBe(2);
+    // Zero-copy typed arrays, NOT re-flattened number[][].
+    expect(res.data.vertices).toBeInstanceOf(Float32Array);
+    expect(res.data.indices).toBeInstanceOf(Uint32Array);
+    expect(Array.from(res.data.vertices)).toEqual([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]);
+    expect(Array.from(res.data.indices)).toEqual([0, 1, 2, 0, 2, 3]);
+    expect(Array.from(res.data.vertexColors!)).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0]);
+  });
+
+  it('maps materials/textures from meta onto plantMaterials', async () => {
+    mockFetchBinaryFrame(
+      {
+        success: true,
+        vertex_count: 3,
+        triangle_count: 1,
+        has_textures: true,
+        materials: [{ name: 'bark', color: [0.5, 0.25, 0.1], texture_name: 'bark.png', has_alpha: false }],
+        material_groups: [{ material_name: 'bark', triangle_indices: [0] }],
+        textures: { 'bark.png': 'BASE64DATA' },
+      },
+      [
+        { name: 'vertices', dtype: 'f32', data: [0, 0, 0, 1, 0, 0, 0, 1, 0] },
+        { name: 'indices', dtype: 'u32', data: [0, 1, 2] },
+        { name: 'uv_coordinates', dtype: 'f32', data: [0, 0, 1, 0, 0, 1] },
+      ],
+    );
+    const res = await importTexturedMesh('/abs/path/tree.obj');
+    expect(res.hasTextures).toBe(true);
+    expect(res.plantMaterials).toHaveLength(1);
+    expect(res.plantMaterials![0]).toMatchObject({
+      name: 'bark',
+      textureData: 'BASE64DATA',
+      hasAlpha: false,
+      triangleIndices: [0],
+    });
+    expect(Array.from(res.data.uvCoordinates!)).toEqual([0, 0, 1, 0, 0, 1]);
   });
 
   it('surfaces detail on error', async () => {
     mockFetchError(404, { detail: 'Mesh file not found' });
     await expect(importTexturedMesh('/missing.obj')).rejects.toThrow('Mesh file not found');
+  });
+
+  it('throws the backend error carried in a failed frame', async () => {
+    // A frame with success:false carries the reason in meta, with no buffers.
+    mockFetchBinaryFrame(
+      { success: false, error: 'No faces found in PLY mesh (file appears to be a point cloud).' },
+      [],
+    );
+    await expect(importTexturedMesh('/cloud.ply')).rejects.toThrow('No faces found in PLY mesh');
+  });
+});
+
+describe('isBackendUnreachable', () => {
+  it('is true for a connection failure', () => {
+    expect(isBackendUnreachable(new TypeError('Failed to fetch'))).toBe(true);
+    expect(isBackendUnreachable(new Error('NetworkError when attempting to fetch'))).toBe(true);
+  });
+
+  it('is false for an error the backend itself returned', () => {
+    // The regression this guards: a backend that answered with a failure (or a
+    // client-side decode error) must NOT be reported as "backend unavailable",
+    // because that sends users to restart a process that was up the whole time.
+    expect(isBackendUnreachable(new Error('Mesh file not found'))).toBe(false);
+    expect(isBackendUnreachable(new Error('HTTP 500: Internal Server Error'))).toBe(false);
+    expect(
+      isBackendUnreachable(new Error('Cannot create a string longer than 0x1fffffe8 characters')),
+    ).toBe(false);
+  });
+
+  it('is false for a timeout — the backend was reachable, just slow', () => {
+    expect(isBackendUnreachable(new BackendTimeoutError('/api/mesh/import', 600000))).toBe(false);
   });
 });
 
@@ -668,6 +740,32 @@ describe('point cloud LAS/LAZ import/export', () => {
     expect(JSON.parse(init?.body as string)).toEqual(req);
   });
 
+  it('exportPointCloudLasLaz forwards dest_path so the backend writes the file itself', async () => {
+    // Regression: without dest_path the backend returns the file base64-encoded
+    // inside JSON. That body is ~1.8x the file size, so a 25 M-point export
+    // lands near 1 GB and `response.json()` dies on V8's ~512 MB string cap
+    // ("Unexpected end of JSON input"). dest_path must reach the backend, and
+    // the response then carries metadata only — `data` is null.
+    const spy = mockFetchOk({
+      success: true,
+      data: null,
+      filename: 'cloud.xyz',
+      point_count: 25_000_000,
+      has_colors: false,
+      format: 'xyz',
+    });
+    const res = await exportPointCloudLasLaz({
+      source: { source_path: '/abs/in.xyz' },
+      format: 'xyz',
+      dest_path: '/abs/out/cloud.xyz',
+    });
+    const [, init] = spy.mock.calls[0];
+    expect(JSON.parse(init?.body as string).dest_path).toBe('/abs/out/cloud.xyz');
+    expect(res.success).toBe(true);
+    expect(res.data ?? null).toBeNull();
+    expect(res.point_count).toBe(25_000_000);
+  });
+
   it('exportPointCloudLasLaz surfaces error', async () => {
     mockFetchError(500, { detail: 'lazrs missing' });
     await expect(
@@ -689,10 +787,12 @@ describe('point cloud LAS/LAZ import/export', () => {
     vi.useFakeTimers();
     try {
       const pending = exportPointCloudLasLaz({ points: [], format: 'laz' });
+      // 10 min budget — a 25 M-point export takes ~35 s on a fast disk, and the
+      // failure mode of a too-short deadline is a truncated file.
       const assertion = expect(pending).rejects.toThrow(
-        /Export timed out\..*within 2 min \(POST \/api\/pointcloud\/export\).*\[slow\].*restart the backend/s,
+        /Export timed out\..*within 10 min \(POST \/api\/pointcloud\/export\).*\[slow\].*restart the backend/s,
       );
-      await vi.advanceTimersByTimeAsync(120000);
+      await vi.advanceTimersByTimeAsync(600000);
       await assertion;
     } finally {
       vi.useRealTimers();

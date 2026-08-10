@@ -48,7 +48,7 @@ def two_clouds(tmp_path):
     return fa, fb, _read_xyz(fa), _read_xyz(fb)
 
 
-def test_merged_sources_matches_inline_union(client, two_clouds):
+def test_merged_sources_matches_inline_union(client, two_clouds, make_file_session):
     fa, fb, a, b = two_clouds
     union = np.vstack([a, b])
 
@@ -57,8 +57,8 @@ def test_merged_sources_matches_inline_union(client, two_clouds):
     }).content)
     merged, _ = decode_bin_frame(client.post("/api/triangulate", json={
         "sources": [
-            {"source_path": str(fa), "ascii_format": FORMAT},
-            {"source_path": str(fb), "ascii_format": FORMAT},
+            {"session_id": make_file_session(str(fa), FORMAT)},
+            {"session_id": make_file_session(str(fb), FORMAT)},
         ],
         "method": "alpha_shape", "alpha": 0.2,
     }).content)
@@ -73,14 +73,14 @@ def test_merged_sources_matches_inline_union(client, two_clouds):
     assert abs(merged["num_triangles"] - inline["num_triangles"]) <= 8
 
 
-def test_merged_sources_uses_all_points(client, two_clouds):
+def test_merged_sources_uses_all_points(client, two_clouds, make_file_session):
     """The merge must use BOTH clouds, not just one — points_used is the sum and
     the surface spans the full 1.5-wide union, not a single 1.0-wide grid."""
     fa, fb, a, b = two_clouds
     merged, _ = decode_bin_frame(client.post("/api/triangulate", json={
         "sources": [
-            {"source_path": str(fa), "ascii_format": FORMAT},
-            {"source_path": str(fb), "ascii_format": FORMAT},
+            {"session_id": make_file_session(str(fa), FORMAT)},
+            {"session_id": make_file_session(str(fb), FORMAT)},
         ],
         "method": "alpha_shape", "alpha": 0.2,
     }).content)
@@ -91,7 +91,7 @@ def test_merged_sources_uses_all_points(client, two_clouds):
     assert merged["surface_area"] > 1.05, merged["surface_area"]
 
 
-def test_merged_sources_folds_in_inline_points(client, two_clouds):
+def test_merged_sources_folds_in_inline_points(client, two_clouds, make_file_session):
     """`sources` and inline `points` compose: one cloud from a file, the other
     inline, must fuse to the same mesh as both inline."""
     fa, fb, a, b = two_clouds
@@ -101,7 +101,7 @@ def test_merged_sources_folds_in_inline_points(client, two_clouds):
         "points": union.tolist(), "method": "alpha_shape", "alpha": 0.2,
     }).content)
     mixed, _ = decode_bin_frame(client.post("/api/triangulate", json={
-        "sources": [{"source_path": str(fa), "ascii_format": FORMAT}],
+        "sources": [{"session_id": make_file_session(str(fa), FORMAT)}],
         "points": b.tolist(),
         "method": "alpha_shape", "alpha": 0.2,
     }).content)

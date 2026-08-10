@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import main
+from tests.binframe import decode_bin_frame
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -343,36 +344,43 @@ def test_mesh_import_obj_mtl_roundtrip(client):
     obj = FIXTURES / "quad.obj"
     resp = client.post("/api/mesh/import", json={"path": str(obj)})
     assert resp.status_code == 200, resp.text
-    body = resp.json()
+    # Geometry rides in a PHB1 binary frame (a multi-million-triangle mesh as
+    # JSON exceeds V8's ~512 MB string cap in the renderer); materials/textures
+    # ride in the frame's JSON meta.
+    meta, buffers = decode_bin_frame(resp.content)
 
-    assert body["success"] is True
-    assert body["has_textures"] is True
+    assert meta["success"] is True
+    assert meta["has_textures"] is True
     # Two triangles, non-indexed → 6 vertices.
-    assert body["triangle_count"] == 2
-    assert body["vertex_count"] == 6
-    assert len(body["uv_coordinates"]) == 6
+    assert meta["triangle_count"] == 2
+    assert meta["vertex_count"] == 6
+    uvs = buffers["uv_coordinates"].reshape(-1, 2)
+    assert len(uvs) == 6
 
     # vt (0,0) is V-flipped to (0,1) for three.js.
-    assert body["uv_coordinates"][0] == [0.0, 1.0]
+    assert uvs[0].tolist() == [0.0, 1.0]
 
     # One material with the quad's Kd colour and PNG texture.
-    mats = body["materials"]
+    mats = meta["materials"]
     assert len(mats) == 1
     assert mats[0]["texture_name"] == "quad_texture.png"
     assert mats[0]["color"] == [0.3, 0.55, 0.2]
     assert mats[0]["has_alpha"] is True
 
-    groups = body["material_groups"]
+    groups = meta["material_groups"]
     assert groups[0]["triangle_indices"] == [0, 1]
 
     # Texture decodes to the fixture PNG.
-    raw = base64.b64decode(body["textures"]["quad_texture.png"])
+    raw = base64.b64decode(meta["textures"]["quad_texture.png"])
     assert raw[:4] == b"\x89PNG"
 
     # Per-vertex colours come from Kd.
-    assert body["colors"][0] == [0.3, 0.55, 0.2]
+    assert buffers["colors"].reshape(-1, 3)[0].tolist() == pytest.approx([0.3, 0.55, 0.2])
     # Normals from vn.
-    assert body["normals"][0] == [0.0, 0.0, 1.0]
+    assert buffers["normals"].reshape(-1, 3)[0].tolist() == [0.0, 0.0, 1.0]
+    # Indices are a real triangle list over the 6 expanded vertices.
+    assert buffers["indices"].reshape(-1, 3).shape == (2, 3)
+    assert buffers["indices"].max() < 6
 
 
 def test_mesh_import_missing_file(client):
@@ -437,25 +445,26 @@ def test_mesh_import_ply_ascii(client, tmp_path):
     ply.write_text(_PLY_QUAD_ASCII)
     resp = client.post("/api/mesh/import", json={"path": str(ply)})
     assert resp.status_code == 200, resp.text
-    body = resp.json()
+    meta, buffers = decode_bin_frame(resp.content)
 
-    assert body["success"] is True
-    assert body["has_textures"] is False
-    assert body["materials"] is None
-    assert body["textures"] is None
+    assert meta["success"] is True
+    assert meta["has_textures"] is False
+    assert meta["materials"] is None
+    assert meta["textures"] is None
     # Indexed geometry: 4 vertices, 2 triangles.
-    assert body["vertex_count"] == 4
-    assert body["triangle_count"] == 2
-    assert sorted(tuple(t) for t in body["indices"]) == [(0, 1, 2), (0, 2, 3)]
+    assert meta["vertex_count"] == 4
+    assert meta["triangle_count"] == 2
+    tris = buffers["indices"].reshape(-1, 3)
+    assert sorted(tuple(int(i) for i in t) for t in tris) == [(0, 1, 2), (0, 2, 3)]
 
     # Per-vertex colours preserved (0-1), first vertex is red.
-    assert body["colors"] is not None
-    assert len(body["colors"]) == 4
-    r, g, b = body["colors"][0]
+    colors = buffers["colors"].reshape(-1, 3)
+    assert len(colors) == 4
+    r, g, b = colors[0]
     assert r > 0.9 and g < 0.1 and b < 0.1
     # Normals computed (quad lies in z=0 plane → normal ±z).
-    assert body["normals"] is not None
-    assert abs(abs(body["normals"][0][2]) - 1.0) < 1e-6
+    normals = buffers["normals"].reshape(-1, 3)
+    assert abs(abs(normals[0][2]) - 1.0) < 1e-6
 
 
 def test_mesh_import_ply_binary(client, tmp_path):
@@ -464,12 +473,51 @@ def test_mesh_import_ply_binary(client, tmp_path):
     _write_binary_ply_quad(ply)
     resp = client.post("/api/mesh/import", json={"path": str(ply)})
     assert resp.status_code == 200, resp.text
-    body = resp.json()
+    meta, buffers = decode_bin_frame(resp.content)
 
-    assert body["success"] is True
-    assert body["vertex_count"] == 4
-    assert body["triangle_count"] == 2
-    assert body["colors"] is not None and len(body["colors"]) == 4
+    assert meta["success"] is True
+    assert meta["vertex_count"] == 4
+    assert meta["triangle_count"] == 2
+    assert len(buffers["colors"].reshape(-1, 3)) == 4
+    assert buffers["vertices"].reshape(-1, 3).shape == (4, 3)
+
+
+def test_mesh_import_large_mesh_body_stays_under_v8_string_cap(client, tmp_path):
+    """A mesh's response must stay well under V8's ~512 MB string-length limit.
+
+    The regression: /api/mesh/import used to return JSON, and a scanner-grade
+    mesh (3.1 M vertices / 6.3 M triangles) serialized to a ~693 MB body. The
+    renderer's `response.json()` must materialize that as one JS string, which
+    throws ERR_STRING_TOO_LONG above 0x1fffffe8 chars — a hard failure no
+    timeout could fix. The binary frame is ~6x smaller AND has no string step.
+
+    Rather than build a 3 M-vertex mesh here (slow), assert the invariant that
+    makes it safe: the frame is FIXED-WIDTH per element, so its size is exactly
+    predictable. We measure the per-vertex and per-triangle costs on a small
+    mesh, then project them onto the real scan's counts. (The projection can't
+    use this fixture's own bytes/triangle: a 4-vertex/2-triangle quad has an
+    inverted vertex:triangle ratio, where real meshes run ~1:2.)
+    """
+    ply = tmp_path / "quad_binary.ply"
+    _write_binary_ply_quad(ply)
+    resp = client.post("/api/mesh/import", json={"path": str(ply)})
+    meta, buffers = decode_bin_frame(resp.content)
+
+    nv, nt = meta["vertex_count"], meta["triangle_count"]
+    # Per-vertex buffers (position/normal/colour) vs the per-triangle index list.
+    per_vertex = sum(b.nbytes for n, b in buffers.items() if n != "indices") / nv
+    per_tri = buffers["indices"].nbytes / nt
+    assert per_tri == 12.0, "indices must be 3 uint32 per triangle"
+    assert per_vertex == 36.0, "expected float32 position + normal + colour per vertex"
+
+    # Project onto the real apple scan that triggered this bug.
+    projected = per_vertex * 3_174_846 + per_tri * 6_302_999
+    v8_string_cap = 0x1FFFFFE8
+    assert projected < v8_string_cap, (
+        f"projected {projected/1e6:.0f} MB exceeds V8's {v8_string_cap/1e6:.0f} MB string cap"
+    )
+    # And comfortably so — the JSON body this replaced was ~693 MB.
+    assert projected < 250 * 1024 * 1024, f"projected {projected/1e6:.0f} MB is larger than expected"
 
 
 def test_mesh_import_ply_pointcloud_rejected(client, tmp_path):

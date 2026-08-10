@@ -229,6 +229,7 @@ import { BACKEND_PORT_PROD } from '../../shared/constants';
 // that turns it into ScanParameters; imported here for CloudSessionMetadata and
 // re-exported below so backendApi consumers get it without a second import.
 import type { ScanParamsFromFile } from '../lib/scanParameters';
+import type { MeshData, PlantMaterialDef } from '../lib/pointCloudTypes';
 
 // Cached backend base URL. The port is chosen per-instance by the main process
 // (src/main/backend.ts) so concurrent app instances / dev sessions / E2E runs
@@ -271,11 +272,27 @@ export function getBackendUrl(): string {
  * we rewrite it; genuine HTTP-status errors (which we throw ourselves with the
  * backend's `detail`) pass through untouched.
  */
+/**
+ * Whether an error means the backend could not be REACHED, as opposed to the
+ * backend answering with a failure. Callers with a local fallback path use this
+ * to tell the two apart: falling back is right when the backend is genuinely
+ * absent, but reporting "the backend was unavailable" for an error the backend
+ * itself returned (or for a client-side decode failure) sends users chasing a
+ * process that was up the whole time.
+ */
+export function isBackendUnreachable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  // A deadline abort means the backend was reachable but too slow — not absent.
+  if (error instanceof BackendTimeoutError) return false;
+  return (
+    error.name === 'TypeError' ||
+    /failed to fetch|networkerror|load failed|connection/i.test(error.message)
+  );
+}
+
 export function describeBackendError(error: unknown, action: string): Error {
   if (error instanceof Error) {
-    const isConnectionFailure =
-      error.name === 'TypeError' ||
-      /failed to fetch|networkerror|load failed|connection/i.test(error.message);
+    const isConnectionFailure = isBackendUnreachable(error);
     if (isConnectionFailure) {
       return new Error(
         `${action} failed: could not reach the backend (it may still be starting, ` +
@@ -2073,6 +2090,12 @@ export interface PointCloudExportRequest {
   // octree clouds may send any of these (the backend formats the text).
   format: 'las' | 'laz' | 'xyz' | 'txt' | 'csv' | 'ply' | 'obj';
   filename?: string;
+  // Absolute path for the backend to write directly. Always set this when a
+  // destination is known: the base64-in-JSON alternative inflates the body ~1.8x,
+  // so a 25 M-point cloud lands near 1 GB and `response.json()` dies on V8's
+  // ~512 MB string cap ("Unexpected end of JSON input"). With dest_path the
+  // response is ~100 bytes of metadata and `data` comes back null.
+  dest_path?: string;
 }
 
 export interface PointCloudExportResponse {
@@ -2096,41 +2119,32 @@ export interface PointCloudImportResponse {
 }
 
 /**
- * Export a point cloud to LAS or LAZ format via the backend.
- * Uses laspy with lazrs for efficient LAZ compression.
+ * Export a point cloud via the backend (LAS/LAZ via laspy, text formats via the
+ * vectorised formatter).
+ *
+ * Streams PHP1 progress markers ahead of its JSON tail, so `onProgress` gets a
+ * real percentage rather than an indeterminate spinner: formatting a text export
+ * is ~97% of its wall time and the backend reports it per chunk. `signal` +
+ * `onRunId` make the export cancellable — POST /api/cancel/{runId} stops the
+ * backend work, and aborting the signal tears down the fetch.
+ *
+ * 10 minute budget, matching the import: a 25 M-point cloud takes ~35 s to read,
+ * format and write on a fast disk. fetchJsonWithProgress refreshes the deadline
+ * on every chunk, so a slow-but-streaming export is never killed mid-write.
  */
 export async function exportPointCloudLasLaz(
-  request: PointCloudExportRequest
+  request: PointCloudExportRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<PointCloudExportResponse> {
-  const baseUrl = getBackendUrl();
   console.log('Point cloud export -', request.points ? `${request.points.length} points` : `source:${request.source?.source_path}`, 'format:', request.format);
-
-  // Use AbortController for timeout
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 120000, '/api/pointcloud/export'); // 2 minutes
   const t0 = performance.now();
-
   try {
-    const response = await fetch(`${baseUrl}/api/pointcloud/export`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
+    return await fetchJsonWithProgress<PointCloudExportResponse>(
+      '/api/pointcloud/export', request, signal, 600000, onProgress, onRunId);
   } catch (error) {
-    clearTimeout(timeoutId);
-    console.error(`LAS/LAZ export failed after ${Math.round(performance.now() - t0)} ms:`, error);
+    console.error(`Point cloud export failed after ${Math.round(performance.now() - t0)} ms:`, error);
     throw describeBackendError(error, 'Export');
   }
 }
@@ -2396,51 +2410,70 @@ export async function importPointCloudByPath(
 
 // ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
 
-export interface MeshImportResponse {
+export interface MeshImportResult {
   success: boolean;
-  vertices: number[][];          // [[x, y, z], ...]
-  indices: number[][];           // [[v0, v1, v2], ...]
-  normals?: number[][];
-  colors?: number[][];           // per-vertex colors (0-1)
-  uv_coordinates?: number[][];   // [[u, v], ...] V-flipped for three.js
-  materials?: PlantMaterial[];
-  material_groups?: PlantMaterialGroup[];
-  textures?: Record<string, string>;  // {basename: base64}
-  vertex_count: number;
-  triangle_count: number;
+  data: MeshData;
+  plantMaterials?: PlantMaterialDef[];
   filename?: string;
-  has_textures: boolean;
+  hasTextures: boolean;
   error?: string;
 }
 
 /**
- * Import a textured mesh (OBJ + sibling MTL + texture images) from a disk path.
- * The backend resolves the MTL and image files relative to the OBJ and returns
- * geometry, real per-vertex UVs, and base64 textures in the same shape the
- * textured renderer already consumes for plant models.
+ * Import a mesh (OBJ + sibling MTL + texture images, or ASCII/binary PLY) from a
+ * disk path. The backend resolves the MTL and image files relative to the OBJ and
+ * returns geometry, real per-vertex UVs, and base64 textures.
+ *
+ * Transport is a PHB1 binary frame, not JSON: a scanner-grade mesh (millions of
+ * triangles) serializes to a JSON body past V8's ~512 MB string cap, where
+ * `response.json()` throws ERR_STRING_TOO_LONG regardless of timeout. The frame's
+ * buffers become the returned MeshData's typed arrays with no per-element
+ * repacking, so this also skips the number[][] round-trip entirely.
  */
-export async function importTexturedMesh(filePath: string): Promise<MeshImportResponse> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 120000, '/api/mesh/import');
-  try {
-    const response = await fetch(`${baseUrl}/api/mesh/import`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: filePath }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Textured mesh import failed:', error);
-    throw error;
+export async function importTexturedMesh(filePath: string): Promise<MeshImportResult> {
+  // 10 minutes: reading + normal-generating a multi-million-triangle mesh off
+  // disk is tens of seconds, and the frame still has to cross the socket.
+  const { meta, buffers } = await fetchBinaryFrame(
+    '/api/mesh/import', { path: filePath }, undefined, 600000,
+  );
+  if (!meta.success) {
+    throw new Error((meta.error as string) ?? 'Mesh import failed');
   }
+
+  const materials = (meta.materials as PlantMaterial[] | null) ?? undefined;
+  const materialGroups = (meta.material_groups as PlantMaterialGroup[] | null) ?? undefined;
+  const textures = (meta.textures as Record<string, string> | null) ?? undefined;
+
+  let plantMaterials: PlantMaterialDef[] | undefined;
+  if (materials && materialGroups) {
+    plantMaterials = materials.map((mat) => {
+      const group = materialGroups.find((g) => g.material_name === mat.name);
+      const textureData = mat.texture_name && textures ? textures[mat.texture_name] : undefined;
+      return {
+        name: mat.name,
+        color: mat.color as [number, number, number] | undefined,
+        textureData,
+        hasAlpha: mat.has_alpha,
+        triangleIndices: group?.triangle_indices ?? [],
+      };
+    });
+  }
+
+  return {
+    success: true,
+    data: {
+      vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
+      indices: (buffers.indices as Uint32Array) ?? new Uint32Array(0),
+      normals: buffers.normals as Float32Array | undefined,
+      vertexColors: buffers.colors as Float32Array | undefined,
+      uvCoordinates: buffers.uv_coordinates as Float32Array | undefined,
+      vertexCount: meta.vertex_count as number,
+      triangleCount: meta.triangle_count as number,
+    },
+    plantMaterials,
+    filename: meta.filename as string | undefined,
+    hasTextures: Boolean(meta.has_textures),
+  };
 }
 
 // 32-byte header: 4s magic, I count, B has_colors, B has_intensity, 22x reserved.

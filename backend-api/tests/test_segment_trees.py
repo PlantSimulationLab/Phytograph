@@ -108,10 +108,10 @@ def test_endpoint_inline(client):
 
 
 @requires_treeiso
-def test_endpoint_from_source(client):
+def test_endpoint_from_source(client, make_file_session):
     res = client.post(
         "/api/segment/trees",
-        json={"source": {"source_path": str(FIXTURE), "ascii_format": "x y z treeiso_label"}},
+        json={"source": {"session_id": make_file_session(str(FIXTURE), "x y z treeiso_label")}},
     )
     assert res.status_code == 200, res.text
     body = res.json()
@@ -635,11 +635,11 @@ def test_loader_carries_ply_scalar_fields():
 
 @requires_treeiso
 @requires_plyfile
-def test_endpoint_inline_from_ply_source(client):
+def test_endpoint_inline_from_ply_source(client, make_file_session):
     """/api/segment/trees with a PLY `source` returns per-point labels."""
     res = client.post(
         "/api/segment/trees",
-        json={"source": {"source_path": str(PLY_FIXTURE)}},
+        json={"source": {"session_id": make_file_session(str(PLY_FIXTURE))}},
     )
     assert res.status_code == 200, res.text
     body = res.json()

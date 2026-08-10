@@ -22,7 +22,7 @@ import { BackfillMissesPopup } from './BackfillMissesPopup';
 import { QSMPopup, type QSMStartOptions } from './QSMPopup';
 import { CrownFitPopup, type CrownFitStartArgs } from './CrownFitPopup';
 import { CROWN_SHAPE_LABELS, crownColorForTreeId, allocateCrownColor, type CrownFitScanEligibility } from '../lib/crownFit';
-import { downloadFile as saveToFile } from '../utils/fileDownload';
+import { downloadFile as saveToFile, saveBinaryFileQuiet, saveTextFileQuiet } from '../utils/fileDownload';
 import { Toolbar } from './Toolbar';
 import { StitchDialog } from './StitchDialog';
 import { AlignDialog } from './AlignDialog';
@@ -1493,6 +1493,14 @@ export default function PointCloudViewer({
   // indeterminate StatusPill for the duration — otherwise the user stares at a
   // frozen dialog and re-clicks Export.
   const [isExportingScan, setIsExportingScan] = useState(false);
+  // Live export progress: {fraction 0..1 | null, message} streamed from the
+  // backend as PHP1 markers. Null fraction => indeterminate (the pill hides its
+  // bar and shows only the stage label).
+  const [exportProgress, setExportProgress] = useState<{ fraction: number | null; label: string } | null>(null);
+  // AbortController + backend run id for the in-flight export, so the pill's
+  // cancel button can stop BOTH sides: the backend work and the fetch.
+  const exportAbortRef = useRef<AbortController | null>(null);
+  const exportRunIdRef = useRef<string | null>(null);
 
   // Global app settings (persisted via electron-store, edited in SettingsDialog).
   // Loaded once on mount: the triangulate point cap for octree clouds, plus the
@@ -6454,16 +6462,36 @@ export default function PointCloudViewer({
       const t = getEditState(cloud.id).translation;
       const translation: [number, number, number] | null =
         (t.x !== 0 || t.y !== 0 || t.z !== 0) ? [t.x, t.y, t.z] : null;
+      // A cloud is read from its file exactly ONCE, at import
+      // (/api/cloud/session/create); from then on the session's in-RAM arrays are
+      // the source of truth, carrying every edit — deletions, translation,
+      // filtering, segmentation labels — that the file on disk does not.
+      //
+      // The BACKEND enforces this: `_read_points_from_source` rejects a
+      // file-only source for every compute/export path, so a missing sessionId
+      // cannot silently produce a stale-data answer regardless of caller. This
+      // check is not that safety net — it exists to fail here, with the cloud's
+      // name and a clear next step, rather than surfacing as a generic 400 from
+      // a request we already knew was malformed.
+      if (!octree.sessionId) {
+        throw new Error(
+          `Cloud "${cloud.data.fileName ?? cloud.id}" has an octree but no backend session. ` +
+          `Its source file would not reflect edits (the in-RAM session is the source of ` +
+          `truth), so this operation was stopped. Re-import the cloud.`,
+        );
+      }
       return {
         kind: 'source',
         source: {
+          // Provenance only — the backend ignores it when session_id is set, and
+          // it is empty for synthetic-scan clouds that never had a source file.
           source_path: octree.sourceXyzPath || '',
           ascii_format: octree.asciiFormat ?? null,
           translation,
-          // When the cloud is session-backed, downstream ops read the in-RAM
-          // masked array (deletions already applied) instead of re-reading the
-          // source file — so unbaked deletions are honored with no bake.
-          session_id: octree.sessionId ?? null,
+          // Downstream ops read the in-RAM masked array (deletions already
+          // applied) instead of re-reading the source file, so unbaked edits are
+          // honored with no bake.
+          session_id: octree.sessionId,
         },
       };
     }
@@ -6530,17 +6558,38 @@ export default function PointCloudViewer({
     return out;
   }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox, cropSegment]);
 
-  // Helper to download a file
-  const downloadFile = useCallback((content: string | Blob, fileName: string) => {
-    const blob = content instanceof Blob ? content : new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  // Save exported content to a user-chosen path. Returns the written file name,
+  // or null if the user cancelled the save dialog.
+  //
+  // This MUST await a real save dialog + fs write rather than clicking an
+  // `<a download>`: under Electron an anchor download is handled out-of-band by
+  // Chromium, which pops its OWN native Save-As that the renderer never sees.
+  // The click returns immediately, so the caller reported "Export Complete"
+  // before the user had even picked a destination — and then went silent for the
+  // write that actually mattered. See exportPointCloud's success toast.
+  const downloadFile = useCallback(async (content: string | Uint8Array, fileName: string): Promise<string | null> => {
+    const saved = typeof content === 'string'
+      ? await saveTextFileQuiet(content, fileName)
+      : await saveBinaryFileQuiet(content, fileName);
+    if (!saved) return null;
+    // Report the name the user actually chose, not the suggested one.
+    const sep = saved.includes('\\') ? '\\' : '/';
+    return saved.slice(saved.lastIndexOf(sep) + 1) || fileName;
+  }, []);
+
+  // Write content to a path the user ALREADY chose (no dialog). Returns the
+  // file's base name. Used by the export branches that build their bytes in the
+  // renderer, after exportPointCloud has resolved the destination up front —
+  // which is what keeps the save dialog from appearing behind the progress pill.
+  const writeToPath = useCallback(async (content: string | Uint8Array, destPath: string): Promise<string> => {
+    if (typeof content === 'string') {
+      await window.electronAPI?.fs.writeText(destPath, content);
+    } else {
+      const ab = content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength) as ArrayBuffer;
+      await window.electronAPI?.fs.writeBinary(destPath, ab);
+    }
+    const sep = destPath.includes('\\') ? '\\' : '/';
+    return destPath.slice(destPath.lastIndexOf(sep) + 1) || destPath;
   }, []);
 
   // Export point cloud in various formats
@@ -6554,12 +6603,27 @@ export default function PointCloudViewer({
   // export failed (having already shown its own error toast). The caller owns the
   // single success toast so every format reports completion the same way — an
   // export that finishes silently reads as one that never ran.
-  const exportPointCloudInner = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null, cloud: PointCloudEntry): Promise<{ fileName: string; pointCount: number } | null> => {
+  //
+  // `destPath` is the absolute path the user already chose; the caller resolves
+  // it BEFORE calling so the save dialog never appears behind a progress pill.
+  const exportPointCloudInner = useCallback(async (
+    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz',
+    columns: string[] | null,
+    cloud: PointCloudEntry,
+    destPath: string,
+    // Progress/cancel plumbing for the backend-backed branches. The in-renderer
+    // branches (ASCII/PLY/OBJ/LAS on a flat cloud) format synchronously and have
+    // nothing to stream, so they ignore it.
+    opts?: { signal?: AbortSignal; onProgress?: BinaryFrameProgress; onRunId?: (runId: string) => void },
+  ): Promise<{ fileName: string; pointCount: number } | null> => {
     const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
+    const destName = destPath.slice(destPath.lastIndexOf(destPath.includes('\\') ? '\\' : '/') + 1);
 
     // Octree-backed cloud: it has no renderer positions to format, so every
     // format goes through the backend, which streams from the source file
-    // (applying any pending translation) and returns base64 output.
+    // (applying any pending translation) and writes it straight to destPath.
+    // Sending dest_path (rather than taking base64 back) is what makes a
+    // 25 M-point export possible at all — see PointCloudExportRequest.
     const ps = buildPointSource(cloud);
     if (ps.kind === 'source') {
       try {
@@ -6567,23 +6631,10 @@ export default function PointCloudViewer({
           source: { ...ps.source, want_colors: true },
           format,
           filename: `${baseName}.${format}`,
-        });
-        if (response.success && response.data) {
-          const binaryString = atob(response.data);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-          const blob = new Blob([bytes], { type: 'application/octet-stream' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = response.filename;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          return { fileName: response.filename, pointCount: response.point_count };
+          dest_path: destPath,
+        }, opts?.signal, opts?.onProgress, opts?.onRunId);
+        if (response.success) {
+          return { fileName: response.filename || destName, pointCount: response.point_count };
         }
         showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
       } catch (error) {
@@ -6624,26 +6675,12 @@ export default function PointCloudViewer({
           points,
           colors,
           format: 'laz',
-          filename: `${baseName}.laz`
-        });
+          filename: `${baseName}.laz`,
+          dest_path: destPath,
+        }, opts?.signal, opts?.onProgress, opts?.onRunId);
 
-        if (response.success && response.data) {
-          // Decode base64 and download
-          const binaryString = atob(response.data);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-          const blob = new Blob([bytes], { type: 'application/octet-stream' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = response.filename;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          return { fileName: response.filename, pointCount: response.point_count };
+        if (response.success) {
+          return { fileName: response.filename || destName, pointCount: response.point_count };
         }
         console.error('LAZ export failed:', response.error);
         showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
@@ -6673,8 +6710,10 @@ export default function PointCloudViewer({
       const delimiter = format === 'csv' ? ',' : ' ';
       const headerPrefix = format === 'csv' ? '' : '# ';
       const text = buildAsciiExport(data, slugs, delimiter, headerPrefix);
-      downloadFile(text, `${baseName}.${format}`);
-      return { fileName: `${baseName}.${format}`, pointCount: data.pointCount };
+      {
+        const saved = await writeToPath(text, destPath);
+        return { fileName: saved, pointCount: data.pointCount };
+      }
     } else if (format === 'ply') {
       const hasColors = !!data.colors;
       const lines: string[] = [
@@ -6696,15 +6735,19 @@ export default function PointCloudViewer({
         }
         lines.push(line);
       }
-      downloadFile(lines.join('\n'), `${baseName}.ply`);
-      return { fileName: `${baseName}.ply`, pointCount: data.pointCount };
+      {
+        const saved = await writeToPath(lines.join('\n'), destPath);
+        return { fileName: saved, pointCount: data.pointCount };
+      }
     } else if (format === 'obj') {
       const lines: string[] = [`# Point cloud exported from Phytograph`, `# ${data.pointCount} points`];
       for (let i = 0; i < data.pointCount; i++) {
         lines.push(`v ${data.positions[i * 3].toFixed(6)} ${data.positions[i * 3 + 1].toFixed(6)} ${data.positions[i * 3 + 2].toFixed(6)}`);
       }
-      downloadFile(lines.join('\n'), `${baseName}.obj`);
-      return { fileName: `${baseName}.obj`, pointCount: data.pointCount };
+      {
+        const saved = await writeToPath(lines.join('\n'), destPath);
+        return { fileName: saved, pointCount: data.pointCount };
+      }
     } else if (format === 'las') {
       // Export as LAS 1.2 format (binary)
       const hasColors = !!data.colors;
@@ -6828,21 +6871,14 @@ export default function PointCloudViewer({
         }
       }
 
-      // Download binary file
-      const blob = new Blob([buffer], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${baseName}.las`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      return { fileName: `${baseName}.las`, pointCount: data.pointCount };
+      // Save the binary through the real save dialog (not an <a download>, which
+      // Electron handles out-of-band with its own invisible Save-As).
+      const saved = await writeToPath(new Uint8Array(buffer), destPath);
+      return { fileName: saved, pointCount: data.pointCount };
     }
 
     return null;
-  }, [getDisplayData, buildPointSource, downloadFile]);
+  }, [getDisplayData, buildPointSource, writeToPath]);
 
   const exportPointCloud = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null = null) => {
     if (selectedIds.size !== 1) return;
@@ -6850,19 +6886,40 @@ export default function PointCloudViewer({
     const cloud = clouds.find(c => c.id === id);
     if (!cloud) return;
 
-    // A large cloud takes seconds to serialize/compress on the backend with no
-    // streaming progress, so dismiss the modal and raise the StatusPill for the
-    // duration — same treatment as the scan export. The inner work keeps its own
-    // early returns; the finally clears the pill on every path.
+    // Ask WHERE first. The save dialog has to come before the progress pill:
+    // raising the pill first left it spinning behind the file browser, claiming
+    // work was underway while we were still waiting on the user. Cancelling here
+    // must leave no trace — no pill, no file, no toast.
+    const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
+    const destPath = await window.electronAPI?.dialog.save({
+      defaultPath: `${baseName}.${format}`,
+      title: 'Export Point Cloud',
+      filters: [{ name: `${format.toUpperCase()} files`, extensions: [format] }],
+    });
+    if (!destPath) { setShowExportPanel(false); return; }
+
+    // The destination is chosen — the work now begins. A large cloud takes
+    // seconds to read/format/write with no streaming progress, so dismiss the
+    // modal and raise the StatusPill for the duration. The inner work keeps its
+    // own early returns; the finally clears the pill on every path.
     setShowExportPanel(false);
     setIsExportingScan(true);
+    setExportProgress({ fraction: null, label: 'Exporting…' });
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    exportRunIdRef.current = null;
     try {
       // Yield a frame before starting. The ASCII/PLY/OBJ/LAS branches serialize
       // millions of points synchronously on the main thread, so without this the
       // pill's state update and its clear land in the same task and React never
       // paints it — the user sees a multi-second freeze and no progress at all.
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-      const result = await exportPointCloudInner(format, columns, cloud);
+      const result = await exportPointCloudInner(format, columns, cloud, destPath, {
+        signal: controller.signal,
+        onProgress: (fraction, message) =>
+          setExportProgress({ fraction, label: message || 'Exporting…' }),
+        onRunId: (runId) => { exportRunIdRef.current = runId; },
+      });
       if (result) {
         showToast({
           title: 'Export Complete',
@@ -6871,10 +6928,19 @@ export default function PointCloudViewer({
         });
       }
     } catch (error) {
-      showToast({ title: 'Export Failed', type: 'error',
-        message: error instanceof Error ? error.message : 'Unknown error' });
+      // A user cancel is not a failure — the pill's X aborts the signal, which
+      // surfaces as a reason-less AbortError (see describeBackendError).
+      if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        showToast({ title: 'Export cancelled', type: 'info' });
+      } else {
+        showToast({ title: 'Export Failed', type: 'error',
+          message: error instanceof Error ? error.message : 'Unknown error' });
+      }
     } finally {
       setIsExportingScan(false);
+      setExportProgress(null);
+      exportAbortRef.current = null;
+      exportRunIdRef.current = null;
     }
   }, [selectedIds, clouds, exportPointCloudInner]);
 
@@ -7104,7 +7170,7 @@ export default function PointCloudViewer({
         } else {
           // Browser fallback (vite dev outside Electron): anchor-download each file.
           for (const f of files) {
-            downloadFile(f.bytes ? new Blob([f.bytes.buffer.slice(0) as ArrayBuffer]) : (f.text ?? ''), f.name);
+            await downloadFile(f.bytes ? new Uint8Array(f.bytes) : (f.text ?? ''), f.name);
           }
         }
         const extras = files.length - 1;
@@ -7122,7 +7188,7 @@ export default function PointCloudViewer({
         if (window.electronAPI && savePath) {
           await window.electronAPI.fs.writeText(savePath, content);
         } else {
-          downloadFile(content, `${baseName}.${format}`);
+          await downloadFile(content, `${baseName}.${format}`);
         }
         showToast({
           title: 'Export Complete',
@@ -7137,7 +7203,7 @@ export default function PointCloudViewer({
         if (window.electronAPI && savePath) {
           await window.electronAPI.fs.writeText(`${dir}${dir ? sep : ''}${xmlName}`, mesh.heliosXml);
         } else {
-          downloadFile(mesh.heliosXml, xmlName);
+          await downloadFile(mesh.heliosXml, xmlName);
         }
       }
     } catch (error) {
@@ -7816,7 +7882,7 @@ export default function PointCloudViewer({
   );
 
   // Export skeleton in various formats
-  const exportSkeleton = useCallback((skeletonId: string, format: 'obj' | 'ply' | 'json') => {
+  const exportSkeleton = useCallback(async (skeletonId: string, format: 'obj' | 'ply' | 'json') => {
     const skeleton = skeletons.find(s => s.id === skeletonId);
     if (!skeleton) return;
 
@@ -7920,7 +7986,7 @@ export default function PointCloudViewer({
           vertexCount += radialSegments * 2;
         }
 
-        downloadFile(lines.join('\n'), `${baseName}_skeleton_mesh.obj`);
+        await downloadFile(lines.join('\n'), `${baseName}_skeleton_mesh.obj`);
       } else {
         // Export as points and lines (original behavior)
         const lines: string[] = [
@@ -7936,7 +8002,7 @@ export default function PointCloudViewer({
             lines.push(`l ${from + 1} ${to + 1}`);
           }
         }
-        downloadFile(lines.join('\n'), `${baseName}_skeleton.obj`);
+        await downloadFile(lines.join('\n'), `${baseName}_skeleton.obj`);
       }
     } else if (format === 'ply') {
       const lines: string[] = [
@@ -7962,7 +8028,7 @@ export default function PointCloudViewer({
           lines.push(`${from} ${to}`);
         }
       }
-      downloadFile(lines.join('\n'), `${baseName}_skeleton.ply`);
+      await downloadFile(lines.join('\n'), `${baseName}_skeleton.ply`);
     } else if (format === 'json') {
       const data = {
         nodes: Array.from({ length: pointCount }, (_, i) => ({
@@ -7979,7 +8045,7 @@ export default function PointCloudViewer({
           maxBranchOrder: skeleton.data.maxBranchOrder,
         },
       };
-      downloadFile(JSON.stringify(data, null, 2), `${baseName}_skeleton.json`);
+      await downloadFile(JSON.stringify(data, null, 2), `${baseName}_skeleton.json`);
     }
     setShowExportPanel(false);
   }, [skeletons, clouds, downloadFile, skeletonShowAsCylinders, skeletonTubeRadius]);
@@ -13714,24 +13780,39 @@ export default function PointCloudViewer({
       console.log(`[GIF] Captured ${frameCount} frames, encoding...`);
       setGifProgress({ current: frameCount, total: totalFrames, phase: 'encoding' });
 
-      // Encode GIF
+      // Encode GIF, then save it where the user chooses. An `<a download>` click
+      // would be serviced out-of-band by Electron (its own Save-As, invisible to
+      // us) and return immediately — so the old success toast fired before the
+      // file existed, and a cancelled save still reported success.
       gif.on('finished', (blob: Blob) => {
-        // Download the GIF
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${mesh.plantType}_growth_${startAge}-${endAge}.gif`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        console.log('[GIF] Download started');
-        showToast({ title: 'GIF downloaded successfully!', type: 'success' });
-
-        cleanup();
-        setIsGeneratingGif(false);
-        setGifProgress(null);
+        void (async () => {
+          try {
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            const saved = await saveBinaryFileQuiet(
+              bytes,
+              `${mesh.plantType}_growth_${startAge}-${endAge}.gif`,
+              'image/gif',
+            );
+            if (saved) {
+              const sep = saved.includes('\\') ? '\\' : '/';
+              showToast({
+                title: 'GIF Saved',
+                type: 'success',
+                message: `Wrote ${saved.slice(saved.lastIndexOf(sep) + 1)} (${frameCount} frames).`,
+              });
+            }
+          } catch (err) {
+            showToast({
+              title: 'GIF save failed',
+              type: 'error',
+              message: err instanceof Error ? err.message : String(err),
+            });
+          } finally {
+            cleanup();
+            setIsGeneratingGif(false);
+            setGifProgress(null);
+          }
+        })();
       });
 
       gif.render();
@@ -15637,7 +15718,20 @@ export default function PointCloudViewer({
           the to-be-cropped points stay hidden via isApplyingCrop. */}
       {isApplyingCrop && <StatusPill label="Cropping…" />}
 
-      {isExportingScan && <StatusPill testId="scan-export-running" label="Exporting…" />}
+      {isExportingScan && (
+        <StatusPill
+          testId="scan-export-running"
+          label={exportProgress?.label || 'Exporting…'}
+          progress={exportProgress?.fraction ?? null}
+          onCancel={() => {
+            // Stop the backend work first (it frees its memory and stops
+            // formatting), then tear down the fetch.
+            const runId = exportRunIdRef.current;
+            if (runId) void cancelRun(runId).catch(() => {});
+            exportAbortRef.current?.abort();
+          }}
+        />
+      )}
 
       {/* Open3D triangulation status indicator (ball pivoting / poisson / etc.) */}
       {triangulationInProgress && !isHeliosRunning && (

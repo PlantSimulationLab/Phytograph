@@ -347,10 +347,10 @@ def test_segment_ground_endpoint_inline(client):
 
 
 @requires_csf
-def test_segment_ground_endpoint_from_source(client):
+def test_segment_ground_endpoint_from_source(client, make_file_session):
     res = client.post(
         "/api/segment/ground",
-        json={"source": {"source_path": str(FIXTURE), "ascii_format": ASCII_FORMAT}},
+        json={"source": {"session_id": make_file_session(str(FIXTURE), ASCII_FORMAT)}},
     )
     assert res.status_code == 200, res.text
     body = res.json()

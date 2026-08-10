@@ -378,11 +378,20 @@ ASCII readers (CloudCompare included) skip the `#` line as a comment.
 If you need to round-trip with full fidelity, use `.ply` — it preserves
 everything Phytograph knows about the cloud.
 
-After you click **Export** the dialog closes and a small **progress pill**
-appears at the top of the viewer while the cloud is written (a cloud of a few
-million points takes a few seconds). The pill clears and a toast reports the
-file name and point count when the write finishes — there's no need to click
-Export twice.
+After you click **Export**, a save dialog asks where to write the file. Once you
+confirm the destination the Export window closes and a **progress pill** appears
+at the top of the viewer, showing a live percentage as the cloud is written (a
+25-million-point text export takes roughly half a minute). The pill has a
+**cancel** button — stopping an export leaves no partial file behind. When the
+write finishes the pill clears and a toast reports the file name and point
+count, so there's no need to click Export twice. Cancelling the save dialog
+writes nothing and reports nothing.
+
+The pill names the stage it is on. For the text formats that is mostly
+*Formatting*, which is where nearly all their time goes; `.las`/`.laz` step
+through *Computing bounds*, *Packing coordinates*, *Packing colours* and
+*Writing file* instead. Binary formats are several times faster than text for
+the same cloud, so their pill moves through those stages quickly.
 
 ### Exporting scans
 
@@ -479,6 +488,9 @@ beside the mesh.
 
 Use `.json` if you want to do further analysis programmatically. Use
 `.obj` if you want a quick visualization in Blender or MeshLab.
+
+As with the other object types, clicking a format opens a save dialog; the file
+is written where you choose and a toast confirms it.
 
 ## What's next
 

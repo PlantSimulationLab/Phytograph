@@ -7,6 +7,8 @@ import {
   DistributionParam,
 } from '../utils/backendApi';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
+import { saveTextFileQuiet } from '../utils/fileDownload';
+import { showToast } from './Toast';
 
 interface MorphPopupProps {
   isOpen: boolean;
@@ -551,19 +553,36 @@ export function MorphPopup({
     setGeometryScales(resetScales);
   }, [defaultDistributionParams, geometryScales]);
 
-  const handleExport = useCallback(() => {
+  const handleExport = useCallback(async () => {
     const data = {
       plant_type: plantType,
       distribution_params: distributionParams,
       geometry_scales: geometryScales,
     };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${plantType}_morph_params.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    // Save through the real dialog rather than an `<a download>` click: under
+    // Electron the anchor is handled out-of-band by Chromium (its own Save-As),
+    // so the app couldn't tell whether — or where — the file landed, and this
+    // export reported nothing at all either way.
+    try {
+      const saved = await saveTextFileQuiet(
+        JSON.stringify(data, null, 2),
+        `${plantType}_morph_params.json`,
+      );
+      if (saved) {
+        const sep = saved.includes('\\') ? '\\' : '/';
+        showToast({
+          title: 'Parameters Saved',
+          type: 'success',
+          message: `Wrote ${saved.slice(saved.lastIndexOf(sep) + 1)}.`,
+        });
+      }
+    } catch (err) {
+      showToast({
+        title: 'Save Failed',
+        type: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   }, [plantType, distributionParams, geometryScales]);
 
   const handleImport = useCallback(

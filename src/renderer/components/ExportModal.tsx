@@ -471,7 +471,7 @@ export function ExportModal({
               <div className="text-[10px] text-neutral-500 mb-2">{skeletonNodeCount} nodes · {skeletonTotalLength.toFixed(2)}m</div>
               <div className="grid grid-cols-3 gap-1">
                 {(['obj', 'ply', 'json'] as const).map(f => (
-                  <button key={f} onClick={() => onExportSkeleton(f)}
+                  <button key={f} data-testid={`export-skeleton-${f}`} onClick={() => onExportSkeleton(f)}
                     className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200">{f.toUpperCase()}</button>
                 ))}
               </div>

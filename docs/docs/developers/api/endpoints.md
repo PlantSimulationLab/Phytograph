@@ -40,7 +40,7 @@ The tables are grouped by feature area. To find a handler, grep `^@app\.` in
 | POST | `/api/triangulate` | `main.py` | Triangulate a point cloud |
 | POST | `/api/triangulate/helios` | `main.py` | Helios-style triangulation. Each `scans[]` entry carries its own acquisition geometry (`origin`, `n_theta`/`n_phi`, `theta_min`/`max`, `phi_min`/`max`); an optional `grid` (center/size + `nx`/`ny`/`nz`) comes from a voxel box. With no `grid` the backend auto-fits a single cell over all points and sets `grid_warning` on the response. Each scan is triangulated independently, so the response includes `triangle_scan_ids` — the source scan index per triangle — for coloring by scan |
 | POST | `/api/lidar/scan` | `main.py` | True ray-traced synthetic LiDAR scan via the PyHelios `lidar` plugin. `meshes[]` carry world-space `vertices`/`triangles` (+ optional per-vertex `colors`); `scanners[]` carry each scanner's renderer `id` plus its `ScanParameters` (`origin`, `n_theta`/`n_phi`, `theta_min_deg`/`max`, `phi_min_deg`/`max`, `return_mode` (`single`/`multi`), `max_returns` (multi), `return_selection` (`strongest`/`first`/`last`, single), `exit_diameter_m`, `beam_divergence_mrad`). A legacy `return_type` (`single`/`multi`) is still accepted and mapped to `return_mode`. Optional `extra_fields[]` names custom primitive-data labels to sample onto hits (column-format driven). All meshes load into one Helios `Context`; scanners are added in order so the Helios scanID equals the request index, and each scan's stored `ReturnMode`/`maxReturns`/selection is set via the per-scan setters. `syntheticScan` ray-traces once (one global `rays_per_pulse`: every scan fires that many sub-rays across its beam cone, and `rays_per_pulse=1` collapses the cone to one exact ray per pulse — the idealized scan) and hits are partitioned back per scanner via `getHitScanID`. Optional `synthetic_scan_memory_budget_mb` caps the transient ray-tracing scratch buffers (via `LiDARCloud.setSyntheticScanMemoryBudget`) so a large fan-out is chunked instead of traced in one OOM-prone batch; omitted/`null`/≤0 leaves Helios's automatic path-dependent default (4 GiB CPU / 8 GiB GPU) in place, and chunking is result-invariant. Returns `results[]` — one per scanner (`scanner_id`, `points`, `colors`, and `scalars{}`: intensity/distance/timestamp/target_index/target_count read via `getHitData`) — occlusion-aware, unlike random surface sampling |
-| POST | `/api/mesh/import` | `main.py` | Parse a textured `.obj` (+ sibling `.mtl` + images) from a disk `path` into geometry, V-flipped per-vertex UVs, per-material triangle groups, and base64-encoded textures — the same response shape the textured renderer consumes for plant models |
+| POST | `/api/mesh/import` | `main.py` | Parse a textured `.obj` (+ sibling `.mtl` + images) or a `.ply` polygon mesh (ASCII or binary, with per-vertex colour) from a disk `path` into geometry, V-flipped per-vertex UVs, per-material triangle groups, and base64-encoded textures. Returns a **PHB1** binary frame: geometry rides in the buffers (`vertices`, `indices`, and optional `normals`/`colors`/`uv_coordinates`) while materials/textures ride in the JSON meta. JSON would break here — a scanner-grade mesh (millions of triangles) serializes past V8's ~512 MB string cap, where the renderer's `response.json()` throws `ERR_STRING_TOO_LONG` regardless of timeout |
 | POST | `/api/triangulate/check-spacing` | `main.py` | Opt-in diagnostic cross-checking the auto-estimated `Lmax` against actual in-grid point spacing (the renderer offers it when the Otsu indicators aren't both High). Builds a KD-tree over up to tens of millions of points, so it streams keepalive whitespace to survive WebKit's ~60s stall timeout, then yields the JSON verdict. Reuses `HeliosTriangulationRequest` |
 
 ## Scanning support & job control
@@ -199,7 +199,7 @@ structure as a representative sample.
 | POST | `/api/pointcloud/import` | `main.py` | Import a LAS/LAZ file (multipart upload) |
 | POST | `/api/pointcloud/preview` | `main.py` | Cheaply inspect a file for the import wizard: reads only the header + first ~20 rows (ASCII) or header + a few points (PLY/PCD/LAS) and returns the detected delimiter, per-column auto-detected role, a `type_hint` (integer/float/categorical/empty) used to pre-tick the categorical box, sample rows, and `remappable` (true for ASCII, false for in-file-layout formats). Never 500s on a parse problem — returns a 200 with a `warning` so the wizard can still offer auto-detect |
 | POST | `/api/pointcloud/import_by_path` | `main.py` | Parse a point cloud from a path on disk (dispatches `.xyz`/`.txt`/`.csv`/`.pts`/`.asc` to pandas, `.ply`/`.pcd` to open3d). Returns a packed binary stream so multi-GB scans aren't bottlenecked by JSON encoding. Accepts an optional `column_plan` (the import wizard's explicit per-column roles + custom scalar slug/label + `rgb_is_255` scale) that overrides auto-detection; absent → identical to the previous behaviour |
-| POST | `/api/pointcloud/export` | `main.py` | Export a point cloud to LAS/LAZ — or, for octree-backed clouds (via a `source` descriptor), to any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ. The backend streams from the source file and applies any pending translation |
+| POST | `/api/pointcloud/export` | `main.py` | Export a point cloud to LAS/LAZ — or, for octree-backed clouds (via a `source` descriptor), to any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ. The backend streams from the source file and applies any pending translation. Set **`dest_path`** (absolute) and the backend writes the file itself, returning metadata only with `data: null` — the app always does this, and it's the only form that works at scale: base64-in-JSON inflates the body ~1.8x, so a 25 M-point XYZ export lands near 1 GB and the renderer's `response.json()` throws `ERR_STRING_TOO_LONG` ("Unexpected end of JSON input"). Omitting `dest_path` keeps the legacy base64-in-`data` response for callers with no filesystem destination |
 
 Octree building, cropping, and filtering for imported clouds go through the
 **cloud-session** endpoints (next section) — the in-RAM array is the source of
@@ -264,7 +264,7 @@ sessions from the array. All of it is file-read-free after import.
 | POST | `/api/c2c/icp-register` | `main.py` | Cloud-to-cloud ICP |
 | POST | `/api/m2m/icp-register` | `main.py` | Mesh-to-mesh ICP |
 
-!!! note "Reading points from disk — the `source` descriptor (M4)"
+!!! note "Reading points — the `source` descriptor"
     Octree-backed clouds keep no point positions in the renderer (the geometry
     lives only in the on-disk Potree octree, streamed to the GPU). So the
     downstream endpoints — `/api/skeleton/extract`, `/api/triangulate`,
@@ -274,23 +274,33 @@ sessions from the array. All of it is file-read-free after import.
 
     ```json
     "source": {
-      "source_path": "/path/to/scan.xyz",
-      "ascii_format": "x y z r255 g255 b255 reflectance",
+      "session_id": "3f2a…",
       "max_points": 20000,
       "translation": [tx, ty, tz],
       "want_colors": true
     }
     ```
 
+    **`session_id` is required.** A cloud's file is read exactly once, at import
+    (`/api/cloud/session/create`); from then on the session's in-RAM arrays are
+    the source of truth, and they carry every edit — deletions, translation,
+    filtering, segmentation labels — that the file on disk does not. Computing
+    from the file would therefore return a silently wrong answer, so
+    `_read_points_from_source` **rejects a file-only source with a 400** for
+    every compute and export path. This is enforced at that single chokepoint,
+    not per-endpoint, so the rule holds for every caller.
+
+    `source_path` may still be sent alongside `session_id`, but it is
+    **provenance only** and is never re-read. The `allow_file_source: true`
+    escape hatch exists for files that are not live clouds (unit tests driving
+    the loaders directly); the app never sets it.
+
     When `source` is set the backend reads (and optionally stride-downsamples)
-    the points from the original file via `_read_points_from_source`, applies
-    the pending translation (added to every point), and runs the same
-    computation. There is no octree reader — the source file is always the
-    point of truth. Flat (PLY/PCD) clouds keep sending inline `points`
-    unchanged. `/api/triangulate` returns `points_used` so the UI can warn when
-    the global *triangulate max points* cap downsampled a large cloud.
-    `/api/triangulate/helios` already reads each scan from `file_path`; M4 also
-    passes the known `ascii_format` so column mapping isn't guessed.
+    the session's points, applies the pending translation (added to every
+    point), and runs the same computation. Flat (PLY/PCD) clouds keep sending
+    inline `points` unchanged. `/api/triangulate` returns `points_used` so the
+    UI can warn when the global *triangulate max points* cap downsampled a large
+    cloud.
 
 !!! tip "Live API docs"
     FastAPI's interactive docs are exposed at `/docs` on the backend's port

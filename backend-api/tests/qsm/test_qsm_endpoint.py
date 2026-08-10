@@ -128,7 +128,7 @@ def _write_xyz(path, pts) -> str:
     return str(path)
 
 
-def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_path):
+def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_path, make_file_session):
     """Aggregate mode: two file `sources` (two halves of ONE tree, the multi-view
     case) fuse into a SINGLE QSM whose points_used equals the combined count and
     whose structure matches a single-cloud build (one trunk, scaffolds present).
@@ -140,7 +140,7 @@ def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_pa
     a = _write_xyz(tmp_path / "view_a.xyz", pts[:half])
     b = _write_xyz(tmp_path / "view_b.xyz", pts[half:])
 
-    body = build_qsm(client, {"sources": [{"source_path": a}, {"source_path": b}]})
+    body = build_qsm(client, {"sources": [{"session_id": make_file_session(a)}, {"session_id": make_file_session(b)}]})
     assert body["success"] is True, body.get("error")
     # Every point from BOTH files was used — nothing dropped.
     assert body["points_used"] == len(pts)
@@ -151,7 +151,7 @@ def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_pa
     assert body["n_cylinders"] > 0
 
 
-def test_build_qsm_aggregate_sources_plus_inline_points(client, cloud_points, tmp_path):
+def test_build_qsm_aggregate_sources_plus_inline_points(client, cloud_points, tmp_path, make_file_session):
     """A mixed selection (one file `source` + one flat cloud's inline `points`)
     fuses both: points_used is the sum, proving inline points aren't dropped when
     `sources` is also present."""
@@ -160,7 +160,7 @@ def test_build_qsm_aggregate_sources_plus_inline_points(client, cloud_points, tm
     a = _write_xyz(tmp_path / "octree_view.xyz", pts[:half])
     inline = pts[half:].tolist()
 
-    body = build_qsm(client, {"sources": [{"source_path": a}], "points": inline})
+    body = build_qsm(client, {"sources": [{"session_id": make_file_session(a)}], "points": inline})
     assert body["success"] is True, body.get("error")
     assert body["points_used"] == len(pts)
 
