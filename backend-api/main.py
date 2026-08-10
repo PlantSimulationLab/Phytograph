@@ -10427,6 +10427,67 @@ WOOD_CLASS_LEAF = 2
 WOOD_CLASS_SLUG = "wood_class"
 WOOD_CLASS_LABEL = "Wood Class"
 
+# ── Manual point labelling ────────────────────────────────────────────────────
+#
+# The column the labelling tool paints into. One per cloud by default; the
+# request carries `slug` so a second pass ("my_qc_pass") is a config change
+# rather than a refactor, but the CLASSES are what users define, not the column.
+MANUAL_CLASS_SLUG = "manual_class"
+MANUAL_CLASS_LABEL = "Manual Class"
+
+# Class 0 is reserved as "Unclassified" in every palette, and this is
+# load-bearing rather than cosmetic: `merge` zero-fills a slug that is missing
+# from one of its input sessions, so points from a never-labelled cloud arrive
+# as 0. That is only correct if 0 means "unclassified" everywhere. Matches ASPRS
+# class 0 (Created, never classified) and the renderer's existing
+# "class 0 → unassigned grey" convention in classification.ts.
+MANUAL_CLASS_UNLABELED = 0
+
+# Class values are a single byte, matching the LAS classification range. The
+# renderer keeps user-defined classes in 64-255 (the ASPRS user-definable band)
+# so a future writer to the real LAS classification byte is pure serialisation
+# with no renumbering of data users already painted.
+MANUAL_CLASS_MIN = 0
+MANUAL_CLASS_MAX = 255
+
+# Slugs must be a safe extra-dim name. The hard rule is the reserved-name one:
+# `_session_to_las` re-adds every extra-dim slug via `add_extra_dim`, and a slug
+# colliding with a standard LAS dimension name — `classification` above all —
+# makes laspy try to bit-pack a float column into the classification-flags byte
+# and HARD-CRASH the process. Everything else here is ordinary hygiene.
+_LABEL_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
+
+# Standard LAS dimension names an extra-dim slug must never take.
+# `classification` is the one that crashes the process; the rest are listed
+# because colliding with them would silently shadow real LAS data on export.
+_LAS_RESERVED_SLUGS = frozenset({
+    "x", "y", "z", "intensity", "classification", "classification_flags",
+    "raw_classification", "return_number", "number_of_returns", "scan_direction_flag",
+    "edge_of_flight_line", "scan_angle", "scan_angle_rank", "user_data",
+    "point_source_id", "gps_time", "red", "green", "blue", "nir",
+    "scanner_channel", "synthetic", "key_point", "withheld", "overlap",
+})
+
+
+def _validate_label_slug(slug: str) -> str:
+    """Validate a label-column slug, or raise 400. See _LABEL_SLUG_RE."""
+    if not isinstance(slug, str) or not _LABEL_SLUG_RE.match(slug):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"label slug must match {_LABEL_SLUG_RE.pattern!r}; "
+                    f"got {slug!r}"),
+        )
+    # Case-insensitive: laspy resolves standard dimension names case-blind, so
+    # 'Classification' is just as fatal as 'classification'.
+    if slug.lower() in _LAS_RESERVED_SLUGS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"label slug {slug!r} collides with a reserved LAS "
+                    "dimension name; pick another (the LAS writer would "
+                    "bit-pack it into the classification-flags byte and crash)"),
+        )
+    return slug
+
 # Above this many points, segment_wood auto-downsamples (voxel) the geometry
 # step and propagates labels back to full resolution — the per-point k-NN
 # feature extraction is O(N·k_max) in memory and a multi-million-point cloud at
@@ -12783,7 +12844,7 @@ class PlantGenerationResponse(BaseModel):
 
 import uuid
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 # Global storage for active plant sessions
@@ -20766,7 +20827,29 @@ def _squares_union_mask(
     return mask
 
 
-def _region_mask(positions: "np.ndarray", region: Optional[dict]) -> "np.ndarray":
+def _region_pixels(positions: "np.ndarray", region: dict) -> "np.ndarray":
+    """Project `positions` to canvas pixels using a screen-space region's frozen
+    camera. Returns (n, 2). Only meaningful for polygon / squares_union kinds.
+
+    Split out so a caller applying SEVERAL regions that share one frozen camera
+    — every stamp of a single brush drag — can project once and reuse the
+    result via `_region_mask(..., pixels=...)`. The projection is O(N) over the
+    whole cloud and dominates the cost of a stroke, so re-projecting per stamp
+    turns one pass over a 50 M-point cloud into k passes."""
+    return _project_world_to_pixel(
+        positions,
+        np.asarray(region["projection"], dtype=np.float64),
+        np.asarray(region["view"], dtype=np.float64),
+        int(region["canvas"]["width"]),
+        int(region["canvas"]["height"]),
+    )
+
+
+def _region_mask(
+    positions: "np.ndarray",
+    region: Optional[dict],
+    pixels: Optional["np.ndarray"] = None,
+) -> "np.ndarray":
     """Spatial keep-mask for already-materialised Nx3 world positions.
 
     Supports box / polygon / squares_union regions over a whole positions
@@ -20778,6 +20861,11 @@ def _region_mask(positions: "np.ndarray", region: Optional[dict]) -> "np.ndarray
     polygon/squares_union the camera matrices and canvas come from `region`,
     matching the renderer's frozen-camera preview. Returns a bool ndarray of
     length N.
+
+    `pixels` optionally supplies the projected (n, 2) canvas pixels for the
+    screen-space kinds, so a batch of regions sharing one frozen camera projects
+    once (see `_region_pixels`). It MUST have been produced from the same
+    projection/view/canvas this region carries; pass None to project here.
     """
     n = positions.shape[0]
     if region is None:
@@ -20796,29 +20884,19 @@ def _region_mask(positions: "np.ndarray", region: Optional[dict]) -> "np.ndarray
             (zs >= cmin[2]) & (zs <= cmax[2])
         )
     elif kind == "polygon":
-        proj = np.asarray(region["projection"], dtype=np.float64)
-        view = np.asarray(region["view"], dtype=np.float64)
-        canvas = region["canvas"]
         polygon = np.asarray(region["points"], dtype=np.float64)
         if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
             raise HTTPException(
                 status_code=400,
                 detail="region.points must be at least 3 [x, y] entries.",
             )
-        pixels = _project_world_to_pixel(
-            positions, proj, view, int(canvas["width"]), int(canvas["height"]),
-        )
-        mask = _points_in_polygon_mask(pixels, polygon)
+        px = pixels if pixels is not None else _region_pixels(positions, region)
+        mask = _points_in_polygon_mask(px, polygon)
     elif kind == "squares_union":
-        proj = np.asarray(region["projection"], dtype=np.float64)
-        view = np.asarray(region["view"], dtype=np.float64)
-        canvas = region["canvas"]
         centers = np.asarray(region["centers"], dtype=np.float64)
         half_sizes = np.asarray(region["half_sizes"], dtype=np.float64)
-        pixels = _project_world_to_pixel(
-            positions, proj, view, int(canvas["width"]), int(canvas["height"]),
-        )
-        mask = _squares_union_mask(pixels, centers, half_sizes)
+        px = pixels if pixels is not None else _region_pixels(positions, region)
+        mask = _squares_union_mask(px, centers, half_sizes)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
 
@@ -21065,6 +21143,144 @@ def _sweep_plant_sessions() -> None:
             print(f"[Plant Session] Evicted idle/over-cap session {sid}")
 
 
+# Manual-labelling undo budget. Capped by BYTES rather than by entry count
+# (the idiom `_MAX_DELETED_HISTORY` uses) because label-edit sizes span four
+# orders of magnitude: a brush stamp changes a few thousand points (~25 KB)
+# while a bulk/propagate pass rewrites millions. A count cap would either waste
+# hundreds of MB or silently drop undo steps depending on which kind the user
+# happened to make. The count cap below is a belt-and-braces guard against a
+# pathological all-tiny-strokes session bloating the Python list itself.
+_MAX_LABEL_HISTORY_BYTES = int(
+    os.environ.get("PHYTOGRAPH_MAX_LABEL_HISTORY_BYTES", str(256 * 1024 * 1024))
+)
+_MAX_LABEL_HISTORY = int(os.environ.get("PHYTOGRAPH_MAX_LABEL_HISTORY", "2000"))
+
+
+@dataclass
+class _LabelDelta:
+    """Prior values of the points ONE label edit changed, so it can be rolled
+    back exactly.
+
+    Reverse-applying these is exact even when several strokes repainted the same
+    point, because each entry stored the value as it was AT THE TIME that entry
+    ran — the same correctness property `deleted_history`'s snapshots give, at
+    roughly 1/1000th the memory.
+
+    Two encodings, chosen by whichever is smaller at write time:
+
+      'sparse' — `idx` (absolute int64 indices) + `prev` (uint8 prior classes),
+        ~5 bytes per CHANGED point. This is the common case and the reason RLE
+        alone is not enough: a screen-space region selects points that are
+        scattered in absolute/morton order, so run-length encoding degenerates
+        to one run per point (~13 bytes) — 2.6x WORSE than sparse for the
+        dominant case.
+
+      'runs' — `starts` + `lengths` + one `prev` per run, ~13 bytes per run.
+        Wins when the changed set is contiguous in absolute index space with a
+        constant prior value per run, which is exactly the bulk/propagate case
+        (a whole-cloud rewrite is a handful of ranges). Without this encoding the
+        propagate loop is what blows the memory budget.
+
+    `prev` is uint8 because class values are a single byte (MANUAL_CLASS_MIN..MAX)
+    — a 4x saving over float32, lossless GIVEN that invariant. `prev_float` is
+    the escape hatch for a column that holds non-integral or out-of-range values
+    (e.g. a palette bound to an imported float column), where the uint8
+    assumption would silently corrupt the rollback.
+    """
+    stroke_id: str
+    encoding: str                                  # 'sparse' | 'runs'
+    idx: Optional[np.ndarray] = None               # sparse: (k,) int64 absolute
+    prev: Optional[np.ndarray] = None              # (k,) or (runs,) uint8
+    starts: Optional[np.ndarray] = None            # runs: (r,) int64 absolute
+    lengths: Optional[np.ndarray] = None           # runs: (r,) int64
+    prev_float: Optional[np.ndarray] = None        # non-integral fallback
+    changed_count: int = 0
+
+    def nbytes(self) -> int:
+        """Approximate resident size, for the history byte budget."""
+        total = 0
+        for arr in (self.idx, self.prev, self.starts, self.lengths, self.prev_float):
+            if arr is not None:
+                total += int(arr.nbytes)
+        return total
+
+
+def _encode_label_delta(
+    stroke_id: str, changed_idx: np.ndarray, prev_vals: np.ndarray,
+) -> _LabelDelta:
+    """Build the smaller of the two encodings for one edit's prior values.
+
+    `changed_idx` is ASCENDING absolute indices (np.flatnonzero output already
+    is) and `prev_vals` are the matching pre-edit column values."""
+    k = int(changed_idx.shape[0])
+    # Values outside the single-byte class range (or non-integral) can't ride the
+    # uint8 encoding without corruption — fall back to float32 and keep it sparse.
+    integral = k == 0 or (
+        np.all(np.isfinite(prev_vals))
+        and np.all(prev_vals == np.rint(prev_vals))
+        and float(prev_vals.min(initial=0)) >= MANUAL_CLASS_MIN
+        and float(prev_vals.max(initial=0)) <= MANUAL_CLASS_MAX
+    )
+    if not integral:
+        return _LabelDelta(
+            stroke_id=stroke_id, encoding="sparse",
+            idx=changed_idx.astype(np.int64, copy=False),
+            prev_float=prev_vals.astype(np.float32, copy=False),
+            changed_count=k,
+        )
+    prev_u8 = np.rint(prev_vals).astype(np.uint8, copy=False)
+    sparse_bytes = k * (8 + 1)
+    # Run boundaries: a new run starts where the index is not contiguous with the
+    # previous one, or the prior value changes.
+    if k == 0:
+        run_starts = np.zeros(0, dtype=np.int64)
+    else:
+        brk = np.ones(k, dtype=bool)
+        brk[1:] = (changed_idx[1:] != changed_idx[:-1] + 1) | (prev_u8[1:] != prev_u8[:-1])
+        run_starts = np.flatnonzero(brk)
+    runs = int(run_starts.shape[0])
+    runs_bytes = runs * (8 + 8 + 1)
+    if runs_bytes < sparse_bytes:
+        starts = changed_idx[run_starts].astype(np.int64, copy=False)
+        ends = np.append(run_starts[1:], k)
+        lengths = (ends - run_starts).astype(np.int64, copy=False)
+        return _LabelDelta(
+            stroke_id=stroke_id, encoding="runs", starts=starts, lengths=lengths,
+            prev=prev_u8[run_starts], changed_count=k,
+        )
+    return _LabelDelta(
+        stroke_id=stroke_id, encoding="sparse",
+        idx=changed_idx.astype(np.int64, copy=False), prev=prev_u8, changed_count=k,
+    )
+
+
+def _apply_label_delta_reverse(col: np.ndarray, delta: _LabelDelta) -> None:
+    """Restore the prior values this delta recorded, in place on `col`."""
+    if delta.encoding == "runs":
+        for start, length, value in zip(delta.starts, delta.lengths, delta.prev):
+            col[start:start + length] = float(value)
+        return
+    if delta.prev_float is not None:
+        col[delta.idx] = delta.prev_float
+    else:
+        col[delta.idx] = delta.prev.astype(np.float32, copy=False)
+
+
+def _trim_label_history_locked(sess: "CloudSession", slug: str) -> int:
+    """Evict OLDEST-first until the slug's history fits the byte and count caps.
+    Returns the surviving entry count so the caller can report it — the renderer
+    holds a parallel stroke list and must trim to match, and this is the one
+    place the two can silently drift. Caller holds the lock."""
+    hist = sess.label_history.get(slug)
+    if not hist:
+        return 0
+    total = sum(d.nbytes() for d in hist)
+    while hist and (total > _MAX_LABEL_HISTORY_BYTES or len(hist) > _MAX_LABEL_HISTORY):
+        total -= hist[0].nbytes()
+        hist.pop(0)
+    return len(hist)
+
+
 @dataclass
 class CloudSession:
     """An imported point cloud held in RAM as the COMPLETE source of truth.
@@ -21170,6 +21386,31 @@ class CloudSession:
     # to georeference DEM raster exports (GeoTIFF). Defaulted so existing direct
     # CloudSession(...) constructions need no change.
     crs_epsg: Optional[int] = None
+    # Manual-labelling undo stack, keyed by label-column slug. Each entry records
+    # the PRIOR values of the points one edit changed (see `_LabelDelta`), so a
+    # rollback is a reverse-apply rather than a snapshot restore.
+    #
+    # Deliberately NOT shaped like `deleted_history`: that stores a full (N,) bool
+    # mask per edit, which is ~1 bit/point and capped at 50 entries. A label
+    # snapshot would be an (N,) float32 column — 200 MB per stroke on a 50 M-point
+    # cloud — and labelling produces hundreds of strokes, so snapshots are wrong by
+    # two orders of magnitude in both directions. Deltas are ~5 bytes per CHANGED
+    # point instead, and the stack is bounded by BYTES (see
+    # `_trim_label_history_locked`) because entry sizes span four orders of
+    # magnitude between a brush stamp and a whole-cloud bulk apply.
+    #
+    # Cleared by `bake`, which compacts the arrays and so invalidates every
+    # absolute index these deltas hold. Defaulted so existing direct
+    # CloudSession(...) constructions need no change.
+    label_history: Dict[str, List["_LabelDelta"]] = field(default_factory=dict)
+    # Per-slug flag: the in-RAM label column has edits the DERIVED OCTREE does not
+    # carry yet, so the renderer must overlay them client-side until an explicit
+    # `commit_labels` rebuild. Distinct from `octree_cache_id = None` ("the octree
+    # is stale"), which label edits deliberately do NOT set — see
+    # `label_cloud_region`'s docstring. Purely a DISPLAY concern: every backend op
+    # reads the in-RAM arrays, so split/filter/extract/export already see fresh
+    # labels with no commit.
+    label_dirty: Dict[str, bool] = field(default_factory=dict)
 
 
 def _epsg_from_wkt_vlr(header) -> Optional[int]:
@@ -21793,6 +22034,42 @@ class DeleteRegionRequest(BaseModel):
     deletion on the GPU via its clip-volume stack, so the viewport updates
     immediately."""
     region: CropOctreeRegion
+
+
+class LabelStroke(BaseModel):
+    """One replayable label edit: "inside `region`, points whose CURRENT class
+    is in `from_classes` become `to_class`".
+
+    `from_classes` is TerraScan's From-class filter and is what makes fast,
+    sloppy selection safe — "only repaint leaf→wood" turns overspray onto the
+    ground into a no-op. `None` means "any visible", i.e. no class gate at all.
+    That is deliberately NOT the same as listing every palette value: a point
+    holding a class the palette doesn't define (imported data, or a class the
+    user removed) must still be repaintable, so the None sentinel is load-bearing.
+    Visibility composes here explicitly — the renderer sends the currently
+    visible class set, because the backend cannot know what is hidden.
+
+    `stroke_id` is generated by the renderer and is the join key between its
+    stroke list and this session's label history, so undo can truncate both to
+    the same point."""
+    region: CropOctreeRegion
+    to_class: int
+    from_classes: Optional[List[int]] = None
+    stroke_id: str
+
+
+class LabelRegionRequest(BaseModel):
+    """Repaint points on a cloud session. Instant: mutates the in-RAM label
+    column and does NOT rebuild the octree.
+
+    `strokes` are applied IN ORDER and atomically (one lock acquisition), so a
+    brush drag flushes its whole batch in a single call rather than one request
+    per stamp. Order matters: labelling is not commutative (paint-everything-leaf
+    then paint-a-subregion-wood is not the reverse), so the list is never sorted
+    or deduped."""
+    strokes: List[LabelStroke]
+    slug: str = MANUAL_CLASS_SLUG
+    label: str = MANUAL_CLASS_LABEL
 
 
 class BackfillMissesRequest(BaseModel):
@@ -22475,6 +22752,142 @@ def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
     }
 
 
+def _label_class_summary_locked(
+    sess: "CloudSession", slug: str, editable: np.ndarray,
+) -> tuple[dict, list]:
+    """(class_counts, value_range) over the EDITABLE points only.
+
+    Restricting to editable is not cosmetic: computing over the whole column
+    would count deleted rows and sky/miss points (which are always 0), so a scan
+    that is 40% misses would report a huge phantom "Unclassified" tally and the
+    user's "how much have I labelled?" readout would be meaningless. Caller
+    holds the lock."""
+    col = sess.extras.get(slug)
+    if col is None or not editable.any():
+        return {}, [0.0, 0.0]
+    vals = np.rint(col[editable]).astype(np.int64)
+    uniq, counts = np.unique(vals, return_counts=True)
+    return (
+        {int(v): int(c) for v, c in zip(uniq, counts)},
+        [float(uniq.min()), float(uniq.max())],
+    )
+
+
+@app.post("/api/cloud/session/{session_id}/label_region")
+def label_cloud_region(session_id: str, request: LabelRegionRequest):
+    """Repaint points inside each stroke's region. No octree rebuild.
+
+    Deliberately does NOT null `octree_cache_id`, which is where this diverges
+    from `delete_region` — and the divergence is load-bearing, so do not
+    "fix" the inconsistency:
+
+      A deletion is expressible on the GPU (the renderer hides the points with a
+      clip volume), so a stale octree still renders correctly. A LABEL change is
+      not: the octree bakes attribute values into octree.bin at PotreeConverter
+      time. Nulling the cache id per stroke would either remount the cloud (a
+      full re-stream per brush stamp) or leave the renderer pointing at a cache
+      the backend considers stale. The octree is not WRONG after a stroke, it is
+      BEHIND, and the renderer's client-side label overlay closes the gap until
+      an explicit `commit_labels` rebuild.
+
+    Strokes are applied IN ORDER under one lock acquisition, so a brush drag is
+    one request and one critical section rather than one per stamp."""
+    sess = _get_cloud_session(session_id)
+    slug = _validate_label_slug(request.slug)
+    if not request.strokes:
+        raise HTTPException(status_code=400, detail="strokes must not be empty.")
+
+    # Validate every region and class BEFORE taking the lock — these raise 400
+    # and must not leave a half-applied batch behind.
+    region_dicts = []
+    for stroke in request.strokes:
+        rd = stroke.region.model_dump()
+        _canonical_region(rd)
+        if not (MANUAL_CLASS_MIN <= stroke.to_class <= MANUAL_CLASS_MAX):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"to_class must be in [{MANUAL_CLASS_MIN}, {MANUAL_CLASS_MAX}]; "
+                        f"got {stroke.to_class}"),
+            )
+        for fc in (stroke.from_classes or []):
+            if not (MANUAL_CLASS_MIN <= fc <= MANUAL_CLASS_MAX):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"from_classes entries must be in [{MANUAL_CLASS_MIN}, "
+                            f"{MANUAL_CLASS_MAX}]; got {fc}"),
+                )
+        region_dicts.append(rd)
+
+    with _cloud_session_lock:
+        created = _ensure_label_column_locked(sess, slug, request.label)
+        col = sess.extras[slug]
+        # Loop-invariant: alive AND not a sky/miss point. Hoisted so a 12-stamp
+        # drag computes it once.
+        editable = _session_editable_mask_locked(sess)
+        history = sess.label_history.setdefault(slug, [])
+
+        # Project ONCE per distinct frozen camera. Every stamp of one drag shares
+        # the camera, and the projection is a full O(N) pass over the cloud, so
+        # this turns k passes into one on the dominant path.
+        pixel_cache: dict = {}
+
+        def pixels_for(rd: dict):
+            if rd.get("kind") not in ("polygon", "squares_union"):
+                return None
+            key = (
+                tuple(rd.get("projection") or ()), tuple(rd.get("view") or ()),
+                rd["canvas"]["width"], rd["canvas"]["height"],
+            )
+            cached = pixel_cache.get(key)
+            if cached is None:
+                cached = _region_pixels(sess.positions, rd)
+                pixel_cache[key] = cached
+            return cached
+
+        applied = []
+        for stroke, rd in zip(request.strokes, region_dicts):
+            select = _region_mask(sess.positions, rd, pixels=pixels_for(rd))
+            select &= editable
+            if stroke.from_classes is not None:
+                # np.rint before comparing: the column is float32 on disk and a
+                # LAS round-trip can leave an integer class as 4.999999. Same
+                # convention as _scalar_filter_mask.
+                current = np.rint(col).astype(np.int64)
+                select &= np.isin(current, list(stroke.from_classes))
+            selected_count = int(select.sum())
+            # Exclude no-ops so `changed_count` means what it says and the delta
+            # carries no dead weight for points already in the target class.
+            changed = select & (np.rint(col).astype(np.int64) != stroke.to_class)
+            changed_idx = np.flatnonzero(changed)
+            if changed_idx.size:
+                history.append(_encode_label_delta(
+                    stroke.stroke_id, changed_idx, col[changed_idx].copy(),
+                ))
+                col[changed_idx] = float(stroke.to_class)
+            applied.append({
+                "stroke_id": stroke.stroke_id,
+                "selected_count": selected_count,
+                "changed_count": int(changed_idx.size),
+            })
+
+        kept = _trim_label_history_locked(sess, slug)
+        class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
+        sess.last_accessed = time.time()
+        # Mark the derived octree as behind for this column (NOT stale — see the
+        # docstring); the renderer overlays until commit.
+        sess.label_dirty[slug] = True
+
+    return {
+        "session_id": session_id,
+        "slug": slug,
+        "created_column": created,
+        "applied": applied,
+        "class_counts": class_counts,
+        "value_range": value_range,
+        "label_edit_count": kept,
+    }
+
+
 class ResetCloudEditsRequest(BaseModel):
     """Undo. `edit_count` = how many committed deletes to KEEP; the mask is
     restored to that snapshot in the history and later ones are discarded.
@@ -22502,6 +22915,96 @@ def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
         "deleted_count": deleted_count,
         "remaining_count": total - deleted_count,
         "total_count": total,
+    }
+
+
+class ResetLabelEditsRequest(BaseModel):
+    """Undo. `edit_count` = how many committed label edits to KEEP; the column is
+    rolled back to that point and later entries are discarded. Omit to clear ALL
+    labelling on the slug (edit_count = 0)."""
+    edit_count: Optional[int] = None
+    slug: str = MANUAL_CLASS_SLUG
+
+
+@app.post("/api/cloud/session/{session_id}/reset_label_edits")
+def reset_cloud_label_edits(session_id: str, request: ResetLabelEditsRequest):
+    """Roll the label column back to an earlier point in its history (undo).
+
+    Same shape as `reset_edits` so the renderer's undo path reads alike, but the
+    mechanism differs: `reset_edits` restores a stored bool-mask SNAPSHOT, which
+    for a label column would be (N,) float32 — 200 MB per stroke on a 50 M-point
+    cloud. Here we REVERSE-APPLY the stored deltas instead, newest first. That is
+    exact even when several strokes repainted the same point, because each delta
+    holds the value as it was when that delta ran.
+
+    Redo needs no endpoint: the renderer holds the stroke list and simply
+    re-issues `label_region` with the truncated tail."""
+    sess = _get_cloud_session(session_id)
+    slug = _validate_label_slug(request.slug)
+    with _cloud_session_lock:
+        hist = sess.label_history.get(slug, [])
+        k = 0 if request.edit_count is None else max(0, int(request.edit_count))
+        k = min(k, len(hist))
+        col = sess.extras.get(slug)
+        if col is not None:
+            for delta in reversed(hist[k:]):
+                _apply_label_delta_reverse(col, delta)
+        sess.label_history[slug] = hist[:k]
+        editable = _session_editable_mask_locked(sess)
+        class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
+        sess.label_dirty[slug] = True
+        sess.last_accessed = time.time()
+    return {
+        "session_id": session_id,
+        "slug": slug,
+        "class_counts": class_counts,
+        "value_range": value_range,
+        "label_edit_count": k,
+    }
+
+
+class CommitLabelsRequest(BaseModel):
+    slug: str = MANUAL_CLASS_SLUG
+
+
+@app.post("/api/cloud/session/{session_id}/commit_labels")
+def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
+    """Rebuild the derived octree so the label column is baked into octree.bin.
+    The slow step (a PotreeConverter run).
+
+    THIS IS PURELY A DISPLAY OPERATION, which is counterintuitive enough to be
+    worth stating plainly: every backend op already reads the in-RAM session
+    arrays, so `split`, `filter`, `extract`, `extract_by_column` and LAS/LAZ
+    export ALL see fresh labels with no commit at all. Do not insert a defensive
+    commit before those paths. The only thing a commit changes is that the
+    renderer no longer needs its client-side overlay to show the labels.
+
+    Unlike `bake` this does NOT compact arrays, clear deletions, or clear the
+    label history — an undo after a commit still works; it just needs another
+    commit to become visible in the baked octree."""
+    sess = _get_cloud_session(session_id)
+    slug = _validate_label_slug(request.slug)
+    with _cloud_session_lock:
+        if slug not in sess.extras:
+            raise HTTPException(
+                status_code=400,
+                detail=f"session has no label column {slug!r} to commit",
+            )
+    # _session_rebuild takes the lock itself (and must not be called holding it —
+    # PotreeConverter is slow).
+    cache_key, cache_dir, meta = _session_rebuild(sess)
+    with _cloud_session_lock:
+        sess.label_dirty[slug] = False
+        editable = _session_editable_mask_locked(sess)
+        class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
+    return {
+        "session_id": session_id,
+        "slug": slug,
+        "cache_id": cache_key,
+        "cache_dir": str(cache_dir),
+        "class_counts": class_counts,
+        "value_range": value_range,
+        **meta,
     }
 
 
@@ -22569,6 +23072,12 @@ def bake_cloud_session(session_id: str):
             sess.beam_origins = sess.beam_origins[keep]
         sess.deleted = np.zeros(len(sess.positions), dtype=bool)
         sess.deleted_history = []
+        # Bake COMPACTS every point-aligned array, so every absolute index the
+        # label deltas hold is now invalid. Undo across a bake is therefore
+        # impossible, not merely undesirable — clear it. (The label COLUMN
+        # itself rides the extras compaction loop above and survives intact.)
+        sess.label_history = {}
+        sess.label_dirty = {}
         sess.octree_cache_id = cache_key
         remaining = int(len(sess.positions))
 
@@ -22622,11 +23131,75 @@ def _session_survivor_hit_mask(sess: "CloudSession") -> np.ndarray:
     return np.ones(int(surv.sum()), dtype=bool)
 
 
+def _ensure_label_column_locked(
+    sess: "CloudSession",
+    slug: str,
+    label: str,
+    default: int = MANUAL_CLASS_UNLABELED,
+) -> bool:
+    """Create the (N,) float32 manual-label column if absent. Returns True if it
+    was created. Caller holds `_cloud_session_lock`.
+
+    The column is FULL-LENGTH and ABSOLUTE-indexed (one entry per row of
+    `sess.positions`, including deleted rows), because label edits are applied
+    in place by absolute index.
+
+    DELIBERATELY NOT `_session_add_extra_column` — see that function below.
+    It takes SURVIVOR-aligned values and rebuilds the whole column as
+    `np.zeros(N); full[~deleted] = values`, which is wrong here twice over:
+
+      1. It ZEROES every deleted row on each call. Deleted rows come back —
+         `reset_edits` restores them from `deleted_history` — so a user who
+         paints, erases over some painted points, then undoes the erase would
+         get their points back with the labels silently destroyed.
+      2. It is an O(N) allocation + full-column rewrite per call. A brush stroke
+         touches thousands of points; on a 50 M-point cloud that is a ~200 MB
+         allocation per stroke.
+
+    `_session_add_extra_column` remains correct for the BULK path (a whole-cloud
+    classification result), where survivor alignment is the natural contract.
+    """
+    existing = sess.extras.get(slug)
+    if existing is not None:
+        if existing.shape[0] != sess.positions.shape[0]:
+            raise HTTPException(
+                status_code=500,
+                detail=(f"label column {slug!r} has {existing.shape[0]} rows but "
+                        f"the session has {sess.positions.shape[0]} points"),
+            )
+        return False
+    sess.extras[slug] = np.full(len(sess.positions), float(default), dtype=np.float32)
+    if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
+        sess.extra_dims_meta.append({"slug": slug, "label": label})
+    return True
+
+
+def _session_editable_mask_locked(sess: "CloudSession") -> np.ndarray:
+    """Absolute-indexed bool mask of the points a label edit may touch: alive
+    (not deleted) AND a real return (not a sky/miss point). Caller holds the lock.
+
+    Miss exclusion mirrors `delete_region`'s guard. A miss is a ray that hit
+    nothing, projected ~1 km out along the beam, so it lands inside screen-space
+    regions by coordinate accident rather than user intent. Labelling one would
+    poison the class counts, the legend's value range, and any child cloud split
+    out by class — and a "Leaf" cloud carrying sky points at 1 km hangs the next
+    reconstruction tool rather than erroring."""
+    editable = ~sess.deleted
+    miss_arr = sess.extras.get(_MISS_SLUG)
+    if miss_arr is not None:
+        editable = editable & (miss_arr == 0)
+    return editable
+
+
 def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, values: np.ndarray) -> None:
     """Append (or replace) a per-point scalar extra-dim column on the session
     array. `values` is aligned to the SURVIVING points (positions[~deleted]);
     it's scattered back to a full-length (N,) column with 0 for deleted rows so
-    every session array stays the same length. Caller holds the lock."""
+    every session array stays the same length. Caller holds the lock.
+
+    NOTE for label edits: use `_ensure_label_column_locked` + an in-place write
+    instead. This function's zero-fill of deleted rows destroys labels on points
+    that `reset_edits` can later restore — see that helper's docstring."""
     full = np.zeros(len(sess.positions), dtype=np.float32)
     full[~sess.deleted] = values.astype(np.float32)
     sess.extras[slug] = full
@@ -22775,6 +23348,7 @@ def session_split(session_id: str, request: SessionSplitRequest):
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[leftover_mask]] = True
         sess.deleted_history = []
+        sess.label_history = {}   # label undo must not reach across this commit either
         sess.octree_cache_id = None
 
     leftover_meta = None
@@ -23703,6 +24277,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         sess.octree_cache_id = None
         sess.deleted_history = []
         remaining = int((~sess.deleted).sum())
+        sess.label_history = {}   # label undo must not reach across this commit either
         total = int(len(sess.positions))
 
     # Rebuild derived octrees OUTSIDE the lock (PotreeConverter is slow).
@@ -23789,6 +24364,7 @@ def session_filter(session_id: str, request: SessionFilterRequest):
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[~keep]] = True
         sess.deleted_history = []
+        sess.label_history = {}   # label undo must not reach across this commit either
         sess.octree_cache_id = None
         remaining = int((~sess.deleted).sum())
 
