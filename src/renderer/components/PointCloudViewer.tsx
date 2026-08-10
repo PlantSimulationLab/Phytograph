@@ -2796,6 +2796,9 @@ export default function PointCloudViewer({
         sessionId: sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
         worldShift: octreeInfo.worldShift ?? null,
         continuousAttributes: octreeInfo.continuousAttributes,
+        // Carry the user's palettes across the rebuild, or the cloud comes back
+        // with invented "Class N" names derived from the observed value range.
+        classPalettes: octreeInfo.classPalettes,
       },
     );
     // A bake/filter/segment result carries the new hits octree (+ miss octree id)
@@ -3733,6 +3736,7 @@ export default function PointCloudViewer({
           sessionId,
           worldShift: octreeInfo.worldShift ?? null,
           continuousAttributes: octreeInfo.continuousAttributes,
+          classPalettes: octreeInfo.classPalettes,
         },
       );
       onUpdateCloud(cloud.id, newData);

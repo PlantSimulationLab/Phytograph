@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { PointCloudData, ScalarField } from './pointCloudTypes';
+import type { ClassPalette } from './classPalettes';
 import {
   importPointCloudByPath,
   importPointCloudLasLaz,
@@ -830,6 +831,12 @@ export interface BuildOctreeCloudOptions {
   worldShift?: [number, number, number] | null;
   /** Slugs the user forced continuous ("Scalar") over a registered scheme. */
   continuousAttributes?: string[];
+  /**
+   * User-defined class palettes, keyed by attribute slug. Must be threaded
+   * through every rebuild path or a cloud comes back with invented "Class N"
+   * names — see OctreeRef.classPalettes.
+   */
+  classPalettes?: Record<string, ClassPalette>;
 }
 
 export function buildPointCloudFromOctree(
@@ -845,6 +852,7 @@ export function buildPointCloudFromOctree(
     sessionId,
     worldShift,
     continuousAttributes,
+    classPalettes,
   } = options;
   // Prefer the tight data extent over the cube-padded octree bounds.
   // Crop-box init, fit-to-bounds camera framing, and the bounds shown in
@@ -914,6 +922,9 @@ export function buildPointCloudFromOctree(
         : undefined,
       continuousAttributes: continuousAttributes && continuousAttributes.length
         ? continuousAttributes
+        : undefined,
+      classPalettes: classPalettes && Object.keys(classPalettes).length
+        ? classPalettes
         : undefined,
       // Sky/miss info comes from the cloud-session create response (a superset
       // of OctreeMetadata); plain OctreeMetadata callers leave these undefined.

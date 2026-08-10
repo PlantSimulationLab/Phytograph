@@ -1485,6 +1485,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           sessionId: merged.session_id,
           worldShift: merged.world_shift ?? null,
           continuousAttributes: firstOctree.continuousAttributes,
+          classPalettes: firstOctree.classPalettes,
         },
       );
       if (newData.octree) {

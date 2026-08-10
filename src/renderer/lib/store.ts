@@ -2,6 +2,7 @@
 // Replaces the previous @tauri-apps/plugin-store implementation.
 // External API (TAG_COLORS, getSettings/updateSettings, tag CRUD, import/export)
 // is unchanged so call sites keep working.
+import { parsePaletteList, type ClassPalette } from './classPalettes';
 
 export const TAG_COLORS = [
   { name: 'slate', bg: 'bg-slate-100', text: 'text-slate-600', border: 'border-slate-200' },
@@ -122,6 +123,64 @@ export async function importData(jsonString: string): Promise<void> {
   const data = JSON.parse(jsonString) as Partial<StoreData>;
   if (data.tags) await kvSet('tags', data.tags);
   if (data.settings) await kvSet('settings', data.settings);
+}
+
+// ==================== CLASS PALETTE LIBRARY ====================
+//
+// The app-level library of user-defined labelling palettes — the equivalent of
+// TerraScan's `.PTC` class-definition files: a reusable, shareable asset rather
+// than per-cloud state. (A cloud's BOUND palette is stored on its OctreeRef; this
+// is the pool a user picks from and saves back into.)
+//
+// Rides the existing key-value store, so there is no new IPC surface.
+
+const PALETTES_KEY = 'classPalettes';
+
+/** Every saved palette. Malformed entries are skipped rather than throwing, so
+ *  one bad record can't make the whole library unreadable. */
+export async function getClassPalettes(): Promise<ClassPalette[]> {
+  return parsePaletteList(await kvGet<unknown>(PALETTES_KEY));
+}
+
+/** Insert or replace by id, stamping updatedAt. Returns the new library. */
+export async function saveClassPalette(
+  palette: ClassPalette, now: number = Date.now(),
+): Promise<ClassPalette[]> {
+  const all = await getClassPalettes();
+  const stamped = { ...palette, updatedAt: now };
+  const i = all.findIndex((p) => p.id === palette.id);
+  const next = i >= 0
+    ? [...all.slice(0, i), stamped, ...all.slice(i + 1)]
+    : [...all, stamped];
+  await kvSet(PALETTES_KEY, next);
+  return next;
+}
+
+export async function deleteClassPalette(id: string): Promise<ClassPalette[]> {
+  const next = (await getClassPalettes()).filter((p) => p.id !== id);
+  await kvSet(PALETTES_KEY, next);
+  return next;
+}
+
+/** Serialise the library for sharing between collaborators. */
+export async function exportClassPalettes(): Promise<string> {
+  return JSON.stringify(await getClassPalettes(), null, 2);
+}
+
+/**
+ * Merge palettes from an exported file. Same-id palettes are REPLACED (an
+ * updated copy of a shared palette should win); unknown ids are appended.
+ * Returns the number merged, or throws on unparseable JSON.
+ */
+export async function importClassPalettes(
+  jsonString: string, now: number = Date.now(),
+): Promise<number> {
+  const incoming = parsePaletteList(JSON.parse(jsonString));
+  if (incoming.length === 0) return 0;
+  const byId = new Map((await getClassPalettes()).map((p) => [p.id, p]));
+  for (const p of incoming) byId.set(p.id, { ...p, updatedAt: now });
+  await kvSet(PALETTES_KEY, [...byId.values()]);
+  return incoming.length;
 }
 
 // ==================== TAG FUNCTIONS ====================

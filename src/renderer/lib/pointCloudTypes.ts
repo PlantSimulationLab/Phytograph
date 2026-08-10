@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationMethod, DemLayer } from '../utils/backendApi';
 import type { ScanParameters } from './scanParameters';
+import type { ClassPalette } from './classPalettes';
 
 // potree-core's RequestManager interface isn't re-exported from the package
 // root in v2.0.15. The shape is small and stable, so mirror it locally
@@ -84,6 +85,17 @@ export interface OctreeRef {
   // registers these as continuous overrides so the fixed Hit/Miss scheme is
   // suppressed for this cloud. See classification.ts registerContinuousSlug.
   continuousAttributes?: string[];
+  // User-defined class palettes bound to this cloud's categorical columns, keyed
+  // by attribute slug. A SIBLING of categoricalAttributes rather than a widening
+  // of it: that field is a bare string[] threaded through half a dozen call
+  // sites, and an optional new field is additive (older clouds simply have none).
+  //
+  // Must be carried forward through EVERY octree-rebuild path, because
+  // categoricalSchemeForRange derives its class list from the OBSERVED value
+  // range — a cloud painted with only classes 0 and 3 reports [0,3] and would
+  // otherwise come back from a rebuild with invented "Class 1"/"Class 2" entries
+  // and the user's own names gone.
+  classPalettes?: Record<string, ClassPalette>;
   // Sky/miss points (laser pulses that returned nothing). They live in the
   // backend session for LAD but are NOT in THIS (hits) octree (their ~20 km
   // coords would poison its bounding box). The backend builds them into their
