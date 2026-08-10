@@ -852,9 +852,12 @@ export default function PointCloudViewer({
   // Measure the ground tolerance off the settled cloth rather than seeding it
   // from the cloud's extent (the seed scales with tile width, which is unrelated
   // to the ground return band's thickness — see _estimate_class_threshold).
-  // `lastAutoThreshold` echoes what the last run measured, so the value the user
-  // is being given is visible rather than hidden inside the backend.
-  const [groundAutoClassThreshold, setGroundAutoClassThreshold] = useState(false);
+  // Defaults ON: the extent-derived seed is wrong often enough on field-scale
+  // scans that measuring is the better first run, and the panel fills the
+  // measured value into the tolerance box so hand-tuning from it stays one
+  // untick away. `lastAutoThreshold` echoes what the last run measured, so the
+  // value the user is being given is visible rather than hidden in the backend.
+  const [groundAutoClassThreshold, setGroundAutoClassThreshold] = useState(true);
   // Keyed by cloud: a measured tolerance describes the cloud it was measured on,
   // and the panel re-seeds from extent every time it opens, so without the key
   // the measurement would be silently clobbered the moment the user reopened it.

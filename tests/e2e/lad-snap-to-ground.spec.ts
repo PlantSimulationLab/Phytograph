@@ -89,6 +89,9 @@ test('snaps a voxel grid to a DEM and LAD follows the slope', async () => {
     // ── 3. Segment ground (so the DEM grids the ground points) ───────────
     await page.getByTestId('tool-ground-segment').click();
     await page.getByTestId('ground-cloth-resolution').fill('0.3');
+    // Measuring from the scan is the default; this test wants its own
+    // fixture-tuned tolerance, so turn the measurement off first.
+    await page.getByTestId('ground-auto-class-threshold').uncheck();
     await page.getByTestId('ground-class-threshold').fill('0.1');
     await page.getByTestId('ground-segment-run-button').click();
     await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });

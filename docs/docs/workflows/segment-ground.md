@@ -34,7 +34,9 @@ labels the points the cloth settles onto as ground.
       finer ground relief but is slower; for pot/plot-scale scans a few
       centimetres works well.
     - **Ground tolerance (m)** — how far a point can sit *above* the draped
-      cloth and still count as ground. Raise it to pull low plant material —
+      cloth and still count as ground. The box is greyed out while **Measure
+      from the scan** (below) is ticked, which it is by default; untick that to
+      set the tolerance by hand. Raise it to pull low plant material —
       weeds, ground cover, inter-row vegetation — into the ground class;
       lower it to keep more of the plant base separate. Because it's an
       absolute height above the cloth, field- or orchard-scale scans need
@@ -43,11 +45,11 @@ labels the points the cloth settles onto as ground.
       tree canopy as non-ground, whereas the seeded ~0.5 m keeps them
       separate. Nudge it up until the weeds flip to ground without the trees
       following.
-    - **Measure from the scan** — tick this to have the tolerance measured
+    - **Measure from the scan** — on by default: the tolerance is measured
       from your data instead of seeded from the cloud's size, and see
-      [below](#why-ground-points-come-out-as-non-ground) for when you need it.
-      The measured value is reported when the run finishes and filled into the
-      tolerance box, so you can nudge it from there on a later run.
+      [below](#why-ground-points-come-out-as-non-ground) for why. The measured
+      value is reported when the run finishes and filled into the tolerance
+      box, so you can untick this and nudge it from there on a later run.
     - **Rigidness (1–3)** — cloth stiffness. Use **3** for flat ground,
       lower (down to **1**) for undulating or sloped terrain so the cloth can
       bend to follow the slope instead of bridging over it.
