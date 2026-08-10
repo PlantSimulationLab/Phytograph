@@ -46,6 +46,8 @@ by the four stages of a typical processing pipeline.
 
 - :material-forest: **[Segment individual trees](segment-trees.md)** — separate a multi-tree cloud into per-tree instances.
 
+- :material-brush: **[Label points by hand](label-points.md)** — assign your own classes with a lasso, to correct a classifier or build ground truth.
+
 </div>
 
 ## 3. Reconstruction & analysis

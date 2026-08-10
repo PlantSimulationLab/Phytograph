@@ -59,6 +59,17 @@ just commits the typed value.
 (Filter and Resample are panels rather than edit tools, so these keys don't
 apply to them.)
 
+## Label Points
+
+| Shortcut | Action |
+|---|---|
+| <kbd>1</kbd>–<kbd>9</kbd> | Select the first nine classes as the paint class |
+| Left-click | Place a lasso corner |
+| <kbd>Enter</kbd> or double-click | Close the lasso and paint the enclosed points |
+| Right-click | Remove the last lasso corner |
+| <kbd>Esc</kbd> | Cancel the lasso in progress |
+| <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo the last stroke |
+
 ## Crop polygon (while drawing)
 
 | Shortcut | Action |
