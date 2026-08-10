@@ -1031,7 +1031,7 @@ export const POINT_CLOUD_FORMATS = [
 
 export const MESH_FORMATS = [
   { ext: '.obj', name: 'OBJ', desc: 'Wavefront mesh' },
-  { ext: '.stl', name: 'STL', desc: 'Stereolithography (ASCII)' },
+  { ext: '.stl', name: 'STL', desc: 'Stereolithography (ASCII + binary)' },
   { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (mesh)' },
 ];
 
@@ -1126,9 +1126,53 @@ export async function parseOBJMesh(file: File): Promise<ParsedMesh> {
   return result;
 }
 
-// Parse STL mesh format (ASCII)
-export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
-  const text = await file.text();
+// A corrupt/misread triangle count is a uint32, so it can ask for up to 4.29e9
+// triangles (~154 GB of typed arrays). Cap it so a bogus count becomes a clean
+// classification miss rather than an unhandled allocation RangeError. The cap is
+// a ceiling, not a policy — 50M triangles is already a 2.5 GB file.
+const MAX_STL_TRIANGLES = 50_000_000;
+
+export type StlKind = 'binary' | 'ascii';
+
+/**
+ * Decide whether an STL is binary or ASCII from its first 84 bytes and its size.
+ *
+ * The length test (84 + 50n vs size) is authoritative; the leading `solid` token
+ * is deliberately NOT consulted. That heuristic fails in both directions: plenty
+ * of binary writers put arbitrary text in the 80-byte header, and the file that
+ * motivated this code (a Blender-exported binary STL) has a header of 80 zero
+ * bytes — no `solid` prefix to key off at all. The arithmetic, by contrast, is
+ * self-validating: a real ASCII file whose bytes 80..83 happen to satisfy
+ * 84 + 50n == size is a coincidence we have never seen in practice.
+ *
+ * Anything not positively identified as binary falls through to 'ascii', so a
+ * misclassification degrades to the text parser (which reports its own error)
+ * rather than to a bogus read.
+ */
+export function detectStlKind(headerBytes: ArrayBuffer, fileSize: number): StlKind {
+  if (headerBytes.byteLength < 84 || fileSize < 84) return 'ascii';
+
+  const n = new DataView(headerBytes).getUint32(80, true);
+  // An empty binary STL is indistinguishable from a header-only ASCII one; let
+  // the ASCII path handle it so the "no mesh data" error stays the single voice
+  // for empty files.
+  if (n === 0) return 'ascii';
+  if (n > MAX_STL_TRIANGLES) return 'ascii';
+
+  const expected = 84 + 50 * n;
+  // Exact match, or trailing bytes (some writers pad or append metadata).
+  if (expected <= fileSize) return 'binary';
+  // expected > fileSize: truncated if it really is binary. Fall to ASCII, which
+  // either parses it (it was text) or raises the truncation error below.
+  return 'ascii';
+}
+
+/**
+ * Parse ASCII STL text. Output is unwelded — 3 fresh vertices per facet, with the
+ * facet normal replicated to each — which parseBinarySTL matches exactly so the
+ * two encodings behave identically downstream.
+ */
+function parseAsciiSTL(text: string, fileName: string): ParsedMesh {
   const lines = text.trim().split('\n');
 
   const vertices: number[] = [];
@@ -1145,10 +1189,17 @@ export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
       const ny = parseFloat(parts[3]);
       const nz = parseFloat(parts[4]);
 
-      // Read the three vertices
+      // Read this facet's vertices, bounded by its own `endfacet` (or the start
+      // of the next facet, for files missing the terminator). Scanning past the
+      // boundary would let a malformed facet with <3 vertices silently absorb the
+      // NEXT facet's vertices — producing a spliced triangle and shifting every
+      // facet after it, with no error raised.
       const triangleVertices: number[] = [];
-      for (let j = i + 1; j < lines.length && triangleVertices.length < 9; j++) {
+      let j = i + 1;
+      for (; j < lines.length; j++) {
         const vLine = lines[j].trim().toLowerCase();
+        if (vLine.startsWith('endfacet')) break;
+        if (vLine.startsWith('facet normal')) break;
         if (vLine.startsWith('vertex')) {
           const vParts = vLine.split(/\s+/);
           triangleVertices.push(parseFloat(vParts[1]), parseFloat(vParts[2]), parseFloat(vParts[3]));
@@ -1156,12 +1207,16 @@ export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
       }
 
       if (triangleVertices.length === 9) {
-        vertices.push(...triangleVertices);
+        for (let k = 0; k < 9; k++) vertices.push(triangleVertices[k]);
         // Same normal for all three vertices
         normals.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
         indices.push(vertexIndex, vertexIndex + 1, vertexIndex + 2);
         vertexIndex += 3;
       }
+
+      // Resume after the lines this facet consumed. `j` sits on the terminator or
+      // on the next `facet normal`; step back one so the loop's i++ lands on it.
+      i = j - 1;
     }
   }
 
@@ -1178,8 +1233,152 @@ export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
     normals: new Float32Array(normals),
     vertexCount,
     triangleCount,
-    fileName: file.name,
+    fileName,
   };
+}
+
+/**
+ * Parse a binary STL. Layout, little-endian throughout:
+ *   [0, 80)   header — ignored (may be zeros, may contain text including "solid")
+ *   [80, 84)  uint32 triangle count
+ *   then 50 bytes per triangle:
+ *     12 bytes  float32 nx ny nz   facet normal
+ *     36 bytes  float32 x y z ×3   the three vertices
+ *      2 bytes  uint16             attribute byte count (see color note below)
+ */
+function parseBinarySTL(buffer: ArrayBuffer, fileName: string): ParsedMesh {
+  const view = new DataView(buffer);
+  const triangleCount = view.getUint32(80, true);
+
+  // detectStlKind already guarantees this, but a future direct caller must not be
+  // able to walk off the end and get a raw "Offset is outside the bounds" error.
+  const needed = 84 + 50 * triangleCount;
+  if (triangleCount > MAX_STL_TRIANGLES || needed > buffer.byteLength) {
+    throw new Error(
+      `STL file appears to be binary but is truncated: header declares ${triangleCount} triangles ` +
+        `(expects ${needed} bytes), file is ${buffer.byteLength} bytes.`,
+    );
+  }
+
+  const vertexCount = triangleCount * 3;
+  const vertices = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const indices = new Uint32Array(triangleCount * 3);
+
+  // The 2-byte attribute word after each triangle is unstandardized. Two dialects
+  // pack RGB555 into it and disagree with each other: VisCAM reads bit 15 as "this
+  // facet carries a color", SolidWorks reads it as "ignore these bits, use the
+  // default" — inverted — and they order the RGB bits oppositely. So "attribute is
+  // nonzero" cannot mean color: under SolidWorks, 0x0000 would make every facet
+  // black. We follow VisCAM (bit 15 = valid) and require at least one facet in the
+  // file to set it before reading ANY color. A file that never opts in gets no
+  // vertexColors at all, which is what keeps ordinary binary STLs untinted.
+  let hasColor = false;
+  for (let i = 0; i < triangleCount; i++) {
+    if (view.getUint16(84 + i * 50 + 48, true) & 0x8000) {
+      hasColor = true;
+      break;
+    }
+  }
+  const colors = hasColor ? new Float32Array(vertexCount * 3) : undefined;
+
+  // Tracks whether every coordinate read was finite. A comparison-based min/max
+  // cannot detect this: NaN < min and NaN > max are both false, so a NaN sails
+  // through the extent untouched and only surfaces later as broken bounds.
+  let allFinite = true;
+
+  for (let i = 0; i < triangleCount; i++) {
+    const off = 84 + i * 50;
+    const nx = view.getFloat32(off, true);
+    const ny = view.getFloat32(off + 4, true);
+    const nz = view.getFloat32(off + 8, true);
+
+    let r = 1, g = 1, b = 1;
+    if (colors) {
+      const attr = view.getUint16(off + 48, true);
+      if (attr & 0x8000) {
+        r = ((attr >> 10) & 0x1f) / 31;
+        g = ((attr >> 5) & 0x1f) / 31;
+        b = (attr & 0x1f) / 31;
+      }
+    }
+
+    for (let v = 0; v < 3; v++) {
+      const src = off + 12 + v * 12;
+      const x = view.getFloat32(src, true);
+      const y = view.getFloat32(src + 4, true);
+      const z = view.getFloat32(src + 8, true);
+
+      if (allFinite && !(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z))) {
+        allFinite = false;
+      }
+
+      const dst = (i * 3 + v) * 3;
+      vertices[dst] = x;
+      vertices[dst + 1] = y;
+      vertices[dst + 2] = z;
+      normals[dst] = nx;
+      normals[dst + 1] = ny;
+      normals[dst + 2] = nz;
+      if (colors) {
+        colors[dst] = r;
+        colors[dst + 1] = g;
+        colors[dst + 2] = b;
+      }
+    }
+
+    // Unwelded, matching the ASCII path: every facet owns its three vertices.
+    indices[i * 3] = i * 3;
+    indices[i * 3 + 1] = i * 3 + 1;
+    indices[i * 3 + 2] = i * 3 + 2;
+  }
+
+  // A NaN/Inf coordinate is silent poison downstream — it breaks bounds and camera
+  // framing without ever raising. The flag is accumulated in the loop above, so
+  // this costs no extra pass.
+  if (!allFinite) {
+    throw new Error('STL file contains invalid (NaN or infinite) vertex coordinates');
+  }
+
+  const result: ParsedMesh = {
+    vertices,
+    indices,
+    normals,
+    vertexCount,
+    triangleCount,
+    fileName,
+  };
+  if (colors) result.vertexColors = colors;
+  return result;
+}
+
+// Parse STL mesh format — binary or ASCII, detected from the file's own bytes.
+export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
+  // One read serves both branches: binary reads the buffer directly, ASCII decodes
+  // it as text (same shape as parsePLYMesh).
+  const buffer = await file.arrayBuffer();
+
+  if (detectStlKind(buffer, buffer.byteLength) === 'binary') {
+    return parseBinarySTL(buffer, file.name);
+  }
+
+  try {
+    return parseAsciiSTL(new TextDecoder().decode(buffer), file.name);
+  } catch (err) {
+    // Text parsing found nothing. If the header still looked like a plausible
+    // binary triangle count, the file is a truncated binary STL — say so, rather
+    // than leaving the user with the generic "no mesh data".
+    if (buffer.byteLength >= 84) {
+      const n = new DataView(buffer).getUint32(80, true);
+      if (n > 0 && n <= MAX_STL_TRIANGLES) {
+        throw new Error(
+          `STL file appears to be binary but is truncated: header declares ${n} triangles ` +
+            `(expects ${84 + 50 * n} bytes), file is ${buffer.byteLength} bytes.`,
+        );
+      }
+    }
+    throw err;
+  }
 }
 
 // Sniff a PLY file's header to decide whether it carries polygon-mesh data

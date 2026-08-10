@@ -156,7 +156,7 @@ neither, the inversion warns that its result is likely to be inaccurate.
 |---|---|---|---|
 | `.obj` | ✅ | ✅ | Vertices + faces + normals + UVs + materials. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied; on export, that `.mtl` and its texture images are written back alongside the `.obj`. |
 | `.ply` | ✅ | ✅ | Vertices + faces + normals + per-vertex color. ASCII **and** binary on import (read via open3d). No textures. |
-| `.stl` | ✅ | ✅ | Triangles only — no color or topology metadata. |
+| `.stl` | ✅ | ✅ | Triangles only — no topology metadata. ASCII **and** binary on import; exported as ASCII. Binary STL's non-standard per-facet color is read only for facets that set its "color valid" bit. |
 
 Polygonal faces with more than three vertices are triangulated on
 import. Textured `.obj` import reads UV coordinates (`vt`) and per-material

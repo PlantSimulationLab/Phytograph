@@ -277,6 +277,13 @@ imports as a point cloud — see
 Both ASCII and binary PLY meshes are read, including per-vertex color; PLY
 meshes carry no textures.
 
+An `.stl` is imported as a mesh in either encoding — ASCII or binary, detected
+from the file's own contents, so binary files written by Blender, MeshLab, CAD
+tools and slicers import directly. Binary STL has an unstandardized per-facet
+color field that different tools write incompatibly; Phytograph reads it only
+for facets that set the field's "color valid" bit, and leaves the mesh
+untinted when no facet does. STL is always **exported** as ASCII.
+
 ### Importing ASCII clouds with custom columns
 
 For `.xyz`, `.txt`, and `.csv` files, auto-detection maps columns by header
