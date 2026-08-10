@@ -190,7 +190,7 @@ import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
 import { ExportModal } from './ExportModal';
-import { defaultExportColumns, buildAsciiExport } from '../lib/exportColumns';
+import { defaultExportColumns, buildAsciiExport, cellValue } from '../lib/exportColumns';
 import { QSMExportPanel } from './viewer/panels/QSMExportPanel';
 import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
@@ -6632,6 +6632,11 @@ export default function PointCloudViewer({
           format,
           filename: `${baseName}.${format}`,
           dest_path: destPath,
+          // Forward the column picker's ordered selection. Without this the
+          // backend fell back to its fixed layout, so the picker was decorative
+          // on the octree/session path — i.e. on every normally-imported cloud.
+          // LAS/LAZ ignore it (fixed schema + named extra dimensions).
+          ...(columns && columns.length ? { columns } : {}),
         }, opts?.signal, opts?.onProgress, opts?.onRunId);
         if (response.success) {
           return { fileName: response.filename || destName, pointCount: response.point_count };
@@ -6715,25 +6720,30 @@ export default function PointCloudViewer({
         return { fileName: saved, pointCount: data.pointCount };
       }
     } else if (format === 'ply') {
-      const hasColors = !!data.colors;
+      // PLY takes a column selection (an ASCII PLY names each column as a
+      // `property`, so a chosen scalar round-trips by name). Honor the picker's
+      // slugs; fall back to geometry + colour when none were passed, which is
+      // the layout this branch always wrote before the picker covered PLY.
+      let slugs = columns ?? [];
+      if (slugs.length === 0) {
+        slugs = ['x', 'y', 'z'];
+        if (data.colors) slugs.push('r', 'g', 'b');
+      }
+      // Declare each column with the type PLY expects: colour is uchar 0-255,
+      // geometry and scalars are float.
+      const PLY_PROPS: Record<string, string> = {
+        x: 'float x', y: 'float y', z: 'float z',
+        r: 'uchar red', g: 'uchar green', b: 'uchar blue',
+      };
       const lines: string[] = [
         'ply',
         'format ascii 1.0',
         `element vertex ${data.pointCount}`,
-        'property float x',
-        'property float y',
-        'property float z',
+        ...slugs.map(s => `property ${PLY_PROPS[s] ?? `float ${s}`}`),
+        'end_header',
       ];
-      if (hasColors) {
-        lines.push('property uchar red', 'property uchar green', 'property uchar blue');
-      }
-      lines.push('end_header');
       for (let i = 0; i < data.pointCount; i++) {
-        let line = `${data.positions[i * 3].toFixed(6)} ${data.positions[i * 3 + 1].toFixed(6)} ${data.positions[i * 3 + 2].toFixed(6)}`;
-        if (hasColors) {
-          line += ` ${Math.round(data.colors![i * 3] * 255)} ${Math.round(data.colors![i * 3 + 1] * 255)} ${Math.round(data.colors![i * 3 + 2] * 255)}`;
-        }
-        lines.push(line);
+        lines.push(slugs.map(s => cellValue(data, s, i)).join(' '));
       }
       {
         const saved = await writeToPath(lines.join('\n'), destPath);
@@ -17973,6 +17983,15 @@ export default function PointCloudViewer({
               // Octree/session clouds keep their points (and scalar columns) on
               // disk, so recover the available columns from the ASCII_format hint.
               asciiFormat: c.data.octree?.asciiFormat ?? c.asciiFormat ?? null,
+              // …and from the octree's own attribute list, which is the only
+              // source that covers a plain LAS/LAZ/E57/PLY import (no
+              // ASCII_format, no in-RAM scalarFields). Same input the colour-by
+              // and scalar-filter pickers use.
+              octreeAttributes: Object.keys(c.data.octree?.attributeRanges ?? {}),
+              // …and the ranges themselves, so the all-zero LAS schema dims
+              // PotreeConverter invents for a bare XYZ source (intensity,
+              // classification, gps-time…) don't show up as exportable fields.
+              octreeAttributeRanges: c.data.octree?.attributeRanges,
             });
           })()}
           // Every scan that carries scanner parameters (so it can be written as a

@@ -361,29 +361,61 @@ the options.
 
 ### Point cloud formats
 
-Pick a **Format** in the Export window, then click **Export**. For the text
-formats (XYZ / TXT / CSV) a **column picker** appears: check which fields to
-write (x, y, z, colour, intensity, scalars, labels) and **drag the rows to
-reorder** them — the chosen order becomes the file's column order. The binary /
-structured formats (LAS / LAZ / PLY / OBJ) use their own fixed schema, so the
-column picker is hidden for them.
+Pick a **Format** in the Export window, then click **Export**. Every format
+except OBJ shows a **field picker**: check which fields to write (x, y, z, colour,
+intensity, scalars, labels). Everything is checked by default, so a plain export
+stays lossless and you prune from there. The picker lists **every field the cloud
+actually holds** — including scalars that came from a LAS extra dimension or an
+import-wizard column, and the class labels a segmentation added.
+
+For XYZ / TXT / CSV / PLY you can also **drag the rows to reorder** them; the
+chosen order becomes the file's column order. **LAS / LAZ** identify their
+dimensions by name rather than by position, so order doesn't apply there and the
+drag handle is omitted.
+
+**OBJ** stores vertex coordinates only and cannot carry colour or scalars at all,
+so it has no picker.
+
+!!! note "What LAS/LAZ cannot leave out"
+
+    Each scalar becomes a named LAS *extra dimension*, so any scalar can be
+    unchecked. Two standard dimensions are different:
+
+    - **X/Y/Z** are the point record itself.
+    - **Intensity** is present in every LAS point format, so it cannot be
+      removed — unchecking it could only write zeros. Both are shown locked.
+
+    Unchecking **colour** is a real omission: it selects LAS point format 1,
+    which has no RGB dimension. (Because the point format is a fixed menu rather
+    than a free choice of dimensions, dropping RGB also drops GPS time.)
 
 | Format | Carries |
 |---|---|
-| `.las` / `.laz` | x, y, z, intensity, color, classification — LAS standard fields only |
-| `.ply` | All fields including arbitrary scalars |
-| `.xyz` | x, y, z only, with a `#`-prefixed column header line |
-| `.txt` | x, y, z plus color / intensity / scalars, with a `#`-prefixed column header |
-| `.csv` | Same fields as `.txt` but comma-separated with a plain header row |
-| `.obj` | Vertices only (no faces) — useful for piping into other tools |
+| `.las` / `.laz` | x, y, z, intensity, colour, plus the scalars you select as **named LAS extra dimensions** |
+| `.ply` | The columns you select, each declared as a named `property` |
+| `.xyz` | The columns you select, whitespace-separated, with no header line |
+| `.txt` | The columns you select, whitespace-separated, with a `#`-prefixed column header |
+| `.csv` | Same columns as `.txt` but comma-separated with a plain header row |
+| `.obj` | Vertices only (no faces) — geometry cannot carry scalars in OBJ |
 
-The `.xyz` and `.txt` exports write a leading `#`-prefixed column header
-(the CloudCompare convention, e.g. `# x y z is_miss`). Phytograph's own
-importer reads that header to auto-map columns on re-import, and most
-ASCII readers (CloudCompare included) skip the `#` line as a comment.
+The `.txt` export writes a leading `#`-prefixed column header (the CloudCompare
+convention, e.g. `# X Y Z is_miss`). Phytograph's own importer reads that header
+to auto-map columns on re-import, and most ASCII readers (CloudCompare included)
+skip the `#` line as a comment. Bare `.xyz` carries no header, so its extra
+columns are positional — use `.txt` or `.csv` when you want the field names
+preserved.
 
-If you need to round-trip with full fidelity, use `.ply` — it preserves
-everything Phytograph knows about the cloud.
+For a full-fidelity round trip, use `.las` / `.laz` or `.ply`. LAS/LAZ writes
+each scalar as a named extra dimension, so re-importing the file restores the
+same named fields (and is far smaller and faster than text for a large cloud).
+
+!!! note "Scalar fields are no longer dropped"
+
+    Before v0.65.0 the text exports wrote only x/y/z (plus colour and intensity
+    for `.txt`/`.csv`) and LAS/LAZ wrote only x/y/z and colour — every other
+    field was silently lost, and the column picker offered only x/y/z for a
+    normally-imported cloud. If you have exports from an earlier version that
+    are missing their scalars, re-export them.
 
 After you click **Export**, a save dialog asks where to write the file. Once you
 confirm the destination the Export window closes and a **progress pill** appears
@@ -396,9 +428,11 @@ writes nothing and reports nothing.
 
 The pill names the stage it is on. For the text formats that is mostly
 *Formatting*, which is where nearly all their time goes; `.las`/`.laz` step
-through *Computing bounds*, *Packing coordinates*, *Packing colours* and
-*Writing file* instead. Binary formats are several times faster than text for
-the same cloud, so their pill moves through those stages quickly.
+through *Computing bounds*, *Packing coordinates*, *Packing colours*, *Packing
+intensity*, *Packing scalar fields* and *Writing file* instead (the packing
+stages appear only for the fields the cloud actually has). Binary formats are
+several times faster than text for the same cloud, so their pill moves through
+those stages quickly.
 
 ### Exporting scans
 

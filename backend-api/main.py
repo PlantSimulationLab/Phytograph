@@ -236,7 +236,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.64.7"
+BACKEND_VERSION = "0.65.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -1697,6 +1697,17 @@ class PointSource(BaseModel):
     # (`positions[i*3] + tx`) and the in-RAM `_region_mask` translation path.
     translation: Optional[List[float]] = None
     want_colors: bool = False
+    # Surface the session's scalar extra-dimension columns (`extras`) alongside
+    # positions. OFF by default because the compute consumers want geometry only
+    # and copying every scalar column for a 25 M-point cloud is pure waste.
+    #
+    # Export is the caller that sets it: a cloud's scalars (reflectance,
+    # ground_class, target_index, is_miss, any wizard-imported column) are part of
+    # the data the user imported, and an export that silently drops them is
+    # lossy. Before this flag existed `_read_points_from_source` returned a
+    # 3-tuple by signature, so there was no way for ANY caller to get them —
+    # which is why both the text and LAS export paths wrote x/y/z(+rgb) only.
+    want_extras: bool = False
     # Sky/miss points (`is_miss != 0`) are dropped by default: a miss is a ray
     # that hit nothing, projected ~1 km out, so the surface-reconstruction
     # consumers (triangulate, skeleton, segment, QSM) must never see it — exactly
@@ -15464,6 +15475,22 @@ class PointCloudExportRequest(BaseModel):
     filename: Optional[str] = None  # Optional filename for the export
     # Absolute path the backend writes to. When set, `data` comes back null.
     dest_path: Optional[str] = None
+    # Ordered column slugs from the export modal's field picker, e.g.
+    # ["x","y","z","reflectance","ground_class"]. A slug the cloud doesn't carry
+    # is dropped rather than written as zeros. None/omitted = the format's
+    # historical full layout, so older callers and the flat-cloud path are
+    # unaffected and a default export stays lossless.
+    #
+    # Honored by every format except OBJ (a `v` line takes exactly x/y/z):
+    #   * xyz/txt/csv — the file's columns, in this order.
+    #   * ply         — the declared `property` list, in this order.
+    #   * las/laz     — WHICH dimensions are written; order is ignored, because
+    #                   LAS identifies dimensions by name. Each scalar is a
+    #                   declared extra dimension and so is freely omittable;
+    #                   dropping r/g/b selects point format 1 (no RGB). x/y/z and
+    #                   intensity live in the core point record of every format
+    #                   and cannot be removed — the UI locks them on.
+    columns: Optional[List[str]] = None
 
 
 class PointCloudExportResponse(BaseModel):
@@ -15503,11 +15530,18 @@ def _format_points_as_text(
     colors: Optional[np.ndarray],
     intensity: Optional[np.ndarray],
     progress=None,
+    extras=None,
+    columns=None,
 ) -> str:
-    """Format an (N,3) point array (+ optional 0-1 colors, intensity) as XYZ /
-    TXT / CSV / PLY / OBJ text. Column conventions match the renderer's flat
-    text export exactly: 6-decimal positions, colors as 0-255 ints, intensity
-    4-decimal.
+    """Format an (N,3) point array (+ optional 0-1 colors, intensity, scalar
+    `extras`) as XYZ / TXT / CSV / PLY / OBJ text. Column conventions match the
+    renderer's flat text export exactly: 6-decimal positions, colors as 0-255
+    ints, intensity 4-decimal.
+
+    `columns` is the user's ordered slug selection from the export modal; None
+    keeps the historical fixed layout. Both the column set and the header/format
+    per column come from `_text_export_layout`, shared with the streaming writer
+    (`_write_points_as_text`) so the two cannot drift.
 
     Vectorised with `np.savetxt` rather than a per-point Python f-string loop —
     on a multi-million-point octree cloud the old loop dominated export time and
@@ -15518,13 +15552,6 @@ def _format_points_as_text(
     real percentage instead of an indeterminate spinner. Chunking is what makes
     that possible at all — see `_TEXT_EXPORT_CHUNK_ROWS`.
     """
-    import io
-
-    n = len(points)
-    has_colors = colors is not None and len(colors) == n
-    has_int = intensity is not None and len(intensity) == n
-    rgb = np.clip(np.rint(colors * 255.0), 0, 255).astype(int) if has_colors else None
-
     def _savetxt(cols: list, fmts: list, sep: str) -> str:
         """Format the column-stacked `cols` with per-column `fmts`, joined by
         `sep`, returning the body WITHOUT a trailing newline.
@@ -15561,95 +15588,146 @@ def _format_points_as_text(
                 progress(done / total, f"Formatting {done:,} / {total:,} points")
         return "".join(parts).rstrip("\n")
 
-    pos_fmt = ["%.6f", "%.6f", "%.6f"]
-
-    if fmt == "xyz":
-        return _savetxt([points[:, 0], points[:, 1], points[:, 2]], pos_fmt, " ")
-
-    if fmt in ("txt", "csv"):
-        sep = "," if fmt == "csv" else " "
-        head = ["X", "Y", "Z"]
-        cols = [points[:, 0], points[:, 1], points[:, 2]]
-        fmts = list(pos_fmt)
-        if has_colors:
-            head += ["R", "G", "B"]
-            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
-            fmts += ["%d", "%d", "%d"]
-        if has_int:
-            head += ["Intensity"]
-            cols += [np.asarray(intensity, dtype=np.float64)]
-            fmts += ["%.4f"]
-        body = _savetxt(cols, fmts, sep)
-        # Match the old loop exactly: header only (no trailing newline) when empty.
-        return sep.join(head) + ("\n" + body if body else "")
-
-    if fmt == "ply":
-        header = ["ply", "format ascii 1.0", f"element vertex {n}",
-                  "property float x", "property float y", "property float z"]
-        cols = [points[:, 0], points[:, 1], points[:, 2]]
-        fmts = list(pos_fmt)
-        if has_colors:
-            header += ["property uchar red", "property uchar green", "property uchar blue"]
-            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
-            fmts += ["%d", "%d", "%d"]
-        header.append("end_header")
-        body = _savetxt(cols, fmts, " ")
-        return "\n".join(header) + ("\n" + body if body else "")
-
-    if fmt == "obj":
-        header = ["# Point cloud exported from Phytograph", f"# {n} points"]
-        # The 'v ' prefix is the first format field (a literal column).
-        body = _savetxt(
-            [points[:, 0], points[:, 1], points[:, 2]],
-            ["v %.6f", "%.6f", "%.6f"], " ",
-        )
-        return "\n".join(header) + ("\n" + body if body else "")
-
-    raise HTTPException(status_code=400, detail=f"Unsupported text export format: {fmt}")
+    header, cols, fmts, sep = _text_export_layout(
+        fmt, points, colors, intensity, extras=extras, columns=columns)
+    body = _savetxt(cols, fmts, sep) if len(points) else ""
+    # Join header to body with exactly one newline, and emit no trailing newline
+    # in any case — matches the streaming writer, which suppresses the separating
+    # newline the same way (header-only when empty; body-only for headerless xyz).
+    return "\n".join([part for part in ("\n".join(header), body) if part])
 
 
-def _text_export_layout(fmt, points, colors, intensity):
-    """Resolve one text format into (header_lines, columns, per-column formats,
-    separator) — the single description both the string and streaming writers
-    build from, so they cannot drift."""
+# Display headers for the fixed geometry/colour slugs in a text export. Any slug
+# not listed here is a scalar column and gets its own slug as the header.
+_TEXT_EXPORT_SLUG_HEADERS = {
+    "x": "X", "y": "Y", "z": "Z", "r": "R", "g": "G", "b": "B",
+    "intensity": "Intensity",
+}
+
+# PLY property declarations for the fixed slugs. Scalars are declared `float`.
+_PLY_PROPERTY_TYPES = {
+    "x": "float x", "y": "float y", "z": "float z",
+    "r": "uchar red", "g": "uchar green", "b": "uchar blue",
+}
+
+
+def _resolve_export_columns(
+    columns, points, colors, intensity, extras, default_slugs=None,
+) -> list[tuple[str, np.ndarray, str]]:
+    """Resolve a requested slug list into ordered (slug, values, printf-format)
+    triples, dropping any slug whose data this cloud doesn't actually carry.
+
+    `columns` is the ordered list the export modal's column picker produced.
+    None/empty falls back to `default_slugs` — which each format supplies, because
+    the historical fixed layouts differ per format: txt/csv carried colour AND
+    intensity, ply carried colour only, and xyz/obj were geometry-only. Getting
+    that wrong is not cosmetic; `test_text_export_is_byte_identical_to_reference`
+    pins every one of those combinations.
+
+    Dropping absent slugs (rather than emitting a zero column) matters because
+    the picker is built from octree attribute metadata, which can name a scalar
+    the session no longer holds after a bake/split. A silent zero column reads as
+    real data; an omitted one is visibly absent in the header.
+    """
     n = len(points)
     has_colors = colors is not None and len(colors) == n
     has_int = intensity is not None and len(intensity) == n
     rgb = np.clip(np.rint(colors * 255.0), 0, 255).astype(int) if has_colors else None
-    pos = [points[:, 0], points[:, 1], points[:, 2]]
-    pos_fmt = ["%.6f", "%.6f", "%.6f"]
+
+    available: dict[str, tuple[np.ndarray, str]] = {
+        "x": (points[:, 0], "%.6f"),
+        "y": (points[:, 1], "%.6f"),
+        "z": (points[:, 2], "%.6f"),
+    }
+    if has_colors:
+        available["r"] = (rgb[:, 0], "%d")
+        available["g"] = (rgb[:, 1], "%d")
+        available["b"] = (rgb[:, 2], "%d")
+    if has_int:
+        available["intensity"] = (np.asarray(intensity, dtype=np.float64), "%.4f")
+    for slug, col in (extras or {}).items():
+        arr = np.asarray(col)
+        if arr.shape != (n,):
+            # A desynced column would silently mislabel points; skip it.
+            continue
+        # The dedicated arrays win: a session that holds a real intensity/colour
+        # array has already registered those slugs above, so an extras column of
+        # the same name (LAS promotes intensity to its standard dimension) must
+        # not shadow it.
+        if slug in available:
+            continue
+        # Integer-valued scalars (class labels, target_index, is_miss) print as
+        # ints so a `ground_class` column reads `2`, not `2.000000`.
+        is_int = np.issubdtype(arr.dtype, np.integer) or (
+            arr.size > 0 and np.all(np.isfinite(arr)) and np.all(arr == np.rint(arr))
+        )
+        available[slug] = (
+            (arr.astype(np.int64), "%d") if is_int else (arr.astype(np.float64), "%.6f")
+        )
+
+    requested = columns if columns else (default_slugs or ["x", "y", "z"])
+    slugs = [s for s in requested if s in available]
+    return [(s, available[s][0], available[s][1]) for s in slugs]
+
+
+def _text_export_layout(fmt, points, colors, intensity, extras=None, columns=None):
+    """Resolve one text format into (header_lines, columns, per-column formats,
+    separator) — the single description both the string and streaming writers
+    build from, so they cannot drift.
+
+    `extras` are the cloud's scalar columns and `columns` the user's ordered slug
+    selection from the export modal's column picker. With both omitted the layout
+    is exactly the historical fixed one (see `_resolve_export_columns`).
+    """
+    n = len(points)
+    has_colors = colors is not None and len(colors) == n
+    has_int = intensity is not None and len(intensity) == n
+
+    # Each format's HISTORICAL fixed layout, used when the caller sends no
+    # explicit column selection. These differ per format and must be preserved
+    # exactly — see `_resolve_export_columns`.
+    geom = ["x", "y", "z"]
+    rgb_slugs = ["r", "g", "b"] if has_colors else []
+    if fmt in ("txt", "csv"):
+        default_slugs = geom + rgb_slugs + (["intensity"] if has_int else [])
+    elif fmt == "ply":
+        default_slugs = geom + rgb_slugs      # never carried intensity
+    else:
+        default_slugs = geom                  # xyz / obj: geometry only
+
+    resolved = _resolve_export_columns(
+        columns, points, colors, intensity, extras, default_slugs=default_slugs)
+    slugs = [s for s, _, _ in resolved]
+    cols = [v for _, v, _ in resolved]
+    fmts = [f for _, _, f in resolved]
 
     if fmt == "xyz":
-        return [], pos, pos_fmt, " "
+        # Bare XYZ carries no header line, so a selection beyond x/y/z is written
+        # as extra whitespace-separated columns — the same convention the
+        # importer's ASCII_format reads back.
+        return [], cols, fmts, " "
 
     if fmt in ("txt", "csv"):
         sep = "," if fmt == "csv" else " "
-        head, cols, fmts = ["X", "Y", "Z"], list(pos), list(pos_fmt)
-        if has_colors:
-            head += ["R", "G", "B"]
-            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
-            fmts += ["%d", "%d", "%d"]
-        if has_int:
-            head += ["Intensity"]
-            cols += [np.asarray(intensity, dtype=np.float64)]
-            fmts += ["%.4f"]
+        head = [_TEXT_EXPORT_SLUG_HEADERS.get(s, s) for s in slugs]
         return [sep.join(head)], cols, fmts, sep
 
     if fmt == "ply":
-        header = ["ply", "format ascii 1.0", f"element vertex {n}",
-                  "property float x", "property float y", "property float z"]
-        cols, fmts = list(pos), list(pos_fmt)
-        if has_colors:
-            header += ["property uchar red", "property uchar green", "property uchar blue"]
-            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
-            fmts += ["%d", "%d", "%d"]
+        header = ["ply", "format ascii 1.0", f"element vertex {n}"]
+        header += [
+            f"property {_PLY_PROPERTY_TYPES[s]}" if s in _PLY_PROPERTY_TYPES
+            else f"property float {s}"
+            for s in slugs
+        ]
         header.append("end_header")
         return header, cols, fmts, " "
 
     if fmt == "obj":
+        # OBJ vertices are geometry only — a `v` line takes exactly x/y/z, so the
+        # column selection cannot apply here.
         header = ["# Point cloud exported from Phytograph", f"# {n} points"]
         # The 'v ' prefix is the first format field (a literal column).
-        return header, list(pos), ["v %.6f", "%.6f", "%.6f"], " "
+        return header, [points[:, 0], points[:, 1], points[:, 2]], ["v %.6f", "%.6f", "%.6f"], " "
 
     raise HTTPException(status_code=400, detail=f"Unsupported text export format: {fmt}")
 
@@ -15661,6 +15739,8 @@ def _write_points_as_text(
     colors: Optional[np.ndarray],
     intensity: Optional[np.ndarray],
     progress=None,
+    extras=None,
+    columns=None,
 ) -> None:
     """Format and write a point cloud to `dest` WITHOUT building the whole file
     in memory first.
@@ -15675,7 +15755,8 @@ def _write_points_as_text(
     (the string version strips the joined result; here the final chunk is
     written without its last newline).
     """
-    header, cols, fmts, sep = _text_export_layout(fmt, points, colors, intensity)
+    header, cols, fmts, sep = _text_export_layout(
+        fmt, points, colors, intensity, extras=extras, columns=columns)
     stacked = np.column_stack(cols) if len(points) else None
     total = len(points)
     row_fmt = sep.join(fmts) + "\n"
@@ -15761,16 +15842,22 @@ def _do_point_cloud_export(
     # renderer can't iterate an empty positions buffer.
     src_colors = None
     src_intensity = None
+    src_extras: Dict[str, np.ndarray] = {}
     if request.source is not None:
         src = request.source
         src.want_colors = True
+        # An export must round-trip the cloud, so it takes the scalar columns too
+        # (reflectance, class labels, target_index, is_miss, anything the wizard
+        # imported). Without this the text formats wrote x/y/z(+rgb/intensity) and
+        # LAS wrote x/y/z(+rgb) — every other imported field was silently lost.
+        src.want_extras = True
         # Export preserves whatever the user imported, sky/misses included — the
         # compute consumers drop them, but an export should round-trip the cloud.
         src.include_misses = True
         if progress is not None:
             progress(0.02, "Reading points")
         _cancel_checkpoint(progress)
-        points, src_colors, src_intensity = _read_points_from_source(src)
+        points, src_colors, src_intensity, src_extras = _read_points_and_extras(src)
         if fmt in ("xyz", "txt", "csv", "ply", "obj"):
             try:
                 # Formatting is ~97% of a text export's wall time; report it as
@@ -15794,11 +15881,13 @@ def _do_point_cloud_export(
                 if dest is not None:
                     _write_points_as_text(
                         dest, fmt, points, src_colors, src_intensity,
-                        progress=_fmt_progress)
+                        progress=_fmt_progress, extras=src_extras,
+                        columns=request.columns)
                     text = None
                 else:
                     text = _format_points_as_text(
-                        fmt, points, src_colors, src_intensity, progress=_fmt_progress)
+                        fmt, points, src_colors, src_intensity, progress=_fmt_progress,
+                        extras=src_extras, columns=request.columns)
             except (HTTPException, ScanCancelled):
                 # ScanCancelled is a plain Exception, so the broad handler below
                 # would swallow it and report a user cancel as "Export failed".
@@ -15870,8 +15959,52 @@ def _do_point_cloud_export(
                 error="No points provided"
             )
 
-        # Choose point format: 0 = XYZ only, 2 = XYZ + RGB
-        point_format = 2 if has_colors else 0
+        # Intensity + the scalar extra columns, for the source-backed path. The
+        # flat inline path has neither (it sends `points`/`colors` only).
+        has_intensity = (
+            request.source is not None
+            and src_intensity is not None
+            and len(src_intensity) == len(points)
+        )
+        # Only columns that align with the (already miss/deletion-filtered) point
+        # array can be written; a desynced one would mislabel every row.
+        export_extras = {
+            slug: np.asarray(col)
+            for slug, col in (src_extras or {}).items()
+            if np.asarray(col).shape == (len(points),)
+        }
+
+        # Honor the column selection here too. LAS extra dimensions are an
+        # explicit declared list, so writing a SUBSET is exactly as valid as
+        # writing all of them — there is no structural reason to force the full
+        # set. (This endpoint used to ignore `columns` for LAS/LAZ on the premise
+        # that a "fixed schema" left nothing to choose. That is true only of the
+        # STANDARD dimensions; every scalar rides as an extra dim and is freely
+        # omittable.) Omitting `columns` still writes everything, so the default
+        # export stays lossless.
+        if request.columns:
+            wanted = set(request.columns)
+            export_extras = {k: v for k, v in export_extras.items() if k in wanted}
+
+        # Point format: 3 = XYZ + intensity + RGB + GPS time, 1 = the same minus
+        # RGB — the pairing `_xyz_to_las` uses on import, so an export re-imports
+        # through our own loader unchanged. Dropping r/g/b from the selection
+        # picks format 1, which is how RGB is genuinely omitted (the point format
+        # is a fixed menu, so RGB can only be dropped as a bundle with GPS time).
+        #
+        # Two standard dimensions can NOT be honored à la carte, and the UI says
+        # so rather than pretending otherwise:
+        #   * `intensity` is in the core point record of ALL formats, so it always
+        #     exists as a field; deselecting it can only zero it, not remove it.
+        #   * GPS time is coupled to RGB by the format menu (0/1/2/3).
+        #
+        # Note it is NOT the point format that was losing scalars: laspy accepts
+        # extra dimensions on any format. The old `2 if has_colors else 0` narrowed
+        # nothing by itself — the loss came from never READING the scalars
+        # (`want_extras`), never declaring them, and never assigning intensity.
+        want_color = has_colors and (not request.columns or bool(
+            {"r", "g", "b"} & set(request.columns)))
+        point_format = 3 if want_color else 1
 
         # Assembling the LAS is NOT free, despite each step being vectorised: at
         # 25 M points the stages below total ~5 s (bounds ~0.5 s, the quantising
@@ -15888,11 +16021,19 @@ def _do_point_cloud_export(
         # Each marker is emitted BEFORE the work it names, so the label the user
         # sees always describes the step currently running.
         _stage(0.10, "Computing bounds")
-        header = laspy.LasHeader(point_format=point_format, version="1.2")
+        # Version 1.4 (was 1.2) because extra dimensions need the 1.4 header —
+        # same pairing the importer uses. Point format 3 is valid in both.
+        header = laspy.LasHeader(point_format=point_format, version="1.4")
         min_coords = points.min(axis=0)
-        max_coords = points.max(axis=0)
-        header.offsets = min_coords
+        # floor() the offset: a raw min on a projected/UTM cloud can leave the
+        # scaled int32 one quantum past its range. See the LAS UTM offset fix.
+        header.offsets = np.floor(min_coords)
         header.scales = [0.001, 0.001, 0.001]  # 1mm precision
+        # Declare every scalar as a float32 extra dimension, named by slug —
+        # identical to `_xyz_to_las`, so our own importer reads them back as the
+        # same named scalars (and PotreeConverter carries them into the octree).
+        for slug in export_extras:
+            header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=np.float32))
         las = laspy.LasData(header)
 
         # Each assignment quantises to the header scale (the 1 mm grid), which is
@@ -15904,13 +16045,34 @@ def _do_point_cloud_export(
         _stage(0.55, "Packing coordinates")
         las.z = points[:, 2]
 
-        # Add colors if available (convert from 0-1 to 16-bit)
-        if has_colors:
+        # Add colors if available (convert from 0-1 to 16-bit). Gated on
+        # `want_color`, not `has_colors`: deselecting r/g/b chose format 1, which
+        # has no red/green/blue dimension to assign to.
+        if want_color:
             _stage(0.65, "Packing colours")
             colors = np.clip(np.asarray(colors_arr, dtype=np.float64), 0, 1)
             las.red = (colors[:, 0] * 65535).astype(np.uint16)
             las.green = (colors[:, 1] * 65535).astype(np.uint16)
             las.blue = (colors[:, 2] * 65535).astype(np.uint16)
+
+        # Intensity rides the standard LAS dimension (uint16). `_read_points_from_source`
+        # hands it back as 0-1 floats, matching the /65535 it applied on the way out,
+        # so scale it back to the LAS range here.
+        #
+        # Deselecting intensity leaves the dimension at its zero default rather
+        # than removing it — every LAS point format carries `intensity` in the core
+        # record, so it cannot be omitted. The UI states this instead of offering a
+        # checkbox that would silently mean "write zeros".
+        if has_intensity and (not request.columns or "intensity" in request.columns):
+            _stage(0.72, "Packing intensity")
+            inten = np.clip(np.asarray(src_intensity, dtype=np.float64), 0, 1)
+            las.intensity = (inten * 65535).astype(np.uint16)
+
+        # Scalars into their declared extra dimensions, by slug.
+        if export_extras:
+            _stage(0.78, f"Packing {len(export_extras)} scalar field(s)")
+            for slug, col in export_extras.items():
+                las[slug] = col.astype(np.float32)
 
         # Determine file extension
         ext = ".laz" if request.format.lower() == "laz" else ".las"
@@ -15932,7 +16094,7 @@ def _do_point_cloud_export(
                 progress(1.0, "Done")
             return dict(
                 success=True, data=None, filename=dest.name,
-                point_count=len(points), has_colors=has_colors,
+                point_count=len(points), has_colors=want_color,
                 format=request.format,
             )
 
@@ -15952,7 +16114,7 @@ def _do_point_cloud_export(
                 data=file_data,
                 filename=filename,
                 point_count=len(points),
-                has_colors=has_colors,
+                has_colors=want_color,
                 format=request.format
             )
         finally:
@@ -18192,6 +18354,30 @@ def _read_points_from_source(
     """Resolve a PointSource to (positions[N,3] float64, colors[N,3] float32 in
     0-1 | None, intensity[N] float32 | None).
 
+    The 3-tuple facade over `_read_points_and_extras`, kept because every compute
+    consumer (triangulate, skeleton, c2m, icp, …) wants exactly these three and
+    unpacks them positionally. Callers that also need the scalar extra-dimension
+    columns — export — call `_read_points_and_extras` directly.
+    """
+    positions, colors, intensity, _extras = _read_points_and_extras(src)
+    return positions, colors, intensity
+
+
+def _read_points_and_extras(
+    src: PointSource,
+) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, np.ndarray]]:
+    """Resolve a PointSource to (positions[N,3] float64, colors[N,3] float32 in
+    0-1 | None, intensity[N] float32 | None, extras{slug -> (N,) array}).
+
+    `extras` is the cloud's scalar extra-dimension columns (reflectance,
+    ground_class, target_index, is_miss, any wizard-imported scalar), filtered in
+    LOCKSTEP with positions through every step below — the deletion mask, the
+    miss filter, and the stride-downsample. That lockstep is the whole point: a
+    scalar column that keeps its original length after positions were filtered is
+    not merely useless, it silently mislabels every point past the first dropped
+    row. Empty unless `src.want_extras` is set, and always empty for a file
+    source (the loaders return positions/colors/intensity only).
+
     Reuses `_load_pointcloud_arrays` (which dispatches XYZ via pandas and
     PLY/PCD via open3d, and 404s on a missing file), then applies the optional
     stride-downsample and translation. Positions come back as float64 because
@@ -18221,6 +18407,7 @@ def _read_points_from_source(
     miss column (`_file_miss_mask`). The misses-overlay endpoint reads
     `sess.extras` directly, not through this function, so it still sees them.
     """
+    extras: Dict[str, np.ndarray] = {}
     if src.session_id is not None:
         sess = _get_cloud_session(src.session_id)
         with _cloud_session_lock:
@@ -18229,6 +18416,18 @@ def _read_points_from_source(
                 keep = keep & (sess.extras[_MISS_SLUG] == 0)
             positions = sess.positions[keep].copy()
             session_world_shift = sess.world_shift
+            # Extras ride the SAME `keep` mask as positions, inside the same lock
+            # hold, so a concurrent delete can't land between the two and desync
+            # their lengths. Order follows `extra_dims_meta` (the session's own
+            # column order) rather than dict order, so an export's column layout
+            # is stable across runs; any extra not in the meta list is appended.
+            if src.want_extras:
+                ordered = [m.get("slug") for m in (sess.extra_dims_meta or [])]
+                for slug in ordered + [s for s in sess.extras if s not in ordered]:
+                    col = sess.extras.get(slug) if slug else None
+                    if col is None:
+                        continue
+                    extras[slug] = np.asarray(col[keep])
             # Surface colours/intensity only when asked (export does; the compute
             # consumers don't need them and skip the copy). The session stores
             # both at LAS uint16 scale, but every consumer of this function's
@@ -18295,12 +18494,14 @@ def _read_points_from_source(
                 positions = positions[keep]
                 colors = colors[keep] if colors is not None else None
                 intensity = intensity[keep] if intensity is not None else None
+                extras = {k: v[keep] for k, v in extras.items()}
 
     if src.max_points is not None and src.max_points > 0 and len(positions) > src.max_points:
         stride = int(math.ceil(len(positions) / src.max_points))
         positions = positions[::stride]
         colors = colors[::stride] if colors is not None else None
         intensity = intensity[::stride] if intensity is not None else None
+        extras = {k: v[::stride] for k, v in extras.items()}
 
     positions = positions.astype(np.float64, copy=False)
     if src.translation is not None:
@@ -18315,7 +18516,7 @@ def _read_points_from_source(
     if not src.want_colors:
         colors = None
 
-    return positions, colors, intensity
+    return positions, colors, intensity, extras
 
 
 @app.post("/api/pointcloud/import_by_path")

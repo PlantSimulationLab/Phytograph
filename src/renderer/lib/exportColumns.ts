@@ -1,11 +1,19 @@
-// Column model for ASCII point-cloud / scan export. The export modal lets the
-// user pick which fields become columns and in what order, but only for the
-// text formats (XYZ / TXT / CSV / Helios scan .xyz) — binary/structured formats
-// (LAS/LAZ/PLY/OBJ) have their own fixed schema and ignore this entirely.
+// Column model for point-cloud / scan export. The export modal lets the user pick
+// which fields become columns — for every format except OBJ, which carries
+// geometry only (see COLUMN_PICKER_FORMATS). The text formats and PLY also honor
+// the column ORDER; LAS/LAZ store dimensions by name, so order doesn't apply
+// (usesFixedColumnOrder) and a couple of standard dimensions can't be dropped at
+// all (LAS_LOCKED_KINDS).
 //
 // A "column" is one exportable field. Geometry (x/y/z) and colour (r/g/b) are
 // fixed slugs; every other field is a named scalar (intensity, is_miss, a custom
-// scan column, a class label, …) carried on the cloud's scalarFields.
+// scan column, a class label, …).
+//
+// Where the available fields come from matters: a cloud imported through the
+// normal (octree/session) path holds NO flat arrays — `positions` is empty and
+// colors/intensities/scalarFields are unset — so its field list must come from
+// `octree.attributeRanges`. Reading only the flat arrays is what limited this
+// picker to bare x/y/z for every real import; see AvailableColumnsOptions.
 
 import type { PointCloudData } from './pointCloudTypes';
 
@@ -22,11 +30,53 @@ export interface ExportColumn {
   required?: boolean;
 }
 
-// Formats whose columns the user can choose/reorder. Everything else is fixed.
-export const ASCII_EXPORT_FORMATS = new Set(['xyz', 'txt', 'csv', 'scan']);
+// Formats whose columns the user can choose. Only OBJ is excluded — a `v` line
+// takes exactly x/y/z, so there is genuinely nothing to pick.
+//
+// PLY belongs here even though it is not a bare text layout: an ASCII PLY
+// declares each column as a named `property`, so a chosen scalar round-trips
+// with its name (the backend emits `property float <slug>`).
+//
+// LAS/LAZ belong here too. It is tempting to exclude them as "fixed schema", but
+// that conflates two different things: the STANDARD dimensions are a fixed menu,
+// while every scalar rides as an explicitly declared EXTRA dimension and is
+// freely omittable. See LAS_LOCKED_KINDS for the parts that really are fixed.
+export const COLUMN_PICKER_FORMATS = new Set([
+  'xyz', 'txt', 'csv', 'ply', 'las', 'laz', 'scan',
+]);
 
-export function isAsciiExportFormat(format: string): boolean {
-  return ASCII_EXPORT_FORMATS.has(format);
+// True when the format lets the user pick its columns. (Named for the capability
+// rather than "isAscii", which would wrongly imply a plain text layout now that
+// PLY and LAS/LAZ — structured formats — take a column selection.)
+export function supportsColumnSelection(format: string): boolean {
+  return COLUMN_PICKER_FORMATS.has(format);
+}
+
+// True when the format writes a fixed COLUMN ORDER, so drag-reordering is
+// meaningless even though the column SET is selectable. LAS/LAZ store dimensions
+// by name in a header, not positionally — the order rows appear in the picker has
+// no effect on the file.
+export function usesFixedColumnOrder(format: string): boolean {
+  return format === 'las' || format === 'laz';
+}
+
+// Column kinds LAS/LAZ cannot omit, and why. Both are standard dimensions:
+//   * geometry — x/y/z ARE the point record.
+//   * intensity — present in the core record of every LAS point format (0-3), so
+//     deselecting it could only write zeros, never remove the field. A checkbox
+//     that silently meant "zero this" would be worse than stating the limit.
+// Colour is deliberately NOT here: dropping r/g/b selects point format 1, which
+// has no RGB dimension at all — a real omission. (It comes bundled with GPS time,
+// since the point format is a menu rather than a free choice of dimensions.)
+export const LAS_LOCKED_KINDS = new Set<ExportColumn['kind']>(['geometry', 'intensity']);
+
+// Apply LAS/LAZ rules to a column list: the dimensions that cannot be omitted are
+// forced on and locked, so the picker can only offer choices the format can
+// actually honor. Everything else (colour, scalars, labels) stays as the user set
+// it. Mirrors `lockGeometryForScanXml`, which does the same for a scan bundle.
+export function lockFixedDimsForLas(columns: ExportColumn[]): ExportColumn[] {
+  return columns.map(c =>
+    LAS_LOCKED_KINDS.has(c.kind) ? { ...c, selected: true, required: true } : c);
 }
 
 // Categorical / label slugs that should be presented under the "label" kind so
@@ -44,7 +94,54 @@ export interface AvailableColumnsOptions {
   // string instead. Tokens x/y/z and r/g/b are handled as geometry/colour; the
   // rest become scalar columns.
   asciiFormat?: string | null;
+  // The octree's per-attribute names, from `OctreeRef.attributeRanges` (keys) —
+  // the authoritative list of what a session/octree-backed cloud actually holds.
+  //
+  // This is the load-bearing input for the normal import path. Octree clouds keep
+  // no flat arrays at all (`buildPointCloudFromOctree` sets `positions` to an
+  // empty Float32Array and never sets colors/intensities/scalarFields), and
+  // `asciiFormat` is populated only by the Helios-XML importer — so without this
+  // the picker degenerated to bare x/y/z for every LAS/LAZ/E57/PLY/XYZ import.
+  // The colour-by dropdown, the scalar filter and the point-pick inspector all
+  // already read this same source; export was the one consumer that didn't.
+  octreeAttributes?: string[];
+  // The octree's per-attribute min/max (`OctreeRef.attributeRanges`), used to
+  // suppress DEGENERATE schema dimensions.
+  //
+  // PotreeConverter writes the full LAS point schema even when the source is a
+  // bare XYZ with no such data, so a plain `x y z` import reports `intensity`,
+  // `classification`, `gps-time` … all identically zero. Offering those as
+  // export columns invents fields the cloud never had (a re-import would then
+  // show a real-looking all-zero `classification`). A name blocklist can't
+  // decide this — `classification` and `intensity` ARE meaningful on a LAS
+  // import — but an all-zero range is exactly the signal that separates them.
+  //
+  // Only attributes that appear here AND are all-zero are dropped; an attribute
+  // with no range entry is kept (absence of evidence isn't evidence of absence).
+  octreeAttributeRanges?: Record<string, { min: number[]; max: number[] }>;
 }
+
+// True when an octree attribute's reported range is identically zero — the
+// signature of a LAS schema dimension PotreeConverter emitted for a source that
+// never carried it. A genuinely all-zero real field is indistinguishable here,
+// but exporting a constant-zero column loses nothing either way.
+function _isDegenerateRange(range?: { min: number[]; max: number[] }): boolean {
+  if (!range || !range.min?.length || !range.max?.length) return false;
+  return range.min.every(v => v === 0) && range.max.every(v => v === 0);
+}
+
+// Octree attribute names that are geometry/colour/intensity rather than scalars,
+// plus PotreeConverter's schema plumbing. Kept parallel to
+// OCTREE_BUILTIN_ATTRIBUTES in pointCloudHelpers.ts, but export treats `rgb` and
+// `intensity` as REAL exportable columns (they map to r/g/b and intensity slugs)
+// rather than hiding them the way the colour-by picker does.
+const _OCTREE_NON_SCALAR = new Set([
+  'position', 'normal', 'indices', 'spacing',
+  'return number', 'number of returns',
+  'scan angle rank', 'user data', 'point source id', 'gps-time',
+]);
+
+const _OCTREE_COLOR_NAMES = new Set(['rgb', 'rgba', 'color']);
 
 // Tokens in a Helios ASCII_format that are geometry/colour (not extra scalars).
 const _GEO_COLOR_TOKENS = new Set([
@@ -72,7 +169,16 @@ export function defaultExportColumns(
   const fmtTokens = (opts.asciiFormat ?? '').split(/\s+/).filter(Boolean);
   const hasColorTokens = fmtTokens.includes('r') || fmtTokens.includes('r255');
 
-  if (data.colors || hasColorTokens) {
+  // Octree attributes: the authoritative field list for a session-backed cloud,
+  // minus the degenerate all-zero LAS schema dimensions PotreeConverter emits
+  // for sources that never carried them (see octreeAttributeRanges).
+  const ranges = opts.octreeAttributeRanges;
+  const octreeAttrs = (opts.octreeAttributes ?? []).filter(
+    a => !_isDegenerateRange(ranges?.[a]));
+  const hasOctreeColor = octreeAttrs.some(a => _OCTREE_COLOR_NAMES.has(a.toLowerCase()));
+  const hasOctreeIntensity = octreeAttrs.some(a => a.toLowerCase() === 'intensity');
+
+  if (data.colors || hasColorTokens || hasOctreeColor) {
     cols.push(
       { slug: 'r', label: 'R', kind: 'color', selected: true },
       { slug: 'g', label: 'G', kind: 'color', selected: true },
@@ -80,12 +186,21 @@ export function defaultExportColumns(
     );
   }
 
-  // Gather scalar slugs from both the in-RAM fields and the format string, in a
-  // stable union (in-RAM first, then any format-only tokens not already seen).
+  // Gather scalar slugs from the in-RAM fields, the octree attributes, and the
+  // format string, in a stable union (in-RAM first, then octree attributes, then
+  // any format-only tokens not already seen).
   const seen = new Set<string>(['x', 'y', 'z', 'r', 'g', 'b']);
   const scalarSlugs: string[] = [];
   for (const slug of Object.keys(data.scalarFields ?? {})) {
     if (!seen.has(slug)) { seen.add(slug); scalarSlugs.push(slug); }
+  }
+  for (const name of octreeAttrs) {
+    const lower = name.toLowerCase();
+    // Colour/geometry/plumbing aren't scalar columns; `intensity` is handled
+    // separately below so it keeps its dedicated slug and ordering.
+    if (_OCTREE_NON_SCALAR.has(lower) || _OCTREE_COLOR_NAMES.has(lower)) continue;
+    if (lower === 'intensity') continue;
+    if (!seen.has(name)) { seen.add(name); scalarSlugs.push(name); }
   }
   for (const tok of fmtTokens) {
     if (_GEO_COLOR_TOKENS.has(tok) || tok === 'skip') continue;
@@ -93,7 +208,7 @@ export function defaultExportColumns(
   }
 
   // Intensity is a distinct, well-known scalar; surface it before the rest.
-  if (data.intensities && !scalarSlugs.includes('intensity')) {
+  if ((data.intensities || hasOctreeIntensity) && !scalarSlugs.includes('intensity')) {
     cols.push({ slug: 'intensity', label: 'Intensity', kind: 'intensity', selected: true });
     seen.add('intensity');
   }

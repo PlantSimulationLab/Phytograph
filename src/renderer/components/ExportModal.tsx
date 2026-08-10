@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Download, FileCode, GripVertical, X } from 'lucide-react';
 import {
+  lockFixedDimsForLas,
   lockGeometryForScanXml,
   reorderColumns,
   selectedSlugs,
-  isAsciiExportFormat,
+  supportsColumnSelection,
+  usesFixedColumnOrder,
   type ExportColumn,
 } from '../lib/exportColumns';
 
@@ -37,7 +39,7 @@ export interface ExportModalProps {
   cloudIsScan: boolean;
   cloudName: string;
   // Available export columns for the single selected cloud (geometry + colour +
-  // scalars/labels), in default order. Used by the ASCII column picker.
+  // scalars/labels), in default order. Used by the column picker.
   cloudColumns: ExportColumn[];
   scanExportList: ScanExportListItem[];
   // Voxel-box grids in the scene the user can add to a scan XML export so the
@@ -54,8 +56,9 @@ export interface ExportModalProps {
   skeletonNodeCount: number;
   skeletonTotalLength: number;
   onClose: () => void;
-  // Point-cloud export. For ASCII formats, `columns` is the ordered slug list the
-  // user chose; for binary/structured formats it is null (fixed schema).
+  // Point-cloud export. For the formats that take a column selection (text +
+  // PLY), `columns` is the ordered slug list the user chose; for the fixed-schema
+  // formats (LAS/LAZ/OBJ) it is null.
   onExportCloud: (
     format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz',
     columns: string[] | null,
@@ -74,8 +77,8 @@ export interface ExportModalProps {
   onExportSkeleton: (format: 'obj' | 'ply' | 'json') => void;
 }
 
-// Per-scan data-only formats (Data only mode). ASCII formats (xyz/csv/txt) get
-// the column picker; the rest use their fixed schema.
+// Per-scan data-only formats (Data only mode). The text formats (xyz/csv/txt)
+// and PLY get the column picker; the rest use their fixed schema.
 const SCAN_DATA_FORMATS = ['las', 'laz', 'ply', 'xyz', 'csv', 'txt', 'obj', 'e57'] as const;
 
 const CLOUD_FORMATS: { id: 'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj'; label: string; title?: string }[] = [
@@ -145,7 +148,7 @@ export function ExportModal({
     return next;
   });
 
-  // ---- Column picker (ASCII formats only) ---------------------------------
+  // ---- Column picker (formats that take a column selection) ---------------
   // Editable copy of the cloud's columns. Re-seeded when the cloud changes.
   const [columns, setColumns] = useState<ExportColumn[]>(cloudColumns);
   const cloudColumnsKey = useMemo(() => cloudColumns.map(c => c.slug).join(','), [cloudColumns]);
@@ -155,9 +158,20 @@ export function ExportModal({
   }, [cloudColumnsKey]);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
 
-  // For the cloud-export tab the picker follows the chosen format; for the scan
-  // section it always applies (scan data is ASCII), with x/y/z locked on.
-  const cloudFormatIsAscii = isAsciiExportFormat(cloudFormat);
+  // Every format except OBJ takes a column selection (PLY names each column as a
+  // `property`; LAS/LAZ declare each scalar as a named extra dimension).
+  const cloudFormatTakesColumns = supportsColumnSelection(cloudFormat);
+  // LAS/LAZ store dimensions by name in the header, so the row ORDER is not
+  // meaningful there — the picker drops its drag affordance for them.
+  const cloudFormatIsOrdered = !usesFixedColumnOrder(cloudFormat);
+  const cloudIsLas = cloudFormat === 'las' || cloudFormat === 'laz';
+
+  // Columns for a LAS/LAZ export: the standard dimensions it cannot omit
+  // (x/y/z, intensity) are forced on and locked; colour and scalars stay
+  // selectable. Mirrors `scanColumns` below.
+  const lasColumns = useMemo(() => lockFixedDimsForLas(columns), [columns]);
+  // The list the cloud picker actually renders/submits for the chosen format.
+  const activeCloudColumns = cloudIsLas ? lasColumns : columns;
 
   const toggleColumn = (slug: string) => setColumns(prev =>
     prev.map(c => (c.slug === slug && !c.required ? { ...c, selected: !c.selected } : c)));
@@ -172,13 +186,26 @@ export function ExportModal({
   // is_miss column is added by the backend; we don't surface it as a picker row.
   const scanColumns = useMemo(() => lockGeometryForScanXml(columns), [columns]);
 
-  // The effective scan-export format is ASCII (so the column picker applies) when
-  // writing the XML bundle (always .xyz) or when the chosen data-only format is a
-  // text format. Binary/structured formats use their own fixed schema.
-  const scanFormatIsAscii = writeXml || isAsciiExportFormat(scanDataFormat);
+  // The scan column picker applies when writing the XML bundle (always .xyz) or
+  // when the chosen data-only format takes a selection — which is everything the
+  // scan writer supports except OBJ (geometry only) and E57 (its own fixed
+  // schema). The scan backend already filters its scalar set by the requested
+  // columns for every format, LAS/LAZ included.
+  const scanFormatTakesColumns = writeXml || supportsColumnSelection(scanDataFormat);
+  const scanFormatIsOrdered = writeXml || !usesFixedColumnOrder(scanDataFormat);
+  // LAS/LAZ scan data: lock intensity as well as geometry (see lockFixedDimsForLas).
+  const activeScanColumns = useMemo(
+    () => (!writeXml && usesFixedColumnOrder(scanDataFormat)
+      ? lockFixedDimsForLas(scanColumns)
+      : scanColumns),
+    [writeXml, scanDataFormat, scanColumns]);
 
-  // A compact, reusable column-picker block.
-  const ColumnPicker = ({ source }: { source: ExportColumn[] }) => (
+  // A compact, reusable column-picker block. `orderable` is false for formats
+  // that store columns by name rather than positionally (LAS/LAZ): the drag
+  // affordance is dropped rather than left as a control that does nothing.
+  const ColumnPicker = ({
+    source, orderable = true,
+  }: { source: ExportColumn[]; orderable?: boolean }) => (
     <div className="border border-neutral-700 rounded-lg divide-y divide-neutral-700/50" data-testid="export-column-picker">
       {source.map((c, idx) => (
         <div
@@ -186,15 +213,18 @@ export function ExportModal({
           data-testid="export-column-row"
           data-slug={c.slug}
           data-selected={c.selected ? 'true' : 'false'}
-          draggable
-          onDragStart={() => setDragIdx(idx)}
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={() => handleDrop(idx)}
+          data-locked={c.required ? 'true' : 'false'}
+          draggable={orderable}
+          onDragStart={orderable ? () => setDragIdx(idx) : undefined}
+          onDragOver={orderable ? (e) => e.preventDefault() : undefined}
+          onDrop={orderable ? () => handleDrop(idx) : undefined}
           className={`flex items-center gap-2 px-2 py-1.5 text-xs ${
-            dragIdx === idx ? 'bg-neutral-700/40' : 'hover:bg-neutral-700/30'
+            orderable && dragIdx === idx ? 'bg-neutral-700/40' : 'hover:bg-neutral-700/30'
           }`}
         >
-          <GripVertical className="w-3 h-3 text-neutral-500 cursor-grab flex-shrink-0" />
+          {orderable
+            ? <GripVertical className="w-3 h-3 text-neutral-500 cursor-grab flex-shrink-0" />
+            : <span className="w-3 flex-shrink-0" />}
           <input
             type="checkbox"
             checked={c.selected}
@@ -202,6 +232,7 @@ export function ExportModal({
             onChange={() => toggleColumn(c.slug)}
             className="accent-green-600"
             data-testid={`export-column-check-${c.slug}`}
+            title={c.required ? 'This field cannot be omitted in this format' : undefined}
           />
           <span className="flex-1 truncate text-neutral-200" title={c.slug}>{c.label}</span>
           <span className="text-[9px] uppercase tracking-wide text-neutral-500">{c.kind}</span>
@@ -252,32 +283,54 @@ export function ExportModal({
                 ))}
               </div>
 
-              {cloudFormatIsAscii ? (
+              {cloudFormatTakesColumns ? (
                 <>
                   <div className="text-[10px] text-neutral-400 mb-1">
-                    Columns (check to include, drag to reorder)
+                    {cloudFormatIsOrdered
+                      ? 'Columns (check to include, drag to reorder)'
+                      : 'Fields (check to include)'}
                   </div>
-                  <ColumnPicker source={columns} />
-                  {selectedSlugs(columns).length === 0 && (
+                  <ColumnPicker source={activeCloudColumns} orderable={cloudFormatIsOrdered} />
+                  {/* LAS/LAZ: state the two limits that are real rather than
+                      implying the whole schema is fixed. Scalars ARE freely
+                      omittable (each is a declared extra dimension); x/y/z and
+                      intensity are not (both live in the core point record, so
+                      deselecting intensity could only zero it). Dropping RGB is a
+                      genuine omission — it selects point format 1. */}
+                  {cloudIsLas && (
+                    <div
+                      className="text-[10px] text-neutral-500 mt-1"
+                      data-testid="export-las-schema-note"
+                    >
+                      Each scalar is written as a named LAS extra dimension, so any
+                      of them can be left out. X/Y/Z and intensity are part of every
+                      LAS point record and cannot be removed. Field order is not
+                      stored — LAS identifies dimensions by name.
+                    </div>
+                  )}
+                  {selectedSlugs(activeCloudColumns).length === 0 && (
                     <div className="text-[10px] text-amber-300 mt-1">Select at least one column.</div>
                   )}
                 </>
               ) : (
-                <div className="text-[10px] text-neutral-500">
-                  {cloudFormat.toUpperCase()} uses a fixed column layout — its
-                  standard fields (coordinates, colour{cloudFormat === 'las' || cloudFormat === 'laz' ? ', intensity, scalars as extra dimensions' : ''}) are written automatically.
+                <div className="text-[10px] text-neutral-500" data-testid="export-fixed-schema-note">
+                  {/* OBJ is the only format with nothing to pick: a `v` line takes
+                      exactly x/y/z. Everything else (LAS/LAZ included) now has a
+                      picker. */}
+                  OBJ stores vertex coordinates only — it has no way to carry colour
+                  or scalar fields. Use PLY, LAS or CSV to keep them.
                 </div>
               )}
 
               <button
                 data-testid="export-cloud-go"
-                disabled={cloudFormatIsAscii && selectedSlugs(columns).length === 0}
+                disabled={cloudFormatTakesColumns && selectedSlugs(activeCloudColumns).length === 0}
                 onClick={() => onExportCloud(
                   cloudFormat,
-                  cloudFormatIsAscii ? selectedSlugs(columns) : null,
+                  cloudFormatTakesColumns ? selectedSlugs(activeCloudColumns) : null,
                 )}
                 className={`mt-3 w-full px-3 py-2 rounded text-xs flex items-center justify-center gap-1.5 ${
-                  cloudFormatIsAscii && selectedSlugs(columns).length === 0
+                  cloudFormatTakesColumns && selectedSlugs(activeCloudColumns).length === 0
                     ? 'bg-neutral-700/50 text-neutral-500 cursor-not-allowed'
                     : 'bg-green-600 hover:bg-green-500 text-white'
                 }`}
@@ -353,14 +406,17 @@ export function ExportModal({
                 </>
               )}
 
-              {/* Column picker — applies whenever the effective data format is
-                  ASCII (XML mode is always .xyz; data-only when an ASCII format is
-                  chosen). x/y/z are locked on. Binary/structured formats use their
-                  own fixed schema, so the picker is hidden for them. */}
-              {scanFormatIsAscii && (
+              {/* Column picker — applies to every data format except OBJ and E57
+                  (XML mode is always .xyz). x/y/z are always locked on: a scan
+                  that drops geometry can't be re-loaded. For LAS/LAZ, intensity is
+                  locked too (it is in every LAS point record) and order is not
+                  stored, so the drag affordance is dropped. */}
+              {scanFormatTakesColumns && (
                 <>
-                  <div className="text-[10px] text-neutral-400 mb-1">Columns (x/y/z required)</div>
-                  <ColumnPicker source={scanColumns} />
+                  <div className="text-[10px] text-neutral-400 mb-1">
+                    {scanFormatIsOrdered ? 'Columns (x/y/z required)' : 'Fields (x/y/z required)'}
+                  </div>
+                  <ColumnPicker source={activeScanColumns} orderable={scanFormatIsOrdered} />
                 </>
               )}
 
@@ -422,7 +478,7 @@ export function ExportModal({
                 data-testid="export-scan-xml"
                 onClick={() => onExportScanXml(
                   [...checkedScanIds], includeMisses && anyCheckedHasMisses, writeXml,
-                  scanFormatIsAscii ? selectedSlugs(scanColumns) : ['x', 'y', 'z'],
+                  scanFormatTakesColumns ? selectedSlugs(activeScanColumns) : ['x', 'y', 'z'],
                   writeXml ? 'xyz' : scanDataFormat,
                   exportGrid && writeXml ? [...checkedGridIds] : [],
                 )}

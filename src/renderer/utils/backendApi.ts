@@ -2096,6 +2096,15 @@ export interface PointCloudExportRequest {
   // ~512 MB string cap ("Unexpected end of JSON input"). With dest_path the
   // response is ~100 bytes of metadata and `data` comes back null.
   dest_path?: string;
+  // Ordered column slugs from the export modal's column picker, e.g.
+  // ['x','y','z','reflectance','ground_class']. Applies to the TEXT formats
+  // (xyz/txt/csv) and to PLY's property list; a slug this cloud doesn't carry is
+  // dropped rather than written as zeros. Omit for the format's default layout.
+  //
+  // LAS/LAZ ignore it by design: the format has a fixed standard schema plus
+  // named extra dimensions, so the backend writes EVERY available scalar as its
+  // own extra dimension and the UI hides the picker for it.
+  columns?: string[];
 }
 
 export interface PointCloudExportResponse {
