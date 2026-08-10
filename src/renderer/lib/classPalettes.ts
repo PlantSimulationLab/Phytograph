@@ -13,7 +13,9 @@
 //
 // Pure + stateless — no React, no DOM, no three.js.
 import type { ClassDef, CategoricalScheme } from './classification';
-import { ORGAN_SCHEME_CLASSES, WOOD_SCHEME_CLASSES } from './classification';
+import {
+  ORGAN_SCHEME_CLASSES, WOOD_SCHEME_CLASSES, ASPRS_CLASS_LIST,
+} from './classification';
 import type { RGB } from './colormaps';
 
 export type PalettePreset = 'asprs' | 'organ' | 'wood_leaf';
@@ -204,38 +206,13 @@ function def(value: number, label: string, color: RGB): ClassDef {
 }
 
 /**
- * ASPRS LAS 1.4 standard classes 0–18. Colours follow Potree's
- * ClassificationScheme, which is the de-facto convention users will recognise
- * from other tools (brown ground, a three-shade green vegetation ramp).
+ * ASPRS LAS 1.4 standard classes 0–18.
  *
- * Also fixes a long-standing papercut unrelated to labelling: an imported LAS
- * `classification` column currently renders as "Class 5" instead of
- * "High Vegetation".
- *
- * 8 and 12 are Reserved in LAS 1.4 — their old meanings (Model Key-point,
- * Overlap) moved to per-point FLAGS, which are orthogonal to the class code.
+ * Re-exported from `classification.ts` rather than redefined, so the labelling
+ * tool's ASPRS preset and the scheme that names an IMPORTED file's
+ * `las_classification` column are literally the same list — they cannot drift.
  */
-export const ASPRS_CLASSES: ClassDef[] = [
-  def(0, 'Never Classified', [0.5, 0.5, 0.5]),
-  def(1, 'Unassigned', [0.6, 0.6, 0.6]),
-  def(2, 'Ground', [0.63, 0.32, 0.18]),
-  def(3, 'Low Vegetation', [0.0, 1.0, 0.0]),
-  def(4, 'Medium Vegetation', [0.0, 0.8, 0.0]),
-  def(5, 'High Vegetation', [0.0, 0.6, 0.0]),
-  def(6, 'Building', [1.0, 0.66, 0.0]),
-  def(7, 'Low Point (Noise)', [1.0, 0.0, 1.0]),
-  def(8, 'Reserved', [0.55, 0.55, 0.55]),
-  def(9, 'Water', [0.0, 0.0, 1.0]),
-  def(10, 'Rail', [0.4, 0.2, 0.6]),
-  def(11, 'Road Surface', [0.35, 0.35, 0.35]),
-  def(12, 'Reserved', [0.55, 0.55, 0.55]),
-  def(13, 'Wire — Guard', [0.9, 0.9, 0.2]),
-  def(14, 'Wire — Conductor', [0.9, 0.7, 0.2]),
-  def(15, 'Transmission Tower', [0.7, 0.5, 0.3]),
-  def(16, 'Wire Connector', [0.8, 0.8, 0.5]),
-  def(17, 'Bridge Deck', [0.5, 0.3, 0.7]),
-  def(18, 'High Noise', [1.0, 0.2, 0.6]),
-];
+export const ASPRS_CLASSES: ClassDef[] = ASPRS_CLASS_LIST;
 
 export function makePreset(
   preset: PalettePreset, slug: string, now: number,

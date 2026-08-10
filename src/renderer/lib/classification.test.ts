@@ -17,6 +17,8 @@ import {
   registerContinuousSlug,
   unregisterCategoricalSlug,
   unregisterContinuousSlug,
+  LAS_CLASSIFICATION_ATTRIBUTE,
+  ASPRS_CLASS_LIST,
 } from './classification';
 
 describe('categoricalSchemeFor', () => {
@@ -367,5 +369,50 @@ describe('forced-continuous override (wizard "Scalar" over a registered scheme)'
     registerContinuousSlug(undefined);
     // is_miss is categorical again (no real slug was registered).
     expect(categoricalSchemeFor(MISS_ATTRIBUTE)).not.toBeNull();
+  });
+});
+
+describe('las_classification (ASPRS standard classes)', () => {
+  it('names an imported LAS class instead of showing "Class N"', () => {
+    // The papercut this fixes: before registering the scheme, an imported file's
+    // classification column fell through to the generic path and rendered as
+    // "Class 5" rather than "High Vegetation".
+    const scheme = categoricalSchemeFor(LAS_CLASSIFICATION_ATTRIBUTE);
+    expect(scheme).not.toBeNull();
+    expect(scheme!.classes.find((c) => c.value === 5)?.label).toBe('High Vegetation');
+    expect(scheme!.classes.find((c) => c.value === 2)?.label).toBe('Ground');
+    expect(scheme!.classes.find((c) => c.value === 9)?.label).toBe('Water');
+  });
+
+  it('covers the full LAS 1.4 standard range 0-18', () => {
+    const values = ASPRS_CLASS_LIST.map((c) => c.value);
+    expect(values).toEqual(Array.from({ length: 19 }, (_, i) => i));
+  });
+
+  it('marks 8 and 12 Reserved (their meanings moved to per-point flags)', () => {
+    expect(ASPRS_CLASS_LIST.find((c) => c.value === 8)?.label).toBe('Reserved');
+    expect(ASPRS_CLASS_LIST.find((c) => c.value === 12)?.label).toBe('Reserved');
+  });
+
+  it('still honours the wizard\'s "Scalar" override', () => {
+    // Registering a by-name scheme must not take the choice away from a user who
+    // explicitly asked to see the raw numbers as a gradient.
+    registerContinuousSlug(LAS_CLASSIFICATION_ATTRIBUTE);
+    try {
+      expect(categoricalSchemeFor(LAS_CLASSIFICATION_ATTRIBUTE)).toBeNull();
+      expect(categoricalSchemeForRange(LAS_CLASSIFICATION_ATTRIBUTE, [0, 18])).toBeNull();
+      expect(isCategoricalAttribute(LAS_CLASSIFICATION_ATTRIBUTE)).toBe(false);
+    } finally {
+      unregisterContinuousSlug(LAS_CLASSIFICATION_ATTRIBUTE);
+    }
+    expect(categoricalSchemeFor(LAS_CLASSIFICATION_ATTRIBUTE)).not.toBeNull();
+  });
+
+  it('a registered scheme beats the generic Class-N path for a partial range', () => {
+    // A cloud holding only ground and high vegetation reports range [2,5]; the
+    // generic path would invent Classes 2,3,4,5 with neutral names. The
+    // registered scheme must win so the real names survive.
+    const scheme = categoricalSchemeForRange(LAS_CLASSIFICATION_ATTRIBUTE, [2, 5]);
+    expect(scheme?.classes.find((c) => c.value === 5)?.label).toBe('High Vegetation');
   });
 });

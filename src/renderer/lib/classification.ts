@@ -195,6 +195,49 @@ const ORGAN_SCHEME: CategoricalScheme = {
   classes: ORGAN_SCHEME_CLASSES,
 };
 
+// A LAS file's own `classification` byte, carried in by the importer under the
+// `las_` prefix (the bare name would collide with a reserved LAS dimension and
+// crash laspy on export — see main.py's _LAS_STD_DIMS note).
+//
+// Registering the ASPRS 1.4 standard classes here is what turns an imported
+// file's classes from "Class 5" into "High Vegetation" in the legend and the
+// class-filter checkboxes. Colours follow Potree's ClassificationScheme, which
+// is the convention users will recognise from other LiDAR tools — brown ground,
+// a three-shade green vegetation ramp.
+//
+// Codes 8 and 12 are Reserved in LAS 1.4: their old meanings (Model Key-point,
+// Overlap) moved to per-point FLAGS, which are orthogonal to the class code.
+// The class list is shared with the labelling tool's ASPRS preset palette
+// (lib/classPalettes.ts) so the two can never drift apart.
+export const LAS_CLASSIFICATION_ATTRIBUTE = 'las_classification';
+
+export const ASPRS_CLASS_LIST: ClassDef[] = [
+  { value: 0, label: 'Never Classified', color: [0.50, 0.50, 0.50] },
+  { value: 1, label: 'Unassigned', color: [0.60, 0.60, 0.60] },
+  { value: 2, label: 'Ground', color: [0.63, 0.32, 0.18] },
+  { value: 3, label: 'Low Vegetation', color: [0.00, 1.00, 0.00] },
+  { value: 4, label: 'Medium Vegetation', color: [0.00, 0.80, 0.00] },
+  { value: 5, label: 'High Vegetation', color: [0.00, 0.60, 0.00] },
+  { value: 6, label: 'Building', color: [1.00, 0.66, 0.00] },
+  { value: 7, label: 'Low Point (Noise)', color: [1.00, 0.00, 1.00] },
+  { value: 8, label: 'Reserved', color: [0.55, 0.55, 0.55] },
+  { value: 9, label: 'Water', color: [0.00, 0.00, 1.00] },
+  { value: 10, label: 'Rail', color: [0.40, 0.20, 0.60] },
+  { value: 11, label: 'Road Surface', color: [0.35, 0.35, 0.35] },
+  { value: 12, label: 'Reserved', color: [0.55, 0.55, 0.55] },
+  { value: 13, label: 'Wire — Guard', color: [0.90, 0.90, 0.20] },
+  { value: 14, label: 'Wire — Conductor', color: [0.90, 0.70, 0.20] },
+  { value: 15, label: 'Transmission Tower', color: [0.70, 0.50, 0.30] },
+  { value: 16, label: 'Wire Connector', color: [0.80, 0.80, 0.50] },
+  { value: 17, label: 'Bridge Deck', color: [0.50, 0.30, 0.70] },
+  { value: 18, label: 'High Noise', color: [1.00, 0.20, 0.60] },
+];
+
+const LAS_CLASSIFICATION_SCHEME: CategoricalScheme = {
+  attribute: LAS_CLASSIFICATION_ATTRIBUTE,
+  classes: ASPRS_CLASS_LIST,
+};
+
 // Registry of known categorical schemes, keyed by attribute slug. Future
 // classifications (semantic labels, …) register here and get discrete coloring
 // + a legend for free.
@@ -203,6 +246,7 @@ const SCHEMES: Record<string, CategoricalScheme> = {
   [WOOD_CLASS_ATTRIBUTE]: WOOD_SCHEME,
   [MISS_ATTRIBUTE]: MISS_SCHEME,
   [ORGAN_ATTRIBUTE]: ORGAN_SCHEME,
+  [LAS_CLASSIFICATION_ATTRIBUTE]: LAS_CLASSIFICATION_SCHEME,
 };
 
 // True when `slug` has a STATIC registered scheme (is_miss, ground_class, …) —
