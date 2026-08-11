@@ -20778,9 +20778,47 @@ def _canonical_region(region: dict) -> str:
             int(w), int(h),
             "1" if invert else "0",
         )
+    if kind == "slab":
+        invert = bool(region.get("invert", False))
+        a = region.get("a")
+        b = region.get("b")
+        for name, v in (("a", a), ("b", b)):
+            if not isinstance(v, (list, tuple)) or len(v) != 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"region.{name} must be an [x, y] pair for a slab region.",
+                )
+        depth = region.get("depth")
+        if not isinstance(depth, (int, float)) or depth <= 0:
+            raise HTTPException(
+                status_code=400, detail="region.depth must be a positive slab thickness.",
+            )
+        z_min = region.get("zMin")
+        z_max = region.get("zMax")
+        for name, v in (("zMin", z_min), ("zMax", z_max)):
+            if not isinstance(v, (int, float)):
+                raise HTTPException(
+                    status_code=400, detail=f"region.{name} must be a number for a slab region.",
+                )
+        if float(z_max) < float(z_min):
+            raise HTTPException(
+                status_code=400, detail="region.zMax must be >= region.zMin.",
+            )
+        if math.hypot(float(b[0]) - float(a[0]), float(b[1]) - float(a[1])) < 1e-12:
+            raise HTTPException(
+                status_code=400,
+                detail="region.a and region.b must differ (a slab needs a centreline).",
+            )
+        return "slab|{:.6g},{:.6g}|{:.6g},{:.6g}|{:.6g}|{:.6g},{:.6g}|{:.6g}|{}".format(
+            float(a[0]), float(a[1]), float(b[0]), float(b[1]),
+            float(depth), float(z_min), float(z_max),
+            float(region.get("offset", 0.0)),
+            "1" if invert else "0",
+        )
     raise HTTPException(
         status_code=400,
-        detail=f"region.kind must be 'box', 'polygon', or 'squares_union'. Got: {kind!r}",
+        detail=(f"region.kind must be 'box', 'polygon', 'squares_union', or "
+                f"'slab'. Got: {kind!r}"),
     )
 
 
@@ -20854,6 +20892,45 @@ def _squares_union_mask(
     return mask
 
 
+def _slab_mask(positions: "np.ndarray", region: dict) -> "np.ndarray":
+    """Boolean mask for a vertical cross-section slab.
+
+    MIRRORS `slabPredicate` in src/renderer/lib/crossSection.ts — a golden-vector
+    parity test pins the two together, the same discipline `_points_in_polygon_mask`
+    keeps with `pointInPolygon`.
+
+    Unlike every other region kind this involves NO CAMERA: the slab is a
+    world-space prism, so the preview and this replay agree by construction
+    rather than by two implementations of a projection happening to match. That
+    is also why a slab session never has to freeze the camera.
+
+    A point is inside when it lies within depth/2 of the (offset) centreline
+    plane, between the centreline's endpoints along the tangent, and within the
+    vertical extent."""
+    a = np.asarray(region["a"], dtype=np.float64)
+    b = np.asarray(region["b"], dtype=np.float64)
+    t = b - a
+    length = float(np.hypot(t[0], t[1]))
+    if length < 1e-12:
+        raise HTTPException(
+            status_code=400,
+            detail="region.a and region.b must differ (a slab needs a centreline).",
+        )
+    t = t / length
+    n = np.array([-t[1], t[0]], dtype=np.float64)   # left normal
+
+    d = positions[:, :2] - a
+    along = d @ t
+    across = d @ n - float(region.get("offset", 0.0))
+    half = float(region["depth"]) / 2.0
+    z = positions[:, 2]
+    return (
+        (np.abs(across) <= half)
+        & (along >= 0.0) & (along <= length)
+        & (z >= float(region["zMin"])) & (z <= float(region["zMax"]))
+    )
+
+
 def _region_pixels(positions: "np.ndarray", region: dict) -> "np.ndarray":
     """Project `positions` to canvas pixels using a screen-space region's frozen
     camera. Returns (n, 2). Only meaningful for polygon / squares_union kinds.
@@ -20924,6 +21001,8 @@ def _region_mask(
         half_sizes = np.asarray(region["half_sizes"], dtype=np.float64)
         px = pixels if pixels is not None else _region_pixels(positions, region)
         mask = _squares_union_mask(px, centers, half_sizes)
+    elif kind == "slab":
+        mask = _slab_mask(positions, region)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
 
@@ -21038,6 +21117,16 @@ class CropOctreeRegion(BaseModel):
     # in pixels (axis-aligned in screen space).
     centers: Optional[List[List[float]]] = None
     half_sizes: Optional[List[float]] = None
+    # Cross-section slab fields. WORLD-space and camera-free — see `_slab_mask`.
+    # `a`/`b` are the horizontal centreline endpoints, `depth` the thickness,
+    # `offset` how far the slab has been STEPPED along its normal from where it
+    # was drawn (so the centreline keeps expressing the user's chosen azimuth).
+    a: Optional[List[float]] = None
+    b: Optional[List[float]] = None
+    depth: Optional[float] = None
+    zMin: Optional[float] = None
+    zMax: Optional[float] = None
+    offset: float = 0.0
     invert: bool = False
 
 
