@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   validatePalette, paletteErrors, nextFreeClassValue,
   paletteToScheme, paletteToIndexScheme, paletteIndexMaps,
-  makePreset, makeEmptyPalette, parsePalette, parsePaletteList,
+  makePreset, makeEmptyPalette, parsePalette, parsePaletteList, defaultSlugForPreset,
   ASPRS_CLASSES, UNCLASSIFIED_VALUE, USER_CLASS_MIN,
   PALETTE_SOFT_MAX, type ClassPalette,
 } from './classPalettes';
@@ -168,7 +168,7 @@ describe('presets', () => {
     expect(ASPRS_CLASSES.find((c) => c.value === 2)?.label).toBe('Ground');
   });
 
-  it.each(['asprs', 'organ', 'wood_leaf'] as const)('%s preset validates', (p) => {
+  it.each(['asprs', 'organ', 'wood_leaf', 'ground'] as const)('%s preset validates', (p) => {
     expect(paletteErrors(makePreset(p, 'manual_class', NOW))).toEqual([]);
   });
 
@@ -184,6 +184,32 @@ describe('presets', () => {
     const organ = makePreset('organ', 'manual_class', NOW);
     expect(organ.classes.find((c) => c.value === 1)?.label).toBe('Leaf');
     expect(organ.classes.find((c) => c.value === 3)?.label).toBe('Shoot');
+  });
+
+  it('binds each preset to the COLUMN it describes, not just a vocabulary', () => {
+    // The bug: every preset was bound to manual_class, so switching to ASPRS
+    // read the (empty) hand-labelling column while the cloud's real classes sat
+    // in an imported one — Ground reported 0 points and nothing coloured.
+    expect(defaultSlugForPreset('asprs', 'manual_class')).toBe('las_classification');
+    expect(defaultSlugForPreset('wood_leaf', 'manual_class')).toBe('manual_class');
+    expect(defaultSlugForPreset('organ', 'manual_class')).toBe('manual_class');
+    // The reported case: a cloud already segmented by the ground tool must show
+    // its real classes, which live in ground_class, not the manual column.
+    expect(defaultSlugForPreset('ground', 'manual_class')).toBe('ground_class');
+  });
+
+  it('the ground preset reuses the segmentation tool\'s own class codes', () => {
+    const g = makePreset('ground', defaultSlugForPreset('ground', 'manual_class'), NOW);
+    expect(g.slug).toBe('ground_class');
+    expect(g.classes.find((c) => c.value === 1)?.label).toBe('Ground');
+    expect(g.classes.find((c) => c.value === 2)?.label).toBe('Non-ground');
+    expect(paletteErrors(g)).toEqual([]);
+  });
+
+  it('a preset built with its default slug carries it through', () => {
+    const p = makePreset('asprs', defaultSlugForPreset('asprs', 'manual_class'), NOW);
+    expect(p.slug).toBe('las_classification');
+    expect(paletteToScheme(p).attribute).toBe('las_classification');
   });
 
   it('an empty palette starts valid, with only Unclassified', () => {

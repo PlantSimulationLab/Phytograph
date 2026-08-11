@@ -15,10 +15,11 @@
 import type { ClassDef, CategoricalScheme } from './classification';
 import {
   ORGAN_SCHEME_CLASSES, WOOD_SCHEME_CLASSES, ASPRS_CLASS_LIST,
+  LAS_CLASSIFICATION_ATTRIBUTE, GROUND_CLASS_ATTRIBUTE, GROUND_SCHEME_CLASSES,
 } from './classification';
 import type { RGB } from './colormaps';
 
-export type PalettePreset = 'asprs' | 'organ' | 'wood_leaf';
+export type PalettePreset = 'asprs' | 'organ' | 'wood_leaf' | 'ground';
 
 export interface ClassPalette {
   /** Stable id, so a rename doesn't break a cloud's binding. */
@@ -214,6 +215,27 @@ function def(value: number, label: string, color: RGB): ClassDef {
  */
 export const ASPRS_CLASSES: ClassDef[] = ASPRS_CLASS_LIST;
 
+/**
+ * The COLUMN each preset describes.
+ *
+ * A palette names both a class vocabulary and the attribute it applies to, and
+ * conflating the two is a real bug: binding every preset to `manual_class`
+ * meant switching to the ASPRS palette read the (empty) manual column while the
+ * cloud's real classes sat in `ground_class`, so Ground showed 0 points and
+ * nothing coloured.
+ *
+ * ASPRS describes an imported LAS classification byte; wood/leaf and organs are
+ * hand-labelling vocabularies that live in the manual column. A user editing a
+ * preset into something of their own keeps whatever slug it was bound to.
+ */
+export function defaultSlugForPreset(
+  preset: PalettePreset, manualSlug: string,
+): string {
+  if (preset === 'asprs') return LAS_CLASSIFICATION_ATTRIBUTE;
+  if (preset === 'ground') return GROUND_CLASS_ATTRIBUTE;
+  return manualSlug;
+}
+
 export function makePreset(
   preset: PalettePreset, slug: string, now: number,
 ): ClassPalette {
@@ -227,6 +249,19 @@ export function makePreset(
       // vocabulary and can be compared directly.
       return { id: 'preset-organ', name: 'Plant organs', slug,
                classes: ORGAN_SCHEME_CLASSES.map((c) => ({ ...c })), preset, updatedAt: now };
+    case 'ground':
+      // Mirrors what the ground-segmentation tool writes (1=ground,
+      // 2=non-ground), so a cloud already segmented by that tool shows its real
+      // classes the moment this palette is selected. Prepends the required
+      // Unclassified for points the segmentation never assigned.
+      return {
+        id: 'preset-ground', name: 'Ground / non-ground', slug,
+        classes: [
+          def(UNCLASSIFIED_VALUE, UNCLASSIFIED_LABEL, UNCLASSIFIED_COLOR),
+          ...GROUND_SCHEME_CLASSES.map((c) => ({ ...c })),
+        ],
+        preset, updatedAt: now,
+      };
     case 'wood_leaf':
       // Mirrors the automatic wood/leaf segmentation output, so a user can
       // correct its result by hand in the same vocabulary. That tool emits

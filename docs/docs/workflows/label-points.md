@@ -6,7 +6,7 @@ a cloud right, but not all of it. **Label Points** lets you assign classes by
 hand: to correct what a classifier got wrong, or to build ground truth for
 checking how well it did.
 
-Classes are yours to define. Phytograph ships three starting sets, but you can
+Classes are yours to define. Phytograph ships four starting sets, but you can
 label anything you like.
 
 ## Label
@@ -51,11 +51,21 @@ Use **Classes** in the panel to switch between the built-in sets:
 - **Plant organs** — leaf, petiole, shoot, peduncle, fruit, petiolule. These are
   the same organ codes a [simulated scan](simulate-scan.md) carries, so
   hand-labelled and simulated data can be compared directly.
+- **Ground / non-ground** — matches [Segment ground points](segment-ground.md).
 - **ASPRS standard** — the LAS classification codes (Ground, Low/Medium/High
   Vegetation, Building, Water…), for data that has to line up with other LiDAR
   software.
 
 Every set includes **Unclassified** (class 0), which is what points start as.
+
+!!! note "A class set also names the column it reads"
+    Each set describes a different **attribute** on the cloud, not just a list of
+    names. Ground / non-ground reads what the ground-segmentation tool wrote;
+    ASPRS reads an imported LAS classification byte; wood/leaf and organs read
+    the hand-labelling column. So switching sets changes both the class names
+    *and* which existing classification you are looking at — a cloud that has
+    been ground-segmented shows its real counts under **Ground / non-ground**
+    and zeros under the others until you paint something.
 
 ## Only repaint certain classes
 
@@ -87,8 +97,9 @@ it while you work on the rest.
 
 ## What happens to the labels
 
-Labels are stored on the cloud as a `manual_class` attribute. Once committed
-they behave like any other scalar:
+Hand labels are stored on the cloud as a `manual_class` attribute (the
+ground/non-ground and ASPRS sets edit their own existing columns instead — see
+the note above). Once committed they behave like any other scalar:
 
 - colour the cloud by them (they appear in the colour-by list with your class
   names and colours),

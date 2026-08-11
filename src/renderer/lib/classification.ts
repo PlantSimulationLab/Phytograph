@@ -37,12 +37,16 @@ export const GROUND_CLASS_ATTRIBUTE = 'ground_class';
 // (register it via registerContinuousSlug, the opposite of ground_class).
 export const HEIGHT_ABOVE_GROUND_ATTRIBUTE = 'height_above_ground';
 
+// Exported so the labelling tool's ground preset is the same class list the
+// segmentation writes — one vocabulary for machine and hand classification.
+export const GROUND_SCHEME_CLASSES: ClassDef[] = [
+  { value: 1, label: 'Ground', color: [0.55, 0.40, 0.26] },
+  { value: 2, label: 'Non-ground', color: [0.30, 0.69, 0.31] },
+];
+
 const GROUND_SCHEME: CategoricalScheme = {
   attribute: GROUND_CLASS_ATTRIBUTE,
-  classes: [
-    { value: 1, label: 'Ground', color: [0.55, 0.40, 0.26] },
-    { value: 2, label: 'Non-ground', color: [0.30, 0.69, 0.31] },
-  ],
+  classes: GROUND_SCHEME_CLASSES,
 };
 
 // Wood/leaf classification (segment_wood writes `wood_class`): 1 = wood

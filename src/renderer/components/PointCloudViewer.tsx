@@ -86,7 +86,7 @@ import {
 } from '../lib/cropGeometry';
 import { projectionKindOf } from '../lib/cameraRay';
 import {
-  makePreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
+  makePreset, defaultSlugForPreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
   type ClassPalette,
 } from '../lib/classPalettes';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
@@ -3850,6 +3850,32 @@ export default function PointCloudViewer({
     }
   }, [labelTargetCloud, labelDrawing, cropDrawState]);
 
+  /**
+   * Pull the authoritative per-class counts for `slug` and show them.
+   *
+   * Shared by tool-open and palette-switch. A palette names both a class
+   * VOCABULARY and the COLUMN it describes, so switching palettes must refetch:
+   * counts are keyed by class value, so leaving the old map in place renders
+   * one column's numbers under another's class names (wood/leaf's 40K/15K/10K
+   * reappearing as Unknown/Leaf/Petiole under the organ palette).
+   */
+  const refreshLabelCounts = useCallback(async (
+    sessionId: string, slug: string, cancelled?: () => boolean,
+  ) => {
+    try {
+      const res = await getCloudLabelSummary(sessionId, slug);
+      if (cancelled?.()) return;
+      setLabelClassCounts(
+        Object.fromEntries(
+          Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
+        ) as Record<number, number>,
+      );
+    } catch {
+      // Only costs the readout; the next stroke's response repopulates it.
+      if (!cancelled?.()) setLabelClassCounts({});
+    }
+  }, []);
+
   // Seed the palette when the tool opens on a cloud: prefer one already bound to
   // this cloud (so re-opening keeps the user's own classes), else the wood/leaf
   // preset — the common correction case for this app's data.
@@ -3874,18 +3900,7 @@ export default function PointCloudViewer({
     const sessionId = labelTargetCloud.data.octree?.sessionId;
     if (sessionId) {
       let cancelled = false;
-      void getCloudLabelSummary(sessionId, MANUAL_CLASS_ATTRIBUTE)
-        .then((res) => {
-          if (cancelled) return;
-          setLabelClassCounts(
-            Object.fromEntries(
-              Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
-            ) as Record<number, number>,
-          );
-        })
-        // A failure here costs only the initial readout; the first stroke's
-        // response repopulates it. Not worth a toast.
-        .catch(() => {});
+      void refreshLabelCounts(sessionId, palette.slug, () => cancelled);
       // Guard against a late reply landing after the user switched clouds.
       return () => { cancelled = true; };
     }
@@ -3946,7 +3961,7 @@ export default function PointCloudViewer({
         to_class: stroke.toClass,
         ...(stroke.fromClasses ? { from_classes: stroke.fromClasses } : {}),
         stroke_id: strokeId,
-      }]);
+      }], palette.slug);
 
       const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
       setLabelClassCounts(
@@ -4088,7 +4103,7 @@ export default function PointCloudViewer({
     const keep = labelStrokes.length - 1;
     setLabelBusy(true);
     try {
-      const res = await resetCloudLabelEdits(sessionId, keep);
+      const res = await resetCloudLabelEdits(sessionId, keep, labelPaletteRef.current?.slug);
       // Trust the BACKEND's surviving count: its history is byte-bounded and may
       // have evicted older entries, in which case the renderer's list is longer
       // than anything it can still undo.
@@ -4120,7 +4135,7 @@ export default function PointCloudViewer({
     if (!cloud || !octreeInfo || !sessionId) return;
     setLabelBusy(true);
     try {
-      const res = await commitCloudLabels(sessionId);
+      const res = await commitCloudLabels(sessionId, labelPaletteRef.current?.slug);
       const palette = labelPaletteRef.current;
       const newData = buildSessionOctreeData(
         res, octreeInfo, cloud.data.fileName ?? cloud.id,
@@ -14802,7 +14817,7 @@ export default function PointCloudViewer({
           // than a write to the cloud's stored mode.
           const isLabelTarget = labelTargetCloud?.id === cloud.id;
           const { mode: cloudColorMode, field: cloudScalarField } = isLabelTarget
-            ? { mode: 'scalar' as const, field: MANUAL_CLASS_ATTRIBUTE }
+            ? { mode: 'scalar' as const, field: labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE }
             : rawColorMode;
           // Keep the crop preview (hidden to-be-cropped points) alive while
           // the apply's backend round-trip is in flight. handleApplyCrop
@@ -14938,7 +14953,7 @@ export default function PointCloudViewer({
                   labelOverlayRef={
                     labelTargetCloud?.id === cloud.id ? labelOverlayRef : null
                   }
-                  labelCommittedSlug={MANUAL_CLASS_ATTRIBUTE}
+                  labelCommittedSlug={labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE}
                   labelIndexScheme={
                     labelTargetCloud?.id === cloud.id ? labelIndexScheme : null
                   }
@@ -18004,13 +18019,27 @@ export default function PointCloudViewer({
           // (add/rename/recolour, save to the shared library) is the natural
           // next increment — the data model and persistence already support it.
           onEditPalette={() => {
-            const order: Array<'wood_leaf' | 'organ' | 'asprs'> = ['wood_leaf', 'organ', 'asprs'];
+            const order: Array<'wood_leaf' | 'organ' | 'ground' | 'asprs'> =
+              ['wood_leaf', 'organ', 'ground', 'asprs'];
             const i = order.indexOf((labelPalette.preset ?? 'wood_leaf') as typeof order[number]);
-            const next = makePreset(order[(i + 1) % order.length], MANUAL_CLASS_ATTRIBUTE, Date.now());
+            const preset = order[(i + 1) % order.length];
+            // Each preset names its own COLUMN, not just a vocabulary: ASPRS
+            // describes an imported LAS classification byte, the others describe
+            // the hand-labelling column. Binding them all to manual_class made
+            // ASPRS read an empty column and report every class as 0.
+            const next = makePreset(
+              preset, defaultSlugForPreset(preset, MANUAL_CLASS_ATTRIBUTE), Date.now(),
+            );
             setLabelPalette(next);
             setLabelVisibleClasses(new Set(next.classes.map(c => c.value)));
             setLabelActiveClass(next.classes.find(c => c.value !== 0)?.value ?? 0);
             setLabelFromClasses(null);
+            // Counts are keyed by class VALUE, so a stale map renders one
+            // column's numbers under another's class names. Refetch for the
+            // column this palette actually describes.
+            setLabelClassCounts({});
+            const sid = labelTargetCloud.data.octree?.sessionId;
+            if (sid) void refreshLabelCounts(sid, next.slug);
           }}
           drawing={labelDrawing}
           onToggleDrawing={() => setLabelDrawing(v => !v)}
