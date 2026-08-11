@@ -608,6 +608,17 @@ export function OctreePointCloud({
     if (effectiveRange) {
       (m as any).intensityRange = effectiveRange;
     }
+    // The labelling overlay writes DENSE PALETTE INDICES into the intensity
+    // slot, so the shader's value space must be [0, n-1] to match. Without this
+    // the stops are laid out over the palette's index range while the shader
+    // maps each index against the OCTREE attribute's range — every point then
+    // samples the wrong part of the gradient (in practice: the whole cloud
+    // renders as one flat colour, usually the unclassified grey, no matter what
+    // was painted).
+    if (labelIndexScheme) {
+      const n = Math.max(1, labelIndexScheme.classes.length - 1);
+      (m as any).intensityRange = [0, n];
+    }
 
     switch (colorMode) {
       case 'rgb': m.pointColorType = PointColorType.RGB; break;
