@@ -22926,6 +22926,42 @@ class ResetLabelEditsRequest(BaseModel):
     slug: str = MANUAL_CLASS_SLUG
 
 
+@app.get("/api/cloud/session/{session_id}/label_summary")
+def get_cloud_label_summary(session_id: str, slug: str = MANUAL_CLASS_SLUG):
+    """Current per-class counts for a label column. Read-only.
+
+    Exists so the renderer can populate the class list the moment the tool
+    opens. Without it the panel showed every class as 0 on a fresh cloud — which
+    reads as "nothing here" when in fact every point is Unclassified.
+
+    The renderer cannot compute this itself: the counts are over EDITABLE points
+    (excluding deleted rows and sky/miss points), so a client-side
+    `data.pointCount` would disagree with every subsequent update and the total
+    would visibly jump after the first stroke.
+
+    A session with no label column yet reports every point as unclassified
+    rather than an empty map, which is the true state."""
+    sess = _get_cloud_session(session_id)
+    _validate_label_slug(slug)
+    with _cloud_session_lock:
+        editable = _session_editable_mask_locked(sess)
+        if slug in sess.extras:
+            class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
+        else:
+            # No column: every editable point is unclassified by definition.
+            n = int(editable.sum())
+            class_counts = {MANUAL_CLASS_UNLABELED: n} if n else {}
+            value_range = [float(MANUAL_CLASS_UNLABELED), float(MANUAL_CLASS_UNLABELED)]
+        edit_count = len(sess.label_history.get(slug, []))
+    return {
+        "session_id": session_id,
+        "slug": slug,
+        "class_counts": class_counts,
+        "value_range": value_range,
+        "label_edit_count": edit_count,
+    }
+
+
 @app.post("/api/cloud/session/{session_id}/reset_label_edits")
 def reset_cloud_label_edits(session_id: str, request: ResetLabelEditsRequest):
     """Roll the label column back to an earlier point in its history (undo).

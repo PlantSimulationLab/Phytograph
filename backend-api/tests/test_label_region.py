@@ -322,6 +322,66 @@ def test_history_is_trimmed_by_byte_budget_oldest_first(
     assert len(main._cloud_sessions[sid].label_history[SLUG]) <= 3
 
 
+# ── Summary (the tool's initial readout) ─────────────────────────────────────
+
+def test_label_summary_reports_all_points_unclassified_before_any_paint(
+    client, cache_root, grid_xyz,
+):
+    """A fresh cloud has no label column at all. The summary must still report
+    every point as Unclassified — the panel showing 0 for every class reads as
+    "nothing here" when in fact nothing has been painted yet."""
+    sid = _create(client, grid_xyz)
+    assert SLUG not in main._cloud_sessions[sid].extras
+
+    res = client.get(f"/api/cloud/session/{sid}/label_summary")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["class_counts"] == {str(main.MANUAL_CLASS_UNLABELED): 1000}
+    assert body["label_edit_count"] == 0
+
+
+def test_label_summary_excludes_deleted_and_miss_points(
+    client, cache_root, tmp_path, monkeypatch,
+):
+    """The count is over EDITABLE points, which is exactly why the renderer
+    cannot derive it from its own point count."""
+    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "cache"))
+    f = tmp_path / "mixed.xyz"
+    lines = [f"{i*0.1:.4f} 0.0000 0.0000 0" for i in range(20)]
+    lines += [f"{i*0.1:.4f} 1.0000 0.0000 1" for i in range(5)]   # misses
+    f.write_text("\n".join(lines) + "\n")
+
+    sid = _create(client, f, "x y z is_miss")
+    body = client.get(f"/api/cloud/session/{sid}/label_summary").json()
+    # 20 hits, not 25 — the 5 misses are never labellable.
+    assert body["class_counts"] == {str(main.MANUAL_CLASS_UNLABELED): 20}
+
+
+def test_label_summary_tracks_painting_and_is_read_only(client, cache_root, grid_xyz):
+    sid = _create(client, grid_xyz)
+    sess = main._cloud_sessions[sid]
+    painted = int(_box_mask(sess.positions, BOX_BIG).sum())
+    _paint(client, sid, [_stroke(BOX_BIG, 4, "s1")])
+
+    body = client.get(f"/api/cloud/session/{sid}/label_summary").json()
+    assert body["class_counts"][str(4)] == painted
+    assert body["class_counts"][str(main.MANUAL_CLASS_UNLABELED)] == 1000 - painted
+    assert body["label_edit_count"] == 1
+
+    # Reading must not disturb anything — it is a GET, not reset_label_edits
+    # pressed into service as a getter.
+    labels_before = _labels(sid).copy()
+    client.get(f"/api/cloud/session/{sid}/label_summary")
+    assert np.array_equal(_labels(sid), labels_before)
+    assert len(sess.label_history[SLUG]) == 1
+
+
+def test_label_summary_rejects_a_reserved_slug(client, cache_root, grid_xyz):
+    sid = _create(client, grid_xyz)
+    res = client.get(f"/api/cloud/session/{sid}/label_summary?slug=classification")
+    assert res.status_code == 400
+
+
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 
 def test_bake_compacts_labels_and_clears_history(client, cache_root, grid_xyz):

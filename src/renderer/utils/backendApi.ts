@@ -3578,6 +3578,32 @@ export async function labelCloudRegion(
 }
 
 /**
+ * Read the current per-class counts without changing anything. Used to populate
+ * the class list the moment the labelling tool opens — the renderer cannot
+ * derive these itself because they exclude deleted rows and sky/miss points.
+ */
+export async function getCloudLabelSummary(
+  sessionId: string,
+  slug?: string,
+): Promise<Omit<LabelRegionResult, 'created_column' | 'applied'>> {
+  const baseUrl = getBackendUrl();
+  const q = slug ? `?slug=${encodeURIComponent(slug)}` : '';
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/label_summary${q}`,
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('get_cloud_label_summary failed:', error);
+    throw error;
+  }
+}
+
+/**
  * Undo: roll the label column back, keeping the first `editCount` edits. Omit
  * to clear all labelling on the slug. No rebuild.
  */

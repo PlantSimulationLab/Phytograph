@@ -93,6 +93,12 @@ test('painting a lasso labels the enclosed points with the active class', async 
   const active = await panel.getAttribute('data-active-class');
   expect(Number(active)).toBeGreaterThan(0);
 
+  // Every point starts Unclassified, so the panel must SAY so on open. Showing
+  // 0 for every class reads as "no points here", and the total then jumps once
+  // the first stroke lands.
+  await expect.poll(async () => (await counts(panel))['0'] ?? 0, { timeout: 15_000 })
+    .toBe(60);
+
   await expect(panel).toHaveAttribute('data-pending-strokes', '0');
   await paintWholeViewport(page);
 
