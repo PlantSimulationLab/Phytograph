@@ -16135,6 +16135,33 @@ def _do_point_cloud_export(
             for slug, col in export_extras.items():
                 las[slug] = col.astype(np.float32)
 
+        # ALSO write a class column into the standard LAS `classification` byte.
+        #
+        # Without this, exporting a classified cloud produced a file whose
+        # classification byte was all zeros, with the real classes hidden in an
+        # ExtraBytes dimension only Phytograph knows to look for. Re-importing it
+        # then showed "everything unclassified" under the ASPRS class set — and
+        # every other LiDAR tool saw an unclassified file too.
+        #
+        # The byte is the interoperable home for this, so populate it from the
+        # first class column present in priority order. Extra dims are written
+        # too (above), so nothing is lost and Phytograph still round-trips its
+        # own richer vocabulary.
+        #
+        # laspy's `classification` is an integer field; values are rounded and
+        # clipped to the 0-255 the LAS 1.4 byte allows. Writing a FLOAT column
+        # straight to a reserved standard name is what crashes laspy (it tries to
+        # bit-pack into the flags byte), hence the explicit cast.
+        class_source = next(
+            (sl for sl in (MANUAL_CLASS_SLUG, "las_classification",
+                           GROUND_CLASS_SLUG, WOOD_CLASS_SLUG)
+             if sl in export_extras),
+            None,
+        )
+        if class_source is not None:
+            vals = np.rint(np.asarray(export_extras[class_source], dtype=np.float64))
+            las.classification = np.clip(vals, 0, 255).astype(np.uint8)
+
         # Determine file extension
         ext = ".laz" if request.format.lower() == "laz" else ".las"
         filename = request.filename or f"pointcloud{ext}"

@@ -219,8 +219,12 @@ test('labels display even when the cloud was coloured by RGB', async () => {
     { timeout: 15_000 },
   ).toEqual({ colorMode: 'scalar', scalarField: 'manual_class' });
 
-  const stats = await page.evaluate(() => (window as any).__labelOverlay);
-  expect(stats.painted).toBe(stats.total);
+  // Poll rather than sample once: tiles stream in, so the overlay's replay can
+  // still be catching up the frame after the render mode settles.
+  await expect.poll(async () => {
+    const s = await page.evaluate(() => (window as any).__labelOverlay);
+    return s && s.total > 0 ? s.painted === s.total : false;
+  }, { timeout: 15_000 }).toBe(true);
 });
 
 test('undo removes the preview immediately too', async () => {
@@ -266,6 +270,12 @@ test('switching the active class repaints — counts move rather than accumulate
   await paintWholeViewport(page);
   await expect(panel).toHaveAttribute('data-pending-strokes', '2', { timeout: 15_000 });
 
+  // Wait for the COUNTS, not just the stroke. Since the preview is painted
+  // optimistically, pending-strokes rises before the backend replies, so
+  // reading the counts here raced the response.
+  await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
+
   // The points MOVED class: the second class holds all 60 and the first is
   // empty. A bug that appended instead of repainting would leave 60 in both.
   const c = await counts(panel);
@@ -303,13 +313,22 @@ test('the From-class gate makes a non-matching repaint a no-op', async () => {
   await expect(page.getByTestId('label-class-0')).toHaveAttribute('data-in-from', 'true');
 
   const before = await counts(panel);
+  expect(before[String(first)]).toBe(60);
+
   await paintWholeViewport(page);
   await expect(panel).toHaveAttribute('data-pending-strokes', '2', { timeout: 15_000 });
+
+  // Wait for the second stroke's RESPONSE before comparing. pending-strokes
+  // rises optimistically, so reading counts here raced the reply — and this
+  // test asserts counts did NOT change, which a not-yet-arrived reply would
+  // satisfy for the wrong reason. Poll until the labelled total is stable at
+  // the full cloud, then compare.
+  await expect.poll(async () => (await counts(panel))[String(first)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
 
   // Same counts as before: the gate held. Without it the active class would
   // have swallowed the whole cloud again.
   expect(await counts(panel)).toEqual(before);
-  expect(before[String(first)]).toBe(60);
 });
 
 test('commit bakes the labels into the cloud and clears the dirty flag', async () => {

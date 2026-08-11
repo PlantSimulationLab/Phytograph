@@ -3770,6 +3770,9 @@ export default function PointCloudViewer({
     labelTargetCloudRef.current = labelTargetCloud ? { id: labelTargetCloud.id } : null;
   }, [labelTargetCloud]);
 
+  // Monotonic stamp so a slow label-summary read can never overwrite a newer
+  // paint/undo/commit result.
+  const labelCountsSeqRef = useRef(0);
   const labelPaletteRef = useRef<ClassPalette | null>(null);
   useEffect(() => { labelPaletteRef.current = labelPalette; }, [labelPalette]);
 
@@ -3862,9 +3865,15 @@ export default function PointCloudViewer({
   const refreshLabelCounts = useCallback(async (
     sessionId: string, slug: string, cancelled?: () => boolean,
   ) => {
+    // Stamp the request. A summary fetch is a READ of state that a paint may be
+    // about to change, so a slow reply must never clobber a newer write: paint
+    // while the open-fetch is still in flight and the stale {0: all} reply would
+    // land after it and reset the counts to zero. Monotonic counter, newest
+    // wins — the same discipline the stroke list uses against the backend.
+    const seq = ++labelCountsSeqRef.current;
     try {
       const res = await getCloudLabelSummary(sessionId, slug);
-      if (cancelled?.()) return;
+      if (cancelled?.() || seq !== labelCountsSeqRef.current) return;
       setLabelClassCounts(
         Object.fromEntries(
           Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
@@ -3872,7 +3881,7 @@ export default function PointCloudViewer({
       );
     } catch {
       // Only costs the readout; the next stroke's response repopulates it.
-      if (!cancelled?.()) setLabelClassCounts({});
+      if (!cancelled?.() && seq === labelCountsSeqRef.current) setLabelClassCounts({});
     }
   }, []);
 
@@ -3964,6 +3973,7 @@ export default function PointCloudViewer({
       }], palette.slug);
 
       const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
+      labelCountsSeqRef.current++;   // any in-flight summary read is now stale
       setLabelClassCounts(
         Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
       );
@@ -4108,6 +4118,7 @@ export default function PointCloudViewer({
       // have evicted older entries, in which case the renderer's list is longer
       // than anything it can still undo.
       setLabelStrokes(prev => prev.slice(0, Math.min(keep, res.label_edit_count)));
+      labelCountsSeqRef.current++;
       setLabelClassCounts(
         Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
       );
@@ -4154,6 +4165,7 @@ export default function PointCloudViewer({
       // Now the octree carries the labels — safe to drop the overlay.
       setLabelStrokes([]);
       setLabelDirty(false);
+      labelCountsSeqRef.current++;
       setLabelClassCounts(
         Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
       );

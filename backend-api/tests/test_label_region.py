@@ -86,8 +86,10 @@ def _stroke(box, to_class, stroke_id, from_classes=None):
 
 
 def _create(client, path, fmt=GRID_FORMAT) -> str:
-    res = client.post("/api/cloud/session/create",
-                      json={"source_path": str(path), "ascii_format": fmt})
+    payload = {"source_path": str(path)}
+    if fmt is not None:
+        payload["ascii_format"] = fmt
+    res = client.post("/api/cloud/session/create", json=payload)
     assert res.status_code == 200, res.text
     return decode_streamed_json(res.content)["session_id"]
 
@@ -425,6 +427,51 @@ def test_commit_without_a_label_column_is_a_400(client, cache_root, grid_xyz):
     sid = _create(client, grid_xyz)
     res = client.post(f"/api/cloud/session/{sid}/commit_labels", json={})
     assert res.status_code == 400
+
+
+# ── LAS classification round-trip ────────────────────────────────────────────
+
+def test_export_writes_classes_into_the_las_classification_byte(
+    client, cache_root, grid_xyz, tmp_path,
+):
+    """Export -> re-import must preserve classes in the STANDARD byte.
+
+    Reported: ground-segment a cloud, export to LAZ, re-import, open the label
+    tool on the ASPRS set — everything showed as unclassified. The classes were
+    written only to an ExtraBytes dimension, so the LAS classification byte was
+    all zeros: our own importer drops it as constant, and every other LiDAR tool
+    saw an unclassified file too.
+    """
+    import laspy
+
+    sid = _create(client, grid_xyz)
+    sess = main._cloud_sessions[sid]
+    painted = int(_box_mask(sess.positions, BOX_BIG).sum())
+    assert painted > 0
+    _paint(client, sid, [_stroke(BOX_BIG, 5, "s1")])
+
+    out = tmp_path / "labelled.laz"
+    res = client.post("/api/pointcloud/export", json={
+        "source": {"kind": "session", "session_id": sid},
+        "dest_path": str(out), "format": "laz",
+    })
+    assert res.status_code == 200, res.text
+    assert decode_streamed_json(res.content)["success"] is True
+    assert out.exists()
+
+    las = laspy.read(str(out))
+    written = np.asarray(las.classification)
+    # The painted class reached the standard byte, not just an extra dim.
+    assert int((written == 5).sum()) == painted
+    # ...and the richer column is still there for our own round-trip.
+    assert SLUG in las.point_format.dimension_names
+
+    # Re-importing sees it as a real classification, not a constant to discard.
+    sid2 = _create(client, out, fmt=None)
+    body = client.get(
+        f"/api/cloud/session/{sid2}/label_summary?slug=las_classification"
+    ).json()
+    assert body["class_counts"].get("5") == painted
 
 
 # ── Validation ───────────────────────────────────────────────────────────────
