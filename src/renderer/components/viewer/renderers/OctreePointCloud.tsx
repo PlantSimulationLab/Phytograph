@@ -131,6 +131,19 @@ export interface OctreePointCloudProps {
   /** Categorical scheme for the overlay's dense INDEX values, so the points and
    *  the legend agree while previewing. Null when not labelling. */
   labelIndexScheme?: { attribute: string; classes: Array<{ value: number; label: string; color: [number, number, number] }> } | null;
+  /**
+   * Cross-section slab, as world-space half-space planes (see
+   * lib/crossSection.ts `slabToPlanes`). When set, points outside the slab are
+   * culled on the GPU so the user works in a thin, unoccluded section.
+   *
+   * Planes rather than a clip BOX on purpose: they AND-intersect and can only
+   * clear `insideAny`, so they compose with the rest of the clip system instead
+   * of fighting it — and, unlike a box, they do not trip the crop preview's
+   * LOD/point-budget reduction. A section must render at FULL resolution: the
+   * whole argument for the workflow is that the slab already bounds the point
+   * count (this is what ArcGIS does), so degrading it would defeat the purpose.
+   */
+  slabPlanes?: THREE.Plane[] | null;
   // World-space translation for this cloud (the Translate tool / T-modal value).
   // The PointCloudOctree is attached directly to the scene root (not inside the
   // parent's React `<group position>`), so the group transform does NOT reach it
@@ -269,6 +282,7 @@ export function OctreePointCloud({
   labelOverlayRef = null,
   labelCommittedSlug = null,
   labelIndexScheme = null,
+  slabPlanes = null,
   cropMask = null,
   translation,
   rotation,
@@ -758,15 +772,39 @@ export function OctreePointCloud({
   type ClipState =
     | { mode: 'none' }
     | { mode: 'crop-box'; boxes: any[]; invert: boolean }
-    | { mode: 'delete-union'; boxes: any[] };
+    | { mode: 'delete-union'; boxes: any[] }
+    | { mode: 'slab'; planes: THREE.Plane[] };
 
   // Identity key for the oriented-box union, so the effect re-runs only when
   // the boxes actually move (matrices are new objects every parent render).
   const clipBoxesKey = (clipBoxes ?? [])
     .map(b => b.matrix.elements.map(e => e.toFixed(4)).join(','))
     .join('|');
+  // Same idea for the slab: planes are new objects each render, so key on value.
+  const slabPlanesKey = (slabPlanes ?? [])
+    .map(p => `${p.normal.x.toFixed(6)},${p.normal.y.toFixed(6)},${p.normal.z.toFixed(6)},${p.constant.toFixed(6)}`)
+    .join('|');
 
   const clipState = useMemo<ClipState>(() => {
+    if (slabPlanes && slabPlanes.length > 0) {
+      // Planes AND-intersect in the shader, which is exactly a slab, and they
+      // can only ever CLEAR `insideAny` — so under CLIP_OUTSIDE with no volumes
+      // present the planes alone decide and out-of-slab points are culled.
+      //
+      // The planes are world-space but the cloud renders at world − displayOffset,
+      // so translate each plane into the display frame (a plane shifts by
+      // subtracting normal·offset from its constant). Same round trip the crop
+      // box does above.
+      const dx = displayOffset?.x ?? 0;
+      const dy = displayOffset?.y ?? 0;
+      const dz = displayOffset?.z ?? 0;
+      const planes = slabPlanes.map((pl) => {
+        const p = pl.clone();
+        p.constant += p.normal.x * dx + p.normal.y * dy + p.normal.z * dz;
+        return p;
+      });
+      return { mode: 'slab', planes };
+    }
     if (clipBox) {
       // `createClipBox(size, position)` takes a SIZE vector (not min/max) and a
       // CENTER; the box renders as a unit cube transformed by (scale=size,
@@ -816,7 +854,8 @@ export function OctreePointCloud({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clipBox?.min.x, clipBox?.min.y, clipBox?.min.z,
       clipBox?.max.x, clipBox?.max.y, clipBox?.max.z, clipBox?.invert,
-      clipBoxesKey, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
+      clipBoxesKey, slabPlanesKey,
+      displayOffset?.x, displayOffset?.y, displayOffset?.z]);
 
   useEffect(() => {
     if (!octree) return;
@@ -832,8 +871,27 @@ export function OctreePointCloud({
         m.setClipBoxes([]);
         m.clipMode = ClipMode.DISABLED;
       }
+      if (m.clippingPlanes?.length) m.clippingPlanes = [];
       return;
     }
+    if (clipState.mode === 'slab') {
+      // potree has no public setClipPlanes: its material reads the INHERITED
+      // three.js `clippingPlanes` property in syncClippingPlanes(), which
+      // updateMaterial() calls every frame — so assigning it is enough, and the
+      // shader define flips on as soon as the count goes non-zero.
+      //
+      // Any box volume must be cleared: boxes OR into `insideAny`, so leaving a
+      // stale one would REVEAL points outside the slab rather than hide them.
+      if (m.numClipBoxes > 0) m.setClipBoxes([]);
+      m.clippingPlanes = clipState.planes;
+      // CLIP_OUTSIDE with no volumes present: `hasVolumeClip` is false, so
+      // `insideAny` starts true and the planes alone decide. Points failing any
+      // plane are culled — exactly a slab.
+      m.clipMode = ClipMode.CLIP_OUTSIDE;
+      return;
+    }
+    // Leaving slab mode: drop the planes or they keep culling.
+    if (m.clippingPlanes?.length) m.clippingPlanes = [];
     m.setClipBoxes(clipState.boxes);
     // crop-box: CLIP_OUTSIDE keeps what's inside the box; `invert` flips it to
     // "discard what's inside", matching the Crop tool's Keep-Outside checkbox.
@@ -883,6 +941,13 @@ export function OctreePointCloud({
   // dropped this cloud from 42 loaded tiles to 3 (722k points to 143k), which
   // reads as the crop having eaten ~80% of the cloud that it never touched.
   // The masking work is bounded by the point budget regardless of depth.
+  // Keyed on `clipBox` ONLY — deliberately not on the slab.
+  //
+  // A crop preview trades detail for responsiveness while a gizmo drags. A
+  // cross-section must NOT: the entire argument for the workflow (and what
+  // ArcGIS does) is that the slab already bounds the point count, so the
+  // section renders at full resolution. Implementing the slab as a clip BOX
+  // would have silently inherited this cap and rendered every section sparse.
   const cropPreviewActive = !!clipBox;
   useEffect(() => {
     if (!octree) return;
