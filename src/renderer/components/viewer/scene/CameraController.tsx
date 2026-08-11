@@ -995,6 +995,26 @@ export function CameraController({
     (window as any).__resetPointCloudCamera = resetCamera;
     (window as any).__snapToView = snapToView;
     (window as any).__orientToAxis = orientToAxis;
+    // Look at a cross-section face-on. A one-shot imperative move, NOT a
+    // per-frame override: the section's projection is pinned by
+    // SectionProjectionOverride, but the user must still be able to nudge the
+    // view, so the pose is set once here and then left alone. Stepping the slab
+    // calls this again, which TRANSLATES the camera without rotating or
+    // rezooming — what makes stepping feel like flipping pages.
+    (window as any).__viewSlab = (
+      eye: { x: number; y: number; z: number },
+      target: { x: number; y: number; z: number },
+    ) => {
+      camera.position.set(eye.x, eye.y, eye.z);
+      camera.up.set(0, 0, 1);
+      if (controlsRef.current) {
+        controlsRef.current.target.set(target.x, target.y, target.z);
+        controlsRef.current.update();
+      } else {
+        camera.lookAt(target.x, target.y, target.z);
+      }
+      camera.updateMatrixWorld();
+    };
     (window as any).__frameSelection = frameSelection;
     (window as any).__frameSceneOrigin = frameSceneOrigin;
     // Test hook: read live camera + controls + scene state without poking
@@ -1109,6 +1129,7 @@ export function CameraController({
       delete (window as any).__resetPointCloudCamera;
       delete (window as any).__snapToView;
       delete (window as any).__orientToAxis;
+      delete (window as any).__viewSlab;
       delete (window as any).__frameSelection;
       delete (window as any).__frameSceneOrigin;
       delete (window as any).__getCameraState;

@@ -143,7 +143,7 @@ export interface OctreePointCloudProps {
    * whole argument for the workflow is that the slab already bounds the point
    * count (this is what ArcGIS does), so degrading it would defeat the purpose.
    */
-  slabPlanes?: THREE.Plane[] | null;
+  slabBoxMatrix?: THREE.Matrix4 | null;
   // World-space translation for this cloud (the Translate tool / T-modal value).
   // The PointCloudOctree is attached directly to the scene root (not inside the
   // parent's React `<group position>`), so the group transform does NOT reach it
@@ -282,7 +282,7 @@ export function OctreePointCloud({
   labelOverlayRef = null,
   labelCommittedSlug = null,
   labelIndexScheme = null,
-  slabPlanes = null,
+  slabBoxMatrix = null,
   cropMask = null,
   translation,
   rotation,
@@ -773,7 +773,7 @@ export function OctreePointCloud({
     | { mode: 'none' }
     | { mode: 'crop-box'; boxes: any[]; invert: boolean }
     | { mode: 'delete-union'; boxes: any[] }
-    | { mode: 'slab'; planes: THREE.Plane[] };
+    | { mode: 'slab'; boxes: any[] };
 
   // Identity key for the oriented-box union, so the effect re-runs only when
   // the boxes actually move (matrices are new objects every parent render).
@@ -781,29 +781,37 @@ export function OctreePointCloud({
     .map(b => b.matrix.elements.map(e => e.toFixed(4)).join(','))
     .join('|');
   // Same idea for the slab: planes are new objects each render, so key on value.
-  const slabPlanesKey = (slabPlanes ?? [])
-    .map(p => `${p.normal.x.toFixed(6)},${p.normal.y.toFixed(6)},${p.normal.z.toFixed(6)},${p.constant.toFixed(6)}`)
-    .join('|');
+  const slabPlanesKey = slabBoxMatrix
+    ? slabBoxMatrix.elements.map(e => e.toFixed(4)).join(',')
+    : '';
 
   const clipState = useMemo<ClipState>(() => {
-    if (slabPlanes && slabPlanes.length > 0) {
-      // Planes AND-intersect in the shader, which is exactly a slab, and they
-      // can only ever CLEAR `insideAny` — so under CLIP_OUTSIDE with no volumes
-      // present the planes alone decide and out-of-slab points are culled.
+    if (slabBoxMatrix) {
+      // A slab as an oriented clip BOX, not clip planes.
       //
-      // The planes are world-space but the cloud renders at world − displayOffset,
-      // so translate each plane into the display frame (a plane shifts by
-      // subtracting normal·offset from its constant). Same round trip the crop
-      // box does above.
-      const dx = displayOffset?.x ?? 0;
-      const dy = displayOffset?.y ?? 0;
-      const dz = displayOffset?.z ?? 0;
-      const planes = slabPlanes.map((pl) => {
-        const p = pl.clone();
-        p.constant += p.normal.x * dx + p.normal.y * dy + p.normal.z * dz;
-        return p;
-      });
-      return { mode: 'slab', planes };
+      // potree declares `uniform vec4 clipPlanes[max_clip_planes]` and the
+      // shader logic is correct, but the plane path could not be made to cull in
+      // practice: define set, clipPlaneCount=4, correct normals uploaded, and
+      // points still drew. Clip BOXES are the path crop and erase already use
+      // successfully every day, and a slab is exactly an oriented box — so use
+      // the mechanism that is known to work rather than keep pushing on one
+      // that is not exercised anywhere else in the codebase.
+      const matrix = slabBoxMatrix.clone();
+      // World → display frame, matching the crop box above.
+      matrix.premultiply(new THREE.Matrix4().makeTranslation(
+        -(displayOffset?.x ?? 0), -(displayOffset?.y ?? 0), -(displayOffset?.z ?? 0),
+      ));
+      const inverse = matrix.clone().invert();
+      const position = new THREE.Vector3().setFromMatrixPosition(matrix);
+      return {
+        mode: 'slab',
+        boxes: [{
+          box: new THREE.Box3(
+            new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5),
+          ),
+          inverse, matrix, position,
+        }],
+      };
     }
     if (clipBox) {
       // `createClipBox(size, position)` takes a SIZE vector (not min/max) and a
@@ -871,27 +879,19 @@ export function OctreePointCloud({
         m.setClipBoxes([]);
         m.clipMode = ClipMode.DISABLED;
       }
-      if (m.clippingPlanes?.length) m.clippingPlanes = [];
       return;
     }
     if (clipState.mode === 'slab') {
-      // potree has no public setClipPlanes: its material reads the INHERITED
-      // three.js `clippingPlanes` property in syncClippingPlanes(), which
-      // updateMaterial() calls every frame — so assigning it is enough, and the
-      // shader define flips on as soon as the count goes non-zero.
-      //
-      // Any box volume must be cleared: boxes OR into `insideAny`, so leaving a
-      // stale one would REVEAL points outside the slab rather than hide them.
-      if (m.numClipBoxes > 0) m.setClipBoxes([]);
-      m.clippingPlanes = clipState.planes;
-      // CLIP_OUTSIDE with no volumes present: `hasVolumeClip` is false, so
-      // `insideAny` starts true and the planes alone decide. Points failing any
-      // plane are culled — exactly a slab.
+      // CLIP_OUTSIDE with the slab box: keep what is inside, cull the rest.
+      m.setClipBoxes(clipState.boxes);
       m.clipMode = ClipMode.CLIP_OUTSIDE;
+      if (data.octree?.cacheId) {
+        ((globalThis as any).__octreeClipState ??= {})[data.octree.cacheId] = {
+          mode: 'slab', numClipBoxes: m.numClipBoxes ?? null, clipMode: m.clipMode,
+        };
+      }
       return;
     }
-    // Leaving slab mode: drop the planes or they keep culling.
-    if (m.clippingPlanes?.length) m.clippingPlanes = [];
     m.setClipBoxes(clipState.boxes);
     // crop-box: CLIP_OUTSIDE keeps what's inside the box; `invert` flips it to
     // "discard what's inside", matching the Crop tool's Keep-Outside checkbox.

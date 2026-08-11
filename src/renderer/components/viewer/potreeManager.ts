@@ -111,6 +111,14 @@ export function updateAllPointClouds(camera: THREE.Camera, renderer: THREE.WebGL
   }
   if (active.length > 0) {
     manager.updatePointClouds(active.map((e) => e.octree), camera, renderer);
+    (globalThis as any).__potreeClipLive = active.map((e) => {
+      const m = (e.octree as any).material ?? {};
+      return {
+        numClipPlanes: m.numClipPlanes ?? 0,
+        numClipBoxes: m.numClipBoxes ?? 0,
+        clipMode: m.clipMode ?? null,
+      };
+    });
   }
   // After the shared pass, so every callback sees final visibleNodes.
   for (const entry of active) entry.afterUpdate?.();

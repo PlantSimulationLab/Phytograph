@@ -86,7 +86,7 @@ import {
 } from '../lib/cropGeometry';
 import { projectionKindOf } from '../lib/cameraRay';
 import {
-  slabToPlanes, slabPredicate, slabToPayload, stepSlab, slabCoverage, slabCenter,
+  slabToBox, slabPredicate, slabToPayload, stepSlab, slabCoverage, slabCenter,
   defaultSlabForBounds, slabViewPose,
   type SlabRegion, type SlabStepMode,
 } from '../lib/crossSection';
@@ -2720,6 +2720,11 @@ export default function PointCloudViewer({
     // re-pointed at the latest implementation on every render, so this stable
     // wrapper never goes stale. Used by the View → Fit to Selection app menu.
     (window as any).__zoomToSelection = () => zoomToSelectionRef.current();
+    // E2E seam: place a slab with EXACT geometry. Two viewport clicks can only
+    // give screen-derived coordinates, which is fine for testing the gesture but
+    // useless for asserting hard point counts — and hard counts are the only way
+    // to prove the section actually bounds what a stroke paints.
+    (window as any).__setSlab = (next: SlabRegion) => setSlab(next);
     // E2E seams for the labelling preview. The overlay's own __labelOverlay
     // fact counts the CPU buffer, which is filled in EVERY colour mode — it
     // cannot tell you whether the shader actually SAMPLES it. These two expose
@@ -2735,6 +2740,7 @@ export default function PointCloudViewer({
       delete (window as any).__handleRedo;
       delete (window as any).__openExportPanel;
       delete (window as any).__zoomToSelection;
+      delete (window as any).__setSlab;
     };
   }, [handleUndo, handleRedo, closeAllToolPanels, selectedIds, colorModeFor, setCloudColorMode]);
 
@@ -3796,9 +3802,9 @@ export default function PointCloudViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionTargetCloud, editStates]);
 
-  /** GPU clip planes for the active slab. Null when no section is active. */
-  const slabPlanes = useMemo(
-    () => (sectionTargetCloud && slab ? slabToPlanes(slab) : null),
+  /** Oriented clip-box transform for the active slab. Null when no section. */
+  const slabBoxMatrix = useMemo(
+    () => (sectionTargetCloud && slab ? slabToBox(slab).matrix : null),
     [sectionTargetCloud, slab],
   );
 
@@ -15111,7 +15117,7 @@ export default function PointCloudViewer({
                     labelTargetCloud?.id === cloud.id ? labelOverlayRef : null
                   }
                   labelCommittedSlug={labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE}
-                  slabPlanes={sectionTargetCloud?.id === cloud.id ? slabPlanes : null}
+                  slabBoxMatrix={sectionTargetCloud?.id === cloud.id ? slabBoxMatrix : null}
                   labelIndexScheme={
                     labelTargetCloud?.id === cloud.id ? labelIndexScheme : null
                   }
