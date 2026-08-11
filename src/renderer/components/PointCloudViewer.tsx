@@ -3839,11 +3839,16 @@ export default function PointCloudViewer({
   // After a stroke lands, re-arm the lasso so the user can paint again without
   // re-entering the tool.
   useEffect(() => {
-    if (labelTargetCloud && labelDrawing && !labelBusy && cropDrawState === 'idle') {
+    // Deliberately NOT gated on `labelBusy`: the paint is already on screen
+    // (optimistic), so making the user wait for the in-flight request before
+    // they can start the next lasso would put the round trip back into the
+    // interaction, just one step later. Strokes are applied in order server-side
+    // and each carries its own id, so overlapping requests reconcile correctly.
+    if (labelTargetCloud && labelDrawing && cropDrawState === 'idle') {
       setCropDrawState('drawing-polygon');
       setPolygonInProgress([]);
     }
-  }, [labelTargetCloud, labelDrawing, labelBusy, cropDrawState]);
+  }, [labelTargetCloud, labelDrawing, cropDrawState]);
 
   // Seed the palette when the tool opens on a cloud: prefer one already bound to
   // this cloud (so re-opening keeps the user's own classes), else the wood/leaf
@@ -3884,6 +3889,30 @@ export default function PointCloudViewer({
       toClass: labelActiveClass,
       fromClasses: labelFromClasses ? [...labelFromClasses] : undefined,
     };
+    const before: LabelEditState = {
+      strokes: labelStrokes,
+      activeClass: labelActiveClass,
+      visibleClasses: [...labelVisibleClasses],
+      paletteId: palette.id,
+      dirty: labelDirty,
+    };
+    const nextStrokes = [...labelStrokes, stroke];
+
+    // PAINT FIRST, confirm after.
+    //
+    // The overlay is driven by `labelStrokes` and is entirely client-side, so
+    // appending here makes the preview appear on the next frame — a ~16 ms pass
+    // over the loaded tiles. Waiting for the backend first (as this did
+    // originally) meant the user stared at an unchanged viewport for the whole
+    // HTTP round trip PLUS a full-resolution O(N) projection of the entire
+    // cloud: on a 50 M-point scan that is ~25x the work the renderer does, since
+    // the renderer only ever touches the ~2 M loaded points. That defeated the
+    // entire purpose of having a client-side overlay.
+    //
+    // The backend stays the source of truth: its reply supplies the authoritative
+    // class counts, and a failure rolls the stroke back below.
+    setLabelStrokes(nextStrokes);
+    setLabelDirty(true);
     setLabelBusy(true);
     try {
       const res = await labelCloudRegion(sessionId, [{
@@ -3893,26 +3922,25 @@ export default function PointCloudViewer({
         stroke_id: strokeId,
       }]);
 
-      const before: LabelEditState = {
-        strokes: labelStrokes,
-        activeClass: labelActiveClass,
-        visibleClasses: [...labelVisibleClasses],
-        paletteId: palette.id,
-        dirty: labelDirty,
-      };
-      const nextStrokes = [...labelStrokes, stroke];
       const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
-
-      setLabelStrokes(nextStrokes);
       setLabelClassCounts(
         Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
       );
-      setLabelDirty(true);
+      // Trust the backend's surviving history length: its stack is byte-bounded
+      // and may have evicted older entries, in which case the renderer's list is
+      // longer than anything it can still undo.
+      if (res.label_edit_count < nextStrokes.length) {
+        setLabelStrokes((prev) => prev.slice(0, res.label_edit_count));
+      }
       scene.commit({
         label: 'label points',
         actions: [{ t: 'labelEdit', id: cloud.id, slug: res.slug, before, after }],
       });
     } catch (err) {
+      // Roll the optimistic paint back so the viewport can never show a stroke
+      // the session does not actually carry.
+      setLabelStrokes((prev) => prev.filter((x) => x.strokeId !== strokeId));
+      setLabelDirty(before.dirty ?? false);
       showToast({ title: describeBackendError(err, 'Labelling').message, type: 'error' });
     } finally {
       setLabelBusy(false);
@@ -3967,6 +3995,25 @@ export default function PointCloudViewer({
     };
   }, []);
 
+  /**
+   * Cheap world-space AABB for a stroke, so the overlay can skip tiles the
+   * stroke cannot possibly touch (octreeLabelOverlay's per-stroke rejection).
+   *
+   * A BOX region has an exact one. A SCREEN-SPACE region does not: its volume is
+   * the frustum through the polygon, unbounded in depth, and any box we derived
+   * would either be wrong or be the whole scene. Returning null there is honest —
+   * the overlay then tests every tile, which is what it did before. The win is
+   * real for box strokes and for anything future that carries bounds (the Phase 3
+   * sphere brush has an exact AABB).
+   */
+  const strokeAabb = useCallback((region: PendingDeleteRegion): THREE.Box3 | null => {
+    if (region.kind !== 'box') return null;
+    return new THREE.Box3(
+      new THREE.Vector3(region.min[0], region.min[1], region.min[2]),
+      new THREE.Vector3(region.max[0], region.max[1], region.max[2]),
+    );
+  }, []);
+
   // ── Live label preview ────────────────────────────────────────────────────
   //
   // Turn the pending stroke list into the per-tile overlay the octree renderer
@@ -3988,7 +4035,7 @@ export default function PointCloudViewer({
       const fromIndices = s.fromClasses
         ? new Set(s.fromClasses.map((v) => valueToIndex.get(v) ?? -1))
         : null;
-      return { predicate, aabb: null, toIndex, fromIndices };
+      return { predicate, aabb: strokeAabb(s.region), toIndex, fromIndices };
     });
     return {
       strokes,

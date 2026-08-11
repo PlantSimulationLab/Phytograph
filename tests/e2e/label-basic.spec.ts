@@ -134,6 +134,38 @@ test('painted points recolour IMMEDIATELY, without waiting for a commit', async 
   await expect(panel).toHaveAttribute('data-label-dirty', 'true');
 });
 
+test('the preview appears without waiting for the backend', async () => {
+  // The stroke is appended to the local list BEFORE the request is awaited, so
+  // the overlay repaints on the next frame rather than after a round trip plus
+  // a full-resolution O(N) scan of the whole cloud. Originally the await came
+  // first, which defeated the entire purpose of a client-side overlay.
+  //
+  // Asserted by ORDERING, not by a stopwatch. Verified against a sabotage that
+  // restored the await-then-paint version: on this 60-point fixture the backend
+  // replies in single-digit ms, so BOTH orderings look instant and a timing
+  // bound cannot separate them. What this test does pin is that the overlay is
+  // painted from the local stroke list and reaches a painted state at or before
+  // the backend-derived counts — a real regression (e.g. driving the overlay
+  // from the response) still fails it. The user-visible win is on large clouds,
+  // where the reply also waits on a full-resolution O(N) scan.
+  const { page, panel } = await openLabelTool();
+  await paintWholeViewport(page);
+
+  const t0 = Date.now();
+  await expect.poll(
+    async () => (await page.evaluate(() => (window as any).__labelOverlay))?.painted ?? 0,
+    { timeout: 15_000, intervals: [16, 16, 16] },
+  ).toBeGreaterThan(0);
+  const previewMs = Date.now() - t0;
+
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  const countsMs = Date.now() - t0;
+
+  // The preview must never LAG the backend-derived counts.
+  expect(previewMs).toBeLessThanOrEqual(countsMs);
+  expect(previewMs).toBeLessThan(3_000);
+});
+
 test('labels display even when the cloud was coloured by RGB', async () => {
   // The gap the first preview test missed. `__labelOverlay.painted` counts the
   // CPU buffer, which is filled correctly in EVERY colour mode — but the shader
