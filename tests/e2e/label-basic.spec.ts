@@ -134,6 +134,57 @@ test('painted points recolour IMMEDIATELY, without waiting for a commit', async 
   await expect(panel).toHaveAttribute('data-label-dirty', 'true');
 });
 
+test('labels display even when the cloud was coloured by RGB', async () => {
+  // The gap the first preview test missed. `__labelOverlay.painted` counts the
+  // CPU buffer, which is filled correctly in EVERY colour mode — but the shader
+  // only SAMPLES that slot under scalar/INTENSITY_GRADIENT. On a cloud coloured
+  // by RGB (any real scan) the labels were computed, uploaded, and then not
+  // drawn: counts moved, viewport never changed. tiny.xyz has no colour, so the
+  // original test sat in a mode that happened to work.
+  const { page, panel } = await openLabelTool();
+
+  // Force the cloud into a mode that does NOT read the intensity slot, the way
+  // a real coloured scan arrives.
+  await page.evaluate(() => (window as any).__setCloudColorMode?.('rgb'));
+
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+
+  // Assert on what the MATERIAL was actually built with, published by the
+  // renderer itself. A seam that echoed the parent's intent would be
+  // self-confirming — verified: with the scalar override reverted, this fails
+  // while every other test still passes.
+  //
+  // INTENSITY_GRADIENT (2) is the only pointColorType that samples the
+  // intensity slot the overlay writes into; under RGB the labels are uploaded
+  // and never drawn.
+  // Key the lookup to THIS cloud's octree. Picking an arbitrary entry made the
+  // assertion depend on which clouds an earlier test left mounted in the shared
+  // session — green alone, flaky in a full run.
+  await expect.poll(
+    async () => page.evaluate(() => {
+      const all = (window as any).__octreeRenderMode ?? {};
+      const modes = Object.values(all) as Array<
+        { colorMode?: string; scalarField?: string | null }
+      >;
+      // Exactly one cloud is labelled, so the labelled render mode is the one
+      // reporting the manual_class field.
+      // Report the LABEL-mode cloud if one exists, else the cloud that is
+      // actually mounted — the fallback must show the wrong state rather than
+      // hide it, or the sabotage check below would pass on a missing entry.
+      const labelled = modes.find((m) => m.scalarField === 'manual_class');
+      const entry = labelled ?? modes[modes.length - 1];
+      return entry
+        ? { colorMode: entry.colorMode ?? null, scalarField: entry.scalarField ?? null }
+        : null;
+    }),
+    { timeout: 15_000 },
+  ).toEqual({ colorMode: 'scalar', scalarField: 'manual_class' });
+
+  const stats = await page.evaluate(() => (window as any).__labelOverlay);
+  expect(stats.painted).toBe(stats.total);
+});
+
 test('undo removes the preview immediately too', async () => {
   const { page, panel } = await openLabelTool();
   await paintWholeViewport(page);
@@ -239,6 +290,61 @@ test('commit bakes the labels into the cloud and clears the dirty flag', async (
   await expect(panel).toHaveAttribute('data-labelled-count', '60');
   const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
   await expect(row).toHaveAttribute('data-point-count', '60');
+});
+
+test('the lasso can be disarmed to orbit, by button and by L', async () => {
+  // Without this the tool is unusable on real data: every viewport click is a
+  // lasso vertex, so there is no way to reframe between strokes.
+  const { page, panel } = await openLabelTool();
+  await expect(panel).toHaveAttribute('data-label-drawing', 'true');
+  await expect(page.getByTestId('crop-polygon-overlay')).toBeVisible();
+
+  // Button disarms: the lasso overlay goes away, so drags reach the camera.
+  await page.getByTestId('label-mode-toggle').click();
+  await expect(panel).toHaveAttribute('data-label-drawing', 'false');
+  await expect(page.getByTestId('crop-polygon-overlay')).toHaveCount(0);
+  // The panel stays open — the class selection is not lost.
+  await expect(panel).toBeVisible();
+
+  // 'L' re-arms it.
+  await page.keyboard.press('l');
+  await expect(panel).toHaveAttribute('data-label-drawing', 'true');
+  await expect(page.getByTestId('crop-polygon-overlay')).toBeVisible();
+
+  // ...and disarms again, so the shortcut is a true toggle.
+  await page.keyboard.press('l');
+  await expect(panel).toHaveAttribute('data-label-drawing', 'false');
+
+  // Re-arm and confirm painting still works after the round trip.
+  await page.getByTestId('label-mode-toggle').click();
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+});
+
+test('closing the panel disarms the tool — the lasso stops accepting clicks', async () => {
+  // The panel closing is not enough: if the tool stays armed, the toolbar button
+  // still reads active and viewport clicks keep dropping polygon vertices on a
+  // tool the user believes is shut.
+  const { page, panel } = await openLabelTool();
+
+  const toolBtn = page.getByTestId('tool-label');
+  const overlay = page.getByTestId('crop-polygon-overlay');
+  await expect(overlay).toBeVisible();
+
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+
+  // The lasso overlay is gone, so a viewport click cannot place a vertex...
+  await expect(overlay).toHaveCount(0);
+  // ...and the toolbar no longer shows the tool as active.
+  await expect(toolBtn).not.toHaveAttribute('data-active', 'true');
+
+  // A click in the middle of the viewport places nothing.
+  const canvas = page.locator('canvas').first();
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error('viewer canvas has no bounding box');
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(page.getByTestId('crop-polygon-overlay')).toHaveCount(0);
 });
 
 test('uncommitted strokes are flagged in the panel and before File > New', async () => {

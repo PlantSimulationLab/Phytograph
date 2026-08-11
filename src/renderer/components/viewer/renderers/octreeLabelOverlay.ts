@@ -252,7 +252,9 @@ export function clearLabelOverlayFromVisibleNodes(octree: any): void {
     const geom = node?.sceneNode?.geometry;
     if (geom) clearLabelOverlayFromGeometry(geom);
   }
-  if (octree) (globalThis as any).__labelOverlay = undefined;
+  // Always clear, even if the octree is already gone — a stale global would
+  // otherwise report counts for a cloud that no longer exists.
+  (globalThis as any).__labelOverlay = undefined;
 }
 
 /**

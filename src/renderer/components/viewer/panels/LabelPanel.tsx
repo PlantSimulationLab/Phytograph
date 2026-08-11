@@ -30,6 +30,9 @@ export interface LabelPanelProps {
   pendingStrokes: number;
   /** True when the octree is behind the label column. */
   dirty: boolean;
+  /** True while the lasso is armed (clicks place vertices, view is frozen). */
+  drawing: boolean;
+  onToggleDrawing: () => void;
   busy: boolean;
   onSelectClass: (value: number) => void;
   onToggleVisible: (value: number) => void;
@@ -50,6 +53,8 @@ export function LabelPanel({
   fromClasses,
   pendingStrokes,
   dirty,
+  drawing,
+  onToggleDrawing,
   busy,
   onSelectClass,
   onToggleVisible,
@@ -64,12 +69,21 @@ export function LabelPanel({
     .filter(([v]) => Number(v) !== 0)
     .reduce((n, [, c]) => n + c, 0);
 
+  const nameOf = (v: number) => classes.find((c) => c.value === v)?.label ?? `Class ${v}`;
+  const activeName = nameOf(activeClass);
+  const fromNames = fromClasses
+    ? [...fromClasses].map(nameOf).join(', ')
+    : '';
+  // "Paint X only over X" — the combination that silently does nothing.
+  const isNoOp = !!fromClasses && fromClasses.size === 1 && fromClasses.has(activeClass);
+
   return (
     <div
       data-testid="label-panel"
       data-active-class={activeClass}
       data-pending-strokes={pendingStrokes}
       data-label-dirty={dirty ? 'true' : 'false'}
+      data-label-drawing={drawing ? 'true' : 'false'}
       data-labelled-count={labelled}
       // Serialised counts, so a spec can assert on per-class totals without
       // reaching into the scene graph.
@@ -96,6 +110,23 @@ export function LabelPanel({
         </button>
       </div>
 
+      {/* Arm/disarm, mirroring the Erase tool's toggle. ON freezes the view and
+          makes clicks place lasso vertices; OFF hands the viewport back so the
+          user can orbit and reframe between strokes WITHOUT closing the tool and
+          losing their class selection. Without this the tool is unusable on real
+          data: every click is a vertex, so there is no way to look around. */}
+      <button
+        data-testid="label-mode-toggle"
+        onClick={onToggleDrawing}
+        className={`w-full mb-3 px-2 py-1.5 text-xs font-medium rounded transition-colors ${
+          drawing
+            ? 'bg-blue-600 hover:bg-blue-500 text-white'
+            : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
+        }`}
+      >
+        {drawing ? 'Drawing — view frozen (L)' : 'Start Drawing (L)'}
+      </button>
+
       <div className="flex items-center justify-between mb-2">
         <span className="text-[10px] text-neutral-400 truncate" title={paletteName}>
           {paletteName}
@@ -112,7 +143,15 @@ export function LabelPanel({
 
       {/* Class list. Clicking a row makes it the active class (1-9 do the same
           for the first nine); the eye toggles visibility; the dot toggles the
-          From-class gate. */}
+          From-class gate. The header names those last two columns — an unlabeled
+          dot next to an unlabeled eye gives no clue that one means "paint this"
+          and the other "paint over this". */}
+      <div className="flex items-center gap-1.5 px-1.5 pb-1 text-[9px] text-neutral-500 uppercase tracking-wide">
+        <span className="w-3" />
+        <span className="flex-1">Click a class to paint it</span>
+        <span title="Only paint over this class">over</span>
+        <span title="Show/hide this class">show</span>
+      </div>
       <div
         data-testid="label-class-list"
         className="max-h-56 overflow-y-auto mb-3 border border-neutral-700 rounded"
@@ -168,10 +207,22 @@ export function LabelPanel({
         })}
       </div>
 
-      {/* The From gate, stated in words — "repaint only X" is easy to set by
-          accident and confusing to debug if it is not visible. */}
+      {/* The active class and the From gate, stated as a SENTENCE.
+          The two are easy to confuse — one is what a stroke paints, the other is
+          what it is allowed to paint OVER — and the most natural-looking
+          combination (highlight a class AND set its own From dot) is a no-op by
+          construction: "paint X, but only over X". Spelling it out, and warning
+          on that exact case, is cheaper than expecting the icons to carry it. */}
       <div className="mb-3 text-[10px]">
-        <div className="text-neutral-400 mb-1">Repaint</div>
+        <div data-testid="label-rule" className="text-neutral-300 mb-1 leading-relaxed">
+          Painting <span className="text-white font-medium">{activeName}</span>
+          {' over '}
+          <span className="text-white font-medium">
+            {fromClasses === null
+              ? 'any visible class'
+              : fromNames || 'nothing'}
+          </span>
+        </div>
         <button
           data-testid="label-from-any"
           onClick={onSetFromAnyVisible}
@@ -182,9 +233,16 @@ export function LabelPanel({
           }`}
         >
           {fromClasses === null
-            ? 'Any visible class'
-            : `Only ${fromClasses.size} selected class${fromClasses.size === 1 ? '' : 'es'}`}
+            ? 'Paint over any visible class'
+            : 'Reset — paint over any visible class'}
         </button>
+        {isNoOp && (
+          <div data-testid="label-noop-warning" className="mt-1.5 text-amber-400">
+            This paints {activeName} only over points that are already
+            {' '}{activeName}, so it will do nothing. Clear the ◉ on that class,
+            or pick a different class to paint.
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-1.5">

@@ -2015,6 +2015,11 @@ export default function PointCloudViewer({
   // a stroke), so there is no new selection code here; the slab and the brush
   // land in later phases.
   const [showLabelPanel, setShowLabelPanel] = useState(false);
+  // Drawing MODE within the open Label tool, mirroring `eraseActive`. The tool
+  // can be open with the panel visible while the view stays interactive;
+  // toggling this ON freezes the view and makes clicks place lasso vertices.
+  // Starts ON so opening the tool is immediately useful, and `L` toggles it.
+  const [labelDrawing, setLabelDrawing] = useState(true);
   // Palette bound to the labelled cloud. Seeded from the cloud's OctreeRef when
   // the tool opens, else from the wood/leaf preset (the common correction case).
   const [labelPalette, setLabelPalette] = useState<ClassPalette | null>(null);
@@ -2668,6 +2673,10 @@ export default function PointCloudViewer({
     setTimeout(() => { isUndoingRef.current = false; }, 0);
   }, [scene]);
 
+  // Forward ref to the cloud being labelled — declared here because the window
+  // seams above are registered before labelTargetCloud exists.
+  const labelTargetCloudRef = useRef<{ id: string } | null>(null);
+
   // Expose viewer-scoped actions on window so the application menu (wired in
   // src/main/menu.ts) can dispatch to them via App.tsx without prop-drilling.
   // Matches the existing __resetPointCloudCamera / __snapToView pattern in
@@ -2684,13 +2693,23 @@ export default function PointCloudViewer({
     // re-pointed at the latest implementation on every render, so this stable
     // wrapper never goes stale. Used by the View → Fit to Selection app menu.
     (window as any).__zoomToSelection = () => zoomToSelectionRef.current();
+    // E2E seams for the labelling preview. The overlay's own __labelOverlay
+    // fact counts the CPU buffer, which is filled in EVERY colour mode — it
+    // cannot tell you whether the shader actually SAMPLES it. These two expose
+    // the render mode the selected cloud is really in, and let a spec put it
+    // into a mode that ignores the intensity slot (as a real RGB scan does).
+    (window as any).__setCloudColorMode = (mode: ColorMode, field?: string) => {
+      const id = Array.from(selectedIds)[0];
+      if (id) setCloudColorMode(id, field ? { mode, field } : { mode });
+    };
     return () => {
+      delete (window as any).__setCloudColorMode;
       delete (window as any).__handleUndo;
       delete (window as any).__handleRedo;
       delete (window as any).__openExportPanel;
       delete (window as any).__zoomToSelection;
     };
-  }, [handleUndo, handleRedo, closeAllToolPanels]);
+  }, [handleUndo, handleRedo, closeAllToolPanels, selectedIds, colorModeFor, setCloudColorMode]);
 
   // Build a world-space inclusion predicate for the active crop region.
   // Returns null when there's no usable region (mode mismatch / nothing
@@ -3743,7 +3762,13 @@ export default function PointCloudViewer({
   // whether the lasso should paint rather than crop, without re-creating itself
   // on every state change.
   const labelModeRef = useRef(false);
-  useEffect(() => { labelModeRef.current = !!labelTargetCloud; }, [labelTargetCloud]);
+  // Whether the tool was armed on the PREVIOUS run of the arm/disarm effect
+  // below, which owns this ref exclusively. See the comment there.
+  const labelArmedRef = useRef(false);
+  useEffect(() => {
+    labelModeRef.current = !!labelTargetCloud;
+    labelTargetCloudRef.current = labelTargetCloud ? { id: labelTargetCloud.id } : null;
+  }, [labelTargetCloud]);
 
   const labelPaletteRef = useRef<ClassPalette | null>(null);
   useEffect(() => { labelPaletteRef.current = labelPalette; }, [labelPalette]);
@@ -3779,6 +3804,11 @@ export default function PointCloudViewer({
   // therefore works unchanged.
   useEffect(() => {
     if (labelTargetCloud) {
+      // Reset the published overlay fact when (re)opening on a cloud, so it can
+      // never report the previous session's counts before the first frame.
+      (window as any).__labelOverlay = undefined;
+    }
+    if (labelTargetCloud && labelDrawing) {
       // Its OWN mode. Borrowing editMode==='crop' made the label tool literally
       // BE the crop tool: the Crop toolbar button lit up as active, the crop
       // box gizmo mounted behind the panel, and — worse — showCropPreview went
@@ -3789,22 +3819,31 @@ export default function PointCloudViewer({
       setCropDrawState('drawing-polygon');
       setPolygonInProgress([]);
       setCropPolygon(null);
-    } else if (labelModeRef.current) {
-      // Tool closed: leave draw mode so the crop overlay does not linger.
+    } else if (labelArmedRef.current) {
+      // Tool closed: disarm it. Without this the panel disappears but the lasso
+      // stays live — the toolbar button reads active and clicks in the viewport
+      // keep dropping polygon vertices on a tool the user thinks is shut.
+      //
+      // Guarded by its OWN ref, not labelModeRef: that one is updated by a
+      // separate effect on the same dependency, and effects run in declaration
+      // order, so it has ALREADY flipped to false by the time this runs — the
+      // branch never fired.
       setCropDrawState('idle');
       setPolygonInProgress([]);
+      setCropPolygon(null);
       setEditMode('none');
     }
-  }, [labelTargetCloud]);
+    labelArmedRef.current = !!labelTargetCloud;
+  }, [labelTargetCloud, labelDrawing]);
 
   // After a stroke lands, re-arm the lasso so the user can paint again without
   // re-entering the tool.
   useEffect(() => {
-    if (labelTargetCloud && !labelBusy && cropDrawState === 'idle') {
+    if (labelTargetCloud && labelDrawing && !labelBusy && cropDrawState === 'idle') {
       setCropDrawState('drawing-polygon');
       setPolygonInProgress([]);
     }
-  }, [labelTargetCloud, labelBusy, cropDrawState]);
+  }, [labelTargetCloud, labelDrawing, labelBusy, cropDrawState]);
 
   // Seed the palette when the tool opens on a cloud: prefer one already bound to
   // this cloud (so re-opening keeps the user's own classes), else the wood/leaf
@@ -4704,6 +4743,18 @@ export default function PointCloudViewer({
         if (!typing && editMode === 'erase') {
           e.preventDefault();
           setEraseActive(a => !a);
+        }
+      }
+      // 'L' arms/disarms the label lasso, mirroring 'E' for the erase brush.
+      // Without a quick disarm the tool swallows every viewport click, so there
+      // is no way to orbit between strokes.
+      if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const el = document.activeElement as HTMLElement | null;
+        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+          || el.tagName === 'SELECT' || el.isContentEditable);
+        if (!typing && showLabelPanel) {
+          e.preventDefault();
+          setLabelDrawing(d => !d);
         }
       }
       // Enter: while mid-polygon, close the polygon. Otherwise (in crop
@@ -14665,7 +14716,21 @@ export default function PointCloudViewer({
           // This cloud's OWN color mode (its override, else the scene default).
           // Every colour decision below reads these, not the global state, so
           // two clouds can sit in different modes at once.
-          const { mode: cloudColorMode, field: cloudScalarField } = colorModeFor(cloud.id);
+          const rawColorMode = colorModeFor(cloud.id);
+          // While the labelling tool is open on THIS cloud, force scalar mode.
+          //
+          // The overlay writes classes into the `intensity` attribute slot, but
+          // that slot is only ever SAMPLED under PointColorType.INTENSITY_GRADIENT
+          // — i.e. scalar mode. In 'rgb' / 'per-scan' / 'height' the shader
+          // ignores it entirely, so the labels are computed and uploaded and then
+          // simply not drawn: counts move in the panel, viewport never changes.
+          // The user's own colour choice is SUSPENDED, not overwritten — closing
+          // the tool restores it, because this is a render-time override rather
+          // than a write to the cloud's stored mode.
+          const isLabelTarget = labelTargetCloud?.id === cloud.id;
+          const { mode: cloudColorMode, field: cloudScalarField } = isLabelTarget
+            ? { mode: 'scalar' as const, field: MANUAL_CLASS_ATTRIBUTE }
+            : rawColorMode;
           // Keep the crop preview (hidden to-be-cropped points) alive while
           // the apply's backend round-trip is in flight. handleApplyCrop
           // flips editMode to 'none' immediately (to hide the box handles +
@@ -17874,6 +17939,8 @@ export default function PointCloudViewer({
             setLabelActiveClass(next.classes.find(c => c.value !== 0)?.value ?? 0);
             setLabelFromClasses(null);
           }}
+          drawing={labelDrawing}
+          onToggleDrawing={() => setLabelDrawing(v => !v)}
           onClose={() => setShowLabelPanel(false)}
         />
       )}

@@ -18,12 +18,22 @@ label anything you like.
    number keys `1`–`9` select the first nine classes.
 4. Draw a **lasso** around the points to label: click to place each corner, then
    press `Enter` (or double-click) to close it. Everything inside the lasso
-   takes the active class.
+   takes the active class, and recolours straight away.
 5. Repeat with different classes as needed. **Undo** removes the last stroke.
 6. Click **Commit** to save the labels into the point cloud.
 
 Each class row shows how many points currently carry it, so you can see the
 counts move as you work.
+
+!!! tip "Press `L` to look around"
+    While the lasso is armed every viewport click places a corner, so you can't
+    orbit. Press `L` — or click **Drawing — view frozen** — to disarm it, move
+    the camera freely, then press `L` again to carry on. The panel stays open
+    and your class selection is kept.
+
+The panel states what the next stroke will do in words, e.g.
+*"Painting **Leaf** over **any visible class**"*. Read that line if a stroke
+does not do what you expect.
 
 !!! warning "Commit before you close"
     Strokes are not saved until you press **Commit**. The panel shows a count of
@@ -49,15 +59,25 @@ Every set includes **Unclassified** (class 0), which is what points start as.
 
 ## Only repaint certain classes
 
-The small circle on each class row is a **repaint filter**. Switch it on for one
-or more classes and a stroke will only affect points already in those classes —
-everything else inside the lasso is left alone.
+The class list has two distinct controls, and it is worth being clear about
+which is which:
 
-This is what makes fast, rough lassos safe. To reclassify some leaf points as
-wood, filter to **Leaf** and paint freely: the ground and trunk points your
-lasso also covers are untouched.
+- **Clicking the row** picks the class a stroke **paints** (the highlighted row).
+- **The dot in the `over` column** picks which classes a stroke is allowed to
+  paint **over**.
 
-With no filter set, a stroke repaints any visible class.
+Switch the dot on for one or more classes and a stroke only affects points
+already in those classes — everything else inside the lasso is left alone. This
+is what makes fast, rough lassos safe: to reclassify some leaf points as wood,
+select **Wood** as the paint class, set the `over` dot on **Leaf**, and paint
+freely. The ground and trunk points your lasso also covers are untouched.
+
+With no dot set, a stroke repaints any visible class.
+
+!!! warning "Painting a class over itself does nothing"
+    Selecting **Wood** *and* setting the `over` dot on **Wood** means "paint wood
+    only where it is already wood" — a no-op. The panel warns you when the two
+    line up like this.
 
 ## Show and hide classes
 

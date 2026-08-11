@@ -507,7 +507,12 @@ export function OctreePointCloud({
       colorMode === 'scalar' && selectedScalarField
         ? data.octree?.attributeRanges?.[selectedScalarField]
         : undefined;
-    const scalarActive = !!scalarRange;
+    // The labelling overlay supplies its own range (dense palette indices), and
+    // it must work BEFORE the first commit — at which point the octree carries
+    // no `manual_class` attribute at all, so attributeRanges has no entry and
+    // the check above would leave scalar mode inactive, silently falling back to
+    // a solid colour with the painted classes invisible.
+    const scalarActive = !!scalarRange || !!labelIndexScheme;
     const m = octree.material;
 
     // Mutate newFormat directly. potree-core doesn't expose a setter for
@@ -704,6 +709,19 @@ export function OctreePointCloud({
       (m as any).updateShaderSource();
     }
     m.needsUpdate = true;
+
+    // E2E seam: what the material was ACTUALLY configured with. Published here,
+    // from inside the material effect, rather than by the parent — a seam that
+    // echoes the parent's intent is self-confirming and cannot detect the very
+    // bug it exists for (labels written into the intensity slot while the
+    // shader is in an RGB mode that never samples it).
+    if (data.octree?.cacheId) {
+      ((globalThis as any).__octreeRenderMode ??= {})[data.octree.cacheId] = {
+        colorMode,
+        pointColorType: (m as any).pointColorType,
+        scalarField: scalarActive ? (selectedScalarField ?? null) : null,
+      };
+    }
 
     setMaterialVersion(v => v + 1);
   }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax, labelIndexScheme]);

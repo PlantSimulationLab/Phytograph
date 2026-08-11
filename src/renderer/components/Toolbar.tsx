@@ -63,6 +63,10 @@ export function Toolbar({ commands, selection, title = 'Tools', groups = TOOL_GR
                   <button
                     key={cmd.id}
                     data-testid={cmd.testId ?? `tool-${cmd.id}`}
+                    // Exposed so a spec can assert a tool really disarmed —
+                    // closing a panel must not leave its button lit and its
+                    // viewport interaction still live.
+                    data-active={active ? 'true' : 'false'}
                     // While busy the action is in flight — ignore clicks so it
                     // can't be re-triggered, but keep the button enabled so its
                     // spinner stays full-opacity (disabled would grey it out).
