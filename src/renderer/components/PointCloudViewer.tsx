@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3} from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -85,6 +85,14 @@ import {
   polygonRegionFromCamera,
 } from '../lib/cropGeometry';
 import { projectionKindOf } from '../lib/cameraRay';
+import {
+  slabToPlanes, slabPredicate, slabToPayload, stepSlab, slabCoverage, slabCenter,
+  defaultSlabForBounds, slabViewPose,
+  type SlabRegion, type SlabStepMode,
+} from '../lib/crossSection';
+import { SlabWireframe } from './viewer/gizmos/SlabWireframe';
+import { SectionProjectionOverride } from './viewer/gizmos/SectionProjectionOverride';
+import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
 import {
   makePreset, defaultSlugForPreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
   type ClassPalette,
@@ -2014,6 +2022,22 @@ export default function PointCloudViewer({
   // polygon lasso as its selection primitive (draw → close → the region becomes
   // a stroke), so there is no new selection code here; the slab and the brush
   // land in later phases.
+  // ── Cross-section slab ────────────────────────────────────────────────────
+  // A thin vertical section the user paints inside. World-space and camera-free
+  // (see lib/crossSection.ts), which is why — unlike crop and erase — the camera
+  // never has to be frozen here.
+  const [showSectionPanel, setShowSectionPanel] = useState(false);
+  const [slab, setSlab] = useState<SlabRegion | null>(null);
+  // Two-click centreline placement, reusing BoxDrawRaycaster's ground picks.
+  const [slabDrawState, setSlabDrawState] = useState<'idle' | 'awaiting-a' | 'awaiting-b'>('idle');
+  const [slabFirstPoint, setSlabFirstPoint] = useState<{ x: number; y: number } | null>(null);
+  const [slabStepMode, setSlabStepMode] = useState<SlabStepMode>('half');
+  const [slabFixedStep, setSlabFixedStep] = useState(0);
+  // ON by default: the face-on ortho view is the point of the workflow. Turning
+  // it off lets the user orbit to inspect the SAME slab in 3-D, which the
+  // world-space region makes safe.
+  const [slabLocked, setSlabLocked] = useState(true);
+
   const [showLabelPanel, setShowLabelPanel] = useState(false);
   // Drawing MODE within the open Label tool, mirroring `eraseActive`. The tool
   // can be open with the panel visible while the view stays interactive;
@@ -2400,6 +2424,9 @@ export default function PointCloudViewer({
     // Closing the label tool only hides the panel — uncommitted strokes persist
     // so they are not lost by opening another tool (same as point-pick).
     if (except !== 'label') setShowLabelPanel(false);
+    // Closing the section panel hides it but KEEPS the slab, so a user can open
+    // the label tool and keep working inside the section they set up.
+    if (except !== 'cross-section') setShowSectionPanel(false);
   }, []);
 
   // Get edit state for a cloud
@@ -3749,6 +3776,86 @@ export default function PointCloudViewer({
     setEditMode('none');
   }, [editMode, selectedIds, clouds, editStates, onUpdateCloud, eraseFrame, eraseBrushPx]);
 
+  // ── Cross-section derived state ───────────────────────────────────────────
+
+  /** The cloud the section applies to (single selection, session-backed). */
+  const sectionTargetCloud = useMemo(() => {
+    if (!showSectionPanel || selectedIds.size !== 1) return null;
+    return clouds.find(c => selectedIds.has(c.id)) ?? null;
+  }, [showSectionPanel, selectedIds, clouds]);
+
+  /** World bounds of that cloud, for seeding and for the coverage readout. */
+  const sectionBounds = useMemo(() => {
+    const b = sectionTargetCloud?.data.bounds;
+    if (!b) return null;
+    const t = getEditState(sectionTargetCloud!.id).translation;
+    return {
+      min: new THREE.Vector3(b.min.x + t.x, b.min.y + t.y, b.min.z + t.z),
+      max: new THREE.Vector3(b.max.x + t.x, b.max.y + t.y, b.max.z + t.z),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sectionTargetCloud, editStates]);
+
+  /** GPU clip planes for the active slab. Null when no section is active. */
+  const slabPlanes = useMemo(
+    () => (sectionTargetCloud && slab ? slabToPlanes(slab) : null),
+    [sectionTargetCloud, slab],
+  );
+
+  const slabCoverageInfo = useMemo(
+    () => (slab && sectionBounds
+      ? slabCoverage(slab, sectionBounds, slabStepMode, slabFixedStep)
+      : null),
+    [slab, sectionBounds, slabStepMode, slabFixedStep],
+  );
+
+  /**
+   * Move the camera to look at the slab face-on. One-shot imperative write, not
+   * a per-frame override — the user must still be able to nudge the view.
+   */
+  const viewSlabFaceOn = useCallback((s: SlabRegion) => {
+    const camera = polygonCameraRef.current;
+    const target = slabCenter(s);
+    const distance = Math.max(
+      camera ? camera.position.distanceTo(target) : 0,
+      Math.max(s.zMax - s.zMin, 1) * 2,
+    );
+    const pose = slabViewPose(s, distance);
+    const off = displayOffsetRef.current;
+    (window as any).__viewSlab?.(
+      { x: pose.eye.x - (off?.x ?? 0), y: pose.eye.y - (off?.y ?? 0), z: pose.eye.z - (off?.z ?? 0) },
+      { x: pose.target.x - (off?.x ?? 0), y: pose.target.y - (off?.y ?? 0), z: pose.target.z - (off?.z ?? 0) },
+    );
+  }, []);
+
+  /** Second click of the centreline: build the slab and frame it. */
+  const commitSlabCentreline = useCallback((ax: number, ay: number, bx: number, by: number) => {
+    if (!sectionBounds) return;
+    const seed = defaultSlabForBounds(sectionBounds);
+    const next: SlabRegion = {
+      ...seed,
+      a: { x: ax, y: ay },
+      b: { x: bx, y: by },
+      offset: 0,
+    };
+    setSlab(next);
+    setSlabDrawState('idle');
+    setSlabFirstPoint(null);
+    if (slabLocked) viewSlabFaceOn(next);
+  }, [sectionBounds, slabLocked, viewSlabFaceOn]);
+
+  const handleSlabStep = useCallback((dir: 1 | -1) => {
+    setSlab(prev => {
+      if (!prev) return prev;
+      const next = stepSlab(prev, dir, slabStepMode, slabFixedStep);
+      // The camera TRANSLATES with the slab — no rotation, no zoom change. That
+      // is what makes stepping feel like flipping pages rather than
+      // re-navigating, and it is why the pose is derived from the slab.
+      if (slabLocked) viewSlabFaceOn(next);
+      return next;
+    });
+  }, [slabStepMode, slabFixedStep, slabLocked, viewSlabFaceOn]);
+
   // ── Manual labelling ──────────────────────────────────────────────────────
 
   // The cloud being labelled (single selection, session-backed).
@@ -3935,11 +4042,16 @@ export default function PointCloudViewer({
     if (!cloud || !sessionId || !palette) return;
 
     const strokeId = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    // A stroke drawn inside a cross-section is bounded by it. Captured on the
+    // stroke (not read live) so undo/redo replays the section the user actually
+    // painted in, even after they have stepped the slab on.
+    const activeSlab = sectionTargetCloud?.id === cloud.id ? slab : null;
     const stroke: LabelStroke = {
       strokeId,
       region,
       toClass: labelActiveClass,
       fromClasses: labelFromClasses ? [...labelFromClasses] : undefined,
+      slab: activeSlab ? slabToPayload(activeSlab) : undefined,
     };
     const before: LabelEditState = {
       strokes: labelStrokes,
@@ -3971,6 +4083,7 @@ export default function PointCloudViewer({
         region: region as CropOctreeRegion,
         to_class: stroke.toClass,
         ...(stroke.fromClasses ? { from_classes: stroke.fromClasses } : {}),
+        ...(stroke.slab ? { slab: stroke.slab as unknown as CropOctreeRegion } : {}),
         stroke_id: strokeId,
       }], palette.slug);
 
@@ -4095,7 +4208,22 @@ export default function PointCloudViewer({
     const { valueToIndex } = paletteIndexMaps(labelPalette);
     const unlabeledIndex = valueToIndex.get(UNCLASSIFIED_VALUE) ?? 0;
     const strokes = labelStrokes.map((s) => {
-      const predicate = buildRegionPredicate(s.region);
+      const regionTest = buildRegionPredicate(s.region);
+      // AND the slab into the preview predicate. Without this the overlay would
+      // paint the points behind the section that the backend correctly refuses,
+      // and preview and result would disagree.
+      const slabTest = s.slab
+        ? slabPredicate({
+            kind: 'slab',
+            a: { x: s.slab.a[0], y: s.slab.a[1] },
+            b: { x: s.slab.b[0], y: s.slab.b[1] },
+            depth: s.slab.depth, zMin: s.slab.zMin, zMax: s.slab.zMax,
+            offset: s.slab.offset,
+          })
+        : null;
+      const predicate = slabTest
+        ? (x: number, y: number, z: number) => regionTest(x, y, z) && slabTest(x, y, z)
+        : regionTest;
       const toIndex = valueToIndex.get(s.toClass) ?? unlabeledIndex;
       const fromIndices = s.fromClasses
         ? new Set(s.fromClasses.map((v) => valueToIndex.get(v) ?? -1))
@@ -5934,6 +6062,7 @@ export default function PointCloudViewer({
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true },
 
       // ── Segmentation ────────────────────────────────────────────────
+      { id: 'cloud-cross-section', name: 'Cross-section', keywords: ['section', 'slab', 'slice', 'profile', 'transect'], action: () => { closeAllToolPanels('cross-section'); setShowSectionPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
       { id: 'cloud-label', name: 'Label Points', keywords: ['label', 'classify', 'classification', 'class', 'paint', 'annotate', 'ground truth', 'manual'], action: () => { closeAllToolPanels('label'); setShowLabelPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel },
       { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Layers, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
       { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GitBranch, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
@@ -14982,6 +15111,7 @@ export default function PointCloudViewer({
                     labelTargetCloud?.id === cloud.id ? labelOverlayRef : null
                   }
                   labelCommittedSlug={labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE}
+                  slabPlanes={sectionTargetCloud?.id === cloud.id ? slabPlanes : null}
                   labelIndexScheme={
                     labelTargetCloud?.id === cloud.id ? labelIndexScheme : null
                   }
@@ -15558,6 +15688,33 @@ export default function PointCloudViewer({
         {/* Point picker. Armed from the Pick Point control; each click labels
             the point under the cursor. Picks across EVERY visible octree cloud
             plus the flat ones, so it needs no selection. */}
+        {/* Cross-section: two ground-plane clicks place the centreline, reusing
+            the crop tool's raycaster rather than a new gizmo. The wireframe
+            shows where the slab sits; the projection override flattens the view
+            so a 2-D lasso selects what it visually encloses. */}
+        {sectionTargetCloud && slabDrawState !== 'idle' && (
+          <BoxDrawRaycaster
+            groundZ={sectionBounds ? (sectionBounds.min.z + sectionBounds.max.z) / 2 : 0}
+            onPick={(x, y) => {
+              if (slabDrawState === 'awaiting-a') {
+                setSlabFirstPoint({ x, y });
+                setSlabDrawState('awaiting-b');
+              } else if (slabFirstPoint) {
+                commitSlabCentreline(slabFirstPoint.x, slabFirstPoint.y, x, y);
+              }
+            }}
+          />
+        )}
+        {sectionTargetCloud && slab && (
+          <SlabWireframe
+            slab={slab}
+            displayOffset={displayOffset}
+            dimmed={slabLocked}
+          />
+        )}
+        {sectionTargetCloud && slab && slabLocked && (
+          <SectionProjectionOverride slab={slab} />
+        )}
         {pointPickMode && (
           <PointPicker
             octrees={clouds.flatMap((c) => {
@@ -18017,6 +18174,37 @@ export default function PointCloudViewer({
       />
 
       {/* Ground Segmentation Panel */}
+      {sectionTargetCloud && (
+        <CrossSectionPanel
+          hasSlab={!!slab}
+          drawing={slabDrawState !== 'idle'}
+          thickness={slab?.depth ?? 0}
+          thicknessMin={sectionBounds ? Math.max((sectionBounds.max.z - sectionBounds.min.z) / 1000, 1e-4) : 0.001}
+          thicknessMax={sectionBounds ? Math.max(sectionBounds.max.y - sectionBounds.min.y, 1) : 100}
+          thicknessStep={slab ? Math.max(slab.depth / 10, 1e-4) : 0.01}
+          stepMode={slabStepMode}
+          fixedStep={slabFixedStep}
+          coverage={slabCoverageInfo}
+          locked={slabLocked}
+          onDraw={() => { setSlabDrawState('awaiting-a'); setSlabFirstPoint(null); }}
+          onThicknessChange={(v) => setSlab(prev => (prev ? { ...prev, depth: v } : prev))}
+          onStepModeChange={setSlabStepMode}
+          onFixedStepChange={setSlabFixedStep}
+          onStep={handleSlabStep}
+          onResetOffset={() => setSlab(prev => {
+            if (!prev) return prev;
+            const next = { ...prev, offset: 0 };
+            if (slabLocked) viewSlabFaceOn(next);
+            return next;
+          })}
+          onToggleLocked={() => setSlabLocked(v => {
+            const next = !v;
+            if (next && slab) viewSlabFaceOn(slab);
+            return next;
+          })}
+          onClose={() => setShowSectionPanel(false)}
+        />
+      )}
       {labelTargetCloud && labelPalette && (
         <LabelPanel
           classes={labelPalette.classes}

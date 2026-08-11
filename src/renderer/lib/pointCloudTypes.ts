@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationMethod, DemLayer } from '../utils/backendApi';
 import type { ScanParameters } from './scanParameters';
 import type { ClassPalette } from './classPalettes';
+import type { SlabRegionPayload } from './crossSection';
 
 // potree-core's RequestManager interface isn't re-exported from the package
 // root in v2.0.15. The shape is small and stable, so mirror it locally
@@ -266,6 +267,13 @@ export interface LabelStroke {
   region: PendingDeleteRegion;
   toClass: number;
   fromClasses?: number[];
+  /**
+   * Cross-section slab the stroke was drawn inside, INTERSECTED with `region`.
+   * The lasso says where on screen, the slab says how deep — so a stroke drawn
+   * in a section does not paint the points behind it. Captured per-stroke so
+   * undo replays the section that was actually active at the time.
+   */
+  slab?: SlabRegionPayload;
 }
 
 /**

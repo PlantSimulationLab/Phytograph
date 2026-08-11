@@ -41,6 +41,7 @@ export const TOOLS_MENU: ToolMenuSection[] = [
       { id: 'pick-point', label: 'Pick Point' },
       { id: 'cloud-crop', label: 'Crop Point Cloud' },
       { id: 'cloud-erase', label: 'Erase Brush' },
+      { id: 'cloud-cross-section', label: 'Cross-section' },
       { id: 'cloud-filter', label: 'Filter Points' },
       { id: 'cloud-resample', label: 'Resample Point Cloud' },
       { id: 'cloud-move-origin', label: 'Move to Origin' },

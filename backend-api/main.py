@@ -22177,6 +22177,16 @@ class LabelStroke(BaseModel):
     to_class: int
     from_classes: Optional[List[int]] = None
     stroke_id: str
+    # Optional cross-section slab the stroke was drawn inside. INTERSECTED with
+    # `region` rather than replacing it: the lasso says where on screen, the slab
+    # says how deep, and a stroke drawn in a section must not paint the points
+    # behind it. Carried per-stroke (not per-request) because the slab can be
+    # stepped between strokes in one batch.
+    #
+    # A dedicated field rather than a general and/or region combinator — that
+    # would mean canonicalisation, nesting rules and validation for a composition
+    # this is the only caller of.
+    slab: Optional[CropOctreeRegion] = None
 
 
 class LabelRegionRequest(BaseModel):
@@ -22924,6 +22934,8 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
     for stroke in request.strokes:
         rd = stroke.region.model_dump()
         _canonical_region(rd)
+        if stroke.slab is not None:
+            _canonical_region(stroke.slab.model_dump())   # validate (raises 400)
         if not (MANUAL_CLASS_MIN <= stroke.to_class <= MANUAL_CLASS_MAX):
             raise HTTPException(
                 status_code=400,
@@ -22969,6 +22981,10 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
         for stroke, rd in zip(request.strokes, region_dicts):
             select = _region_mask(sess.positions, rd, pixels=pixels_for(rd))
             select &= editable
+            if stroke.slab is not None:
+                # Depth bound from the cross-section. Closed-form and
+                # camera-free, so this matches the renderer's preview exactly.
+                select &= _region_mask(sess.positions, stroke.slab.model_dump())
             if stroke.from_classes is not None:
                 # np.rint before comparing: the column is float32 on disk and a
                 # LAS round-trip can leave an integer class as 4.999999. Same
