@@ -62,6 +62,10 @@ async function paintWholeViewport(page: LaunchedApp['page']) {
   const overlay = page.getByTestId('crop-polygon-overlay');
   await expect(overlay).toBeVisible();
   await expect(overlay).toHaveCSS('pointer-events', 'auto');
+  // Wait for the lasso to be RE-ARMED and empty before clicking. After a stroke
+  // the tool clears the polygon and re-arms on the next effect pass; clicking
+  // into that gap drops the first vertex, and the stroke silently never closes.
+  await expect(overlay.locator('circle')).toHaveCount(0, { timeout: 10_000 });
   const box = await overlay.boundingBox();
   if (!box) throw new Error('crop-polygon-overlay has no bounding box');
 

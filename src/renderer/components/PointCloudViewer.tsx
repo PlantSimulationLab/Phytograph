@@ -3774,7 +3774,9 @@ export default function PointCloudViewer({
   // paint/undo/commit result.
   const labelCountsSeqRef = useRef(0);
   const labelPaletteRef = useRef<ClassPalette | null>(null);
-  useEffect(() => { labelPaletteRef.current = labelPalette; }, [labelPalette]);
+  // Render-time, not an effect: paintLabelStroke reads this synchronously via
+  // the ref, so a post-paint effect could hand it the previous palette.
+  labelPaletteRef.current = labelPalette;
 
   // Uncommitted-stroke guard.
   //
@@ -3977,12 +3979,18 @@ export default function PointCloudViewer({
       setLabelClassCounts(
         Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
       );
-      // Trust the backend's surviving history length: its stack is byte-bounded
-      // and may have evicted older entries, in which case the renderer's list is
-      // longer than anything it can still undo.
-      if (res.label_edit_count < nextStrokes.length) {
-        setLabelStrokes((prev) => prev.slice(0, res.label_edit_count));
-      }
+      // Do NOT reconcile the stroke list against `label_edit_count` here.
+      //
+      // The two counts measure different things: the renderer's list is USER
+      // GESTURES, the backend's history is UNDOABLE CHANGES. A stroke that
+      // changes nothing — e.g. the From-class gate matched no points — is
+      // correctly not recorded server-side, so the counts legitimately diverge
+      // by one. Truncating on that difference deleted the user's own stroke
+      // right after they drew it, and made the next lasso appear to do nothing.
+      //
+      // Eviction (the byte-bounded history dropping OLD entries) is a real case,
+      // but it trims the FRONT of the stack, so comparing lengths cannot detect
+      // it and slicing the tail is the wrong repair regardless.
       scene.commit({
         label: 'label points',
         actions: [{ t: 'labelEdit', id: cloud.id, slug: res.slug, before, after }],
@@ -4002,7 +4010,13 @@ export default function PointCloudViewer({
   // closePolygonFrom is created once, so it must reach the CURRENT painter
   // through a ref rather than a captured closure.
   const paintLabelStrokeRef = useRef<typeof paintLabelStroke | null>(null);
-  useEffect(() => { paintLabelStrokeRef.current = paintLabelStroke; }, [paintLabelStroke]);
+  // Assigned during RENDER, not in an effect. An effect runs after paint, so a
+  // second lasso closed before it flushed would call the PREVIOUS closure —
+  // whose `labelStrokes` is the older array — and `[...old, stroke]` would come
+  // out the same length as before. Symptom: the stroke silently never lands,
+  // pending-strokes stays at 1, and the tool still looks armed. Writing a ref in
+  // render is safe here because it holds no state, only the latest callback.
+  paintLabelStrokeRef.current = paintLabelStroke;
 
   // World-space membership test for a committed region, mirroring exactly what
   // the backend's `_region_mask` does for the same payload — the preview and
@@ -4096,7 +4110,9 @@ export default function PointCloudViewer({
       unlabeledIndex,
     };
   }, [labelTargetCloud, labelPalette, labelStrokes]);
-  useEffect(() => { labelOverlayRef.current = labelOverlayState; }, [labelOverlayState]);
+  // Render-time: the per-frame overlay pass reads this ref, so an effect-delayed
+  // update costs a frame of stale preview after every stroke.
+  labelOverlayRef.current = labelOverlayState;
 
   // The categorical scheme the overlay's INDEX values colour through, so the
   // legend and the points agree while previewing.

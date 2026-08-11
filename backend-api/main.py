@@ -21676,7 +21676,12 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
         vals = np.asarray(las[name])
         if vals.size and np.any(vals != vals.flat[0]):  # not constant
             extras[slug] = vals.astype(np.float32)
-            extra_dims_meta.append({"slug": slug, "label": name})
+            # Label it "LAS <name>", not the bare name. PotreeConverter always
+            # emits its OWN built-in `classification` attribute (all zeros here,
+            # since it does not read our extra dims), so a bare label put two
+            # entries called "classification" in the colour-by list — one real,
+            # one empty, with nothing to tell them apart.
+            extra_dims_meta.append({"slug": slug, "label": f"LAS {name}"})
     return LasReadResult(
         positions=positions,
         colors=colors,
