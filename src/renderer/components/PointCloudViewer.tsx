@@ -2030,7 +2030,13 @@ export default function PointCloudViewer({
   const [slab, setSlab] = useState<SlabRegion | null>(null);
   // Two-click centreline placement, reusing BoxDrawRaycaster's ground picks.
   const [slabDrawState, setSlabDrawState] = useState<'idle' | 'awaiting-a' | 'awaiting-b'>('idle');
-  const [slabFirstPoint, setSlabFirstPoint] = useState<{ x: number; y: number } | null>(null);
+  // Mirror of the two-click draw state for the raycaster's mounted handler,
+  // which cannot see later renders. Assigned during render, not in an effect —
+  // an effect runs after paint and the second click can beat it.
+  const slabDrawRef = useRef<{
+    state: 'idle' | 'awaiting-a' | 'awaiting-b';
+    first: { x: number; y: number } | null;
+  }>({ state: 'idle', first: null });
   const [slabStepMode, setSlabStepMode] = useState<SlabStepMode>('half');
   const [slabFixedStep, setSlabFixedStep] = useState(0);
   // ON by default: the face-on ortho view is the point of the workflow. Turning
@@ -2424,9 +2430,15 @@ export default function PointCloudViewer({
     // Closing the label tool only hides the panel — uncommitted strokes persist
     // so they are not lost by opening another tool (same as point-pick).
     if (except !== 'label') setShowLabelPanel(false);
-    // Closing the section panel hides it but KEEPS the slab, so a user can open
-    // the label tool and keep working inside the section they set up.
-    if (except !== 'cross-section') setShowSectionPanel(false);
+    // The cross-section panel is deliberately NOT closed here.
+    //
+    // A section is a VIEW STATE — like the camera or the point budget — not a
+    // mode. Modes are mutually exclusive; view states are not. Treating it as a
+    // mode meant opening Label closed the section (losing the clip and the
+    // stroke bound), and reaching over to adjust thickness mid-labelling closed
+    // the Label panel and the user's class selection with it.
+    //
+    // It stacks below the active tool's panel instead (see the panel mount).
   }, []);
 
   // Get edit state for a cloud
@@ -3858,7 +3870,6 @@ export default function PointCloudViewer({
     };
     setSlab(next);
     setSlabDrawState('idle');
-    setSlabFirstPoint(null);
     if (slabLocked) viewSlabFaceOn(next);
   }, [sectionBounds, slabLocked, viewSlabFaceOn]);
 
@@ -6080,7 +6091,7 @@ export default function PointCloudViewer({
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true },
 
       // ── Segmentation ────────────────────────────────────────────────
-      { id: 'cloud-cross-section', name: 'Cross-section', keywords: ['section', 'slab', 'slice', 'profile', 'transect'], action: () => { closeAllToolPanels('cross-section'); setShowSectionPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
+      { id: 'cloud-cross-section', name: 'Cross-section', keywords: ['section', 'slab', 'slice', 'profile', 'transect'], action: () => setShowSectionPanel(v => !v), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
       { id: 'cloud-label', name: 'Label Points', keywords: ['label', 'classify', 'classification', 'class', 'paint', 'annotate', 'ground truth', 'manual'], action: () => { closeAllToolPanels('label'); setShowLabelPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel },
       { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Layers, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
       { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GitBranch, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
@@ -15714,11 +15725,19 @@ export default function PointCloudViewer({
           <BoxDrawRaycaster
             groundZ={sectionBounds ? (sectionBounds.min.z + sectionBounds.max.z) / 2 : 0}
             onPick={(x, y) => {
-              if (slabDrawState === 'awaiting-a') {
-                setSlabFirstPoint({ x, y });
+              // Read the draw state through a REF. The two clicks land on the
+              // same mounted raycaster, and a state read from this closure is
+              // the value from the render that mounted it — so the second click
+              // still saw 'awaiting-a' and just overwrote the first point,
+              // meaning a slab was never committed. Same stale-closure trap as
+              // paintLabelStroke and the overlay ref.
+              if (slabDrawRef.current.state === 'awaiting-a') {
+                slabDrawRef.current = { state: 'awaiting-b', first: { x, y } };
                 setSlabDrawState('awaiting-b');
-              } else if (slabFirstPoint) {
-                commitSlabCentreline(slabFirstPoint.x, slabFirstPoint.y, x, y);
+              } else if (slabDrawRef.current.first) {
+                const a = slabDrawRef.current.first;
+                slabDrawRef.current = { state: 'idle', first: null };
+                commitSlabCentreline(a.x, a.y, x, y);
               }
             }}
           />
@@ -18194,6 +18213,7 @@ export default function PointCloudViewer({
       {/* Ground Segmentation Panel */}
       {sectionTargetCloud && (
         <CrossSectionPanel
+          stacked={!!labelTargetCloud}
           hasSlab={!!slab}
           drawing={slabDrawState !== 'idle'}
           thickness={slab?.depth ?? 0}
@@ -18204,7 +18224,10 @@ export default function PointCloudViewer({
           fixedStep={slabFixedStep}
           coverage={slabCoverageInfo}
           locked={slabLocked}
-          onDraw={() => { setSlabDrawState('awaiting-a'); setSlabFirstPoint(null); }}
+          onDraw={() => {
+            slabDrawRef.current = { state: 'awaiting-a', first: null };
+            setSlabDrawState('awaiting-a');
+          }}
           onThicknessChange={(v) => setSlab(prev => (prev ? { ...prev, depth: v } : prev))}
           onStepModeChange={setSlabStepMode}
           onFixedStepChange={setSlabFixedStep}

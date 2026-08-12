@@ -107,10 +107,28 @@ the note above). Once committed they behave like any other scalar:
 - split the cloud into one cloud per class,
 - [export](import-export.md) them to LAS/LAZ.
 
-!!! note "Lasso selection cuts through the cloud"
-    A lasso is drawn on screen, so it selects every point inside it at **every
-    depth** — including points behind the ones you can see. On a dense canopy,
-    orbit to an angle where the points you want are not in front of anything
-    else, or hide the classes you have already finished.
+## Work in a cross-section
 
-    Depth-limited painting and a cross-section view are planned.
+A lasso is drawn on screen, so on its own it selects every point inside it at
+**every depth** — including the far side of the canopy you cannot see. A
+**cross-section** is the fix, and it is how professional LiDAR classification is
+normally done.
+
+1. Open **Tools › Pre-processing › Cross-section** and click **Draw section**.
+2. Click two points in the view to set the line the section runs along.
+3. Set **Thickness** thin enough that nothing hides behind anything.
+4. Open **Label Points** — the section stays active, and the panel says so.
+   Paint normally; strokes only affect points inside the section.
+5. Step through the cloud with **◀ ▶**. The default half-thickness step makes
+   consecutive sections overlap, so no point is skipped, and the
+   *"Section 7 of 42"* readout tells you when you have covered everything.
+
+The section is a **view**, not a mode: it stays in effect while you use other
+tools, and both panels are visible at once. Clear it from the notice in the
+Label panel, or close the section and press **Redraw section**.
+
+!!! note "Without a section, a lasso still cuts through"
+    If no section is active, orbit to an angle where the points you want are not
+    in front of anything else, or hide the classes you have already finished.
+
+    A depth-limited brush is planned as a further option.

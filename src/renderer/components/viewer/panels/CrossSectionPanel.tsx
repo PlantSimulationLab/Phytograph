@@ -5,9 +5,12 @@ import type { SlabStepMode } from '../../../lib/crossSection';
 // Presentational cross-section panel. All slab geometry and camera work lives
 // in PointCloudViewer / lib/crossSection.ts; this renders the controls.
 //
-// Kept separate from the labelling panel on purpose: a cross-section is a
-// reusable capability in its own right (TerraScan and ArcGIS both ship it as a
-// standalone view), so it should not be entangled with labelling state.
+// Separate from the labelling panel because a section is a VIEW STATE, not a
+// mode. It coexists with whatever tool is active — inspect a canopy with no tool
+// open, bound an erase stroke, check a QSM against its points, or (the main
+// case) bound a labelling stroke. Modes are mutually exclusive; view states are
+// not, which is why this panel does not participate in closeAllToolPanels and
+// stacks below the active tool's panel instead.
 
 const STEP_MODES: Array<{ id: SlabStepMode; label: string; hint: string }> = [
   { id: 'half', label: 'Half', hint: 'Half the thickness — sections overlap, so nothing is missed (recommended)' },
@@ -17,6 +20,12 @@ const STEP_MODES: Array<{ id: SlabStepMode; label: string; hint: string }> = [
 ];
 
 export interface CrossSectionPanelProps {
+  /**
+   * Push the panel down when another tool's panel occupies the top slot. The
+   * section is a view state that coexists with a tool rather than replacing it,
+   * so the two are visible at once and must not overlap.
+   */
+  stacked?: boolean;
   /** True once a centreline exists; false while the user is still drawing one. */
   hasSlab: boolean;
   drawing: boolean;
@@ -40,6 +49,7 @@ export interface CrossSectionPanelProps {
 }
 
 export function CrossSectionPanel({
+  stacked = false,
   hasSlab,
   drawing,
   thickness,
@@ -71,7 +81,9 @@ export function CrossSectionPanel({
       // z-20 keeps the panel above the z-10 lasso overlay, which fills the
       // viewport while drawing. Without it the overlay swallows every click here
       // and the panel cannot even be closed. See CropPanel / LabelPanel.
-      className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-20"
+      className={`absolute right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 z-20 ${
+        stacked ? 'top-[26rem]' : 'top-4'
+      }`}
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
         <span className="flex items-center gap-2">
