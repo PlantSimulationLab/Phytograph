@@ -6,6 +6,7 @@ import {
   slabViewPose, slabOrthoFrustum,
   slabStepDistance, stepSlab, slabCoverage,
   defaultSlabForBounds, slabToPayload,
+  slabFromCentreline, drawnSlabDepth, centrelineIsPreviewable,
   type SlabRegion,
 } from './crossSection';
 
@@ -282,5 +283,96 @@ describe('slabToPayload', () => {
       zMax: 10,
       offset: 2,
     });
+  });
+});
+
+describe('slabFromCentreline', () => {
+  const bounds = {
+    min: new THREE.Vector3(-10, -10, 0),
+    max: new THREE.Vector3(10, 10, 5),
+  };
+
+  it('puts the centreline exactly where it was drawn', () => {
+    const s = slabFromCentreline({ x: -3, y: 2 }, { x: 4, y: 2 }, bounds);
+    expect(s.a).toEqual({ x: -3, y: 2 });
+    expect(s.b).toEqual({ x: 4, y: 2 });
+    expect(s.offset).toBe(0);
+  });
+
+  it('spans the cloud vertically regardless of where the clicks landed', () => {
+    // Both clicks sit at one height; the section must still slice the whole
+    // tree rather than being clipped to the pick plane.
+    const s = slabFromCentreline({ x: 0, y: 0 }, { x: 6, y: 0 }, bounds);
+    expect(s.zMin).toBeLessThanOrEqual(bounds.min.z);
+    expect(s.zMax).toBeGreaterThanOrEqual(bounds.max.z);
+  });
+
+  it('derives thickness from the drawn length when none is given', () => {
+    const s = slabFromCentreline({ x: 0, y: 0 }, { x: 20, y: 0 }, bounds);
+    expect(s.depth).toBeCloseTo(1, 9);   // 20 / 20
+  });
+
+  it('honours an explicit depth — the preview holds it FIXED while dragging', () => {
+    // The whole point of the fixed-thickness preview: length grows with the
+    // drag, width does not. A depth that tracked the drag would splay the
+    // walls outward while the user is trying to aim.
+    const short = slabFromCentreline({ x: 0, y: 0 }, { x: 2, y: 0 }, bounds, 0.4);
+    const long = slabFromCentreline({ x: 0, y: 0 }, { x: 18, y: 0 }, bounds, 0.4);
+    expect(short.depth).toBeCloseTo(0.4, 9);
+    expect(long.depth).toBeCloseTo(0.4, 9);
+  });
+
+  it('matches what the committed slab would be, so preview cannot drift', () => {
+    // Preview and commit share this function; a preview that disagreed with
+    // the second click's result would be worse than no preview.
+    const a = { x: -2, y: 1 }, b = { x: 5, y: 4 };
+    expect(slabFromCentreline(a, b, bounds)).toEqual(slabFromCentreline(a, b, bounds));
+  });
+
+  it('never produces a non-positive thickness (the backend rejects it)', () => {
+    expect(slabFromCentreline({ x: 0, y: 0 }, { x: 0, y: 0 }, bounds).depth)
+      .toBeGreaterThan(0);
+    expect(slabFromCentreline({ x: 0, y: 0 }, { x: 5, y: 0 }, bounds, 0).depth)
+      .toBeGreaterThan(0);
+  });
+});
+
+describe('drawnSlabDepth', () => {
+  it('is a twentieth of the drawn length', () => {
+    expect(drawnSlabDepth(20, 9)).toBeCloseTo(1, 9);
+  });
+
+  it('falls back for a degenerate drag rather than returning zero', () => {
+    expect(drawnSlabDepth(0, 0.25)).toBe(0.25);
+  });
+
+  it('clamps to a positive floor even for an absurdly short line', () => {
+    expect(drawnSlabDepth(1e-5, 0.5)).toBeGreaterThan(0);
+  });
+});
+
+describe('centrelineIsPreviewable', () => {
+  const bounds = {
+    min: new THREE.Vector3(0, 0, 0),
+    max: new THREE.Vector3(100, 100, 10),
+  };
+
+  it('is false at the instant of the first click, before any movement', () => {
+    // Guards the degenerate box: a and b coincide, the tangent is unstable,
+    // and a zero-width flicker at the click point reads as a glitch.
+    expect(centrelineIsPreviewable({ x: 5, y: 5 }, { x: 5, y: 5 }, bounds)).toBe(false);
+  });
+
+  it('is true once the drag is a visible fraction of the cloud', () => {
+    expect(centrelineIsPreviewable({ x: 5, y: 5 }, { x: 45, y: 5 }, bounds)).toBe(true);
+  });
+
+  it('scales with the cloud, not an absolute distance', () => {
+    // 2 units is a real drag on a 10-unit cloud and noise on a 1000-unit one.
+    const drag = [{ x: 0, y: 0 }, { x: 2, y: 0 }] as const;
+    const small = { min: new THREE.Vector3(0, 0, 0), max: new THREE.Vector3(10, 10, 1) };
+    const huge = { min: new THREE.Vector3(0, 0, 0), max: new THREE.Vector3(1000, 1000, 1) };
+    expect(centrelineIsPreviewable(drag[0], drag[1], small)).toBe(true);
+    expect(centrelineIsPreviewable(drag[0], drag[1], huge)).toBe(false);
   });
 });

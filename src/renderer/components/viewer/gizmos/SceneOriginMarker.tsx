@@ -177,6 +177,23 @@ export function SceneOriginMarker({
     grp.getWorldPosition(worldPos);
     const scale = PIXEL_RADIUS * worldPerPixel(camera, camera.position, size.height, worldPos);
     if (scale > 0) grp.scale.setScalar(scale);
+    // E2E seam: the marker's APPARENT size is the whole contract ("a fixed
+    // number of pixels at any zoom, under any projection"), and it lives in a
+    // per-frame world scale the DOM cannot show. Publishing the world scale
+    // alongside the world-per-pixel lets a test assert the ratio — i.e. the
+    // pixel radius actually rendered — rather than trusting the projection.
+    (globalThis as any).__originMarkerScale = {
+      worldScale: scale,
+      worldPerPixel: scale > 0 ? scale / PIXEL_RADIUS : 0,
+      pixelRadius: PIXEL_RADIUS,
+      // The projection and viewport the scale was computed against, so a test
+      // can derive the CORRECT world-per-pixel independently and compare.
+      // Without these the only available check is worldScale / worldPerPixel,
+      // which is PIXEL_RADIUS by construction and passes with the bug present.
+      projection: Array.from(camera.projectionMatrix.elements),
+      viewportHeight: size.height,
+      cameraDistance: camera.position.distanceTo(worldPos),
+    };
   });
 
   const handleClick = (e: ThreeEvent<MouseEvent>) => {

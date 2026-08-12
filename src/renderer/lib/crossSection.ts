@@ -310,6 +310,72 @@ export function defaultSlabForBounds(
   };
 }
 
+/**
+ * Thickness for a section drawn as a centreline of `drawnLength`.
+ *
+ * Relative to the line the user actually drew, not to a fixed cloud axis:
+ * `defaultSlabForBounds` divides the Y extent, which is the ALONG axis for a
+ * centreline drawn north-south, and produced a section far too thin (or too
+ * thick) depending purely on which way they dragged.
+ */
+export function drawnSlabDepth(drawnLength: number, fallback: number): number {
+  return drawnLength > 1e-6 ? Math.max(drawnLength / 20, 1e-3) : fallback;
+}
+
+/**
+ * Build a slab from a centreline plus a cloud's bounds.
+ *
+ * Shared by the committed section and the while-you-drag preview so the two
+ * cannot drift — a preview that disagreed with what the second click produces
+ * would be worse than no preview at all.
+ *
+ * `depth` overrides the drawn-length rule. The preview passes a FIXED thickness:
+ * deriving it from the live drag makes the walls splay outward as the user moves
+ * the cursor, which is distracting to aim with and teaches the wrong model,
+ * since thickness is really an independent parameter tuned in the panel.
+ */
+export function slabFromCentreline(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  bounds: { min: THREE.Vector3; max: THREE.Vector3 },
+  depth?: number,
+): SlabRegion {
+  const seed = defaultSlabForBounds(bounds);
+  const drawnLength = Math.hypot(b.x - a.x, b.y - a.y);
+  return {
+    ...seed,
+    a: { x: a.x, y: a.y },
+    b: { x: b.x, y: b.y },
+    depth: depth !== undefined
+      ? Math.max(depth, 1e-3)
+      : drawnSlabDepth(drawnLength, seed.depth),
+    // Span the cloud vertically — a section is a vertical slice through the
+    // whole tree, so it must not be clipped in Z by the seed's own extent.
+    zMin: bounds.min.z - 1,
+    zMax: bounds.max.z + 1,
+    offset: 0,
+  };
+}
+
+/**
+ * Shortest centreline worth previewing, in world units, scaled to the cloud.
+ *
+ * Below this the box degenerates: `a` and `b` nearly coincide, the tangent is
+ * numerically unstable, and the backend rejects a sub-1e-12 centreline outright.
+ * Returning false keeps the preview from flickering a near-zero box at the
+ * moment of the first click, before the user has moved anywhere.
+ */
+export function centrelineIsPreviewable(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  bounds: { min: THREE.Vector3; max: THREE.Vector3 },
+): boolean {
+  const spanX = Math.max(bounds.max.x - bounds.min.x, 1e-6);
+  const spanY = Math.max(bounds.max.y - bounds.min.y, 1e-6);
+  const minLength = Math.max(Math.hypot(spanX, spanY) * 0.01, 1e-6);
+  return Math.hypot(b.x - a.x, b.y - a.y) >= minLength;
+}
+
 /** Wire shape for the backend `slab` region kind. Mirrors main.py. */
 export interface SlabRegionPayload {
   kind: 'slab';

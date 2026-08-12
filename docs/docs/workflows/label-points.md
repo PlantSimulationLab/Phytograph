@@ -115,7 +115,9 @@ A lasso is drawn on screen, so on its own it selects every point inside it at
 normally done.
 
 1. Open **Tools › Pre-processing › Cross-section** and click **Draw section**.
-2. Click two points in the view to set the line the section runs along.
+2. Click two points in the view to set the line the section runs along. As you
+   move toward the second point, the slab you are about to create is drawn so
+   you can see the volume before committing to it.
 3. Set **Thickness** thin enough that nothing hides behind anything.
 4. Open **Label Points** — the section stays active, and the panel says so.
    Paint normally; strokes only affect points inside the section.
@@ -123,9 +125,29 @@ normally done.
    consecutive sections overlap, so no point is skipped, and the
    *"Section 7 of 42"* readout tells you when you have covered everything.
 
+The section is drawn as a thin, vertical-walled box: bounded by your two clicks
+along the line, half the thickness either side of it, and spanning the full
+height of the cloud.
+
+### Getting back to the whole cloud
+
 The section is a **view**, not a mode: it stays in effect while you use other
-tools, and both panels are visible at once. Clear it from the notice in the
-Label panel, or close the section and press **Redraw section**.
+tools, and both panels are visible at once. That also means closing the panel
+does *not* remove it — otherwise opening the Label tool, which shares the same
+panel slot, would silently switch off the section you set up to paint inside.
+
+While a section is active a small indicator sits at the top of the viewport with
+two ways out, so you never have to remember which tool put it there:
+
+- **Show full cloud** — stop clipping temporarily. The section, its thickness
+  and its place in the traverse are all kept, so you can look around and drop
+  straight back into it.
+- **Clear** — remove the section and return to a normal view.
+
+Both are also in the Cross-section panel, and the Label panel's
+*"Strokes are limited to the cross-section"* notice carries its own **Clear**.
+**Redraw section** shows the whole cloud while you pick the new line, so you are
+never aiming at points the old section is hiding.
 
 !!! note "Without a section, a lasso still cuts through"
     If no section is active, orbit to an angle where the points you want are not

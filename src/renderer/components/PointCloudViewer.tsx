@@ -87,10 +87,12 @@ import {
 import { projectionKindOf } from '../lib/cameraRay';
 import {
   slabToBox, slabPredicate, slabToPayload, stepSlab, slabCoverage, slabCenter,
-  defaultSlabForBounds, slabViewPose,
+  defaultSlabForBounds, slabViewPose, slabFromCentreline,
   type SlabRegion, type SlabStepMode,
 } from '../lib/crossSection';
 import { SlabWireframe } from './viewer/gizmos/SlabWireframe';
+import { SlabCentrelinePreview } from './viewer/gizmos/SlabCentrelinePreview';
+import { SlabDragPreview } from './viewer/gizmos/SlabDragPreview';
 import { SectionProjectionOverride } from './viewer/gizmos/SectionProjectionOverride';
 import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
 import {
@@ -2033,6 +2035,37 @@ export default function PointCloudViewer({
   // Mirror of the two-click draw state for the raycaster's mounted handler,
   // which cannot see later renders. Assigned during render, not in an effect —
   // an effect runs after paint and the second click can beat it.
+  // Mirrors of the draw state for RENDERING the in-progress centreline. The ref
+  // above drives the handler (which cannot see later renders); these drive the
+  // preview, which must re-render.
+  const [slabFirstPointState, setSlabFirstPointState] =
+    useState<{ x: number; y: number } | null>(null);
+  const [slabCursor, setSlabCursor] = useState<{ x: number; y: number } | null>(null);
+  // Same cursor, outside React. SlabDragPreview reads this every frame so the
+  // box can track the pointer without re-rendering this component at 60 Hz.
+  const slabCursorRef = useRef<{ x: number; y: number } | null>(null);
+  // Thickness the drag preview is drawn at, frozen when the first point lands
+  // so the walls don't splay outward as the user aims.
+  const slabPreviewDepthRef = useRef(0);
+  /**
+   * Section defined but temporarily not clipping — "show me the whole cloud".
+   *
+   * Distinct from clearing it: the slab, its thickness and its position in the
+   * traverse all survive, so the user can look around and drop straight back
+   * into the same section. Without this the only way back to a full view was to
+   * destroy the section and redefine it from scratch.
+   */
+  const [slabSuspended, setSlabSuspended] = useState(false);
+
+  // E2E seam for the centreline placement feedback. Publishes the two facts a
+  // test can't otherwise see — the first click landed, and the rubber band is
+  // tracking — without exposing the scene graph. Mirrors __labelOverlay.
+  useEffect(() => {
+    (globalThis as any).__slabDraw = {
+      first: slabFirstPointState ?? null,
+      cursor: slabCursor ?? null,
+    };
+  }, [slabFirstPointState, slabCursor]);
   const slabDrawRef = useRef<{
     state: 'idle' | 'awaiting-a' | 'awaiting-b';
     first: { x: number; y: number } | null;
@@ -3797,6 +3830,7 @@ export default function PointCloudViewer({
   // ── Cross-section derived state ───────────────────────────────────────────
 
   /** The cloud the section applies to (single selection, session-backed). */
+  /** Cloud whose SECTION is in effect — clip, wireframe, stroke bound. */
   const sectionTargetCloud = useMemo(() => {
     // Gated on a SLAB EXISTING, not on the panel being open.
     //
@@ -3826,10 +3860,19 @@ export default function PointCloudViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionTargetCloud, editStates]);
 
-  /** Oriented clip-box transform for the active slab. Null when no section. */
+  /**
+   * Oriented clip-box transform for the active slab. Null when no section, or
+   * while the section is suspended.
+   *
+   * This is the ONLY path by which the slab clips the view — labelling reads
+   * `slab` directly (see paintLabelStroke). That separation is deliberate:
+   * suspending the clip shows the whole cloud WITHOUT silently unbounding the
+   * paint, which would otherwise let a stroke sweep the full depth while the
+   * viewport looked like there was no section at all.
+   */
   const slabBoxMatrix = useMemo(
-    () => (sectionTargetCloud && slab ? slabToBox(slab).matrix : null),
-    [sectionTargetCloud, slab],
+    () => (sectionTargetCloud && slab && !slabSuspended ? slabToBox(slab).matrix : null),
+    [sectionTargetCloud, slab, slabSuspended],
   );
 
   const slabCoverageInfo = useMemo(
@@ -3843,6 +3886,27 @@ export default function PointCloudViewer({
    * Move the camera to look at the slab face-on. One-shot imperative write, not
    * a per-frame override — the user must still be able to nudge the view.
    */
+  /**
+   * Remove the section entirely and return to a normal view of the whole cloud.
+   *
+   * The escape hatch. Every other control ADJUSTS the section — thickness,
+   * stepping, lock, suspend — so without this the only way out of a section was
+   * to close the panel and live with a permanently clipped cloud, since closing
+   * deliberately does not clear (the Label tool shares the panel slot, and
+   * clearing on close would silently switch off the section a user set up to
+   * paint inside).
+   */
+  const clearSlabSection = useCallback(() => {
+    setSlab(null);
+    setSlabSuspended(false);
+    setSlabLocked(true);   // back to the default for the next section
+    slabDrawRef.current = { state: 'idle', first: null };
+    setSlabFirstPointState(null);
+    setSlabCursor(null);
+    slabCursorRef.current = null;
+    setSlabDrawState('idle');
+  }, []);
+
   const viewSlabFaceOn = useCallback((s: SlabRegion) => {
     const camera = polygonCameraRef.current;
     const target = slabCenter(s);
@@ -3861,14 +3925,15 @@ export default function PointCloudViewer({
   /** Second click of the centreline: build the slab and frame it. */
   const commitSlabCentreline = useCallback((ax: number, ay: number, bx: number, by: number) => {
     if (!sectionBounds) return;
-    const seed = defaultSlabForBounds(sectionBounds);
-    const next: SlabRegion = {
-      ...seed,
-      a: { x: ax, y: ay },
-      b: { x: bx, y: by },
-      offset: 0,
-    };
+    // Shared with the while-you-drag preview, so what the second click produces
+    // is exactly the box that was on screen a moment earlier.
+    const next = slabFromCentreline(
+      { x: ax, y: ay }, { x: bx, y: by }, sectionBounds,
+    );
     setSlab(next);
+    // The new section takes effect immediately — onDraw suspended clipping so
+    // the user could aim, and this is the click that ends that.
+    setSlabSuspended(false);
     setSlabDrawState('idle');
     if (slabLocked) viewSlabFaceOn(next);
   }, [sectionBounds, slabLocked, viewSlabFaceOn]);
@@ -4147,7 +4212,15 @@ export default function PointCloudViewer({
       setLabelBusy(false);
     }
   }, [labelTargetCloud, labelActiveClass, labelFromClasses, labelStrokes,
-      labelVisibleClasses, labelDirty, scene, showToast]);
+      labelVisibleClasses, labelDirty, scene, showToast,
+      // `slab`/`sectionTargetCloud` are READ in the body (activeSlab), so they
+      // must be dependencies. Omitting them froze `slab` at its first-render
+      // value — null — so every stroke drawn inside a section shipped WITHOUT
+      // its slab. The overlay reads the live slab, so the preview showed the
+      // section-bounded paint while the backend labelled unbounded (or, with
+      // the polygon covering the viewport, everything). Preview and truth
+      // silently disagreed, which is the exact failure C1-R warns about.
+      slab, sectionTargetCloud]);
 
   // closePolygonFrom is created once, so it must reach the CURRENT painter
   // through a ref rather than a captured closure.
@@ -15723,7 +15796,13 @@ export default function PointCloudViewer({
             so a 2-D lasso selects what it visually encloses. */}
         {sectionTargetCloud && slabDrawState !== 'idle' && (
           <BoxDrawRaycaster
-            groundZ={sectionBounds ? (sectionBounds.min.z + sectionBounds.max.z) / 2 : 0}
+            // Pick on the GROUND, not the mid-height of the cloud. Raycasting a
+            // plane floating in mid-canopy put the clicks metres away from the
+            // geometry the user was aiming at, so the section landed somewhere
+            // unrelated to what they clicked on.
+            groundZ={sectionBounds
+              ? (sectionTargetCloud?.data.groundZ ?? sectionBounds.min.z)
+              : 0}
             onPick={(x, y) => {
               // Read the draw state through a REF. The two clicks land on the
               // same mounted raycaster, and a state read from this closure is
@@ -15733,13 +15812,56 @@ export default function PointCloudViewer({
               // paintLabelStroke and the overlay ref.
               if (slabDrawRef.current.state === 'awaiting-a') {
                 slabDrawRef.current = { state: 'awaiting-b', first: { x, y } };
+                setSlabFirstPointState({ x, y });
+                setSlabCursor(null);
+                slabCursorRef.current = null;
+                // Freeze the preview thickness now: keeping an existing
+                // section's thickness makes redraws predictable, and otherwise
+                // fall back to the cloud-derived seed. Either way it stays
+                // constant for the whole drag.
+                slabPreviewDepthRef.current = slab?.depth
+                  ?? (sectionBounds ? defaultSlabForBounds(sectionBounds).depth : 0);
                 setSlabDrawState('awaiting-b');
               } else if (slabDrawRef.current.first) {
                 const a = slabDrawRef.current.first;
                 slabDrawRef.current = { state: 'idle', first: null };
+                setSlabCursor(null);
+                slabCursorRef.current = null;
                 commitSlabCentreline(a.x, a.y, x, y);
               }
             }}
+            onMove={(x, y) => {
+              if (slabDrawRef.current.state !== 'awaiting-b') return;
+              // The ref drives the box every frame; the state drives the
+              // rubber-band line. Only the ref is written per mousemove — the
+              // state write is what a 60 Hz re-render would cost, so it is
+              // throttled to meaningful movement below.
+              slabCursorRef.current = { x, y };
+              setSlabCursor((prev) => (
+                prev && Math.hypot(prev.x - x, prev.y - y) < 1e-4 ? prev : { x, y }
+              ));
+            }}
+          />
+        )}
+        {/* The volume the second click will create. Gated on sectionBounds,
+            which is derived from sectionTargetCloud and additionally requires
+            real bounds to size the box against — the same condition the
+            raycaster above needs to place a point at all. */}
+        {sectionBounds && slabDrawState === 'awaiting-b' && slabFirstPointState && (
+          <SlabDragPreview
+            first={slabFirstPointState}
+            cursorRef={slabCursorRef}
+            bounds={sectionBounds}
+            depth={slabPreviewDepthRef.current}
+            displayOffset={displayOffset}
+          />
+        )}
+        {sectionTargetCloud && slabDrawState === 'awaiting-b' && slabFirstPointState && (
+          <SlabCentrelinePreview
+            first={slabFirstPointState}
+            cursor={slabCursor}
+            z={sectionTargetCloud.data.groundZ ?? sectionBounds?.min.z ?? 0}
+            displayOffset={displayOffset}
           />
         )}
         {sectionTargetCloud && slab && (
@@ -15749,7 +15871,10 @@ export default function PointCloudViewer({
             dimmed={slabLocked}
           />
         )}
-        {sectionTargetCloud && slab && slabLocked && (
+        {/* Not while suspended: the override pins an ortho frustum sized for the
+            slab, so "show the whole cloud" would still be seen through a
+            section-shaped lens — face-on, and cropped to the slab's extent. */}
+        {sectionTargetCloud && slab && slabLocked && !slabSuspended && (
           <SectionProjectionOverride slab={slab} />
         )}
         {pointPickMode && (
@@ -16636,6 +16761,55 @@ export default function PointCloudViewer({
           </div>
         );
       })()}
+
+      {/* Cross-section HUD.
+
+          Mounted on the SLAB, not on the panel, and that is the whole point: a
+          section keeps clipping after its panel is closed (closing only puts the
+          tool away — the Label tool shares that slot and must be able to paint
+          inside a section). Without a viewport-level indicator a user closes the
+          panel, forgets the section is on, and sees a cloud with most of it
+          missing and no visible cause — with the fix being to reopen a tool they
+          have no reason to associate with the problem.
+
+          So: always visible while a section is in effect, and it carries its own
+          way out rather than only naming the tool to go back to. */}
+      {slab && sectionTargetCloud && (
+        <div
+          data-testid="section-hud"
+          data-suspended={slabSuspended ? 'true' : 'false'}
+          className="absolute top-14 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/90 backdrop-blur-sm rounded-full border border-neutral-700/50 z-30 shadow-lg"
+        >
+          <Layers3 className={`w-3 h-3 ${slabSuspended ? 'text-neutral-500' : 'text-sky-400'}`} />
+          <span className="text-[11px] text-neutral-200 font-medium">
+            {slabSuspended ? 'Section hidden' : 'Cross-section'}
+          </span>
+          {slabCoverageInfo && !slabSuspended && (
+            <span className="text-[11px] text-neutral-400 font-mono tabular-nums">
+              {slabCoverageInfo.index}/{slabCoverageInfo.total}
+            </span>
+          )}
+          <span className="text-[11px] text-neutral-600">·</span>
+          <button
+            data-testid="section-hud-suspend"
+            onClick={() => setSlabSuspended(v => !v)}
+            title={slabSuspended
+              ? 'Show the section again'
+              : 'Temporarily show the whole cloud — the section is kept'}
+            className="text-[11px] text-neutral-300 hover:text-white px-1.5 py-0.5 rounded hover:bg-neutral-700"
+          >
+            {slabSuspended ? 'Show section' : 'Show full cloud'}
+          </button>
+          <button
+            data-testid="section-hud-clear"
+            onClick={clearSlabSection}
+            title="Remove the section and go back to the full cloud"
+            className="text-[11px] text-neutral-400 hover:text-red-200 px-1.5 py-0.5 rounded hover:bg-red-900/50"
+          >
+            Clear
+          </button>
+        </div>
+      )}
 
       {/* Manual trajectory editor: the docked pose table + the insert-'+' overlay
           that follows the pointer along a hovered path segment. */}
@@ -18211,7 +18385,10 @@ export default function PointCloudViewer({
       />
 
       {/* Ground Segmentation Panel */}
-      {sectionTargetCloud && (
+      {/* The PANEL follows its own flag. The section itself (clip, wireframe,
+          stroke bound) outlives it — conflating the two made the close button
+          appear dead once a slab existed. */}
+      {showSectionPanel && sectionTargetCloud && (
         <CrossSectionPanel
           stacked={!!labelTargetCloud}
           hasSlab={!!slab}
@@ -18224,8 +18401,19 @@ export default function PointCloudViewer({
           fixedStep={slabFixedStep}
           coverage={slabCoverageInfo}
           locked={slabLocked}
+          suspended={slabSuspended}
+          onToggleSuspended={() => setSlabSuspended(v => !v)}
+          onClear={clearSlabSection}
           onDraw={() => {
             slabDrawRef.current = { state: 'awaiting-a', first: null };
+            setSlabFirstPointState(null);
+            setSlabCursor(null);
+            // Stop clipping while picking. Redrawing left the OLD section
+            // clipping the view, so the user was aiming the new centreline at a
+            // cloud that was still cut away — you cannot aim at what is hidden.
+            // The drag preview shows the box being made, so the old section is
+            // not needed on screen. Reinstated when the second click commits.
+            setSlabSuspended(true);
             setSlabDrawState('awaiting-a');
           }}
           onThicknessChange={(v) => setSlab(prev => (prev ? { ...prev, depth: v } : prev))}
@@ -18301,7 +18489,7 @@ export default function PointCloudViewer({
           drawing={labelDrawing}
           onToggleDrawing={() => setLabelDrawing(v => !v)}
           sectionActive={!!slab && sectionTargetCloud?.id === labelTargetCloud.id}
-          onClearSection={() => setSlab(null)}
+          onClearSection={clearSlabSection}
           onClose={() => setShowLabelPanel(false)}
         />
       )}

@@ -178,3 +178,334 @@ test('the centreline is placed by two clicks in the view', async () => {
   await expect(panel).toHaveAttribute('data-has-slab', 'true', { timeout: 10_000 });
   await expect(panel).toHaveAttribute('data-drawing', 'false');
 });
+
+test('a slab CHANGED after the label tool is open still bounds the paint', async () => {
+  // Regression: the section reached the backend only if it existed before the
+  // label tool mounted.
+  //
+  // `paintLabelStroke` is a useCallback, and `slab`/`sectionTargetCloud` were
+  // missing from its dependency array. So the callback froze whatever slab was
+  // live when it was first created — for a user who opens the label tool and
+  // THEN draws or steps a section, that is `null`. Every stroke shipped without
+  // its slab and painted through the whole cloud, while the overlay (which
+  // reads the live slab) previewed the correctly-bounded result. Preview and
+  // truth disagreed silently, which is the exact failure mode C1-R exists to
+  // prevent.
+  //
+  // The existing depth-bounded test cannot catch this: it sets the slab BEFORE
+  // opening the label tool, so the captured value happens to be correct. The
+  // order here — tool first, slab second — is what the user actually did.
+  const { page } = await importDepthLayers();
+
+  await page.getByTestId('tool-cross-section').click();
+  await expect(page.getByTestId('cross-section-panel')).toBeVisible();
+
+  // Label tool opens FIRST, with no section yet — this is what froze `slab` at
+  // null in the broken build.
+  await page.getByTestId('tool-label').click();
+  const label = page.getByTestId('label-panel');
+  await expect(label).toBeVisible();
+
+  // Only NOW does a section appear, on the near (sparse, 25-point) plane.
+  await setSlab(page, 0, 1);
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBeLessThan(TOTAL);
+
+  const overlay = page.getByTestId('crop-polygon-overlay');
+  await expect(overlay).toBeVisible();
+  const box = await overlay.boundingBox();
+  if (!box) throw new Error('lasso overlay has no bounding box');
+  const inset = 8;
+  for (const c of [
+    { x: box.x + inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + box.height - inset },
+    { x: box.x + inset, y: box.y + box.height - inset },
+  ]) await page.mouse.click(c.x, c.y);
+  await page.keyboard.press('Enter');
+
+  await expect(label).toHaveAttribute('data-pending-strokes', '1', { timeout: 20_000 });
+
+  // EXACTLY the near plane. With the stale closure this labelled all 1706.
+  await expect.poll(
+    async () => Number(await label.getAttribute('data-labelled-count')),
+    { timeout: 20_000 },
+  ).toBe(NEAR_PLANE);
+});
+
+test('the close button closes the section panel', async () => {
+  // Report #3: clicking the X did nothing. The panel was mounted on
+  // `sectionTargetCloud` alone, so closing cleared the *tool* but the panel
+  // stayed as long as a cloud was selected — conflating "the section keeps
+  // clipping" (correct: a section is a view state that outlives the tool) with
+  // "the panel stays open" (wrong).
+  const { page } = await importDepthLayers();
+
+  await page.getByTestId('tool-cross-section').click();
+  const panel = page.getByTestId('cross-section-panel');
+  await expect(panel).toBeVisible();
+
+  // A slab must EXIST for this to be a real test. `sectionTargetCloud` is gated
+  // on the slab, not the panel, so with no slab the panel unmounts through that
+  // path no matter what the close button does — and the test passes even with
+  // the fix reverted.
+  await setSlab(page, 0, 1);
+  await expect(panel).toHaveAttribute('data-has-slab', 'true');
+
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+
+  // And it reopens — closing must not wedge the tool.
+  await page.getByTestId('tool-cross-section').click();
+  await expect(page.getByTestId('cross-section-panel')).toBeVisible();
+});
+
+test('the first centreline click shows a marker before the second is placed', async () => {
+  // Report #1: clicking the first point gave NO feedback, so the user could not
+  // tell the click had registered, where it landed, or which way the section
+  // would run — they clicked twice into a void and the view jumped.
+  const { page } = await importDepthLayers();
+
+  await page.getByTestId('tool-cross-section').click();
+  await expect(page.getByTestId('cross-section-panel')).toBeVisible();
+  await page.getByTestId('section-draw').click();
+
+  const canvas = page.locator('canvas').first();
+  const b = (await canvas.boundingBox())!;
+  const cy = b.y + b.height * 0.5;
+
+  // Nothing placed yet.
+  expect(await page.evaluate(() => (window as any).__slabDraw?.first ?? null)).toBeNull();
+
+  await page.mouse.click(b.x + b.width * 0.35, cy);
+
+  // The marker exists after ONE click — the whole point of the fix.
+  await expect.poll(
+    async () => await page.evaluate(() => (window as any).__slabDraw?.first ?? null),
+    { timeout: 10_000 },
+  ).not.toBeNull();
+
+  // And the rubber band follows the cursor before the second click lands.
+  await page.mouse.move(b.x + b.width * 0.55, cy);
+  await expect.poll(
+    async () => await page.evaluate(() => (window as any).__slabDraw?.cursor ?? null),
+    { timeout: 10_000 },
+  ).not.toBeNull();
+});
+
+test('the slab is previewed while picking the second point, at FIXED thickness', async () => {
+  // Before this, the first click gave a marker and a rubber-band line — the
+  // azimuth but not the volume. There was no way to picture the section until
+  // it snapped into existence on the second click, so the box appeared
+  // somewhere unexpected and the view jumped to face it.
+  const { page } = await importDepthLayers();
+
+  await page.getByTestId('tool-cross-section').click();
+  await expect(page.getByTestId('cross-section-panel')).toBeVisible();
+  await page.getByTestId('section-draw').click();
+
+  const canvas = page.locator('canvas').first();
+  const b = (await canvas.boundingBox())!;
+  const cy = b.y + b.height * 0.5;
+  const read = () => page.evaluate(() => (globalThis as any).__slabDragPreview ?? null);
+
+  await page.mouse.click(b.x + b.width * 0.3, cy);
+
+  // Nothing yet: at the instant of the click a and b coincide, and a zero-width
+  // box flickering at the click point reads as a glitch.
+  await expect.poll(async () => (await read())?.visible ?? null, { timeout: 10_000 })
+    .toBe(false);
+
+  await page.mouse.move(b.x + b.width * 0.5, cy);
+  await expect.poll(async () => (await read())?.visible ?? false, { timeout: 10_000 })
+    .toBe(true);
+  const near = await read();
+
+  await page.mouse.move(b.x + b.width * 0.75, cy);
+  await expect.poll(async () => (await read())?.length ?? 0, { timeout: 10_000 })
+    .toBeGreaterThan(near.length);
+  const far = await read();
+
+  // The whole point of "fixed thickness": dragging further makes the section
+  // LONGER, never WIDER. A depth that tracked the drag would splay the walls
+  // outward while the user is still aiming.
+  expect(far.depth).toBeCloseTo(near.depth, 6);
+
+  // And the committed slab matches the box that was on screen — a preview that
+  // disagreed with the result would be worse than no preview.
+  await page.mouse.click(b.x + b.width * 0.75, cy);
+  const panel = page.getByTestId('cross-section-panel');
+  await expect(panel).toHaveAttribute('data-has-slab', 'true', { timeout: 10_000 });
+  await expect.poll(async () => (await read())?.visible ?? null, { timeout: 10_000 })
+    .toBe(false);
+});
+
+test('the full cloud can be shown again without destroying the section', async () => {
+  // There was no way back to a whole cloud. Every control ADJUSTED the section
+  // — thickness, stepping, lock — and closing the panel deliberately does not
+  // clear (the Label tool shares the slot and must paint inside a section), so
+  // a user who sectioned a cloud was stuck looking at a slice of it.
+  const { page } = await importDepthLayers();
+
+  await page.getByTestId('tool-cross-section').click();
+  const panel = page.getByTestId('cross-section-panel');
+  await expect(panel).toBeVisible();
+  await setSlab(page, 0, 1);
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBeLessThan(TOTAL);
+
+  // Suspend: the whole cloud is drawn again...
+  await page.getByTestId('section-suspend').click();
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBe(TOTAL);
+  // ...but the section itself survives, which is what makes this different
+  // from clearing it.
+  await expect(panel).toHaveAttribute('data-has-slab', 'true');
+  await expect(panel).toHaveAttribute('data-suspended', 'true');
+
+  // And it comes straight back, same slab, no redefining.
+  await page.getByTestId('section-suspend').click();
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBeLessThan(TOTAL);
+});
+
+test('clearing the section restores the full cloud and removes the slab', async () => {
+  const { page } = await importDepthLayers();
+
+  await page.getByTestId('tool-cross-section').click();
+  const panel = page.getByTestId('cross-section-panel');
+  await expect(panel).toBeVisible();
+  await setSlab(page, 0, 1);
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBeLessThan(TOTAL);
+
+  await page.getByTestId('section-clear').click();
+
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBe(TOTAL);
+  await expect(panel).toHaveAttribute('data-has-slab', 'false');
+});
+
+test('a viewport HUD offers the way out even with the panel closed', async () => {
+  // The discoverability half of the problem: a section keeps clipping after its
+  // panel is closed, so without a viewport-level indicator the user sees a
+  // cloud with most of it missing, no visible cause, and no reason to associate
+  // the fix with a tool they already closed.
+  const { page } = await importDepthLayers();
+
+  await page.getByTestId('tool-cross-section').click();
+  const panel = page.getByTestId('cross-section-panel');
+  await expect(panel).toBeVisible();
+  await setSlab(page, 0, 1);
+
+  const hud = page.getByTestId('section-hud');
+  await expect(hud).toBeVisible();
+
+  // Close the panel — the section is still clipping, so the HUD must remain.
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(hud).toBeVisible();
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBeLessThan(TOTAL);
+
+  // And it is a working way out, not just a label.
+  await page.getByTestId('section-hud-clear').click();
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBe(TOTAL);
+  await expect(hud).toHaveCount(0);
+});
+
+test('redrawing shows the whole cloud while you aim the new centreline', async () => {
+  // Redraw left the OLD section clipping, so the user picked the new centreline
+  // against a cloud that was still cut away — aiming at what you cannot see.
+  const { page } = await importDepthLayers();
+
+  await page.getByTestId('tool-cross-section').click();
+  await expect(page.getByTestId('cross-section-panel')).toBeVisible();
+  await setSlab(page, 0, 1);
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBeLessThan(TOTAL);
+
+  await page.getByTestId('section-draw').click();
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBe(TOTAL);
+
+  // Placing the new centreline re-applies clipping — the suspension lasts only
+  // as long as the aiming does.
+  const canvas = page.locator('canvas').first();
+  const b = (await canvas.boundingBox())!;
+  const cy = b.y + b.height * 0.5;
+  await page.mouse.click(b.x + b.width * 0.3, cy);
+  await page.mouse.move(b.x + b.width * 0.6, cy);
+  await page.mouse.click(b.x + b.width * 0.7, cy);
+
+  await expect(page.getByTestId('cross-section-panel'))
+    .toHaveAttribute('data-suspended', 'false', { timeout: 10_000 });
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBeLessThan(TOTAL);
+});
+
+test('the Label panel notice clears the section the same way', async () => {
+  // Three controls clear a section (panel, viewport HUD, and this notice). They
+  // must all go through one handler: this one used to just drop the slab and
+  // leave the suspend/lock/draw state behind, so clearing from here and from
+  // the panel left the tool in measurably different states.
+  const { page } = await importDepthLayers();
+
+  await page.getByTestId('tool-cross-section').click();
+  await expect(page.getByTestId('cross-section-panel')).toBeVisible();
+  await setSlab(page, 0, 1);
+
+  await page.getByTestId('tool-label').click();
+  await expect(page.getByTestId('label-panel')).toBeVisible();
+  await expect(page.getByTestId('label-section-notice')).toBeVisible();
+
+  await page.getByTestId('label-clear-section').click();
+
+  await expect(page.getByTestId('label-section-notice')).toHaveCount(0);
+  await expect(page.getByTestId('section-hud')).toHaveCount(0);
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 })
+    .toBe(TOTAL);
+});
+
+test('the scene-origin marker keeps its on-screen size in a section', async () => {
+  // The marker is meant to occupy a FIXED pixel radius at any zoom. Under the
+  // section's orthographic override it did not: worldPerPixel branched on
+  // camera.isPerspectiveCamera, which the override leaves true while writing an
+  // orthographic projectionMatrix, so the marker was scaled by
+  // distance-from-camera. Framing a section pulls the camera well back, and the
+  // marker inflated with it.
+  const { page } = await importDepthLayers();
+
+  const read = () => page.evaluate(() => (globalThis as any).__originMarkerScale ?? null);
+  await expect.poll(async () => (await read())?.worldScale ?? 0, { timeout: 20_000 })
+    .toBeGreaterThan(0);
+  const before = await read();
+
+  await page.getByTestId('tool-cross-section').click();
+  await expect(page.getByTestId('cross-section-panel')).toBeVisible();
+  await setSlab(page, 0, 1);
+  // Framing the section moves the camera; give the override a few frames.
+  await page.waitForTimeout(1500);
+  const during = await read();
+
+  // Assert against the ACTUAL projection, not against the marker's own ratio:
+  // worldScale / worldPerPixel is PIXEL_RADIUS by construction, so comparing
+  // those two is self-confirming and passes with the bug fully present.
+  //
+  // Under an orthographic projection the correct world-per-pixel is
+  // (frustum height) / (viewport height) — no camera distance anywhere. Read
+  // the live matrix and check the marker agrees with it.
+  const el = during.projection as number[];
+  const isOrtho = Math.abs(el[15] - 1) < 1e-6 && Math.abs(el[11]) < 1e-6;
+  if (!isOrtho) {
+    throw new Error('section view is not orthographic — the test cannot discriminate');
+  }
+  const correct = 2 / Math.abs(el[5]) / during.viewportHeight;
+  expect(during.worldPerPixel).toBeCloseTo(correct, 6);
+
+  // And prove the check has teeth: the buggy value (distance-scaled perspective
+  // math under an ortho matrix) must be materially different from the correct
+  // one, or agreement above would be meaningless.
+  expect(Math.abs(during.cameraDistance)).toBeGreaterThan(1);
+});

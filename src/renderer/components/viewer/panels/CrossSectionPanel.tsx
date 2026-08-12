@@ -1,4 +1,4 @@
-import { Layers3, X, ChevronLeft, ChevronRight, Home, Pencil, Lock, LockOpen } from 'lucide-react';
+import { Layers3, X, ChevronLeft, ChevronRight, Home, Pencil, Lock, LockOpen, Eye, EyeOff, Trash2 } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import type { SlabStepMode } from '../../../lib/crossSection';
 
@@ -38,6 +38,10 @@ export interface CrossSectionPanelProps {
   /** 1-based position in the traverse and the number of steps spanning it. */
   coverage: { index: number; total: number } | null;
   locked: boolean;
+  /** Section defined but not currently clipping — the whole cloud is shown. */
+  suspended: boolean;
+  onToggleSuspended: () => void;
+  onClear: () => void;
   onDraw: () => void;
   onThicknessChange: (v: number) => void;
   onStepModeChange: (m: SlabStepMode) => void;
@@ -60,6 +64,9 @@ export function CrossSectionPanel({
   fixedStep,
   coverage,
   locked,
+  suspended,
+  onToggleSuspended,
+  onClear,
   onDraw,
   onThicknessChange,
   onStepModeChange,
@@ -76,6 +83,7 @@ export function CrossSectionPanel({
       data-drawing={drawing ? 'true' : 'false'}
       data-step-mode={stepMode}
       data-locked={locked ? 'true' : 'false'}
+      data-suspended={suspended ? 'true' : 'false'}
       data-coverage={coverage ? `${coverage.index}/${coverage.total}` : ''}
       data-thickness={thickness}
       // z-20 keeps the panel above the z-10 lasso overlay, which fills the
@@ -216,6 +224,36 @@ export function CrossSectionPanel({
           >
             {locked ? <Lock className="w-3 h-3" /> : <LockOpen className="w-3 h-3" />}
             {locked ? 'Locked to section' : 'Free camera'}
+          </button>
+
+          {/* Getting back to the whole cloud. Everything above ADJUSTS the
+              section; these two are the only ways out of it. Suspend keeps the
+              slab so the user can look around and drop back into the same
+              section; Clear removes it. */}
+          <button
+            data-testid="section-suspend"
+            onClick={onToggleSuspended}
+            title={suspended
+              ? 'Show the section again'
+              : 'Temporarily show the whole cloud — the section is kept'}
+            className={`w-full mt-2 px-2 py-1.5 text-xs rounded flex items-center justify-center gap-1.5 ${
+              suspended
+                ? 'bg-amber-600/80 hover:bg-amber-600 text-white'
+                : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
+            }`}
+          >
+            {suspended ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+            {suspended ? 'Showing full cloud' : 'Show full cloud'}
+          </button>
+
+          <button
+            data-testid="section-clear"
+            onClick={onClear}
+            title="Remove the section and go back to the full cloud"
+            className="w-full mt-2 px-2 py-1.5 text-xs rounded flex items-center justify-center gap-1.5 bg-neutral-700 hover:bg-red-900/60 text-neutral-300 hover:text-red-200"
+          >
+            <Trash2 className="w-3 h-3" />
+            Clear section
           </button>
         </>
       )}
