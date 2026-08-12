@@ -1,4 +1,4 @@
-import { Brush, X, Undo2, Check, Eye, EyeOff, Palette } from 'lucide-react';
+import { Brush, X, Undo2, Check, Eye, EyeOff, Palette, Shuffle } from 'lucide-react';
 import type { ClassDef } from '../../../lib/classification';
 import { rgbToHex } from '../../../lib/classification';
 
@@ -47,6 +47,9 @@ export interface LabelPanelProps {
   onSetFromAnyVisible: () => void;
   onUndoStroke: () => void;
   onCommit: () => void;
+  /** Cycle to the next built-in preset vocabulary. */
+  onCyclePreset: () => void;
+  /** Open the editor to add/rename/recolour classes. */
   onEditPalette: () => void;
   onClose: () => void;
 }
@@ -71,6 +74,7 @@ export function LabelPanel({
   onSetFromAnyVisible,
   onUndoStroke,
   onCommit,
+  onCyclePreset,
   onEditPalette,
   onClose,
 }: LabelPanelProps) {
@@ -159,14 +163,26 @@ export function LabelPanel({
         <span className="text-[10px] text-neutral-400 truncate" title={paletteName}>
           {paletteName}
         </span>
-        <button
-          data-testid="label-edit-palette"
-          onClick={onEditPalette}
-          className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
-        >
-          <Palette className="w-3 h-3" />
-          Classes
-        </button>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            data-testid="label-cycle-preset"
+            onClick={onCyclePreset}
+            title="Switch to the next built-in class set"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
+          >
+            <Shuffle className="w-3 h-3" />
+            Preset
+          </button>
+          <button
+            data-testid="label-edit-palette"
+            onClick={onEditPalette}
+            title="Add, rename or recolour classes — build your own set"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
+          >
+            <Palette className="w-3 h-3" />
+            Edit
+          </button>
+        </div>
       </div>
 
       {/* Class list. Clicking a row makes it the active class (1-9 do the same

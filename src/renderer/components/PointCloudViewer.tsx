@@ -7,7 +7,10 @@ import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circ
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
-import { getSettings } from '../lib/store';
+import {
+  getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
+  exportClassPalettes, importClassPalettes,
+} from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
 import {
   ColormapName,
@@ -93,6 +96,7 @@ import {
 import { SlabWireframe } from './viewer/gizmos/SlabWireframe';
 import { SlabCentrelinePreview } from './viewer/gizmos/SlabCentrelinePreview';
 import { SlabDragPreview } from './viewer/gizmos/SlabDragPreview';
+import { ClassPaletteEditor } from './viewer/panels/ClassPaletteEditor';
 import { SectionProjectionOverride } from './viewer/gizmos/SectionProjectionOverride';
 import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
 import {
@@ -2086,6 +2090,9 @@ export default function PointCloudViewer({
   // Palette bound to the labelled cloud. Seeded from the cloud's OctreeRef when
   // the tool opens, else from the wood/leaf preset (the common correction case).
   const [labelPalette, setLabelPalette] = useState<ClassPalette | null>(null);
+  const [showPaletteEditor, setShowPaletteEditor] = useState(false);
+  /** The app-level saved-palette library, loaded on demand. */
+  const [paletteLibrary, setPaletteLibrary] = useState<ClassPalette[]>([]);
   const [labelActiveClass, setLabelActiveClass] = useState(0);
   const [labelVisibleClasses, setLabelVisibleClasses] = useState<Set<number>>(new Set());
   // null = "Any visible" (no class gate) — see LabelPanel.
@@ -4087,6 +4094,115 @@ export default function PointCloudViewer({
       if (!cancelled?.() && seq === labelCountsSeqRef.current) setLabelClassCounts({});
     }
   }, []);
+
+  /**
+   * Make `next` the live palette.
+   *
+   * Shared by preset cycling and the editor, because switching palettes is
+   * never just a colour change: class VALUES differ between vocabularies, so
+   * the visible set, the active class, the From-gate and — critically — the
+   * counts must all be re-derived. `labelClassCounts` is keyed by class value,
+   * so carrying a stale map renders one column's numbers under another's names.
+   */
+  const applyLabelPalette = useCallback((next: ClassPalette) => {
+    setLabelPalette(next);
+    setLabelVisibleClasses(new Set(next.classes.map(c => c.value)));
+    setLabelActiveClass(prev => (
+      // Keep the user's active class if the new palette still has it, so an
+      // edit that only renames or recolours does not move their brush.
+      next.classes.some(c => c.value === prev && c.value !== UNCLASSIFIED_VALUE)
+        ? prev
+        : next.classes.find(c => c.value !== UNCLASSIFIED_VALUE)?.value ?? UNCLASSIFIED_VALUE
+    ));
+    setLabelFromClasses(null);
+    setLabelClassCounts({});
+    const sid = labelTargetCloud?.data.octree?.sessionId;
+    if (sid) void refreshLabelCounts(sid, next.slug);
+  }, [refreshLabelCounts, labelTargetCloud]);
+
+  // Load the saved-palette library when the editor opens. On demand rather than
+  // at mount: it is a disk read that only this panel needs.
+  useEffect(() => {
+    if (!showPaletteEditor) return;
+    let cancelled = false;
+    void getClassPalettes()
+      .then(list => { if (!cancelled) setPaletteLibrary(list); })
+      .catch(() => { if (!cancelled) setPaletteLibrary([]); });
+    return () => { cancelled = true; };
+  }, [showPaletteEditor]);
+
+  /**
+   * Save the edited palette: apply it, bind it to the cloud, and add it to the
+   * shared library.
+   *
+   * Binding on the cloud is what makes the palette survive closing the tool —
+   * the seed effect prefers `octree.classPalettes` over the default preset. The
+   * library copy is the reusable asset (TerraScan's `.PTC` idea): the same
+   * classes on the next cloud, or shared with a collaborator.
+   */
+  const handleSavePalette = useCallback(async (next: ClassPalette) => {
+    applyLabelPalette(next);
+    const cloud = labelTargetCloud;
+    const octreeInfo = cloud?.data.octree;
+    if (cloud && octreeInfo) {
+      onUpdateCloud(cloud.id, {
+        ...cloud.data,
+        octree: {
+          ...octreeInfo,
+          classPalettes: { ...(octreeInfo.classPalettes ?? {}), [next.slug]: next },
+          categoricalAttributes: Array.from(
+            new Set([...(octreeInfo.categoricalAttributes ?? []), next.slug]),
+          ),
+        },
+      });
+    }
+    try {
+      setPaletteLibrary(await saveClassPalette(next));
+      showToast({ title: `Saved "${next.name}"`, type: 'success' });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Saving palette').message, type: 'error' });
+    }
+  }, [applyLabelPalette, labelTargetCloud, onUpdateCloud, showToast]);
+
+  /** Write the whole library to a JSON file, for sharing between collaborators. */
+  const handleExportPalettes = useCallback(async () => {
+    try {
+      const json = await exportClassPalettes();
+      const savePath = await window.electronAPI?.dialog.save({
+        defaultPath: 'class-palettes.json',
+        title: 'Export class palettes',
+        filters: [{ name: 'Class palettes', extensions: ['json'] }],
+      });
+      if (!savePath) return;
+      await window.electronAPI.fs.writeText(savePath, json);
+      showToast({ title: 'Palettes exported', type: 'success' });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Exporting palettes').message, type: 'error' });
+    }
+  }, [showToast]);
+
+  /** Merge a collaborator's palette file into the library. */
+  const handleImportPalettes = useCallback(async () => {
+    try {
+      const picked = await window.electronAPI.dialog.open({
+        title: 'Import class palettes',
+        filters: [{ name: 'Class palettes', extensions: ['json'] }],
+      });
+      if (!picked) return;
+      const path = Array.isArray(picked) ? picked[0] : picked;
+      const json = await window.electronAPI.fs.readText(path);
+      const count = await importClassPalettes(json);
+      setPaletteLibrary(await getClassPalettes());
+      showToast({
+        title: count > 0
+          ? `Imported ${count} palette${count === 1 ? '' : 's'}`
+          : 'No palettes found in that file',
+        type: count > 0 ? 'success' : 'error',
+      });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Importing palettes').message, type: 'error' });
+    }
+  }, [showToast]);
 
   // Seed the palette when the tool opens on a cloud: prefer one already bound to
   // this cloud (so re-opening keeps the user's own classes), else the wood/leaf
@@ -7863,14 +7979,21 @@ export default function PointCloudViewer({
       const resp = await exportScanXml({
         scans: entries, base_name: chosenBase, include_misses: includeMisses,
         write_xml: writeXml, data_format: dataFormat,
+        // Let the backend write straight into the chosen folder. Taking the files
+        // back as base64 put every scan's bytes in one JSON body, which overran
+        // V8's string cap on a multi-scan export ("Unexpected end of JSON input").
+        dest_dir: dir,
         ...(grids.length ? { grids } : {}),
       });
       if (!resp.success || !resp.files) {
         showToast({ title: 'Export Failed', type: 'error', message: resp.error || 'Unknown error' });
         return;
       }
-      // Write each returned file into the chosen folder, decoding base64.
+      // Write any file the backend handed back inline. With dest_dir it already
+      // wrote them (written=true, data=null), so this loop is a no-op — it stays
+      // for the base64 path, which callers without a known destination still use.
       for (const f of resp.files) {
+        if (f.written || f.data == null) continue;
         const bin = atob(f.data);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -18434,6 +18557,23 @@ export default function PointCloudViewer({
           onClose={() => setShowSectionPanel(false)}
         />
       )}
+      {showPaletteEditor && labelPalette && (
+        <ClassPaletteEditor
+          // Remount on a palette switch so the draft reseeds — otherwise the
+          // editor would keep showing the previous palette's classes.
+          key={labelPalette.id}
+          palette={labelPalette}
+          classCounts={labelClassCounts}
+          library={paletteLibrary}
+          onSave={(next) => { void handleSavePalette(next); setShowPaletteEditor(false); }}
+          onLoad={(p) => { applyLabelPalette(p); setShowPaletteEditor(false); }}
+          onDelete={(id) => { void deleteClassPalette(id).then(setPaletteLibrary); }}
+          onExport={() => { void handleExportPalettes(); }}
+          onImport={() => { void handleImportPalettes(); }}
+          onClose={() => setShowPaletteEditor(false)}
+        />
+      )}
+
       {labelTargetCloud && labelPalette && (
         <LabelPanel
           classes={labelPalette.classes}
@@ -18460,10 +18600,9 @@ export default function PointCloudViewer({
           onSetFromAnyVisible={() => setLabelFromClasses(null)}
           onUndoStroke={handleLabelUndo}
           onCommit={handleLabelCommit}
-          // Phase 1 cycles the three built-in presets. A full palette editor
-          // (add/rename/recolour, save to the shared library) is the natural
-          // next increment — the data model and persistence already support it.
-          onEditPalette={() => {
+          // Two distinct controls: cycle through the built-in preset
+          // vocabularies, or open the editor to build one of your own.
+          onCyclePreset={() => {
             const order: Array<'wood_leaf' | 'organ' | 'ground' | 'asprs'> =
               ['wood_leaf', 'organ', 'ground', 'asprs'];
             const i = order.indexOf((labelPalette.preset ?? 'wood_leaf') as typeof order[number]);
@@ -18486,6 +18625,7 @@ export default function PointCloudViewer({
             const sid = labelTargetCloud.data.octree?.sessionId;
             if (sid) void refreshLabelCounts(sid, next.slug);
           }}
+          onEditPalette={() => setShowPaletteEditor(true)}
           drawing={labelDrawing}
           onToggleDrawing={() => setLabelDrawing(v => !v)}
           sectionActive={!!slab && sectionTargetCloud?.id === labelTargetCloud.id}

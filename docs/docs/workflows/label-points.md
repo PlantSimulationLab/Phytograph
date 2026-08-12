@@ -43,7 +43,7 @@ does not do what you expect.
 
 ## Class sets
 
-Use **Classes** in the panel to switch between the built-in sets:
+Use **Preset** in the panel to switch between the built-in sets:
 
 - **Wood / leaf** (the default) — matches what
   [Separate leaf and wood](segment-wood.md) writes, so you can correct its
@@ -66,6 +66,32 @@ Every set includes **Unclassified** (class 0), which is what points start as.
     *and* which existing classification you are looking at — a cloud that has
     been ground-segmented shows its real counts under **Ground / non-ground**
     and zeros under the others until you paint something.
+
+### Define your own classes
+
+The presets are starting points, not the vocabulary. **Edit** in the panel opens
+the class editor, where you can add classes, rename and recolour them, and save
+the result as a palette of your own.
+
+- **Add class** appends a new class in the 64–255 band, which LAS reserves for
+  user-defined codes — so your classes never collide with the ASPRS standard
+  ones. (Labels currently export as their own `manual_class` column rather than
+  the LAS classification byte; keeping custom classes in 64–255 means the
+  numbers stay valid when writing that byte becomes an option.)
+- **Save palette** applies it, binds it to the cloud (so it is still there when
+  you reopen the tool), and adds it to your saved palettes.
+- **Export / Import** move palettes between projects or collaborators as a JSON
+  file, so a labelling scheme agreed once can be reused by everyone.
+
+Two rules the editor enforces, both to protect points you have already painted:
+
+- **Unclassified (class 0) cannot be removed or renumbered.** Points from an
+  unlabelled or merged cloud arrive as 0, so 0 has to mean "unclassified"
+  everywhere.
+- **A class that already has points keeps its value.** The class *number* is
+  what gets stored in the file, so repointing a class that is in use would leave
+  those points holding a number the palette no longer describes. Renaming and
+  recolouring stay available — only the number is fixed.
 
 ## Only repaint certain classes
 
