@@ -3786,9 +3786,21 @@ export default function PointCloudViewer({
 
   /** The cloud the section applies to (single selection, session-backed). */
   const sectionTargetCloud = useMemo(() => {
-    if (!showSectionPanel || selectedIds.size !== 1) return null;
+    // Gated on a SLAB EXISTING, not on the panel being open.
+    //
+    // Tying this to `showSectionPanel` meant opening the Label tool (which
+    // closes the section panel, since they share a slot) silently switched the
+    // whole section off — the clip, the wireframe, and the slab carried on each
+    // stroke. The user set up a section, went to paint in it, and the labelling
+    // tool behaved exactly as if no section existed.
+    //
+    // The section is a VIEWING CONTEXT, not a modal tool: it stays in effect
+    // until explicitly cleared, which is what makes "set up a section, then
+    // label inside it" work at all.
+    if (selectedIds.size !== 1) return null;
+    if (!showSectionPanel && !slab) return null;
     return clouds.find(c => selectedIds.has(c.id)) ?? null;
-  }, [showSectionPanel, selectedIds, clouds]);
+  }, [showSectionPanel, slab, selectedIds, clouds]);
 
   /** World bounds of that cloud, for seeding and for the coverage readout. */
   const sectionBounds = useMemo(() => {
@@ -18265,6 +18277,8 @@ export default function PointCloudViewer({
           }}
           drawing={labelDrawing}
           onToggleDrawing={() => setLabelDrawing(v => !v)}
+          sectionActive={!!slab && sectionTargetCloud?.id === labelTargetCloud.id}
+          onClearSection={() => setSlab(null)}
           onClose={() => setShowLabelPanel(false)}
         />
       )}

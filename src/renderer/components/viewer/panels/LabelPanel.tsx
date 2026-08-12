@@ -33,6 +33,13 @@ export interface LabelPanelProps {
   /** True while the lasso is armed (clicks place vertices, view is frozen). */
   drawing: boolean;
   onToggleDrawing: () => void;
+  /**
+   * True when a cross-section is bounding strokes. Surfaced because it silently
+   * changes what a lasso does — without it the user cannot tell why a stroke
+   * painted fewer points than it enclosed.
+   */
+  sectionActive?: boolean;
+  onClearSection?: () => void;
   busy: boolean;
   onSelectClass: (value: number) => void;
   onToggleVisible: (value: number) => void;
@@ -55,6 +62,8 @@ export function LabelPanel({
   dirty,
   drawing,
   onToggleDrawing,
+  sectionActive = false,
+  onClearSection,
   busy,
   onSelectClass,
   onToggleVisible,
@@ -84,6 +93,7 @@ export function LabelPanel({
       data-pending-strokes={pendingStrokes}
       data-label-dirty={dirty ? 'true' : 'false'}
       data-label-drawing={drawing ? 'true' : 'false'}
+      data-section-active={sectionActive ? 'true' : 'false'}
       data-labelled-count={labelled}
       // Serialised counts, so a spec can assert on per-class totals without
       // reaching into the scene graph.
@@ -126,6 +136,24 @@ export function LabelPanel({
       >
         {drawing ? 'Drawing — view frozen (L)' : 'Start Drawing (L)'}
       </button>
+
+      {sectionActive && (
+        <div
+          data-testid="label-section-notice"
+          className="mb-3 px-2 py-1.5 rounded bg-sky-900/40 border border-sky-700/50 text-[10px] text-sky-200 flex items-center justify-between gap-2"
+        >
+          <span>Strokes are limited to the cross-section.</span>
+          {onClearSection && (
+            <button
+              data-testid="label-clear-section"
+              onClick={onClearSection}
+              className="shrink-0 underline hover:text-white"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="flex items-center justify-between mb-2">
         <span className="text-[10px] text-neutral-400 truncate" title={paletteName}>
