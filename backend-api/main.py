@@ -9089,6 +9089,14 @@ class ScanExportRequest(BaseModel):
     # Voxel-box grids to inject as <grid> blocks (write_xml=True only). None/empty
     # → no grid blocks written. Lets a scan bundle round-trip its grid(s).
     grids: Optional[List["ScanExportGrid"]] = None
+    # Absolute directory the backend writes the bundle into. Always set this when
+    # the destination is known (the renderer resolves it from the save dialog
+    # before calling): the base64-in-JSON alternative inflates each file ~1.33x and
+    # holds EVERY scan's bytes in one response, so a multi-scan LAZ export blows
+    # V8's ~512 MB string cap in response.json() and surfaces as "Unexpected end of
+    # JSON input". With dest_dir the response carries names + sizes only, `data` is
+    # null, and the renderer writes nothing.
+    dest_dir: Optional[str] = None
 
 
 # Standard scalar columns we try to preserve on export, in a stable order. Any of
@@ -9560,6 +9568,41 @@ def _read_scan_columns_from_file(file_path: str, ascii_format: Optional[str]) ->
     return {c: np.asarray(v, dtype=np.float64) for c, v in rows.items()}
 
 
+def _resolve_export_dest_dir(dest_dir: str) -> Path:
+    """Validate the directory a scan bundle is written into.
+
+    Same contract as _resolve_export_dest, one level up: the path comes from the
+    user's own native Save-As, but it still arrives in a request body, so require
+    an absolute path, resolve it (collapsing `..`), and require the directory to
+    already exist. We never create it — the save dialog always yields an existing
+    folder, so a missing one means the path isn't what we think it is.
+    """
+    p = Path(dest_dir).expanduser()
+    if not p.is_absolute():
+        raise HTTPException(status_code=400, detail=f"Export path must be absolute: {dest_dir}")
+    p = p.resolve()
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"Export directory does not exist: {p}")
+    return p
+
+
+def _emit_scan_export_file(name: str, raw_bytes: bytes, is_xml: bool,
+                           dest: Optional[Path]) -> dict:
+    """Return one entry for the export response's `files` list.
+
+    With `dest` the bytes go straight to disk and the entry carries only metadata
+    (`data` null); without it the caller gets the legacy base64 payload. Keeping
+    both shapes in one helper is what stops the two export modes from drifting.
+    """
+    if dest is not None:
+        (dest / name).write_bytes(raw_bytes)
+        return {"name": name, "data": None, "is_xml": is_xml,
+                "bytes": len(raw_bytes), "written": True}
+    import base64
+    return {"name": name, "data": base64.b64encode(raw_bytes).decode("ascii"),
+            "is_xml": is_xml, "bytes": len(raw_bytes), "written": False}
+
+
 def _do_scan_export(request: "ScanExportRequest") -> dict:
     """Export the request's scans, one data file per scan. Two modes:
 
@@ -9568,30 +9611,41 @@ def _do_scan_export(request: "ScanExportRequest") -> dict:
     * write_xml=False → one <base>_<id>.<fmt> per scan in `data_format`
       (las/laz/ply/xyz/csv/txt/obj/e57), written directly — no XML, no PyHelios.
 
-    Returns {"success", "files": [{"name", "data"(base64), "is_xml"}], ...}. The
-    renderer writes every returned file into the user-chosen folder.
+    Returns {"success", "files": [{"name", "data", "is_xml", "bytes", "written"}],
+    ...}. With `dest_dir` the backend writes each file itself and `data` is null;
+    without it `data` is base64 and the renderer writes the files (see dest_dir on
+    the request — the base64 path cannot carry a multi-scan bundle).
     """
-    import base64
-
     if not request.scans:
         return {"success": False, "error": "No scans to export"}
 
     raw = request.base_name or "scans"
     base = os.path.splitext(os.path.basename(raw))[0] or "scans"
 
+    # Validate before doing any work, so a bad destination fails in milliseconds
+    # rather than after serializing several million points. Its HTTPException must
+    # propagate as a 400 rather than be flattened into a generic error below.
+    dest = _resolve_export_dest_dir(request.dest_dir) if request.dest_dir else None
+
     try:
         if request.write_xml:
-            return _do_scan_export_xml(request, base)
-        return _do_scan_export_data(request, base)
+            return _do_scan_export_xml(request, base, dest)
+        return _do_scan_export_data(request, base, dest)
+    except HTTPException:
+        raise
     except Exception as e:  # noqa: BLE001
         import traceback
         traceback.print_exc()
         return {"success": False, "error": f"Scan export failed: {e}"}
 
 
-def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
-    """XML+data mode: Helios scan bundle via PyHelios exportScans()."""
-    import base64
+def _do_scan_export_xml(request: "ScanExportRequest", base: str,
+                        dest: Optional[Path] = None) -> dict:
+    """XML+data mode: Helios scan bundle via PyHelios exportScans().
+
+    `dest` (when set) is the validated directory the files are written into
+    instead of being base64'd back to the renderer.
+    """
     import tempfile
     import math as _math
 
@@ -9716,20 +9770,20 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
         files = []
         for name in sorted(os.listdir(tmpdir)):
             with open(os.path.join(tmpdir, name), "rb") as fh:
-                files.append({
-                    "name": name,
-                    "data": base64.b64encode(fh.read()).decode("ascii"),
-                    "is_xml": name.lower().endswith(".xml"),
-                })
+                files.append(_emit_scan_export_file(
+                    name, fh.read(), name.lower().endswith(".xml"), dest))
 
     return {"success": True, "files": files, "point_count": total_points,
             "scan_count": len(request.scans)}
 
 
-def _do_scan_export_data(request: "ScanExportRequest", base: str) -> dict:
-    """Data-only mode: one <base>_<id>.<fmt> per scan in `data_format`."""
-    import base64
+def _do_scan_export_data(request: "ScanExportRequest", base: str,
+                         dest: Optional[Path] = None) -> dict:
+    """Data-only mode: one <base>_<id>.<fmt> per scan in `data_format`.
 
+    `dest` (when set) is the validated directory each file is written into
+    instead of being base64'd back to the renderer.
+    """
     fmt = (request.data_format or "xyz").lower()
     if fmt not in ("las", "laz", "ply", "xyz", "csv", "txt", "obj", "e57"):
         return {"success": False, "error": f"Unsupported data format: {fmt}"}
@@ -9740,11 +9794,11 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str) -> dict:
         resolved = _resolve_scan_for_format(scan_entry, request.include_misses)
         total_points += int(resolved["positions"].shape[0])
         name, raw_bytes = _write_scan_to_bytes(resolved, fmt, f"{base}_{i}")
-        files.append({
-            "name": name,
-            "data": base64.b64encode(raw_bytes).decode("ascii"),
-            "is_xml": False,
-        })
+        files.append(_emit_scan_export_file(name, raw_bytes, False, dest))
+        # Drop the reference before resolving the next scan: with dest set the
+        # bytes are already on disk, so holding them would rebuild the very
+        # all-scans-in-memory peak dest_dir exists to avoid.
+        del raw_bytes
 
     return {"success": True, "files": files, "point_count": total_points,
             "scan_count": len(request.scans)}
@@ -23301,7 +23355,8 @@ class BackfillMissesRequest(BaseModel):
 
 
 def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _Path,
-                             progress=None, cancel_event=None) -> dict:
+                             progress=None, cancel_event=None,
+                             preloaded: "Optional[LasReadResult]" = None) -> dict:
     """The heavy worker behind `/api/cloud/session/create`, factored out so it can
     run OFF the event loop under `_bin_frame_streaming_response` and report
     per-stage progress via `progress(fraction, message)`.
