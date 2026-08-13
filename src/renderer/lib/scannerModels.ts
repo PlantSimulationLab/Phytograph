@@ -131,6 +131,7 @@ import livoxAviaUrl from '../assets/models/livox_avia.obj?url';
 export type ScannerModelId =
   | 'generic'
   | 'riegl_vz400i'
+  | 'riegl_vz1000'
   | 'leica_p40'
   | 'leica_blk360'
   | 'leica_blk360_g2'
@@ -230,6 +231,38 @@ export const SCANNER_MODELS: ScannerModel[] = [
       azimuthMaxDeg: 360,
       // Effective measurement rate up to ~1.2 MHz (datasheet PRR modes).
       pulseRateHz: 1200000,
+    },
+  },
+  {
+    id: 'riegl_vz1000',
+    label: 'RIEGL VZ-1000',
+    // Shares the VZ-series body mesh with the VZ-400i — same V-Line housing
+    // family and close enough in proportion that a separate model would be
+    // noise. Height is the datasheet figure for the VZ-1000 itself.
+    meshUrl: rieglVzUrl,
+    meshFormat: 'obj',
+    heightMeters: 0.308,
+    preset: {
+      pattern: 'raster',
+      // Full-waveform pulsed TLS. The datasheet does not quote a hard target
+      // ceiling; real .rxp captures from this instrument show up to 3 returns
+      // per pulse (verified over 13.1M points of a leaf-off orchard scan), and
+      // the VZ-400i's 15 is the family's documented upper bound.
+      returnMode: 'multi',
+      maxReturns: 15,
+      beamDivergenceMrad: 0.3, // 0.3 mrad @ 1/e² (datasheet)
+      // Vertical (line) FOV 100°, horizontal (frame) 360°. Confirmed against a
+      // real scan's .pat file: SCN_SET_RECT_FOV(30, 130, …, 0, 360, …), i.e.
+      // RIEGL's own commanded pattern uses exactly this zenith range.
+      zenithMinDeg: 30,
+      zenithMaxDeg: 130,
+      azimuthMinDeg: 0,
+      azimuthMaxDeg: 360,
+      // Effective measurement rate up to 122 kHz (datasheet, long-range mode).
+      // A real capture reported pulse_repetition_rate = 291,971 Hz, which is
+      // the laser PRR rather than the effective measurement rate; the latter is
+      // what this field means elsewhere, so the datasheet figure is used.
+      pulseRateHz: 122000,
     },
   },
   {

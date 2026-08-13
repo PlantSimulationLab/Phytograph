@@ -22,6 +22,8 @@ by the four stages of a typical processing pipeline.
 
 - :material-export: **[Export from RiPROCESS](export-from-riprocess.md)** — get RIEGL scans out with the fields Phytograph needs.
 
+- :material-scanner: **[Import a RIEGL raw project](import-riegl-riproject.md)** — read `.riproject` scans directly, no RiSCAN PRO round trip.
+
 </div>
 
 ## 1. Pre-processing

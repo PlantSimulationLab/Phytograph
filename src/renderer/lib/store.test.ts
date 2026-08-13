@@ -67,6 +67,7 @@ describe('store settings', () => {
       scanMarkerScale: 1,
       missDistanceThreshold: 1001,
       syntheticScanMemoryBudgetMb: null,
+      rivlibPath: null,
     });
   });
 
@@ -162,6 +163,7 @@ describe('store export/import', () => {
       scanMarkerScale: 1,
       missDistanceThreshold: 1001,
       syntheticScanMemoryBudgetMb: null,
+      rivlibPath: null,
     });
   });
 });

@@ -344,6 +344,184 @@ export async function getDeviceInfo(signal?: AbortSignal): Promise<DeviceInfo> {
 }
 
 /**
+ * Whether RIEGL raw-project (.riproject / .rxp) import is available here, and
+ * why not when it isn't.
+ *
+ * Reading .rxp needs RIEGL's closed-source RiVLib, which has no macOS build, so
+ * Phytograph runs it inside a linux/amd64 container. That makes the feature
+ * conditional on three things at once — Docker reachable, the user's own RiVLib
+ * supplied, and the image built from it — and RiVLib's licence forbids us from
+ * shipping it, so this is a runtime probe rather than a build-time flag.
+ * See /api/riegl/status.
+ */
+export interface RieglStatus {
+  available: boolean;
+  platformSupported: boolean;
+  dockerPresent: boolean;
+  imageBuilt: boolean;
+  rivlibPath: string | null;
+  rivlibValid: boolean;
+  image: string;
+  reason: string;
+}
+
+/**
+ * Build the RIEGL reader Docker image from the bundled Dockerfile.
+ *
+ * The image is always built locally and never pulled: publishing it would mean
+ * redistributing RiVLib, which its licence forbids. The build itself carries no
+ * licensed bytes (RiVLib is bind-mounted at run time), so it is safe to re-run
+ * and cheap on a warm cache.
+ *
+ * Streams PHP1 progress like every other long backend operation.
+ */
+export async function buildRieglImage(
+  rivlibPath: string | null,
+  opts?: ImportProgressOptions,
+): Promise<{ ok: boolean; image: string }> {
+  return fetchJsonWithProgress<{ ok: boolean; image: string }>(
+    '/api/riegl/image/build',
+    { rivlib_path: rivlibPath },
+    opts?.signal,
+    // Docker pulls a ~150 MB base image on a cold cache, so allow well beyond
+    // the default; the backend enforces its own 30-minute ceiling.
+    30 * 60 * 1000,
+    opts?.onProgress,
+    opts?.onRunId,
+  );
+}
+
+/** One scan position inside a raw RIEGL project. */
+export interface RieglScanPosition {
+  name: string;
+  /**
+   * The cloud session the backend built for this position, present after
+   * extraction. The importer streams points straight into a session — no
+   * intermediate LAS is written, so there is no file for the renderer to
+   * re-import (that round trip cost ~10 s and ~1.6 GB per position).
+   */
+  session?: CloudSessionMetadata;
+  /** Exact after extraction; a bounded probe read during inspect. */
+  point_count?: number;
+  point_count_probed?: number;
+  size_bytes?: number;
+  max_returns_per_pulse?: number;
+  instrument?: { model?: string; serial?: string };
+  /** The commanded scan pattern from the position's .pat file. */
+  scan_params?: ScanParamsFromFile & {
+    theta_increment?: number;
+    phi_increment?: number;
+  };
+  gnss?: {
+    latitude: number;
+    longitude: number;
+    height_m: number;
+    height_datum: string;
+  } | null;
+  /** Centroid-anchored ENU offset (metres) derived from the GNSS fix. */
+  enu?: { east_m: number; north_m: number; up_m: number } | null;
+  origin_prior?: [number, number, number];
+  /** Set when pulse grouping disagreed with RiVLib's echo flags. */
+  warning?: string;
+  error?: string;
+}
+
+export interface RieglProject {
+  project: string;
+  rivlib_version: string;
+  scan_count: number;
+  gnss_anchor: {
+    latitude: number;
+    longitude: number;
+    height_m: number;
+  } | null;
+  /**
+   * ALWAYS false for a raw project. Raw scanner data carries no registration
+   * (that is what RiSCAN PRO produces), so every position sits in its own
+   * frame; the GNSS-derived `origin_prior` is a metres-level seed for ICP, not
+   * a placement. The import UI must not imply otherwise.
+   */
+  registered: boolean;
+  scans: RieglScanPosition[];
+  /** Extraction only: the directory holding the written LAS files. */
+  extract_dir?: string;
+}
+
+/** List a raw RIEGL project's scan positions without extracting point data. */
+export async function inspectRieglProject(
+  projectPath: string,
+  rivlibPath: string | null,
+  signal?: AbortSignal,
+): Promise<RieglProject> {
+  const res = await fetch(`${getBackendUrl()}/api/riegl/project/inspect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_path: projectPath, rivlib_path: rivlibPath }),
+    signal,
+  });
+  if (!res.ok) {
+    // 503 carries the capability remediation ("start Docker", "choose a RiVLib
+    // folder"); surface it verbatim rather than a generic status message.
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.detail ?? `riegl inspect failed: ${res.status}`);
+  }
+  return (await res.json()) as RieglProject;
+}
+
+/**
+ * Extract the chosen scan positions to LAS, one file per position.
+ *
+ * Each written file is an ordinary point cloud: the caller imports it through
+ * the normal `parsePointCloudFromPath` path, so nothing downstream has to know
+ * what a .riproject is.
+ */
+export async function extractRieglProject(
+  projectPath: string,
+  scans: string[] | null,
+  rivlibPath: string | null,
+  opts?: ImportProgressOptions,
+): Promise<RieglProject> {
+  return fetchJsonWithProgress<RieglProject>(
+    '/api/riegl/project/extract',
+    { project_path: projectPath, scans, rivlib_path: rivlibPath },
+    opts?.signal,
+    // ~14 M points per position, plus LAS writing, under x86 emulation: a
+    // six-position project runs into the minutes. The backend enforces its own
+    // one-hour ceiling.
+    60 * 60 * 1000,
+    opts?.onProgress,
+    opts?.onRunId,
+  );
+}
+
+export async function getRieglStatus(
+  rivlibPath?: string | null,
+  signal?: AbortSignal,
+): Promise<RieglStatus> {
+  // The path travels per request because the backend sidecar is spawned once at
+  // launch: passing it in the environment would go stale as soon as the user
+  // picked a different folder, and only an app restart would pick it up.
+  const url = new URL(`${getBackendUrl()}/api/riegl/status`);
+  if (rivlibPath) url.searchParams.set('rivlib_path', rivlibPath);
+
+  const res = await fetch(url.toString(), { signal });
+  if (!res.ok) throw new Error(`riegl-status failed: ${res.status}`);
+  const j = (await res.json()) as Record<string, unknown>;
+  // Validate every field: a backend that omits one should yield a safe default
+  // (i.e. "not available"), never `undefined` leaking into the UI.
+  return {
+    available: j.available === true,
+    platformSupported: j.platform_supported === true,
+    dockerPresent: j.docker_present === true,
+    imageBuilt: j.image_built === true,
+    rivlibPath: typeof j.rivlib_path === 'string' ? j.rivlib_path : null,
+    rivlibValid: j.rivlib_valid === true,
+    image: typeof j.image === 'string' ? j.image : '',
+    reason: typeof j.reason === 'string' ? j.reason : '',
+  };
+}
+
+/**
  * Send triangulation request to backend API
  */
 export async function triangulatePointCloud(
@@ -2213,12 +2391,22 @@ export interface ScanExportRequest {
   // Voxel-box grids to write as <grid> blocks (XML mode only). Omitted/empty →
   // no grid blocks. Lets a bundle like sphere.xml round-trip its grid.
   grids?: HeliosGrid[];
+  // Absolute directory for the backend to write the bundle into. Always set this
+  // when the destination is known: base64-in-JSON inflates each file ~1.33x and
+  // this response carries EVERY scan at once, so exporting several scans (the LAZ
+  // case especially) overruns V8's ~512 MB string cap in `response.json()` and
+  // fails as "Unexpected end of JSON input". With dest_dir the backend writes the
+  // files and returns names + sizes only.
+  dest_dir?: string;
 }
 
 export interface ScanExportFile {
   name: string;
-  data: string;       // base64
+  // base64 file content — null when the backend wrote the file itself (dest_dir).
+  data: string | null;
   is_xml: boolean;
+  bytes?: number;    // size on disk
+  written?: boolean; // true → already written by the backend; renderer must skip it
 }
 
 export interface ScanExportResponse {

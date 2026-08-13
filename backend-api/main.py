@@ -17,6 +17,8 @@ import time
 import signal
 import atexit
 import subprocess
+import shutil
+import struct
 from pathlib import Path
 from pytexit import py2tex
 
@@ -236,7 +238,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.65.0"
+BACKEND_VERSION = "0.66.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -462,6 +464,1078 @@ def device_info():
         "effective_path": path,
         "reason": reason,
     }
+
+
+# ---------------------------------------------------------------------------
+# RIEGL .rxp capability (Docker + user-supplied RiVLib)
+# ---------------------------------------------------------------------------
+#
+# Reading RIEGL raw scanner data needs RIEGL's closed-source RiVLib, which ships
+# for Windows and Linux only. On macOS the only way to run it is inside a
+# linux/amd64 container, so the whole feature is gated on three things being
+# true at once: Docker is reachable, the user has supplied a RiVLib copy, and
+# the image has been built from it.
+#
+# RiVLib is NEVER redistributed — its licence forbids it ("You may NOT
+# distribute or modify the software for the use in commercial applications
+# without the written consent of RLMS"), so the user downloads it with their own
+# RIEGL account and points Phytograph at it. That is why this is a runtime probe
+# and not a build-time feature flag.
+#
+# v1 scope is macOS only. Windows and Linux keep the RiSCAN-export route for
+# now; a native (non-container) RiVLib path can be dropped in behind this same
+# probe later without the UI or the endpoints changing.
+
+RIEGL_IMAGE = "phytograph-riegl:latest"
+_RIEGL_DOCKER_TIMEOUT_S = 10
+
+
+def _riegl_rivlib_path(override: "str | None" = None) -> "str | None":
+    """The user-supplied RiVLib directory, or None when unset.
+
+    The renderer owns this setting (it comes from a directory picker and lives
+    in electron-store), so it travels PER REQUEST rather than in the backend's
+    environment: the sidecar is spawned once at launch, and an env var would go
+    stale the moment the user picked a different folder, forcing a restart to
+    take effect. PHYTOGRAPH_RIVLIB_PATH remains as a fallback for tests and for
+    driving the backend standalone.
+    """
+    if override:
+        return override
+    p = os.environ.get("PHYTOGRAPH_RIVLIB_PATH")
+    return p or None
+
+
+def _riegl_rivlib_valid(path: "str | None") -> bool:
+    """A RiVLib directory is usable when it carries the shared object we load."""
+    if not path:
+        return False
+    return (Path(path) / "lib" / "libscanifc.so").is_file()
+
+
+def _docker_present() -> bool:
+    """Best-effort probe for a reachable Docker daemon.
+
+    `docker version --format {{.Server.Version}}` (not `--version`) because it
+    round-trips to the daemon: the CLI alone can be installed while Docker
+    Desktop is stopped, which would otherwise read as available.
+    """
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True, text=True, timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
+def _riegl_image_built() -> bool:
+    """Whether the RIEGL reader image exists locally.
+
+    It can only ever be built locally (never pulled) because building it is what
+    binds the user's own RiVLib to the runtime.
+    """
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["docker", "image", "inspect", RIEGL_IMAGE],
+            capture_output=True, text=True, timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _riegl_status(rivlib_override: "str | None" = None) -> dict:
+    """Resolve whether RIEGL .rxp reading is available, and why not when it isn't.
+
+    Both a machine-readable verdict (`available`) and a human `reason` travel
+    together so the UI never has to reconstruct the explanation. Every probe is
+    guarded: a broken probe reports "unavailable", never a 500.
+    """
+    import platform as _platform
+    system = _platform.system().lower()
+
+    rivlib_path = _riegl_rivlib_path(rivlib_override)
+    rivlib_ok = _riegl_rivlib_valid(rivlib_path)
+
+    # Platform veto first, mirroring device_info's macOS check: on Windows and
+    # Linux the feature is simply not offered in v1, so don't shell out to
+    # docker at all.
+    if system != "darwin":
+        return {
+            "available": False,
+            "platform_supported": False,
+            "docker_present": False,
+            "image_built": False,
+            "rivlib_path": rivlib_path,
+            "rivlib_valid": rivlib_ok,
+            "image": RIEGL_IMAGE,
+            "reason": (
+                "RIEGL .rxp import is macOS-only in this release. On Windows and "
+                "Linux, export to LAS/E57 from RiSCAN PRO or RiPROCESS instead."
+            ),
+        }
+
+    # Guard the probe CALLS, not just their internals. Each helper already
+    # swallows its own subprocess errors, but an unexpected failure here (a
+    # missing PATH entry, a sandbox denial) must still degrade to "unavailable"
+    # rather than 500 — an optional capability failing to answer is a normal
+    # state, not a server error.
+    try:
+        docker_ok = _docker_present()
+    except Exception:
+        docker_ok = False
+    try:
+        image_ok = _riegl_image_built() if docker_ok else False
+    except Exception:
+        image_ok = False
+
+    if not docker_ok:
+        reason = (
+            "Docker is not running. RIEGL's RiVLib has no macOS build, so "
+            "Phytograph reads .rxp inside a Linux container. Start Docker "
+            "Desktop and try again."
+        )
+    elif not rivlib_path:
+        reason = (
+            "RiVLib has not been configured. It is proprietary and cannot be "
+            "distributed with Phytograph — download it from RIEGL's members "
+            "area and select the folder in Settings."
+        )
+    elif not rivlib_ok:
+        reason = (
+            f"No lib/libscanifc.so under {rivlib_path}. Select the top level of "
+            "the extracted RiVLib download (the folder containing bin/, "
+            "include/ and lib/)."
+        )
+    elif not image_ok:
+        reason = (
+            "The RIEGL reader image has not been built yet. Build it from your "
+            "RiVLib copy to enable .rxp import."
+        )
+    else:
+        reason = "RIEGL .rxp import is ready."
+
+    return {
+        "available": bool(docker_ok and image_ok and rivlib_ok),
+        "platform_supported": True,
+        "docker_present": docker_ok,
+        "image_built": image_ok,
+        "rivlib_path": rivlib_path,
+        "rivlib_valid": rivlib_ok,
+        "image": RIEGL_IMAGE,
+        "reason": reason,
+    }
+
+
+def _riegl_docker_context() -> Path:
+    """Locate the docker/riegl build context (Dockerfile + rxp_reader.py).
+
+    Resolution mirrors _resolve_potree_converter_path: an explicit override for
+    tests, then the packaged extraResources location, then the repo checkout.
+    Unlike PotreeConverter this is two small text files rather than a binary, so
+    it ships with every build regardless of platform.
+    """
+    override = os.environ.get("PHYTOGRAPH_RIEGL_DOCKER_CONTEXT")
+    if override:
+        p = Path(override)
+        if (p / "Dockerfile").is_file():
+            return p
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "PHYTOGRAPH_RIEGL_DOCKER_CONTEXT has no Dockerfile: " + override
+            ),
+        )
+
+    candidates = []
+    resources_env = os.environ.get("PHYTOGRAPH_RESOURCES")
+    if resources_env:
+        candidates.append(Path(resources_env) / "docker" / "riegl")
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates.append(repo_root / "docker" / "riegl")
+
+    for c in candidates:
+        if (c / "Dockerfile").is_file():
+            return c
+
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "RIEGL Docker build context not found. Looked in: "
+            f"{[str(c) for c in candidates]}."
+        ),
+    )
+
+
+class RieglImageBuildRequest(BaseModel):
+    # Not used by `docker build` itself — the image never contains RiVLib, which
+    # is bind-mounted at run time because its licence forbids redistribution.
+    # It is carried so the build can refuse to run before the user has a usable
+    # RiVLib, which is the only reason to build the image at all.
+    rivlib_path: Optional[str] = None
+
+
+@app.post("/api/riegl/image/build")
+def riegl_image_build(request: RieglImageBuildRequest, http_request: Request):
+    """Build the RIEGL reader image from the bundled Dockerfile.
+
+    This is the one setup step that cannot be done for the user ahead of time:
+    the image is always built locally and never pulled, because publishing it
+    would mean redistributing RiVLib. The build itself only installs numpy and
+    laspy onto a python:3.11-slim-bullseye base, so it carries no licensed bytes
+    and is safe to re-run.
+
+    Streams PHP1 progress and honours /api/cancel/{run_id} like every other long
+    operation. Declared `def` (not `async def`) per the event-loop rule — the
+    work is a blocking subprocess, so FastAPI runs it in the threadpool.
+    """
+    status = _riegl_status(request.rivlib_path)
+    if not status["platform_supported"]:
+        raise HTTPException(status_code=503, detail=status["reason"])
+    if not status["docker_present"]:
+        raise HTTPException(status_code=503, detail=status["reason"])
+    # Building without a usable RiVLib would "succeed" and still leave the
+    # feature unavailable, which reads as a broken build. Fail with the reason.
+    if not status["rivlib_valid"]:
+        raise HTTPException(status_code=503, detail=status["reason"])
+
+    context = _riegl_docker_context()
+    run_id, cancel_event = _new_cancel_token()
+
+    def build_frame(progress):
+        # An indeterminate (None) fraction: `docker build` reports layer-level
+        # progress that doesn't map to a percentage, and StatusPill renders a
+        # null fraction as a pulsing label rather than an empty bar.
+        progress(None, "Building RIEGL reader image…")
+        _run_docker_build(context, cancel_event=cancel_event)
+        progress(1.0, "Image built.")
+        return json.dumps({"ok": True, "image": RIEGL_IMAGE}).encode("utf-8")
+
+    return _bin_frame_streaming_response(
+        build_frame, request=http_request, cancel_event=cancel_event,
+        run_id=run_id,
+    )
+
+
+def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
+                      timeout_s: float = 1800.0) -> None:
+    """Run `docker build` for the reader image, cancellably.
+
+    Same shape as _run_riegl_container: env scrub, log file rather than a pipe,
+    Popen + poll so the child can actually be killed. `docker build` IS a normal
+    child process (unlike `docker run`, whose container the daemon owns), so
+    killing it is enough — but the daemon may keep building briefly afterwards,
+    which is harmless since a partial build simply leaves no tagged image.
+    """
+    import subprocess
+    import tempfile
+
+    env = os.environ.copy()
+    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env.pop(var, None)
+
+    cmd = [
+        "docker", "build", "--platform", "linux/amd64",
+        "-t", RIEGL_IMAGE, str(context),
+    ]
+
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".riegl-build.log", delete=False
+    ) as logf:
+        log_path = logf.name
+
+    proc = None
+    try:
+        with open(log_path, "w") as log_handle:
+            proc = subprocess.Popen(
+                cmd, stdout=log_handle, stderr=subprocess.STDOUT, env=env,
+                text=True,
+            )
+            started = time.time()
+            while proc.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    proc.kill()
+                    proc.wait()
+                    raise ScanCancelled()
+                if time.time() - started > timeout_s:
+                    proc.kill()
+                    proc.wait()
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"Image build exceeded {timeout_s:.0f}s.",
+                    )
+                time.sleep(poll)
+
+        if proc.returncode != 0:
+            tail = ""
+            try:
+                with open(log_path) as fh:
+                    tail = fh.read()[-1500:]
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"docker build failed (exit {proc.returncode}). {tail}",
+            )
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            os.unlink(log_path)
+        except Exception:
+            pass
+
+
+class RieglProjectInspectRequest(BaseModel):
+    project_path: str
+    rivlib_path: Optional[str] = None
+
+
+def _riegl_project_mounts(status: dict, project: Path) -> List[tuple]:
+    """Standard read-only mounts for a reader invocation.
+
+    The project is mounted READ-ONLY on purpose: this tool only ever reads
+    scanner data, and irreplaceable field captures must not be reachable by a
+    bug in the container.
+    """
+    return [
+        (status["rivlib_path"], "/rivlib", "ro"),
+        (str(project), "/project", "ro"),
+    ]
+
+
+def _validate_riproject(project_path: str) -> Path:
+    project = Path(project_path)
+    if not project.is_dir():
+        # A .riproject is a DIRECTORY of ScanPos* folders, not a file — the most
+        # likely mistake is picking one of the .rxp files inside it.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{project_path} is not a directory. Select the .riproject "
+                "folder itself, not a file inside it."
+            ),
+        )
+    return project
+
+
+@app.post("/api/riegl/project/inspect")
+def riegl_project_inspect(request: RieglProjectInspectRequest):
+    """List a raw RIEGL project's scan positions without extracting points.
+
+    Drives the import selection UI: each entry carries the scan pattern (from
+    the position's .pat file), the instrument identity and the GNSS fix, plus a
+    centroid-anchored ENU offset so the caller can lay the positions out.
+
+    Cheap relative to extraction — the reader only pulls a bounded prefix of
+    each point stream, which it must do at all because RiVLib emits the
+    housekeeping records (where GNSS lives) as a side effect of reading points.
+    """
+    status = _resolve_riegl_runtime(request.rivlib_path)
+    project = _validate_riproject(request.project_path)
+
+    out = _run_riegl_container(
+        ["inspect", "/project"],
+        _riegl_project_mounts(status, project),
+        # Bounded prefix reads only; a 6-position project takes ~30 s.
+        timeout_s=600.0,
+    )
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=500,
+            detail="RIEGL reader returned malformed JSON.",
+        )
+
+
+class RieglProjectExtractRequest(BaseModel):
+    project_path: str
+    # Scan position names (e.g. ["ScanPos001", "ScanPos003"]). None/empty = all.
+    scans: Optional[List[str]] = None
+    rivlib_path: Optional[str] = None
+    # Threaded through to each position's session so the user's far-field
+    # miss-detection setting applies here as it does to every other import.
+    miss_distance_threshold: Optional[float] = None
+
+
+def _riegl_arrays_to_las_result(
+    arrays: dict, origin: "Optional[List[float]]" = None,
+) -> "LasReadResult":
+    """Adapt streamed RIEGL arrays to the shape the session builder consumes.
+
+    This is what lets the import skip a LAS write AND the read back: the reader
+    container hands over raw arrays, and CloudSession's source of truth is
+    arrays, so the file in between was pure overhead (~10 s and ~1.6 GB per
+    position). Nothing is written here.
+
+    `origin` TRANSLATES the points into the project frame. RiVLib returns every
+    position in its OWN scanner-local frame (raw projects carry no registration),
+    so without this every cloud piles up at 0,0,0 while its scanner marker sits
+    correctly at the GNSS-derived offset — points and marker disagreeing by the
+    whole layout. The session's `origin` field does NOT do this: it only projects
+    sky/miss points onto the display shell, and `world_shift` is SUBTRACTED, so
+    neither can place a cloud. The arrays are the only place the shift can happen.
+
+    `intensity` is the display channel, derived from RIEGL reflectance the same
+    way the LAS writer did — dB relative to a white diffuse target, negative for
+    most natural surfaces, so it is rescaled over PDAL's -25..+5 dB window
+    rather than cast. Full-precision reflectance is kept in `extras`.
+    """
+    xyz = arrays["positions"]
+    if origin is not None and len(origin) == 3:
+        # New array: the caller's buffer may still be referenced by the stream
+        # decoder, and mutating it in place would be a surprising side effect.
+        xyz = xyz + np.asarray(origin, dtype=np.float64)
+    n = int(xyz.shape[0])
+
+    reflectance = arrays["reflectance"]
+    refl_lo, refl_hi = -25.0, 5.0
+    norm = (reflectance - refl_lo) / (refl_hi - refl_lo)
+    intensity = (np.clip(norm, 0.0, 1.0) * 65535).astype(np.uint16)
+
+    # .rxp records only returns; no-return shots are absent rather than flagged,
+    # so there is nothing to mark as a miss (Phase 7 recovers these).
+    extras: Dict[str, np.ndarray] = {
+        "is_miss": np.zeros(n, dtype=np.float32),
+    }
+    for slug in _RIEGL_STREAM_ATTRS:
+        extras[slug] = arrays[slug]
+
+    extra_dims_meta = [{"slug": "is_miss", "label": "Miss"}] + [
+        {"slug": slug, "label": slug.replace("_", " ").title()}
+        for slug in _RIEGL_STREAM_ATTRS
+    ]
+
+    return LasReadResult(
+        positions=xyz,
+        colors=None,
+        intensity=intensity,
+        extras=extras,
+        extra_dims_meta=extra_dims_meta,
+        timestamps=None,
+        gps_time_encoding=None,
+        beam_origins=None,
+    )
+
+
+def _riegl_extract_dir() -> Path:
+    """Where extracted LAS files land.
+
+    NOT under the octree cache root, and not a sibling of it either. That was
+    the first attempt and it lost files: the cache directory is swept by several
+    independent agents (the backend's own eviction, `launchApp`'s per-run
+    teardown, resetToFreshScene), and anything living beside it gets caught in
+    the same rmtree. A 759 MB extract vanished ~40s after being written, between
+    the extract call and the import that consumed it.
+
+    These files are also NOT temp files: the renderer imports them right after
+    extraction, and a session keeps reading its source until the cloud is
+    closed, so a /tmp cleaner deleting one mid-session would break the import.
+    They get their own directory with its own override, cleaned only by
+    _prune_riegl_extracts below.
+    """
+    override = os.environ.get("PHYTOGRAPH_RIEGL_EXTRACT_ROOT")
+    if override:
+        root = Path(override)
+    else:
+        # Same per-OS user-data base as the octree cache, one level up from
+        # `cache/` so no cache sweep can reach it.
+        if sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support" / "Phytograph"
+        elif sys.platform.startswith("win"):
+            base = Path(
+                os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+            ) / "Phytograph"
+        else:
+            base = Path(
+                os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+            ) / "Phytograph"
+        root = base / "riegl_extracts"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+# Extracts are large (a single VZ-1000 position is ~760 MB) and nothing else
+# will ever delete them, so trim old ones on each extraction. Age-based rather
+# than size-based: an extract's whole purpose is to be imported immediately, so
+# anything from a previous day is finished with.
+_RIEGL_EXTRACT_MAX_AGE_S = 24 * 3600
+
+
+def _prune_riegl_extracts(keep: "Optional[Path]" = None) -> None:
+    """Delete extract directories older than a day. Best-effort and never fatal:
+    losing disk space is a lesser failure than aborting an import."""
+    import shutil
+
+    root = _riegl_extract_dir()
+    now = time.time()
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        if keep is not None and child.resolve() == keep.resolve():
+            continue
+        try:
+            if now - child.stat().st_mtime > _RIEGL_EXTRACT_MAX_AGE_S:
+                shutil.rmtree(child, ignore_errors=True)
+        except OSError:
+            continue
+
+
+@app.post("/api/riegl/project/extract")
+def riegl_project_extract(
+    request: RieglProjectExtractRequest, http_request: Request
+):
+    """Extract selected scan positions to LAS, one file per position.
+
+    Each LAS is a normal Phytograph point cloud: the renderer imports it through
+    the existing `create_cloud_session` path with no RIEGL-specific handling.
+    That is deliberate — it keeps the container boundary dumb and means the
+    directory-shaped .riproject never has to be understood downstream.
+
+    Points are in the SCANNER'S OWN FRAME. Raw projects carry no registration
+    (that is what RiSCAN PRO produces), so every position sits at its own
+    origin; `origin_prior` is the GNSS-derived ENU offset for seeding ICP, not
+    a registration. `registered: false` in the response says so explicitly.
+
+    Streams PHP1 progress and honours /api/cancel/{run_id}.
+    """
+    status = _resolve_riegl_runtime(request.rivlib_path)
+    project = _validate_riproject(request.project_path)
+
+    # No output directory: this import writes no intermediate files at all.
+    # Sweep any left by older versions so their gigabytes are reclaimed.
+    try:
+        _prune_riegl_extracts()
+    except Exception:
+        pass
+
+    # One writable mount: the transport directory. The container writes raw
+    # arrays there (~880 MB/s, against ~32 MB/s through a stdout pipe) and the
+    # host deletes each position's files the moment they are loaded, so peak
+    # disk is one position rather than the whole project. The PROJECT itself
+    # stays read-only — irreplaceable field data must not be reachable for
+    # writing.
+    out_dir = _riegl_extract_dir() / uuid.uuid4().hex[:12]
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    args = ["stream", "/project", "--out", "/out"]
+    if request.scans:
+        args += ["--scans"] + list(request.scans)
+
+    mounts = _riegl_project_mounts(status, project)
+    mounts.append((str(out_dir), "/out", "rw"))
+
+    run_id, cancel_event = _new_cancel_token()
+
+    def build_frame(progress):
+        # The reader's first pass reads a bounded prefix of EVERY selected
+        # position (that is how the GNSS housekeeping records are flushed) before
+        # a single point streams. Reported as its own phase because folding it
+        # into position 1 made the first scan look ~1.5s/position slower than the
+        # rest for no reason the user could see.
+        nsel = len(request.scans) if request.scans else 0
+        progress(
+            None,
+            f"Reading project metadata{f' ({nsel} positions)' if nsel else ''}…",
+        )
+        # Sessions are built INSIDE the stream callback, as each position
+        # finishes arriving. Two reasons:
+        #
+        #  * MEMORY. Accumulating every position first meant ~3.6 GB resident
+        #    for a six-position project; now it is one position's arrays.
+        #  * OVERLAP. The container keeps decoding position N+1 (emulated x86)
+        #    while the host builds position N's octree (native CPU + disk).
+        #    Different resources, so the two genuinely run at once — the pipe's
+        #    backpressure is what schedules it, with no threads to coordinate.
+        built: List[dict] = []
+        total = len(request.scans) if request.scans else 0
+
+        def on_scan(index: int, entry: dict, arrays) -> Optional[dict]:
+            name = entry.get("name", f"scan{index}")
+            info = dict(entry)
+            if arrays is None:
+                info.setdefault("error", "no points were streamed")
+                built.append(info)
+                return None
+
+            _cancel_checkpoint(progress)
+            npts = arrays["positions"].shape[0]
+            denom = max(1, total or (index + 1))
+            progress(
+                min(0.99, (index + 0.5) / denom),
+                f"Building {name} ({npts:,} points)…",
+            )
+            # NO INTERMEDIATE LAS. The arrays are already in RAM and
+            # CloudSession's source of truth IS arrays, so writing them out just
+            # to read them back cost ~10 s and ~1.6 GB of disk per position.
+            sess_req = CloudSessionCreateRequest(
+                source_path=str(project),
+                miss_distance_threshold=request.miss_distance_threshold,
+                origin=info.get("origin_prior"),
+            )
+            try:
+                info["session"] = _do_create_cloud_session(
+                    sess_req, project, progress=None,
+                    cancel_event=cancel_event,
+                    preloaded=_riegl_arrays_to_las_result(
+                        arrays, origin=info.get("origin_prior"),
+                    ),
+                )
+            except ScanCancelled:
+                raise
+            except HTTPException as exc:
+                info["error"] = str(exc.detail)
+            built.append(info)
+            return None
+
+        header, _per_scan, trailer = _stream_riegl_container(
+            args, mounts, out_dir, cancel_event=cancel_event,
+            timeout_s=3600.0, on_scan=on_scan,
+        )
+
+        # Fold the trailing per-scan summary (point counts, bboxes, multi-return
+        # warnings) into the entries built above — those values are only known
+        # after decoding, so they cannot ride in the header.
+        by_name = {t.get("name"): t for t in trailer}
+        scans_out: List[dict] = []
+        for info in built:
+            merged = dict(info)
+            merged.update({
+                k: v for k, v in by_name.get(info.get("name"), {}).items()
+                if k != "name"
+            })
+            scans_out.append(merged)
+
+        # The per-scan directories are removed as each is loaded; drop the
+        # run's own directory so a cancelled or failed run leaves nothing.
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+        payload = dict(header)
+        payload["scans"] = scans_out
+        progress(1.0, "Extraction complete.")
+        return json.dumps(payload).encode("utf-8")
+
+    return _bin_frame_streaming_response(
+        build_frame, request=http_request, cancel_event=cancel_event,
+        run_id=run_id,
+    )
+
+
+@app.get("/api/riegl/status")
+def riegl_status(rivlib_path: Optional[str] = None):
+    """Report whether RIEGL .riproject import is available on this machine.
+
+    `rivlib_path` is the renderer's persisted setting, passed per request
+    because the backend sidecar is spawned once at launch and would otherwise
+    need a restart to notice the user changing it.
+    """
+    return _riegl_status(rivlib_path)
+
+
+def _resolve_riegl_runtime(rivlib_override: "str | None" = None) -> dict:
+    """Return the RIEGL runtime config, or raise 503 with the remediation.
+
+    503 is the established status for "optional capability not installed" here
+    (see _resolve_potree_converter_path), and the detail carries the same reason
+    string the status endpoint reports so the UI can surface one message.
+    """
+    status = _riegl_status(rivlib_override)
+    if not status["available"]:
+        raise HTTPException(status_code=503, detail=status["reason"])
+    return status
+
+
+def _run_riegl_container(
+    args: List[str],
+    mounts: List[tuple],
+    *,
+    cancel_event=None,
+    poll: float = 0.2,
+    timeout_s: float = 3600.0,
+) -> str:
+    """Run the RIEGL reader container and return its stdout (a JSON document).
+
+    `mounts` is a list of (host_path, container_path, mode) with mode "ro"/"rw".
+    `args` are the arguments passed to the image's entrypoint (rxp_reader.py).
+
+    THE CONTAINER IS NOT IN OUR PROCESS TREE. `docker run` is a thin client that
+    asks the daemon to start a container elsewhere, so the process-group kill
+    used for PotreeConverter and the segmentation workers does nothing here —
+    killing the CLI would orphan a running container. Cancellation therefore
+    goes through a deterministic `--name` plus `docker kill`, and `--rm` makes
+    the daemon reap the container either way.
+
+    Everything else mirrors _run_potree_converter, for the same reasons it does:
+
+      * Scrub DYLD_/LD_LIBRARY_PATH — a PyInstaller-bundled Python injects
+        these and they break any child expecting system libs.
+      * stderr goes to a LOG FILE, not a pipe. The reader streams per-scan
+        progress there, and a poll loop with PIPE and no reader deadlocks once
+        the child fills the ~64 KB buffer. stdout IS a pipe, but it only
+        receives one JSON document at the very end, so it cannot fill.
+      * Popen + poll rather than subprocess.run, because run() retains no
+        handle and its child could never be cancelled.
+    """
+    import subprocess
+    import tempfile
+    import uuid as _uuid
+
+    # Unique per run so a cancel can only ever target this container, even with
+    # several imports in flight (the backend is genuinely concurrent).
+    container_name = f"phytograph-riegl-{_uuid.uuid4().hex[:12]}"
+
+    env = os.environ.copy()
+    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env.pop(var, None)
+
+    cmd = ["docker", "run", "--rm", "--name", container_name,
+           "--platform", "linux/amd64"]
+    for host, container, mode in mounts:
+        cmd += ["-v", f"{host}:{container}:{mode}" if mode == "ro"
+                else f"{host}:{container}"]
+    cmd += [RIEGL_IMAGE] + list(args)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".riegl.log", delete=False
+    ) as logf:
+        log_path = logf.name
+
+    proc = None
+    try:
+        with open(log_path, "w") as log_handle:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=log_handle,
+                env=env, text=True,
+            )
+
+            started = time.time()
+            while proc.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    _kill_riegl_container(container_name, proc)
+                    raise ScanCancelled()
+                if time.time() - started > timeout_s:
+                    _kill_riegl_container(container_name, proc)
+                    raise HTTPException(
+                        status_code=504,
+                        detail=(
+                            f"RIEGL extraction exceeded {timeout_s:.0f}s and was "
+                            "stopped."
+                        ),
+                    )
+                time.sleep(poll)
+
+            stdout, _ = proc.communicate()
+
+        if proc.returncode != 0:
+            tail = ""
+            try:
+                with open(log_path) as fh:
+                    tail = fh.read()[-1500:]
+            except Exception:
+                pass
+            # The reader reports its own failures as {"error": ...} on stdout
+            # before exiting non-zero, so prefer that over the log tail.
+            detail = None
+            try:
+                parsed = json.loads(stdout)
+                detail = parsed.get("error")
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=detail or (
+                    f"RIEGL reader failed (exit {proc.returncode}). {tail}"
+                ),
+            )
+        return stdout
+    finally:
+        if proc is not None and proc.poll() is None:
+            _kill_riegl_container(container_name, proc)
+        try:
+            os.unlink(log_path)
+        except Exception:
+            pass
+
+
+def _stream_riegl_container(
+    args: List[str],
+    mounts: List[tuple],
+    out_dir: Path,
+    *,
+    cancel_event=None,
+    timeout_s: float = 3600.0,
+    on_scan=None,
+) -> tuple:
+    """Run the reader, consuming each position's arrays as it finishes.
+
+    TRANSPORT: raw arrays through a bind-mounted directory, NOT stdout. Measured
+    on this machine moving 1 GB container->host with no RIEGL code involved, a
+    Docker stdout pipe runs at ~32 MB/s against ~880 MB/s for a bind mount — at
+    576 MB per position the pipe alone was ~20 s of a ~40 s import.
+
+    stdout now carries only the JSON header. stderr carries per-scan progress,
+    a `{"ready": name}` line as each position's arrays land, and a trailing
+    summary; it goes to a log FILE because a poll loop with a second unread pipe
+    deadlocks once the child fills it.
+
+    `on_scan(index, entry, arrays)` runs as each position becomes ready, so the
+    host builds position N's session while the container decodes N+1 — different
+    resources (native CPU vs emulated), genuinely concurrent.
+    """
+    import subprocess
+    import tempfile
+    import uuid as _uuid
+
+    container_name = f"phytograph-riegl-{_uuid.uuid4().hex[:12]}"
+
+    env = os.environ.copy()
+    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env.pop(var, None)
+
+    cmd = ["docker", "run", "--rm", "--name", container_name,
+           "--platform", "linux/amd64"]
+    for host, container, mode in mounts:
+        cmd += ["-v", f"{host}:{container}:{mode}" if mode == "ro"
+                else f"{host}:{container}"]
+    cmd += [RIEGL_IMAGE] + list(args)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".riegl-stream.log", delete=False
+    ) as logf:
+        log_path = logf.name
+
+    proc = None
+    started = time.time()
+    header: dict = {}
+    results: List[Any] = []
+    trailer: List[dict] = []
+    try:
+        with open(log_path, "w") as log_handle:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=log_handle, env=env,
+                bufsize=1024 * 1024,
+            )
+            header = _read_riegl_header(proc.stdout)
+            entries = header.get("scans", [])
+            by_name = {e.get("name"): (i, e) for i, e in enumerate(entries)}
+            handled: set = set()
+
+            def drain(final: bool = False) -> None:
+                """Dispatch every position whose arrays have landed."""
+                for line in _tail_json_lines(log_path):
+                    if "trailer" in line:
+                        trailer[:] = line["trailer"]
+                    elif "error" in line and not final:
+                        raise HTTPException(status_code=500, detail=line["error"])
+                    name = line.get("ready")
+                    if not name or name in handled or name not in by_name:
+                        continue
+                    idx, entry = by_name[name]
+                    arrays = _load_riegl_scan_arrays(out_dir / name)
+                    handled.add(name)
+                    if on_scan is not None:
+                        results.append(on_scan(idx, entry, arrays))
+                    else:
+                        results.append(arrays)
+
+            while proc.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    _kill_riegl_container(container_name, proc)
+                    raise ScanCancelled()
+                if time.time() - started > timeout_s:
+                    _kill_riegl_container(container_name, proc)
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"RIEGL extraction exceeded {timeout_s:.0f}s.",
+                    )
+                drain()
+                time.sleep(0.25)
+
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            drain(final=True)
+
+        if proc.returncode != 0:
+            tail = ""
+            try:
+                with open(log_path) as fh:
+                    tail = fh.read()[-1500:]
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"RIEGL reader failed (exit {proc.returncode}). {tail}",
+            )
+
+        # A position that never reported ready still needs an entry, so the
+        # caller sees it failed rather than silently missing.
+        for name, (idx, entry) in by_name.items():
+            if name not in handled and on_scan is not None:
+                results.append(on_scan(idx, entry, None))
+
+        return header, results, trailer
+    finally:
+        if proc is not None and proc.poll() is None:
+            _kill_riegl_container(container_name, proc)
+        try:
+            os.unlink(log_path)
+        except Exception:
+            pass
+
+
+def _tail_json_lines(log_path: str) -> List[dict]:
+    """Parse every JSON object currently in the reader's stderr log.
+
+    Re-reads from the start each poll: the file is a few KB of progress lines,
+    so this is far cheaper than tracking offsets, and callers dedupe by name.
+    """
+    out: List[dict] = []
+    try:
+        with open(log_path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+_RIEGL_STREAM_MAGIC = b"PHRX"
+_RIEGL_STREAM_VERSION = 2
+
+# Column order and dtypes, matching rxp_reader._ARRAY_SPEC exactly. A mismatch
+# here would silently transpose or misread attributes rather than error.
+_RIEGL_STREAM_ATTRS = (
+    "reflectance", "amplitude", "deviation", "target_index", "target_count",
+)
+_RIEGL_ARRAY_SPEC = (
+    ("positions.f64", "<f8", 3),
+    ("reflectance.f32", "<f4", 1),
+    ("amplitude.f32", "<f4", 1),
+    ("deviation.f32", "<f4", 1),
+    ("target_index.f32", "<f4", 1),
+    ("target_count.f32", "<f4", 1),
+)
+
+
+def _read_exactly(stream, n: int) -> bytes:
+    """Read exactly n bytes or raise. A pipe read can return short."""
+    parts = []
+    remaining = n
+    while remaining > 0:
+        block = stream.read(remaining)
+        if not block:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "RIEGL reader stream ended early — expected "
+                    f"{n} bytes, got {n - remaining}."
+                ),
+            )
+        parts.append(block)
+        remaining -= len(block)
+    return b"".join(parts)
+
+
+def _read_riegl_header(stream) -> dict:
+    """Read the JSON header the reader emits on stdout before any arrays."""
+    magic = _read_exactly(stream, 4)
+    if magic != _RIEGL_STREAM_MAGIC:
+        raise HTTPException(
+            status_code=500,
+            detail=f"RIEGL reader stream has bad magic {magic!r}.",
+        )
+    version, hdr_len = struct.unpack("<II", _read_exactly(stream, 8))
+    if version != _RIEGL_STREAM_VERSION:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"RIEGL reader stream version {version} is not supported "
+                f"(expected {_RIEGL_STREAM_VERSION}). Rebuild the reader image "
+                "(Settings -> RIEGL RiVLib folder -> Build reader image)."
+            ),
+        )
+    return json.loads(_read_exactly(stream, hdr_len).decode("utf-8"))
+
+
+def _load_riegl_scan_arrays(scan_dir: Path) -> "Optional[dict]":
+    """Load one position's columns from the bind-mounted directory.
+
+    Returns None when `done.json` is absent — the marker is written last, so its
+    absence means the position is incomplete (failed, or still being written)
+    and must not be read.
+
+    The files are DELETED once loaded: at ~576 MB per position, keeping them
+    would put gigabytes on disk for data that is already in RAM and never read
+    again.
+    """
+    marker = scan_dir / "done.json"
+    if not marker.is_file():
+        return None
+    try:
+        n = int(json.loads(marker.read_text())["point_count"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+    arrays: Dict[str, np.ndarray] = {}
+    try:
+        for name, dtype, cols in _RIEGL_ARRAY_SPEC:
+            path = scan_dir / name
+            data = np.fromfile(str(path), dtype=dtype)
+            expected = n * cols
+            if data.size != expected:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"RIEGL array {name} has {data.size} values, expected "
+                        f"{expected} — the reader output is truncated."
+                    ),
+                )
+            arrays[name.split(".")[0]] = (
+                data.reshape(n, cols) if cols > 1 else data
+            )
+    finally:
+        # Reclaim immediately, whether or not every column loaded.
+        shutil.rmtree(scan_dir, ignore_errors=True)
+    return arrays
+
+
+def _kill_riegl_container(container_name: str, proc=None) -> None:
+    """Stop a running reader container and its client process.
+
+    `docker kill` targets the container by name because that is the only handle
+    that reaches it — the daemon owns it, not us. The local CLI process is then
+    terminated too so the poll loop's `communicate()` cannot block on a pipe
+    that will never close.
+    """
+    import subprocess
+    try:
+        subprocess.run(
+            ["docker", "kill", container_name],
+            capture_output=True, timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+    except Exception:
+        pass
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 # Model mapping
@@ -22255,12 +23329,26 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
         tmp_dir = _Path(_tmp)
         _report(0.02, "Reading source file…")
         _cancel_checkpoint(progress)
-        las_path, las_is_temp, source_extra_dims, full_xyz, source_origins = _source_to_las(
-            source_path, request.ascii_format, tmp_dir, request.column_plan,
-        )
-        _report(0.25, "Loading points into memory…")
-        _cancel_checkpoint(progress)
-        _las = _read_las_into_arrays(las_path)
+        if preloaded is not None:
+            # ALREADY IN RAM — skip the normalise-to-LAS + read-it-back round
+            # trip entirely. The RIEGL importer streams arrays straight out of
+            # the reader container, so writing them to a LAS purely so this
+            # function could read them again cost ~10 s and ~1.6 GB of disk per
+            # scan position for no gain. `source_path` stays as provenance only,
+            # exactly as CloudSession documents.
+            las_path, las_is_temp = source_path, False
+            source_extra_dims = [
+                {"slug": k, "label": k} for k in preloaded.extras.keys()
+            ]
+            full_xyz, source_origins = None, None
+            _las = preloaded
+        else:
+            las_path, las_is_temp, source_extra_dims, full_xyz, source_origins = _source_to_las(
+                source_path, request.ascii_format, tmp_dir, request.column_plan,
+            )
+            _report(0.25, "Loading points into memory…")
+            _cancel_checkpoint(progress)
+            _las = _read_las_into_arrays(las_path)
         # The session array is the source of truth and must hold FULL precision
         # (it is never re-read from the file). For ASCII/XYZ imports the LAS we
         # synthesised is 1 mm-quantized — coarse enough to shatter precision-

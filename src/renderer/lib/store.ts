@@ -63,6 +63,16 @@ export interface AppSettings {
   // fan-out is chunked to stay near this budget; results are unchanged). null =
   // leave Helios's automatic default (≈4 GiB on this CPU build) untouched.
   syntheticScanMemoryBudgetMb: number | null;
+  // Absolute path to the user's own RiVLib download, used to read RIEGL raw
+  // scanner projects (.riproject / .rxp). RiVLib is proprietary and its licence
+  // forbids redistribution, so Phytograph cannot ship it — the user downloads it
+  // from RIEGL's members area and points us at the extracted folder (the one
+  // containing bin/, include/, lib/). null = not configured, which is the only
+  // reason .rxp import is unavailable on an otherwise-ready machine.
+  //
+  // Path only. It is passed to the backend, which bind-mounts it read-only into
+  // the reader container; nothing is ever copied into Phytograph or an image.
+  rivlibPath: string | null;
 }
 
 export interface StoreData {
@@ -78,6 +88,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   scanMarkerScale: 1,
   missDistanceThreshold: 1001,
   syntheticScanMemoryBudgetMb: null,
+  rivlibPath: null,
 };
 
 const hasElectron = (): boolean => typeof window !== 'undefined' && !!window.electronAPI;

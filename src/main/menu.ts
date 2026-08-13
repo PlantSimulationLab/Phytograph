@@ -90,6 +90,7 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
             { label: 'Skeleton…', click: () => send({ kind: 'import-skeleton' }) },
             { label: 'Scan XML…', click: () => send({ kind: 'import-scan-xml' }) },
             { label: 'QSM CSV…', click: () => send({ kind: 'import-qsm' }) },
+            { label: 'RIEGL Project…', click: () => send({ kind: 'import-riegl' }) },
           ],
         },
         { type: 'separator' },

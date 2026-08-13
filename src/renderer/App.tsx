@@ -5,11 +5,11 @@ import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
 import { BulkImportProgress, type BulkImportProgressState } from "./components/BulkImportProgress";
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
-import { scanDisplayName, type Scan } from "./lib/scan";
+import { scanDisplayName, type Scan, allocateScanColor } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { shiftPoseStream } from "./lib/poseStream";
 import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
-import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError } from "./utils/backendApi";
+import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
 import { isQsmCsvFile } from "./lib/qsmImport";
 
 // A user cancel is not a failure: it must never land in the per-file `errors[]`
@@ -29,8 +29,10 @@ import { resolveTargets } from "./lib/bulkActions";
 import { FeedbackDialog } from "./components/FeedbackDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { RieglProjectDialog } from "./components/RieglProjectDialog";
 import StatusPill from "./components/StatusPill";
 import { getSettings } from "./lib/store";
+import { isRieglProjectPath } from "./lib/rieglProject";
 import type { FeedbackMode } from "./lib/feedback";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
@@ -1320,6 +1322,130 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     setSelectedScanIds(new Set(newOnes.map(s => s.id)));
   }, [addScansTx]);
 
+  // ── RIEGL raw project import ────────────────────────────────────────────
+  //
+  // A .riproject is a DIRECTORY of scan positions, so this can't ride the
+  // ordinary file-import path (which reads bytes per path). The flow is:
+  //   pick directory → inspect (fast) → user selects positions → extract to LAS
+  //   → import each LAS through the NORMAL cloud path → one batched add.
+  //
+  // Extraction is what makes this worth a bespoke flow: each position becomes
+  // an ordinary LAS, so everything downstream — sessions, octrees, the viewer —
+  // needs no RIEGL-specific handling at all.
+  const [rieglProjectPath, setRieglProjectPath] = useState<string | null>(null);
+  const [rieglRivlibPath, setRieglRivlibPath] = useState<string | null>(null);
+  const rieglResolveRef = useRef<((scans: string[] | null) => void) | null>(null);
+
+  const chooseRieglScans = useCallback(
+    (path: string): Promise<string[] | null> =>
+      new Promise((resolve) => {
+        rieglResolveRef.current = resolve;
+        setRieglProjectPath(path);
+      }),
+    [],
+  );
+
+  // `presetPath` skips the picker: a dropped .riproject folder already knows
+  // its path (see onDropCapture), and re-prompting would be absurd.
+  const handleImportRieglProject = useCallback(async (presetPath?: string) => {
+    const picked = presetPath ?? await window.electronAPI?.dialog.open({
+      directory: true,
+      title: 'Select a RIEGL project (.riproject)',
+    });
+    if (typeof picked !== 'string' || !picked) return;
+
+    const settings = await getSettings().catch(() => null);
+    const rivlibPath = settings?.rivlibPath ?? null;
+    setRieglRivlibPath(rivlibPath);
+
+    // The dialog runs the inspect itself so its own spinner covers the wait,
+    // and it surfaces a 503 (Docker down / RiVLib unset) inline rather than as
+    // a toast detached from the thing the user just clicked.
+    const chosen = await chooseRieglScans(picked);
+    setRieglProjectPath(null);
+    if (!chosen || chosen.length === 0) return;
+
+    importCancelledRef.current = false;
+    const controller = new AbortController();
+    importAbortRef.current = controller;
+    setImportProgress({
+      current: 1,
+      total: chosen.length,
+      title: 'Importing RIEGL project',
+      label: `Extracting ${chosen.length} scan position${chosen.length > 1 ? 's' : ''}…`,
+      hint: 'Reading .rxp through RiVLib — expect tens of seconds per position.',
+      fraction: null,
+    });
+
+    try {
+      const project = await extractRieglProject(picked, chosen, rivlibPath, {
+        signal: controller.signal,
+        onRunId: (id: string) => { importRunIdRef.current = id; },
+        onProgress: (fraction: number | null, message: string) =>
+          setImportProgress((p) => (p ? { ...p, label: message, fraction } : p)),
+      });
+      if (importCancelledRef.current) return;
+
+      // The backend already built a cloud session (and its octree) for every
+      // position while streaming, so there is nothing left to import here — no
+      // file to re-read, no second pass. This loop only wraps each session in a
+      // Scan.
+      const newScans: Scan[] = [];
+      const okScans = project.scans.filter(
+        (s: RieglScanPosition) => s.session && !s.error,
+      );
+      for (const s of okScans) {
+        if (importCancelledRef.current) break;
+        const data = buildPointCloudFromOctree(
+          s.session!,
+          // Provenance: the project directory, since no per-scan file exists.
+          picked,
+          `${s.name}`,
+          { sessionId: s.session!.session_id },
+        );
+        newScans.push({
+          id: crypto.randomUUID(),
+          label: s.name,
+          visible: true,
+          color: allocateScanColor(
+            new Set([...scans.map((sc) => sc.color), ...newScans.map((sc) => sc.color)]),
+          ),
+          data,
+          // The scan pattern from the position's .pat file, its instrument, and
+          // the GNSS origin prior all ride in on scan_params.
+          params: s.scan_params
+            ? scanParametersFromFile(s.scan_params)
+            : undefined,
+          sourcePath: picked,
+        });
+      }
+
+      if (newScans.length > 0 && !importCancelledRef.current) {
+        handleAddScans(newScans);
+        const warned = project.scans.filter((s: RieglScanPosition) => s.warning);
+        showToast({
+          title: `Imported ${newScans.length} RIEGL scan position${newScans.length > 1 ? 's' : ''}`,
+          message:
+            'Scans are unregistered — run ICP to align them.' +
+            (warned.length ? ` ${warned.length} had multi-return warnings.` : ''),
+          type: warned.length ? 'warning' : 'success',
+        });
+      }
+    } catch (err) {
+      if (!importCancelledRef.current) {
+        showToast({
+          title: 'RIEGL import failed',
+          message: describeBackendError(err, 'RIEGL import').message,
+          type: 'error',
+        });
+      }
+    } finally {
+      setImportProgress(null);
+      importAbortRef.current = null;
+      importRunIdRef.current = null;
+    }
+  }, [chooseRieglScans, handleAddScans, scans.length]);
+
   // Stitch multiple data-bearing scans into one. The result is data-only —
   // a merged cloud has no single defined origin, so any source params are
   // dropped. By default the sources are REMOVED from the scene and undo
@@ -1700,6 +1826,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         case 'import-qsm':
           void handleMenuImport('qsm');
           break;
+        case 'import-riegl':
+          void handleImportRieglProject();
+          break;
         case 'save':
         case 'export':
           setSettingsOpen(false);
@@ -1938,6 +2067,32 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       onDropCapture={(e) => {
         try {
           const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+          // A dropped .riproject is a DIRECTORY. react-dropzone expands a
+          // folder into its contents, so by `onDrop` it has already become ~100
+          // .rxp/.jpg/.ppm files and the generic importer rejects every one of
+          // them ("Unsupported file format: .ppm"). This capture phase sees the
+          // un-expanded entry, which is the only place the folder can still be
+          // recognised as a single thing.
+          const rieglDir = files
+            .map((f) => {
+              let p: string | undefined;
+              try { p = window.electronAPI?.getPathForFile?.(f) || undefined; }
+              catch { p = undefined; }
+              return p;
+            })
+            .find((p) => isRieglProjectPath(p));
+          if (rieglDir) {
+            e.preventDefault();
+            e.stopPropagation();
+            // Stopping propagation means react-dropzone never sees this drop —
+            // so its `onDrop` (the ONLY place `setIsDragOver(false)` runs) never
+            // fires and the "Drop to load scans" overlay stays up forever,
+            // covering the dialog we just opened. Clear it ourselves.
+            setIsDragOver(false);
+            droppedPathsRef.current.clear();
+            void handleImportRieglProject(rieglDir);
+            return;
+          }
           for (const f of files) {
             let p: string | undefined;
             try { p = window.electronAPI?.getPathForFile?.(f) || undefined; } catch { p = undefined; }
@@ -1968,6 +2123,16 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           import shows an identical modal. Cancel really stops the backend work
           (kills the PotreeConverter child) — it does not just hide the dialog. */}
       <BulkImportProgress progress={importProgress} onCancel={cancelImport} />
+
+      <RieglProjectDialog
+        projectPath={rieglProjectPath}
+        rivlibPath={rieglRivlibPath}
+        onResolve={(picked) => {
+          setRieglProjectPath(null);
+          rieglResolveRef.current?.(picked);
+          rieglResolveRef.current = null;
+        }}
+      />
 
       {/* Stitch Clouds merge progress — reuses the same modal as imports, but
           with its own header (the default reads "Importing scans…"). */}

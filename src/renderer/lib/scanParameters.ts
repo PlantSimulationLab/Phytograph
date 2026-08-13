@@ -279,6 +279,12 @@ export interface ScanParamsFromFile {
   // ExtraBytes, from which the backend rebuilds a decimated path. Mapped through
   // poseStreamFromWire so the imported scan is auto-flagged moving with its path drawn.
   trajectory?: unknown;
+  // The instrument that captured the scan, when the format names it. RIEGL raw
+  // projects do (RiVLib reports type_id, e.g. "VZ-1000"); no other file-header
+  // import currently identifies its scanner, so this is usually absent. An
+  // unrecognised id is ignored rather than guessed at — see
+  // scanParametersFromFile.
+  scanner_model?: string;
 }
 
 // Build ScanParameters from the partial set a file header carried, filling any
@@ -318,5 +324,30 @@ export function scanParametersFromFile(src: ScanParamsFromFile): ScanParameters 
       // Leave the scan static if the reconstructed trajectory can't be mapped.
     }
   }
+  // The instrument, when the format names it (RIEGL raw projects do). An id we
+  // don't have a preset for is LEFT UNSET rather than approximated: a wrong
+  // model would silently substitute another instrument's beam divergence and
+  // FOV into the scan, and "unknown scanner" is the honest state.
+  const modelId = scannerModelIdFromFile(src.scanner_model);
+  if (modelId) p.scannerModel = modelId;
   return p;
+}
+
+// Map a scanner identity as a FILE reports it onto our catalog id. RiVLib's
+// `type_id` is the raw instrument string ("VZ-1000"), not our slug, so the two
+// namespaces have to be bridged somewhere; doing it here keeps every file-header
+// importer consistent. Matching is case- and separator-insensitive because
+// vendors are inconsistent about hyphens ("VZ-400i" vs "VZ400i").
+const FILE_SCANNER_MODEL_IDS: Record<string, import('./scannerModels').ScannerModelId> = {
+  vz1000: 'riegl_vz1000',
+  vz400i: 'riegl_vz400i',
+  minivux3uav: 'riegl_minivux3uav',
+};
+
+export function scannerModelIdFromFile(
+  raw: string | undefined,
+): import('./scannerModels').ScannerModelId | undefined {
+  if (!raw) return undefined;
+  const key = raw.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return FILE_SCANNER_MODEL_IDS[key];
 }

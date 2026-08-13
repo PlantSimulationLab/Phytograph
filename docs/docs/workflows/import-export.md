@@ -5,6 +5,12 @@
 Three entry points. All accept the same set of formats — see
 **[File formats](../reference/file-formats.md)** for the full list.
 
+!!! tip "RIEGL raw projects"
+    A `.riproject` is a *directory* of scan positions, not a file, so it has its
+    own path: **[Import a RIEGL raw project](import-riegl-riproject.md)**. Data
+    that has already been through RiSCAN PRO or RiPROCESS should be exported to
+    LAS/E57 and imported normally.
+
 === "Drag and drop"
 
     Drag any supported file from your file manager anywhere onto the

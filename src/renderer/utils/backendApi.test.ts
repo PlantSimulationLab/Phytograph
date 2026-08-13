@@ -16,6 +16,7 @@ import {
   getBackendUrl,
   getDeviceInfo,
   getPlantSessionStatus,
+  getRieglStatus,
   heliosTriangulate,
   icpRegisterCloudToCloud,
   icpRegisterMeshToCloud,
@@ -837,6 +838,40 @@ describe('point cloud LAS/LAZ import/export', () => {
     expect(JSON.parse(spy.mock.calls[0][1]?.body as string)).toEqual(req);
   });
 
+  it('exportScanXml forwards dest_dir so a multi-scan bundle never returns base64', async () => {
+    // The regression: every scan's bytes used to come back base64 in ONE JSON
+    // body, so exporting several scans (LAZ especially) overran V8's ~512 MB
+    // string cap and died in response.json() with "Unexpected end of JSON input".
+    // dest_dir must reach the backend, and the response carries metadata only.
+    const req = {
+      scans: [
+        { origin: [0, 0, 3] as [number, number, number], session_id: 's1' },
+        { origin: [1, 0, 3] as [number, number, number], session_id: 's2' },
+      ],
+      base_name: 'scans',
+      include_misses: true,
+      write_xml: false,
+      data_format: 'laz',
+      dest_dir: '/tmp/exports',
+    };
+    const spy = mockFetchOk({
+      success: true,
+      files: [
+        { name: 'scans_0.laz', data: null, is_xml: false, bytes: 1024, written: true },
+        { name: 'scans_1.laz', data: null, is_xml: false, bytes: 2048, written: true },
+      ],
+      point_count: 200,
+      scan_count: 2,
+    });
+    const resp = await exportScanXml(req);
+    const body = JSON.parse(spy.mock.calls[0][1]?.body as string);
+    expect(body.dest_dir).toBe('/tmp/exports');
+    expect(body).toEqual(req);
+    // Nothing for the renderer to decode or write.
+    expect(resp.files?.every(f => f.written && f.data === null)).toBe(true);
+    expect(resp.files?.map(f => f.bytes)).toEqual([1024, 2048]);
+  });
+
   it('exportScanXml surfaces error', async () => {
     mockFetchError(500, { detail: 'export boom' });
     await expect(
@@ -1468,6 +1503,80 @@ describe('getDeviceInfo', () => {
   it('throws on a non-ok response', async () => {
     mockFetchError(500, { detail: 'boom' });
     await expect(getDeviceInfo()).rejects.toThrow(/device-info failed: 500/);
+  });
+});
+
+describe('getRieglStatus', () => {
+  const ready = {
+    available: true,
+    platform_supported: true,
+    docker_present: true,
+    image_built: true,
+    rivlib_path: '/opt/rivlib',
+    rivlib_valid: true,
+    image: 'phytograph-riegl:latest',
+    reason: 'RIEGL .rxp import is ready.',
+  };
+
+  it('maps backend snake_case fields to a camelCase RieglStatus', async () => {
+    mockFetchOk(ready);
+    const s = await getRieglStatus('/opt/rivlib');
+    expect(s).toEqual({
+      available: true,
+      platformSupported: true,
+      dockerPresent: true,
+      imageBuilt: true,
+      rivlibPath: '/opt/rivlib',
+      rivlibValid: true,
+      image: 'phytograph-riegl:latest',
+      reason: 'RIEGL .rxp import is ready.',
+    });
+  });
+
+  it('sends the configured rivlib path as a query parameter', async () => {
+    // The path travels per request (not in the backend's environment) because
+    // the sidecar is spawned once at launch and would otherwise need a restart
+    // to notice the user picking a different folder.
+    const spy = mockFetchOk(ready);
+    await getRieglStatus('/opt/riv lib');
+    const url = new URL(String(spy.mock.calls[0][0]));
+    expect(url.pathname).toBe('/api/riegl/status');
+    // Read the parameter back rather than asserting on the encoded string:
+    // URLSearchParams encodes a space as '+', not '%20'.
+    expect(url.searchParams.get('rivlib_path')).toBe('/opt/riv lib');
+  });
+
+  it('omits the query parameter when no path is configured', async () => {
+    const spy = mockFetchOk({ ...ready, available: false, rivlib_path: null });
+    await getRieglStatus(null);
+    expect(String(spy.mock.calls[0][0])).not.toContain('rivlib_path');
+  });
+
+  it('defaults missing fields to unavailable rather than undefined', async () => {
+    // A backend that omits a field must never read as "available" — the whole
+    // point of the probe is that the capability is conditional.
+    mockFetchOk({ reason: 'partial' });
+    const s = await getRieglStatus();
+    expect(s.available).toBe(false);
+    expect(s.platformSupported).toBe(false);
+    expect(s.dockerPresent).toBe(false);
+    expect(s.imageBuilt).toBe(false);
+    expect(s.rivlibValid).toBe(false);
+    expect(s.rivlibPath).toBeNull();
+    expect(s.image).toBe('');
+    expect(s.reason).toBe('partial');
+  });
+
+  it('treats truthy-but-not-true values as false', async () => {
+    mockFetchOk({ ...ready, available: 'yes', docker_present: 1 });
+    const s = await getRieglStatus();
+    expect(s.available).toBe(false);
+    expect(s.dockerPresent).toBe(false);
+  });
+
+  it('throws on a non-ok response', async () => {
+    mockFetchError(500, { detail: 'boom' });
+    await expect(getRieglStatus()).rejects.toThrow(/riegl-status failed: 500/);
   });
 });
 
