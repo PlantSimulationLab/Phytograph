@@ -91,10 +91,14 @@ pre-alignment.
 The difference is what gets matched. Matching raw points fails on a planting,
 because every plant's foliage looks like every other plant's — the match
 happily snaps the source onto a *neighbouring* plant, one row-spacing off,
-and still reports a good score. Auto-Register first reduces each cloud to
-**one landmark per plant**, then matches those. A few dozen well-separated
-landmarks are far easier to line up unambiguously than a million
-interchangeable foliage points.
+and still reports a good score.
+
+Auto-Register instead matches the **overall pattern of the planting**: it looks
+down on each cloud from above and finds the rotation and shift that make the two
+patterns line up. Because it uses the whole cloud at once, it does not depend on
+recognising the same individual plants in both scans — which matters, since two
+scan positions typically detect only about half the same plants, the rest being
+hidden behind others.
 
 1. Open **Auto-Register Clouds** from the **Pre-processing** toolbar group
    (sparkles icon), **Tools → Pre-processing**, or the command palette
@@ -128,9 +132,24 @@ its own.
     Auto-Register necessary. Reach for Auto-Register when a built scene starts
     badly out of alignment.
 
+### If a run looks wrong
+
+Auto-Register offers three matching strategies. The default (**canopy pattern**)
+is the fastest and the most reliable on real data, and is what you should
+normally use.
+
+| Strategy | When to try it |
+|----------|----------------|
+| **Canopy pattern** (default) | Almost always. Matches the planting's overall layout. |
+| **Plant landmarks** | Sparse, well-separated plants where individual crowns or trunks are cleanly detectable in both scans. |
+| **Surface shape** | Built scenes rather than vegetation. |
+
+If Auto-Register warns that the result may be wrong, the first thing to try is a
+different strategy — they fail in different ways.
+
 ### Choosing what to match on
 
-*(Vegetated scenes only — built scenes ignore this.)*
+*(Only applies to the **plant landmarks** strategy on vegetated scenes.)*
 
 The right landmark depends on how the data was captured, not on which
 algorithm sounds better:
@@ -170,6 +189,30 @@ A quiet result means the plants matched unambiguously.
 
 Like ICP, the transform is applied to the source's points *and* its scanner
 origin/trajectory, and a single **Undo** reverts it.
+
+### How accurate is it?
+
+Validated against RiSCAN PRO's automatic registration on a four-position
+terrestrial survey of a real almond orchard (~14 M points per scan, trees to
+~12 m, scanners in a clearing). Registering each scan onto a common reference
+and comparing with RiSCAN's solution:
+
+| Scan | Difference from RiSCAN |
+|------|------------------------|
+| ScanPos002 | 0.16° / 4 cm |
+| ScanPos004 | 1.41° / 33 cm |
+| ScanPos005 | 0.64° / 21 cm |
+
+ScanPos005 is the interesting one: it sits at roughly 170° to the others, and
+Auto-Register recovered it with no starting guess. **Align Clouds (ICP) cannot
+do that** — it needs the clouds to start close together.
+
+Two practical notes from that test. More points is not more accurate: the same
+survey registered slightly *better* at 100 k points per scan than at 400 k,
+because tree positions are what matter and those are already resolved at the
+lower density. And the **trunk-bases** method was the least reliable on this
+data, where crowns and canopy peaks both agreed closely with RiSCAN — if a
+result looks wrong, switching method is the first thing to try.
 
 !!! tip "Auto-register first, then fine-tune"
     Auto-Register finishes with an ICP refinement pass, so its output is

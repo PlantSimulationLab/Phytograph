@@ -56,8 +56,9 @@ const ANCHOR_METHODS: { value: AnchorMethod; label: string; hint: string }[] = [
 ];
 
 const ESTIMATORS: { value: GlobalEstimator; label: string; hint: string }[] = [
-  { value: 'ransac_fpfh', label: 'RANSAC (recommended)', hint: 'Slower, more robust on repetitive plantings' },
-  { value: 'fgr', label: 'Fast global', hint: 'Quicker, but less reliable when plants look alike' },
+  { value: 'correlation', label: 'Canopy pattern (recommended)', hint: 'Matches the overall planting pattern — fastest and most reliable' },
+  { value: 'ransac_fpfh', label: 'Plant landmarks', hint: 'Matches individual plants; only works when both scans detect the same ones' },
+  { value: 'fgr', label: 'Surface shape', hint: 'For built scenes rather than vegetation' },
 ];
 
 export function AutoRegisterDialog({
@@ -67,7 +68,7 @@ export function AutoRegisterDialog({
   const [sourceId, setSourceId] = useState<string>('');
   const [sceneType, setSceneType] = useState<SceneType>('agriculture');
   const [anchorMethod, setAnchorMethod] = useState<AnchorMethod>('crown');
-  const [estimator, setEstimator] = useState<GlobalEstimator>('ransac_fpfh');
+  const [estimator, setEstimator] = useState<GlobalEstimator>('correlation');
   const [voxelSize, setVoxelSize] = useState<number | undefined>(undefined);
 
   useEffect(() => {
@@ -162,7 +163,7 @@ export function AutoRegisterDialog({
 
           {/* Landmark choice is meaningless on a built scene — there are no
               plants to key on — so it is hidden rather than shown disabled. */}
-          {sceneType !== 'urban' && (
+          {sceneType !== 'urban' && estimator === 'ransac_fpfh' && (
           <div className="space-y-1.5">
             <label className="block text-xs font-medium text-neutral-300">Match on</label>
             <select

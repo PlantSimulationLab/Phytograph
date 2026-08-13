@@ -23008,7 +23008,7 @@ async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_requ
 
 _SCENE_TYPES = ("agriculture", "natural", "urban")
 _GLOBAL_ANCHOR_METHODS = ("crown", "trunk", "chm")
-_GLOBAL_ESTIMATORS = ("ransac_fpfh", "fgr")
+_GLOBAL_ESTIMATORS = ("correlation", "ransac_fpfh", "fgr")
 
 
 def _drop_far_outliers(points: np.ndarray, k: float = 20.0) -> np.ndarray:
@@ -23243,7 +23243,7 @@ class GlobalRegisterRequest(BaseModel):
     # the same prompt cannot block them twice.
     scene_type_confirmed: bool = False
     anchor_method: str = "crown"
-    estimator: str = "ransac_fpfh"
+    estimator: str = "correlation"
     # Downsampling/feature scale. Defaults to a fraction of the robust extent.
     voxel_size: Optional[float] = None
     # Run a point-to-plane ICP pass on the coarse result before returning, so a
@@ -23255,7 +23255,7 @@ class GlobalRegisterRequest(BaseModel):
 
 
 def _extract_anchors_killable(points: "np.ndarray", method: str, extent: float,
-                              progress=None):
+                              progress=None, second: "Optional[np.ndarray]" = None):
     """Run landmark extraction in a KILLABLE child process.
 
     Extraction drives CSF and TreeIso — the same heavyweight CPU work every
@@ -23279,6 +23279,11 @@ def _extract_anchors_killable(points: "np.ndarray", method: str, extent: float,
 
     with tempfile.TemporaryDirectory(prefix="phyto_anchor_") as workdir:
         np.save(os.path.join(workdir, "input.npy"), np.ascontiguousarray(points))
+        if second is not None:
+            # Extract BOTH clouds in one worker: startup costs ~4.3 s (it
+            # re-imports main.py and the native library), so a second call would
+            # double that overhead on ~4 s of real work.
+            np.save(os.path.join(workdir, "input2.npy"), np.ascontiguousarray(second))
         with open(os.path.join(workdir, "request.json"), "w") as f:
             _json.dump({"tool": "anchors",
                         "params": {"method": method, "extent": float(extent)}}, f)
@@ -23300,7 +23305,10 @@ def _extract_anchors_killable(points: "np.ndarray", method: str, extent: float,
             logger.warning("anchor worker could not be spawned (%s); "
                            "extracting in-process", exc)
             from anchor_extraction import extract_anchors
-            return extract_anchors(points, method, extent)
+            first = extract_anchors(points, method, extent)
+            if second is None:
+                return first
+            return first, extract_anchors(second, method, extent)
 
         # Poll so a cancel between checks can SIGKILL the child mid-compute;
         # a running C++ segment is not otherwise interruptible.
@@ -23321,13 +23329,18 @@ def _extract_anchors_killable(points: "np.ndarray", method: str, extent: float,
             # A crashed extractor is a fallback signal, not a failed request:
             # the caller drops to raw-surface matching and says so.
             logger.warning("anchor worker exited %s: %s", proc.returncode, err)
-            return np.empty((0, 3)), np.empty((0, 2))
+            blank = (np.empty((0, 3)), np.empty((0, 2)))
+            return blank if second is None else (blank, blank)
 
-        out = os.path.join(workdir, "output.npy")
-        feats = os.path.join(workdir, "features.npy")
-        xyz = np.load(out) if os.path.exists(out) else np.empty((0, 3))
-        f = np.load(feats) if os.path.exists(feats) else np.empty((0, 2))
-        return xyz, f
+        def _read(tag=""):
+            o = os.path.join(workdir, f"output{tag}.npy")
+            g = os.path.join(workdir, f"features{tag}.npy")
+            return (np.load(o) if os.path.exists(o) else np.empty((0, 3)),
+                    np.load(g) if os.path.exists(g) else np.empty((0, 2)))
+
+        if second is None:
+            return _read()
+        return _read(), _read("2")
 
 
 def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict:
@@ -23425,6 +23438,10 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
         # have no per-plant landmark to find, and the planes and corners they DO
         # have are exactly what FPFH+RANSAC was designed for.
         use_landmarks = request.scene_type != "urban"
+        # Correlation works on the raw cloud, so the expensive landmark stage
+        # (CSF + TreeIso, and the killable worker that hosts them) is skipped
+        # entirely. That is most of why this path is ~1.5 s rather than ~20 s.
+        needs_landmarks = use_landmarks and request.estimator != "correlation"
 
         _cancel_checkpoint(progress)
         if progress is not None:
@@ -23433,14 +23450,10 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
 
         # Extraction runs in a killable child process (CSF + TreeIso), so Cancel
         # works mid-stage and a CSF segfault cannot take down the backend.
-        if use_landmarks:
-            tgt_xyz, tgt_feat = _extract_anchors_killable(
-                target_points, request.anchor_method, extent, progress)
-            _cancel_checkpoint(progress)
-            if progress is not None:
-                progress(0.30, "Extracting anchors (source)")
-            src_xyz, src_feat = _extract_anchors_killable(
-                source_points, request.anchor_method, extent, progress)
+        if needs_landmarks:
+            (tgt_xyz, tgt_feat), (src_xyz, src_feat) = _extract_anchors_killable(
+                target_points, request.anchor_method, extent, progress,
+                second=source_points)
         else:
             # Built scene: no landmark stage at all. Skipping it is most of why
             # the urban path is fast — no CSF, no TreeIso.
@@ -23462,7 +23475,26 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
 
         ambiguous = False
         match_margin = None
-        if anchors_usable:
+        if use_landmarks and request.estimator == "correlation":
+            # Correlate top-down rasters instead of matching per-plant landmarks.
+            # Landmarks are only ~50% repeatable between scan positions (measured
+            # 25/46 on a real vineyard, and the forest literature reports the
+            # same), and triangle congruence cubes that to ~16% usable evidence.
+            # Correlation never picks landmarks, so it never has to pick the same
+            # ones twice. Head-to-head on the real vineyard: correlation 4/4,
+            # landmark triangles 0/4 (which returned identity every time).
+            from raster_correlation import register_by_correlation
+
+            result = register_by_correlation(target_points, source_points)
+            transform = result["transformation"]
+            coarse_fitness = result["score"]
+            coarse_rmse = 0.0
+            ambiguous = bool(result["ambiguous"])
+            match_margin = float(result["margin"])
+            match_path = "raster-correlation"
+            anchors_usable = True      # this path needs no landmarks at all
+            n_tgt = n_src = 0
+        elif anchors_usable:
             # Match the landmark sets by their PAIRWISE DISTANCES, not with a
             # surface descriptor. FPFH was the obvious reuse and it does not
             # work here: it histograms normal angles over a dense neighbourhood

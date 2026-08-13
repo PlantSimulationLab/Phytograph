@@ -78,7 +78,12 @@ async function autoRegister(
   await dialog.getByTestId('auto-register-target-picker').getByTestId('picker-row').nth(t).click();
   await dialog.getByTestId('auto-register-source-picker').getByTestId('picker-row').nth(s).click();
   if (sceneType) await dialog.getByTestId('auto-register-scene').selectOption(sceneType);
-  if (method) await dialog.getByTestId('auto-register-method').selectOption(method);
+  if (method) {
+    // The per-plant "match on" control only applies to the landmark estimator;
+    // the default (canopy-pattern correlation) does not use landmarks at all.
+    await dialog.getByTestId('auto-register-estimator').selectOption('ransac_fpfh');
+    await dialog.getByTestId('auto-register-method').selectOption(method);
+  }
 
   await dialog.getByTestId('auto-register-run').click();
   await expect(dialog).toBeHidden();
@@ -163,8 +168,14 @@ test('Auto-Register dialog offers every anchor method and defaults to crowns', a
   const dialog = page.getByTestId('auto-register-dialog');
   await expect(dialog).toBeVisible();
 
-  // All three extractors are reachable — they exist because no single anchor
-  // works on every acquisition, so a user must be able to switch.
+  // The default matches the overall canopy pattern rather than individual
+  // plants, so the per-plant control is not shown until that path is chosen.
+  await expect(dialog.getByTestId('auto-register-estimator')).toHaveValue('correlation');
+  await expect(dialog.getByTestId('auto-register-method')).toHaveCount(0);
+
+  // Switching to landmark matching reveals all three extractors — they exist
+  // because no single anchor works on every acquisition.
+  await dialog.getByTestId('auto-register-estimator').selectOption('ransac_fpfh');
   const method = dialog.getByTestId('auto-register-method');
   await expect(method).toHaveValue('crown');
   await expect(method.locator('option')).toHaveCount(3);
@@ -190,11 +201,15 @@ test('Scene type drives the method, and built-site hides the plant options', asy
   // Vegetated scenes are matched plant by plant, so the landmark choice applies.
   const scene = dialog.getByTestId('auto-register-scene');
   await expect(scene).toHaveValue('agriculture');
-  await expect(dialog.getByTestId('auto-register-method')).toBeVisible();
   await expect(scene.locator('option')).toHaveCount(3);
 
-  // A built site is matched on surface shape instead — there is no per-plant
-  // landmark to pick, so the control is hidden rather than shown disabled.
+  // The per-plant control needs BOTH a vegetated scene and the landmark
+  // estimator; the default correlation path does not use landmarks.
+  await dialog.getByTestId('auto-register-estimator').selectOption('ransac_fpfh');
+  await expect(dialog.getByTestId('auto-register-method')).toBeVisible();
+
+  // A built site is matched on surface shape — no per-plant landmark exists,
+  // so the control is hidden rather than shown disabled.
   await scene.selectOption('urban');
   await expect(dialog.getByTestId('auto-register-method')).toHaveCount(0);
 

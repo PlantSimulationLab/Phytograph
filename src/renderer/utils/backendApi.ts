@@ -2901,7 +2901,7 @@ export async function icpRegisterCloudToCloud(
 
 /** Which per-plant landmark each cloud is reduced to before matching. */
 export type AnchorMethod = 'crown' | 'trunk' | 'chm';
-export type GlobalEstimator = 'ransac_fpfh' | 'fgr';
+export type GlobalEstimator = 'correlation' | 'ransac_fpfh' | 'fgr';
 
 /** What kind of scene this is. Not a preset: `urban` selects a structurally
  *  different algorithm (surface matching) because built scenes have no
@@ -2937,7 +2937,7 @@ export interface GlobalRegisterResponse extends ICPRegistrationResponse {
   /** Which algorithm actually ran: per-plant landmarks, or raw surface
    *  matching when too few plants were found. Never left implicit — a user
    *  judging a result needs to know which method produced it. */
-  match_path?: 'plant-landmarks' | 'raw-surface';
+  match_path?: 'raster-correlation' | 'plant-landmarks' | 'raw-surface';
   /** True when a rival pose scored nearly as well as the winner, i.e. the
    *  scene is too symmetric to tell them apart. This is the one failure a
    *  residual check cannot see: a 180°-flipped orchard is a genuinely good
