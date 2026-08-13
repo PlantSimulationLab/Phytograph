@@ -2921,6 +2921,13 @@ export interface GlobalRegisterRequest {
   estimator?: GlobalEstimator;
   voxel_size?: number;
   refine_icp?: boolean;
+  /** Scanner heading in degrees, when known (GNSS/IMU/compass). Constrains the
+   *  coarse yaw search, and when present the backend prefers plain ICP
+   *  refinement over a global search — measured as substantially more accurate
+   *  on GNSS-seeded data. Omit when no heading is available. */
+  yaw_prior_deg?: number | null;
+  yaw_search_deg?: number;
+  prefer_refine_with_prior?: boolean;
   confidence_threshold?: number;
 }
 
@@ -2937,7 +2944,7 @@ export interface GlobalRegisterResponse extends ICPRegistrationResponse {
   /** Which algorithm actually ran: per-plant landmarks, or raw surface
    *  matching when too few plants were found. Never left implicit — a user
    *  judging a result needs to know which method produced it. */
-  match_path?: 'raster-correlation' | 'plant-landmarks' | 'raw-surface';
+  match_path?: 'pose-prior-refine' | 'raster-correlation' | 'plant-landmarks' | 'raw-surface';
   /** True when a rival pose scored nearly as well as the winner, i.e. the
    *  scene is too symmetric to tell them apart. This is the one failure a
    *  residual check cannot see: a 180°-flipped orchard is a genuinely good
@@ -2945,6 +2952,8 @@ export interface GlobalRegisterResponse extends ICPRegistrationResponse {
   ambiguous?: boolean;
   /** How far the winning pose beat the runner-up (0-1). */
   match_margin?: number | null;
+  /** The heading prior actually used, if any. */
+  yaw_prior_used?: number | null;
   /** The scene type the run actually used. */
   scene_type_used?: SceneType;
   /** A weak scene-type disagreement — worth showing, never worth blocking. */

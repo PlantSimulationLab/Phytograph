@@ -132,16 +132,32 @@ def _rotate_xy(points: np.ndarray, degrees: float, centre: np.ndarray) -> np.nda
 
 def register_by_correlation(target: np.ndarray, source: np.ndarray,
                             mode: str = "occupancy",
-                            cell: Optional[float] = None) -> dict:
+                            cell: Optional[float] = None,
+                            yaw_prior_deg: Optional[float] = None,
+                            yaw_search_deg: float = 30.0) -> dict:
     """Coarse-align `source` onto `target`.
 
     Returns {'transformation' 4x4, 'score', 'margin', 'ambiguous', 'yaw_deg'}.
 
-    `margin` and `ambiguous` carry over from the landmark matcher and matter for
-    the same reason: a regular planting is close to symmetric, so a wrong pose
-    can score nearly as well as the right one. A residual-based check cannot see
-    that -- a row-flipped orchard genuinely lands plant-on-plant -- but the gap
-    between the best and second-best correlation peak can.
+    `margin` and `ambiguous` matter because a regular planting is close to
+    symmetric, so a wrong pose can score nearly as well as the right one. A
+    residual-based check cannot see that -- a row-flipped orchard genuinely
+    lands plant-on-plant -- but the gap between the best and second-best
+    correlation peak can.
+
+    **`yaw_prior_deg` is the single most valuable input this function takes.**
+    A terrestrial scanner records its own heading (GNSS/IMU/compass), typically
+    good to a few degrees, and searching the whole circle throws that away.
+    Measured on a real peach orchard against RiSCAN PRO: an unconstrained sweep
+    found poses with LOWER point-to-point residual than RiSCAN's (0.06 m vs
+    0.53 m) that were nevertheless 17-149 degrees wrong, because an orchard
+    scanned from within is nearly self-similar under rotation and several poses
+    land canopy-on-canopy. Lower residual does not mean correct. Restricting the
+    sweep to +/-`yaw_search_deg` around the recorded heading removes those
+    aliases from consideration entirely rather than trying to score them away.
+
+    Pass None only when no heading is available; then the full circle is
+    searched and the result should be treated with more suspicion.
     """
     target = np.asarray(target, dtype=np.float64)
     source = np.asarray(source, dtype=np.float64)
@@ -174,11 +190,25 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
             out.append((peak, a, shift))
         return sorted(out, key=lambda t: -t[0])
 
-    coarse = best_over(np.arange(-180.0, 180.0, _COARSE_STEP_DEG))
+    if yaw_prior_deg is None:
+        sweep = np.arange(-180.0, 180.0, _COARSE_STEP_DEG)
+    else:
+        # Only the neighbourhood of the recorded heading is physically
+        # plausible; everything else is an alias waiting to be picked.
+        sweep = np.arange(yaw_prior_deg - yaw_search_deg,
+                          yaw_prior_deg + yaw_search_deg + 1e-9,
+                          _COARSE_STEP_DEG)
+    coarse = best_over(sweep)
     best_peak, best_angle, best_shift = coarse[0]
 
     # Runner-up must be a genuinely DIFFERENT pose, not a neighbouring step of
     # the same peak, or every result would look ambiguous.
+    # Runner-up must be a genuinely DIFFERENT pose, not a neighbouring step of
+    # the same peak, or every result would look ambiguous. With a yaw prior the
+    # sweep may be narrower than 20 degrees on one side, in which case there may
+    # legitimately be no rival to compare against -- that is a CONSTRAINED
+    # search, not an unambiguous one, so leave `second` at zero and let the
+    # margin reflect the prior having done the disambiguating.
     second = 0.0
     for peak, a, _ in coarse[1:]:
         if abs((a - best_angle + 180) % 360 - 180) > 20.0:

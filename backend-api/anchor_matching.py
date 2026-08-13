@@ -303,6 +303,16 @@ def _score_votes(votes: np.ndarray, target_xyz: np.ndarray,
         inliers=int(best_n),
         score=float(score),
         margin=float(margin),
-        ambiguous=bool(second_n >= 0.8 * best_n),
+        # A rival within 40% of the winner means the scene cannot really tell
+        # them apart. The bar was 0.8, and that was far too permissive: on a
+        # lattice of identical plants the matcher returned a 179.98-degree flip
+        # -- the exact failure this guard exists to catch -- with a runner-up at
+        # 75% of the winner, which sailed through as "confident". On a genuinely
+        # distinguishable planting the true pose wins by a mile (measured margin
+        # 1.0), so tightening this costs nothing there while catching the case
+        # that matters. Erring toward "ambiguous" is the right bias anyway: a
+        # warned-about wrong answer costs a re-run, an unwarned one corrupts
+        # every measurement downstream.
+        ambiguous=bool(second_n >= 0.6 * best_n),
         num_candidates=int(len(votes)),
     )

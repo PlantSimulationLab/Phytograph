@@ -132,6 +132,26 @@ its own.
     Auto-Register necessary. Reach for Auto-Register when a built scene starts
     badly out of alignment.
 
+### Use the scanner heading
+
+Most terrestrial scanners record their own position and heading (GNSS,
+inclination sensors, compass). When your scans carry that information, leave
+**Use the scanner heading** ticked — it makes registration markedly more
+reliable, and it is on by default.
+
+The reason is worth knowing. An orchard scanned from within looks much the same
+from several directions, so a search over all possible rotations can find an
+alignment that fits the points *better* than the correct one while being
+completely wrong. Measured against RiSCAN PRO on a real peach orchard, an
+unconstrained search produced a tighter point-to-point fit than RiSCAN's answer
+while sitting 149° away from it. A lower residual does not mean a better
+alignment.
+
+Knowing roughly which way the scanner was pointing removes those false matches
+from consideration entirely. Untick the box only if the recorded heading is
+missing or you know it to be wrong — registration then searches every
+orientation, which is slower and more easily fooled on repetitive plantings.
+
 ### If a run looks wrong
 
 Auto-Register offers three matching strategies. The default (**canopy pattern**)

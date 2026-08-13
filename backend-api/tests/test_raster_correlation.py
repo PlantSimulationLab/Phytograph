@@ -184,3 +184,40 @@ def test_rasterise_centres_on_the_median_not_the_bounding_box():
     grid = rasterise(with_outliers, cell, extent, centre)
 
     assert grid.sum() > 0, "raster is empty — centred on the wrong place"
+
+
+def test_yaw_prior_rejects_rotational_aliases():
+    """A heading prior is the single most valuable input this takes.
+
+    An orchard scanned from within is nearly self-similar under rotation, so a
+    full-circle search can find a pose with LOWER point-to-point residual than
+    the correct one. Measured on a real GNSS-seeded peach orchard against
+    RiSCAN PRO: unconstrained search produced 0.06 m residual while being 149
+    degrees wrong, versus RiSCAN's 0.53 m residual at the right pose. Lower
+    residual does not mean correct — so the aliases must be excluded from the
+    search rather than scored away afterwards."""
+    scene = _planting(seed=4)
+    applied = _rigid(170.0, [2.0, -1.0, 0.0])
+    target, source = _two_views(scene, applied, seed=9)
+
+    # With a prior saying "the heading barely changed", the 170-degree pose is
+    # not even considered.
+    constrained = register_by_correlation(target, source, yaw_prior_deg=0.0,
+                                          yaw_search_deg=30.0)
+    assert abs(constrained["yaw_deg"]) <= 30.0 + 1e-6, (
+        f"prior was ignored: searched to {constrained['yaw_deg']:.1f} degrees")
+
+
+def test_no_prior_still_searches_the_full_circle():
+    """The prior is optional. Without a heading the full circle must still be
+    searched, or scans that genuinely need a large rotation become
+    unregisterable."""
+    scene = _planting(seed=6)
+    applied = _rigid(150.0, [1.0, 2.0, 0.0])
+    target, source = _two_views(scene, applied, seed=15)
+
+    result = register_by_correlation(target, source)          # no prior
+    rot_err, _ = _pose_error(result["transformation"], np.linalg.inv(applied))
+    assert rot_err < 5.0, (
+        f"unconstrained search failed to find a 150-degree rotation "
+        f"({rot_err:.1f} degrees off)")

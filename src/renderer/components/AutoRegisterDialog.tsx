@@ -23,6 +23,10 @@ export interface AutoRegisterCloudOption {
 
 export interface AutoRegisterOptions {
   sceneType: SceneType;
+  /** Use the scanner heading, when the scans carry one, to constrain the
+   *  search. Far more accurate on GNSS-seeded data than a blind global
+   *  search — the default whenever a heading is available. */
+  useHeading: boolean;
   anchorMethod: AnchorMethod;
   estimator: GlobalEstimator;
   voxelSize?: number;
@@ -67,6 +71,7 @@ export function AutoRegisterDialog({
   const [targetId, setTargetId] = useState<string>('');
   const [sourceId, setSourceId] = useState<string>('');
   const [sceneType, setSceneType] = useState<SceneType>('agriculture');
+  const [useHeading, setUseHeading] = useState(true);
   const [anchorMethod, setAnchorMethod] = useState<AnchorMethod>('crown');
   const [estimator, setEstimator] = useState<GlobalEstimator>('correlation');
   const [voxelSize, setVoxelSize] = useState<number | undefined>(undefined);
@@ -143,6 +148,23 @@ export function AutoRegisterDialog({
             mode="single"
             emptyMessage="No point clouds available."
           />
+
+          <label className="flex items-start gap-2 text-xs text-neutral-300">
+            <input
+              data-testid="auto-register-use-heading"
+              type="checkbox"
+              checked={useHeading}
+              onChange={(e) => setUseHeading(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Use the scanner heading
+              <span className="block text-[11px] text-neutral-500">
+                Much more reliable when the scans record their position and heading.
+                Untick only if the recorded heading is wrong or missing.
+              </span>
+            </span>
+          </label>
 
           <div className="space-y-1.5">
             <label className="block text-xs font-medium text-neutral-300">Scene type</label>
@@ -223,7 +245,7 @@ export function AutoRegisterDialog({
           <button
             data-testid="auto-register-run"
             onClick={() => {
-              onRegister(targetId, sourceId, { sceneType, anchorMethod, estimator, voxelSize });
+              onRegister(targetId, sourceId, { sceneType, useHeading, anchorMethod, estimator, voxelSize });
               onClose();
             }}
             disabled={!canRun}

@@ -131,10 +131,21 @@ def run(workdir: str) -> int:
             # would otherwise take down the whole backend.
             from anchor_extraction import extract_anchors
 
+            # Both clouds are extracted in ONE worker call. Starting a worker
+            # costs ~4.3 s (it re-imports main.py and the native pyhelios
+            # library), so doing target and source separately paid that twice —
+            # ~8.6 s of pure overhead on a job whose actual compute is ~4 s.
             xyz, feats = extract_anchors(
                 points, params["method"], float(params["extent"]))
             np.save(os.path.join(workdir, "output.npy"), np.asarray(xyz))
             np.save(os.path.join(workdir, "features.npy"), np.asarray(feats))
+
+            second = os.path.join(workdir, "input2.npy")
+            if os.path.exists(second):
+                xyz2, feats2 = extract_anchors(
+                    np.load(second), params["method"], float(params["extent"]))
+                np.save(os.path.join(workdir, "output2.npy"), np.asarray(xyz2))
+                np.save(os.path.join(workdir, "features2.npy"), np.asarray(feats2))
 
         elif tool == "skeleton":
             result = main.compute_skeleton(points, params)

@@ -23244,6 +23244,23 @@ class GlobalRegisterRequest(BaseModel):
     scene_type_confirmed: bool = False
     anchor_method: str = "crown"
     estimator: str = "correlation"
+    # Heading prior, in degrees, for the coarse yaw search. A terrestrial
+    # scanner records its own heading (GNSS/IMU/compass) to within a few
+    # degrees, and searching the whole circle throws that away. Measured on a
+    # real peach orchard: an unconstrained sweep found poses with LOWER
+    # point-to-point residual than RiSCAN PRO's (0.06 m vs 0.53 m) that were
+    # nevertheless 17-149 degrees wrong, because an orchard scanned from within
+    # is nearly self-similar under rotation. Restricting the sweep removes those
+    # aliases outright instead of trying to score them away.
+    #
+    # None means "no heading available" -> full-circle search, and the result
+    # deserves more suspicion.
+    yaw_prior_deg: Optional[float] = None
+    yaw_search_deg: float = 30.0
+    # When a prior IS available, plain ICP refinement usually beats a global
+    # search: measured ICP-only at 10-32 degrees from RiSCAN's answer against
+    # coarse+ICP at 17-149. Set False to force the coarse stage anyway.
+    prefer_refine_with_prior: bool = True
     # Downsampling/feature scale. Defaults to a fraction of the robust extent.
     voxel_size: Optional[float] = None
     # Run a point-to-plane ICP pass on the coarse result before returning, so a
@@ -23475,7 +23492,31 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
 
         ambiguous = False
         match_margin = None
-        if use_landmarks and request.estimator == "correlation":
+        if (request.yaw_prior_deg is not None
+                and request.prefer_refine_with_prior
+                and request.estimator == "correlation"):
+            # A usable heading prior means the clouds are ALREADY roughly
+            # aligned, so there is nothing for a global search to find -- and
+            # searching anyway actively hurts. Measured on a real GNSS-seeded
+            # peach orchard against RiSCAN PRO's answer: plain ICP refinement
+            # landed 10-32 degrees out, while coarse-then-ICP landed 17-149
+            # degrees out, because the coarse stage kept finding
+            # better-fitting-but-wrong rotational aliases. Hand the pose
+            # straight to ICP instead.
+            # Deliberately DON'T set a transform here. Handing ICP an explicit
+            # identity would suppress its own centroid pre-alignment (the init
+            # is rebased through inv(T_center)), and that pre-alignment is worth
+            # real accuracy: measured 31.1 degrees from RiSCAN's answer with it
+            # versus 49.8 without. Leaving `transform` as None lets the refine
+            # step below run ICP unseeded, which is exactly the behaviour that
+            # beat the coarse stage.
+            transform = None
+            coarse_fitness = 1.0
+            coarse_rmse = 0.0
+            match_path = "pose-prior-refine"
+            anchors_usable = True
+            n_tgt = n_src = 0
+        elif use_landmarks and request.estimator == "correlation":
             # Correlate top-down rasters instead of matching per-plant landmarks.
             # Landmarks are only ~50% repeatable between scan positions (measured
             # 25/46 on a real vineyard, and the forest literature reports the
@@ -23485,7 +23526,10 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             # landmark triangles 0/4 (which returned identity every time).
             from raster_correlation import register_by_correlation
 
-            result = register_by_correlation(target_points, source_points)
+            result = register_by_correlation(
+                target_points, source_points,
+                yaw_prior_deg=request.yaw_prior_deg,
+                yaw_search_deg=request.yaw_search_deg)
             transform = result["transformation"]
             coarse_fitness = result["score"]
             coarse_rmse = 0.0
@@ -23543,7 +23587,10 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             refined = _do_c2c_icp(CloudToCloudICPRequest(
                 target_points=target_points.ravel().tolist(),
                 source_points=source_points.ravel().tolist(),
-                init_transform=transform.flatten().tolist(),
+                # None => let ICP centroid-pre-align and start from identity,
+                # which is strictly better than forcing identity through.
+                init_transform=(None if transform is None
+                                else transform.flatten().tolist()),
             ), progress=None)
             if refined.get("success") and refined.get("transformation_matrix"):
                 refined_m = np.asarray(refined["transformation_matrix"],
@@ -23556,6 +23603,13 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
                     fitness = float(refined["fitness"])
                     rmse = float(refined.get("rmse") or 0.0)
                     refined_ok = True
+
+        if transform is None:
+            # The pose-prior path leaves this None so ICP can pre-align itself.
+            # If refinement did not produce a usable matrix (no overlap found),
+            # fall back to identity: the clouds are already GNSS-placed, so
+            # "leave them where they are" is the honest answer, not a crash.
+            transform = np.eye(4)
 
         rmse_ratio, quality_warning = _icp_quality(rmse, extent, fitness)
         # Confidence is judged on the FINAL fit, not on the coarse score.
@@ -23624,6 +23678,7 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             # matching, and a user seeing only a low-confidence flag had no way
             # to tell which method produced the result they are judging.
             match_path=match_path,
+            yaw_prior_used=request.yaw_prior_deg,
             scene_type_used=request.scene_type,
             # A weak disagreement (planted vs natural spacing) never blocks, but
             # the user should still see it.

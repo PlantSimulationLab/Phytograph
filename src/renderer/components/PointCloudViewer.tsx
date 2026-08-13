@@ -9377,6 +9377,11 @@ export default function PointCloudViewer({
           ...sourcePayload,
           scene_type: sceneType,
           scene_type_confirmed: confirmedSceneType !== undefined,
+          // The clouds are already placed by whatever pose the scanner
+          // recorded, so relative to each other the expected heading change is
+          // zero. Passing that as the prior constrains the search to the
+          // plausible neighbourhood instead of the whole circle.
+          ...(opts.useHeading ? { yaw_prior_deg: 0 } : {}),
           anchor_method: opts.anchorMethod,
           estimator: opts.estimator,
           ...(opts.voxelSize ? { voxel_size: opts.voxelSize } : {}),
