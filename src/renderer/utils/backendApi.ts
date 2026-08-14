@@ -290,6 +290,36 @@ export function isBackendUnreachable(error: unknown): boolean {
   );
 }
 
+/**
+ * Render a FastAPI `detail` as text.
+ *
+ * A raised HTTPException gives a plain string, but a 422 VALIDATION error gives
+ * an ARRAY of `{loc, msg, type}` objects — and interpolating that into a
+ * template literal yields the useless "[object Object]" a user actually saw.
+ * Flatten those into "field: message" so a malformed request says which field
+ * was wrong.
+ */
+export function formatBackendDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((e) => {
+        if (typeof e === 'string') return e;
+        const err = e as { loc?: unknown[]; msg?: string };
+        // `loc` is like ["body", "keep_columns"]; the last element names the
+        // offending field, which is the part worth showing.
+        const field = Array.isArray(err.loc) ? String(err.loc[err.loc.length - 1]) : '';
+        return field ? `${field}: ${err.msg ?? 'invalid'}` : (err.msg ?? 'invalid');
+      })
+      .join('; ');
+  }
+  if (detail && typeof detail === 'object') {
+    const d = detail as { msg?: string; detail?: string };
+    return d.msg ?? d.detail ?? JSON.stringify(detail);
+  }
+  return '';
+}
+
 export function describeBackendError(error: unknown, action: string): Error {
   if (error instanceof Error) {
     const isConnectionFailure = isBackendUnreachable(error);
@@ -479,18 +509,44 @@ export async function extractRieglProject(
   projectPath: string,
   scans: string[] | null,
   rivlibPath: string | null,
+  /**
+   * Scalar columns to keep, from the import wizard. null/undefined keeps
+   * everything the scanner recorded. `is_miss` is always retained regardless —
+   * it is a system flag driving the Hit/Miss scheme and the octree exclusion,
+   * not a user column.
+   */
+  keepColumns?: string[] | null | ImportProgressOptions,
   opts?: ImportProgressOptions,
 ): Promise<RieglProject> {
+  // Tolerate the options object being passed in the keepColumns position.
+  // A caller written against the older 4-arg signature does exactly that, and
+  // the failure mode was ugly: the object reached the backend as
+  // `keep_columns`, which 422'd with "Input should be a valid list" — rendered
+  // in the UI as "[object Object]". Detecting it here costs nothing and turns a
+  // silent shape mismatch into correct behaviour.
+  let keep: string[] | null = null;
+  let options = opts;
+  if (Array.isArray(keepColumns)) {
+    keep = keepColumns;
+  } else if (keepColumns && typeof keepColumns === 'object') {
+    options = keepColumns as ImportProgressOptions;
+  }
+
   return fetchJsonWithProgress<RieglProject>(
     '/api/riegl/project/extract',
-    { project_path: projectPath, scans, rivlib_path: rivlibPath },
-    opts?.signal,
+    {
+      project_path: projectPath,
+      scans,
+      rivlib_path: rivlibPath,
+      keep_columns: keep,
+    },
+    options?.signal,
     // ~14 M points per position, plus LAS writing, under x86 emulation: a
     // six-position project runs into the minutes. The backend enforces its own
     // one-hour ceiling.
     60 * 60 * 1000,
-    opts?.onProgress,
-    opts?.onRunId,
+    options?.onProgress,
+    options?.onRunId,
   );
 }
 
@@ -2387,6 +2443,7 @@ export interface ScanExportRequest {
   // false → write only the per-scan data files (no XML), in `data_format`.
   write_xml: boolean;
   // Data-only output format (write_xml=false): las/laz/ply/xyz/csv/txt/obj/e57.
+  // 'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj' | 'e57' | 'ptx'.
   data_format?: string;
   // Voxel-box grids to write as <grid> blocks (XML mode only). Omitted/empty →
   // no grid blocks. Lets a bundle like sphere.xml round-trip its grid.
@@ -2954,7 +3011,10 @@ export async function fetchBinaryFrame(
     if (!response.ok) {
       clearTimeout(timeoutId);
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+      throw new Error(
+        formatBackendDetail(errorData.detail)
+          || `HTTP ${response.status}: ${response.statusText}`,
+      );
     }
     if (!onProgress || !response.body) {
       clearTimeout(timeoutId);
@@ -3638,6 +3698,72 @@ export async function createCloudSession(
     // error and every cancel would raise an error toast.
     if (error instanceof ScanCancelledError) throw error;
     console.error('create_cloud_session failed:', error);
+    throw describeBackendError(error, 'Import');
+  }
+}
+
+/** One scan position of a multi-scan source, as returned by createCloudSessions. */
+export interface CloudScanPosition {
+  /** Index within the file (0-based). */
+  scan_index: number;
+  /** Display name — the file stem, suffixed with the position for multi-scan files. */
+  name: string;
+  /** Present unless this position failed; absent alongside `error`. */
+  session?: CloudSessionMetadata;
+  /** Why this one position failed. Its siblings still imported. */
+  error?: string;
+}
+
+export interface CloudScanPositions {
+  scans: CloudScanPosition[];
+  scan_count: number;
+}
+
+/**
+ * Import a source as one session PER SCAN POSITION.
+ *
+ * The plural sibling of {@link createCloudSession}. A multi-scan E57 or
+ * multi-block PTX holds several genuinely separate acquisitions, and a scan is
+ * defined by its pose — merging them leaves one origin standing in for all of
+ * them, which breaks the LAD inversion (it takes a single scanner origin), puts
+ * the sky/miss display shell around the wrong centre, and makes the per-scan
+ * row/column rasters collide.
+ *
+ * Every other format comes back as a one-element list, so callers have a single
+ * shape to handle rather than branching on the extension.
+ */
+export async function createCloudSessions(
+  filePath: string,
+  asciiFormat?: string | null,
+  columnPlan?: ColumnPlan | null,
+  worldShift?: [number, number, number] | null,
+  missDistanceThreshold?: number | null,
+  origin?: [number, number, number] | null,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<CloudScanPosition[]> {
+  try {
+    const res = await fetchJsonWithProgress<CloudScanPositions & { error?: string }>(
+      '/api/cloud/session/create-multi',
+      {
+        source_path: filePath,
+        ascii_format: asciiFormat ?? null,
+        column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
+        world_shift: worldShift ?? null,
+        miss_distance_threshold: missDistanceThreshold ?? null,
+        origin: origin ?? null,
+      },
+      signal,
+      600000,
+      onProgress,
+      onRunId,
+    );
+    if (res.error) throw new Error(res.error);
+    return res.scans ?? [];
+  } catch (error) {
+    if (error instanceof ScanCancelledError) throw error;
+    console.error('create_multi_cloud_session failed:', error);
     throw describeBackendError(error, 'Import');
   }
 }

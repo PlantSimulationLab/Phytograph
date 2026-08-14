@@ -9,7 +9,7 @@
 | `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-scan (one `.e57` per scan) via the scan export's **Data only** mode, carrying x/y/z, intensity, and colour. |
 | `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** writes only x/y/z + optional RGB. Structured/organized PLYs recover sky/miss points (see below). |
 | `.pcd` | ✅ | — | Point Cloud Data format (PCL). Import only; parsed via Open3D, which drops non-standard scalar fields. |
-| `.riproject` | ✅ | — | RIEGL **raw scanner project** — a *directory* of scan positions, not a file. macOS only, and needs Docker plus a user-supplied RiVLib: see **[Import a RIEGL raw project](../workflows/import-riegl-riproject.md)**. Carries reflectance, amplitude, deviation and per-pulse return numbering; scans arrive **unregistered**, and sky/miss points are not recovered (so LAD is unavailable). |
+| `.riproject` | ✅ | — | RIEGL **raw scanner project** — a *directory* of scan positions, not a file. macOS only, and needs Docker plus a user-supplied RiVLib: see **[Import a RIEGL raw project](../workflows/import-riegl-riproject.md)**. Carries reflectance, amplitude, deviation and per-pulse return numbering; scans arrive **unregistered**; sky/miss points are recovered from the scanner's per-shot record, so LAD works. |
 | `.xyz` / `.txt` | ✅ | ✅ | Whitespace-separated. First three columns = x, y, z. |
 | `.csv` | ✅ | ✅ | Comma-separated. First non-numeric row treated as header. |
 | `.pts` | ✅ | — | Whitespace-separated, usually with a header line of the point count. Import only. |
@@ -147,12 +147,13 @@ If a scan has **no** miss points but **does** have a `timestamp` column, the LAD
 inversion recovers misses automatically by *gapfilling* the scan grid; if it has
 neither, the inversion warns that its result is likely to be inaccurate.
 
-> **RIEGL `.rxp` carries no miss points.** An `.rxp` records only returns —
-> shots that hit nothing are absent rather than flagged — so a scan imported
-> from a [`.riproject`](../workflows/import-riegl-riproject.md) has no sky/miss
-> points and cannot use LAD. Convert to `.e57` (e.g. in RiSCAN PRO) if you need
-> miss recovery. Loose `.rxp` files are not importable on their own; import the
-> containing `.riproject` directory.
+> **RIEGL `.rxp` stores only returns**, but the misses are recovered anyway. A
+> shot that hits nothing is absent from the file rather than flagged, so
+> Phytograph reads the scanner's own per-shot record to reconstruct each miss
+> with its true beam direction — see
+> [Import a RIEGL raw project](../workflows/import-riegl-riproject.md). Loose
+> `.rxp` files are not importable on their own; import the containing
+> `.riproject` directory.
 
 ## Meshes
 

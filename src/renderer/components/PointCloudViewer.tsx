@@ -115,6 +115,7 @@ import {
   fuzzyMatch,
   generateShapeMesh,
   octreeScalarFieldOptions,
+  importedColumnsFor,
   assembleScanScalarFields,
   voxelMeshToHeliosGrid,
   gridSnapSignature,
@@ -17524,6 +17525,27 @@ export default function PointCloudViewer({
                           tilt: <span className="font-mono text-neutral-300">roll {scan.params.tiltRollDeg}° · pitch {scan.params.tiltPitchDeg}°</span>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {/* Which scalar columns this cloud actually carries.
+                      The Color-by dropdown is a lossy proxy for this: it hides
+                      `intensity` (own mode), every LAS builtin, and anything
+                      constant-valued — so an importer that silently dropped a
+                      column looked identical to one that kept it. Listing them
+                      here is the only direct answer to "what did I import?". */}
+                  {isExpanded && scanHasData && importedColumnsFor(scan).length > 0 && (
+                    <div
+                      data-testid={`scan-columns-${scan.id}`}
+                      className="pl-6 pr-2 pb-2 text-[10px] text-neutral-400"
+                    >
+                      <span>fields: </span>
+                      <span
+                        className="font-mono text-neutral-300"
+                        data-columns={importedColumnsFor(scan).join(',')}
+                      >
+                        {importedColumnsFor(scan).join(', ')}
+                      </span>
                     </div>
                   )}
                 </div>

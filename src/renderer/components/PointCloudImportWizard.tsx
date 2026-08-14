@@ -128,6 +128,28 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
 // the categorical variant of 'extra'.
 const SCALAR_ROLES = new Set(['extra', 'label']);
 
+// Formats whose import path takes no global shift, so offering the control
+// would be a lie: the user could tick it, type an offset, and nothing would
+// happen.
+//
+// A RIEGL raw project is scanner-local metres — each position sits at its own
+// origin, offset only by a centroid-anchored ENU prior — so coordinates are
+// always small and there is nothing to shift away. The extract endpoint has no
+// world_shift parameter at all, unlike create_cloud_session.
+export const SHIFTLESS_KINDS = new Set(['riproject']);
+
+// Formats whose importer takes no externally-supplied trajectory, so offering
+// the upload would be dead UI: the file is read, parsed, and then ignored.
+//
+// A RIEGL raw project describes its own platform. Static tripod positions
+// (ScanPos001, ScanPos002, …) each have a single GNSS fix and a fixed origin —
+// there is no motion to describe, and attaching a trajectory would flip
+// isMovingScan() true and route LAD down the trajectory-join path for a scan
+// that does not need it. A genuinely mobile capture records its path in the
+// project's own poslog_*.rxp files, which is where a trajectory should come
+// from if we ever derive one — not from a separate upload.
+export const TRAJECTORYLESS_KINDS = new Set(['riproject']);
+
 // Roles that are singletons within a scan: a cloud has exactly one of each. The
 // backend keys every algorithm off a canonical slug (one 'timestamp', one 'x',
 // …), so assigning a singleton role to two columns silently orphans the second
@@ -730,8 +752,10 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
               the viewport doesn't lose float32 precision (kinked grid / flickering
               meshes). Auto-suggested + on by default for large (e.g. UTM) clouds;
               the original coordinates are restored on export. Shown for every
-              previewed scan, including auto-detect-only ones. */}
-          {cfg && !cfg.loading && !cfg.error && (
+              previewed scan, including auto-detect-only ones — EXCEPT formats
+              whose importer has no shift to apply (see SHIFTLESS_KINDS). */}
+          {cfg && !cfg.loading && !cfg.error
+            && !SHIFTLESS_KINDS.has(cfg.preview?.kind ?? '') && (
             <div
               data-testid="import-wizard-shift"
               className="border border-neutral-700 rounded-lg px-3 py-2.5 space-y-2"
@@ -780,8 +804,11 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
               acquisition — leaf-area inversion then reconstructs a per-beam origin
               per return by joining each return's timestamp to the path. Importing
               one on any scan auto-populates the others (one pass, many files); each
-              scan can still get its own. Shown for every previewed scan. */}
-          {cfg && !cfg.loading && !cfg.error && (
+              scan can still get its own. Shown for every previewed scan EXCEPT
+              formats that carry their own platform information (see
+              TRAJECTORYLESS_KINDS). */}
+          {cfg && !cfg.loading && !cfg.error
+            && !TRAJECTORYLESS_KINDS.has(cfg.preview?.kind ?? '') && (
             <div
               data-testid="import-wizard-trajectory"
               className="border border-neutral-700 rounded-lg px-3 py-2.5 space-y-2"

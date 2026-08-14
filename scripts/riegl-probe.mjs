@@ -281,8 +281,8 @@ function reportExtract(data, hostOutDir) {
       'GNSS\nprior for seeding ICP, not a registration.',
   );
   console.log(
-    'Misses are not recovered from .rxp — has_misses is false, so LAD is not ' +
-      'yet\nsupported on these imports.',
+    'Sky/miss points are recovered from the scanner per-shot record and placed ' +
+      'on the\nfar-field shell, so LAD is supported.',
   );
   if (failures) process.exitCode = 1;
 }

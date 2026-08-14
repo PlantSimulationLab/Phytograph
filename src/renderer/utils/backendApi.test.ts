@@ -17,6 +17,8 @@ import {
   getDeviceInfo,
   getPlantSessionStatus,
   getRieglStatus,
+  formatBackendDetail,
+  extractRieglProject,
   heliosTriangulate,
   icpRegisterCloudToCloud,
   icpRegisterMeshToCloud,
@@ -1626,5 +1628,64 @@ describe('request deadlines', () => {
   it('still rewrites an unreachable backend', () => {
     const e = describeBackendError(new TypeError('Failed to fetch'), 'Import');
     expect(e.message).toMatch(/could not reach the backend/);
+  });
+});
+
+describe('formatBackendDetail', () => {
+  it('renders a FastAPI 422 validation array readably', () => {
+    // THE BUG: a 422's `detail` is an ARRAY of {loc,msg,type}, and
+    // interpolating it into a template literal produced "[object Object]" —
+    // which is what a user saw when the request shape was wrong.
+    const detail = [
+      { type: 'list_type', loc: ['body', 'keep_columns'], msg: 'Input should be a valid list' },
+    ];
+    expect(formatBackendDetail(detail)).toBe('keep_columns: Input should be a valid list');
+  });
+
+  it('joins several validation errors', () => {
+    expect(formatBackendDetail([
+      { loc: ['body', 'a'], msg: 'bad a' },
+      { loc: ['body', 'b'], msg: 'bad b' },
+    ])).toBe('a: bad a; b: bad b');
+  });
+
+  it('passes a plain string detail through', () => {
+    // A raised HTTPException — the common case — must be unchanged.
+    expect(formatBackendDetail('Docker is not running.')).toBe('Docker is not running.');
+  });
+
+  it('never yields "[object Object]"', () => {
+    for (const d of [[{ loc: ['body', 'x'], msg: 'no' }], { msg: 'hi' }, {}, null, undefined]) {
+      expect(formatBackendDetail(d)).not.toContain('[object Object]');
+    }
+  });
+});
+
+describe('extractRieglProject argument shapes', () => {
+  it('sends keep_columns as a list when given one', async () => {
+    const spy = mockFetchOk({ scans: [] });
+    await extractRieglProject('/p.riproject', ['ScanPos001'], '/riv', ['reflectance']);
+    const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit).body));
+    expect(body.keep_columns).toEqual(['reflectance']);
+  });
+
+  it('tolerates the options object in the keepColumns position', async () => {
+    // A caller written against the older 4-arg signature passes opts here. That
+    // used to reach the backend as `keep_columns`, which 422'd with "Input
+    // should be a valid list" and surfaced in the UI as "[object Object]".
+    const spy = mockFetchOk({ scans: [] });
+    const ctl = new AbortController();
+    await extractRieglProject('/p.riproject', ['ScanPos001'], '/riv', {
+      signal: ctl.signal,
+    } as never);
+    const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit).body));
+    expect(body.keep_columns).toBeNull();
+  });
+
+  it('sends null when nothing is specified', async () => {
+    const spy = mockFetchOk({ scans: [] });
+    await extractRieglProject('/p.riproject', null, '/riv');
+    const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit).body));
+    expect(body.keep_columns).toBeNull();
   });
 });

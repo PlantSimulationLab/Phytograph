@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isRieglProjectPath } from './rieglProject';
+import { isRieglProjectPath, parseRieglProgress } from './rieglProject';
 
 describe('isRieglProjectPath', () => {
   it('matches a project directory, with or without a trailing slash', () => {
@@ -28,5 +28,25 @@ describe('isRieglProjectPath', () => {
     expect(isRieglProjectPath(undefined)).toBe(false);
     expect(isRieglProjectPath(null)).toBe(false);
     expect(isRieglProjectPath('')).toBe(false);
+  });
+});
+
+describe('parseRieglProgress', () => {
+  it('advances the counter from the [N/M] prefix', () => {
+    // THE BUG: the backend builds every position itself, so the renderer had no
+    // view of progress. It set current:1 once and never moved it — the dialog
+    // read "1 of 6" for an entire six-position import and finished around 20%.
+    expect(parseRieglProgress('[1/6] Building ScanPos001 (20,601,737 points)…'))
+      .toEqual({ current: 1, total: 6, label: 'Building ScanPos001 (20,601,737 points)…' });
+    expect(parseRieglProgress('[4/6] Finished ScanPos004'))
+      .toEqual({ current: 4, total: 6, label: 'Finished ScanPos004' });
+  });
+
+  it('returns null for messages with no prefix', () => {
+    // The metadata phase precedes any position work; it must not reset the
+    // counter to something misleading.
+    expect(parseRieglProgress('Reading project metadata (6 positions)…')).toBeNull();
+    expect(parseRieglProgress('Extraction complete.')).toBeNull();
+    expect(parseRieglProgress('')).toBeNull();
   });
 });

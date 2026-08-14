@@ -32,7 +32,7 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { RieglProjectDialog } from "./components/RieglProjectDialog";
 import StatusPill from "./components/StatusPill";
 import { getSettings } from "./lib/store";
-import { isRieglProjectPath } from "./lib/rieglProject";
+import { isRieglProjectPath, parseRieglProgress } from "./lib/rieglProject";
 import type { FeedbackMode } from "./lib/feedback";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
@@ -1365,6 +1365,22 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     setRieglProjectPath(null);
     if (!chosen || chosen.length === 0) return;
 
+    // Let the user pick which scalars to keep, as every other path-backed
+    // import does. One wizard step covers the whole project: the reader
+    // produces the same schema for every position, so per-position choices
+    // would be noise. Cancelling here cancels the import.
+    const wizard = await openImportWizard([
+      { path: picked, fileName: picked.split('/').pop() ?? 'RIEGL project' },
+    ]);
+    if (!wizard) return;
+    // NOTE: fixed-layout formats cannot currently express "skip" in the wizard
+    // (SCALAR_ROLES is {extra,label}), so this is normally undefined — meaning
+    // "keep everything". The plumbing is here for when skip becomes available.
+    const keepSlugs = wizard[0]?.columnPlan?.columns
+      ?.filter((col) => col.role !== 'skip')
+      .map((col) => col.slug)
+      .filter((slug): slug is string => !!slug);
+
     importCancelledRef.current = false;
     const controller = new AbortController();
     importAbortRef.current = controller;
@@ -1378,11 +1394,21 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     });
 
     try {
-      const project = await extractRieglProject(picked, chosen, rivlibPath, {
+      const project = await extractRieglProject(picked, chosen, rivlibPath, keepSlugs ?? null, {
         signal: controller.signal,
         onRunId: (id: string) => { importRunIdRef.current = id; },
         onProgress: (fraction: number | null, message: string) =>
-          setImportProgress((p) => (p ? { ...p, label: message, fraction } : p)),
+          setImportProgress((p) => {
+            if (!p) return p;
+            const parsed = parseRieglProgress(message);
+            return {
+              ...p,
+              current: parsed ? parsed.current : p.current,
+              total: parsed ? parsed.total : p.total,
+              label: parsed ? parsed.label : message,
+              fraction,
+            };
+          }),
       });
       if (importCancelledRef.current) return;
 

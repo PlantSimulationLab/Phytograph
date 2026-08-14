@@ -40,7 +40,9 @@ import math
 import os
 import re
 import struct
+import subprocess
 import sys
+import time
 
 import numpy as np
 
@@ -113,6 +115,93 @@ if ctypes.sizeof(ScanifcAttributes) != _EXPECTED_ATTR_SIZE:
 
 class RxpError(RuntimeError):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Miss recovery (no-return shots) via the C++ shim
+# ---------------------------------------------------------------------------
+#
+# An .rxp stores only returns, so `scanifc_point3dstream_read` never mentions a
+# shot that hit nothing — yet those are ~46% of a real scan (7,518,052 of
+# 18,199,111 shots on the reference position) and they ARE the transmission
+# term LAD needs. rxp_shim.cpp reaches them through the C++ pointcloud class;
+# see its header comment for why on_shot_end and not on_gap.
+#
+# Built on first use rather than at image-build time: the shim links against
+# libscanifc.so, which is bind-mounted at run time because RIEGL's licence
+# forbids baking it into the image.
+
+_SHIM_SRC = "/opt/riegl/rxp_shim.cpp"
+_SHIM_SO = "/tmp/librxpshim.so"
+_RIVLIB_ROOT = os.environ.get("RIVLIB_ROOT", "/rivlib")
+
+
+def _build_shim() -> str:
+    """Compile the miss-recovery shim if it isn't already built."""
+    if os.path.exists(_SHIM_SO):
+        return _SHIM_SO
+    if not os.path.exists(_SHIM_SRC):
+        raise RxpError(f"miss-recovery shim source missing at {_SHIM_SRC}")
+    cmd = [
+        "g++", "-std=c++11", "-O2", "-fPIC", "-shared",
+        f"-I{_RIVLIB_ROOT}/include", _SHIM_SRC,
+        f"-L{_RIVLIB_ROOT}/lib", "-lscanifc", "-o", _SHIM_SO,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not os.path.exists(_SHIM_SO):
+        raise RxpError(
+            "could not build the miss-recovery shim: "
+            + (proc.stderr or proc.stdout or "no compiler output")[-800:]
+        )
+    return _SHIM_SO
+
+
+def collect_misses(rxp_path: str) -> dict:
+    """Return the beam direction and time of every no-return shot.
+
+    {'dirs': (M,3) float64 unit vectors in the SCANNER frame,
+     'times': (M,) float64 seconds,
+     'shots', 'hit_shots', 'echoes': counts for cross-checking}
+
+    The counts are the reconciliation handle: `shots` must equal
+    `hit_shots + len(times)`, and `echoes` must match what the C API returned.
+    """
+    lib = ctypes.CDLL(_build_shim())
+    lib.rxpshim_collect_misses.restype = ctypes.c_void_p
+    lib.rxpshim_collect_misses.argtypes = [ctypes.c_char_p]
+    lib.rxpshim_error.restype = ctypes.c_char_p
+    lib.rxpshim_error.argtypes = [ctypes.c_void_p]
+    for name in ("rxpshim_miss_count", "rxpshim_shot_count",
+                 "rxpshim_hit_shot_count", "rxpshim_echo_count"):
+        getattr(lib, name).restype = ctypes.c_uint64
+        getattr(lib, name).argtypes = [ctypes.c_void_p]
+    lib.rxpshim_copy.argtypes = [
+        ctypes.c_void_p,
+        np.ctypeslib.ndpointer(dtype=np.float64, flags="C_CONTIGUOUS"),
+        np.ctypeslib.ndpointer(dtype=np.float64, flags="C_CONTIGUOUS"),
+    ]
+    lib.rxpshim_free.argtypes = [ctypes.c_void_p]
+
+    handle = lib.rxpshim_collect_misses(_uri(rxp_path).encode())
+    if not handle:
+        raise RxpError("miss recovery could not allocate")
+    try:
+        err = (lib.rxpshim_error(handle) or b"").decode("latin-1")
+        if err:
+            raise RxpError(f"miss recovery failed: {err}")
+        m = int(lib.rxpshim_miss_count(handle))
+        dirs = np.empty((max(m, 1), 3), dtype=np.float64)
+        times = np.empty(max(m, 1), dtype=np.float64)
+        lib.rxpshim_copy(handle, dirs, times)
+        return {
+            "dirs": dirs[:m],
+            "times": times[:m],
+            "shots": int(lib.rxpshim_shot_count(handle)),
+            "hit_shots": int(lib.rxpshim_hit_shot_count(handle)),
+            "echoes": int(lib.rxpshim_echo_count(handle)),
+        }
+    finally:
+        lib.rxpshim_free(handle)
 
 
 class _Scanifc:
@@ -620,6 +709,35 @@ def targets_from_timestamps(
     return target_index.astype(np.float32), target_count.astype(np.float32)
 
 
+def decode_flags(flags: np.ndarray) -> dict:
+    """Split the per-point `flags` bitfield into named scalar columns.
+
+    RiVLib packs several independent facts into one uint16
+    (riegl/detail/pointsifc_t.h). Only bits 0-1 (the echo type) were being read,
+    for the multi-return cross-check, and the rest were discarded — including
+    `pseudo_echo`, which flags a SYNTHETIC return at a fixed 0.1 m range rather
+    than a real measurement. Those were importing as ordinary points.
+
+      bit0-1  echo type (0 single, 1 first, 2 interior, 3 last)
+      bit3    waveform available
+      bit4    pseudo echo, fixed range 0.1 m  -> not a real target
+      bit5    target calculated in software rather than detected
+      bit6    pps not older than 1.5 s
+      bit7    time is in the pps timeframe   -> the timestamp is GPS-locked
+      bit8-9  mirror facet number (0-3)
+      bit13   line stop
+    """
+    f = flags.astype(np.uint16)
+    return {
+        "echo_type": (f & 0x3).astype(np.float32),
+        "waveform_available": ((f >> 3) & 0x1).astype(np.float32),
+        "pseudo_echo": ((f >> 4) & 0x1).astype(np.float32),
+        "sw_calculated": ((f >> 5) & 0x1).astype(np.float32),
+        "pps_locked": ((f >> 7) & 0x1).astype(np.float32),
+        "facet": ((f >> 8) & 0x3).astype(np.float32),
+    }
+
+
 def validate_against_echo(
     target_index: np.ndarray, target_count: np.ndarray, flags: np.ndarray
 ) -> int:
@@ -822,7 +940,9 @@ def extract_scan(
                 "min": [float(v) for v in xyz.min(axis=0)],
                 "max": [float(v) for v in xyz.max(axis=0)],
             },
-            "has_misses": False,
+            "has_misses": bool(n_miss),
+            "hit_count": n_hits,
+            "miss_count": n_miss,
             "max_returns_per_pulse": max_returns,
             "extra_dims": [
                 {"slug": slug, "label": label} for slug, label in _EXTRA_DIMS
@@ -897,7 +1017,23 @@ _ARRAY_SPEC = (
     ("deviation.f32", "<f4", 1),
     ("target_index.f32", "<f4", 1),
     ("target_count.f32", "<f4", 1),
+    ("is_miss.f32", "<f4", 1),
+    ("background_radiation.f32", "<f4", 1),
+    ("echo_type.f32", "<f4", 1),
+    ("waveform_available.f32", "<f4", 1),
+    ("pseudo_echo.f32", "<f4", 1),
+    ("sw_calculated.f32", "<f4", 1),
+    ("pps_locked.f32", "<f4", 1),
+    ("facet.f32", "<f4", 1),
+    # float64: this is the moving-platform LAD join key and CloudSession keeps
+    # it in double precision for that reason. A float32 cast loses it.
+    ("timestamp.f64", "<f8", 1),
 )
+
+# Where a no-return shot is placed along its beam. Matches _MISS_GAP_DISTANCE
+# in the backend (and Helios's own gapfillMisses), so RIEGL misses land on the
+# same far-field shell as every other importer's.
+_MISS_GAP_DISTANCE = 20000.0
 
 
 def _write_scan_arrays(out_dir: str, arrays: dict) -> None:
@@ -905,17 +1041,24 @@ def _write_scan_arrays(out_dir: str, arrays: dict) -> None:
 
     `tofile` is a straight memcpy — the point of this transport. The marker is
     written last so a partially-written scan is never mistaken for a complete
-    one.
+    one, and it NAMES the columns actually written: the set varies by scanner
+    (a VZ-1000 records no background_radiation, and several flag bits are
+    constant), so a fixed list on the host would look for files that do not
+    exist.
     """
     os.makedirs(out_dir, exist_ok=True)
     n = int(arrays["positions"].shape[0])
+    written = []
     for name, dtype, _cols in _ARRAY_SPEC:
         key = name.split(".")[0]
+        if key not in arrays:
+            continue
         np.ascontiguousarray(arrays[key], dtype=dtype).tofile(
             os.path.join(out_dir, name)
         )
+        written.append(name)
     with open(os.path.join(out_dir, "done.json"), "w") as fh:
-        json.dump({"point_count": n}, fh)
+        json.dump({"point_count": n, "columns": written}, fh)
 
 
 def stream_scan(
@@ -946,6 +1089,7 @@ def stream_scan(
         dev_chunks: list[np.ndarray] = []
         flag_chunks: list[np.ndarray] = []
         time_chunks: list[np.ndarray] = []
+        bgr_chunks: list[np.ndarray] = []
 
         xyz_buf = (ScanifcXYZ * _READ_CHUNK)()
         attr_buf = (ScanifcAttributes * _READ_CHUNK)()
@@ -977,6 +1121,9 @@ def stream_scan(
             refl_chunks.append(attr_view["reflectance"].astype(np.float32))
             ampl_chunks.append(attr_view["amplitude"].astype(np.float32))
             dev_chunks.append(attr_view["deviation"].astype(np.float32))
+            bgr_chunks.append(
+                attr_view["background_radiation"].astype(np.float32)
+            )
             flag_chunks.append(attr_view["flags"].astype(np.uint16))
             time_chunks.append(
                 np.ctypeslib.as_array(time_buf)[:n].astype(np.uint64)
@@ -994,13 +1141,74 @@ def stream_scan(
         deviation = np.concatenate(dev_chunks, axis=0)
         flags = np.concatenate(flag_chunks, axis=0)
         timestamps = np.concatenate(time_chunks, axis=0)
+        background = np.concatenate(bgr_chunks, axis=0)
         del xyz_chunks, refl_chunks, ampl_chunks, dev_chunks
-        del flag_chunks, time_chunks
+        del flag_chunks, time_chunks, bgr_chunks
+        # RiVLib reports time in nanoseconds; seconds is what every other
+        # Phytograph timestamp column carries.
+        time_s = timestamps.astype(np.float64) * 1e-9
+        flag_cols = decode_flags(flags)
 
         target_index, target_count = targets_from_timestamps(timestamps)
         echo_mismatches = validate_against_echo(target_index, target_count, flags)
         max_returns = int(target_count.max()) if target_count.size else 0
-        del timestamps, flags
+        del timestamps
+
+        # NO-RETURN SHOTS. The C API above only ever yields returns, so the
+        # misses are collected separately through the C++ shim and appended
+        # here. They are placed the way every other Phytograph importer places a
+        # miss — origin + unit_dir * _MISS_GAP_DISTANCE — so the far-field
+        # shell, the hits-only octree and LAD all treat them identically.
+        n_hits = total
+        miss_info = collect_misses(rxp_path)
+        n_miss = int(miss_info["times"].size)
+        if n_miss:
+            miss_xyz = miss_info["dirs"] * _MISS_GAP_DISTANCE
+            xyz = np.concatenate([xyz, miss_xyz], axis=0)
+            # A miss carries no return, so its per-return attributes are
+            # meaningless; zero them rather than invent values. `is_miss` is
+            # what every consumer keys off.
+            zeros = np.zeros(n_miss, dtype=np.float32)
+            reflectance = np.concatenate([reflectance, zeros])
+            amplitude = np.concatenate([amplitude, zeros])
+            deviation = np.concatenate([deviation, zeros])
+            target_index = np.concatenate([target_index, zeros])
+            target_count = np.concatenate([target_count, zeros])
+            background = np.concatenate([background, zeros])
+            for k in flag_cols:
+                flag_cols[k] = np.concatenate([flag_cols[k], zeros])
+            # A miss DOES have a real time — the shim records it per shot — so
+            # this column stays meaningful across hits and misses, which is what
+            # lets the timestamp-based miss reconstruction cross-check the shim.
+            time_s = np.concatenate([time_s, miss_info["times"].astype(np.float64)])
+        is_miss = np.concatenate([
+            np.zeros(n_hits, dtype=np.float32),
+            np.ones(n_miss, dtype=np.float32),
+        ])
+        total = n_hits + n_miss
+
+        # The counts must reconcile or something is being dropped: every shot
+        # either produced returns or was a miss.
+        if miss_info["shots"] != miss_info["hit_shots"] + n_miss:
+            raise RxpError(
+                f"shot accounting does not reconcile for {rxp_path}: "
+                f"{miss_info['shots']} shots vs {miss_info['hit_shots']} with "
+                f"returns + {n_miss} misses"
+            )
+
+        # Drop columns this instrument does not actually populate. The VZ-1000
+        # leaves background_radiation entirely NaN, and several flag bits are
+        # constant-zero for a given scanner; surfacing those as scalars the user
+        # can colour by is just noise in the picker. Which columns survive is
+        # reported per scan so the wizard lists only the real ones.
+        optional = {"background_radiation": background, **flag_cols}
+        carried = {}
+        for _k, _v in optional.items():
+            if not np.isfinite(_v).any():
+                continue          # all NaN: instrument does not record it
+            if float(np.nanmin(_v)) == float(np.nanmax(_v)):
+                continue          # constant: no information to colour by
+            carried[_k] = _v
 
         _write_scan_arrays(out_dir, {
             "positions": xyz,
@@ -1009,6 +1217,9 @@ def stream_scan(
             "deviation": deviation,
             "target_index": target_index,
             "target_count": target_count,
+            "is_miss": is_miss,
+            "timestamp": time_s,
+            **carried,
         })
 
         result = {
@@ -1018,7 +1229,9 @@ def stream_scan(
                 "min": [float(v) for v in xyz.min(axis=0)],
                 "max": [float(v) for v in xyz.max(axis=0)],
             },
-            "has_misses": False,
+            "has_misses": bool(n_miss),
+            "hit_count": n_hits,
+            "miss_count": n_miss,
             "max_returns_per_pulse": max_returns,
             "extra_dims": [
                 {"slug": slug, "label": label} for slug, label in _EXTRA_DIMS
@@ -1264,6 +1477,21 @@ def cmd_extract(args: argparse.Namespace) -> int:
     return 0
 
 
+# How long to wait for the host to load a finished position before giving up
+# and decoding the next one anyway. The host's work per position is a session
+# build plus a PotreeConverter run — seconds, not minutes — so a long stall
+# means it has died or been cancelled. Pressing on then is the right call: the
+# run is already doomed and blocking forever would just hang the container.
+_CONSUME_TIMEOUT_S = 900.0
+
+
+def _wait_for_consumption(scan_dir: str, timeout_s: float = _CONSUME_TIMEOUT_S) -> None:
+    """Block until the host has loaded (and deleted) this position's arrays."""
+    deadline = time.time() + timeout_s
+    while os.path.exists(scan_dir) and time.time() < deadline:
+        time.sleep(0.1)
+
+
 def cmd_stream(args: argparse.Namespace) -> int:
     """Stream selected scan positions' points to stdout as raw arrays.
 
@@ -1393,6 +1621,15 @@ def cmd_stream(args: argparse.Namespace) -> int:
             # Tell the host this position is ready NOW, so it can load and build
             # while the container decodes the next one.
             print(json.dumps({"ready": pos["name"]}), file=sys.stderr, flush=True)
+            # Then WAIT for the host to consume it before decoding the next.
+            #
+            # Without this the container runs ahead: it writes position N+1
+            # while the host is still building N, so two positions' arrays are
+            # on disk at once (~3.2 GB rather than ~1.6 GB). That doubled peak
+            # is what actually filled a user's disk mid-import. The host deletes
+            # each position's directory as it loads it, so its disappearance is
+            # the signal — no extra channel needed.
+            _wait_for_consumption(os.path.join(args.out, pos["name"]))
         except RxpError as exc:
             trailer.append({"name": pos["name"], "error": str(exc)})
 

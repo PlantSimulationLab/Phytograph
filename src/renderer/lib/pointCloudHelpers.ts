@@ -1437,3 +1437,33 @@ export function resampleCloud(
     },
   } as PointCloudData;
 }
+
+// Every scalar column a cloud actually carries, for the "fields:" line in the
+// expanded scan row.
+//
+// This is deliberately BROADER than `octreeScalarFieldOptions`, which answers a
+// different question ("what can I colour by?") and therefore hides `intensity`,
+// the LAS schema builtins, and anything constant. Those omissions made the
+// Color-by dropdown a misleading way to check what an import produced: a column
+// that was silently dropped looked exactly like one that was kept but happened
+// to be constant. This answers "what did I import?" instead, so it keeps
+// everything except `position` itself.
+//
+// Works for both cloud shapes: octree-backed clouds hold their columns in
+// `octree.attributeRanges`, flat clouds in `scalarFields`.
+export function importedColumnsFor(scan: {
+  data?: {
+    octree?: { attributeRanges?: Record<string, unknown>; attributeLabels?: Record<string, string> };
+    scalarFields?: Record<string, unknown>;
+  };
+}): string[] {
+  const names = new Set<string>();
+  for (const k of Object.keys(scan.data?.octree?.attributeRanges ?? {})) names.add(k);
+  for (const k of Object.keys(scan.data?.scalarFields ?? {})) names.add(k);
+  // `position` is the geometry, not a scalar field; `rgb`/`rgba` are colour and
+  // are already visible as a colour mode.
+  for (const geom of ['position', 'rgb', 'rgba', 'color', 'normal', 'indices', 'spacing']) {
+    names.delete(geom);
+  }
+  return [...names].sort((a, b) => a.localeCompare(b));
+}

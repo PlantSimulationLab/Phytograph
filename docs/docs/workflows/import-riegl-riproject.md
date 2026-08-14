@@ -103,23 +103,22 @@ instrument's built-in GNSS is metres-accurate, not survey-grade. Use it to seed
 Where a position has **no fix**, it imports at the origin — so several such
 positions will sit on top of one another until you register them.
 
-### Sky/miss points are not recovered
+### Sky/miss points are recovered exactly
 
-An `.rxp` file records only *returns*. Shots that hit nothing are simply absent
-rather than flagged, so an imported RIEGL scan has no sky/miss points.
+An `.rxp` file stores only *returns* — a shot that hits nothing is absent
+rather than flagged — so the miss rays have to be recovered separately.
+Phytograph reads them from the scanner's own record of every laser shot, which
+means each miss carries its **true beam direction** rather than one inferred
+from the scan grid. On a typical scan they are a large fraction of the data
+(about 46% of shots on our reference position).
 
-The practical consequence: **[Leaf Area Density](../concepts/leaf-area-density.md)
-will refuse to compute** for these scans, because LAD needs the miss rays for
-its Beer's-law transmission term.
+They are placed 20 km along their beam, the same far-field shell every other
+Phytograph importer uses, and flagged with `is_miss` — so they are hidden by
+default, excluded from the bounding box, and available to
+[Leaf Area Density](../concepts/leaf-area-density.md), which needs them for its
+Beer's-law transmission term.
 
-[Backfill Misses](backfill-misses.md) is not offered for them either — the
-button simply doesn't appear. Reconstructing misses needs either a per-point
-`timestamp` or both grid indices, and a `.riproject` import carries neither, so
-LAD lists these scans as unable to recover misses and points you at re-importing
-a format that retains them (E57 or structured PLY). Exporting to `.e57` from
-RiSCAN PRO is the practical route for RIEGL data.
-
-Every other tool works normally.
+To see them, turn on **Show sky/miss points** for the scan.
 
 ### What does come through
 

@@ -295,8 +295,9 @@ export function RieglProjectDialog({
                   </span>
                 </div>
                 <div className="text-neutral-500 pl-5">
-                  Sky/miss points are not recovered from .rxp, so Leaf Area
-                  Density is not available for these scans.
+                  Sky/miss points are recovered from the scanner's per-shot
+                  record, so Leaf Area Density is available. They are hidden by
+                  default &mdash; use <em>Show sky/miss points</em> to see them.
                 </div>
               </div>
             </>

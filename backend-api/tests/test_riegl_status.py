@@ -390,6 +390,23 @@ def test_inspect_503s_when_capability_unavailable(client, monkeypatch, tmp_path)
     assert "docker" in res.json()["detail"].lower()
 
 
+def _plenty_of_disk(monkeypatch):
+    """Neutralise the pre-flight free-space check.
+
+    These tests are about mounts and session building, not capacity — without
+    this they fail with 507 on any machine whose disk happens to be full, which
+    is exactly the state that motivated the check.
+    """
+    import shutil as _shutil
+    real = _shutil.disk_usage
+
+    def fake(path):
+        u = real("/")
+        return type(u)(u.total, 0, 10 * 1024**3)
+
+    monkeypatch.setattr(main.shutil, "disk_usage", fake)
+
+
 def test_extract_mounts_only_the_transport_dir_writable(
     client, monkeypatch, tmp_path
 ):
@@ -406,6 +423,7 @@ def test_extract_mounts_only_the_transport_dir_writable(
     project = tmp_path / "p.riproject"
     project.mkdir()
     monkeypatch.setenv("PHYTOGRAPH_RIEGL_EXTRACT_ROOT", str(tmp_path / "extracts"))
+    _plenty_of_disk(monkeypatch)
 
     seen = {}
 
@@ -458,6 +476,7 @@ def test_extract_builds_sessions_without_writing_any_file(
     project.mkdir()
     extracts = tmp_path / "extracts"
     monkeypatch.setenv("PHYTOGRAPH_RIEGL_EXTRACT_ROOT", str(extracts))
+    _plenty_of_disk(monkeypatch)
 
     n = 5
     arrays = {
@@ -467,6 +486,7 @@ def test_extract_builds_sessions_without_writing_any_file(
         "deviation": np.zeros(n, dtype=np.float32),
         "target_index": np.ones(n, dtype=np.float32),
         "target_count": np.ones(n, dtype=np.float32),
+        "is_miss": np.zeros(n, dtype=np.float32),
     }
 
     # Drive the real callback path: the runner hands each scan to `on_scan` as
@@ -479,12 +499,20 @@ def test_extract_builds_sessions_without_writing_any_file(
         scan_dir.mkdir(parents=True, exist_ok=True)
         # Sizes must match `point_count` or the truncation guard rejects them.
         np.zeros((n, 3), dtype="<f8").tofile(scan_dir / "positions.f64")
-        for col in (
+        cols = [
             "reflectance", "amplitude", "deviation",
-            "target_index", "target_count",
-        ):
+            "target_index", "target_count", "is_miss",
+        ]
+        for col in cols:
             np.zeros(n, dtype="<f4").tofile(scan_dir / f"{col}.f32")
-        (scan_dir / "done.json").write_text(json.dumps({"point_count": n}))
+        np.zeros(n, dtype="<f8").tofile(scan_dir / "timestamp.f64")
+        # The manifest names the columns actually written — the set varies by
+        # scanner, so the host reads this rather than assuming a fixed list.
+        (scan_dir / "done.json").write_text(json.dumps({
+            "point_count": n,
+            "columns": ["positions.f64"] + [f"{c}.f32" for c in cols]
+                       + ["timestamp.f64"],
+        }))
         header = {"scans": [{"name": "ScanPos001"}]}
         if on_scan is not None:
             # The real runner loads (and deletes) the directory before handing
@@ -545,6 +573,7 @@ def test_streamed_arrays_map_onto_session_inputs(monkeypatch):
         "deviation": np.zeros(n, dtype=np.float32),
         "target_index": np.array([1, 1, 2, 1], dtype=np.float32),
         "target_count": np.array([1, 2, 2, 1], dtype=np.float32),
+        "is_miss": np.zeros(n, dtype=np.float32),
     }
     res = main._riegl_arrays_to_las_result(arrays)
 
@@ -553,7 +582,8 @@ def test_streamed_arrays_map_onto_session_inputs(monkeypatch):
         "is_miss", "reflectance", "amplitude", "deviation",
         "target_index", "target_count",
     }
-    # .rxp carries only returns, so nothing is a miss (see Phase 7).
+    # `is_miss` is carried through from the reader, not synthesised here — this
+    # fixture happens to supply all-hits.
     assert float(res.extras["is_miss"].sum()) == 0.0
     # Multi-return columns survive verbatim — LAD reads these.
     assert res.extras["target_count"].tolist() == [1.0, 2.0, 2.0, 1.0]
@@ -585,6 +615,7 @@ def test_points_are_translated_into_the_project_frame():
         "deviation": np.zeros(n, dtype=np.float32),
         "target_index": np.ones(n, dtype=np.float32),
         "target_count": np.ones(n, dtype=np.float32),
+        "is_miss": np.zeros(n, dtype=np.float32),
     }
     o1 = [6.70, 0.76, -0.57]
     o2 = [-6.43, 0.26, -4.00]
@@ -605,6 +636,163 @@ def test_points_are_translated_into_the_project_frame():
     )
     # The caller's buffer is not mutated — the stream decoder still holds it.
     assert np.array_equal(arrays["positions"], base)
+
+
+def test_misses_survive_the_origin_translation():
+    """A recovered miss must stay on its own scanner's ray.
+
+    Misses are placed at origin + unit_dir * 20000 m in the SCANNER frame, then
+    the whole cloud is translated into the project frame by the GNSS offset.
+    Both hits and misses ride in one array precisely so that translation cannot
+    separate them — if a miss ever moved independently, its ray would no longer
+    point back at the instrument and LAD's transmission term would be wrong.
+    """
+    import numpy as np
+
+    n_hit, n_miss = 4, 3
+    dirs = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    arrays = {
+        "positions": np.vstack([np.zeros((n_hit, 3)), dirs * 20000.0]),
+        "reflectance": np.zeros(n_hit + n_miss, dtype=np.float32),
+        "amplitude": np.zeros(n_hit + n_miss, dtype=np.float32),
+        "deviation": np.zeros(n_hit + n_miss, dtype=np.float32),
+        "target_index": np.zeros(n_hit + n_miss, dtype=np.float32),
+        "target_count": np.zeros(n_hit + n_miss, dtype=np.float32),
+        "is_miss": np.concatenate([
+            np.zeros(n_hit, dtype=np.float32),
+            np.ones(n_miss, dtype=np.float32),
+        ]),
+    }
+    origin = [10.0, 20.0, 30.0]
+    res = main._riegl_arrays_to_las_result(arrays, origin=origin)
+
+    m = res.extras["is_miss"] == 1
+    assert int(m.sum()) == n_miss, "the miss flag must survive the adapter"
+    # Hits land at the scanner; misses stay exactly 20 km along their ray.
+    assert np.allclose(res.positions[~m], origin)
+    assert np.allclose(
+        np.linalg.norm(res.positions[m] - np.array(origin), axis=1), 20000.0
+    )
+
+
+def test_miss_flag_is_carried_not_synthesised():
+    """`is_miss` must come from the reader, not be zeroed here.
+
+    It used to be hardcoded to all-zeros because .rxp appeared to have no
+    no-return shots. They are in fact recoverable through the C++ shim (~46% of
+    shots on real data), so silently zeroing the column would throw away the
+    entire transmission term LAD depends on.
+    """
+    import numpy as np
+
+    n = 6
+    flags = np.array([0, 0, 1, 0, 1, 1], dtype=np.float32)
+    arrays = {
+        "positions": np.zeros((n, 3)),
+        "reflectance": np.zeros(n, dtype=np.float32),
+        "amplitude": np.zeros(n, dtype=np.float32),
+        "deviation": np.zeros(n, dtype=np.float32),
+        "target_index": np.zeros(n, dtype=np.float32),
+        "target_count": np.zeros(n, dtype=np.float32),
+        "is_miss": flags,
+    }
+    res = main._riegl_arrays_to_las_result(arrays)
+    assert np.array_equal(res.extras["is_miss"], flags)
+    assert [d["slug"] for d in res.extra_dims_meta].count("is_miss") == 1
+
+
+def test_wizard_selection_drops_unwanted_scalars():
+    """The import wizard's column choice must actually filter the import.
+
+    RIEGL bypassed the wizard entirely at first, so the scalar set was whatever
+    the reader happened to forward — the user had no say, and several columns
+    were silently dropped. Now the wizard lists them and this is what enforces
+    the answer.
+    """
+    import numpy as np
+
+    n = 4
+    arrays = {
+        "positions": np.zeros((n, 3)),
+        "reflectance": np.ones(n, dtype=np.float32),
+        "amplitude": np.ones(n, dtype=np.float32),
+        "deviation": np.ones(n, dtype=np.float32),
+        "target_index": np.ones(n, dtype=np.float32),
+        "target_count": np.ones(n, dtype=np.float32),
+        "is_miss": np.zeros(n, dtype=np.float32),
+        "echo_type": np.ones(n, dtype=np.float32),
+        "timestamp": np.arange(n, dtype=np.float64),
+    }
+
+    # Keep only reflectance; is_miss must survive regardless.
+    res = main._riegl_arrays_to_las_result(arrays, keep_columns=["reflectance"])
+    assert set(res.extras) == {"reflectance", "is_miss"}, (
+        "is_miss is a system flag (Hit/Miss scheme, hits-only octree) and must "
+        "never be dropped by a user selection"
+    )
+    # A column the user didn't keep must not appear in the octree sidecar either.
+    assert [d["slug"] for d in res.extra_dims_meta] == ["reflectance", "is_miss"]
+    # Timestamp lives outside `extras`, so it is filtered separately.
+    assert res.timestamps is None
+
+    # Keeping it explicitly brings it back.
+    res2 = main._riegl_arrays_to_las_result(
+        arrays, keep_columns=["reflectance", "timestamp"]
+    )
+    assert res2.timestamps is not None
+
+    # No selection at all keeps everything the scanner recorded.
+    res3 = main._riegl_arrays_to_las_result(arrays)
+    assert "echo_type" in res3.extras
+    assert res3.timestamps is not None
+
+
+def test_extract_refuses_up_front_when_the_disk_is_full(
+    client, monkeypatch, tmp_path
+):
+    """A full disk must fail BEFORE decoding, with an actionable message.
+
+    Regression test for a real failure: the import ran for minutes, decoded four
+    of six positions, then died mid-write with a numpy OSError buried in the
+    reader's traceback ("Not enough free space to write 168330104 bytes").
+
+    The transport needs ~1.6 GB per position. The container now blocks until the
+    host has loaded and deleted each position before writing the next, so that
+    is the peak (measured: 1.28 GB across a three-position import, against
+    ~2.6 GB when the two were allowed to overlap on disk).
+    """
+    _mac(monkeypatch)
+    monkeypatch.setattr(main, "_docker_present", lambda: True)
+    monkeypatch.setattr(main, "_riegl_image_built", lambda: True)
+    project = tmp_path / "p.riproject"
+    project.mkdir()
+    monkeypatch.setenv("PHYTOGRAPH_RIEGL_EXTRACT_ROOT", str(tmp_path / "extracts"))
+
+    import shutil as _shutil
+    real = _shutil.disk_usage
+    monkeypatch.setattr(
+        main.shutil, "disk_usage",
+        lambda p: type(real("/"))(real("/").total, 0, 100 * 1024**2),  # 100 MB
+    )
+    reached = []
+    monkeypatch.setattr(
+        main, "_stream_riegl_container",
+        lambda *a, **k: reached.append(True) or ({}, [], []),
+    )
+
+    res = client.post(
+        "/api/riegl/project/extract",
+        json={
+            "project_path": str(project),
+            "rivlib_path": str(_valid_rivlib(tmp_path)),
+        },
+    )
+    assert res.status_code == 507
+    detail = res.json()["detail"]
+    assert "disk space" in detail.lower()
+    # Both numbers, so the user can see how far short they are.
+    assert "GB is needed" in detail and "GB is free" in detail
+    assert reached == [], "must refuse before decoding anything"
 
 
 def test_per_request_path_overrides_environment(client, monkeypatch, tmp_path):

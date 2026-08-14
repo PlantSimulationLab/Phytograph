@@ -42,11 +42,26 @@ FROM --platform=linux/amd64 python:3.11-slim-bullseye
 
 # numpy: point batches come back from RiVLib as C arrays and are bulk-copied
 # into numpy rather than looped over in Python.
-# laspy: writes the extracted LAS. lazrs is deliberately NOT installed — the
-# container writes uncompressed .las to a bind mount that the host reads
-# immediately, so compression would only add CPU under emulation for a file
-# that is about to be deleted.
+# laspy: still used by the standalone `extract` command (riegl-probe.mjs --out);
+# the app's own path streams raw arrays instead.
 RUN pip install --no-cache-dir numpy==2.2.1 laspy==2.5.4
+
+# g++ compiles rxp_shim.cpp, which reads the NO-RETURN shots that the plain C
+# scanifc API cannot see (see the shim's header comment). It cannot be compiled
+# at image-build time because it links against libscanifc.so, and that library
+# is bind-mounted at RUN time — its licence forbids us baking it in. So the
+# toolchain ships and the shim is built on first use, into /tmp inside the
+# container. It is ~90 KB of source and compiles in about a second.
+#
+# ABI NOTE: libscanifc.so is built with gcc 9.5.0 (__cxx11); this base image
+# ships gcc 10. That pairing is verified working on real data — the C++ path
+# reproduces the C API's echo and pulse counts exactly. If the base image ever
+# moves to a much newer gcc, re-verify rather than assume.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY rxp_shim.cpp /opt/riegl/rxp_shim.cpp
 
 # RiVLib's shared objects live here at run time via -v <host>:/rivlib:ro.
 # Declaring the mountpoint and the loader path up front means the run command

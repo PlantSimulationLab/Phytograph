@@ -864,10 +864,15 @@ class RieglProjectExtractRequest(BaseModel):
     # Threaded through to each position's session so the user's far-field
     # miss-detection setting applies here as it does to every other import.
     miss_distance_threshold: Optional[float] = None
+    # Scalar columns the import wizard kept. None = keep everything the scanner
+    # recorded. `is_miss` is always retained regardless: it is a system flag
+    # driving the Hit/Miss scheme and the hits-only octree, not a user column.
+    keep_columns: Optional[List[str]] = None
 
 
 def _riegl_arrays_to_las_result(
     arrays: dict, origin: "Optional[List[float]]" = None,
+    keep_columns: "Optional[List[str]]" = None,
 ) -> "LasReadResult":
     """Adapt streamed RIEGL arrays to the shape the session builder consumes.
 
@@ -901,18 +906,31 @@ def _riegl_arrays_to_las_result(
     norm = (reflectance - refl_lo) / (refl_hi - refl_lo)
     intensity = (np.clip(norm, 0.0, 1.0) * 65535).astype(np.uint16)
 
-    # .rxp records only returns; no-return shots are absent rather than flagged,
-    # so there is nothing to mark as a miss (Phase 7 recovers these).
+    # `is_miss` now arrives from the reader: an .rxp stores only returns, so the
+    # no-return shots are recovered separately through the C++ shim and streamed
+    # alongside the hits, already placed on the far-field shell.
+    # Only the columns this scanner actually produced — see the manifest note in
+    # _load_riegl_scan_arrays.
+    # Only the columns this scanner produced, further narrowed to the wizard's
+    # selection. `is_miss` is never dropped — the Hit/Miss colour scheme, the
+    # hits-only octree and LAD all key off it.
+    keep = set(keep_columns) if keep_columns is not None else None
     extras: Dict[str, np.ndarray] = {
-        "is_miss": np.zeros(n, dtype=np.float32),
-    }
-    for slug in _RIEGL_STREAM_ATTRS:
-        extras[slug] = arrays[slug]
-
-    extra_dims_meta = [{"slug": "is_miss", "label": "Miss"}] + [
-        {"slug": slug, "label": slug.replace("_", " ").title()}
+        slug: arrays[slug]
         for slug in _RIEGL_STREAM_ATTRS
+        if slug in arrays and (keep is None or slug in keep or slug == "is_miss")
+    }
+
+    extra_dims_meta = [
+        {"slug": slug,
+         "label": _RIEGL_LABELS.get(slug, slug.replace("_", " ").title())}
+        for slug in _RIEGL_STREAM_ATTRS if slug in extras
     ]
+    # NOTE: `timestamp` is deliberately NOT added to extra_dims_meta. That list
+    # and `extras` must stay in lockstep — _session_to_las indexes extras by
+    # every declared slug — and the float64 timestamps live in their own field,
+    # out of the float32 extras, on purpose. The renderer therefore sees the
+    # column under PotreeConverter's own name, "gps-time".
 
     return LasReadResult(
         positions=xyz,
@@ -920,7 +938,16 @@ def _riegl_arrays_to_las_result(
         intensity=intensity,
         extras=extras,
         extra_dims_meta=extra_dims_meta,
-        timestamps=None,
+        # Kept as float64 out of `extras`: this is the LAD trajectory-join key,
+        # and it is also what Backfill Misses needs to reconstruct misses — so
+        # forwarding it gives an independent cross-check on the shim's recovery.
+        # Honours the wizard's selection like any other column, but is checked
+        # separately because it never rides in the float32 extras.
+        timestamps=(
+            arrays.get("timestamp")
+            if keep is None or "timestamp" in keep
+            else None
+        ),
         gps_time_encoding=None,
         beam_origins=None,
     )
@@ -1026,6 +1053,29 @@ def riegl_project_extract(
     out_dir = _riegl_extract_dir() / uuid.uuid4().hex[:12]
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Fail EARLY on a full disk. The transport writes one position's raw arrays
+    # (~1.6 GB for a 21 M-point VZ-1000 sweep); the container then waits for the
+    # host to load and delete them before writing the next, so that is the peak.
+    # Running out mid-write surfaces as an OSError from numpy deep in the
+    # reader traceback — accurate but unreadable, and it wastes however many
+    # minutes of decoding came first.
+    try:
+        free = shutil.disk_usage(out_dir).free
+        need = _RIEGL_TRANSPORT_BYTES_PER_POSITION
+        if free < need:
+            raise HTTPException(
+                status_code=507,
+                detail=(
+                    f"Not enough free disk space to import: about "
+                    f"{need / 1e9:.1f} GB is needed for the import's temporary "
+                    f"files but only {free / 1e9:.1f} GB is free. The files are "
+                    "deleted as each scan position is loaded, so this is peak "
+                    "usage, not the final size."
+                ),
+            )
+    except OSError:
+        pass  # can't stat the volume: let the write fail naturally
+
     args = ["stream", "/project", "--out", "/out"]
     if request.scans:
         args += ["--scans"] + list(request.scans)
@@ -1036,6 +1086,16 @@ def riegl_project_extract(
     run_id, cancel_event = _new_cancel_token()
 
     def build_frame(progress):
+        # Reclaim the transport directory on EVERY exit path. Cleanup used to
+        # sit at the end of the success path only, so a failed or cancelled
+        # import stranded ~1.6 GB per decoded position on disk — which then made
+        # the NEXT import more likely to fail for lack of space.
+        try:
+            return _build_riegl_frame(progress)
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+    def _build_riegl_frame(progress):
         # The reader's first pass reads a bounded prefix of EVERY selected
         # position (that is how the GNSS housekeeping records are flushed) before
         # a single point streams. Reported as its own phase because folding it
@@ -1069,9 +1129,12 @@ def riegl_project_extract(
             _cancel_checkpoint(progress)
             npts = arrays["positions"].shape[0]
             denom = max(1, total or (index + 1))
+            # The message carries "N/M" because the renderer drives its counter
+            # from these markers — it has no other view of how far the backend
+            # has got, since every position is decoded and built in here.
             progress(
                 min(0.99, (index + 0.5) / denom),
-                f"Building {name} ({npts:,} points)…",
+                f"[{index + 1}/{denom}] Building {name} ({npts:,} points)…",
             )
             # NO INTERMEDIATE LAS. The arrays are already in RAM and
             # CloudSession's source of truth IS arrays, so writing them out just
@@ -1087,6 +1150,7 @@ def riegl_project_extract(
                     cancel_event=cancel_event,
                     preloaded=_riegl_arrays_to_las_result(
                         arrays, origin=info.get("origin_prior"),
+                        keep_columns=request.keep_columns,
                     ),
                 )
             except ScanCancelled:
@@ -1094,6 +1158,10 @@ def riegl_project_extract(
             except HTTPException as exc:
                 info["error"] = str(exc.detail)
             built.append(info)
+            progress(
+                min(0.99, (index + 1) / denom),
+                f"[{min(index + 1, denom)}/{denom}] Finished {name}",
+            )
             return None
 
         header, _per_scan, trailer = _stream_riegl_container(
@@ -1113,10 +1181,6 @@ def riegl_project_extract(
                 if k != "name"
             })
             scans_out.append(merged)
-
-        # The per-scan directories are removed as each is loaded; drop the
-        # run's own directory so a cancelled or failed run leaves nothing.
-        shutil.rmtree(out_dir, ignore_errors=True)
 
         payload = dict(header)
         payload["scans"] = scans_out
@@ -1415,14 +1479,40 @@ def _tail_json_lines(log_path: str) -> List[dict]:
     return out
 
 
+# Peak transport bytes on disk, which is ONE scan position: the container
+# blocks until the host has loaded and deleted each position before writing the
+# next (see _wait_for_consumption in the reader). A 21 M-point VZ-1000 sweep
+# writes float64 xyz + ~11 float32 scalars + a float64 timestamp ~= 1.6 GB;
+# rounded up so the pre-flight check is conservative rather than optimistic.
+_RIEGL_TRANSPORT_BYTES_PER_POSITION = 2_000_000_000
+
 _RIEGL_STREAM_MAGIC = b"PHRX"
 _RIEGL_STREAM_VERSION = 2
 
 # Column order and dtypes, matching rxp_reader._ARRAY_SPEC exactly. A mismatch
 # here would silently transpose or misread attributes rather than error.
+# The float32 scalar columns, in wire order. `timestamp` is deliberately NOT
+# here: it is float64 and rides in LasReadResult.timestamps, out of the float32
+# extras, because it is the moving-platform LAD join key (see CloudSession).
 _RIEGL_STREAM_ATTRS = (
     "reflectance", "amplitude", "deviation", "target_index", "target_count",
+    "is_miss", "background_radiation", "echo_type", "waveform_available",
+    "pseudo_echo", "sw_calculated", "pps_locked", "facet",
 )
+
+# Human labels for the scalar picker and the import wizard. `is_miss` keeps the
+# canonical "Miss" label every other importer uses, so the Hit/Miss colour
+# scheme applies to a RIEGL scan exactly as it does to an E57 one.
+_RIEGL_LABELS = {
+    "is_miss": "Miss",
+    "background_radiation": "Background Radiation",
+    "echo_type": "Echo Type",
+    "waveform_available": "Waveform Available",
+    "pseudo_echo": "Pseudo Echo",
+    "sw_calculated": "SW Calculated Target",
+    "pps_locked": "PPS Locked",
+    "facet": "Mirror Facet",
+}
 _RIEGL_ARRAY_SPEC = (
     ("positions.f64", "<f8", 3),
     ("reflectance.f32", "<f4", 1),
@@ -1430,6 +1520,15 @@ _RIEGL_ARRAY_SPEC = (
     ("deviation.f32", "<f4", 1),
     ("target_index.f32", "<f4", 1),
     ("target_count.f32", "<f4", 1),
+    ("is_miss.f32", "<f4", 1),
+    ("background_radiation.f32", "<f4", 1),
+    ("echo_type.f32", "<f4", 1),
+    ("waveform_available.f32", "<f4", 1),
+    ("pseudo_echo.f32", "<f4", 1),
+    ("sw_calculated.f32", "<f4", 1),
+    ("pps_locked.f32", "<f4", 1),
+    ("facet.f32", "<f4", 1),
+    ("timestamp.f64", "<f8", 1),
 )
 
 
@@ -1492,9 +1591,18 @@ def _load_riegl_scan_arrays(scan_dir: Path) -> "Optional[dict]":
     except (OSError, ValueError, KeyError):
         return None
 
+    # The reader names the columns it wrote: the set varies by scanner, so a
+    # fixed spec here would demand files that were never produced.
+    try:
+        wanted = set(json.loads(marker.read_text()).get("columns") or [])
+    except (OSError, ValueError):
+        wanted = set()
+
     arrays: Dict[str, np.ndarray] = {}
     try:
         for name, dtype, cols in _RIEGL_ARRAY_SPEC:
+            if wanted and name not in wanted:
+                continue
             path = scan_dir / name
             data = np.fromfile(str(path), dtype=dtype)
             expected = n * cols
