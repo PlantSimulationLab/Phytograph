@@ -238,7 +238,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.66.0"
+BACKEND_VERSION = "0.67.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -9252,9 +9252,19 @@ def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
                     if sess.timestamps is not None
                     and sess.timestamps.shape[0] == sess.positions.shape[0]
                     else None)
+            # Same story as `timestamp`: intensity has its own session field and is
+            # kept OUT of `extras` by `_LAS_STD_DIMS_SKIP`, so without this the
+            # `intensity` entry of `_SCAN_EXPORT_SCALAR_COLUMNS` never resolved for
+            # a session-backed cloud and the XML bundle exported without it.
+            inten64 = (np.asarray(sess.intensity, dtype=np.float64)[keep]
+                       if getattr(sess, 'intensity', None) is not None
+                       and sess.intensity.shape[0] == sess.positions.shape[0]
+                       else None)
         def _get(slug):
             if slug == 'timestamp' and ts64 is not None:
                 return ts64
+            if slug == 'intensity' and inten64 is not None:
+                return inten64
             return np.asarray(extras[slug]) if slug in extras else None
     elif scan_entry.points:
         xyz = np.ascontiguousarray(
@@ -9357,13 +9367,32 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool):
 
     colors = None
     intensity = None
+    world_shift = None
     if sess is not None:
         with _cloud_session_lock:
             keep = ~sess.deleted
             xyz = np.ascontiguousarray(sess.positions[keep], dtype=np.float64)
             extras = {k: np.asarray(v[keep]) for k, v in sess.extras.items()}
+            if getattr(sess, 'world_shift', None) is not None:
+                world_shift = np.asarray(sess.world_shift, np.float64).copy()
             if getattr(sess, 'colors', None) is not None:
-                colors = np.ascontiguousarray(sess.colors[keep], dtype=np.float64)
+                # `sess.colors` is uint16 in the LAS 0-65535 scale, but this
+                # function's contract — and every writer below — is 0-1, matching
+                # what the file_path branch's `_load_las_arrays` returns. Without
+                # the divide, `np.clip(colors, 0, 1)` sent every coloured point
+                # out as pure white.
+                colors = np.ascontiguousarray(
+                    sess.colors[keep], dtype=np.float64) / 65535.0
+            # Intensity lives in its OWN session field, not in `extras`:
+            # `_read_las_into_arrays` routes it to `CloudSession.intensity` and
+            # `_LAS_STD_DIMS_SKIP` deliberately keeps it out of extras. So the
+            # `_get('intensity')` fallback below never finds it for a
+            # session-backed cloud, and every scan data-only export of an
+            # imported cloud silently shipped with no intensity at all. Kept in
+            # the raw 0-65535 scale to match the file_path branch.
+            if (getattr(sess, 'intensity', None) is not None
+                    and sess.intensity.shape[0] == sess.positions.shape[0]):
+                intensity = np.asarray(sess.intensity, dtype=np.float64)[keep]
             # Prefer the float64 timestamps field (see _resolve_scan_export_arrays).
             ts64 = (np.asarray(sess.timestamps, dtype=np.float64)[keep]
                     if sess.timestamps is not None
@@ -23148,6 +23177,15 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
                 record.red, record.green, record.blue = c[:, 0], c[:, 1], c[:, 2]
             if sess.intensity is not None:
                 record.intensity = sess.intensity[block]
+            # Point format 3 HAS a gps_time field, but nothing wrote it, so it
+            # stayed identically zero — PotreeConverter then reported an
+            # all-zero range for `gps-time` and the renderer's degenerate-range
+            # filter (correctly) dropped it from the export picker and the
+            # colour-by list. Timestamps live outside `extras` (they are float64,
+            # the extras are float32), so the extra-dims loop above never
+            # covered them; they need their own assignment.
+            if sess.timestamps is not None:
+                record.gps_time = sess.timestamps[block]
             for ed in sess.extra_dims_meta:
                 record[ed["slug"]] = sess.extras[ed["slug"]][block]
             writer.write_points(record)

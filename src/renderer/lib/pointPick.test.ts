@@ -130,7 +130,8 @@ describe('buildAttributeRows', () => {
       'scan angle rank': 0,
       'user data': 0,
       'point source id': 0,
-      'gps-time': 0,
+      // No 'gps-time': it reaches the renderer as `timestamp` (a real scalar),
+      // never under the raw LAS dimension name.
       Deviation: 2,
     });
     expect(rows.map((r) => r.slug)).toEqual(['Deviation']);

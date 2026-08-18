@@ -1,6 +1,7 @@
 // Column model for point-cloud / scan export. The export modal lets the user pick
-// which fields become columns — for every format except OBJ, which carries
-// geometry only (see COLUMN_PICKER_FORMATS). The text formats and PLY also honor
+// which fields become columns — for every format except the fixed-schema ones
+// (OBJ carries geometry only; E57 and PTX define their own layout — PTX's is a
+// complete raster, so its columns aren't a menu at all). See COLUMN_PICKER_FORMATS. The text formats and PLY also honor
 // the column ORDER; LAS/LAZ store dimensions by name, so order doesn't apply
 // (usesFixedColumnOrder) and a couple of standard dimensions can't be dropped at
 // all (LAS_LOCKED_KINDS).
@@ -138,7 +139,11 @@ function _isDegenerateRange(range?: { min: number[]; max: number[] }): boolean {
 const _OCTREE_NON_SCALAR = new Set([
   'position', 'normal', 'indices', 'spacing',
   'return number', 'number of returns',
-  'scan angle rank', 'user data', 'point source id', 'gps-time',
+  'scan angle rank', 'user data', 'point source id',
+  // NOT 'gps-time': the octree view renames it to `timestamp` (see
+  // buildPointCloudFromOctree), and that IS an exportable column — the backend
+  // exporter's allowlist has always included it. Blocking it here is why a
+  // RIEGL scan's timestamp was missing from the export picker.
 ]);
 
 const _OCTREE_COLOR_NAMES = new Set(['rgb', 'rgba', 'color']);

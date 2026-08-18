@@ -107,3 +107,51 @@ def test_miss_positions_to_las_chunks_round_trip(tmp_path, monkeypatch, n, chunk
     assert xyz.shape[0] == n
     if n:
         assert np.allclose(xyz, positions, atol=6e-4)
+
+
+@pytest.mark.parametrize("n,chunk", [(2500, 1000), (1, 1000), (3000, 1)])
+def test_session_to_las_writes_gps_time(tmp_path, monkeypatch, n, chunk):
+    """Timestamps must land in the LAS `gps_time` field.
+
+    Point format 3 has a gps_time field, but the writer only ever assigned
+    positions, colors, intensity and the float32 extra dims. Timestamps live
+    OUTSIDE `extras` (they are float64; the extras are float32), so the
+    extra-dims loop never covered them and gps_time stayed identically zero.
+
+    That is not a silent cosmetic loss: PotreeConverter then reports an all-zero
+    range for `gps-time`, and the renderer's degenerate-range filter drops such a
+    column from the export picker and the colour-by list on purpose (it is how a
+    bare XYZ import avoids advertising a fake all-zero `classification`). So a
+    RIEGL scan's real timestamps were carried all the way to the LAS and then
+    discarded downstream as if they had never existed — and `timestamp` is also
+    what gates Backfill Misses and the LAD trajectory join.
+
+    Chunked on purpose: the assignment sits inside the per-block loop, so a
+    seam-indexing slip would misalign timestamps against positions.
+    """
+    monkeypatch.setattr(main, "_LAS_WRITE_CHUNK", chunk)
+    sess = _make_session(n)
+    # Monotonic, far from zero, and float64-precise: a float32 round-trip would
+    # lose the sub-microsecond resolution GPS time actually carries.
+    sess.timestamps = np.linspace(1.0e9, 1.0e9 + 5.0, n).astype(np.float64)
+
+    out = tmp_path / "ts.las"
+    written = main._session_to_las(sess, out)
+    las, _ = _read_las(out)
+    gps = np.asarray(las.gps_time)
+
+    assert written == n
+    assert gps.shape[0] == n
+    # The actual regression: an all-zero range is what got the column dropped.
+    assert not (gps.min() == 0 and gps.max() == 0), "gps_time written as all-zero"
+    np.testing.assert_allclose(gps, sess.timestamps, rtol=0, atol=1e-6)
+
+
+def test_session_to_las_without_timestamps_is_unharmed(tmp_path):
+    """A session with no timestamps must still write. Most clouds have none, and
+    the new assignment is guarded — this pins that guard so the common path
+    can't regress into an AttributeError on `None[block]`."""
+    sess = _make_session(64)
+    assert sess.timestamps is None
+    out = tmp_path / "none.las"
+    assert main._session_to_las(sess, out) == 64

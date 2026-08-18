@@ -721,13 +721,25 @@ export function fuzzyMatch(query: string, text: string): number {
 //
 // NOTE: 'classification' is intentionally NOT filtered — it's a real LAS dim a
 // user may have segmented (ground/wood/leaf), so it stays selectable.
+// PotreeConverter emits the per-point time column under its LAS dimension name.
+// Phytograph's canonical slug for the same data is `timestamp` — what the export
+// allowlist, missColumnsAvailable and the multi-return columns all look for —
+// so the octree view is normalised onto that at build time (see
+// buildPointCloudFromOctree). These two names must stay together.
+export const OCTREE_GPS_TIME_ATTRIBUTE = 'gps-time';
+export const TIMESTAMP_SLUG = 'timestamp';
+
 export const OCTREE_BUILTIN_ATTRIBUTES = new Set([
   'position', 'rgb', 'rgba', 'color', 'intensity',
   'normal', 'indices', 'spacing',
   // LAS sensor/schema dimensions PotreeConverter always emits (degenerate for
   // non-LAS sources); never user-meaningful as a colour-by field.
   'return number', 'number of returns',
-  'scan angle rank', 'user data', 'point source id', 'gps-time',
+  'scan angle rank', 'user data', 'point source id',
+  // NOT 'gps-time': it is renamed to `timestamp` when the octree view is built,
+  // and a timestamp is a genuine scalar — colourable, exportable, and the key
+  // LAD joins a trajectory on. A cloud that never had one reports an all-zero
+  // range, which the degenerate-range check already suppresses.
 ]);
 
 // Derive the selectable scalar-field options for an octree-backed cloud from

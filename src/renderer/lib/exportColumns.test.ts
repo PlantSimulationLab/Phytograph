@@ -165,7 +165,10 @@ describe('defaultExportColumns', () => {
           octreeAttributes: [
             'position', 'rgb', 'normal', 'indices', 'spacing',
             'return number', 'number of returns', 'scan angle rank',
-            'user data', 'point source id', 'gps-time',
+            'user data', 'point source id',
+            // 'gps-time' is absent by construction: buildPointCloudFromOctree
+            // renames it to `timestamp` before these names are built, and a
+            // timestamp IS exportable (see timestampSlug.test.ts).
             'reflectance',
           ],
         },

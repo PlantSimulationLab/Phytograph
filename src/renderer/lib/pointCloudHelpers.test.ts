@@ -612,7 +612,10 @@ describe('octreeScalarFieldOptions', () => {
       'scan angle rank': { min: [0], max: [0] },
       'user data': { min: [0], max: [0] },
       'point source id': { min: [0], max: [0] },
-      'gps-time': { min: [0], max: [0] },
+      // NOTE: no 'gps-time' here. buildPointCloudFromOctree renames that to
+      // `timestamp` before these ranges are built (a degenerate one is dropped
+      // when a real `timestamp` already exists), so by the time the picker sees
+      // them the LAS name no longer appears. See timestampSlug.test.ts.
       rgb: { min: [0], max: [255] },
       timestamp: { min: [100], max: [247] },
       Deviation: { min: [0], max: [3] },

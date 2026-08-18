@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import type { PointCloudData, ScalarField } from './pointCloudTypes';
 import type { ClassPalette } from './classPalettes';
+import { OCTREE_GPS_TIME_ATTRIBUTE, TIMESTAMP_SLUG } from './pointCloudHelpers';
 import {
   importPointCloudByPath,
   importPointCloudLasLaz,
   createCloudSession,
+  createCloudSessions,
   type OctreeMetadata,
   type ColumnPlan,
   type ScanParamsFromFile,
@@ -871,11 +873,30 @@ export function buildPointCloudFromOctree(
   const attributeRanges: Record<string, { min: number[]; max: number[] }> = {};
   const attributeLabels: Record<string, string> = {};
   for (const a of meta.attributes ?? []) {
+    // PotreeConverter names the per-point time column by its LAS dimension,
+    // `gps-time`, but EVERY Phytograph consumer keys off the slug `timestamp`:
+    // the export allowlist (_SCAN_EXPORT_SCALAR_COLUMNS), missColumnsAvailable
+    // (which gates Backfill Misses), and _MULTI_RETURN_SLUGS. Left unmapped the
+    // column is carried but invisible to all of them — it showed up in the
+    // colour-by picker under the wrong name and was absent from the export
+    // picker entirely. Normalise here, at the one seam where the octree's
+    // attribute view is built, rather than teaching each consumer both names.
+    let name = a.name;
+    if (name === OCTREE_GPS_TIME_ATTRIBUTE) {
+      // A cloud can carry BOTH: an ASCII import with an explicit `timestamp`
+      // column still gets PotreeConverter's degenerate all-zero `gps-time`
+      // alongside it. Renaming unconditionally would then either clobber the
+      // real column with zeros or offer it twice, so defer to an existing
+      // `timestamp` and drop this one — the degenerate-range check would have
+      // suppressed it anyway.
+      if (meta.attributes?.some((o) => o.name === TIMESTAMP_SLUG)) continue;
+      name = TIMESTAMP_SLUG;
+    }
     if (Array.isArray(a.min) && Array.isArray(a.max)) {
-      attributeRanges[a.name] = { min: a.min, max: a.max };
+      attributeRanges[name] = { min: a.min, max: a.max };
     }
     if (a.label) {
-      attributeLabels[a.name] = a.label;
+      attributeLabels[name] = a.label;
     }
   }
 
