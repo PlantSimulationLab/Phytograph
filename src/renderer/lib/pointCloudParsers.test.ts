@@ -1017,7 +1017,46 @@ describe('parsePointCloudFromPath', () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toContain('/api/cloud/session/create');
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null });
+    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null, drop_slugs: null });
+  });
+
+  it('forwards the wizard column plan, carrying a skipped column as role "skip"', async () => {
+    // The wizard's Import checkbox becomes role 'skip' on the ASCII path. It has
+    // to survive serialisation, or the untick is silently ignored and the field
+    // still lands in the octree.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
+    await parsePointCloudFromPath('/p/a.xyz', null, {
+      columns: [
+        { index: 0, role: 'x' }, { index: 1, role: 'y' }, { index: 2, role: 'z' },
+        { index: 3, role: 'skip' },
+      ],
+      rgbIs255: true,
+    });
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.column_plan.columns[3]).toMatchObject({ index: 3, role: 'skip' });
+    expect(body.column_plan.rgb_is_255).toBe(true);
+  });
+
+  it('forwards droppedSlugs as drop_slugs for in-file formats', async () => {
+    // LAS/PLY/E57 fix their own layout, so an unticked column can't ride the
+    // positional plan — it travels as a slug list instead.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
+    await parsePointCloudFromPath('/p/cloud.las', null, null, undefined, null, undefined,
+      null, null, undefined, ['Deviation', 'amplitude']);
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.drop_slugs).toEqual(['Deviation', 'amplitude']);
+    // No plan is invented for an in-file format.
+    expect(body.column_plan).toBeNull();
+  });
+
+  it('sends drop_slugs as null when nothing was unticked', async () => {
+    // An empty list must not reach the wire as [] — the backend treats null as
+    // "drop nothing", and an empty array would be a needless difference.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
+    await parsePointCloudFromPath('/p/cloud.las', null, null, undefined, null, undefined,
+      null, null, undefined, []);
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.drop_slugs).toBeNull();
   });
 
   it('forwards ascii_format to create_cloud_session when provided', async () => {

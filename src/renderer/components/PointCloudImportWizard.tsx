@@ -40,6 +40,15 @@ export interface WizardResult {
   // for LAD, but the user wants a continuous gradient, not the Hit/Miss scheme).
   // App registers these as continuous overrides after import.
   continuousSlugs: string[];
+  // Slugs the user unticked on an IN-FILE format (LAS/LAZ/PLY/PCD/E57/PTX),
+  // where the column layout is fixed by the file so a positional ColumnPlan has
+  // nothing to bind to (and `columnPlan` is null anyway). The backend drops
+  // these from the session's extras by name. ASCII skips do NOT appear here —
+  // they ride the plan as role 'skip'.
+  droppedSlugs: string[];
+  // The complement of `droppedSlugs` — the in-file slugs still ticked. Only the
+  // RIEGL extract path uses it, because that endpoint takes a keep list.
+  keptSlugs: string[];
   // CloudCompare-style global shift [x, y, z] to SUBTRACT from every point at
   // import, or null to keep the original coordinates. Auto-suggested from the
   // preview for large (e.g. UTM) clouds; the user can edit or disable it.
@@ -128,6 +137,52 @@ const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
 // the categorical variant of 'extra'.
 const SCALAR_ROLES = new Set(['extra', 'label']);
 
+// Geometry roles: a cloud is meaningless without them, and `hasXYZ` already
+// blocks Import until all three are assigned, so offering an Import checkbox
+// would only create a dead-end error state. These header cells show no
+// checkbox at all.
+const GEOMETRY_ROLES = new Set(['x', 'y', 'z']);
+
+// Roles that name a session channel directly rather than a free-form scalar.
+// Their role token IS the drop name, because the preview gives a fixed in-file
+// column no `suggested_slug` to fall back on.
+const NAMED_CHANNEL_ROLES = new Set([
+  'intensity', 'reflectance', 'r', 'g', 'b',
+]);
+
+// Slugs that downstream tools look up BY NAME. Dropping one doesn't error — it
+// silently removes a capability — so unticking any of these surfaces an inline
+// warning naming what stops working. The user is still allowed to drop them:
+// these fields are often dead weight (an all-zero is_miss on a hits-only
+// export) and forcing them into every import would be its own bug.
+const PROTECTED_SLUGS: Record<string, string> = {
+  is_miss: 'sky/miss handling — leaf-area density and the Hit/Miss colour scheme',
+  row_index: 'structured-scan gap filling and miss recovery',
+  column_index: 'structured-scan gap filling and miss recovery',
+  timestamp: 'the trajectory join for moving-platform leaf-area density',
+  target_index: 'multi-return grouping (gap filling, leaf-area density)',
+  target_count: 'multi-return grouping (gap filling, leaf-area density)',
+};
+
+// The canonical slug a column would land under, for PROTECTED_SLUGS lookup. A
+// role token (is_miss / row_index / timestamp / …) IS the canonical slug the
+// backend pins, so it wins; otherwise fall back to the column's own slug, which
+// is what an in-file format's fixed field is named.
+//
+// `prevRole` is consulted first for an unticked column: unticking an ASCII
+// column moves its role to 'skip', which would otherwise erase the very
+// identity the protected-field warning needs to report.
+function canonicalSlugOf(col: ColumnConfig): string {
+  const role = (!col.imported && col.prevRole) ? col.prevRole : col.role;
+  if (role in PROTECTED_SLUGS) return role;
+  // intensity / reflectance / r / g / b are named session channels rather than
+  // free-form scalars, so the role token is the name the backend drops by. A
+  // fixed in-file column has no meaningful `slug` (the preview leaves it empty
+  // for non-scalars), so falling through to it would send an empty string.
+  if (NAMED_CHANNEL_ROLES.has(role)) return role;
+  return (col.slug || '').toLowerCase();
+}
+
 // Formats whose import path takes no global shift, so offering the control
 // would be a lie: the user could tick it, type an offset, and nothing would
 // happen.
@@ -175,6 +230,18 @@ interface ColumnConfig {
   label: string;           // rename target
   typeHint: string;
   remappable: boolean;
+  // Untick the header's "Import" checkbox to drop the column. The two format
+  // families need different machinery, so this flag drives both:
+  //   - remappable (ASCII): unticking also sets role 'skip', which the backend
+  //     already honours positionally (a unique `skip:N` placeholder that the
+  //     pandas `usecols` filter drops). `prevRole` restores the role on re-tick.
+  //   - in-file (LAS/PLY/E57/PTX): roles are fixed by the file, so the column
+  //     travels in `droppedSlugs` instead and the backend filters it out of the
+  //     session's extras by name.
+  imported: boolean;
+  // Role held before the user unticked Import, so re-ticking round-trips back
+  // to it instead of stranding the column on 'skip'.
+  prevRole: string | null;
 }
 
 interface ScanConfig {
@@ -226,6 +293,12 @@ function configFromColumn(c: PreviewColumn): ColumnConfig {
   return {
     index: c.index,
     headerName: c.header_name,
+    // A column the backend reported as 'skip' and that was NOT promoted to a
+    // carried scalar above has nothing to import, so it starts unticked. Every
+    // other column starts ticked, keeping a no-edit import byte-identical to
+    // the old auto-detect behaviour.
+    imported: role !== 'skip',
+    prevRole: null,
     // Default a carried scalar to 'extra' (continuous), never 'label', so a
     // no-edit import matches the old auto-detect colouring — a field that used
     // to render as a gradient shouldn't silently become discrete. The type hint
@@ -248,7 +321,11 @@ function dedupeExclusiveRoles(columns: ColumnConfig[]): ColumnConfig[] {
   const seen = new Set<string>();
   return columns.map((col) => {
     if (!EXCLUSIVE_ROLES.has(col.role)) return col;
-    if (seen.has(col.role)) return { ...col, role: 'skip' };
+    // A demoted duplicate carries nothing, so its Import checkbox must clear in
+    // lockstep — leaving it ticked would show "Import ✓ / Skip", which reads as
+    // a contradiction and would put the column in `droppedSlugs` on the in-file
+    // path while the plan says otherwise.
+    if (seen.has(col.role)) return { ...col, role: 'skip', imported: false };
     seen.add(col.role);
     return col;
   });
@@ -314,12 +391,52 @@ function buildColumnPlan(cfg: ScanConfig): ColumnPlan | null {
 }
 
 // Slugs mapped to the 'Label' role for a scan — registered for categorical
-// (discrete) colouring after import.
+// (discrete) colouring after import. Unticked columns are excluded: they never
+// reach the cloud, so registering a scheme for them would be dead state.
 function categoricalSlugs(cfg: ScanConfig): string[] {
   return cfg.columns
-    .filter((c) => c.role === 'label')
+    .filter((c) => c.imported && c.role === 'label')
     .map((c) => c.slug)
     .filter(Boolean);
+}
+
+// Slugs to drop on an IN-FILE format, where the file fixes the layout so the
+// positional ColumnPlan can't express the choice (buildColumnPlan returns null
+// for these scans entirely). ASCII skips are deliberately NOT included — they
+// travel as role 'skip' inside the plan, which the backend already honours.
+export function droppedSlugs(cfg: ScanConfig): string[] {
+  return cfg.columns
+    .filter((c) => !c.imported && !c.remappable)
+    .map((c) => canonicalSlugOf(c))
+    .filter(Boolean);
+}
+
+// The complement of `droppedSlugs` for an in-file scan: every scalar slug the
+// preview offered that is still ticked. The RIEGL extract endpoint takes a KEEP
+// list (`keep_columns`) rather than a drop list, and the wizard is the only
+// place that knows the full offered set — inverting in the caller would mean
+// re-deriving it from a preview the caller never sees.
+export function keptSlugs(cfg: ScanConfig): string[] {
+  return cfg.columns
+    .filter((c) => c.imported && !c.remappable)
+    .map((c) => canonicalSlugOf(c))
+    .filter(Boolean);
+}
+
+// Warnings for unticked columns whose slug drives a downstream tool. Returned
+// as "<field> — <what stops working>" strings for the inline notice.
+export function protectedDropWarnings(cfg: ScanConfig): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const col of cfg.columns) {
+    if (col.imported) continue;
+    const slug = canonicalSlugOf(col);
+    const consequence = PROTECTED_SLUGS[slug];
+    if (!consequence || seen.has(slug)) continue;
+    seen.add(slug);
+    out.push(`${col.headerName ?? slug} — ${consequence}`);
+  }
+  return out;
 }
 
 // Slugs the user set to 'Scalar' (role 'extra') whose name carries a registered
@@ -401,9 +518,45 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
       return {
         ...c,
         columns: c.columns.map((col) => {
-          if (col.index === colIndex) return { ...col, ...patch };
-          if (claims && col.role === patch.role) return { ...col, role: 'skip' };
+          if (col.index === colIndex) {
+            // Choosing 'Skip' in the dropdown and unticking Import are the same
+            // user intent, so keep the two controls consistent in both
+            // directions rather than letting them disagree.
+            const next = { ...col, ...patch };
+            if (patch.role !== undefined && patch.imported === undefined) {
+              next.imported = patch.role !== 'skip';
+            }
+            return next;
+          }
+          if (claims && col.role === patch.role) {
+            return { ...col, role: 'skip', imported: false };
+          }
           return col;
+        }),
+      };
+    }));
+  }, [stepIdx]);
+
+  // Toggle a column's Import checkbox. For a remappable (ASCII) column this
+  // also moves the role to/from 'skip' so the existing positional plan
+  // machinery carries the choice — no second mechanism on that path. The role
+  // held before the untick is stashed in `prevRole` so re-ticking restores it
+  // rather than stranding the column on 'skip'.
+  const setColumnImported = useCallback((colIndex: number, imported: boolean) => {
+    setConfigs((prev) => prev.map((c, i) => {
+      if (i !== stepIdx) return c;
+      return {
+        ...c,
+        columns: c.columns.map((col) => {
+          if (col.index !== colIndex) return col;
+          if (!col.remappable) return { ...col, imported };
+          if (!imported) {
+            return { ...col, imported: false, prevRole: col.role, role: 'skip' };
+          }
+          // Re-tick: restore the previous role, falling back to a carried
+          // scalar when there is nothing to restore (a column that arrived as
+          // 'skip' from auto-detect and is now being opted in).
+          return { ...col, imported: true, role: col.prevRole ?? 'extra', prevRole: null };
         }),
       };
     }));
@@ -481,6 +634,11 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
           role: src.columns[idx]?.role ?? col.role,
           slug: src.columns[idx]?.slug ?? col.slug,
           label: src.columns[idx]?.label ?? col.label,
+          // Carry the Import choice too — the whole point of apply-to-all is
+          // that the user shouldn't have to untick the same junk column on
+          // every file of a matching-layout batch.
+          imported: src.columns[idx]?.imported ?? col.imported,
+          prevRole: src.columns[idx]?.prevRole ?? col.prevRole,
         })),
       };
     }));
@@ -509,6 +667,8 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         columnPlan: buildColumnPlan(c),
         categoricalSlugs: categoricalSlugs(c),
         continuousSlugs: continuousSlugs(c),
+        droppedSlugs: droppedSlugs(c),
+        keptSlugs: keptSlugs(c),
         worldShift: effectiveShift(c),
         trajectory: c.trajectory,
       };
@@ -605,6 +765,23 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                             <div className="text-[10px] text-neutral-400 font-medium truncate mb-1 text-left" title={col.headerName ?? ''}>
                               {col.headerName ?? <span className="italic text-neutral-600">column {col.index + 1}</span>}
                             </div>
+                            {/* Import checkbox — the one uniform way to drop a
+                                column, in every format. Omitted for X/Y/Z:
+                                `hasXYZ` already blocks Import without all three,
+                                so an untick there could only produce a
+                                dead-end. */}
+                            {!GEOMETRY_ROLES.has(col.role) && (
+                              <label className="flex items-center gap-1.5 mb-1 cursor-pointer text-[10px] text-neutral-300 select-none">
+                                <input
+                                  type="checkbox"
+                                  data-testid="import-wizard-include"
+                                  checked={col.imported}
+                                  onChange={(e) => setColumnImported(col.index, e.target.checked)}
+                                  className="accent-blue-500"
+                                />
+                                Import
+                              </label>
+                            )}
                             {/* Role dropdown. 'Scalar' = continuous gradient,
                                 'Label' = categorical (discrete classes). For
                                 in-file formats (PLY/PCD/LAS/E57) the file fixes
@@ -617,8 +794,8 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                                 than falling back to the first list entry. */}
                             <select
                               data-testid="import-wizard-role"
-                              value={col.role}
-                              disabled={!col.remappable && !isScalar}
+                              value={col.imported ? col.role : 'skip'}
+                              disabled={(!col.remappable && !isScalar) || !col.imported}
                               onChange={(e) => updateColumn(col.index, { role: e.target.value })}
                               className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
@@ -626,7 +803,11 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                                 ? ROLE_OPTIONS
                                 : isScalar
                                   ? ROLE_OPTIONS.filter((o) => SCALAR_ROLES.has(o.value))
-                                  : ROLE_OPTIONS.filter((o) => o.value === col.role))
+                                  // A dropped in-file column keeps 'Skip' as its
+                                  // displayed value so the select doesn't fall
+                                  // back to the first list entry and show a role
+                                  // the column no longer has.
+                                  : ROLE_OPTIONS.filter((o) => o.value === col.role || (!col.imported && o.value === 'skip')))
                                 .map((o) => (
                                   <option key={o.value} value={o.value}>{o.label}</option>
                                 ))}
@@ -681,7 +862,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                             <td
                               key={col.index}
                               className={`border-r border-neutral-800 last:border-r-0 px-2 py-1 text-[11px] whitespace-nowrap ${
-                                col.role === 'skip' ? 'text-neutral-600' : ''
+                                col.role === 'skip' || !col.imported ? 'text-neutral-600' : ''
                               }`}
                             >
                               {row[col.index] ?? ''}
@@ -734,6 +915,25 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                 </div>
               )}
 
+              {/* Dropping a field that a tool looks up BY NAME doesn't error —
+                  the capability just quietly disappears — so name the field and
+                  what stops working. Not a block: an all-zero is_miss on a
+                  hits-only export is exactly the dead weight worth dropping. */}
+              {protectedDropWarnings(cfg).length > 0 && (
+                <div
+                  data-testid="import-wizard-drop-warning"
+                  className="flex items-start gap-2 text-[11px] text-amber-300"
+                >
+                  <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                  <div>
+                    <div>Skipping these disables the tools that read them:</div>
+                    <ul className="mt-0.5 list-disc list-inside text-amber-300/90">
+                      {protectedDropWarnings(cfg).map((w) => <li key={w}>{w}</li>)}
+                    </ul>
+                  </div>
+                </div>
+              )}
+
             </>
           )}
 
@@ -741,7 +941,8 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
           {cfg && !cfg.loading && !cfg.autoOnly && cfg.preview && cfg.columns.every((c) => !c.remappable) && cfg.columns.length > 0 && (
             <div className="text-[10px] text-neutral-500">
               This format defines its own column layout, so X/Y/Z and colour roles can't be
-              reassigned. You can still rename scalar fields and switch any scalar between
+              reassigned. You can still untick <span className="text-neutral-400">Import</span> to
+              leave a field out, rename scalar fields, and switch any scalar between
               <span className="text-neutral-400"> Scalar</span> (gradient) and
               <span className="text-neutral-400"> Label</span> (discrete classes).
             </div>

@@ -2628,6 +2628,9 @@ export async function importPointCloudByPath(
   asciiFormat?: string | null,
   columnPlan?: ColumnPlan | null,
   worldShift?: [number, number, number] | null,
+  // Scalar slugs to leave out (wizard Import checkboxes), for formats whose
+  // layout the file fixes. ASCII skips ride `columnPlan` as role 'skip'.
+  droppedSlugs?: string[] | null,
 ): Promise<ImportPointCloudByPathResult> {
   const baseUrl = getBackendUrl();
   // 10 minute timeout: a multi-GB scan takes tens of seconds to parse and
@@ -2643,6 +2646,7 @@ export async function importPointCloudByPath(
         ascii_format: asciiFormat ?? null,
         column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
         world_shift: worldShift ?? null,
+        drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
       }),
       signal: controller.signal,
     });
@@ -3665,6 +3669,10 @@ export async function createCloudSession(
   onProgress?: BinaryFrameProgress,
   // Receives the backend run id (first marker) — the /api/cancel/{id} target.
   onRunId?: (runId: string) => void,
+  // Scalar slugs the wizard's Import checkboxes excluded. Only meaningful for
+  // in-file formats (LAS/LAZ/PLY/PCD/E57/PTX) — an ASCII skip travels inside
+  // `columnPlan` as role 'skip' and never reaches here.
+  droppedSlugs?: string[] | null,
 ): Promise<CloudSessionMetadata> {
   try {
     // The endpoint streams PHP1 progress markers ahead of its JSON tail, so it
@@ -3681,6 +3689,7 @@ export async function createCloudSession(
         world_shift: worldShift ?? null,
         miss_distance_threshold: missDistanceThreshold ?? null,
         origin: origin ?? null,
+        drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
       },
       signal,
       600000,
@@ -3742,6 +3751,8 @@ export async function createCloudSessions(
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
   onRunId?: (runId: string) => void,
+  // See createCloudSession: in-file formats only; ASCII skips ride the plan.
+  droppedSlugs?: string[] | null,
 ): Promise<CloudScanPosition[]> {
   try {
     const res = await fetchJsonWithProgress<CloudScanPositions & { error?: string }>(
@@ -3753,6 +3764,7 @@ export async function createCloudSessions(
         world_shift: worldShift ?? null,
         miss_distance_threshold: missDistanceThreshold ?? null,
         origin: origin ?? null,
+        drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
       },
       signal,
       600000,

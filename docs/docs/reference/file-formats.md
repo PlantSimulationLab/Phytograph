@@ -50,7 +50,8 @@ column names are, so aliases like `col`, `red`, `easting`, or `reflectivity`
 resolve to their role too. Any other token is carried through as a named
 **scalar field** (color-mappable in the viewer) rather than discarded —
 on large octree-streamed clouds they travel into the octree as extra
-attributes. Field names come from the file's header row when present
+attributes. (That's the *default*: a column whose **Import** checkbox you
+untick in the import wizard is dropped instead, whatever its token.) Field names come from the file's header row when present
 (e.g. `Reflectance[dB]` → `Reflectance [dB]`); when the file has **no**
 header, the `<ASCII_format>` token itself names the field — so a headerless
 `.xyz` referenced by an XML whose legend reads

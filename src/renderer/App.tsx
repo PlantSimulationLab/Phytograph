@@ -368,14 +368,14 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // callers that don't offer a cancel (none, currently) still work.
     opts?: ImportProgressOptions,
   ): Promise<Scan> => {
-    const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, worldShift } = result;
+    const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, droppedSlugs, worldShift } = result;
     // Far-field miss-detection threshold is a user setting; thread it into the
     // import so the backend's distance fallback honours it (the primary
     // target_index==99 signal ignores it).
     const missDistanceThreshold = (await getSettings()).missDistanceThreshold;
     const data = await parsePointCloudFromPath(
       input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift, continuousSlugs,
-      missDistanceThreshold, null, opts,
+      missDistanceThreshold, null, opts, droppedSlugs,
     );
     for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
     for (const slug of continuousSlugs) registerContinuousSlug(slug);
@@ -1373,13 +1373,15 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       { path: picked, fileName: picked.split('/').pop() ?? 'RIEGL project' },
     ]);
     if (!wizard) return;
-    // NOTE: fixed-layout formats cannot currently express "skip" in the wizard
-    // (SCALAR_ROLES is {extra,label}), so this is normally undefined — meaning
-    // "keep everything". The plumbing is here for when skip becomes available.
-    const keepSlugs = wizard[0]?.columnPlan?.columns
-      ?.filter((col) => col.role !== 'skip')
-      .map((col) => col.slug)
-      .filter((slug): slug is string => !!slug);
+    // `.riproject` is a fixed-layout format, so the choice arrives as
+    // `droppedSlugs` (the wizard's Import checkboxes) rather than inside a
+    // positional column plan, which is always null here. The extract endpoint
+    // takes a KEEP list, so invert: everything the preview offered, minus the
+    // unticked slugs. Undefined when nothing was dropped, which the backend
+    // reads as "keep everything" (and it force-keeps `is_miss` regardless).
+    const keepSlugs = (wizard[0]?.droppedSlugs?.length ?? 0) > 0
+      ? (wizard[0]?.keptSlugs ?? [])
+      : undefined;
 
     importCancelledRef.current = false;
     const controller = new AbortController();

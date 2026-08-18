@@ -1016,6 +1016,9 @@ describe('importPointCloudByPath (renamed from importXyzByPath; now also serves 
       ascii_format: null,
       column_plan: null,
       world_shift: null,
+      // No column was unticked in the wizard, so nothing is dropped. Sent as
+      // null rather than [] — the backend reads null as "keep everything".
+      drop_slugs: null,
     });
   });
 

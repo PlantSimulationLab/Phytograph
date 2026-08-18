@@ -778,6 +778,11 @@ export async function parsePointCloudFromPath(
   // options object rather than three more positionals — the list is already
   // long. Only the octree path consumes them; the flat fallbacks are fast.
   opts?: ImportProgressOptions,
+  // Scalar fields to leave out, from the wizard's Import checkboxes. Only used
+  // by IN-FILE formats (LAS/LAZ/PLY/PCD/E57/PTX), whose fixed layout a
+  // positional `columnPlan` can't describe — an ASCII skip rides the plan as
+  // role 'skip' instead and never appears here.
+  droppedSlugs?: string[] | null,
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -792,7 +797,7 @@ export async function parsePointCloudFromPath(
     const meta = await createCloudSession(
       path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
       missDistanceThreshold ?? null, origin ?? null,
-      opts?.signal, opts?.onProgress, opts?.onRunId,
+      opts?.signal, opts?.onProgress, opts?.onRunId, droppedSlugs ?? null,
     );
     return buildPointCloudFromOctree(meta, path, name, {
       asciiFormat,
@@ -805,7 +810,8 @@ export async function parsePointCloudFromPath(
   }
 
   if (BACKEND_PATH_EXTENSIONS.has(ext)) {
-    const result = await importPointCloudByPath(path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null);
+    const result = await importPointCloudByPath(
+      path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null, droppedSlugs ?? null);
     return buildPointCloudFromBackend(result, name);
   }
 
@@ -850,6 +856,7 @@ export async function parsePointCloudsFromPath(
   missDistanceThreshold?: number | null,
   origin?: [number, number, number] | null,
   opts?: ImportProgressOptions,
+  droppedSlugs?: string[] | null,
 ): Promise<ImportedScanPosition[]> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -860,7 +867,7 @@ export async function parsePointCloudsFromPath(
     // verbatim rather than duplicating its fallbacks.
     const data = await parsePointCloudFromPath(
       path, asciiFormat, columnPlan, categoricalAttributes, worldShift,
-      continuousAttributes, missDistanceThreshold, origin, opts,
+      continuousAttributes, missDistanceThreshold, origin, opts, droppedSlugs,
     );
     return [{ data, name, scanIndex: 0 }];
   }
@@ -868,7 +875,7 @@ export async function parsePointCloudsFromPath(
   const positions = await createCloudSessions(
     path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
     missDistanceThreshold ?? null, origin ?? null,
-    opts?.signal, opts?.onProgress, opts?.onRunId,
+    opts?.signal, opts?.onProgress, opts?.onRunId, droppedSlugs ?? null,
   );
 
   const ok = positions.filter(p => p.session && !p.error);

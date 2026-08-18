@@ -89,6 +89,25 @@ dropdowns in; you correct anything that's wrong before importing:
   **Label**, and **Skip** is a *singleton* — a cloud has exactly one of each —
   so assigning one to a column removes it from whichever column previously held
   it (that column drops to **Skip**).
+- **Import (skip a column)** — every column except X / Y / Z carries an
+  **Import** checkbox above its role dropdown. Untick it to leave that field
+  out: its preview values grey out, and the column is never read. A skipped
+  field is not stored in the cloud, doesn't appear in the Display panel's
+  *Color by* list, and can't be exported — so unticking the columns you don't
+  need keeps a cloud smaller and its field list shorter. X, Y, and Z have no
+  checkbox because a cloud can't be imported without them.
+
+    Unlike the role dropdown, the checkbox works for **every** format. For
+    ASCII files it is the same thing as choosing the **Skip** role (the two
+    controls stay in sync). For formats that define their own layout
+    (`.las`, `.laz`, `.ply`, `.pcd`, `.e57`, `.ptx`, `.riproject`) the roles
+    can't be reassigned, but you can still drop individual fields this way.
+
+    Unticking a field that other tools read — **Miss Flag**, the scan grid
+    indices, or the multi-return trio — shows an inline warning naming what
+    stops working (leaf-area density, gap filling, the Hit/Miss coloring).
+    It's still allowed: an all-zero miss flag on a hits-only export is exactly
+    the kind of dead weight worth dropping.
 - **Scalar vs Label** — a **Scalar** column is a continuous measurement
   (intensity, height, timestamp) and colors as a smooth gradient; a
   **Label** column holds class ids (tree id, segment, classification) and

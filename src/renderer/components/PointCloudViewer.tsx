@@ -1371,7 +1371,7 @@ export default function PointCloudViewer({
         results = onRequestImportWizard
           ? await onRequestImportWizard(inputs)
           : // No wizard host (defensive): import with auto-detect.
-            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], worldShift: null, trajectory: null }));
+            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], droppedSlugs: [], keptSlugs: [], worldShift: null, trajectory: null }));
         if (!results) return; // user cancelled the wizard
       }
 

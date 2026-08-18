@@ -17983,6 +17983,66 @@ def _normalise_origin_alias(name: str) -> Optional[str]:
     return _ORIGIN_ALIAS_TO_SLUG.get(base)
 
 
+def _canonical_drop_slugs(drop_slugs: "Optional[List[str]]") -> "tuple[str, ...]":
+    """Normalise a wizard drop list to a sorted, de-duplicated, lower-cased tuple.
+
+    Used both to filter the session's extras and to key the octree cache, so the
+    two can never disagree about what "the same drop list" means (['A','b'] and
+    ['b','a','A'] must hash alike). Empty/None collapses to () so an import that
+    drops nothing keeps the cache identity it had before this field existed.
+    """
+    if not drop_slugs:
+        return ()
+    return tuple(sorted({s.strip().lower() for s in drop_slugs if s and s.strip()}))
+
+
+def _drops_channel(drop_slugs: "Optional[List[str]]", channel: str) -> bool:
+    """True when the wizard unticked a NON-extra-dim channel.
+
+    `intensity` and the r/g/b colour triple are first-class session fields, not
+    entries in `extras`, so `_apply_drop_slugs` can't reach them — yet the
+    wizard offers them an Import checkbox like any other column. Colour is
+    dropped only when the WHOLE triple is unticked: a cloud with two of three
+    channels has no meaningful colour, and the renderer has no way to show one.
+    """
+    drop = set(_canonical_drop_slugs(drop_slugs))
+    if not drop:
+        return False
+    if channel == "intensity":
+        return "intensity" in drop
+    if channel == "colors":
+        return {"r", "g", "b"}.issubset(drop) or {"red", "green", "blue"}.issubset(drop)
+    return False
+
+
+def _apply_drop_slugs(extras: "Optional[Dict[str, np.ndarray]]",
+                      extra_dims_meta: "Optional[List[dict]]",
+                      drop_slugs: "Optional[List[str]]"):
+    """Remove the user-deselected scalar fields from a session's extras.
+
+    This is the IN-FILE counterpart to the ASCII path's positional role='skip'.
+    LAS/LAZ/PLY/PCD/E57/PTX define their own layout, so there is no column
+    position to skip — the choice arrives as slugs and is applied here, at the
+    single point where every format's arrays have been read but the session has
+    not yet been built. The octree is rebuilt from these arrays
+    (`_session_to_las` -> PotreeConverter), NOT from the source file, so
+    dropping here removes the field from the octree, the renderer's colour-by
+    menu and every export, for all formats at once.
+
+    Returns the filtered (extras, extra_dims_meta). Both may be None (formats
+    that carry no scalars); the drop list is matched case-insensitively.
+    """
+    drop = set(_canonical_drop_slugs(drop_slugs))
+    if not drop:
+        return extras, extra_dims_meta
+    if extras is not None:
+        extras = {k: v for k, v in extras.items() if k.lower() not in drop}
+    if extra_dims_meta is not None:
+        extra_dims_meta = [ed for ed in extra_dims_meta
+                           if str(ed.get("slug", "")).lower() not in drop]
+    return extras, extra_dims_meta
+
+
 # Singleton roles: a cloud carries exactly one column of each, so a wizard column
 # plan must never assign the same one twice. The renderer enforces this too (it
 # demotes a prior holder — see EXCLUSIVE_ROLES in PointCloudImportWizard.tsx);
@@ -18318,6 +18378,9 @@ class ImportPointCloudByPathRequest(BaseModel):
     file_path: str
     ascii_format: Optional[str] = None
     column_plan: Optional[ColumnPlan] = None
+    # Scalar slugs to leave out (wizard Import checkboxes) for in-file formats,
+    # whose layout the file fixes so `column_plan` can't express the choice.
+    drop_slugs: Optional[List[str]] = None
     # CloudCompare-style global shift [x, y, z] SUBTRACTED from every point at
     # import (mirrors the cloud-session path). For the flat (non-octree) small-
     # cloud path the renderer keeps the resulting small coordinates as its in-RAM
@@ -24977,6 +25040,12 @@ class CloudSessionCreateRequest(BaseModel):
     # every position into one cloud — the pre-multi-scan behaviour, kept for
     # single-scan sources and for any caller that doesn't fan out.
     scan_index: Optional[int] = None
+    # Scalar fields to leave out of the import, from the wizard's per-column
+    # Import checkboxes. Names the extra-dim SLUG (case-insensitive), not a
+    # column position — this is the in-file formats' equivalent of the ASCII
+    # path's positional role='skip', which those formats can't express because
+    # their layout is defined by the file rather than by the request.
+    drop_slugs: Optional[List[str]] = None
 
 
 class DeleteRegionRequest(BaseModel):
@@ -25186,6 +25255,23 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
         _label_by_slug = {ed["slug"]: ed.get("label", ed["slug"]) for ed in (source_extra_dims or [])}
         for ed in extra_dims_meta:
             ed["label"] = _label_by_slug.get(ed["slug"], ed["label"])
+        # Drop the scalars the user unticked in the import wizard. Applied HERE,
+        # after every format's arrays are in RAM and before the session exists,
+        # because this is the one place all in-file formats converge — and the
+        # octree is rebuilt from these arrays rather than the source file, so a
+        # field removed here is gone from the octree, the colour-by menu and
+        # every export. Deliberately BEFORE miss auto-detection: dropping
+        # `is_miss` must let the detector re-derive misses from the remaining
+        # signals, not read the column the user just removed.
+        extras, extra_dims_meta = _apply_drop_slugs(
+            extras, extra_dims_meta, request.drop_slugs)
+        # Intensity and colour are first-class session channels rather than
+        # entries in `extras`, so they need dropping explicitly — the wizard
+        # offers them a checkbox like any other column.
+        if _drops_channel(request.drop_slugs, "intensity"):
+            intensity = None
+        if _drops_channel(request.drop_slugs, "colors"):
+            colors = None
         # E57 stashes the scanner origin + miss summary keyed by the temp LAS
         # path; pop it so we can surface them in the response (renderer uses the
         # origin for the scan params and miss-point display relocation).
